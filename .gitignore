@@ -1,0 +1,24 @@
+# 模型权重与运行环境 (Bonsai 已弃用，10GB 权重不进版本库; VLM 走 Ollama)
+Bonsai-demo/
+
+# 测试照片 (个人照片、体积大)
+photot/
+
+# 构建产物
+选片工具.app/
+选片工具.dmg
+culling-poc/LabelGUI/.build/
+
+# Python 虚拟环境与缓存
+culling-poc/.venv/
+__pycache__/
+*.pyc
+
+# 分析产物 (previews/manifest/layer 结果都是可再生的)
+culling-poc/data/
+
+# 模型文件 (YuNet onnx 等，下载可得)
+culling-poc/models/
+
+# macOS
+.DS_Store

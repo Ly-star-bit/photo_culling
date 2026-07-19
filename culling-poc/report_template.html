@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>选片流水线验证报告</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 2rem; color: #222; }
+  h1 { font-size: 1.4rem; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 2rem; }
+  th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; font-size: 0.85rem; }
+  th { background: #f4f4f4; }
+  .metric-table td:first-child { font-weight: 600; }
+  .ok { color: #1a7f37; }
+  .bad { color: #c0392b; font-weight: 600; }
+  .thumb { width: 120px; height: auto; }
+  .disagree-row { background: #fff5f5; }
+  .lowconf { background: #fffdf0; }
+  code { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>选片流水线验证报告</h1>
+
+<h2>汇总指标</h2>
+<table class="metric-table">
+{% for row in metrics %}
+  <tr><td>{{ row.name }}</td><td class="{{ 'ok' if row.ok else 'bad' }}">{{ row.value }}</td><td>{{ row.detail }}</td></tr>
+{% endfor %}
+</table>
+
+{% if group_sweep %}
+<h2>去重分组阈值扫描</h2>
+<table>
+<tr><th>hash_threshold</th><th>time_window(s)</th><th>pairwise precision</th><th>pairwise recall</th><th>F1</th></tr>
+{% for row in group_sweep %}
+  <tr><td>{{ row.hash_threshold }}</td><td>{{ row.time_window }}</td><td>{{ '%.3f'|format(row.precision) }}</td><td>{{ '%.3f'|format(row.recall) }}</td><td>{{ '%.3f'|format(row.f1) }}</td></tr>
+{% endfor %}
+</table>
+{% endif %}
+
+<h2>逐张对照（分歧 / 低置信度优先）</h2>
+<table>
+<tr>
+  <th>预览</th><th>id</th><th>人工-虚焦</th><th>算法-锐度</th>
+  <th>人工-闭眼</th><th>算法-闭眼</th><th>VLM-闭眼</th>
+  <th>人工-构图问题</th><th>VLM-构图问题</th><th>VLM-淘汰建议</th><th>VLM-置信度</th><th>分歧</th>
+</tr>
+{% for row in rows %}
+  <tr class="{{ 'disagree-row' if row.disagree else ('lowconf' if row.lowconf else '') }}">
+    <td><img class="thumb" src="{{ row.preview_path }}"></td>
+    <td>{{ row.id }}</td>
+    <td>{{ row.human_blur }}</td>
+    <td>{{ '%.1f'|format(row.sharpness) if row.sharpness is not none else '-' }} ({{ row.sharpness_scope }})</td>
+    <td>{{ row.human_closed_eyes }}</td>
+    <td>{{ row.pred_closed_eyes }}</td>
+    <td>{{ row.vlm_closed_eyes }}</td>
+    <td>{{ row.human_composition }}</td>
+    <td>{{ row.vlm_composition }}</td>
+    <td>{{ row.vlm_reject }}</td>
+    <td>{{ '%.2f'|format(row.vlm_confidence) if row.vlm_confidence is not none else '-' }}</td>
+    <td>{{ '⚠️' if row.disagree else '' }}</td>
+  </tr>
+{% endfor %}
+</table>
+</body>
+</html>
