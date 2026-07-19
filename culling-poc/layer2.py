@@ -188,7 +188,11 @@ def call_ollama(base_url, model, prompt_text, image_b64, schema, timeout):
             "messages": [{"role": "user", "content": prompt_text, "images": [image_b64]}],
             "format": schema,
             "stream": False,
-            "options": {"temperature": 0},
+            # num_ctx pinned: this Ollama version auto-sizes context to VRAM
+            # (262144 on big Macs) and the KV cache lazily grows toward that
+            # ceiling as photos stream through — reads as a memory leak. One
+            # image + a short question + a JSON answer fits in 8K many times over.
+            "options": {"temperature": 0, "num_ctx": 8192, "num_predict": 500},
         },
         timeout=timeout,
     )
@@ -290,6 +294,8 @@ def main():
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--progress", action="store_true",
                         help="print machine-readable 'PROGRESS n/total' lines to stdout as photos finish (for GUI streaming)")
+    parser.add_argument("--fresh", action="store_true",
+                        help="re-judge everything, ignoring results already in --out")
     args = parser.parse_args()
 
     manifest = load_manifest(Path(args.manifest))
@@ -309,29 +315,53 @@ def main():
         photos = [p for p in photos if p["id"] in wanted]
     if args.limit:
         photos = photos[: args.limit]
-    print(f"Judging {len(photos)} photos with model={args.model!r} at {args.base_url}")
 
-    results = []
+    # Resume: photos already judged (successfully, by the SAME model) are skipped
+    # and their results carried over — an interrupted batch continues instead of
+    # restarting. Results are flushed to disk after EVERY photo, so any kind of
+    # death (cancel, crash, server gone) loses at most the in-flight requests.
+    out_path = Path(args.out)
+    done_by_id = {}
+    if not args.fresh and out_path.exists():
+        try:
+            prev = load_manifest(out_path)
+            if prev.get("model") == args.model:
+                done_by_id = {r["id"]: r for r in prev.get("results", []) if "error" not in r}
+        except Exception:
+            pass
+    todo = [p for p in photos if p["id"] not in done_by_id]
+    if len(todo) < len(photos):
+        print(f"Resuming: {len(photos) - len(todo)} already judged, {len(todo)} remaining")
+    print(f"Judging {len(todo)} photos with model={args.model!r} at {args.base_url}")
+
+    def flush():
+        save_manifest({"model": args.model, "base_url": args.base_url,
+                       "results": list(done_by_id.values())}, out_path)
+
+    finished = 0
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         if args.backend == "ollama":
             futures = {
                 pool.submit(judge_photo_ollama, p, l1_by_id.get(p["id"]),
                             args.base_url, args.model, args.timeout): p
-                for p in photos
+                for p in todo
             }
         else:
             prompt_text = PROMPT_PATH.read_text(encoding="utf-8")
             futures = {
                 pool.submit(judge_photo, p, args.base_url, args.model, prompt_text, args.timeout): p
-                for p in photos
+                for p in todo
             }
         for fut in tqdm(as_completed(futures), total=len(futures), desc="layer2"):
-            results.append(fut.result())
+            result = fut.result()
+            done_by_id[result["id"]] = result
+            flush()
+            finished += 1
             if args.progress:
-                print(f"PROGRESS {len(results)}/{len(futures)}", flush=True)
+                print(f"PROGRESS {finished}/{len(futures)}", flush=True)
 
-    save_manifest({"model": args.model, "base_url": args.base_url, "results": results}, Path(args.out))
-
+    flush()
+    results = list(done_by_id.values())
     ok = [r for r in results if "error" not in r]
     errors = [r for r in results if "error" in r]
     avg_time = sum(r["elapsed_sec"] for r in ok) / len(ok) if ok else 0
