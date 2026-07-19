@@ -10,6 +10,33 @@ let appDataDir: URL = {
     return dir
 }()
 
+/// The Python pipeline (layer2.py etc.) ships INSIDE the app bundle
+/// (Contents/Resources/culling-poc) and is synced to App Support on every
+/// launch. Two reasons: uv needs to create .venv beside the scripts and the
+/// signed bundle is read-only; and scripts must never version-skew from the
+/// app again (new app + stale runtime once broke --backend).
+func syncEmbeddedPipeline(to dataDir: URL) {
+    let fm = FileManager.default
+    guard let embedded = Bundle.main.resourceURL?.appendingPathComponent("culling-poc"),
+          fm.fileExists(atPath: embedded.path) else { return }  // bare dev binary: keep using the checkout
+    let dest = dataDir.appendingPathComponent("runtime/culling-poc")
+    try? fm.createDirectory(at: dest, withIntermediateDirectories: true)
+    // Replace everything except .venv — uv's environment survives app updates
+    // and gets reconciled by uv itself when the lockfile changed.
+    if let stale = try? fm.contentsOfDirectory(at: dest, includingPropertiesForKeys: nil) {
+        for url in stale where url.lastPathComponent != ".venv" {
+            try? fm.removeItem(at: url)
+        }
+    }
+    if let fresh = try? fm.contentsOfDirectory(at: embedded, includingPropertiesForKeys: nil) {
+        for url in fresh {
+            try? fm.copyItem(at: url, to: dest.appendingPathComponent(url.lastPathComponent))
+        }
+    }
+}
+
+syncEmbeddedPipeline(to: appDataDir)
+
 let appConfig = AppConfig.load(from: appDataDir)
 
 // Headless mode for testing/automation: LabelGUI --analyze <photo_dir>
@@ -42,7 +69,6 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--analyze"),
 struct LabelGUIApp: App {
     @StateObject private var batchStore: BatchStore
     @StateObject private var labelStore: LabelStore
-    @StateObject private var migrationStore: MigrationStore
 
     init() {
         let batch = BatchStore(
@@ -51,7 +77,6 @@ struct LabelGUIApp: App {
         )
         _batchStore = StateObject(wrappedValue: batch)
         _labelStore = StateObject(wrappedValue: LabelStore(dataDir: batch.sessionDir))
-        _migrationStore = StateObject(wrappedValue: MigrationStore(dataDir: appDataDir, batchStore: batch))
     }
 
     var body: some Scene {
@@ -59,12 +84,6 @@ struct LabelGUIApp: App {
             ContentView(store: labelStore, batchStore: batchStore)
         }
         .defaultSize(width: 1280, height: 850)
-
-        // Rarely-used utility, reachable via 窗口 menu → 迁移.
-        Window("迁移", id: "migration") {
-            MigrationView(store: migrationStore, batchStore: batchStore)
-                .frame(minWidth: 480, minHeight: 420)
-        }
     }
 }
 
