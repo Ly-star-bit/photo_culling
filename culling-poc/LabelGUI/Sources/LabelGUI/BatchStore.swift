@@ -48,6 +48,11 @@ struct BatchItem: Identifiable {
     let vlmReject: Bool
     let vlmCompositionIssues: [String]
     let vlmReason: String?
+    /// Appeal-court verdicts (nil = that charge was never re-examined).
+    let appealClosedEyes: Bool?
+    let appealSubjectSharp: Bool?
+    let appealIntentionalExposure: Bool?
+    let appealReason: String?
     let captureTime: Date?
     let exif: ExifMeta?
     let horizonDeg: Double?
@@ -55,6 +60,9 @@ struct BatchItem: Identifiable {
     var chapter: Int = 0
     var verdict: Verdict = .usable
     var rejectReasons: [String] = []
+    /// Charges the VLM appeal cleared this photo of ("虚焦"/"闭眼"/"曝光裁切") —
+    /// shown as the 平反 badge so the photographer sees WHY it walked.
+    var vlmRescued: [String] = []
     /// Burst-relative eye decision computed by applyThresholds (nil = no
     /// judgment: no usable face, or all faces too small to read reliably).
     var dynamicEyeClosed: Bool?
@@ -237,7 +245,10 @@ final class BatchStore: ObservableObject {
 
     // MARK: - VLM server management (MiniCPM-V 4.6 via Ollama)
 
-    static let ollamaModel = "minicpm-v4.6:f16"
+    /// q4 quant (the `latest` tag, 1.6GB): the user's daily machine is a fanless
+    /// MacBook Air — half the weights/bandwidth of f16 runs cooler and faster,
+    /// and our yes/no culling questions don't feel the quantization.
+    nonisolated static let ollamaModel = "minicpm-v4.6"
 
     func checkVLMServer() async -> Bool {
         var request = URLRequest(url: URL(string: "http://localhost:11434/api/version")!)
@@ -447,6 +458,87 @@ final class BatchStore: ObservableObject {
         }
     }
 
+    /// Appeal court: re-examine AUTO-rejected photos (manual rejects are the
+    /// photographer's word — not appealed), asking the VLM only about the
+    /// specific charges each photo was rejected for. Clears flow back through
+    /// applyThresholds, which drops cleared charges and lets the photo walk.
+    func runAppealOnRejects() {
+        guard !isRunning, !items.isEmpty else { return }
+        let accused = items.filter { $0.verdict == .reject && overrides[$0.id] == nil
+            && !$0.rejectReasons.isEmpty }
+        guard !accused.isEmpty else {
+            progressText = "没有可复审的自动废片"
+            return
+        }
+        isRunning = true
+        lastError = nil
+        let data = sessionDir
+        let root = pythonRoot
+        let box = processBox
+        let count = accused.count
+
+        Task.detached { [weak self] in
+            await MainActor.run { [weak self] in self?.progressText = "复审 \(count) 张废片..." }
+            let idsFile = data.appendingPathComponent("appeal_ids.txt")
+            let reasonsFile = data.appendingPathComponent("appeal_reasons.json")
+            do {
+                try accused.map(\.id).joined(separator: "\n")
+                    .write(to: idsFile, atomically: true, encoding: .utf8)
+                let reasons = Dictionary(uniqueKeysWithValues: accused.map { ($0.id, $0.rejectReasons) })
+                let json = try JSONSerialization.data(withJSONObject: reasons, options: [.sortedKeys])
+                try json.write(to: reasonsFile)
+            } catch {
+                await MainActor.run { [weak self] in
+                    self?.lastError = "写入复审清单失败: \(error.localizedDescription)"
+                    self?.isRunning = false
+                }
+                return
+            }
+            let result = Self.runProcess(
+                executable: "/opt/homebrew/bin/uv",
+                arguments: ["run", "python", "layer2.py",
+                            "--backend", "ollama", "--mode", "appeal",
+                            "--base-url", "http://localhost:11434",
+                            "--model", Self.ollamaModel,
+                            "--manifest", data.appendingPathComponent("manifest.json").path,
+                            "--layer1", data.appendingPathComponent("layer1_results.json").path,
+                            "--out", data.appendingPathComponent("appeal_results.json").path,
+                            "--no-layer1-filter",
+                            "--ids-file", idsFile.path,
+                            "--appeal-file", reasonsFile.path,
+                            "--progress",
+                            "--concurrency", "2"],
+                cwd: root,
+                box: box,
+                onStdoutLine: { line in
+                    guard line.hasPrefix("PROGRESS ") else { return }
+                    let parts = line.dropFirst("PROGRESS ".count).split(separator: "/")
+                    guard parts.count == 2, let done = Int(parts[0]), let total = Int(parts[1]), total > 0 else { return }
+                    Task { @MainActor [weak self] in
+                        self?.progressText = "复审中 \(done)/\(total)..."
+                        self?.progressFraction = Double(done) / Double(total)
+                    }
+                }
+            )
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.progressFraction = nil
+                switch result {
+                case .success:
+                    let before = self.verdictCounts.reject
+                    self.loadResults()
+                    self.applyThresholds()
+                    let freed = before - self.verdictCounts.reject
+                    self.progressText = freed > 0 ? "复审完成: 平反 \(freed) 张" : "复审完成: 维持原判"
+                    NotificationCenter.default.post(name: .analysisDidFinish, object: nil, userInfo: ["dir": self.sessionDir])
+                case .failure(let message):
+                    self.lastError = "复审失败 (服务在跑吗? 先点“启动服务”): \(message)"
+                }
+                self.isRunning = false
+            }
+        }
+    }
+
     /// Extracts "done/total" from progress messages like "分析中 15/210..." so both
     /// the native engine and the VLM subprocess feed the same progress bar.
     nonisolated static func parseFraction(_ message: String) -> Double? {
@@ -524,6 +616,12 @@ final class BatchStore: ObservableObject {
             for r in file.results where r.error == nil { l2ById[r.id] = r }
         }
 
+        var appealById: [String: AppealResult] = [:]
+        if let data = try? Data(contentsOf: sessionDir.appendingPathComponent("appeal_results.json")),
+           let file = try? decoder.decode(AppealFile.self, from: data) {
+            for r in file.results where r.error == nil { appealById[r.id] = r }
+        }
+
         let isoParser = DateFormatter()
         isoParser.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
         isoParser.locale = Locale(identifier: "en_US_POSIX")
@@ -545,10 +643,14 @@ final class BatchStore: ObservableObject {
                 faceAreaPct: l1.faceAreaPct,
                 faces: l1.faces ?? [],
                 burstGroup: group,
-                expressionScore: l2?.expressionScore,
+                expressionScore: l2?.expressionScore ?? appealById[photo.id]?.expressionScore,
                 vlmReject: l2?.rejectRecommended ?? false,
                 vlmCompositionIssues: l2?.compositionIssues ?? [],
                 vlmReason: l2?.reason,
+                appealClosedEyes: appealById[photo.id]?.closedEyes,
+                appealSubjectSharp: appealById[photo.id]?.subjectSharp,
+                appealIntentionalExposure: appealById[photo.id]?.intentionalExposure,
+                appealReason: appealById[photo.id]?.reason,
                 captureTime: photo.captureTime.flatMap(isoParser.date(from:)),
                 exif: photo.exif,
                 horizonDeg: l1.horizonDeg
@@ -811,6 +913,21 @@ final class BatchStore: ObservableObject {
                 }
             }
             if items[i].vlmReject { reasons.append("VLM建议淘汰") }
+
+            // Appeal court: the VLM can only clear the SPECIFIC charge it
+            // re-examined; a photo walks when no charges remain. Verdicts stay
+            // valid across slider moves — "the subject IS sharp" doesn't depend
+            // on where the threshold sits.
+            var rescued: [String] = []
+            func clear(_ charge: String, when verdict: Bool?) {
+                guard verdict == true, reasons.contains(charge) else { return }
+                reasons.removeAll { $0 == charge }
+                rescued.append(charge)
+            }
+            clear("闭眼", when: items[i].appealClosedEyes.map { !$0 })
+            clear("虚焦", when: items[i].appealSubjectSharp)
+            clear("曝光裁切", when: items[i].appealIntentionalExposure)
+            items[i].vlmRescued = rescued
             items[i].rejectReasons = reasons
 
             // Manual override wins over every threshold: a manual non-reject keeps

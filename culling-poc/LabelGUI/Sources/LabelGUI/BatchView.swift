@@ -547,6 +547,11 @@ struct BatchView: View {
                         ForEach(item.rejectReasons, id: \.self) { reason in
                             Image(systemName: Self.reasonIcon(reason)).font(.caption2).foregroundStyle(.red)
                         }
+                        // VLM cleared this photo of charges — green seal.
+                        if !item.vlmRescued.isEmpty {
+                            Image(systemName: "checkmark.seal.fill").font(.caption2).foregroundStyle(.green)
+                                .help("VLM 平反: \(item.vlmRescued.joined(separator: "、"))")
+                        }
                         // Info-only badges (yellow): not rejections, just heads-ups.
                         if item.slowShutter {
                             Image(systemName: "tortoise.fill").font(.caption2).foregroundStyle(.yellow)
@@ -648,13 +653,15 @@ struct BatchView: View {
                         LabeledContent("模型") {
                             Text("MiniCPM-V 4.6").font(.caption).foregroundStyle(.secondary)
                         }
-                        HStack {
-                            Button("启动服务") { store.startVLMServer() }
-                                .help("通过 Ollama 启动 MiniCPM-V 4.6")
-                            Button("跑幸存照片") { store.runVLMOnSurvivors() }
-                                .disabled(store.items.isEmpty || store.isRunning)
-                                .help("调好阈值后再跑：只分析未被淘汰的照片。分开问眼睛(人脸裁剪)和构图(整图)，仅确认闭眼会建议淘汰，其余仅作提示徽章")
-                        }
+                        Button("启动服务") { store.startVLMServer() }
+                            .help("通过 Ollama 启动 MiniCPM-V 4.6")
+                        Button("复审废片 (\(autoRejectCount))") { store.runAppealOnRejects() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(autoRejectCount == 0 || store.isRunning)
+                            .help("给自动淘汰的照片一个平反机会：按各自的淘汰原因定向复查 (虚焦→主体清晰吗;闭眼→是否眯眼笑;曝光→是否刻意剪影/逆光)。洗清罪名的照片自动回到可用并带“平反”徽章;人工改判过的不复审")
+                        Button("精审幸存照片") { store.runVLMOnSurvivors() }
+                            .disabled(store.items.isEmpty || store.isRunning)
+                            .help("可选:给未淘汰照片打表情分(连拍组挑精选用)并检查构图(抢镜/切肢仅作提示徽章)")
                     }
                     .padding(6)
                 }
@@ -700,6 +707,11 @@ struct BatchView: View {
     private var jpegExportCount: Int {
         let counts = store.verdictCounts
         return counts.pick + (jpegIncludeUsable ? counts.usable : 0)
+    }
+
+    /// Auto-rejects only — manual rejects are the photographer's word, no appeal.
+    private var autoRejectCount: Int {
+        store.items.filter { $0.verdict == .reject && store.overrides[$0.id] == nil }.count
     }
 
     private func exportJPEGs() {
@@ -1164,6 +1176,7 @@ struct PhotoInspector: View {
             }
             if item.faceCount > 1 { signal("主体人数", "\(item.faceCount)") }
             if let expr = item.expressionScore { signal("VLM表情", "\(expr)") }
+            if !item.vlmRescued.isEmpty { signal("VLM平反", item.vlmRescued.joined(separator: "、")) }
             if !item.rejectReasons.isEmpty {
                 Text(item.rejectReasons.joined(separator: ", "))
                     .font(.caption).foregroundStyle(.red)

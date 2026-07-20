@@ -223,6 +223,67 @@ def face_crop_b64(photo, l1, pad=0.15):
         return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+SHARP_SCHEMA = {
+    "type": "object",
+    "properties": {"subject_sharp": {"type": "boolean"}},
+    "required": ["subject_sharp"],
+}
+SHARP_PROMPT = (
+    "This photo was flagged as possibly out of focus by an algorithm. Look at "
+    "the MAIN SUBJECT (the person, or the central object if there is no person). "
+    "Is the subject itself acceptably sharp and in focus? Ignore background "
+    "blur — shallow depth of field is normal in portraits."
+)
+
+EXPOSURE_SCHEMA = {
+    "type": "object",
+    "properties": {"intentional_exposure": {"type": "boolean"}},
+    "required": ["intentional_exposure"],
+}
+EXPOSURE_PROMPT = (
+    "This photo was flagged for clipped highlights or shadows. Does the exposure "
+    "read as a deliberate artistic choice that still delivers a usable photo "
+    "(silhouette, dramatic backlight, high-key or low-key look), rather than a "
+    "genuinely ruined exposure?"
+)
+
+
+def judge_photo_appeal(photo, l1, reasons, base_url, model, timeout):
+    """Appeal court: the photo was auto-rejected; re-examine ONLY the charges it
+    was rejected for. Output carries a verdict per charge — the GUI drops a
+    charge when the VLM clears it, and the photo walks if no charges remain."""
+    t0 = time.perf_counter()
+    try:
+        out = {"id": photo["id"]}
+        notes = []
+        full_b64 = encode_image_b64(photo["preview_path"])
+
+        if any("闭眼" in r for r in reasons):
+            crop_b64 = face_crop_b64(photo, l1)
+            face = call_ollama(base_url, model, FACE_PROMPT, crop_b64 or full_b64,
+                               FACE_SCHEMA, timeout)
+            out["closed_eyes"] = face["eyes"] == "closed"
+            out["expression_score"] = face["expression_score"]
+            notes.append("闭眼维持" if out["closed_eyes"] else
+                         ("眯眼笑平反" if face["eyes"] == "squinting_smile" else "睁眼平反"))
+        if any("虚焦" in r for r in reasons):
+            sharp = call_ollama(base_url, model, SHARP_PROMPT, full_b64,
+                                SHARP_SCHEMA, timeout)
+            out["subject_sharp"] = sharp["subject_sharp"]
+            notes.append("主体清晰平反" if sharp["subject_sharp"] else "虚焦维持")
+        if any("曝光" in r for r in reasons):
+            expo = call_ollama(base_url, model, EXPOSURE_PROMPT, full_b64,
+                               EXPOSURE_SCHEMA, timeout)
+            out["intentional_exposure"] = expo["intentional_exposure"]
+            notes.append("刻意曝光平反" if expo["intentional_exposure"] else "曝光维持")
+
+        out["reason"] = "; ".join(notes) if notes else "无可复审罪名"
+        out["elapsed_sec"] = time.perf_counter() - t0
+        return out
+    except Exception as e:
+        return {"id": photo["id"], "error": str(e), "elapsed_sec": time.perf_counter() - t0}
+
+
 def judge_photo_ollama(photo, l1, base_url, model, timeout):
     """Two focused calls instead of one rubric: face crop (eyes, expression),
     full frame (background, photobombers, limb crops). Results are mapped onto
@@ -285,6 +346,12 @@ def main():
     parser.add_argument("--backend", choices=["openai", "ollama"], default="openai",
                         help="openai: one comprehensive judgment per photo (big models); "
                              "ollama: focused per-topic questions with face crops (small models)")
+    parser.add_argument("--mode", choices=["full", "appeal"], default="full",
+                        help="full: judge photos (eyes/composition/expression); "
+                             "appeal: re-examine auto-REJECTED photos, asking only about "
+                             "the charges in --appeal-file (ollama backend only)")
+    parser.add_argument("--appeal-file", default=None,
+                        help="JSON {photo_id: [reject reasons]} written by the GUI for --mode appeal")
     parser.add_argument("--base-url", default="http://localhost:8080/v1",
                         help="for --backend ollama use the server root, e.g. http://localhost:11434")
     parser.add_argument("--model", default="local-vlm")
@@ -338,9 +405,23 @@ def main():
         save_manifest({"model": args.model, "base_url": args.base_url,
                        "results": list(done_by_id.values())}, out_path)
 
+    appeal_reasons = {}
+    if args.mode == "appeal":
+        if args.appeal_file and Path(args.appeal_file).exists():
+            appeal_reasons = json.loads(Path(args.appeal_file).read_text(encoding="utf-8"))
+        else:
+            raise SystemExit("--mode appeal requires --appeal-file")
+
     finished = 0
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-        if args.backend == "ollama":
+        if args.mode == "appeal":
+            futures = {
+                pool.submit(judge_photo_appeal, p, l1_by_id.get(p["id"]),
+                            appeal_reasons.get(p["id"], []),
+                            args.base_url, args.model, args.timeout): p
+                for p in todo
+            }
+        elif args.backend == "ollama":
             futures = {
                 pool.submit(judge_photo_ollama, p, l1_by_id.get(p["id"]),
                             args.base_url, args.model, args.timeout): p

@@ -139,6 +139,33 @@ struct Layer2File: Codable {
     let results: [Layer2Result]
 }
 
+/// One row of appeal_results.json — the VLM's re-examination of an auto-reject.
+/// Each field is nil unless that charge was re-checked; the verdict layer drops
+/// a charge its value clears (eyes NOT closed / subject IS sharp / exposure IS
+/// intentional).
+struct AppealResult: Codable {
+    let id: String
+    let closedEyes: Bool?
+    let subjectSharp: Bool?
+    let intentionalExposure: Bool?
+    /// The eye re-check scores expression too — feeds pick ranking for free.
+    let expressionScore: Int?
+    let reason: String?
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, reason, error
+        case closedEyes = "closed_eyes"
+        case subjectSharp = "subject_sharp"
+        case intentionalExposure = "intentional_exposure"
+        case expressionScore = "expression_score"
+    }
+}
+
+struct AppealFile: Codable {
+    let results: [AppealResult]
+}
+
 /// One row of labels.csv. group_id and composition_issue stay free-form strings;
 /// blur/closed_eyes/exposure_issue are tri-state (nil = not yet labeled).
 struct LabelRow {
