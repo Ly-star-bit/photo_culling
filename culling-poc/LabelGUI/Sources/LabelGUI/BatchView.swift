@@ -1016,6 +1016,154 @@ enum FullResCache {
     }
 }
 
+// MARK: - Native zoom pane (NSScrollView magnification)
+
+/// AppKit-native 1:1 viewer. NSScrollView's own magnification handles the
+/// trackpad pinch — smooth, continuous, anchored at the pointer, exactly the
+/// 预览.app feel. Double-click toggles fit ↔ 100%. SwiftUI's ScrollView can't
+/// do this: it exposes no content-offset control, so pinch zoom can't anchor.
+struct ZoomPane: NSViewRepresentable {
+    enum Entry {
+        /// Open at fit × factor — pinch-to-enter carries its own gesture factor
+        /// so the transition continues the motion instead of teleporting.
+        case fit(factor: CGFloat)
+        /// Open at 100% (one image pixel per physical pixel).
+        case hundred
+    }
+
+    let image: NSImage
+    let entry: Entry
+    /// Primary-face box (normalized top-left) drawn as a layer on the image.
+    let faceBbox: [Double]?
+    let boxColor: NSColor
+
+    final class Coordinator: NSObject {
+        weak var scroll: NSScrollView?
+        var overlayLayer: CALayer?
+
+        @objc func doubleClicked(_ gesture: NSClickGestureRecognizer) {
+            guard let scroll, let doc = scroll.documentView else { return }
+            let backing = scroll.window?.backingScaleFactor ?? 2
+            let hundred = 1.0 / backing
+            let fit = ZoomPane.fitMagnification(scroll)
+            // At (or near) 100% → back to fit; anywhere else → 100% at the
+            // clicked point, so the detail you aimed at stays under the cursor.
+            let target = abs(scroll.magnification - hundred) < 0.01 ? fit : hundred
+            let point = gesture.location(in: doc)
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.25
+                scroll.animator().setMagnification(target, centeredAt: point)
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    static func fitMagnification(_ scroll: NSScrollView) -> CGFloat {
+        guard let doc = scroll.documentView,
+              doc.frame.width > 0, doc.frame.height > 0,
+              scroll.bounds.width > 0, scroll.bounds.height > 0 else { return 1 }
+        return min(scroll.bounds.width / doc.frame.width,
+                   scroll.bounds.height / doc.frame.height)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.contentView = CenteringClipView()
+        scroll.hasHorizontalScroller = true
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.allowsMagnification = true
+        scroll.drawsBackground = true
+        scroll.backgroundColor = .black
+
+        let imageView = NSImageView()
+        imageView.image = image
+        imageView.imageScaling = .scaleAxesIndependently
+        imageView.frame = NSRect(origin: .zero, size: image.size)
+        imageView.wantsLayer = true
+        scroll.documentView = imageView
+
+        let doubleClick = NSClickGestureRecognizer(
+            target: context.coordinator, action: #selector(Coordinator.doubleClicked(_:)))
+        doubleClick.numberOfClicksRequired = 2
+        imageView.addGestureRecognizer(doubleClick)
+
+        context.coordinator.scroll = scroll
+        // Bounds are zero until layout — apply the entry magnification after
+        // the first pass.
+        DispatchQueue.main.async { self.applyEntry(scroll) }
+        syncOverlay(context.coordinator)
+        return scroll
+    }
+
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        if let imageView = scroll.documentView as? NSImageView, imageView.image !== image {
+            imageView.image = image
+            imageView.frame = NSRect(origin: .zero, size: image.size)
+            DispatchQueue.main.async { self.applyEntry(scroll) }
+        }
+        syncOverlay(context.coordinator)
+    }
+
+    private func applyEntry(_ scroll: NSScrollView) {
+        guard scroll.bounds.width > 0 else { return }
+        let backing = scroll.window?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor ?? 2
+        let fit = Self.fitMagnification(scroll)
+        scroll.minMagnification = min(fit, 1 / backing) * 0.5
+        scroll.maxMagnification = 3.0 / backing  // 300% actual pixels
+        let target: CGFloat
+        switch entry {
+        case .fit(let factor):
+            target = min(scroll.maxMagnification, fit * max(1, factor))
+        case .hundred:
+            target = 1.0 / backing
+        }
+        // Centered on the image middle; the user pans/zooms from there.
+        if let doc = scroll.documentView {
+            scroll.setMagnification(
+                target,
+                centeredAt: NSPoint(x: doc.frame.midX, y: doc.frame.midY))
+        } else {
+            scroll.magnification = target
+        }
+    }
+
+    private func syncOverlay(_ coordinator: Coordinator) {
+        coordinator.overlayLayer?.removeFromSuperlayer()
+        coordinator.overlayLayer = nil
+        guard let bbox = faceBbox, bbox.count == 4,
+              let imageView = coordinator.scroll?.documentView else { return }
+        let w = image.size.width, h = image.size.height
+        let layer = CALayer()
+        // Normalized top-left bbox → AppKit's bottom-left origin.
+        layer.frame = CGRect(x: bbox[0] * w, y: h - bbox[3] * h,
+                             width: (bbox[2] - bbox[0]) * w,
+                             height: (bbox[3] - bbox[1]) * h)
+        layer.borderColor = boxColor.cgColor
+        layer.borderWidth = 2
+        imageView.layer?.addSublayer(layer)
+        coordinator.overlayLayer = layer
+    }
+}
+
+/// Keeps an undersized document centered in the scroll view (fit mode / small
+/// images) instead of pinned to the bottom-left corner.
+final class CenteringClipView: NSClipView {
+    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
+        var rect = super.constrainBoundsRect(proposedBounds)
+        guard let doc = documentView else { return rect }
+        if doc.frame.width < rect.width {
+            rect.origin.x = doc.frame.minX - (rect.width - doc.frame.width) / 2
+        }
+        if doc.frame.height < rect.height {
+            rect.origin.y = doc.frame.minY - (rect.height - doc.frame.height) / 2
+        }
+        return rect
+    }
+}
+
 // MARK: - Face crop strip
 
 /// Mid-size decodes for face crops: big enough (2560px) that a subject face crop
@@ -1105,10 +1253,12 @@ struct PhotoInspector: View {
     @State private var zoomed = false
     @State private var fullResImage: NSImage?
     @State private var loadingFullRes = false
-    /// Trackpad-pinch zoom factor applied to the full-res decode (1.0 = one image
-    /// pixel per physical pixel).
-    @State private var zoomScale: CGFloat = 1.0
-    @State private var pinchBase: CGFloat?
+    /// How the zoom pane opens: at fit×pinch-factor (pinch entry, continuous
+    /// with the gesture) or straight at 100% (double-click / toolbar button).
+    @State private var zoomEntry: ZoomPane.Entry = .hundred
+    /// Live scale of the fit view while an entry pinch is in progress — visual
+    /// feedback so the gesture never feels dead before zoom mode takes over.
+    @State private var fitPinch: CGFloat = 1.0
     @State private var showOverlay = true
     @State private var compareOn = false
 
@@ -1213,48 +1363,48 @@ struct PhotoInspector: View {
     private func imagePane(_ item: BatchItem) -> some View {
         Group {
             if zoomed, let full = fullResImage {
-                // SwiftUI sizes are in POINTS; on Retina 1pt = 2 physical px.
-                // Divide by the backing scale so zoomScale 1.0 means one image
-                // pixel per one physical pixel.
-                let backing = NSScreen.main?.backingScaleFactor ?? 2.0
-                ScrollView([.horizontal, .vertical]) {
-                    Image(nsImage: full)
-                        .resizable()
-                        .overlay { analysisOverlay(item) }
-                        .frame(width: full.size.width * zoomScale / backing,
-                               height: full.size.height * zoomScale / backing)
-                }
-                .background(Color.black)
-                .gesture(
-                    MagnifyGesture()
-                        .onChanged { value in
-                            let base = pinchBase ?? zoomScale
-                            pinchBase = base
-                            zoomScale = min(2.5, max(0.15, base * value.magnification))
-                        }
-                        .onEnded { _ in pinchBase = nil }
-                )
+                // AppKit-native magnification: NSScrollView handles the pinch
+                // itself — smooth, continuous, anchored at the pointer. The old
+                // SwiftUI ScrollView + frame-resize approach re-laid the content
+                // on every tick with no anchor control, which felt like the
+                // zoom "jumping around".
+                ZoomPane(image: full,
+                         entry: zoomEntry,
+                         faceBbox: showOverlay ? item.faceBbox : nil,
+                         boxColor: item.dynamicEyeClosed == true ? .systemRed : .systemYellow)
             } else {
                 // Async cached decode — a synchronous NSImage(contentsOfFile:)
                 // here blocked the main thread on every open/photo switch.
                 ThumbnailView(path: item.previewPath, maxPixel: 1600, fit: true)
                     .overlay { analysisOverlay(item) }
+                    .scaleEffect(fitPinch)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color.black)
+                    .clipped()
                     .gesture(
+                        // The pinch's own factor carries into zoom mode
+                        // (fit × factor), so entry is continuous with the
+                        // gesture instead of teleporting to 100%.
                         MagnifyGesture()
+                            .onChanged { value in
+                                fitPinch = max(1.0, value.magnification)
+                            }
                             .onEnded { value in
-                                if value.magnification > 1.15 { toggleZoom(item) }
+                                let factor = value.magnification
+                                fitPinch = 1.0
+                                if factor > 1.1 {
+                                    toggleZoom(item, entry: .fit(factor: factor))
+                                }
                             }
                     )
+                    .onTapGesture(count: 2) { toggleZoom(item, entry: .hundred) }
             }
         }
-        .onTapGesture(count: 2) { toggleZoom(item) }
         .onAppear { prefetchNeighbors() }
         .onChange(of: currentID) {
             zoomed = false
             fullResImage = nil
-            zoomScale = 1.0
+            fitPinch = 1.0
             prefetchNeighbors()
         }
     }
@@ -1520,14 +1670,14 @@ struct PhotoInspector: View {
         }
     }
 
-    private func toggleZoom(_ item: BatchItem) {
+    private func toggleZoom(_ item: BatchItem, entry: ZoomPane.Entry = .hundred) {
         if zoomed {
             zoomed = false
             return
         }
+        zoomEntry = entry
         if let cached = FullResCache.cache.object(forKey: item.decodePath as NSString) {
             fullResImage = cached
-            zoomScale = 1.0
             zoomed = true
             return
         }
@@ -1539,7 +1689,6 @@ struct PhotoInspector: View {
                 loadingFullRes = false
                 if let image {
                     fullResImage = image
-                    zoomScale = 1.0
                     zoomed = true
                 }
             }
