@@ -26,6 +26,7 @@ import base64
 import io
 import json
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -181,23 +182,32 @@ FRAME_PROMPT = (
 
 
 def call_ollama(base_url, model, prompt_text, image_b64, schema, timeout):
-    resp = requests.post(
-        f"{base_url}/api/chat",
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": prompt_text, "images": [image_b64]}],
-            "format": schema,
-            "stream": False,
-            # num_ctx pinned: this Ollama version auto-sizes context to VRAM
-            # (262144 on big Macs) and the KV cache lazily grows toward that
-            # ceiling as photos stream through — reads as a memory leak. One
-            # image + a short question + a JSON answer fits in 8K many times over.
-            "options": {"temperature": 0, "num_ctx": 8192, "num_predict": 500},
-        },
-        timeout=timeout,
-    )
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt_text, "images": [image_b64]}],
+        "format": schema,
+        "stream": False,
+        # think must be OFF: MiniCPM-V 4.6 on newer Ollama defaults to thinking
+        # mode, and a long prompt makes it burn the whole num_predict budget
+        # inside `thinking` — `content` comes back EMPTY and the batch dies
+        # with a JSON parse error on every photo.
+        "think": False,
+        # num_ctx pinned: this Ollama version auto-sizes context to VRAM
+        # (262144 on big Macs) and the KV cache lazily grows toward that
+        # ceiling as photos stream through — reads as a memory leak. One
+        # image + a short question + a JSON answer fits in 8K many times over.
+        "options": {"temperature": 0, "num_ctx": 8192, "num_predict": 500},
+    }
+    resp = requests.post(f"{base_url}/api/chat", json=payload, timeout=timeout)
+    if resp.status_code == 400:
+        # Older Ollama / models that reject the think param — retry without it.
+        payload.pop("think", None)
+        resp = requests.post(f"{base_url}/api/chat", json=payload, timeout=timeout)
     resp.raise_for_status()
-    return json.loads(resp.json()["message"]["content"])
+    content = resp.json()["message"]["content"]
+    if not content.strip():
+        raise ValueError("empty content from model (thinking ate the token budget?)")
+    return json.loads(content)
 
 
 def face_crop_b64(photo, l1, pad=0.15):
@@ -284,7 +294,30 @@ def judge_photo_appeal(photo, l1, reasons, base_url, model, timeout):
         return {"id": photo["id"], "error": str(e), "elapsed_sec": time.perf_counter() - t0}
 
 
-def judge_photo_ollama(photo, l1, base_url, model, timeout):
+class GroupFrameCache:
+    """FRAME-question answers shared across a burst group. The background /
+    photobomber / limb-crop situation is identical for every frame of a 2-second
+    burst, so ask once per group instead of once per photo — 30-40% fewer VLM
+    calls on bursty shoots, at ~6s/call. Per-group locks make concurrent
+    siblings wait for the one in-flight answer instead of duplicating it."""
+
+    def __init__(self):
+        self._cache = {}
+        self._locks = {}
+        self._master = threading.Lock()
+
+    def get_or_compute(self, group, compute):
+        if group is None:
+            return compute()
+        with self._master:
+            lock = self._locks.setdefault(group, threading.Lock())
+        with lock:
+            if group not in self._cache:
+                self._cache[group] = compute()
+            return self._cache[group]
+
+
+def judge_photo_ollama(photo, l1, base_url, model, timeout, frame_cache=None):
     """Two focused calls instead of one rubric: face crop (eyes, expression),
     full frame (background, photobombers, limb crops). Results are mapped onto
     the same output schema the openai backend produces, so rate.py / the GUI /
@@ -296,8 +329,13 @@ def judge_photo_ollama(photo, l1, base_url, model, timeout):
 
         face = call_ollama(base_url, model, FACE_PROMPT, crop_b64 or full_b64,
                            FACE_SCHEMA, timeout)
-        frame = call_ollama(base_url, model, FRAME_PROMPT, full_b64,
-                            FRAME_SCHEMA, timeout)
+        group = (l1 or {}).get("burst_group")
+
+        def ask_frame():
+            return call_ollama(base_url, model, FRAME_PROMPT, full_b64,
+                               FRAME_SCHEMA, timeout)
+
+        frame = frame_cache.get_or_compute(group, ask_frame) if frame_cache else ask_frame()
 
         closed = face["eyes"] == "closed"
         issues = list(frame["background_distractions"])
@@ -422,9 +460,10 @@ def main():
                 for p in todo
             }
         elif args.backend == "ollama":
+            frame_cache = GroupFrameCache()
             futures = {
                 pool.submit(judge_photo_ollama, p, l1_by_id.get(p["id"]),
-                            args.base_url, args.model, args.timeout): p
+                            args.base_url, args.model, args.timeout, frame_cache): p
                 for p in todo
             }
         else:

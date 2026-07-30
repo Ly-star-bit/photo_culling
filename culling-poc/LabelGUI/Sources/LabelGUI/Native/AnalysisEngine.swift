@@ -7,7 +7,7 @@ import CoreGraphics
 /// the existing GUI loaders keep working unchanged — and so native results can be
 /// diffed against the Python pipeline's on the same photos.
 enum AnalysisEngine {
-    struct PhotoAnalysis {
+    struct PhotoAnalysis: Sendable {
         let id: String
         let rawPath: String
         /// The JPEG half of a RAW+JPEG pair (or the file itself) — the fast,
@@ -62,8 +62,13 @@ enum AnalysisEngine {
         var isSet: Bool { lock.lock(); defer { lock.unlock() }; return flag }
     }
 
+    /// `onPhoto` fires as EACH photo's analysis completes (from worker threads) —
+    /// the GUI streams provisional results into the grid instead of staring at a
+    /// progress bar for a 3000-photo shoot. Final authoritative data (with burst
+    /// groups) still lands via the JSON files at the end.
     static func analyzeFolder(_ photoDir: URL, dataDir: URL,
                               cancel: CancelFlag = CancelFlag(),
+                              onPhoto: (@Sendable (PhotoAnalysis) -> Void)? = nil,
                               progress: @escaping @Sendable (String) -> Void) throws -> Summary {
         let photos = ImageLoader.listPhotos(in: photoDir)
         guard !photos.isEmpty else {
@@ -98,6 +103,7 @@ enum AnalysisEngine {
                 resultLock.lock()
                 results[index] = analysis
                 resultLock.unlock()
+                if let analysis { onPhoto?(analysis) }
                 let done = counter.increment()
                 if done % 5 == 0 || done == total {
                     progress("分析中 \(done)/\(total)...")

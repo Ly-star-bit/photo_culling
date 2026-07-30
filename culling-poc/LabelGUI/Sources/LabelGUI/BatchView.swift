@@ -132,6 +132,10 @@ struct BatchView: View {
 
             Spacer()
 
+            Button("撤销") { store.undoLastOverride() }
+                .keyboardShortcut("z", modifiers: .command)
+                .disabled(!store.canUndoOverride)
+                .help("撤销上一次改判 (⌘Z)")
             Button("审片模式") { reviewMode = true }
                 .keyboardShortcut("f", modifiers: [])
                 .disabled(store.items.isEmpty)
@@ -279,9 +283,7 @@ struct BatchView: View {
         if gridMode == .byGroup {
             return groupedItems.map { Self.groupCover($0.members) }
         }
-        let ordered = [Verdict.pick, .usable, .reject].flatMap { v in
-            store.items.filter { $0.verdict == v }
-        }
+        let ordered = [Verdict.pick, .usable, .reject].flatMap { sectionItems($0) }
         guard let filter = store.verdictFilter else { return ordered }
         return ordered.filter { $0.verdict == filter }
     }
@@ -301,7 +303,11 @@ struct BatchView: View {
 
     private var gridArea: some View {
         ScrollViewReader { proxy in
-            ScrollView {
+            VStack(spacing: 0) {
+                if !store.chapterSegments.isEmpty {
+                    chapterTimeline(proxy)
+                }
+                ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     if store.items.isEmpty {
                         emptyState
@@ -321,6 +327,7 @@ struct BatchView: View {
                 }
                 .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
             .background(Color(white: 0.13))
             .environment(\.colorScheme, .dark)
@@ -432,6 +439,57 @@ struct BatchView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.bar)
+    }
+
+    // MARK: - Chapter timeline (跨章节导航 + 覆盖保护可视化)
+
+    /// One segment per shooting chapter, width ∝ photo count, colored by verdict
+    /// makeup — a chapter culled to nothing shows as a solid red block instead
+    /// of a status-bar sentence. Click to jump the grid there.
+    private func chapterTimeline(_ proxy: ScrollViewProxy) -> some View {
+        let segments = store.chapterSegments
+        let total = max(1, segments.reduce(0) { $0 + $1.count })
+        return GeometryReader { geo in
+            HStack(alignment: .top, spacing: 2) {
+                ForEach(segments) { seg in
+                    let width = max(46, (geo.size.width - CGFloat(segments.count - 1) * 2)
+                                        * CGFloat(seg.count) / CGFloat(total))
+                    VStack(spacing: 2) {
+                        HStack(spacing: 0) {
+                            if seg.pick > 0 {
+                                Rectangle().fill(.green)
+                                    .frame(width: width * CGFloat(seg.pick) / CGFloat(seg.count))
+                            }
+                            if seg.usable > 0 {
+                                Rectangle().fill(.blue)
+                                    .frame(width: width * CGFloat(seg.usable) / CGFloat(seg.count))
+                            }
+                            if seg.reject > 0 { Rectangle().fill(.red) }
+                        }
+                        .frame(width: width, height: 7)
+                        .clipShape(Capsule())
+                        Text(seg.timeRange.isEmpty ? "章节\(seg.chapter + 1) · \(seg.count)"
+                                                   : "\(seg.timeRange) · \(seg.count)")
+                            .font(.caption2).monospacedDigit().lineLimit(1)
+                            .foregroundStyle(seg.allRejected ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+                    }
+                    .frame(width: width)
+                    .contentShape(Rectangle())
+                    .help("章节\(seg.chapter + 1) \(seg.timeRange) · 共\(seg.count) · 精选\(seg.pick) 可用\(seg.usable) 废片\(seg.reject)"
+                          + (seg.allRejected ? " ⚠️ 全部被淘汰" : ""))
+                    .onTapGesture {
+                        if let target = visibleItems.first(where: { $0.chapter == seg.chapter }) {
+                            focusedID = target.id
+                            withAnimation { proxy.scrollTo(target.id, anchor: .top) }
+                        }
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        .frame(height: 32)
+        .padding(.horizontal, 10)
+        .padding(.top, 6)
     }
 
     private func moveFocus(_ delta: Int, proxy: ScrollViewProxy) {
@@ -557,16 +615,27 @@ struct BatchView: View {
         return "exclamationmark.triangle"
     }
 
+    /// Items of one verdict section, with the reject section additionally
+    /// narrowed by the active reason filter (shared with keyboard navigation).
+    private func sectionItems(_ verdict: Verdict) -> [BatchItem] {
+        let matching = store.items.filter { $0.verdict == verdict }
+        guard verdict == .reject, let reason = store.reasonFilter else { return matching }
+        return matching.filter { $0.rejectReasons.contains(reason) }
+    }
+
     @ViewBuilder
     private func verdictSection(_ verdict: Verdict, color: Color) -> some View {
-        let matching = store.items.filter { $0.verdict == verdict }
+        let matching = sectionItems(verdict)
         let groupSizes = store.groupSizes
-        if !matching.isEmpty {
+        if !matching.isEmpty || (verdict == .reject && store.reasonFilter != nil) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
                     Circle().fill(color).frame(width: 8, height: 8)
                     Text(verdict.rawValue).font(.headline)
                     Text("\(matching.count)").font(.headline).foregroundStyle(.secondary)
+                    if verdict == .reject {
+                        reasonChips
+                    }
                 }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: thumbSize), spacing: 8)], spacing: 8) {
                     ForEach(matching) { item in
@@ -574,6 +643,30 @@ struct BatchView: View {
                             .id(item.id)
                     }
                 }
+            }
+        }
+    }
+
+    /// Per-reason kill counts as clickable filter chips — "audit all 闭眼 kills
+    /// in one pass" instead of scanning badges thumbnail by thumbnail.
+    private var reasonChips: some View {
+        let counts = store.reasonCounts
+        return HStack(spacing: 4) {
+            ForEach(BatchStore.reasonOrder.filter { counts[$0] != nil }, id: \.self) { reason in
+                let active = store.reasonFilter == reason
+                Button {
+                    store.reasonFilter = active ? nil : reason
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: Self.reasonIcon(reason)).font(.caption2)
+                        Text("\(reason) \(counts[reason]!)").font(.caption)
+                    }
+                    .padding(.horizontal, 7).padding(.vertical, 2)
+                    .background(active ? Color.red.opacity(0.35) : Color.white.opacity(0.08), in: Capsule())
+                    .overlay(Capsule().stroke(active ? Color.red : .clear, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help(active ? "点击取消筛选" : "只看因「\(reason)」被标记的照片")
             }
         }
     }
@@ -694,26 +787,49 @@ struct BatchView: View {
                         .pickerStyle(.segmented)
                         .labelsHidden()
 
+                        let reasonCounts = store.reasonCounts
                         thresholdSlider(
                             label: "锐度下限",
                             value: "\(Int(store.sharpnessThreshold))",
+                            killCount: reasonCounts["虚焦"] ?? 0,
                             slider: Slider(value: $store.sharpnessThreshold, in: 0...150, step: 5),
-                            help: "五官区域梯度锐度，低于此值判为虚焦 → 废片。清晰照片约 65-95"
+                            help: "五官区域梯度锐度，低于此值判为虚焦 → 废片。清晰照片约 65-95。直方图 = 本场分布，红色 = 会被此线淘汰",
+                            histogram: MetricHistogram(
+                                values: store.items.map(\.sharpness),
+                                range: 0...150,
+                                threshold: store.sharpnessThreshold,
+                                killBelow: true
+                            )
                         )
                         thresholdSlider(
                             label: "曝光裁切上限",
                             value: String(format: "%.1f%%", store.exposureThreshold * 100),
+                            killCount: reasonCounts["曝光裁切"] ?? 0,
                             slider: Slider(value: $store.exposureThreshold, in: 0.005...0.5),
-                            help: "死白/死黑像素占比超过此值 → 废片"
+                            help: "死白/死黑像素占比超过此值 → 废片。直方图为开方刻度 (大多数照片裁切接近 0)",
+                            histogram: MetricHistogram(
+                                values: store.items.map(\.worstClipPct),
+                                range: 0.005...0.5,
+                                threshold: store.exposureThreshold,
+                                killBelow: false,
+                                sqrtScale: true
+                            )
                         )
                         thresholdSlider(
                             label: "人脸质量下限",
                             value: store.faceQualityThreshold > 0
                                 ? String(format: "%.2f", store.faceQualityThreshold) : "关闭",
+                            killCount: reasonCounts["人脸质量低"] ?? 0,
                             slider: Slider(value: $store.faceQualityThreshold, in: 0...1),
-                            help: "特写脸的质量下限;小脸按景别自动放宽，连拍组内改为相对比较。拉到 0 关闭"
+                            help: "特写脸的质量下限;小脸按景别自动放宽，连拍组内改为相对比较。拉到 0 关闭",
+                            histogram: MetricHistogram(
+                                values: store.items.compactMap(\.faceQuality),
+                                range: 0...1,
+                                threshold: store.faceQualityThreshold,
+                                killBelow: true
+                            )
                         )
-                        Text("拖动实时生效")
+                        Text("拖动实时生效 · 红字 = 该项当前淘汰数")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
                     .padding(6)
@@ -741,14 +857,22 @@ struct BatchView: View {
         }
     }
 
-    /// One threshold row: name + live value on top, slider below, docs in tooltip.
-    private func thresholdSlider(label: String, value: String, slider: Slider<EmptyView, EmptyView>, help: String) -> some View {
+    /// One threshold row: name + live value + kill count on top, the shoot's
+    /// metric distribution behind the slider, docs in tooltip.
+    private func thresholdSlider(label: String, value: String, killCount: Int,
+                                 slider: Slider<EmptyView, EmptyView>, help: String,
+                                 histogram: MetricHistogram) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack {
                 Text(label).font(.callout)
                 Spacer()
+                if killCount > 0 {
+                    Text("淘汰 \(killCount)").font(.caption).monospacedDigit()
+                        .foregroundStyle(.red)
+                }
                 Text(value).font(.callout).monospacedDigit().foregroundStyle(.secondary)
             }
+            histogram
             slider
         }
         .help(help)
@@ -1126,10 +1250,29 @@ struct PhotoInspector: View {
             }
         }
         .onTapGesture(count: 2) { toggleZoom(item) }
+        .onAppear { prefetchNeighbors() }
         .onChange(of: currentID) {
             zoomed = false
             fullResImage = nil
             zoomScale = 1.0
+            prefetchNeighbors()
+        }
+    }
+
+    /// Warm the fit-view decode of the previous/next photo so ←/→ paging is
+    /// instant instead of showing the gray placeholder.
+    private func prefetchNeighbors() {
+        let ids = visibleIDs
+        guard let idx = ids.firstIndex(of: currentID) else { return }
+        for offset in [1, -1] {
+            let n = idx + offset
+            guard ids.indices.contains(n),
+                  let neighbor = store.items.first(where: { $0.id == ids[n] }) else { continue }
+            let path = neighbor.previewPath
+            guard ThumbCache.cache.object(forKey: ThumbCache.key(path, 1600)) == nil else { continue }
+            Task.detached(priority: .utility) {
+                _ = ThumbCache.load(path: path, maxPixel: 1600)
+            }
         }
     }
 
@@ -1369,6 +1512,11 @@ struct PhotoInspector: View {
                 .buttonStyle(.bordered)
                 .disabled(override == nil)
                 .keyboardShortcut("0", modifiers: [])
+            Button("撤销") { store.undoLastOverride() }
+                .buttonStyle(.bordered)
+                .disabled(!store.canUndoOverride)
+                .keyboardShortcut("z", modifiers: .command)
+                .help("撤销上一次改判 (⌘Z)")
         }
     }
 
@@ -1405,6 +1553,58 @@ struct PhotoInspector: View {
         if ids.indices.contains(next) {
             currentID = ids[next]
         }
+    }
+}
+
+// MARK: - Threshold metric histogram
+
+/// Distribution of one analysis metric across the current shoot, with the
+/// threshold line drawn on top — the slider stops being a blind drag: red bars
+/// are the photos this line kills, before you commit to it.
+struct MetricHistogram: View {
+    let values: [Double]
+    let range: ClosedRange<Double>
+    let threshold: Double
+    /// true = values BELOW the threshold are rejected (sharpness/quality);
+    /// false = values above (exposure clipping).
+    let killBelow: Bool
+    /// Square-root x-axis for metrics bunched near zero (exposure clip) —
+    /// linear would pile everything into the first bar.
+    var sqrtScale: Bool = false
+
+    private func position(_ v: Double) -> Double {
+        let span = range.upperBound - range.lowerBound
+        let f = max(0, min(1, (v - range.lowerBound) / span))
+        return sqrtScale ? f.squareRoot() : f
+    }
+
+    var body: some View {
+        Canvas { context, size in
+            guard !values.isEmpty else { return }
+            let binCount = 40
+            var bins = [Int](repeating: 0, count: binCount)
+            for v in values {
+                bins[min(binCount - 1, Int(position(v) * Double(binCount)))] += 1
+            }
+            guard let maxBin = bins.max(), maxBin > 0 else { return }
+            let barW = size.width / CGFloat(binCount)
+            let tx = CGFloat(position(threshold)) * size.width
+            for (i, count) in bins.enumerated() where count > 0 {
+                let h = max(2, CGFloat(count) / CGFloat(maxBin) * size.height)
+                let x = CGFloat(i) * barW
+                let killed = killBelow ? (x + barW / 2) < tx : (x + barW / 2) >= tx
+                context.fill(
+                    Path(CGRect(x: x, y: size.height - h, width: max(1, barW - 1), height: h)),
+                    with: .color(killed ? .red.opacity(0.8) : .gray.opacity(0.55))
+                )
+            }
+            var line = Path()
+            line.move(to: CGPoint(x: tx, y: 0))
+            line.addLine(to: CGPoint(x: tx, y: size.height))
+            context.stroke(line, with: .color(.white.opacity(0.9)), lineWidth: 1)
+        }
+        .frame(height: 26)
+        .background(.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 3))
     }
 }
 
@@ -1486,8 +1686,11 @@ struct ReviewView: View {
                         Text(exif.summary).font(.caption).monospacedDigit().foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Text("1精选 2可用 3废片(自动下一张) · 0恢复 · ←/→ · Esc退出")
+                    Text("1精选 2可用 3废片(自动下一张) · 0恢复 · ⌘Z撤销 · ←/→ · Esc退出")
                         .font(.caption2).foregroundStyle(.tertiary)
+                    Button("撤销") { store.undoLastOverride() }
+                        .keyboardShortcut("z", modifiers: .command)
+                        .disabled(!store.canUndoOverride)
                     Button("退出") { reviewMode = false }
                         .keyboardShortcut(.escape, modifiers: [])
                 }
@@ -1527,7 +1730,11 @@ struct ReviewView: View {
         }
         .focusable()
         .focusEffectDisabled()
-        .onAppear { if focusedID == nil { focusedID = visibleItems.first?.id } }
+        .onAppear {
+            if focusedID == nil { focusedID = visibleItems.first?.id }
+            prefetchNeighbors()
+        }
+        .onChange(of: focusedID) { prefetchNeighbors() }
         .onKeyPress(.leftArrow) { step(-1); return .handled }
         .onKeyPress(.rightArrow) { step(1); return .handled }
         .onKeyPress(characters: .init(charactersIn: "1230")) { press in
@@ -1547,6 +1754,21 @@ struct ReviewView: View {
         let next = currentIndex + delta
         if visibleItems.indices.contains(next) {
             focusedID = visibleItems[next].id
+        }
+    }
+
+    /// Warm the 1600px decode of the neighbors while the current photo is on
+    /// screen — advancing with → hits the cache instead of a visible decode.
+    private func prefetchNeighbors() {
+        let idx = currentIndex
+        for offset in [1, -1, 2] {
+            let n = idx + offset
+            guard visibleItems.indices.contains(n) else { continue }
+            let path = visibleItems[n].previewPath
+            guard ThumbCache.cache.object(forKey: ThumbCache.key(path, 1600)) == nil else { continue }
+            Task.detached(priority: .utility) {
+                _ = ThumbCache.load(path: path, maxPixel: 1600)
+            }
         }
     }
 

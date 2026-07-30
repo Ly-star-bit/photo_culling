@@ -28,7 +28,7 @@ enum FaceAnalyzer {
     /// One subject face: padded normalized top-left bbox + its own eye state.
     /// Persisted per-face so the UI can render a face-crop strip with eye badges
     /// (the Narrative Select / Aftershoot review pattern).
-    struct SubjectFace {
+    struct SubjectFace: Sendable {
         let bbox: [Double]  // [x0, y0, x1, y1]
         /// Absolute-threshold call, kept for JSON compat with the Python tooling.
         /// The GUI verdict layer recomputes eye state from `ear` with burst-group

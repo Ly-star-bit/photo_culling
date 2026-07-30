@@ -95,6 +95,9 @@ final class BatchStore: ObservableObject {
     @Published var lastError: String?
     /// nil = show everything; otherwise only the chosen verdict group.
     @Published var verdictFilter: Verdict?
+    /// When set, the 废片 section shows only rejects carrying this reason —
+    /// "audit every 闭眼 kill in one pass" instead of hunting badges.
+    @Published var reasonFilter: String?
     /// Photographer's final say: id → forced verdict, wins over every threshold.
     /// Persisted so re-opening the app keeps manual decisions.
     @Published private(set) var overrides: [String: Verdict] = [:]
@@ -260,6 +263,8 @@ final class BatchStore: ObservableObject {
         sessionDir = dataDir.appendingPathComponent("sessions/\(Self.sessionKey(for: folder))")
         try? FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
         overrides = [:]
+        overrideUndoStack = []
+        reasonFilter = nil
         loadOverrides()
         loadResults()
         applyThresholds()
@@ -367,8 +372,31 @@ final class BatchStore: ObservableObject {
         setOverrideBatch([id], verdict)
     }
 
+    /// Undo stack for verdict overrides: one entry per user action, holding each
+    /// touched id's PREVIOUS override (nil = was automatic). ⌘Z pops — a
+    /// mis-keyed digit in tag-and-advance review mode costs one keystroke, not
+    /// a hunt back through the filmstrip.
+    @Published private var overrideUndoStack: [[(id: String, previous: Verdict?)]] = []
+
+    var canUndoOverride: Bool { !overrideUndoStack.isEmpty }
+
+    func undoLastOverride() {
+        guard let last = overrideUndoStack.popLast() else { return }
+        for (id, previous) in last {
+            if let previous {
+                overrides[id] = previous
+            } else {
+                overrides.removeValue(forKey: id)
+            }
+        }
+        saveOverrides()
+        applyThresholds()
+    }
+
     /// Batch form (⌘-click multi-select): one save + one recompute for the lot.
     func setOverrideBatch(_ ids: some Collection<String>, _ verdict: Verdict?) {
+        overrideUndoStack.append(ids.map { ($0, overrides[$0]) })
+        if overrideUndoStack.count > 100 { overrideUndoStack.removeFirst() }
         for id in ids {
             if let verdict {
                 overrides[id] = verdict
@@ -393,6 +421,20 @@ final class BatchStore: ObservableObject {
         }
     }
 
+    /// Canonical display order for reject-reason chips and slider kill-counts.
+    static let reasonOrder = ["闭眼", "虚焦", "曝光裁切", "人脸质量低", "VLM建议淘汰"]
+
+    /// How many photos carry each reject reason under the CURRENT thresholds
+    /// (post-appeal, pre-override — the thresholds' own kill counts). Drives the
+    /// "此线淘汰 N 张" labels and the 废片 filter chips.
+    var reasonCounts: [String: Int] {
+        var counts: [String: Int] = [:]
+        for item in items {
+            for reason in item.rejectReasons { counts[reason, default: 0] += 1 }
+        }
+        return counts
+    }
+
     var verdictCounts: (reject: Int, usable: Int, pick: Int) {
         var r = 0, u = 0, p = 0
         for item in items {
@@ -407,6 +449,64 @@ final class BatchStore: ObservableObject {
 
     // MARK: - Pipeline invocation
 
+    /// Streaming buffer: analysis results accumulate here (main actor) and are
+    /// flushed into `items` in small batches, so the grid fills as the engine
+    /// works instead of appearing all at once after minutes on a big shoot.
+    private var provisionalBuffer: [BatchItem] = []
+    private var provisionalCount = 0
+
+    private func appendProvisional(_ analysis: AnalysisEngine.PhotoAnalysis) {
+        guard isRunning else { return }  // late arrivals after cancel/error
+        provisionalCount += 1
+        provisionalBuffer.append(Self.provisionalItem(from: analysis, group: -provisionalCount))
+        // Batched: per-photo @Published mutation would make SwiftUI diff the
+        // whole grid ~25×/s. Every 20 photos keeps it visibly "live" and cheap.
+        if provisionalBuffer.count >= 20 { flushProvisional() }
+    }
+
+    private func flushProvisional() {
+        guard !provisionalBuffer.isEmpty else { return }
+        items.append(contentsOf: provisionalBuffer)
+        provisionalBuffer.removeAll()
+        rebuildGroupSizes()
+        applyThresholds()
+    }
+
+    /// BatchItem from an in-flight engine result. Burst group is a unique
+    /// NEGATIVE placeholder (no siblings yet → no false group dynamics); the
+    /// real groups arrive with loadResults() when the run finishes.
+    private static func provisionalItem(from a: AnalysisEngine.PhotoAnalysis, group: Int) -> BatchItem {
+        BatchItem(
+            id: a.id,
+            previewPath: a.previewRelPath,
+            rawPath: a.rawPath,
+            decodePath: a.decodePath,
+            sharpness: a.sharpness,
+            worstClipPct: max(a.highlightClipPct, a.shadowClipPct),
+            eyeClosed: a.eyeClosed,
+            faceQuality: a.faceQuality,
+            faceCount: a.subjectFaceCount,
+            faceBbox: a.faceBbox,
+            faceAreaPct: a.faceAreaPct,
+            faces: a.subjectFaces.map {
+                FaceInfo(bbox: $0.bbox, eyeClosed: $0.eyeClosed, ear: $0.ear, areaPct: $0.areaPct)
+            },
+            burstGroup: group,
+            expressionScore: nil,
+            vlmReject: false,
+            vlmCompositionIssues: [],
+            vlmReason: nil,
+            appealClosedEyes: nil,
+            appealSubjectSharp: nil,
+            appealIntentionalExposure: nil,
+            appealReason: nil,
+            captureTime: a.captureTime,
+            exif: ExifMeta(shutterSec: a.shutterSec, aperture: a.aperture, iso: a.iso,
+                           focal35: a.focal35, lens: a.lensModel),
+            horizonDeg: a.horizonDeg
+        )
+    }
+
     func runAnalysis() {
         guard let dir = photoDir else { return }
         guard !isRunning else { return }
@@ -415,6 +515,11 @@ final class BatchStore: ObservableObject {
         cancelFlag = AnalysisEngine.CancelFlag()
         let flag = cancelFlag
         let data = sessionDir
+        // Grid streams this run's results as they arrive; the old session data
+        // is on disk and comes back via loadResults() if the run is cancelled.
+        items = []
+        provisionalBuffer = []
+        provisionalCount = 0
 
         Task.detached { [weak self] in
             // Runs natively (ImageIO/Vision) — no Python, no external deps.
@@ -423,7 +528,14 @@ final class BatchStore: ObservableObject {
             await MainActor.run { [weak self] in self?.progressText = "分析中..." }
             let summary: AnalysisEngine.Summary
             do {
-                summary = try AnalysisEngine.analyzeFolder(dir, dataDir: data, cancel: flag) { message in
+                summary = try AnalysisEngine.analyzeFolder(
+                    dir, dataDir: data, cancel: flag,
+                    onPhoto: { analysis in
+                        Task { @MainActor [weak self] in
+                            self?.appendProvisional(analysis)
+                        }
+                    }
+                ) { message in
                     let fraction = Self.parseFraction(message)
                     Task { @MainActor [weak self] in
                         self?.progressText = message
@@ -432,8 +544,12 @@ final class BatchStore: ObservableObject {
                 }
             } catch {
                 await MainActor.run { [weak self] in
-                    self?.lastError = "分析失败: \(error.localizedDescription)"
-                    self?.isRunning = false
+                    guard let self else { return }
+                    self.lastError = "分析失败: \(error.localizedDescription)"
+                    self.isRunning = false
+                    self.provisionalBuffer = []
+                    self.loadResults()      // restore whatever the disk still has
+                    self.applyThresholds()
                 }
                 return
             }
@@ -444,9 +560,13 @@ final class BatchStore: ObservableObject {
                 if summary.cancelled {
                     self.progressText = "已取消"
                     self.isRunning = false
+                    self.provisionalBuffer = []
+                    self.loadResults()      // drop provisional rows, restore disk state
+                    self.applyThresholds()
                     return
                 }
-                self.loadResults()
+                self.provisionalBuffer = []
+                self.loadResults()          // authoritative results (real burst groups)
                 self.applyThresholds()
                 if summary.failed.isEmpty {
                     self.progressText = "完成: \(summary.analyzed) 张"
@@ -778,6 +898,41 @@ final class BatchStore: ObservableObject {
         f.dateFormat = "HH:mm"
         return f
     }()
+
+    /// One timeline segment per chapter: size + verdict makeup + time range.
+    /// Backs the clickable chapter bar above the grid (empty unless the shoot
+    /// actually has 2+ chapters).
+    struct ChapterSegment: Identifiable {
+        let chapter: Int
+        let count: Int
+        let pick: Int
+        let usable: Int
+        let reject: Int
+        let timeRange: String
+        var id: Int { chapter }
+        var allRejected: Bool { pick + usable == 0 }
+    }
+
+    var chapterSegments: [ChapterSegment] {
+        var byChapter: [Int: [BatchItem]] = [:]
+        for item in items { byChapter[item.chapter, default: []].append(item) }
+        guard byChapter.count > 1 else { return [] }
+        return byChapter.sorted { $0.key < $1.key }.map { chapter, members in
+            let times = members.compactMap(\.captureTime)
+            let range = times.isEmpty ? "" :
+                "\(Self.chapterTimeFormatter.string(from: times.min()!))-\(Self.chapterTimeFormatter.string(from: times.max()!))"
+            var pick = 0, usable = 0, reject = 0
+            for member in members {
+                switch member.verdict {
+                case .pick: pick += 1
+                case .usable: usable += 1
+                case .reject: reject += 1
+                }
+            }
+            return ChapterSegment(chapter: chapter, count: members.count,
+                                  pick: pick, usable: usable, reject: reject, timeRange: range)
+        }
+    }
 
     /// Chapters where culling left NOTHING (all rejected) — losing a whole scene
     /// is a delivery accident, a few extra keepers is just waste.
