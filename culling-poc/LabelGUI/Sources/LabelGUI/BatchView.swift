@@ -20,6 +20,12 @@ struct BatchView: View {
     @State private var showISOSheet = false
     @State private var isoThreshold = 3200
     @State private var isoKeepersOnly = true
+    /// JPG 导出长边 (0 = 原尺寸)。
+    @State private var jpegMaxPixel = 0
+    /// ⌘ 选中恰好 2 张时的任意对比。
+    @State private var showComparePair = false
+    /// 网格实际宽度 — ↑/↓ 换行导航需要估算列数。
+    @State private var gridWidth: CGFloat = 800
 
     enum GridMode: String, CaseIterable {
         case byVerdict = "按判决"
@@ -66,6 +72,13 @@ struct BatchView: View {
         }
         .sheet(isPresented: $showJPEGSheet) { jpegExportSheet }
         .sheet(isPresented: $showISOSheet) { isoExportSheet }
+        .sheet(isPresented: $showComparePair) {
+            ComparePairSheet(
+                store: store,
+                ids: store.items.filter { selectedIDs.contains($0.id) }.map(\.id),
+                isPresented: $showComparePair
+            )
+        }
         .confirmationDialog(
             "把 \(store.verdictCounts.reject) 张废片移到废纸篓？",
             isPresented: $showTrashConfirm
@@ -152,8 +165,17 @@ struct BatchView: View {
                     .disabled(jpegExportCount == 0 || store.isRunning)
                 Button("导出高 ISO RAW (降噪)...") { showISOSheet = true }
                     .disabled(store.items.isEmpty || store.isRunning)
-                Button("导出选片确认表 (HTML)...") { exportContactSheet() }
-                    .disabled(store.verdictCounts.pick == 0 || store.isRunning)
+                Menu("导出选片确认表 (HTML)") {
+                    Button("仅精选 (\(store.verdictCounts.pick))...") {
+                        exportContactSheet(includeUsable: false)
+                    }
+                    .disabled(store.verdictCounts.pick == 0)
+                    Button("精选 + 可用 (\(store.verdictCounts.pick + store.verdictCounts.usable))...") {
+                        exportContactSheet(includeUsable: true)
+                    }
+                    .disabled(store.verdictCounts.pick + store.verdictCounts.usable == 0)
+                }
+                .disabled(store.isRunning)
                 Divider()
                 Button("废片移到废纸篓 (\(store.verdictCounts.reject))", role: .destructive) {
                     showTrashConfirm = true
@@ -216,12 +238,18 @@ struct BatchView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("导出 JPG").font(.headline)
             Toggle("包含可用 (关闭则仅导出精选)", isOn: $jpegIncludeUsable)
+            Picker("尺寸", selection: $jpegMaxPixel) {
+                Text("长边 2048 (选片/微信)").tag(2048)
+                Text("长边 4096 (屏幕交付)").tag(4096)
+                Text("原尺寸").tag(0)
+            }
+            .pickerStyle(.radioGroup)
             HStack {
                 Text("质量")
                 Slider(value: $jpegQuality, in: 60...100, step: 5)
                 Text("\(Int(jpegQuality))").monospacedDigit().frame(width: 30)
             }
-            Text("共 \(jpegExportCount) 张 · 全尺寸重编码，保留 EXIF")
+            Text("共 \(jpegExportCount) 张 · 重编码，保留 EXIF")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Spacer()
@@ -331,23 +359,40 @@ struct BatchView: View {
             }
             .background(Color(white: 0.13))
             .environment(\.colorScheme, .dark)
+            .background(GeometryReader { geo in
+                Color.clear.onChange(of: geo.size.width, initial: true) {
+                    gridWidth = geo.size.width
+                }
+            })
             .focusable()
             .focusEffectDisabled()
             .onKeyPress(.leftArrow) { moveFocus(-1, proxy: proxy); return .handled }
             .onKeyPress(.rightArrow) { moveFocus(1, proxy: proxy); return .handled }
+            .onKeyPress(.upArrow) { moveFocus(-gridColumns, proxy: proxy); return .handled }
+            .onKeyPress(.downArrow) { moveFocus(gridColumns, proxy: proxy); return .handled }
             .onKeyPress(.space) { openFocused(); return .handled }
             .onKeyPress(.return) { openFocused(); return .handled }
             .onKeyPress(characters: .init(charactersIn: "1230")) { press in
                 guard let id = focusedID else { return .ignored }
-                switch press.characters {
-                case "1": store.setOverride(id, .pick)
-                case "2": store.setOverride(id, .usable)
-                case "3": store.setOverride(id, .reject)
-                default: store.setOverride(id, nil)
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    switch press.characters {
+                    case "1": store.setOverride(id, .pick)
+                    case "2": store.setOverride(id, .usable)
+                    case "3": store.setOverride(id, .reject)
+                    default: store.setOverride(id, nil)
+                    }
                 }
                 return .handled
             }
         }
+    }
+
+    /// Columns currently on screen, from the measured grid width — ↑/↓ moves
+    /// focus by one visual row. Approximate across section boundaries, exact
+    /// within a section (same adaptive item size everywhere).
+    private var gridColumns: Int {
+        let contentWidth = gridWidth - 28  // LazyVStack padding 14 × 2
+        return max(1, Int((contentWidth + 8) / (thumbSize + 8)))
     }
 
     private var emptyState: some View {
@@ -412,6 +457,22 @@ struct BatchView: View {
                     }
                 }
             }
+            // VLM calibration: pure counting, no learning — a high release rate
+            // means the model's rejects aren't trustworthy on this kind of shoot.
+            let vlmSuggested = store.items.filter(\.vlmReject)
+            if !vlmSuggested.isEmpty {
+                Divider()
+                Text("VLM 判断校准").font(.caption).foregroundStyle(.secondary)
+                let released = vlmSuggested.filter { $0.verdict != .reject }.count
+                Text("VLM 建议淘汰 \(vlmSuggested.count) 张 · 你放行了其中 \(released) 张 (\(released * 100 / vlmSuggested.count)%)")
+                    .font(.caption)
+                    .foregroundStyle(released * 2 > vlmSuggested.count ? .orange : .primary)
+            }
+            let rescued = store.items.filter { !$0.vlmRescued.isEmpty }.count
+            if rescued > 0 {
+                Text("复审平反 \(rescued) 张 (算法误杀被 VLM 纠正)")
+                    .font(.caption).foregroundStyle(.green)
+            }
         }
         .padding()
         .frame(minWidth: 320)
@@ -422,16 +483,22 @@ struct BatchView: View {
             Text("已选 \(selectedIDs.count) 张 → 批量改判:")
             ForEach(Verdict.allCases, id: \.self) { v in
                 Button(v.rawValue) {
-                    store.setOverrideBatch(selectedIDs, v)
+                    withAnimation { store.setOverrideBatch(selectedIDs, v) }
                     selectedIDs.removeAll()
                 }
                 .buttonStyle(.bordered)
             }
             Button("恢复自动") {
-                store.setOverrideBatch(selectedIDs, nil)
+                withAnimation { store.setOverrideBatch(selectedIDs, nil) }
                 selectedIDs.removeAll()
             }
             .buttonStyle(.bordered)
+            if selectedIDs.count == 2 {
+                Divider().frame(height: 16)
+                Button("对比这两张") { showComparePair = true }
+                    .buttonStyle(.borderedProminent)
+                    .help("并排对比任意两张 (不限连拍组) — 两个机位/两个瞬间选一张")
+            }
             Spacer()
             Button("取消选择") { selectedIDs.removeAll() }
                 .keyboardShortcut(.escape, modifiers: [])
@@ -615,12 +682,17 @@ struct BatchView: View {
         return "exclamationmark.triangle"
     }
 
-    /// Items of one verdict section, with the reject section additionally
-    /// narrowed by the active reason filter (shared with keyboard navigation).
+    /// Items of one verdict section, narrowed by the borderline filter and (for
+    /// rejects) the active reason filter. Shared with keyboard navigation.
     private func sectionItems(_ verdict: Verdict) -> [BatchItem] {
-        let matching = store.items.filter { $0.verdict == verdict }
-        guard verdict == .reject, let reason = store.reasonFilter else { return matching }
-        return matching.filter { $0.rejectReasons.contains(reason) }
+        var matching = store.items.filter { $0.verdict == verdict }
+        if store.borderlineFilter {
+            matching = matching.filter { store.isBorderline($0) }
+        }
+        if verdict == .reject, let reason = store.reasonFilter {
+            matching = matching.filter { $0.rejectReasons.contains(reason) }
+        }
+        return matching
     }
 
     @ViewBuilder
@@ -829,6 +901,9 @@ struct BatchView: View {
                                 killBelow: true
                             )
                         )
+                        Toggle("只看临界照片 (\(store.borderlineCount))", isOn: $store.borderlineFilter)
+                            .font(.caption)
+                            .help("任一阈值 ±15% 区间内的照片 — 调完滑杆先过一眼刀口上的这些，误杀都藏在这里")
                         Text("拖动实时生效 · 红字 = 该项当前淘汰数")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
@@ -892,14 +967,14 @@ struct BatchView: View {
         }
     }
 
-    private func exportContactSheet() {
+    private func exportContactSheet(includeUsable: Bool) {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "选片确认_\(store.photoDir?.lastPathComponent ?? "").html"
         if let htmlType = UTType(filenameExtension: "html") {
             panel.allowedContentTypes = [htmlType]
         }
         if panel.runModal() == .OK, let url = panel.url {
-            store.exportContactSheet(to: url, includeUsable: false)
+            store.exportContactSheet(to: url, includeUsable: includeUsable)
         }
     }
 
@@ -921,7 +996,9 @@ struct BatchView: View {
         panel.allowsMultipleSelection = false
         panel.prompt = "导出到此文件夹"
         if panel.runModal() == .OK, let url = panel.url {
-            store.exportJPEGs(to: url, includeUsable: jpegIncludeUsable, quality: jpegQuality / 100.0)
+            store.exportJPEGs(to: url, includeUsable: jpegIncludeUsable,
+                              quality: jpegQuality / 100.0,
+                              maxPixel: jpegMaxPixel > 0 ? jpegMaxPixel : nil)
         }
     }
 }
@@ -1799,6 +1876,84 @@ struct HistogramView: View {
     }
 }
 
+// MARK: - Arbitrary two-photo compare (跨组对比)
+
+/// Side-by-side compare of any two ⌘-selected photos — the in-group compare
+/// answers "which frame of this burst", this answers "which of these two
+/// moments/angles gets delivered".
+struct ComparePairSheet: View {
+    @ObservedObject var store: BatchStore
+    let ids: [String]
+    @Binding var isPresented: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("并排对比").font(.headline)
+                Spacer()
+                Text("为每张分别改判后关闭")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                Button("关闭") { isPresented = false }
+                    .keyboardShortcut(.escape, modifiers: [])
+            }
+            .padding()
+            HStack(spacing: 2) {
+                ForEach(ids, id: \.self) { id in
+                    if let item = store.items.first(where: { $0.id == id }) {
+                        side(item)
+                    }
+                }
+            }
+            .background(Color.black)
+        }
+        .frame(minWidth: 1100, minHeight: 720)
+    }
+
+    private func verdictColor(_ v: Verdict) -> Color {
+        switch v {
+        case .pick: return .green
+        case .usable: return .blue
+        case .reject: return .red
+        }
+    }
+
+    private func side(_ item: BatchItem) -> some View {
+        VStack(spacing: 4) {
+            HStack {
+                Text(item.id).font(.caption).foregroundStyle(.white)
+                Text(item.verdict.rawValue).font(.caption2)
+                    .padding(.horizontal, 5)
+                    .background(verdictColor(item.verdict).opacity(0.4), in: Capsule())
+                    .foregroundStyle(.white)
+            }
+            .padding(.top, 6)
+            ThumbnailView(path: item.previewPath, maxPixel: 1600, fit: true)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            HStack(spacing: 10) {
+                Text("锐度 \(Int(item.sharpness))")
+                if let q = item.faceQuality { Text(String(format: "质量 %.2f", q)) }
+                if let e = item.expressionScore { Text("表情 \(e)") }
+                if let exif = item.exif { Text(exif.summary) }
+            }
+            .font(.caption2).foregroundStyle(.white.opacity(0.8))
+            HStack(spacing: 6) {
+                let override = store.overrides[item.id]
+                Button("精选") { store.setOverride(item.id, .pick) }
+                    .buttonStyle(.bordered)
+                    .tint(override == .pick ? .green : nil)
+                Button("可用") { store.setOverride(item.id, .usable) }
+                    .buttonStyle(.bordered)
+                    .tint(override == .usable ? .blue : nil)
+                Button("废片") { store.setOverride(item.id, .reject) }
+                    .buttonStyle(.bordered)
+                    .tint(override == .reject ? .red : nil)
+            }
+            .padding(.bottom, 8)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
 // MARK: - Fullscreen review mode
 
 /// Photo Mechanic-style pro flow: one big photo, filmstrip below, right hand on
@@ -1808,6 +1963,11 @@ struct ReviewView: View {
     let visibleItems: [BatchItem]
     @Binding var focusedID: String?
     @Binding var reviewMode: Bool
+    /// In-flow focus check: Z / double-click / pinch opens the full-res ZoomPane
+    /// right here — no detour through the inspector and back.
+    @State private var zoomed = false
+    @State private var zoomImage: NSImage?
+    @State private var loadingZoom = false
 
     private var currentIndex: Int {
         guard let id = focusedID, let idx = visibleItems.firstIndex(where: { $0.id == id }) else { return 0 }
@@ -1835,19 +1995,37 @@ struct ReviewView: View {
                         Text(exif.summary).font(.caption).monospacedDigit().foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Text("1精选 2可用 3废片(自动下一张) · 0恢复 · ⌘Z撤销 · ←/→ · Esc退出")
+                    Text("1精选 2可用 3废片(自动下一张) · 0恢复 · Z放大 · ⌘Z撤销 · ←/→ · Esc退出")
                         .font(.caption2).foregroundStyle(.tertiary)
+                    Button(zoomed ? "适应窗口" : (loadingZoom ? "解码原图..." : "放大 (Z)")) { toggleZoom(item) }
+                        .disabled(loadingZoom)
                     Button("撤销") { store.undoLastOverride() }
                         .keyboardShortcut("z", modifiers: .command)
                         .disabled(!store.canUndoOverride)
-                    Button("退出") { reviewMode = false }
-                        .keyboardShortcut(.escape, modifiers: [])
+                    Button("退出") {
+                        // Esc backs out one level at a time: zoom first, then review.
+                        if zoomed { zoomed = false } else { reviewMode = false }
+                    }
+                    .keyboardShortcut(.escape, modifiers: [])
                 }
                 .padding(8)
 
-                ThumbnailView(path: item.previewPath, maxPixel: 1600, fit: true)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color.black)
+                if zoomed, let full = zoomImage {
+                    ZoomPane(image: full, entry: .hundred,
+                             faceBbox: item.faceBbox,
+                             boxColor: item.dynamicEyeClosed == true ? .systemRed : .systemYellow)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ThumbnailView(path: item.previewPath, maxPixel: 1600, fit: true)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color.black)
+                        .onTapGesture(count: 2) { toggleZoom(item) }
+                        .gesture(
+                            MagnifyGesture().onEnded { value in
+                                if value.magnification > 1.1 { toggleZoom(item) }
+                            }
+                        )
+                }
 
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -1880,12 +2058,32 @@ struct ReviewView: View {
         .focusable()
         .focusEffectDisabled()
         .onAppear {
-            if focusedID == nil { focusedID = visibleItems.first?.id }
+            // Resume where the last review session stopped — 3000 photos get
+            // reviewed across evenings. An explicit grid focus wins.
+            if focusedID == nil {
+                if let last = store.lastReviewedID,
+                   visibleItems.contains(where: { $0.id == last }) {
+                    focusedID = last
+                } else {
+                    focusedID = visibleItems.first?.id
+                }
+            }
             prefetchNeighbors()
         }
-        .onChange(of: focusedID) { prefetchNeighbors() }
+        .onChange(of: focusedID) {
+            zoomed = false
+            zoomImage = nil
+            prefetchNeighbors()
+        }
+        .onDisappear {
+            if let id = focusedID { store.saveReviewPosition(id) }
+        }
         .onKeyPress(.leftArrow) { step(-1); return .handled }
         .onKeyPress(.rightArrow) { step(1); return .handled }
+        .onKeyPress(characters: .init(charactersIn: "zZ")) { _ in
+            if let item = current { toggleZoom(item) }
+            return .handled
+        }
         .onKeyPress(characters: .init(charactersIn: "1230")) { press in
             guard let item = current else { return .ignored }
             switch press.characters {
@@ -1896,6 +2094,30 @@ struct ReviewView: View {
             }
             if press.characters != "0" { step(1) }  // tag-and-advance
             return .handled
+        }
+    }
+
+    private func toggleZoom(_ item: BatchItem) {
+        if zoomed {
+            zoomed = false
+            return
+        }
+        if let cached = FullResCache.cache.object(forKey: item.decodePath as NSString) {
+            zoomImage = cached
+            zoomed = true
+            return
+        }
+        loadingZoom = true
+        let path = item.decodePath
+        Task.detached(priority: .userInitiated) {
+            let image = FullResCache.load(path: path)
+            await MainActor.run {
+                loadingZoom = false
+                if let image {
+                    zoomImage = image
+                    zoomed = true
+                }
+            }
         }
     }
 

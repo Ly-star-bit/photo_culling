@@ -98,6 +98,10 @@ final class BatchStore: ObservableObject {
     /// When set, the 废片 section shows only rejects carrying this reason —
     /// "audit every 闭眼 kill in one pass" instead of hunting badges.
     @Published var reasonFilter: String?
+    /// Show only photos within ±15% of an active threshold — the ones on the
+    /// knife's edge, worth eyeballing after a slider change. Runtime hedge for
+    /// thresholds that were never calibrated against real bad photos.
+    @Published var borderlineFilter = false
     /// Photographer's final say: id → forced verdict, wins over every threshold.
     /// Persisted so re-opening the app keeps manual decisions.
     @Published private(set) var overrides: [String: Verdict] = [:]
@@ -265,6 +269,8 @@ final class BatchStore: ObservableObject {
         overrides = [:]
         overrideUndoStack = []
         reasonFilter = nil
+        borderlineFilter = false
+        loadReviewPosition()
         loadOverrides()
         loadResults()
         applyThresholds()
@@ -311,6 +317,26 @@ final class BatchStore: ObservableObject {
             && !keep.contains(dir.lastPathComponent) {
             try? FileManager.default.removeItem(at: dir)
         }
+    }
+
+    // MARK: - Review position (续审: 3000 张分两晚审完)
+
+    /// Last photo the user was on in 审片模式 — entering review mode with no
+    /// grid focus resumes here instead of photo 1.
+    private(set) var lastReviewedID: String?
+
+    private var reviewStatePath: URL { sessionDir.appendingPathComponent("review_state.json") }
+
+    func saveReviewPosition(_ id: String) {
+        lastReviewedID = id
+        if let data = try? JSONEncoder().encode(["last": id]) {
+            try? data.write(to: reviewStatePath)
+        }
+    }
+
+    private func loadReviewPosition() {
+        lastReviewedID = (try? Data(contentsOf: reviewStatePath))
+            .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }?["last"]
     }
 
     // MARK: - VLM server management (MiniCPM-V 4.6 via Ollama)
@@ -424,6 +450,23 @@ final class BatchStore: ObservableObject {
     /// Canonical display order for reject-reason chips and slider kill-counts.
     static let reasonOrder = ["闭眼", "虚焦", "曝光裁切", "人脸质量低", "VLM建议淘汰"]
 
+    /// Within ±15% of any ACTIVE threshold — the photos a small slider nudge
+    /// would flip either way.
+    func isBorderline(_ item: BatchItem) -> Bool {
+        let sharp = sharpnessThreshold
+        if sharp > 0, abs(item.sharpness - sharp) <= sharp * 0.15 { return true }
+        let clip = exposureThreshold
+        if abs(item.worstClipPct - clip) <= clip * 0.15 { return true }
+        if faceQualityThreshold > 0, let quality = item.faceQuality {
+            let threshold = Self.compensatedQualityThreshold(
+                slider: faceQualityThreshold, faceAreaPct: item.faceAreaPct)
+            if abs(quality - threshold) <= threshold * 0.15 { return true }
+        }
+        return false
+    }
+
+    var borderlineCount: Int { items.filter(isBorderline).count }
+
     /// How many photos carry each reject reason under the CURRENT thresholds
     /// (post-appeal, pre-override — the thresholds' own kill counts). Drives the
     /// "此线淘汰 N 张" labels and the 废片 filter chips.
@@ -466,6 +509,9 @@ final class BatchStore: ObservableObject {
 
     private func flushProvisional() {
         guard !provisionalBuffer.isEmpty else { return }
+        // Re-analyzed photos replace their stale rows in place; new ones append.
+        let incoming = Set(provisionalBuffer.map(\.id))
+        items.removeAll { incoming.contains($0.id) }
         items.append(contentsOf: provisionalBuffer)
         provisionalBuffer.removeAll()
         rebuildGroupSizes()
@@ -515,9 +561,9 @@ final class BatchStore: ObservableObject {
         cancelFlag = AnalysisEngine.CancelFlag()
         let flag = cancelFlag
         let data = sessionDir
-        // Grid streams this run's results as they arrive; the old session data
-        // is on disk and comes back via loadResults() if the run is cancelled.
-        items = []
+        // Old items STAY on screen: with incremental reuse most of them are
+        // still valid, and re-analyzed photos stream in as in-place
+        // replacements (flushProvisional swaps by id).
         provisionalBuffer = []
         provisionalCount = 0
 
@@ -568,10 +614,10 @@ final class BatchStore: ObservableObject {
                 self.provisionalBuffer = []
                 self.loadResults()          // authoritative results (real burst groups)
                 self.applyThresholds()
-                if summary.failed.isEmpty {
-                    self.progressText = "完成: \(summary.analyzed) 张"
-                } else {
-                    self.progressText = "完成: \(summary.analyzed) 张"
+                self.progressText = summary.reused > 0
+                    ? "完成: 分析 \(summary.analyzed) 张 · 复用 \(summary.reused) 张未变"
+                    : "完成: \(summary.analyzed) 张"
+                if !summary.failed.isEmpty {
                     self.lastError = "\(summary.failed.count) 张无法解析被跳过: \(summary.failed.prefix(5).joined(separator: ", "))\(summary.failed.count > 5 ? "..." : "")"
                 }
                 self.isRunning = false
@@ -1314,7 +1360,9 @@ final class BatchStore: ObservableObject {
     /// (the JPEG half of a RAW+JPEG pair, else the RAW itself via ImageIO's
     /// vendor decoders) and re-encodes at the chosen quality, carrying the
     /// source metadata (EXIF/GPS/orientation) into the output.
-    func exportJPEGs(to folder: URL, includeUsable: Bool, quality: Double) {
+    /// maxPixel nil = full resolution; otherwise long-edge cap (2048 for
+    /// WeChat-able 选片小图, 4096 for screen delivery).
+    func exportJPEGs(to folder: URL, includeUsable: Bool, quality: Double, maxPixel: Int? = nil) {
         guard !isRunning else { return }
         let chosen = items.filter { $0.verdict == .pick || (includeUsable && $0.verdict == .usable) }
         guard !chosen.isEmpty else {
@@ -1342,7 +1390,7 @@ final class BatchStore: ObservableObject {
                     group.addTask {
                         (item.id, Self.writeJPEG(from: URL(fileURLWithPath: item.decodePath),
                                                  to: folder.appendingPathComponent("\(item.id).jpg"),
-                                                 quality: quality))
+                                                 quality: quality, maxPixel: maxPixel))
                     }
                 }
                 for _ in 0..<workers { addNext() }
@@ -1379,14 +1427,34 @@ final class BatchStore: ObservableObject {
     /// setting for JPEG→JPEG). Source properties ride along so EXIF, GPS and
     /// the orientation tag survive; pixels are written un-rotated with the tag,
     /// exactly like the camera did.
-    nonisolated static func writeJPEG(from source: URL, to dest: URL, quality: Double) -> Bool {
+    nonisolated static func writeJPEG(from source: URL, to dest: URL, quality: Double,
+                                      maxPixel: Int? = nil) -> Bool {
         guard let src = CGImageSourceCreateWithURL(source as CFURL, nil),
               CGImageSourceGetCount(src) > 0,
-              let image = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCache: false] as CFDictionary),
               let out = CGImageDestinationCreateWithURL(dest as CFURL, UTType.jpeg.identifier as CFString, 1, nil)
         else { return false }
         var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
         props[kCGImageDestinationLossyCompressionQuality] = quality
+
+        let image: CGImage?
+        if let maxPixel {
+            // Resized path: thumbnail WITH transform bakes the rotation into the
+            // pixels, so the orientation tag must be stripped — keeping it would
+            // double-rotate in every viewer.
+            image = CGImageSourceCreateThumbnailAtIndex(src, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+            ] as CFDictionary)
+            props.removeValue(forKey: kCGImagePropertyOrientation)
+            if var tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
+                tiff.removeValue(forKey: kCGImagePropertyTIFFOrientation)
+                props[kCGImagePropertyTIFFDictionary] = tiff
+            }
+        } else {
+            image = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCache: false] as CFDictionary)
+        }
+        guard let image else { return false }
         CGImageDestinationAddImage(out, image, props as CFDictionary)
         return CGImageDestinationFinalize(out)
     }

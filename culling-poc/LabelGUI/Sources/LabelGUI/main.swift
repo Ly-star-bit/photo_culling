@@ -53,8 +53,8 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--analyze"),
             print(message)
         }
         let elapsed = Date().timeIntervalSince(start)
-        print(String(format: "Done: %d photos in %.1fs (%.2fs/photo)",
-                     summary.analyzed, elapsed, elapsed / Double(max(1, summary.analyzed))))
+        print(String(format: "Done: %d analyzed, %d reused in %.1fs (%.2fs/photo)",
+                     summary.analyzed, summary.reused, elapsed, elapsed / Double(max(1, summary.analyzed))))
         if !summary.failed.isEmpty {
             print("Failed (\(summary.failed.count)): \(summary.failed.joined(separator: ", "))")
         }
