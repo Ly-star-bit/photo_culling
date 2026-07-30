@@ -3,13 +3,15 @@ import SwiftUI
 struct ContentView: View {
     @ObservedObject var store: LabelStore
     @ObservedObject var batchStore: BatchStore
+    @StateObject private var watermarkStore = WatermarkStore(dataDir: appDataDir)
 
     var body: some View {
-        // 迁移 is a once-a-year utility — it lives in its own window (窗口菜单 →
-        // 迁移), not as a permanent top-level tab.
         TabView {
             BatchView(store: batchStore)
                 .tabItem { Label("批量处理", systemImage: "square.grid.3x3") }
+
+            WatermarkView(store: watermarkStore, batchStore: batchStore)
+                .tabItem { Label("水印", systemImage: "signature") }
 
             labelingTab
                 .tabItem { Label("标注校准", systemImage: "checklist") }

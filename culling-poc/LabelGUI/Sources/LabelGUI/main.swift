@@ -1,4 +1,5 @@
 import SwiftUI
+import ImageIO
 
 /// Analysis artifacts (previews, manifest/layer JSONs, labels.csv, settings.json)
 /// live in Application Support — always writable by the app, no TCC prompt, works
@@ -64,6 +65,31 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--analyze"),
         FileHandle.standardError.write("analyze failed: \(error.localizedDescription)\n".data(using: .utf8)!)
         exit(1)
     }
+}
+
+// Headless watermark smoke test:
+// LabelGUI --watermark <photo> <out.jpg> [signature.png]
+// Renders with EXIF text + frame enabled so the whole pipeline gets exercised.
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--watermark"),
+   CommandLine.arguments.count > flagIndex + 2 {
+    let photo = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])
+    let out = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 2])
+    var signature: CGImage?
+    if CommandLine.arguments.count > flagIndex + 3 {
+        let sigURL = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 3])
+        if let src = CGImageSourceCreateWithURL(sigURL as CFURL, nil) {
+            signature = CGImageSourceCreateImageAtIndex(src, 0, nil)
+        }
+    }
+    var config = WatermarkEngine.Config()
+    config.tintEnabled = true
+    config.tint = .white
+    config.exifText.enabled = true
+    config.frame.enabled = true
+    let ok = WatermarkEngine.exportPhoto(source: photo, to: out, signature: signature,
+                                         config: config, options: .init())
+    print(ok ? "watermark OK: \(out.path)" : "watermark FAILED")
+    exit(ok ? 0 : 1)
 }
 
 struct LabelGUIApp: App {
