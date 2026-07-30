@@ -176,17 +176,33 @@ enum Metrics {
         return basis
     }()
 
-    /// pHash from an RGB buffer of ANY size: nearest-neighbor downsample to 32x32
+    /// pHash from an RGB buffer of ANY size: box-average downsample to 32x32
     /// grayscale, 2D DCT, top-left 8x8 coefficients thresholded on their median.
+    /// Averaging (vs nearest-neighbor) matters for grouping stability: a single
+    /// sampled pixel jitters with noise/micro-motion between burst frames, which
+    /// flipped borderline hamming distances around the threshold.
     static func phash(rgba: [UInt8], width: Int, height: Int) -> UInt64 {
         let n = phashInputSize
         var small = [Float](repeating: 0, count: n * n)
-        for y in 0..<n {
-            let sy = min(height - 1, y * height / n)
-            for x in 0..<n {
-                let sx = min(width - 1, x * width / n)
-                let i = (sy * width + sx) * 4
-                small[y * n + x] = 0.299 * Float(rgba[i]) + 0.587 * Float(rgba[i + 1]) + 0.114 * Float(rgba[i + 2])
+        rgba.withUnsafeBufferPointer { src in
+            small.withUnsafeMutableBufferPointer { dst in
+                for y in 0..<n {
+                    let sy0 = y * height / n
+                    let sy1 = max(sy0 + 1, (y + 1) * height / n)
+                    for x in 0..<n {
+                        let sx0 = x * width / n
+                        let sx1 = max(sx0 + 1, (x + 1) * width / n)
+                        var acc: Float = 0
+                        for sy in sy0..<sy1 {
+                            let row = sy * width
+                            for sx in sx0..<sx1 {
+                                let i = (row + sx) * 4
+                                acc += 0.299 * Float(src[i]) + 0.587 * Float(src[i + 1]) + 0.114 * Float(src[i + 2])
+                            }
+                        }
+                        dst[y * n + x] = acc / Float((sy1 - sy0) * (sx1 - sx0))
+                    }
+                }
             }
         }
 

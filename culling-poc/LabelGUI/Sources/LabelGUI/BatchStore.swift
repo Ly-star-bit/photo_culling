@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import AppKit
 import ImageIO
 import UniformTypeIdentifiers
 
@@ -174,6 +175,11 @@ final class BatchStore: ObservableObject {
         let name: String
         var lastAnalyzed: String
         var photoCount: Int
+        /// Security-scoped bookmark of the photo folder — re-grants file access
+        /// after relaunch for TCC-protected locations (桌面/文稿/外置盘), where a
+        /// bare path would open the session but fail on XMP/导出 writes.
+        /// Optional so pre-bookmark sessions.json files still decode.
+        var bookmark: Data? = nil
         var id: String { key }
     }
 
@@ -209,10 +215,48 @@ final class BatchStore: ObservableObject {
         }
     }
 
+    // MARK: - Folder access persistence
+
+    /// Folder currently held open via a resolved security-scoped bookmark.
+    /// In this non-sandboxed build start/stop are harmless no-ops, but the
+    /// bookmarks make folder access survive a future sandboxed/notarized build
+    /// and folder renames today.
+    private var accessedFolder: URL?
+
+    nonisolated private static func makeBookmark(for url: URL) -> Data? {
+        (try? url.bookmarkData(options: .withSecurityScope,
+                               includingResourceValuesForKeys: nil, relativeTo: nil))
+            ?? (try? url.bookmarkData())
+    }
+
+    /// Swap security-scoped access from the previous folder to this one, using
+    /// the stored bookmark when there is one. Returns the resolved URL (tracks
+    /// a folder that was renamed/moved since last time); falls back to the
+    /// given URL when no bookmark exists or resolution fails.
+    private func restoreAccess(to folder: URL) -> URL {
+        accessedFolder?.stopAccessingSecurityScopedResource()
+        accessedFolder = nil
+        guard let bookmark = recentSessions
+            .first(where: { $0.key == Self.sessionKey(for: folder) })?.bookmark else { return folder }
+        var stale = false
+        let resolved = (try? URL(resolvingBookmarkData: bookmark, options: .withSecurityScope,
+                                 relativeTo: nil, bookmarkDataIsStale: &stale))
+            ?? (try? URL(resolvingBookmarkData: bookmark, relativeTo: nil, bookmarkDataIsStale: &stale))
+        guard let resolved else { return folder }
+        if resolved.startAccessingSecurityScopedResource() {
+            accessedFolder = resolved
+        }
+        return resolved
+    }
+
     /// Point the store at the session for this folder: existing results load
     /// instantly (no re-analysis); a new folder starts empty until 开始分析.
     func switchSession(to folder: URL) {
-        photoDir = folder
+        let resolved = restoreAccess(to: folder)
+        photoDir = resolved
+        // Session key from the URL the caller had (the recents entry's path):
+        // keeps existing results reachable even if the bookmark resolved the
+        // folder to a renamed location.
         sessionDir = dataDir.appendingPathComponent("sessions/\(Self.sessionKey(for: folder))")
         try? FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
         overrides = [:]
@@ -231,15 +275,36 @@ final class BatchStore: ObservableObject {
     private func touchSessionIndex() {
         guard let folder = photoDir else { return }
         let key = Self.sessionKey(for: folder)
+        // Fresh bookmark while we demonstrably have access; keep the old one if
+        // creation fails (shouldn't, but a stale bookmark beats none).
+        let bookmark = Self.makeBookmark(for: folder)
+            ?? recentSessions.first(where: { $0.key == key })?.bookmark
         var entries = recentSessions.filter { $0.key != key }
         entries.insert(SessionEntry(
             key: key, path: folder.path, name: folder.lastPathComponent,
             lastAnalyzed: ISO8601DateFormatter().string(from: Date()),
-            photoCount: items.count
+            photoCount: items.count,
+            bookmark: bookmark
         ), at: 0)
         recentSessions = Array(entries.prefix(15))
         if let data = try? JSONEncoder().encode(recentSessions) {
             try? data.write(to: sessionsIndexPath)
+        }
+        pruneOrphanedSessions()
+    }
+
+    /// Delete session dirs that fell out of the recents index — one big shoot's
+    /// previews run to hundreds of MB and nothing else ever removes them.
+    private func pruneOrphanedSessions() {
+        let keep = Set(recentSessions.map(\.key))
+        let root = dataDir.appendingPathComponent("sessions")
+        guard let dirs = try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: nil) else { return }
+        for dir in dirs
+        where dir.hasDirectoryPath
+            && dir.lastPathComponent != "default"
+            && !keep.contains(dir.lastPathComponent) {
+            try? FileManager.default.removeItem(at: dir)
         }
     }
 
@@ -250,7 +315,13 @@ final class BatchStore: ObservableObject {
     /// and our yes/no culling questions don't feel the quantization.
     nonisolated static let ollamaModel = "minicpm-v4.6"
 
-    func checkVLMServer() async -> Bool {
+    /// uv lives in the Homebrew prefix — /opt/homebrew on Apple Silicon,
+    /// /usr/local on Intel Macs. Resolved once at first use.
+    nonisolated static let uvExecutable: String =
+        ["/opt/homebrew/bin/uv", "/usr/local/bin/uv"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) } ?? "/opt/homebrew/bin/uv"
+
+    nonisolated func checkVLMServer() async -> Bool {
         var request = URLRequest(url: URL(string: "http://localhost:11434/api/version")!)
         request.timeoutInterval = 2
         guard let (_, response) = try? await URLSession.shared.data(for: request),
@@ -407,6 +478,16 @@ final class BatchStore: ObservableObject {
                            "--model", Self.ollamaModel]
 
         Task.detached { [weak self] in
+            guard let self else { return }
+            // Preflight: fail in 2s with an actionable message instead of letting
+            // the Python subprocess time out against a server that isn't there.
+            guard await self.checkVLMServer() else {
+                await MainActor.run { [weak self] in
+                    self?.lastError = "Ollama 服务未运行 — 先点“启动 VLM 服务” (模型: ollama pull \(Self.ollamaModel))"
+                    self?.isRunning = false
+                }
+                return
+            }
             await MainActor.run { [weak self] in self?.progressText = "VLM 分析 \(count) 张幸存照片 (每张约6秒)..." }
             let idsFile = data.appendingPathComponent("vlm_ids.txt")
             do {
@@ -419,7 +500,7 @@ final class BatchStore: ObservableObject {
                 return
             }
             let result = Self.runProcess(
-                executable: "/opt/homebrew/bin/uv",
+                executable: Self.uvExecutable,
                 arguments: ["run", "python", "layer2.py"]
                     + backendArgs
                     + ["--manifest", data.appendingPathComponent("manifest.json").path,
@@ -478,6 +559,14 @@ final class BatchStore: ObservableObject {
         let count = accused.count
 
         Task.detached { [weak self] in
+            guard let self else { return }
+            guard await self.checkVLMServer() else {
+                await MainActor.run { [weak self] in
+                    self?.lastError = "Ollama 服务未运行 — 先点“启动 VLM 服务” (模型: ollama pull \(Self.ollamaModel))"
+                    self?.isRunning = false
+                }
+                return
+            }
             await MainActor.run { [weak self] in self?.progressText = "复审 \(count) 张废片..." }
             let idsFile = data.appendingPathComponent("appeal_ids.txt")
             let reasonsFile = data.appendingPathComponent("appeal_reasons.json")
@@ -495,7 +584,7 @@ final class BatchStore: ObservableObject {
                 return
             }
             let result = Self.runProcess(
-                executable: "/opt/homebrew/bin/uv",
+                executable: Self.uvExecutable,
                 arguments: ["run", "python", "layer2.py",
                             "--backend", "ollama", "--mode", "appeal",
                             "--base-url", "http://localhost:11434",
@@ -682,11 +771,18 @@ final class BatchStore: ObservableObject {
         // Undated photos join chapter 0 rather than spawning fake chapters.
     }
 
+    /// Recomputed on every status-bar render — DateFormatter construction is
+    /// milliseconds-expensive, so it must not happen per call.
+    private static let chapterTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f
+    }()
+
     /// Chapters where culling left NOTHING (all rejected) — losing a whole scene
     /// is a delivery accident, a few extra keepers is just waste.
     var chapterWarnings: [String] {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
+        let formatter = Self.chapterTimeFormatter
         var byChapter: [Int: [BatchItem]] = [:]
         for item in items { byChapter[item.chapter, default: []].append(item) }
         guard byChapter.count > 1 else { return [] }
@@ -972,42 +1068,66 @@ final class BatchStore: ObservableObject {
     /// as a broken entry.
     func trashRejects() {
         guard !isRunning else { return }
-        let fm = FileManager.default
         let rejects = items.filter { $0.verdict == .reject }
         guard !rejects.isEmpty else { return }
-
-        var trashedIDs: Set<String> = []
-        var failed: [String] = []
-        for item in rejects {
-            var urls = [URL(fileURLWithPath: item.rawPath)]
-            if item.decodePath != item.rawPath {
-                urls.append(URL(fileURLWithPath: item.decodePath))
-            }
-            let xmp = URL(fileURLWithPath: item.rawPath).deletingPathExtension().appendingPathExtension("xmp")
-            if fm.fileExists(atPath: xmp.path) { urls.append(xmp) }
-            do {
-                for url in urls where fm.fileExists(atPath: url.path) {
-                    try fm.trashItem(at: url, resultingItemURL: nil)
-                }
-                trashedIDs.insert(item.id)
-                try? fm.removeItem(at: URL(fileURLWithPath: item.previewPath))
-            } catch {
-                failed.append(item.id)
-            }
+        isRunning = true
+        lastError = nil
+        // trashItem is a Finder-level operation (~ms each); hundreds of rejects
+        // would beachball the UI if done here — file work goes off-main, only
+        // the bookkeeping comes back.
+        let jobs = rejects.map {
+            (id: $0.id, rawPath: $0.rawPath, decodePath: $0.decodePath, previewPath: $0.previewPath)
         }
+        let total = jobs.count
 
-        items.removeAll { trashedIDs.contains($0.id) }
-        for id in trashedIDs { overrides.removeValue(forKey: id) }
-        saveOverrides()
-        rebuildGroupSizes()
-        purgeFromArtifacts(ids: trashedIDs)
-        touchSessionIndex()
-        NotificationCenter.default.post(name: .analysisDidFinish, object: nil, userInfo: ["dir": sessionDir])
+        Task.detached { [weak self] in
+            let fm = FileManager.default
+            var trashedIDs: Set<String> = []
+            var failed: [String] = []
+            for (index, job) in jobs.enumerated() {
+                var urls = [URL(fileURLWithPath: job.rawPath)]
+                if job.decodePath != job.rawPath {
+                    urls.append(URL(fileURLWithPath: job.decodePath))
+                }
+                let xmp = URL(fileURLWithPath: job.rawPath).deletingPathExtension().appendingPathExtension("xmp")
+                if fm.fileExists(atPath: xmp.path) { urls.append(xmp) }
+                do {
+                    for url in urls where fm.fileExists(atPath: url.path) {
+                        try fm.trashItem(at: url, resultingItemURL: nil)
+                    }
+                    trashedIDs.insert(job.id)
+                    try? fm.removeItem(at: URL(fileURLWithPath: job.previewPath))
+                } catch {
+                    failed.append(job.id)
+                }
+                let done = index + 1
+                if done % 10 == 0 || done == total {
+                    await MainActor.run { [weak self] in
+                        self?.progressText = "移到废纸篓 \(done)/\(total)..."
+                        self?.progressFraction = Double(done) / Double(total)
+                    }
+                }
+            }
 
-        if failed.isEmpty {
-            progressText = "已把 \(trashedIDs.count) 张废片移到废纸篓 (可恢复)"
-        } else {
-            lastError = "移到废纸篓: \(trashedIDs.count) 成功, \(failed.count) 失败 (\(failed.prefix(3).joined(separator: ", ")))"
+            let trashed = trashedIDs
+            let failedIds = failed
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.progressFraction = nil
+                self.items.removeAll { trashed.contains($0.id) }
+                for id in trashed { self.overrides.removeValue(forKey: id) }
+                self.saveOverrides()
+                self.rebuildGroupSizes()
+                self.purgeFromArtifacts(ids: trashed)
+                self.touchSessionIndex()
+                self.isRunning = false
+                NotificationCenter.default.post(name: .analysisDidFinish, object: nil, userInfo: ["dir": self.sessionDir])
+                if failedIds.isEmpty {
+                    self.progressText = "已把 \(trashed.count) 张废片移到废纸篓 (可恢复)"
+                } else {
+                    self.lastError = "移到废纸篓: \(trashed.count) 成功, \(failedIds.count) 失败 (\(failedIds.prefix(3).joined(separator: ", ")))"
+                }
+            }
         }
     }
 
@@ -1030,6 +1150,7 @@ final class BatchStore: ObservableObject {
         filterFile("manifest.json", arrayKey: "photos")
         filterFile("layer1_results.json", arrayKey: "results")
         filterFile("layer2_results.json", arrayKey: "results")
+        filterFile("appeal_results.json", arrayKey: "results")
     }
 
     // MARK: - JPG export (交付用: 精选/可用全尺寸重编码, Capture One 式质量设置)
@@ -1115,14 +1236,114 @@ final class BatchStore: ObservableObject {
         return CGImageDestinationFinalize(out)
     }
 
+    // MARK: - 高ISO RAW export (降噪流程: PureRAW / LR AI 降噪只吃 RAW)
+
+    /// Photos matching the high-ISO export criteria: RAWs to copy + the count of
+    /// matching JPEG-only photos (surfaced as "won't be copied" info). ONE
+    /// implementation shared by the sheet's live numbers and the actual export,
+    /// so the preview count can never drift from what gets copied.
+    func highISOMatches(minISO: Int, keepersOnly: Bool) -> (raws: [BatchItem], jpegOnly: Int) {
+        var raws: [BatchItem] = []
+        var jpegOnly = 0
+        for item in items {
+            guard let iso = item.exif?.iso, iso >= minISO else { continue }
+            if keepersOnly && item.verdict == .reject { continue }
+            if ImageLoader.rawExtensions.contains(URL(fileURLWithPath: item.rawPath).pathExtension.lowercased()) {
+                raws.append(item)
+            } else {
+                jpegOnly += 1
+            }
+        }
+        return (raws, jpegOnly)
+    }
+
+    /// COPIES (never moves — the session's paths must stay valid) the RAW of
+    /// every photo at/above `minISO` into "<拍摄文件夹>/高ISO降噪". That subfolder
+    /// is excluded from analysis scans, so re-running 开始分析 won't double-count.
+    func exportHighISORaws(minISO: Int, keepersOnly: Bool) {
+        guard !isRunning, let photoDir else { return }
+        let (raws, jpegOnly) = highISOMatches(minISO: minISO, keepersOnly: keepersOnly)
+        guard !raws.isEmpty else {
+            lastError = "没有 ISO ≥ \(minISO) 的 RAW"
+                + (jpegOnly > 0 ? " (\(jpegOnly) 张符合但只有 JPG)" : "")
+            return
+        }
+        isRunning = true
+        lastError = nil
+        let destDir = photoDir.appendingPathComponent(ImageLoader.denoiseSubfolder)
+        let sources = raws.map { URL(fileURLWithPath: $0.rawPath) }
+        let total = sources.count
+
+        Task.detached { [weak self] in
+            let fm = FileManager.default
+            var copied = 0, existed = 0
+            var failed: [String] = []
+            do {
+                try fm.createDirectory(at: destDir, withIntermediateDirectories: true)
+                func size(_ url: URL) -> Int? {
+                    ((try? fm.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.intValue
+                }
+                for (index, src) in sources.enumerated() {
+                    let dest = destDir.appendingPathComponent(src.lastPathComponent)
+                    if fm.fileExists(atPath: dest.path), let s = size(src), size(dest) == s {
+                        existed += 1  // complete copy from a previous run: skip
+                    } else {
+                        do {
+                            // Size mismatch = a copy interrupted mid-file last
+                            // time; replace it instead of trusting it forever.
+                            if fm.fileExists(atPath: dest.path) {
+                                try fm.removeItem(at: dest)
+                            }
+                            try fm.copyItem(at: src, to: dest)
+                            copied += 1
+                        } catch {
+                            failed.append(src.lastPathComponent)
+                        }
+                    }
+                    let done = index + 1
+                    await MainActor.run { [weak self] in
+                        self?.progressText = "复制 RAW \(done)/\(total)..."
+                        self?.progressFraction = Double(done) / Double(total)
+                    }
+                }
+            } catch {
+                await MainActor.run { [weak self] in
+                    self?.lastError = "创建 \(ImageLoader.denoiseSubfolder) 文件夹失败: \(error.localizedDescription)"
+                    self?.isRunning = false
+                }
+                return
+            }
+
+            let copiedCount = copied
+            let existedCount = existed
+            let summaryFailed = failed
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.progressFraction = nil
+                self.isRunning = false
+                var parts = ["已复制 \(copiedCount) 个 RAW → \(ImageLoader.denoiseSubfolder)/"]
+                if existedCount > 0 { parts.append("\(existedCount) 个已存在跳过") }
+                if jpegOnly > 0 { parts.append("\(jpegOnly) 张只有 JPG 未复制") }
+                if summaryFailed.isEmpty {
+                    self.progressText = parts.joined(separator: " · ")
+                    NSWorkspace.shared.activateFileViewerSelecting([destDir])
+                } else {
+                    self.lastError = "高ISO RAW: \(copiedCount) 成功, \(summaryFailed.count) 失败 (\(summaryFailed.prefix(3).joined(separator: ", ")))"
+                }
+            }
+        }
+    }
+
     // MARK: - XMP export (native — writes sidecars directly, manual overrides included)
 
     func exportXMP() {
         guard !isRunning, !items.isEmpty else { return }
-        progressText = "写入 XMP..."
-        var written = 0
-        var failed: [String] = []
-        for item in items {
+        isRunning = true
+        lastError = nil
+        // Verdicts/overrides live on the main actor, so the sidecar contents are
+        // derived here; the detached task is pure file IO (thousands of atomic
+        // writes on a big shoot would otherwise freeze the UI for seconds).
+        let jobs: [(id: String, url: URL, content: String)] = items.map { item in
             let stars: Int
             let label: String?
             switch item.verdict {
@@ -1138,18 +1359,41 @@ final class BatchStore: ObservableObject {
             }
             let xmpURL = URL(fileURLWithPath: item.rawPath).deletingPathExtension().appendingPathExtension("xmp")
             let reason = item.verdict == .reject ? item.rejectReasons.joined(separator: "; ") : ""
-            let content = Self.xmpContent(rating: stars, label: label, reason: reason)
-            do {
-                try content.write(to: xmpURL, atomically: true, encoding: .utf8)
-                written += 1
-            } catch {
-                failed.append(item.id)
-            }
+            return (item.id, xmpURL, Self.xmpContent(rating: stars, label: label, reason: reason))
         }
-        if failed.isEmpty {
-            progressText = "XMP 完成: \(written) 个已写入原图目录"
-        } else {
-            lastError = "XMP: \(written) 个成功, \(failed.count) 个失败 (\(failed.prefix(3).joined(separator: ", ")))"
+        let total = jobs.count
+
+        Task.detached { [weak self] in
+            var written = 0
+            var failed: [String] = []
+            for (index, job) in jobs.enumerated() {
+                do {
+                    try job.content.write(to: job.url, atomically: true, encoding: .utf8)
+                    written += 1
+                } catch {
+                    failed.append(job.id)
+                }
+                let done = index + 1
+                if done % 50 == 0 || done == total {
+                    await MainActor.run { [weak self] in
+                        self?.progressText = "写入 XMP \(done)/\(total)..."
+                        self?.progressFraction = Double(done) / Double(total)
+                    }
+                }
+            }
+
+            let writtenCount = written
+            let failedIds = failed
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.progressFraction = nil
+                self.isRunning = false
+                if failedIds.isEmpty {
+                    self.progressText = "XMP 完成: \(writtenCount) 个已写入原图目录"
+                } else {
+                    self.lastError = "XMP: \(writtenCount) 个成功, \(failedIds.count) 个失败 (\(failedIds.prefix(3).joined(separator: ", ")))"
+                }
+            }
         }
     }
 

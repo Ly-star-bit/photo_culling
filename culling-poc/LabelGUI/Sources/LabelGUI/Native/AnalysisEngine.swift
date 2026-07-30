@@ -68,7 +68,7 @@ enum AnalysisEngine {
         let photos = ImageLoader.listPhotos(in: photoDir)
         guard !photos.isEmpty else {
             throw NSError(domain: "AnalysisEngine", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "目录里没有 RAW/JPEG 文件"])
+                          userInfo: [NSLocalizedDescriptionKey: "这个文件夹 (含子文件夹) 里没有支持的图片文件 (RAW/JPG/PNG/HEIC/TIFF)"])
         }
 
         let previewDir = dataDir.appendingPathComponent("previews")
@@ -137,7 +137,8 @@ enum AnalysisEngine {
         let (highlightPct, shadowPct) = Metrics.exposureClipping(rgba: rgba, width: width, height: height)
         let gray = Metrics.grayscale(rgba: rgba, width: width, height: height)
 
-        let face = FaceAnalyzer.detect(in: loaded.image)
+        let vision = FaceAnalyzer.analyze(in: loaded.image)
+        let face = vision.face
         // Sharpness ladder: facial-feature rects (eyes/brows/mouth — where focus
         // is judged, hair and background excluded) → face bbox → foreground
         // subject (ring/bouquet/detail shots with no face) → whole frame.
@@ -189,7 +190,7 @@ enum AnalysisEngine {
             iso: loaded.iso,
             focal35: loaded.focal35,
             lensModel: loaded.lensModel,
-            horizonDeg: FaceAnalyzer.horizonDegrees(in: loaded.image),
+            horizonDeg: vision.horizonDeg,
             phash: hash,
             faceFound: face != nil,
             eyeClosed: face?.eyeClosed,

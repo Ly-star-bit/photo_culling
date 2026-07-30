@@ -11,7 +11,16 @@ enum ImageLoader {
     static let rawExtensions: Set<String> = [
         "cr2", "cr3", "nef", "arw", "raf", "orf", "dng", "rw2", "pef", "srw",
     ]
-    static let imageExtensions: Set<String> = rawExtensions.union(["jpg", "jpeg"])
+    /// 手机图 (heic) / 截图 (png) / 扫描件 (tiff) 都交给 ImageIO 解码 — 网格空着
+    /// 却说"文件夹里明明有图"的工单基本都是格式不在名单里。
+    static let imageExtensions: Set<String> = rawExtensions.union([
+        "jpg", "jpeg", "png", "heic", "heif", "tif", "tiff", "webp", "bmp",
+    ])
+
+    /// Subfolder (inside the shoot folder) where the 高ISO RAW copies for the
+    /// denoising workflow land. Excluded from listPhotos so a re-analysis of the
+    /// shoot doesn't see every high-ISO frame twice.
+    static let denoiseSubfolder = "高ISO降噪"
 
     /// Long edge for the analysis decode. Sharpness numbers scale with resolution,
     /// so this is fixed for every photo (unlike the Python layer, which used
@@ -56,20 +65,29 @@ enum ImageLoader {
         if let enumerator = fm.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey],
                                           options: [.skipsHiddenFiles, .skipsPackageDescendants]) {
             for case let url as URL in enumerator {
+                if url.hasDirectoryPath, url.lastPathComponent == denoiseSubfolder {
+                    enumerator.skipDescendants()
+                    continue
+                }
                 if imageExtensions.contains(url.pathExtension.lowercased()) {
                     images.append(url)
                 }
             }
         }
 
+        // Same-stem collisions WITHIN a kind (IMG_0001.HEIC + IMG_0001.JPG, or a
+        // stray DNG beside its RAF) are NOT pairs — only RAW+one-JPEG pairs are.
+        // Extras become standalone photos with the extension folded into the id;
+        // letting the dictionary overwrite would silently drop a photo.
         var rawByKey: [String: URL] = [:]
         var jpegByKey: [String: URL] = [:]
-        for url in images {
+        var extras: [URL] = []
+        for url in images.sorted(by: { $0.path < $1.path }) {
             let key = url.deletingPathExtension().path
             if rawExtensions.contains(url.pathExtension.lowercased()) {
-                rawByKey[key] = url
+                if rawByKey[key] == nil { rawByKey[key] = url } else { extras.append(url) }
             } else {
-                jpegByKey[key] = url
+                if jpegByKey[key] == nil { jpegByKey[key] = url } else { extras.append(url) }
             }
         }
 
@@ -79,7 +97,7 @@ enum ImageLoader {
             stemCounts[URL(fileURLWithPath: key).lastPathComponent, default: 0] += 1
         }
 
-        return keys.map { key in
+        let paired = keys.map { key -> PhotoFile in
             let keyURL = URL(fileURLWithPath: key)
             let bareStem = keyURL.lastPathComponent
             let stem = stemCounts[bareStem]! > 1
@@ -93,6 +111,14 @@ enum ImageLoader {
                 decodeURL: jpeg ?? raw!
             )
         }
+        let extraFiles = extras.map { url in
+            PhotoFile(
+                stem: "\(url.deletingPathExtension().lastPathComponent)_\(url.pathExtension.lowercased())",
+                primaryURL: url,
+                decodeURL: url
+            )
+        }
+        return paired + extraFiles
     }
 
     static func load(_ url: URL) -> Loaded? {

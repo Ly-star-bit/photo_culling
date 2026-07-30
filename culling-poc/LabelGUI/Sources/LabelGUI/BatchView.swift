@@ -16,6 +16,10 @@ struct BatchView: View {
     @State private var jpegQuality: Double = 90
     @State private var jpegIncludeUsable = true
     @State private var showJPEGSheet = false
+    /// 高ISO RAW 导出 (降噪流程)。
+    @State private var showISOSheet = false
+    @State private var isoThreshold = 3200
+    @State private var isoKeepersOnly = true
 
     enum GridMode: String, CaseIterable {
         case byVerdict = "按判决"
@@ -61,6 +65,7 @@ struct BatchView: View {
             }
         }
         .sheet(isPresented: $showJPEGSheet) { jpegExportSheet }
+        .sheet(isPresented: $showISOSheet) { isoExportSheet }
         .confirmationDialog(
             "把 \(store.verdictCounts.reject) 张废片移到废纸篓？",
             isPresented: $showTrashConfirm
@@ -141,6 +146,8 @@ struct BatchView: View {
                     .disabled(store.items.isEmpty || store.isRunning)
                 Button("导出 JPG...") { showJPEGSheet = true }
                     .disabled(jpegExportCount == 0 || store.isRunning)
+                Button("导出高 ISO RAW (降噪)...") { showISOSheet = true }
+                    .disabled(store.items.isEmpty || store.isRunning)
                 Button("导出选片确认表 (HTML)...") { exportContactSheet() }
                     .disabled(store.verdictCounts.pick == 0 || store.isRunning)
                 Divider()
@@ -227,6 +234,46 @@ struct BatchView: View {
         .frame(width: 360)
     }
 
+    // MARK: - 高ISO RAW export sheet
+
+    /// (RAW count, matching-but-JPEG-only count) under the sheet's current
+    /// settings — same store query the export itself runs, so the numbers match.
+    private var isoExportMatches: (raws: Int, jpegOnly: Int) {
+        let matches = store.highISOMatches(minISO: isoThreshold, keepersOnly: isoKeepersOnly)
+        return (matches.raws.count, matches.jpegOnly)
+    }
+
+    private var isoExportSheet: some View {
+        let matches = isoExportMatches
+        return VStack(alignment: .leading, spacing: 14) {
+            Text("导出高 ISO RAW (降噪)").font(.headline)
+            Picker("ISO ≥", selection: $isoThreshold) {
+                ForEach([800, 1600, 3200, 6400, 12800], id: \.self) { iso in
+                    Text("\(iso)").tag(iso)
+                }
+            }
+            .pickerStyle(.segmented)
+            Toggle("排除废片", isOn: $isoKeepersOnly)
+            Text("符合条件: \(matches.raws) 个 RAW"
+                 + (matches.jpegOnly > 0 ? " (另有 \(matches.jpegOnly) 张只有 JPG，不会复制)" : ""))
+                .font(.caption).foregroundStyle(.secondary)
+            Text("复制 (不移动) 到 拍摄文件夹/\(ImageLoader.denoiseSubfolder)/，供 DxO PureRAW、LR AI 降噪等批量处理；该文件夹不参与分析")
+                .font(.caption2).foregroundStyle(.tertiary)
+            HStack {
+                Spacer()
+                Button("取消") { showISOSheet = false }
+                Button("开始复制") {
+                    showISOSheet = false
+                    store.exportHighISORaws(minISO: isoThreshold, keepersOnly: isoKeepersOnly)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(matches.raws == 0)
+            }
+        }
+        .padding(20)
+        .frame(width: 400)
+    }
+
     /// Grid order under the current filter — shared by keyboard nav and inspector paging.
     private var visibleItems: [BatchItem] {
         if gridMode == .byGroup {
@@ -301,9 +348,28 @@ struct BatchView: View {
             Image(systemName: "photo.stack")
                 .font(.system(size: 42))
                 .foregroundStyle(.tertiary)
-            Text("还没有分析结果")
-                .foregroundStyle(.secondary)
-            Button("选择照片文件夹...") { pickFolder() }
+            if store.isRunning {
+                Text(store.progressText.isEmpty ? "分析中..." : store.progressText)
+                    .foregroundStyle(.secondary)
+            } else if let error = store.lastError {
+                // The status-bar error is easy to miss; an empty grid is exactly
+                // when the user is staring at the middle of the window.
+                Text(error)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: 480)
+                    .multilineTextAlignment(.center)
+                Button("重新分析") { store.runAnalysis() }
+                    .disabled(store.photoDir == nil)
+            } else if let dir = store.photoDir {
+                Text("已选择 \(dir.lastPathComponent)，还没有分析结果")
+                    .foregroundStyle(.secondary)
+                Button("开始分析") { store.runAnalysis() }
+                    .buttonStyle(.borderedProminent)
+            } else {
+                Text("还没有分析结果")
+                    .foregroundStyle(.secondary)
+                Button("选择照片文件夹...") { pickFolder() }
+            }
             Text("点击=选中 · 空格=大图 · F=审片 · ←/→=移动 · 1精选 2可用 3废片 0恢复 · ⌘点击=多选")
                 .font(.caption2).foregroundStyle(.tertiary)
         }
@@ -579,6 +645,11 @@ struct BatchView: View {
                 Circle().fill(color).frame(width: 6, height: 6)
                 Text(item.id).font(.caption2).lineLimit(1)
                     .foregroundStyle(.secondary)
+                if let iso = item.exif?.iso {
+                    // Orange from ISO 3200 up — the range worth batch-denoising.
+                    Text("ISO \(iso)").font(.caption2).monospacedDigit().lineLimit(1)
+                        .foregroundStyle(iso >= 3200 ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
+                }
             }
         }
         .contentShape(Rectangle())
@@ -690,6 +761,10 @@ struct BatchView: View {
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url {
             store.switchSession(to: url)
+            // A folder with no cached session shows an empty grid until analysis
+            // runs — users read that as "选了没反应", so kick it off right away.
+            // Re-picking an analyzed folder keeps its instant cached results.
+            if store.items.isEmpty { store.runAnalysis() }
         }
     }
 

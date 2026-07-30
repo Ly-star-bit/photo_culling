@@ -70,12 +70,29 @@ enum FaceAnalyzer {
         var subjectFaceCount: Int { subjectFaces.count }
     }
 
-    static func detect(in image: CGImage) -> FaceResult? {
+    /// Face analysis + horizon in ONE handler.perform() — the three requests
+    /// share the handler's image preparation instead of paying it per request.
+    struct Analysis {
+        let face: FaceResult?
+        let horizonDeg: Double?
+    }
+
+    static func analyze(in image: CGImage) -> Analysis {
         let request = VNDetectFaceLandmarksRequest()
         let qualityRequest = VNDetectFaceCaptureQualityRequest()
+        let horizonRequest = VNDetectHorizonRequest()
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
-        guard (try? handler.perform([request, qualityRequest])) != nil,
-              let faces = request.results, !faces.isEmpty else {
+        guard (try? handler.perform([request, qualityRequest, horizonRequest])) != nil else {
+            return Analysis(face: nil, horizonDeg: nil)
+        }
+        let horizonDeg = horizonRequest.results?.first.map { Double($0.angle) * 180.0 / .pi }
+        return Analysis(face: faceResult(from: request, quality: qualityRequest),
+                        horizonDeg: horizonDeg)
+    }
+
+    private static func faceResult(from request: VNDetectFaceLandmarksRequest,
+                                   quality qualityRequest: VNDetectFaceCaptureQualityRequest) -> FaceResult? {
+        guard let faces = request.results, !faces.isEmpty else {
             return nil
         }
 
@@ -232,17 +249,6 @@ enum FaceAnalyzer {
         guard areaFraction > 0.02, areaFraction < 0.95 else { return nil }
         return (Double(minX) / Double(w), Double(minY) / Double(h),
                 Double(maxX + 1) / Double(w), Double(maxY + 1) / Double(h))
-    }
-
-    /// Horizon tilt in degrees (positive = clockwise), or nil when Vision can't
-    /// find a horizon. Info-only signal — Vision guesses on horizon-less scenes,
-    /// so this flags, never auto-rejects.
-    static func horizonDegrees(in image: CGImage) -> Double? {
-        let request = VNDetectHorizonRequest()
-        let handler = VNImageRequestHandler(cgImage: image, options: [:])
-        guard (try? handler.perform([request])) != nil,
-              let observation = request.results?.first else { return nil }
-        return Double(observation.angle) * 180.0 / .pi
     }
 
     /// Height/width of the eye outline's bounding extent. Point order in Vision's
