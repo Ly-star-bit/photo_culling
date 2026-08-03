@@ -270,10 +270,18 @@ final class BatchStore: ObservableObject {
         overrideUndoStack = []
         reasonFilter = nil
         borderlineFilter = false
+        lastError = nil
         loadReviewPosition()
         loadOverrides()
         loadResults()
         applyThresholds()
+        // Cached results load happily from a folder that no longer exists — say
+        // so up front instead of letting 导出/分析 fail silently later.
+        if !FileManager.default.fileExists(atPath: resolved.path) {
+            lastError = "「\(folder.lastPathComponent)」的照片文件夹已不存在 (被删除、改名或所在硬盘未挂载)。" +
+                        "下面是上次分析的缓存结果，重新分析/导出/写 XMP 都会失败。"
+        }
+        refreshSessionAvailability()
         NotificationCenter.default.post(name: .analysisDidFinish, object: nil, userInfo: ["dir": sessionDir])
     }
 
@@ -281,6 +289,13 @@ final class BatchStore: ObservableObject {
         guard let data = try? Data(contentsOf: sessionsIndexPath),
               let entries = try? JSONDecoder().decode([SessionEntry].self, from: data) else { return }
         recentSessions = entries
+        refreshSessionAvailability()
+    }
+
+    private func saveSessionsIndex() {
+        if let data = try? JSONEncoder().encode(recentSessions) {
+            try? data.write(to: sessionsIndexPath)
+        }
     }
 
     private func touchSessionIndex() {
@@ -298,10 +313,9 @@ final class BatchStore: ObservableObject {
             bookmark: bookmark
         ), at: 0)
         recentSessions = Array(entries.prefix(15))
-        if let data = try? JSONEncoder().encode(recentSessions) {
-            try? data.write(to: sessionsIndexPath)
-        }
+        saveSessionsIndex()
         pruneOrphanedSessions()
+        refreshSessionAvailability()
     }
 
     /// Delete session dirs that fell out of the recents index — one big shoot's
@@ -317,6 +331,85 @@ final class BatchStore: ObservableObject {
             && !keep.contains(dir.lastPathComponent) {
             try? FileManager.default.removeItem(at: dir)
         }
+    }
+
+    // MARK: - Recents housekeeping
+
+    /// Recents whose photo folder is gone from disk. Their cached verdicts still
+    /// open fine (previews live in the session dir, not next to the originals),
+    /// which is exactly the trap: the grid looks healthy while 分析/导出/XMP/
+    /// 废纸篓/全图缩放 all fail on the missing originals. Menu greys these out.
+    @Published private(set) var missingSessionKeys: Set<String> = []
+
+    /// Where this shoot's folder actually is right now: the recorded path if it
+    /// still exists, else wherever the bookmark says it moved to. nil = deleted
+    /// (or on an unmounted volume). A rename/move is NOT missing — the bookmark
+    /// tracks it and the session key stays keyed to the original path.
+    nonisolated private static func liveFolder(for entry: SessionEntry) -> URL? {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: entry.path) { return URL(fileURLWithPath: entry.path) }
+        guard let bookmark = entry.bookmark else { return nil }
+        var stale = false
+        let resolved = (try? URL(resolvingBookmarkData: bookmark, options: .withSecurityScope,
+                                 relativeTo: nil, bookmarkDataIsStale: &stale))
+            ?? (try? URL(resolvingBookmarkData: bookmark, relativeTo: nil, bookmarkDataIsStale: &stale))
+        guard let resolved, fm.fileExists(atPath: resolved.path) else { return nil }
+        return resolved
+    }
+
+    /// Recompute which recents point at folders that no longer exist. Cheap at
+    /// 15 entries; call on launch, after analysis, and when the menu opens.
+    func refreshSessionAvailability() {
+        missingSessionKeys = Set(recentSessions
+            .filter { Self.liveFolder(for: $0) == nil }
+            .map(\.key))
+    }
+
+    /// Drop one shoot from the menu and delete its cached analysis (previews,
+    /// layer results, overrides). The photos themselves are never touched.
+    /// Removing the shoot that's currently open also clears the view — its
+    /// previews are about to vanish, so leaving it on screen would show holes.
+    func removeSession(_ entry: SessionEntry) {
+        recentSessions.removeAll { $0.key == entry.key }
+        saveSessionsIndex()
+        if let current = photoDir, Self.sessionKey(for: current) == entry.key {
+            resetToNoSession()
+        }
+        try? FileManager.default.removeItem(
+            at: dataDir.appendingPathComponent("sessions/\(entry.key)"))
+        refreshSessionAvailability()
+        progressText = "已从列表移除「\(entry.name)」(照片本身未动)"
+    }
+
+    /// Empty the menu and wipe every cached session. Originals untouched —
+    /// reopening a folder just means analyzing it again.
+    func clearRecentSessions() {
+        let count = recentSessions.count
+        recentSessions = []
+        saveSessionsIndex()
+        resetToNoSession()
+        pruneOrphanedSessions()     // empty keep-set: removes every session dir
+        refreshSessionAvailability()
+        progressText = "已清除 \(count) 条历史记录 (照片本身未动)"
+    }
+
+    /// Back to the launch state with no shoot loaded: `sessions/default` holds
+    /// no manifest, so loadResults() empties the grid.
+    private func resetToNoSession() {
+        accessedFolder?.stopAccessingSecurityScopedResource()
+        accessedFolder = nil
+        photoDir = nil
+        sessionDir = dataDir.appendingPathComponent("sessions/default")
+        overrides = [:]
+        overrideUndoStack = []
+        reasonFilter = nil
+        borderlineFilter = false
+        verdictFilter = nil
+        lastError = nil
+        loadReviewPosition()
+        loadOverrides()
+        loadResults()
+        applyThresholds()
     }
 
     // MARK: - Review position (续审: 3000 张分两晚审完)

@@ -12,6 +12,7 @@ struct BatchView: View {
     @State private var focusedID: String?
     @State private var thumbSize: Double = 140
     @State private var showTrashConfirm = false
+    @State private var showClearRecentsConfirm = false
     /// JPG 交付导出设置 (Capture One 式质量档)。
     @State private var jpegQuality: Double = 90
     @State private var jpegIncludeUsable = true
@@ -88,6 +89,15 @@ struct BatchView: View {
         } message: {
             Text("原图 (RAW+JPG 成对一起) 和 XMP 会移到系统废纸篓，可随时恢复，不是永久删除。")
         }
+        .confirmationDialog(
+            "清除全部 \(store.recentSessions.count) 条历史记录？",
+            isPresented: $showClearRecentsConfirm
+        ) {
+            Button("清除", role: .destructive) { store.clearRecentSessions() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("只删除这些拍摄的缓存分析结果 (预览图/判决/人工改判)，照片本身不动。重新打开这些文件夹需要再分析一次。")
+        }
     }
 
     // MARK: - Top bar (workflow-ordered: source → analyze → view → review → export)
@@ -99,9 +109,22 @@ struct BatchView: View {
                 if !store.recentSessions.isEmpty {
                     Divider()
                     ForEach(store.recentSessions) { session in
-                        Button("\(session.name) · \(session.photoCount) 张") {
+                        let missing = store.missingSessionKeys.contains(session.key)
+                        Button("\(session.name) · \(session.photoCount) 张\(missing ? " (文件夹已不存在)" : "")") {
                             store.switchSession(to: URL(fileURLWithPath: session.path))
                         }
+                    }
+                    Divider()
+                    // NSMenu items can't carry their own context menu, so removal
+                    // lives in a submenu rather than a right-click on each row.
+                    Menu("移除历史记录") {
+                        ForEach(store.recentSessions) { session in
+                            Button("\(session.name) · \(session.photoCount) 张") {
+                                store.removeSession(session)
+                            }
+                        }
+                        Divider()
+                        Button("全部清除...", role: .destructive) { showClearRecentsConfirm = true }
                     }
                 }
             } label: {
@@ -111,6 +134,12 @@ struct BatchView: View {
             }
             .fixedSize()
             .help(store.photoDir?.path ?? "选择一场拍摄的照片文件夹")
+            // Folders get deleted in Finder while the app sits open — recheck on
+            // the way back in so the menu isn't showing yesterday's truth.
+            .onReceive(NotificationCenter.default.publisher(
+                for: NSApplication.didBecomeActiveNotification)) { _ in
+                store.refreshSessionAvailability()
+            }
 
             if store.isRunning {
                 Button("取消") { store.cancel() }
