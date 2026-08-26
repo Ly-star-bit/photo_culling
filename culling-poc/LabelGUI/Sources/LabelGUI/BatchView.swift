@@ -1038,9 +1038,12 @@ struct BatchView: View {
 /// every appearance — scrolling a few hundred photos stuttered. Decode a small
 /// thumbnail off the main thread once and cache it.
 enum ThumbCache {
+    /// Shared by the grid's 512px thumbs AND the review/inspector 1600px fit
+    /// decodes (~7MB each) — a count limit alone let the 1600px entries grow to
+    /// multiple GB on a 500-photo shoot, so the limit is bytes, not entries.
     static let cache: NSCache<NSString, NSImage> = {
         let c = NSCache<NSString, NSImage>()
-        c.countLimit = 2000
+        c.totalCostLimit = 800_000_000
         return c
     }()
 
@@ -1057,7 +1060,7 @@ enum ThumbCache {
                   kCGImageSourceThumbnailMaxPixelSize: maxPixel,
               ] as CFDictionary) else { return nil }
         let image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
-        cache.setObject(image, forKey: cacheKey)
+        cache.setObject(image, forKey: cacheKey, cost: cg.width * cg.height * 4)
         return image
     }
 }
@@ -1105,6 +1108,7 @@ enum FullResCache {
     static let cache: NSCache<NSString, NSImage> = {
         let c = NSCache<NSString, NSImage>()
         c.countLimit = 2
+        c.totalCostLimit = 600_000_000  // two ~40MP frames; a 61MP pair evicts down to one
         return c
     }()
 
@@ -1117,7 +1121,7 @@ enum FullResCache {
                   kCGImageSourceCreateThumbnailWithTransform: true,
               ] as CFDictionary) else { return nil }
         let image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
-        cache.setObject(image, forKey: path as NSString)
+        cache.setObject(image, forKey: path as NSString, cost: cg.width * cg.height * 4)
         return image
     }
 }
@@ -1278,6 +1282,7 @@ enum FaceStripCache {
     static let cache: NSCache<NSString, NSImage> = {
         let c = NSCache<NSString, NSImage>()
         c.countLimit = 8
+        c.totalCostLimit = 200_000_000  // 8 × ~17MB (2560px) with headroom
         return c
     }()
 
@@ -1290,7 +1295,7 @@ enum FaceStripCache {
                   kCGImageSourceCreateThumbnailWithTransform: true,
               ] as CFDictionary) else { return nil }
         let image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
-        cache.setObject(image, forKey: path as NSString)
+        cache.setObject(image, forKey: path as NSString, cost: cg.width * cg.height * 4)
         return image
     }
 }
