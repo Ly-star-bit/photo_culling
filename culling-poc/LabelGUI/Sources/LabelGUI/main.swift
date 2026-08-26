@@ -108,6 +108,9 @@ struct LabelGUIApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView(store: labelStore, batchStore: batchStore)
+                // 深色是产品的一部分，不跟随系统外观：照片必须在中性深底上
+                // 判断，浅色系统下半白半黑的窗口曾被当成"主题坏了"报障。
+                .preferredColorScheme(.dark)
         }
         .defaultSize(width: 1280, height: 850)
     }
