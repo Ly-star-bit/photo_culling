@@ -84,6 +84,9 @@ final class LabelStore: ObservableObject {
         photos = []
         layer1ById = [:]
         layer2ById = [:]
+        // 必须清空：loadLabels 是"合并写入"，不清的话上一场的标注会跟着 id
+        // （文件名 stem，跨场次大量重复）串进这一场，并被 save() 写进它的 labels.csv。
+        labels = [:]
         currentIndex = 0
 
         let manifestPath = dataDir.appendingPathComponent("manifest.json")

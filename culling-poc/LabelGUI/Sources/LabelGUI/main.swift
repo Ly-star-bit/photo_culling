@@ -53,6 +53,10 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--analyze"),
         let summary = try AnalysisEngine.analyzeFolder(dir, dataDir: sessionDir) { message in
             print(message)
         }
+        // 登记到 sessions.json：否则下次 GUI 分析任何文件夹时，
+        // pruneOrphanedSessions 会把这次跑出来的预览和结果整个删掉。
+        BatchStore.registerSession(dataDir: appDataDir, folder: dir,
+                                   photoCount: summary.analyzed + summary.reused)
         let elapsed = Date().timeIntervalSince(start)
         print(String(format: "Done: %d analyzed, %d reused in %.1fs (%.2fs/photo)",
                      summary.analyzed, summary.reused, elapsed, elapsed / Double(max(1, summary.analyzed))))

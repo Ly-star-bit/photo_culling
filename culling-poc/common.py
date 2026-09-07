@@ -1,5 +1,6 @@
 """Shared helpers for the culling pipeline: manifest I/O and burst grouping."""
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -17,9 +18,17 @@ def load_manifest(path=MANIFEST_PATH):
 
 
 def save_manifest(manifest, path=MANIFEST_PATH):
+    """Atomic: layer2 rewrites the whole results file after every photo, so a
+    SIGTERM (the GUI's cancel button) landing mid-dump used to leave truncated
+    JSON — resume was dead and every VLM verdict vanished from the grid."""
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def parse_capture_time(value):

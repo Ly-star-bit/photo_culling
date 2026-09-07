@@ -71,6 +71,20 @@ struct BatchView: View {
                 PhotoInspector(store: store, inspectedID: $inspectedID, initialID: id)
             }
         }
+        // 换了一场拍摄就把选择/焦点全部丢掉。留着的话批量改判栏还显示"已选 3 张"，
+        // 点下去会把判决写进新场次里根本不存在的 id（同名文件则改判错照片）。
+        .onChange(of: store.photoDir) {
+            selectedIDs = []
+            focusedID = nil
+            inspectedID = nil
+        }
+        // 废片进废纸篓后这些 id 就没了，留着同样会写到不存在的照片上。
+        .onChange(of: store.items.count) {
+            let live = Set(store.items.map(\.id))
+            selectedIDs.formIntersection(live)
+            if let focused = focusedID, !live.contains(focused) { focusedID = nil }
+            if let inspected = inspectedID, !live.contains(inspected) { inspectedID = nil }
+        }
         .sheet(isPresented: $showJPEGSheet) { jpegExportSheet }
         .sheet(isPresented: $showISOSheet) { isoExportSheet }
         .sheet(isPresented: $showComparePair) {

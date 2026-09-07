@@ -391,7 +391,9 @@ enum AnalysisEngine {
     private static func writeManifest(_ entries: [[String: Any]], photoDir: URL, dataDir: URL) throws {
         let manifest: [String: Any] = ["photo_dir": photoDir.path, "photos": entries]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: dataDir.appendingPathComponent("manifest.json"))
+        // .atomic: 一场 3000 张的 manifest 要写好一会儿，中途被强退/断电会留下截断的
+        // JSON —— 下次启动网格全空，而且整批要重新分析。
+        try data.write(to: dataDir.appendingPathComponent("manifest.json"), options: .atomic)
     }
 
     private static func writeLayer1(_ entries: [[String: Any]], dataDir: URL) throws {
@@ -402,7 +404,7 @@ enum AnalysisEngine {
             "results": entries,
         ]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: dataDir.appendingPathComponent("layer1_results.json"))
+        try data.write(to: dataDir.appendingPathComponent("layer1_results.json"), options: .atomic)
     }
 }
 

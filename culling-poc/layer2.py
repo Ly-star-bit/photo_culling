@@ -451,6 +451,8 @@ def main():
             raise SystemExit("--mode appeal requires --appeal-file")
 
     finished = 0
+    run_ok = 0
+    run_errors = 0
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         if args.mode == "appeal":
             futures = {
@@ -475,8 +477,15 @@ def main():
         for fut in tqdm(as_completed(futures), total=len(futures), desc="layer2"):
             result = fut.result()
             done_by_id[result["id"]] = result
-            flush()
+            if "error" in result:
+                run_errors += 1
+            else:
+                run_ok += 1
             finished += 1
+            # 每 10 张落一次盘：save_manifest 现在是原子写 (临时文件 + fsync +
+            # rename)，每张一次太贵；中断最多重判 9 张。
+            if finished % 10 == 0:
+                flush()
             if args.progress:
                 print(f"PROGRESS {finished}/{len(futures)}", flush=True)
 
@@ -488,6 +497,12 @@ def main():
     print(f"Done: {len(ok)} judged, {len(errors)} errors. Avg {avg_time:.2f}s/photo. Wrote {args.out}")
     if errors:
         print(f"  sample error: {errors[0]['id']}: {errors[0]['error']}")
+    # 这一轮一张都没成功 = 服务没起/模型没 pull/全部超时。必须非零退出，否则
+    # GUI 只看退出码，会把"一张都没判成"显示为"复审完成: 维持原判"。
+    if todo and run_ok == 0:
+        sample = errors[0]["error"] if errors else "unknown"
+        raise SystemExit(f"every photo failed ({run_errors}/{len(todo)}) — is the server up and "
+                         f"the model pulled? first error: {sample}")
 
 
 if __name__ == "__main__":

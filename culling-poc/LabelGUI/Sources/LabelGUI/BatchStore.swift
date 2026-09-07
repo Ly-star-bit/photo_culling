@@ -324,8 +324,34 @@ final class BatchStore: ObservableObject {
             lastError = "「\(folder.lastPathComponent)」的照片文件夹已不存在 (被删除、改名或所在硬盘未挂载)。" +
                         "下面是上次分析的缓存结果，重新分析/导出/写 XMP 都会失败。"
         }
+        // Register on OPEN, not just after analysis. pruneOrphanedSessions
+        // deletes every sessions/<key> missing from this index, so a session
+        // that was only ever opened (and manually re-judged — overrides.json
+        // lives in there) used to be wiped the next time any other folder was
+        // analyzed.
+        touchSessionIndex()
         refreshSessionAvailability()
         NotificationCenter.default.post(name: .analysisDidFinish, object: nil, userInfo: ["dir": sessionDir])
+    }
+
+    /// Register a session written outside the GUI (the `--analyze` CLI path) so
+    /// pruneOrphanedSessions treats it as live instead of deleting its previews
+    /// and results the next time the app analyzes anything.
+    nonisolated static func registerSession(dataDir: URL, folder: URL, photoCount: Int) {
+        let indexPath = dataDir.appendingPathComponent("sessions.json")
+        let key = sessionKey(for: folder)
+        var entries = (try? Data(contentsOf: indexPath))
+            .flatMap { try? JSONDecoder().decode([SessionEntry].self, from: $0) } ?? []
+        entries.removeAll { $0.key == key }
+        entries.insert(SessionEntry(
+            key: key, path: folder.standardizedFileURL.path, name: folder.lastPathComponent,
+            lastAnalyzed: ISO8601DateFormatter().string(from: Date()),
+            photoCount: photoCount,
+            bookmark: makeBookmark(for: folder)
+        ), at: 0)
+        if let data = try? JSONEncoder().encode(Array(entries.prefix(15))) {
+            try? data.write(to: indexPath, options: .atomic)
+        }
     }
 
     private func loadSessionsIndex() {
@@ -1445,6 +1471,11 @@ final class BatchStore: ObservableObject {
         guard !isRunning else { return }
         let rejects = items.filter { $0.verdict == .reject }
         guard !rejects.isEmpty else { return }
+        // 照片文件夹不在了就别开工：一张也移不动，却会把这些 id 从结果里抹掉。
+        if let dir = photoDir, !FileManager.default.fileExists(atPath: dir.path) {
+            lastError = "照片文件夹「\(dir.lastPathComponent)」不存在 (被删除、改名或硬盘未挂载)，无法移动废片"
+            return
+        }
         isRunning = true
         lastError = nil
         // trashItem is a Finder-level operation (~ms each); hundreds of rejects
@@ -1467,11 +1498,20 @@ final class BatchStore: ObservableObject {
                 let xmp = URL(fileURLWithPath: job.rawPath).deletingPathExtension().appendingPathExtension("xmp")
                 if fm.fileExists(atPath: xmp.path) { urls.append(xmp) }
                 do {
+                    var movedAny = false
                     for url in urls where fm.fileExists(atPath: url.path) {
                         try fm.trashItem(at: url, resultingItemURL: nil)
+                        movedAny = true
                     }
-                    trashedIDs.insert(job.id)
-                    try? fm.removeItem(at: URL(fileURLWithPath: job.previewPath))
+                    // 一个文件都没找到（外置盘没挂载、照片已被别处移走）不算成功：
+                    // 计入 trashedIDs 会把它从 manifest/VLM 结果里永久剔除，
+                    // 而原图其实一张都没动，提示却说"已移到废纸篓 (可恢复)"。
+                    if movedAny {
+                        trashedIDs.insert(job.id)
+                        try? fm.removeItem(at: URL(fileURLWithPath: job.previewPath))
+                    } else {
+                        failed.append(job.id)
+                    }
                 } catch {
                     failed.append(job.id)
                 }
