@@ -1,9 +1,10 @@
-# 推送 v* tag → 在 GitHub 的 macOS 机器上跑 build_app.sh → 自动创建
-# Release 并附上 DMG。手动触发 (workflow_dispatch) 只构建、传产物,不发版。
+# push 到 main → 只构建验证 (CI 先测试);推 v* tag → 构建并自动创建
+# Release 附上 DMG。发版流程:先推 main 等 CI 绿,再打 tag。
 name: Release
 
 on:
   push:
+    branches: [main]
     tags: ['v*']
   workflow_dispatch: {}
 

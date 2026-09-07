@@ -16,6 +16,33 @@ swift build -c release
 
 echo "==> 装配 app bundle"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+# Info.plist 每次都生成 — CI 从零装配 bundle,缺了它 codesign 直接报
+# "bundle format unrecognized"。版本号从 tag 带入 (v1.1.1 → 1.1.1)。
+VERSION="${GITHUB_REF_NAME:-}"
+VERSION="${VERSION#v}"
+[ -z "$VERSION" ] && VERSION="0.1"
+cat > "$APP/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>LabelGUI</string>
+    <key>CFBundleIdentifier</key>
+    <string>local.culling.labelgui</string>
+    <key>CFBundleName</key>
+    <string>选片工具</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$VERSION</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+PLIST
 cp .build/release/LabelGUI "$APP/Contents/MacOS/LabelGUI"
 # Python 流水线进 Resources (只带运行所需,不带开发目录)
 rsync -a --delete \
