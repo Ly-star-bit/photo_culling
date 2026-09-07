@@ -15,6 +15,15 @@ final class WatermarkStore: ObservableObject {
     @Published var outputDir: URL?
     @Published var previewImage: NSImage?
     @Published var isExporting = false
+    /// 批量导出的取消开关：几百张全尺寸重编码要跑很久，选错输出目录时
+    /// 之前只能干等或强退 app。
+    private var exportCancelled = false
+
+    func cancelExport() {
+        guard isExporting else { return }
+        exportCancelled = true
+        progressText = "正在取消导出..."
+    }
     @Published var progressText = ""
     @Published var progressFraction: Double?
     @Published var lastError: String?
@@ -44,7 +53,9 @@ final class WatermarkStore: ObservableObject {
 
     // MARK: - 照片导入
 
-    static let inputExtensions: Set<String> = ["jpg", "jpeg", "png", "tif", "tiff", "webp", "bmp", "heic", "heif"]
+    /// RAW 也收：解码走 ImageIO（导出流程本来就支持），漏掉它们会让"导入选片
+    /// 结果"在纯 RAW 拍摄上一张都导不进来，而按钮还写着"(57)"。
+    static let inputExtensions: Set<String> = ImageLoader.imageExtensions
 
     func addPhotos(_ urls: [URL]) {
         var added = 0
@@ -68,7 +79,12 @@ final class WatermarkStore: ObservableObject {
             }
         }
         if selectedPhoto == nil { selectedPhoto = photos.first }
-        if added > 0 { progressText = "已导入 \(added) 张" }
+        if added > 0 {
+            progressText = "已导入 \(added) 张"
+        } else if !urls.isEmpty {
+            // 一张都没进来时说清楚，别让按钮显示着数量、列表却纹丝不动。
+            progressText = "没有可导入的照片 (格式不支持，或已经在列表里)"
+        }
         schedulePreview()
     }
 
@@ -141,7 +157,18 @@ final class WatermarkStore: ObservableObject {
                               ] as CFDictionary) else { return nil }
                         let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
                         base = thumb
-                        fullW = max((props?[kCGImagePropertyPixelWidth] as? Int) ?? thumb.width, thumb.width)
+                        // kCGImagePropertyPixelWidth is the ENCODED width, before
+                        // EXIF orientation; the thumbnail above already had the
+                        // rotation baked in. On a portrait frame (stored 6000×4000)
+                        // that made scale 1067/6000 instead of 1067/4000, so the
+                        // preview's margins and type were a third too small —
+                        // the export looked nothing like what you saw.
+                        let encodedW = (props?[kCGImagePropertyPixelWidth] as? Int) ?? thumb.width
+                        let encodedH = (props?[kCGImagePropertyPixelHeight] as? Int) ?? thumb.height
+                        // Thumb is already upright: match its aspect to decide
+                        // whether width and height were swapped by the rotation.
+                        let rotated = (thumb.width < thumb.height) != (encodedW < encodedH)
+                        fullW = max(rotated ? encodedH : encodedW, thumb.width)
                     }
                     guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
                     let tags = WatermarkEngine.ExifTags(source: src)
@@ -198,6 +225,7 @@ final class WatermarkStore: ObservableObject {
         }
 
         isExporting = true
+        exportCancelled = false
         lastError = nil
         let sig = signatureImage
         let cfg = config
@@ -224,19 +252,27 @@ final class WatermarkStore: ObservableObject {
                     if !ok { failed.append(name) }
                     done += 1
                     let doneNow = done
-                    await MainActor.run { [weak self] in
+                    let stop = await MainActor.run { [weak self] () -> Bool in
                         self?.progressText = "导出 \(doneNow)/\(total)..."
                         self?.progressFraction = Double(doneNow) / Double(total)
+                        return self?.exportCancelled ?? true
                     }
+                    // 已经写出的文件保留（撤销它们比留着更意外），只是不再排新的。
+                    if stop { break }
                     addNext()
                 }
+                group.cancelAll()
             }
             let failedNames = failed
+            let completed = done
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
                 self.isExporting = false
-                if failedNames.isEmpty {
+                if self.exportCancelled {
+                    self.exportCancelled = false
+                    self.progressText = "导出已取消 (已写出 \(completed)/\(total) 张，保留在输出目录)"
+                } else if failedNames.isEmpty {
                     self.progressText = "导出完成: \(total) 张 → \(outputDir.lastPathComponent)"
                     NSWorkspace.shared.activateFileViewerSelecting([outputDir])
                 } else {

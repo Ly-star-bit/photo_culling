@@ -17,10 +17,12 @@ swift build -c release
 echo "==> 装配 app bundle"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # Info.plist 每次都生成 — CI 从零装配 bundle,缺了它 codesign 直接报
-# "bundle format unrecognized"。版本号从 tag 带入 (v1.1.1 → 1.1.1)。
-VERSION="${GITHUB_REF_NAME:-}"
-VERSION="${VERSION#v}"
-[ -z "$VERSION" ] && VERSION="0.1"
+# "bundle format unrecognized"。版本号只从 TAG 带入 (v1.1.1 → 1.1.1)：
+# GITHUB_REF_NAME 在分支构建上是 "main"，会写出 CFBundleShortVersionString=main。
+VERSION="0.1"
+if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ -n "${GITHUB_REF_NAME:-}" ]; then
+    VERSION="${GITHUB_REF_NAME#v}"
+fi
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -89,6 +91,14 @@ img.save("/tmp/dmg_bg.png", dpi=(144, 144))
 EOF
 
 echo "==> 组装 DMG"
+# 上一次构建若在 detach 前失败（Finder 窗口没关 = Resource busy），卷会一直挂着：
+# 下次 attach 会挂成"选片工具 1"，osascript 和 detach 操作的是旧卷，convert 也会
+# 因为 RW 镜像仍被挂载而失败 —— 从此每次都失败，直到手动 detach。
+if [ -d "/Volumes/选片工具" ]; then
+    echo "==> 卸载上次残留的卷"
+    hdiutil detach "/Volumes/选片工具" -force -quiet || true
+fi
+
 STAGE=$(mktemp -d)
 mkdir -p "$STAGE/.background"
 cp /tmp/dmg_bg.png "$STAGE/.background/bg.png"
@@ -127,7 +137,9 @@ then
 fi
 
 sync && sleep 1
-hdiutil detach "/Volumes/选片工具" -quiet
+# -force：Finder/Spotlight 可能还捏着卷，普通 detach 会 Resource busy，
+# set -e 直接退出并把卷留在那里毒害下一次构建。
+hdiutil detach "/Volumes/选片工具" -force -quiet
 rm -f "$DMG"
 hdiutil convert "$RW" -format UDZO -o "$DMG" -quiet
 rm -rf "$RW" "$STAGE" /tmp/dmg_bg.png

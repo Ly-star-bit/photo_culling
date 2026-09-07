@@ -170,13 +170,19 @@ enum WatermarkEngine {
             return out
         }
 
-        /// frame 语义：找不到的 {key} 删除，参数条保持干净。
+        /// frame 语义：找不到的 {key} 连同它自己的字面量装饰一起删除。
+        /// 只删占位符会在无 EXIF 的图（PNG/截图/被微信剥过的 JPEG）上留下
+        /// "f/  s  ISO" 这种残渣。
         func fillStripMissing(template: String) -> String {
-            var out = fill(template: template)
-            while let open = out.range(of: "{"), let close = out.range(of: "}", range: open.upperBound..<out.endIndex) {
-                out.removeSubrange(open.lowerBound..<close.upperBound)
-            }
-            return out.trimmingCharacters(in: .whitespaces)
+            // 字段之间用双空格分隔（"{focal}  f/{fnumber}  {shutter}s  ISO {iso}"），
+            // 所以按双空格分段、整段丢弃 —— 这样 "ISO" 这种裸字面量会跟着它的
+            // {iso} 一起消失，而不是单独留在条上。
+            let filled = fill(template: template)
+            let kept = filled
+                .components(separatedBy: "  ")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty && !$0.contains("{") }
+            return kept.joined(separator: "  ")
         }
     }
 
@@ -517,8 +523,28 @@ enum WatermarkEngine {
         guard let out = CGImageDestinationCreateWithURL(dest as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
             return false
         }
-        CGImageDestinationAddImage(out, composed, props as CFDictionary)
+        // JPEG 没有 alpha 通道：带透明区域的源图（PNG/WebP）在 premultiplied
+        // 画布上 RGB=0，直接编码会把透明处变成黑块。先压到白底上。
+        CGImageDestinationAddImage(out, flattenedOnWhite(composed) ?? composed, props as CFDictionary)
         return CGImageDestinationFinalize(out)
+    }
+
+    /// 把可能带 alpha 的图合到不透明白底上；本来就不透明则原样返回。
+    private static func flattenedOnWhite(_ image: CGImage) -> CGImage? {
+        switch image.alphaInfo {
+        case .none, .noneSkipFirst, .noneSkipLast:
+            return image
+        default:
+            break
+        }
+        guard let ctx = CGContext(
+            data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return ctx.makeImage()
     }
 
     /// 同一个文件？先比标准化路径，两边都存在时再比文件系统 id —— 大小写不敏感

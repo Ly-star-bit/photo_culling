@@ -45,6 +45,10 @@ struct WatermarkView: View {
             } label: {
                 Label(store.outputDir?.lastPathComponent ?? "输出目录...", systemImage: "folder")
             }
+            if store.isExporting {
+                Button("取消") { store.cancelExport() }
+                    .buttonStyle(.bordered)
+            }
             Button("批量导出 (\(store.photos.count))") { store.exportAll() }
                 .buttonStyle(.borderedProminent)
                 .disabled(store.photos.isEmpty || store.isExporting || store.outputDir == nil)

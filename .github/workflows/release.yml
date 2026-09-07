@@ -29,9 +29,15 @@ jobs:
           # 资产名必须 ASCII — GitHub 会把非 ASCII 字符从文件名里剥掉
           # (选片工具-v1.1.2.dmg 上传后变成 -v1.1.2.dmg)。
           cp 选片工具.dmg "PhotoCulling-${GITHUB_REF_NAME}.dmg"
-          gh release create "$GITHUB_REF_NAME" "PhotoCulling-${GITHUB_REF_NAME}.dmg" \
-            --title "选片工具 $GITHUB_REF_NAME" \
-            --generate-notes
+          # Release 已存在就只补/换资产：半途失败后点 "Re-run jobs" 时
+          # gh release create 会以 422 already_exists 再次失败。
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "PhotoCulling-${GITHUB_REF_NAME}.dmg" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "PhotoCulling-${GITHUB_REF_NAME}.dmg" \
+              --title "选片工具 $GITHUB_REF_NAME" \
+              --generate-notes
+          fi
 
       - name: 上传构建产物 (手动触发时)
         if: github.ref_type != 'tag'
