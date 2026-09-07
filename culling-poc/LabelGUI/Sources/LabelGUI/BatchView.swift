@@ -115,7 +115,8 @@ struct BatchView: View {
             Button("清除", role: .destructive) { store.clearRecentSessions() }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("只删除这些拍摄的缓存分析结果 (预览图/判决/人工改判)，照片本身不动。重新打开这些文件夹需要再分析一次。")
+            Text("将释放约 \(BatchStore.sizeText(store.totalSessionBytes)) 磁盘空间。" +
+                 "只删除这些拍摄的缓存分析结果 (预览图/判决/人工改判)，照片本身不动。重新打开这些文件夹需要再分析一次。")
         }
     }
 
@@ -136,9 +137,12 @@ struct BatchView: View {
                     Divider()
                     // NSMenu items can't carry their own context menu, so removal
                     // lives in a submenu rather than a right-click on each row.
-                    Menu("移除历史记录") {
+                    // 缓存体积在这里显示：预览图约 190KB/张，15 场大拍摄能到几个 GB，
+                    // 而菜单本来完全看不出占了多少盘。
+                    Menu("移除历史记录 (共 \(BatchStore.sizeText(store.totalSessionBytes)))") {
                         ForEach(store.recentSessions) { session in
-                            Button("\(session.name) · \(session.photoCount) 张") {
+                            let bytes = store.sessionSizes[session.key] ?? 0
+                            Button("\(session.name) · \(session.photoCount) 张 · \(BatchStore.sizeText(bytes))") {
                                 store.removeSession(session)
                             }
                         }

@@ -362,7 +362,9 @@ final class BatchStore: ObservableObject {
     private func loadSessionsIndex() {
         guard let data = try? Data(contentsOf: sessionsIndexPath),
               let entries = try? JSONDecoder().decode([SessionEntry].self, from: data) else { return }
-        recentSessions = entries
+        // 同样封顶 15：写入端一直在截断，读取端不截断的话，一个手改过的
+        // sessions.json 就能让菜单无限长下去。
+        recentSessions = Array(entries.prefix(15))
         refreshSessionAvailability()
     }
 
@@ -418,6 +420,42 @@ final class BatchStore: ObservableObject {
     /// 废纸篓/全图缩放 all fail on the missing originals. Menu greys these out.
     @Published private(set) var missingSessionKeys: Set<String> = []
 
+    /// Bytes each cached session occupies on disk. Previews run ~190KB/photo, so
+    /// a 3000-photo shoot is ~570MB and a full 15-entry menu can reach several
+    /// GB — the menu showed no hint of that, and 移除/清除 were the only way to
+    /// reclaim it. Measured off-main because it walks every preview directory.
+    @Published private(set) var sessionSizes: [String: Int64] = [:]
+
+    var totalSessionBytes: Int64 { sessionSizes.values.reduce(0, +) }
+
+    nonisolated static func directorySize(_ url: URL) -> Int64 {
+        guard let e = FileManager.default.enumerator(
+            at: url, includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .fileSizeKey]) else { return 0 }
+        var total: Int64 = 0
+        for case let file as URL in e {
+            let values = try? file.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileSizeKey])
+            total += Int64(values?.totalFileAllocatedSize ?? values?.fileSize ?? 0)
+        }
+        return total
+    }
+
+    static func sizeText(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    private func refreshSessionSizes() {
+        let root = dataDir.appendingPathComponent("sessions")
+        let keys = recentSessions.map(\.key)
+        Task.detached(priority: .utility) {
+            var sizes: [String: Int64] = [:]
+            for key in keys {
+                sizes[key] = Self.directorySize(root.appendingPathComponent(key))
+            }
+            let result = sizes
+            await MainActor.run { [weak self] in self?.sessionSizes = result }
+        }
+    }
+
     /// Where this shoot's folder actually is right now: the recorded path if it
     /// still exists, else wherever the bookmark says it moved to. nil = deleted
     /// (or on an unmounted volume). A rename/move is NOT missing — the bookmark
@@ -440,6 +478,7 @@ final class BatchStore: ObservableObject {
         missingSessionKeys = Set(recentSessions
             .filter { Self.liveFolder(for: $0) == nil }
             .map(\.key))
+        refreshSessionSizes()
     }
 
     /// Drop one shoot from the menu and delete its cached analysis (previews,
