@@ -30,6 +30,10 @@ from pathlib import Path
 
 from common import load_manifest, save_manifest
 
+# 我们自己写的 sidecar 的指纹 —— Lightroom 写的是 x:xmptk="Adobe XMP Core ..."，
+# 靠这个区分“可以安全覆盖”和“别人的调色数据，碰不得”。
+XMP_MARKER = 'x:xmptk="culling-poc"'
+
 XMP_TEMPLATE = """<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="culling-poc">
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
@@ -100,13 +104,28 @@ def pick_group_bests(l1_by_id, l2_by_id, rejected_ids):
     return best_ids
 
 
-def write_xmp(photo_path, rating, label, reason):
+def write_xmp(photo_path, rating, label, reason, force=False):
     """label: 'Green' for picks, 'Red' for rejects (the cross-app 淘汰 color —
-    Capture One ignores Rating=-1 but filters color labels fine), None otherwise."""
+    Capture One ignores Rating=-1 but filters color labels fine), None otherwise.
+
+    Returns True when written, False when a foreign sidecar was left alone.
+    Lightroom keeps develop settings, keywords and GPS in that same .xmp —
+    replacing it with our rating-only template throws away a whole shoot's
+    edits, so anything we didn't write ourselves is preserved unless --force-xmp.
+    """
     xmp_path = Path(photo_path).with_suffix(".xmp")
+    if xmp_path.exists() and not force:
+        try:
+            if XMP_MARKER not in xmp_path.read_text(encoding="utf-8", errors="ignore"):
+                return False
+        except OSError:
+            return False
     label_element = f"   <xmp:Label>{label}</xmp:Label>\n" if label else ""
-    content = XMP_TEMPLATE.format(rating=rating, label_element=label_element, reason=reason.replace("<", "&lt;").replace("&", "&amp;"))
+    # & first — escaping < first would turn a literal "<" into "&amp;lt;".
+    escaped = reason.replace("&", "&amp;").replace("<", "&lt;")
+    content = XMP_TEMPLATE.format(rating=rating, label_element=label_element, reason=escaped)
     xmp_path.write_text(content, encoding="utf-8")
+    return True
 
 
 def main():
@@ -122,6 +141,8 @@ def main():
                          help="reject when Apple FaceCaptureQuality is below this (0 disables)")
     parser.add_argument("--out", default="data/ratings.json")
     parser.add_argument("--write-xmp", action="store_true", help="write .xmp sidecars next to originals")
+    parser.add_argument("--force-xmp", action="store_true",
+                        help="overwrite sidecars written by other apps (DESTROYS Lightroom develop settings)")
     args = parser.parse_args()
 
     manifest = load_manifest(Path(args.manifest))
@@ -145,6 +166,8 @@ def main():
     pick_ids = pick_group_bests(l1_by_id, l2_by_id, rejected_ids)
 
     ratings = []
+    xmp_written = 0
+    xmp_preserved = []
     for pid, l1 in l1_by_id.items():
         reject, reasons, worst_clip = reject_info[pid]
         l2 = l2_by_id.get(pid)
@@ -173,7 +196,11 @@ def main():
 
         if args.write_xmp and entry["raw_path"]:
             label = "Green" if entry["is_pick"] else ("Red" if verdict == "废片" else None)
-            write_xmp(entry["raw_path"], stars, label, "; ".join(reasons) if reasons else "")
+            if write_xmp(entry["raw_path"], stars, label,
+                         "; ".join(reasons) if reasons else "", force=args.force_xmp):
+                xmp_written += 1
+            else:
+                xmp_preserved.append(Path(entry["raw_path"]).name)
 
     save_manifest({"sharpness_threshold": args.sharpness_threshold,
                     "exposure_threshold": args.exposure_threshold,
@@ -184,7 +211,11 @@ def main():
     n_usable = sum(1 for r in ratings if r["verdict"] == "可用")
     print(f"Done: {len(ratings)} photos -> {n_reject} 废片, {n_usable} 可用, {n_pick} 精选. Wrote {args.out}")
     if args.write_xmp:
-        print("Wrote .xmp sidecars next to each original photo.")
+        print(f"Wrote {xmp_written} .xmp sidecars next to the original photos.")
+        if xmp_preserved:
+            sample = ", ".join(xmp_preserved[:3])
+            print(f"Kept {len(xmp_preserved)} existing sidecars written by another app "
+                  f"({sample}...) — they may hold Lightroom edits. Use --force-xmp to overwrite.")
 
 
 if __name__ == "__main__":

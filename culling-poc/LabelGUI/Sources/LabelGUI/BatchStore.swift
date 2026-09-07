@@ -79,9 +79,34 @@ struct BatchItem: Identifiable {
 /// detached task.
 final class ProcessBox: @unchecked Sendable {
     private var process: Process?
+    private var terminatedByUs = false
     private let lock = NSLock()
     func set(_ p: Process?) { lock.lock(); process = p; lock.unlock() }
-    func terminate() { lock.lock(); process?.terminate(); lock.unlock() }
+    func terminate() {
+        lock.lock(); terminatedByUs = true; process?.terminate(); lock.unlock()
+    }
+    /// 用户点了“取消”吗？terminate() 让退出码非 0，不加区分就会把用户主动取消
+    /// 报成“VLM 分析失败 (服务在跑吗?)”。
+    var wasCancelled: Bool { lock.lock(); defer { lock.unlock() }; return terminatedByUs }
+    func resetCancellation() { lock.lock(); terminatedByUs = false; lock.unlock() }
+}
+
+/// 后台线程持续收集子进程 stderr。必须边跑边收：只在进程退出后才读的话，
+/// layer2.py 的 tqdm 进度条会写满 16-64KB 的管道缓冲区，Python 卡在 write、
+/// 我们卡在 waitUntilExit，界面永远停在“VLM 分析中”。
+final class OutputCollector: @unchecked Sendable {
+    private var data = Data()
+    private let lock = NSLock()
+    func append(_ chunk: Data) {
+        lock.lock(); defer { lock.unlock() }
+        data.append(chunk)
+        // 只有末尾会展示给用户，别让刷屏的 traceback 撑大内存。
+        if data.count > 64_000 { data.removeFirst(data.count - 64_000) }
+    }
+    var text: String {
+        lock.lock(); defer { lock.unlock() }
+        return String(data: data, encoding: .utf8) ?? ""
+    }
 }
 
 @MainActor
@@ -230,6 +255,12 @@ final class BatchStore: ObservableObject {
     /// and folder renames today.
     private var accessedFolder: URL?
 
+    /// The key naming the open session's directory, and the path it was derived
+    /// from. Both are pinned by switchSession and must never be recomputed from
+    /// `photoDir` — that one tracks renames, these must not.
+    private var currentSessionKey = "default"
+    private var currentSessionPath = ""
+
     nonisolated private static func makeBookmark(for url: URL) -> Data? {
         (try? url.bookmarkData(options: .withSecurityScope,
                                includingResourceValuesForKeys: nil, relativeTo: nil))
@@ -259,12 +290,24 @@ final class BatchStore: ObservableObject {
     /// Point the store at the session for this folder: existing results load
     /// instantly (no re-analysis); a new folder starts empty until 开始分析.
     func switchSession(to folder: URL) {
+        // 处理中切换会把 A 的流式结果灌进 B 的网格（同名文件还会顶掉 B 的行），
+        // 而 isRunning 永远停在 true —— 之后 runAnalysis 的 guard 让“重新分析”
+        // 静默失效，用户点了毫无反应。先取消，再切。
+        guard !isRunning else {
+            lastError = "正在处理中，先点“取消”再切换文件夹"
+            return
+        }
         let resolved = restoreAccess(to: folder)
         photoDir = resolved
         // Session key from the URL the caller had (the recents entry's path):
         // keeps existing results reachable even if the bookmark resolved the
-        // folder to a renamed location.
-        sessionDir = dataDir.appendingPathComponent("sessions/\(Self.sessionKey(for: folder))")
+        // folder to a renamed location. It is PINNED for as long as this session
+        // is open — recomputing it from `photoDir` (the resolved, possibly
+        // renamed path) made runAnalysis write into sessions/<old key> while the
+        // index recorded <new key>: results vanished and were later pruned.
+        currentSessionKey = Self.sessionKey(for: folder)
+        currentSessionPath = folder.path
+        sessionDir = dataDir.appendingPathComponent("sessions/\(currentSessionKey)")
         try? FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
         overrides = [:]
         overrideUndoStack = []
@@ -299,15 +342,18 @@ final class BatchStore: ObservableObject {
     }
 
     private func touchSessionIndex() {
-        guard let folder = photoDir else { return }
-        let key = Self.sessionKey(for: folder)
+        guard let folder = photoDir, !currentSessionPath.isEmpty else { return }
+        // The PINNED key/path from switchSession, never recomputed from the
+        // resolved folder — see the comment there. `name` does follow the
+        // resolved folder so a renamed shoot shows its new name in the menu.
+        let key = currentSessionKey
         // Fresh bookmark while we demonstrably have access; keep the old one if
         // creation fails (shouldn't, but a stale bookmark beats none).
         let bookmark = Self.makeBookmark(for: folder)
             ?? recentSessions.first(where: { $0.key == key })?.bookmark
         var entries = recentSessions.filter { $0.key != key }
         entries.insert(SessionEntry(
-            key: key, path: folder.path, name: folder.lastPathComponent,
+            key: key, path: currentSessionPath, name: folder.lastPathComponent,
             lastAnalyzed: ISO8601DateFormatter().string(from: Date()),
             photoCount: items.count,
             bookmark: bookmark
@@ -370,9 +416,14 @@ final class BatchStore: ObservableObject {
     /// Removing the shoot that's currently open also clears the view — its
     /// previews are about to vanish, so leaving it on screen would show holes.
     func removeSession(_ entry: SessionEntry) {
+        // 引擎正在往这个目录里写预览图时把目录删掉 = 分析中途报错。
+        guard !isRunning else {
+            lastError = "正在处理中，先点“取消”再移除历史记录"
+            return
+        }
         recentSessions.removeAll { $0.key == entry.key }
         saveSessionsIndex()
-        if let current = photoDir, Self.sessionKey(for: current) == entry.key {
+        if photoDir != nil, currentSessionKey == entry.key {
             resetToNoSession()
         }
         try? FileManager.default.removeItem(
@@ -384,6 +435,10 @@ final class BatchStore: ObservableObject {
     /// Empty the menu and wipe every cached session. Originals untouched —
     /// reopening a folder just means analyzing it again.
     func clearRecentSessions() {
+        guard !isRunning else {
+            lastError = "正在处理中，先点“取消”再清除历史记录"
+            return
+        }
         let count = recentSessions.count
         recentSessions = []
         saveSessionsIndex()
@@ -399,6 +454,8 @@ final class BatchStore: ObservableObject {
         accessedFolder?.stopAccessingSecurityScopedResource()
         accessedFolder = nil
         photoDir = nil
+        currentSessionKey = "default"
+        currentSessionPath = ""
         sessionDir = dataDir.appendingPathComponent("sessions/default")
         overrides = [:]
         overrideUndoStack = []
@@ -727,6 +784,7 @@ final class BatchStore: ObservableObject {
         guard !isRunning, !items.isEmpty else { return }
         isRunning = true
         lastError = nil
+        processBox.resetCancellation()
         let data = sessionDir
         let root = pythonRoot
         let box = processBox
@@ -792,6 +850,10 @@ final class BatchStore: ObservableObject {
                     NotificationCenter.default.post(name: .analysisDidFinish, object: nil, userInfo: ["dir": self.sessionDir])
                 case .failure(let message):
                     self.lastError = "VLM 分析失败 (服务在跑吗? 先点“启动 VLM 服务”): \(message)"
+                case .cancelled:
+                    self.loadResults()   // 已判完的那部分留下来
+                    self.applyThresholds()
+                    self.progressText = "VLM 已取消 (已完成的判决已保留)"
                 }
                 self.isRunning = false
             }
@@ -812,6 +874,7 @@ final class BatchStore: ObservableObject {
         }
         isRunning = true
         lastError = nil
+        processBox.resetCancellation()
         let data = sessionDir
         let root = pythonRoot
         let box = processBox
@@ -881,6 +944,10 @@ final class BatchStore: ObservableObject {
                     NotificationCenter.default.post(name: .analysisDidFinish, object: nil, userInfo: ["dir": self.sessionDir])
                 case .failure(let message):
                     self.lastError = "复审失败 (服务在跑吗? 先点“启动服务”): \(message)"
+                case .cancelled:
+                    self.loadResults()
+                    self.applyThresholds()
+                    self.progressText = "复审已取消 (已完成的部分已保留)"
                 }
                 self.isRunning = false
             }
@@ -908,20 +975,28 @@ final class BatchStore: ObservableObject {
         process.standardError = pipe
         let outPipe = Pipe()
         process.standardOutput = outPipe
-        if let onStdoutLine {
-            // print(..., flush=True) on the Python side writes whole lines per
-            // write(), so splitting availableData on newlines is reliable enough
-            // for short progress lines.
-            outPipe.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                if data.isEmpty {
-                    handle.readabilityHandler = nil
-                    return
-                }
-                guard let text = String(data: data, encoding: .utf8) else { return }
-                for line in text.split(separator: "\n") {
-                    onStdoutLine(String(line))
-                }
+        // 两个管道都必须边跑边排空，否则子进程写满缓冲区就永远阻塞在 write 上。
+        let stderrCollector = OutputCollector()
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            stderrCollector.append(chunk)
+        }
+        // print(..., flush=True) on the Python side writes whole lines per
+        // write(), so splitting availableData on newlines is reliable enough
+        // for short progress lines.
+        outPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            guard let onStdoutLine, let text = String(data: data, encoding: .utf8) else { return }
+            for line in text.split(separator: "\n") {
+                onStdoutLine(String(line))
             }
         }
         do {
@@ -930,10 +1005,16 @@ final class BatchStore: ObservableObject {
             defer { box?.set(nil) }
             process.waitUntilExit()
             outPipe.fileHandleForReading.readabilityHandler = nil
+            pipe.fileHandleForReading.readabilityHandler = nil
+            // handler 拆掉后管道里可能还剩最后一截
+            if let tail = try? pipe.fileHandleForReading.readToEnd(), !tail.isEmpty {
+                stderrCollector.append(tail)
+            }
             if process.terminationStatus != 0 {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let message = String(data: data, encoding: .utf8)?.suffix(500) ?? "exit \(process.terminationStatus)"
-                return .failure(String(message))
+                if box?.wasCancelled == true { return .cancelled }
+                let text = stderrCollector.text
+                let message = text.isEmpty ? "exit \(process.terminationStatus)" : String(text.suffix(500))
+                return .failure(message)
             }
             return .success
         } catch {
@@ -1681,8 +1762,17 @@ final class BatchStore: ObservableObject {
 
         Task.detached { [weak self] in
             var written = 0
+            var preserved: [String] = []
             var failed: [String] = []
             for (index, job) in jobs.enumerated() {
+                // Lightroom 把调色参数、关键字、GPS 都存在同名 .xmp 里。别人的
+                // sidecar 一律不碰 —— 覆盖成我们这份只有星级的模板 = 整场调色报废。
+                if FileManager.default.fileExists(atPath: job.url.path),
+                   let existing = try? String(contentsOf: job.url, encoding: .utf8),
+                   !existing.contains(Self.xmpMarker) {
+                    preserved.append(job.id)
+                    continue
+                }
                 do {
                     try job.content.write(to: job.url, atomically: true, encoding: .utf8)
                     written += 1
@@ -1699,19 +1789,28 @@ final class BatchStore: ObservableObject {
             }
 
             let writtenCount = written
+            let preservedIds = preserved
             let failedIds = failed
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
                 self.isRunning = false
                 if failedIds.isEmpty {
-                    self.progressText = "XMP 完成: \(writtenCount) 个已写入原图目录"
+                    var summary = "XMP 完成: \(writtenCount) 个已写入原图目录"
+                    if !preservedIds.isEmpty {
+                        summary += "；\(preservedIds.count) 个已有其它软件的 XMP (可能含 Lightroom 调色)，已保留未覆盖"
+                    }
+                    self.progressText = summary
                 } else {
                     self.lastError = "XMP: \(writtenCount) 个成功, \(failedIds.count) 个失败 (\(failedIds.prefix(3).joined(separator: ", ")))"
                 }
             }
         }
     }
+
+    /// 我们自己写的 sidecar 的指纹 —— Lightroom 写的是 x:xmptk="Adobe XMP Core ..."。
+    /// 靠它区分“上次是我们写的，可以安全覆盖”和“别人的数据，碰不得”。
+    nonisolated static let xmpMarker = #"x:xmptk="选片工具""#
 
     /// Standard xmp:Rating (-1 rejected, 1-5 stars) + xmp:Label color, readable by
     /// Lightroom/Bridge/Capture One.
@@ -1744,5 +1843,7 @@ extension Result where Success == Void, Failure == Never {
     enum ProcessOutcome {
         case success
         case failure(String)
+        /// 用户点了取消 —— 不是错误，别报“服务在跑吗?”
+        case cancelled
     }
 }

@@ -477,6 +477,9 @@ enum WatermarkEngine {
     /// orientation 已烘焙进像素所以剥掉标签）。
     static func exportPhoto(source: URL, to dest: URL, signature: CGImage?,
                             config: Config, options: ExportOptions) -> Bool {
+        // 绝不写回源文件：后缀被清空 + 输出目录选成照片原目录时 dest == source，
+        // 原片会被带水印的版本静默替换掉（不可恢复）。
+        guard !isSameFile(source, dest) else { return false }
         guard let src = CGImageSourceCreateWithURL(source as CFURL, nil),
               let base = CGImageSourceCreateThumbnailAtIndex(src, 0, [
                   kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -516,6 +519,16 @@ enum WatermarkEngine {
         }
         CGImageDestinationAddImage(out, composed, props as CFDictionary)
         return CGImageDestinationFinalize(out)
+    }
+
+    /// 同一个文件？先比标准化路径，两边都存在时再比文件系统 id —— 大小写不敏感
+    /// 的卷、符号链接、`/tmp` 这类软链目录都骗不过 id 比较。
+    static func isSameFile(_ a: URL, _ b: URL) -> Bool {
+        if a.standardizedFileURL.path == b.standardizedFileURL.path { return true }
+        let keys: Set<URLResourceKey> = [.fileResourceIdentifierKey]
+        guard let ida = try? a.resourceValues(forKeys: keys).fileResourceIdentifier,
+              let idb = try? b.resourceValues(forKeys: keys).fileResourceIdentifier else { return false }
+        return ida.isEqual(idb)
     }
 
     // MARK: - 绘制辅助

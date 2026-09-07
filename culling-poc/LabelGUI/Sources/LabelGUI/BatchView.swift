@@ -133,7 +133,10 @@ struct BatchView: View {
                     .lineLimit(1)
             }
             .fixedSize()
-            .help(store.photoDir?.path ?? "选择一场拍摄的照片文件夹")
+            // 处理中换文件夹会污染网格并让"重新分析"卡死，store 里也有守卫兜底。
+            .disabled(store.isRunning)
+            .help(store.isRunning ? "正在处理中，先取消再切换文件夹"
+                                  : (store.photoDir?.path ?? "选择一场拍摄的照片文件夹"))
             // Folders get deleted in Finder while the app sits open — recheck on
             // the way back in so the menu isn't showing yesterday's truth.
             .onReceive(NotificationCenter.default.publisher(

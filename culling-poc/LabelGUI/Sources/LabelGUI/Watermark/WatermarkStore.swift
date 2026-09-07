@@ -175,9 +175,30 @@ final class WatermarkStore: ObservableObject {
             lastError = "没有任何水印内容 — 选签名图或启用文字/相框"
             return
         }
+        // 目标文件名在批次内去重：a.jpg + a.png、或两个子文件夹里的同名照片会算出
+        // 同一个 dest，先写的那张被后写的顶掉，而两张都报“成功”。
+        var used = Set<String>()
+        var jobs: [(src: URL, dest: URL)] = []
+        for src in photos {
+            let base = src.deletingPathExtension().lastPathComponent + options.filenameSuffix
+            var dest = outputDir.appendingPathComponent("\(base).jpg")
+            var n = 2
+            while used.contains(dest.standardizedFileURL.path) {
+                dest = outputDir.appendingPathComponent("\(base)-\(n).jpg")
+                n += 1
+            }
+            used.insert(dest.standardizedFileURL.path)
+            jobs.append((src, dest))
+        }
+        // 后缀为空 + 输出目录就是照片原目录 = 原片会被覆盖。引擎里也有兜底守卫，
+        // 但那只会报“失败”；在这里拦下才能说清为什么。
+        if let clash = jobs.first(where: { WatermarkEngine.isSameFile($0.src, $0.dest) }) {
+            lastError = "输出会覆盖原片「\(clash.src.lastPathComponent)」—— 请填写文件名后缀，或换一个输出目录"
+            return
+        }
+
         isExporting = true
         lastError = nil
-        let jobs = photos
         let sig = signatureImage
         let cfg = config
         let opts = options
@@ -191,13 +212,11 @@ final class WatermarkStore: ObservableObject {
             var iterator = jobs.makeIterator()
             await withTaskGroup(of: (String, Bool).self) { group in
                 func addNext() {
-                    guard let src = iterator.next() else { return }
+                    guard let job = iterator.next() else { return }
                     group.addTask {
-                        let stem = src.deletingPathExtension().lastPathComponent
-                        let dest = outputDir.appendingPathComponent("\(stem)\(opts.filenameSuffix).jpg")
-                        return (src.lastPathComponent,
-                                WatermarkEngine.exportPhoto(source: src, to: dest, signature: sig,
-                                                            config: cfg, options: opts))
+                        (job.src.lastPathComponent,
+                         WatermarkEngine.exportPhoto(source: job.src, to: job.dest, signature: sig,
+                                                     config: cfg, options: opts))
                     }
                 }
                 for _ in 0..<workers { addNext() }
