@@ -27,7 +27,9 @@ echo "==> 签名"
 codesign --force --sign - "$APP"
 
 echo "==> 渲染 DMG 背景图"
-cd "$POC" && uv run python - <<'EOF'
+# --no-project: 这一步只要 Pillow — 别为了画一张背景图装 mediapipe/opencv
+# 全家桶 (CI runner 上尤其致命)。
+cd "$POC" && uv run --no-project --with pillow python - <<'EOF'
 from PIL import Image, ImageDraw, ImageFont
 
 W, H = 1200, 800
@@ -70,7 +72,9 @@ hdiutil create -volname 选片工具 -srcfolder "$STAGE" -format UDRW -ov -quiet
 hdiutil attach "$RW" -quiet
 sleep 1
 
-osascript <<'EOF'
+# Finder 排版在无 GUI 的 CI runner 上可能失败 — 失败就跳过,DMG 照样能装,
+# 只是没有自定义布局/背景。
+if ! osascript <<'EOF'
 tell application "Finder"
     tell disk "选片工具"
         open
@@ -91,6 +95,9 @@ tell application "Finder"
     end tell
 end tell
 EOF
+then
+    echo "!! Finder 排版失败 (CI 常见) — 继续打包默认布局的 DMG"
+fi
 
 sync && sleep 1
 hdiutil detach "/Volumes/选片工具" -quiet

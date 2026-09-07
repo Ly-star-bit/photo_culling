@@ -1,0 +1,38 @@
+# 推送 v* tag → 在 GitHub 的 macOS 机器上跑 build_app.sh → 自动创建
+# Release 并附上 DMG。手动触发 (workflow_dispatch) 只构建、传产物,不发版。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: 构建 app + DMG
+        run: ./build_app.sh
+
+      - name: 发布 Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp 选片工具.dmg "选片工具-${GITHUB_REF_NAME}.dmg"
+          gh release create "$GITHUB_REF_NAME" "选片工具-${GITHUB_REF_NAME}.dmg" \
+            --title "选片工具 $GITHUB_REF_NAME" \
+            --generate-notes
+
+      - name: 上传构建产物 (手动触发时)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: 选片工具-dmg
+          path: 选片工具.dmg
