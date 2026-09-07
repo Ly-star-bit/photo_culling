@@ -125,10 +125,15 @@ enum Metrics {
                 let row = y * rw
                 for x in sx0..<sx1 {
                     let i = row + x
-                    let gx = Double(g[i - rw + 1] + 2 * g[i + 1] + g[i + rw + 1]
-                                  - g[i - rw - 1] - 2 * g[i - 1] - g[i + rw - 1])
-                    let gy = Double(g[i + rw - 1] + 2 * g[i + rw] + g[i + rw + 1]
-                                  - g[i - rw - 1] - 2 * g[i - rw] - g[i - rw + 1])
+                    // Named taps: the 6-term chains inlined into Double(...)
+                    // made older Swift compilers (CI's Xcode 16) time out
+                    // type-checking this expression.
+                    let tl = g[i - rw - 1], tc = g[i - rw], tr = g[i - rw + 1]
+                    let ml = g[i - 1], mr = g[i + 1]
+                    let bl = g[i + rw - 1], bc = g[i + rw], br = g[i + rw + 1]
+                    let gxF: Float = tr + 2 * mr + br - tl - 2 * ml - bl
+                    let gyF: Float = bl + 2 * bc + br - tl - 2 * tc - tr
+                    let gx = Double(gxF), gy = Double(gyF)
                     sum += gx * gx + gy * gy
                     count += 1
                 }
