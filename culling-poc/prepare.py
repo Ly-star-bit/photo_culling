@@ -7,6 +7,7 @@ import io
 import json
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 import rawpy
@@ -23,12 +24,17 @@ def list_photos(photo_dir):
     + DSCF7207.JPG) is a single photo, keyed on the RAW half — the file XMP
     sidecars belong next to. Matches the native Swift engine's pairing."""
     all_images = sorted(p for p in Path(photo_dir).rglob("*") if p.suffix.lower() in IMAGE_EXTS)
-    by_stem = {}
+    # Key on (directory, stem), not the bare stem: rglob is recursive, and dual-card
+    # or per-scene folders routinely repeat camera filenames (100_FUJI/DSCF0001.RAF
+    # and 101_FUJI/DSCF0001.RAF). Keying on the stem alone silently threw one of
+    # them away. Matches the native Swift engine's per-directory pairing.
+    by_key = {}
     for p in all_images:
-        existing = by_stem.get(p.stem)
+        key = (p.parent, p.stem)
+        existing = by_key.get(key)
         if existing is None or (p.suffix.lower() in RAW_EXTS and existing.suffix.lower() not in RAW_EXTS):
-            by_stem[p.stem] = p
-    return sorted(by_stem.values())
+            by_key[key] = p
+    return sorted(by_key.values())
 
 
 def read_exif_batch(paths):
@@ -75,10 +81,22 @@ def main():
     print(f"Found {len(photos)} photos, reading EXIF...")
     exif_by_path = read_exif_batch(photos)
 
+    # Same-stem photos from different subfolders need distinct ids — the id names
+    # previews/<id>.jpg and keys every downstream result.
+    stem_counts = Counter(p.stem for p in photos)
+    root = Path(args.photo_dir).resolve()
+
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
     entries = []
+    used_ids = set()
     for i, path in enumerate(photos):
         photo_id = path.stem
+        if stem_counts[path.stem] > 1:
+            rel = path.resolve().relative_to(root).with_suffix("")
+            photo_id = "_".join(rel.parts)
+        while photo_id in used_ids:
+            photo_id += "_2"
+        used_ids.add(photo_id)
         exif = exif_by_path.get(str(path), {})
         try:
             preview = extract_preview(path)
@@ -101,9 +119,11 @@ def main():
         if (i + 1) % 25 == 0:
             print(f"  {i + 1}/{len(photos)} previews extracted")
 
-    save_manifest({"photo_dir": str(args.photo_dir), "photos": entries})
+    # --out was accepted and then ignored: everything landed in data/manifest.json,
+    # so a later `--manifest /tmp/x.json` either failed or silently used a stale file.
+    save_manifest({"photo_dir": str(args.photo_dir), "photos": entries}, Path(args.out))
     n_dated = sum(1 for e in entries if e["capture_time"])
-    print(f"Done: {len(entries)} photos, {n_dated} with capture time. Wrote data/manifest.json")
+    print(f"Done: {len(entries)} photos, {n_dated} with capture time. Wrote {args.out}")
 
 
 if __name__ == "__main__":

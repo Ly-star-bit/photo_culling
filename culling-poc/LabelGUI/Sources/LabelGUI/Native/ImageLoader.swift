@@ -97,26 +97,63 @@ enum ImageLoader {
             stemCounts[URL(fileURLWithPath: key).lastPathComponent, default: 0] += 1
         }
 
+        // Ids must be unique: they name previews/<id>.jpg and key every result
+        // JSON. Prefixing only ONE parent level collided across scene folders
+        // (仪式/JPG/DSC_0001 vs 晚宴/JPG/DSC_0001 → both "JPG_DSC_0001"), which
+        // dropped a photo from the manifest and had two workers writing the same
+        // preview file. Colliding stems now carry their whole path below the
+        // shoot root; unique ones keep the bare stem so existing sessions still
+        // match on incremental re-analysis.
+        // Compare path COMPONENTS with symlinks resolved on both sides: a plain
+        // string prefix test fails whenever the shoot lives under a symlinked
+        // parent (/tmp → /private/tmp is the everyday case) and would bake the
+        // whole absolute path into the id.
+        let rootParts = directory.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+        func pathScopedID(_ fileURL: URL) -> String {
+            let fileParts = fileURL.resolvingSymlinksInPath().standardizedFileURL
+                .deletingPathExtension().pathComponents
+            let parts: [String]
+            if fileParts.count > rootParts.count,
+               Array(fileParts.prefix(rootParts.count)) == rootParts {
+                parts = Array(fileParts.dropFirst(rootParts.count))
+            } else {
+                // 兜底：拿不到相对路径也只取最后几级，别把整条绝对路径写进文件名
+                parts = Array(fileParts.suffix(3))
+            }
+            return parts.isEmpty ? fileURL.deletingPathExtension().lastPathComponent
+                                 : parts.joined(separator: "_")
+        }
+        var usedIDs = Set<String>()
+        func claim(_ candidate: String) -> String {
+            var id = candidate
+            var n = 2
+            while usedIDs.contains(id) {
+                id = "\(candidate)_\(n)"
+                n += 1
+            }
+            usedIDs.insert(id)
+            return id
+        }
+
         let paired = keys.map { key -> PhotoFile in
             let keyURL = URL(fileURLWithPath: key)
             let bareStem = keyURL.lastPathComponent
-            let stem = stemCounts[bareStem]! > 1
-                ? "\(keyURL.deletingLastPathComponent().lastPathComponent)_\(bareStem)"
-                : bareStem
+            let candidate = stemCounts[bareStem]! > 1 ? pathScopedID(keyURL) : bareStem
             let raw = rawByKey[key]
             let jpeg = jpegByKey[key]
             return PhotoFile(
-                stem: stem,
+                stem: claim(candidate),
                 primaryURL: raw ?? jpeg!,
                 decodeURL: jpeg ?? raw!
             )
         }
-        let extraFiles = extras.map { url in
-            PhotoFile(
-                stem: "\(url.deletingPathExtension().lastPathComponent)_\(url.pathExtension.lowercased())",
-                primaryURL: url,
-                decodeURL: url
-            )
+        let extraFiles = extras.map { url -> PhotoFile in
+            let ext = url.pathExtension.lowercased()
+            let bare = "\(url.deletingPathExtension().lastPathComponent)_\(ext)"
+            // Only reach for the path-scoped form when the cheap one is taken —
+            // keeps ids stable for the common no-collision case.
+            let candidate = usedIDs.contains(bare) ? "\(pathScopedID(url))_\(ext)" : bare
+            return PhotoFile(stem: claim(candidate), primaryURL: url, decodeURL: url)
         }
         return paired + extraFiles
     }

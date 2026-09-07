@@ -68,7 +68,8 @@ struct BatchView: View {
             set: { if !$0 { inspectedID = nil } }
         )) {
             if let id = inspectedID {
-                PhotoInspector(store: store, inspectedID: $inspectedID, initialID: id)
+                PhotoInspector(store: store, inspectedID: $inspectedID,
+                               gridOrder: visibleItems.map(\.id), initialID: id)
             }
         }
         // 换了一场拍摄就把选择/焦点全部丢掉。留着的话批量改判栏还显示"已选 3 张"，
@@ -77,6 +78,10 @@ struct BatchView: View {
             selectedIDs = []
             focusedID = nil
             inspectedID = nil
+        }
+        // 重新分析会原地覆盖预览图 —— 不清缓存的话数值更新了、图还是旧的。
+        .onReceive(NotificationCenter.default.publisher(for: .analysisDidFinish)) { _ in
+            ThumbCache.invalidate()
         }
         // 废片进废纸篓后这些 id 就没了，留着同样会写到不存在的照片上。
         .onChange(of: store.items.count) {
@@ -1079,8 +1084,23 @@ enum ThumbCache {
         return c
     }()
 
+    /// Re-analysis overwrites previews/<id>.jpg in place, so a purely
+    /// path-keyed cache kept serving the old picture (new numbers, stale
+    /// thumbnail) until relaunch. Bumping this on every analysisDidFinish
+    /// changes the cache key AND the `.task(id:)` of every ThumbnailView, so
+    /// visible cells re-decode instead of sitting on their @State copy.
+    nonisolated(unsafe) private(set) static var generation = 0
+
+    @MainActor
+    static func invalidate() {
+        generation += 1
+        cache.removeAllObjects()
+        FullResCache.cache.removeAllObjects()
+        FaceStripCache.cache.removeAllObjects()
+    }
+
     static func key(_ path: String, _ maxPixel: Int) -> NSString {
-        "\(maxPixel)|\(path)" as NSString
+        "\(generation)|\(maxPixel)|\(path)" as NSString
     }
 
     static func load(path: String, maxPixel: Int = 512) -> NSImage? {
@@ -1392,6 +1412,8 @@ struct FaceCropView: View {
 struct PhotoInspector: View {
     @ObservedObject var store: BatchStore
     @Binding var inspectedID: String?
+    /// The grid's current visible order — paging must match what's on screen.
+    let gridOrder: [String]
     @State var currentID: String
     @State private var zoomed = false
     @State private var fullResImage: NSImage?
@@ -1405,9 +1427,10 @@ struct PhotoInspector: View {
     @State private var showOverlay = true
     @State private var compareOn = false
 
-    init(store: BatchStore, inspectedID: Binding<String?>, initialID: String) {
+    init(store: BatchStore, inspectedID: Binding<String?>, gridOrder: [String], initialID: String) {
         self.store = store
         self._inspectedID = inspectedID
+        self.gridOrder = gridOrder
         self._currentID = State(initialValue: initialID)
     }
 
@@ -1416,10 +1439,11 @@ struct PhotoInspector: View {
     }
 
     /// Navigation order = what the grid shows under the current filter.
-    private var visibleIDs: [String] {
-        let filtered = store.verdictFilter.map { f in store.items.filter { $0.verdict == f } } ?? store.items
-        return filtered.map(\.id)
-    }
+    /// Exactly what the grid shows, handed down from BatchView. Recomputing it
+    /// here from store.items only honoured verdictFilter, so ←/→ paged through
+    /// photos the grid was hiding (reason chips, 只看临界, 按分组封面) and in a
+    /// different order than the pick/usable/reject sections.
+    private var visibleIDs: [String] { gridOrder }
 
     private func groupMembers(_ item: BatchItem) -> [BatchItem] {
         store.items.filter { $0.burstGroup == item.burstGroup }
@@ -1826,10 +1850,14 @@ struct PhotoInspector: View {
         }
         loadingFullRes = true
         let path = item.decodePath
+        let requestedID = item.id
         Task.detached(priority: .userInitiated) {
             let image = FullResCache.load(path: path)
             await MainActor.run {
                 loadingFullRes = false
+                // 一张 40MP 原图要解码约 1 秒，期间用户可能已经 ←/→ 翻走了。
+                // 不校验的话放大窗里是上一张、而头部信息和判决键作用在这一张。
+                guard requestedID == currentID else { return }
                 if let image {
                     fullResImage = image
                     zoomed = true
@@ -2095,7 +2123,11 @@ struct ReviewView: View {
 
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 4) {
+                        // Lazy: a plain HStack instantiated every photo in the
+                        // shoot the moment review mode opened — 3000 cells each
+                        // firing a decode at once, and each holding its NSImage
+                        // in @State where the cache byte limits can't reclaim it.
+                        LazyHStack(spacing: 4) {
                             ForEach(visibleItems) { member in
                                 ThumbnailView(path: member.previewPath, maxPixel: 256)
                                     .frame(width: 92, height: 64)
@@ -2173,12 +2205,17 @@ struct ReviewView: View {
             zoomed = true
             return
         }
+        // 已经在解上一张了就别再排一个：连按 Z 会对同一文件并发跑两次原图解码。
+        guard !loadingZoom else { return }
         loadingZoom = true
         let path = item.decodePath
+        let requestedID = item.id
         Task.detached(priority: .userInitiated) {
             let image = FullResCache.load(path: path)
             await MainActor.run {
                 loadingZoom = false
+                // 解码期间可能已经翻页了 —— 否则放大的是上一张，而数字键判在这一张。
+                guard requestedID == focusedID else { return }
                 if let image {
                     zoomImage = image
                     zoomed = true
