@@ -313,6 +313,9 @@ final class BatchStore: ObservableObject {
         overrideUndoStack = []
         reasonFilter = nil
         borderlineFilter = false
+        // 判决筛选也要跟着清：留着"只看废片"切到新场次，网格里只有废片，
+        // 看起来像是"照片少了一大半"。
+        verdictFilter = nil
         lastError = nil
         loadReviewPosition()
         loadOverrides()
@@ -324,12 +327,14 @@ final class BatchStore: ObservableObject {
             lastError = "「\(folder.lastPathComponent)」的照片文件夹已不存在 (被删除、改名或所在硬盘未挂载)。" +
                         "下面是上次分析的缓存结果，重新分析/导出/写 XMP 都会失败。"
         }
-        // Register on OPEN, not just after analysis. pruneOrphanedSessions
-        // deletes every sessions/<key> missing from this index, so a session
-        // that was only ever opened (and manually re-judged — overrides.json
-        // lives in there) used to be wiped the next time any other folder was
-        // analyzed.
-        touchSessionIndex()
+        // Register a session that HAS cached results as soon as it's opened, not
+        // just after an analysis: pruneOrphanedSessions deletes every
+        // sessions/<key> missing from this index, so a session that was only
+        // ever opened (and manually re-judged — overrides.json lives in there)
+        // used to be wiped the next time any other folder was analyzed.
+        // Empty ones stay out — a mistaken pick shouldn't land in the menu
+        // forever, or evict (and delete) the oldest real session at the 15 cap.
+        if !items.isEmpty { touchSessionIndex() }
         refreshSessionAvailability()
         NotificationCenter.default.post(name: .analysisDidFinish, object: nil, userInfo: ["dir": sessionDir])
     }
