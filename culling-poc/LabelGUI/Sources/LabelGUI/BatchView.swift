@@ -991,8 +991,23 @@ struct BatchView: View {
             store.switchSession(to: url)
             // A folder with no cached session shows an empty grid until analysis
             // runs — users read that as "选了没反应", so kick it off right away.
-            // Re-picking an analyzed folder keeps its instant cached results.
-            if store.items.isEmpty { store.runAnalysis() }
+            if store.items.isEmpty {
+                store.runAnalysis()
+            } else {
+                // Re-picking an analyzed folder used to silently show the same
+                // cached grid — also read as "没反应". Ask instead: re-analysis
+                // is incremental (unchanged photos are skipped), so it's cheap
+                // when the folder gained new photos.
+                let alert = NSAlert()
+                alert.messageText = "「\(url.lastPathComponent)」已有分析结果"
+                alert.informativeText = "已加载缓存的 \(store.items.count) 张。要重新分析吗？" +
+                    "未改动的照片会自动跳过，只分析新增或修改过的部分。"
+                alert.addButton(withTitle: "重新分析")
+                alert.addButton(withTitle: "查看现有结果")
+                if alert.runModal() == .alertFirstButtonReturn {
+                    store.runAnalysis()
+                }
+            }
         }
     }
 
