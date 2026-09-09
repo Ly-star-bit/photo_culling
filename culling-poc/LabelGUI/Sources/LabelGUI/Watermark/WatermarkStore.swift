@@ -483,6 +483,16 @@ final class WatermarkStore: ObservableObject {
             lastError = "水印设置文件损坏，已备份为 state.json.bak，本次使用默认设置"
             return
         }
+        // 文件本身能解，但 presets 是个不成形的值（手改坏了）：容错解码会给出空
+        // 字典，下一次自动保存就把旧预设盖掉了 —— 先留一份备份。
+        if state.presets.isEmpty,
+           let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let rawPresets = raw["presets"], !((rawPresets as? [String: Any])?.isEmpty ?? (rawPresets is NSNull)) {
+            let backup = stateDir.appendingPathComponent("state.json.bak")
+            try? FileManager.default.removeItem(at: backup)
+            try? FileManager.default.copyItem(at: statePath, to: backup)
+            lastError = "预设数据无法读取，已备份为 state.json.bak"
+        }
         config = state.config
         options = state.options
         presets = state.presets
@@ -492,7 +502,7 @@ final class WatermarkStore: ObservableObject {
         if let path = state.outputPath {
             outputDir = URL(fileURLWithPath: path)
         }
-        // didSet 在 init 里不触发；上面这几行也没必要马上写回。
+        // 上面的赋值会触发 didSet 里的 scheduleSave；刚读进来的东西没必要马上写回。
         saveTask?.cancel()
     }
 
