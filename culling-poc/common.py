@@ -18,9 +18,10 @@ def load_manifest(path=MANIFEST_PATH):
 
 
 def save_manifest(manifest, path=MANIFEST_PATH):
-    """Atomic: layer2 rewrites the whole results file after every photo, so a
-    SIGTERM (the GUI's cancel button) landing mid-dump used to leave truncated
-    JSON — resume was dead and every VLM verdict vanished from the grid."""
+    """Atomic: layer2 rewrites the whole results file every 10 photos and again
+    from its SIGTERM handler (the GUI's cancel button); a signal landing
+    mid-dump used to leave truncated JSON — resume was dead and every VLM
+    verdict vanished from the grid."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")

@@ -25,7 +25,9 @@ import argparse
 import base64
 import io
 import json
+import os
 import re
+import signal
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -37,6 +39,11 @@ from tqdm import tqdm
 from common import load_manifest, save_manifest
 
 PROMPT_PATH = Path("prompts/judge_prompt.txt")
+
+# One pooled session for every VLM call: keep-alive to the local server instead
+# of a fresh TCP handshake per question (2-3 questions per photo, thousands of
+# photos). requests.Session is safe to share across the worker threads.
+HTTP = requests.Session()
 
 RESPONSE_SCHEMA = {
     "type": "object",
@@ -87,6 +94,19 @@ def encode_image_b64(path):
         return base64.b64encode(f.read()).decode("ascii")
 
 
+def lazy_image_b64(path):
+    """Encode-on-first-use: the full frame is dead weight when the burst
+    group's FRAME answer is cached, or an appeal only asks about the eyes."""
+    memo = {}
+
+    def get():
+        if "b64" not in memo:
+            memo["b64"] = encode_image_b64(path)
+        return memo["b64"]
+
+    return get
+
+
 def extract_json(text):
     text = text.strip()
     text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.MULTILINE).strip()
@@ -117,7 +137,7 @@ def call_vlm(base_url, model, prompt_text, image_b64, timeout, use_schema=True):
             "json_schema": {"name": "photo_judgement", "schema": RESPONSE_SCHEMA, "strict": True},
         }
 
-    resp = requests.post(f"{base_url}/chat/completions", json=payload, timeout=timeout)
+    resp = HTTP.post(f"{base_url}/chat/completions", json=payload, timeout=timeout)
     if use_schema and resp.status_code >= 400:
         # server may not support structured outputs; retry relying on prompt + lenient parse
         return call_vlm(base_url, model, prompt_text, image_b64, timeout, use_schema=False)
@@ -198,22 +218,52 @@ def call_ollama(base_url, model, prompt_text, image_b64, schema, timeout):
         # image + a short question + a JSON answer fits in 8K many times over.
         "options": {"temperature": 0, "num_ctx": 8192, "num_predict": 500},
     }
-    resp = requests.post(f"{base_url}/api/chat", json=payload, timeout=timeout)
-    if resp.status_code == 400:
+    url = f"{base_url}/api/chat"
+    resp = HTTP.post(url, json=payload, timeout=timeout)
+    if resp.status_code == 400 and "think" in resp.text.lower():
         # Older Ollama / models that reject the think param — retry without it.
+        # Any OTHER 400 (bad model name, oversized image, malformed schema) is
+        # not fixed by a retry: fail fast and surface the server's own words.
         payload.pop("think", None)
-        resp = requests.post(f"{base_url}/api/chat", json=payload, timeout=timeout)
-    resp.raise_for_status()
+        resp = HTTP.post(url, json=payload, timeout=timeout)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"HTTP {resp.status_code} from {url}: {resp.text.strip()[:300]}")
     content = resp.json()["message"]["content"]
     if not content.strip():
         raise ValueError("empty content from model (thinking ate the token budget?)")
     return json.loads(content)
 
 
-def face_crop_b64(photo, l1, pad=0.15):
-    """Crop the primary face out of the preview (bbox is normalized top-left from
-    layer1). Falls back to the full preview when there's no face."""
-    bbox = (l1 or {}).get("face_bbox")
+# Faces smaller than this fraction of the frame have unreliable landmarks; the
+# GUI ignores their EAR (effectiveEar) and so does the appeal crop below.
+MIN_FACE_AREA_PCT = 0.003
+
+
+def appeal_face_bbox(l1):
+    """The face the GUI convicted: among subject-sized faces with a measured
+    EAR, the one with the LOWEST EAR (worst eyes). In a group shot the primary
+    face may be wide open while person two blinked — cropping the primary face
+    would acquit the photo for the wrong reason. Falls back to face_bbox."""
+    l1 = l1 or {}
+    best = None
+    for face in l1.get("faces") or []:
+        ear = face.get("ear")
+        if ear is None or not face.get("bbox"):
+            continue
+        if (face.get("area_pct") or 0.0) < MIN_FACE_AREA_PCT:
+            continue
+        if best is None or ear < best["ear"]:
+            best = face
+    return best["bbox"] if best else l1.get("face_bbox")
+
+
+def face_crop_b64(photo, l1, pad=0.15, bbox=None):
+    """Crop a face out of the preview (bbox is normalized top-left from layer1;
+    defaults to the primary face). Returns None when there is no usable face —
+    callers must then SKIP the face question, not send the whole frame with a
+    "this is a face" prompt."""
+    if bbox is None:
+        bbox = (l1 or {}).get("face_bbox")
     if not bbox:
         return None
     from PIL import Image
@@ -258,31 +308,72 @@ EXPOSURE_PROMPT = (
 )
 
 
-def judge_photo_appeal(photo, l1, reasons, base_url, model, timeout):
-    """Appeal court: the photo was auto-rejected; re-examine ONLY the charges it
-    was rejected for. Output carries a verdict per charge — the GUI drops a
-    charge when the VLM clears it, and the photo walks if no charges remain."""
+# Reject reason (substring, as the GUI writes them: 闭眼 / 虚焦 / 曝光裁切) →
+# the result key that answers that charge. The GUI clears a charge only when
+# its key is present, so "which charges still need asking" is decided here.
+APPEAL_CHARGES = [
+    ("闭眼", "closed_eyes"),
+    ("虚焦", "subject_sharp"),
+    ("曝光", "intentional_exposure"),
+]
+
+
+def charges_for(reasons):
+    """Result keys required by a photo's CURRENT reject reasons, in ask order."""
+    return [key for needle, key in APPEAL_CHARGES if any(needle in r for r in reasons)]
+
+
+def charge_answered(row, key):
+    """closed_eyes is deliberately absent when the VLM could not see the eyes
+    (charge stands, see judge_photo_appeal); the raw `eyes` answer marks that
+    as asked-and-answered so resume doesn't re-ask it on every run."""
+    if key in row:
+        return True
+    return key == "closed_eyes" and row.get("eyes") == "not_visible"
+
+
+def missing_charges(row, reasons):
+    return [key for key in charges_for(reasons) if not charge_answered(row, key)]
+
+
+def judge_photo_appeal(photo, l1, charges, base_url, model, timeout):
+    """Appeal court: the photo was auto-rejected; re-examine ONLY the charges
+    listed (result keys from charges_for). Output carries a verdict per charge —
+    the GUI drops a charge when the VLM clears it, and the photo walks if no
+    charges remain. The caller merges this onto any earlier partial row."""
     t0 = time.perf_counter()
     try:
         out = {"id": photo["id"]}
         notes = []
-        full_b64 = encode_image_b64(photo["preview_path"])
+        full_b64 = lazy_image_b64(photo["preview_path"])
 
-        if any("闭眼" in r for r in reasons):
-            crop_b64 = face_crop_b64(photo, l1)
-            face = call_ollama(base_url, model, FACE_PROMPT, crop_b64 or full_b64,
-                               FACE_SCHEMA, timeout)
-            out["closed_eyes"] = face["eyes"] == "closed"
-            out["expression_score"] = face["expression_score"]
-            notes.append("闭眼维持" if out["closed_eyes"] else
-                         ("眯眼笑平反" if face["eyes"] == "squinting_smile" else "睁眼平反"))
-        if any("虚焦" in r for r in reasons):
-            sharp = call_ollama(base_url, model, SHARP_PROMPT, full_b64,
+        if "closed_eyes" in charges:
+            crop_b64 = face_crop_b64(photo, l1, bbox=appeal_face_bbox(l1))
+            if crop_b64 is None:
+                # No usable face: the eyes can't be re-examined, charge stands.
+                out["eyes"] = "not_visible"
+                notes.append("闭眼:无人脸可复审,维持原判")
+            else:
+                face = call_ollama(base_url, model, FACE_PROMPT, crop_b64,
+                                   FACE_SCHEMA, timeout)
+                out["eyes"] = face["eyes"]
+                out["expression_score"] = face["expression_score"]
+                if face["eyes"] == "not_visible":
+                    # Not an acquittal: a face too small/turned to read is
+                    # exactly the face whose blink the algorithm caught. Leave
+                    # closed_eyes UNSET so the GUI keeps the charge.
+                    notes.append("闭眼:看不清,维持原判")
+                else:
+                    out["closed_eyes"] = face["eyes"] == "closed"
+                    notes.append("闭眼维持" if out["closed_eyes"] else
+                                 ("眯眼笑平反" if face["eyes"] == "squinting_smile" else "睁眼平反"))
+        if "subject_sharp" in charges:
+            sharp = call_ollama(base_url, model, SHARP_PROMPT, full_b64(),
                                 SHARP_SCHEMA, timeout)
             out["subject_sharp"] = sharp["subject_sharp"]
             notes.append("主体清晰平反" if sharp["subject_sharp"] else "虚焦维持")
-        if any("曝光" in r for r in reasons):
-            expo = call_ollama(base_url, model, EXPOSURE_PROMPT, full_b64,
+        if "intentional_exposure" in charges:
+            expo = call_ollama(base_url, model, EXPOSURE_PROMPT, full_b64(),
                                EXPOSURE_SCHEMA, timeout)
             out["intentional_exposure"] = expo["intentional_exposure"]
             notes.append("刻意曝光平反" if expo["intentional_exposure"] else "曝光维持")
@@ -320,19 +411,24 @@ class GroupFrameCache:
 def judge_photo_ollama(photo, l1, base_url, model, timeout, frame_cache=None):
     """Two focused calls instead of one rubric: face crop (eyes, expression),
     full frame (background, photobombers, limb crops). Results are mapped onto
-    the same output schema the openai backend produces, so rate.py / the GUI /
-    evaluate.py don't know or care which backend ran."""
+    the same output schema the openai backend produces, so the GUI and
+    evaluate.py don't know or care which backend ran. Photos without a face
+    skip the face question: expression_score stays null instead of a made-up
+    number leaking into XMP stars and pick ranking (and ~6s saved per photo)."""
     t0 = time.perf_counter()
     try:
-        full_b64 = encode_image_b64(photo["preview_path"])
+        full_b64 = lazy_image_b64(photo["preview_path"])
         crop_b64 = face_crop_b64(photo, l1)
 
-        face = call_ollama(base_url, model, FACE_PROMPT, crop_b64 or full_b64,
-                           FACE_SCHEMA, timeout)
+        if crop_b64 is not None:
+            face = call_ollama(base_url, model, FACE_PROMPT, crop_b64,
+                               FACE_SCHEMA, timeout)
+        else:
+            face = {"eyes": "not_visible", "expression_score": None}
         group = (l1 or {}).get("burst_group")
 
         def ask_frame():
-            return call_ollama(base_url, model, FRAME_PROMPT, full_b64,
+            return call_ollama(base_url, model, FRAME_PROMPT, full_b64(),
                                FRAME_SCHEMA, timeout)
 
         frame = frame_cache.get_or_compute(group, ask_frame) if frame_cache else ask_frame()
@@ -345,7 +441,9 @@ def judge_photo_ollama(photo, l1, base_url, model, timeout, frame_cache=None):
             issues.append("肢体被画框切断")
 
         reasons = []
-        if closed:
+        if crop_b64 is None:
+            reasons.append("无人脸(未问表情)")
+        elif closed:
             reasons.append("闭眼(非眯眼笑)")
         elif face["eyes"] == "squinting_smile":
             reasons.append("眯眼笑(放行)")
@@ -421,10 +519,20 @@ def main():
     if args.limit:
         photos = photos[: args.limit]
 
+    appeal_reasons = {}
+    if args.mode == "appeal":
+        if args.appeal_file and Path(args.appeal_file).exists():
+            appeal_reasons = json.loads(Path(args.appeal_file).read_text(encoding="utf-8"))
+        else:
+            raise SystemExit("--mode appeal requires --appeal-file")
+
     # Resume: photos already judged (successfully, by the SAME model) are skipped
     # and their results carried over — an interrupted batch continues instead of
-    # restarting. Results are flushed to disk after EVERY photo, so any kind of
-    # death (cancel, crash, server gone) loses at most the in-flight requests.
+    # restarting. Results are flushed every 10 photos and on SIGTERM (the GUI's
+    # cancel), so a death loses at most the in-flight requests.
+    # Appeal resume is per CHARGE, not per photo: the photographer moves a
+    # slider, a photo picks up a new charge, and only the new charge gets asked;
+    # the answer is merged onto the row so earlier verdicts survive.
     out_path = Path(args.out)
     done_by_id = {}
     if not args.fresh and out_path.exists():
@@ -434,7 +542,18 @@ def main():
                 done_by_id = {r["id"]: r for r in prev.get("results", []) if "error" not in r}
         except Exception:
             pass
-    todo = [p for p in photos if p["id"] not in done_by_id]
+    if args.mode == "appeal":
+        charges_by_id = {}
+        for p in photos:
+            reasons = appeal_reasons.get(p["id"], [])
+            prev_row = done_by_id.get(p["id"])
+            if prev_row is None:
+                charges_by_id[p["id"]] = charges_for(reasons)
+            elif missing_charges(prev_row, reasons):
+                charges_by_id[p["id"]] = missing_charges(prev_row, reasons)
+        todo = [p for p in photos if p["id"] in charges_by_id]
+    else:
+        todo = [p for p in photos if p["id"] not in done_by_id]
     if len(todo) < len(photos):
         print(f"Resuming: {len(photos) - len(todo)} already judged, {len(todo)} remaining")
     print(f"Judging {len(todo)} photos with model={args.model!r} at {args.base_url}")
@@ -443,12 +562,22 @@ def main():
         save_manifest({"model": args.model, "base_url": args.base_url,
                        "results": list(done_by_id.values())}, out_path)
 
-    appeal_reasons = {}
-    if args.mode == "appeal":
-        if args.appeal_file and Path(args.appeal_file).exists():
-            appeal_reasons = json.loads(Path(args.appeal_file).read_text(encoding="utf-8"))
-        else:
-            raise SystemExit("--mode appeal requires --appeal-file")
+    # The GUI cancels with terminate() = SIGTERM. Flush what's finished and get
+    # out immediately: a SystemExit here would run the executor's __exit__ and
+    # block on in-flight requests for up to --timeout, which is exactly what a
+    # cancel button can't do. os._exit skips that (and skips flushing twice).
+    terminating = threading.Event()
+
+    def on_sigterm(signum, frame):
+        if not terminating.is_set():
+            terminating.set()
+            try:
+                flush()
+            except Exception:
+                pass
+        os._exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, on_sigterm)
 
     finished = 0
     run_ok = 0
@@ -457,7 +586,7 @@ def main():
         if args.mode == "appeal":
             futures = {
                 pool.submit(judge_photo_appeal, p, l1_by_id.get(p["id"]),
-                            appeal_reasons.get(p["id"], []),
+                            charges_by_id[p["id"]],
                             args.base_url, args.model, args.timeout): p
                 for p in todo
             }
@@ -476,11 +605,23 @@ def main():
             }
         for fut in tqdm(as_completed(futures), total=len(futures), desc="layer2"):
             result = fut.result()
-            done_by_id[result["id"]] = result
+            prev_row = done_by_id.get(result["id"])
             if "error" in result:
                 run_errors += 1
+                # A failed re-ask must not wipe the charges already answered in
+                # an earlier run (the GUI drops rows carrying an error).
+                if prev_row is None:
+                    done_by_id[result["id"]] = result
             else:
                 run_ok += 1
+                if prev_row is not None and args.mode == "appeal":
+                    merged = dict(prev_row)
+                    merged.update(result)
+                    if prev_row.get("reason") and result.get("reason"):
+                        merged["reason"] = f"{prev_row['reason']}; {result['reason']}"
+                    done_by_id[result["id"]] = merged
+                else:
+                    done_by_id[result["id"]] = result
             finished += 1
             # 每 10 张落一次盘：save_manifest 现在是原子写 (临时文件 + fsync +
             # rename)，每张一次太贵；中断最多重判 9 张。
@@ -497,6 +638,9 @@ def main():
     print(f"Done: {len(ok)} judged, {len(errors)} errors. Avg {avg_time:.2f}s/photo. Wrote {args.out}")
     if errors:
         print(f"  sample error: {errors[0]['id']}: {errors[0]['error']}")
+    # Machine-readable tail for the GUI: THIS run's tally (the Done line above
+    # counts the whole file including resumed rows). total = photos attempted.
+    print(f"SUMMARY ok={run_ok} err={run_errors} total={len(todo)}", flush=True)
     # 这一轮一张都没成功 = 服务没起/模型没 pull/全部超时。必须非零退出，否则
     # GUI 只看退出码，会把"一张都没判成"显示为"复审完成: 维持原判"。
     if todo and run_ok == 0:
