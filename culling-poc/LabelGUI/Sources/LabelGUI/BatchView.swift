@@ -1442,22 +1442,31 @@ enum FaceStripCache {
     }()
 
     /// Serialises original-file decodes: they are the expensive path (a RAW
-    /// demosaic each), and the strip asks for up to ten at once.
+    /// demosaic each), and the strip asks for up to ten at once. Async so the
+    /// waiting happens on this queue, not on parked cooperative-pool threads.
     static let decodeQueue = DispatchQueue(label: "facestrip.decode", qos: .userInitiated)
 
-    static func decode(path: String) -> NSImage? {
+    static func decode(path: String) async -> NSImage? {
         if let hit = cache.object(forKey: path as NSString) { return hit }
-        return decodeQueue.sync {
-            if let hit = cache.object(forKey: path as NSString) { return hit }
-            guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
-                  let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                      kCGImageSourceCreateThumbnailFromImageAlways: true,
-                      kCGImageSourceThumbnailMaxPixelSize: 2048,
-                      kCGImageSourceCreateThumbnailWithTransform: true,
-                  ] as CFDictionary) else { return nil }
-            let image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
-            cache.setObject(image, forKey: path as NSString, cost: cg.width * cg.height * 4)
-            return image
+        return await withCheckedContinuation { continuation in
+            decodeQueue.async {
+                if let hit = cache.object(forKey: path as NSString) {
+                    continuation.resume(returning: hit)
+                    return
+                }
+                guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+                      let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                          kCGImageSourceCreateThumbnailFromImageAlways: true,
+                          kCGImageSourceThumbnailMaxPixelSize: 2048,
+                          kCGImageSourceCreateThumbnailWithTransform: true,
+                      ] as CFDictionary) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                let image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+                cache.setObject(image, forKey: path as NSString, cost: cg.width * cg.height * 4)
+                continuation.resume(returning: image)
+            }
         }
     }
 
@@ -1465,14 +1474,14 @@ enum FaceStripCache {
     /// preview (already cached for the grid) is the source, no original decode.
     static let previewFaceMinWidth = 110.0
 
-    static func source(previewPath: String, decodePath: String, bbox: [Double]) -> NSImage? {
+    static func source(previewPath: String, decodePath: String, bbox: [Double]) async -> NSImage? {
         guard bbox.count == 4 else { return nil }
         let widthOnPreview = (bbox[2] - bbox[0]) * Double(ImageLoader.previewMaxPixel)
         if widthOnPreview >= previewFaceMinWidth,
            let preview = ThumbCache.load(path: previewPath, maxPixel: ImageLoader.previewMaxPixel) {
             return preview
         }
-        return decode(path: decodePath)
+        return await decode(path: decodePath)
     }
 }
 
@@ -1519,7 +1528,7 @@ struct FaceCropView: View {
             let bbox = face.bbox
             let result = await Task.detached(priority: .userInitiated) { () -> NSImage? in
                 guard bbox.count == 4,
-                      let decoded = FaceStripCache.source(previewPath: preview, decodePath: path, bbox: bbox),
+                      let decoded = await FaceStripCache.source(previewPath: preview, decodePath: path, bbox: bbox),
                       let cg = decoded.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
                 let w = CGFloat(cg.width), h = CGFloat(cg.height)
                 let rect = CGRect(x: bbox[0] * w, y: bbox[1] * h,
@@ -2184,10 +2193,6 @@ struct ReviewView: View {
     @State private var zoomed = false
     @State private var zoomImage: NSImage?
     @State private var loadingZoom = false
-
-    private var visibleItems: [BatchItem] {
-        orderIDs.compactMap { store.item(withID: $0) }
-    }
 
     private var currentIndex: Int {
         guard let id = focusedID, let idx = orderIDs.firstIndex(of: id) else { return 0 }

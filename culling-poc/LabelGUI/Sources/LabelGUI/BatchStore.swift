@@ -285,7 +285,12 @@ final class BatchStore: ObservableObject {
     var autoRejectCount: Int { derived.autoRejectCount }
 
     func item(withID id: String) -> BatchItem? {
-        derived.indexByID[id].map { items[$0] }
+        // The index is rebuilt by applyThresholds; guard against an `items`
+        // assignment that ever skips it so a stale index can't go out of bounds.
+        guard let idx = derived.indexByID[id], idx < items.count, items[idx].id == id else {
+            return items.first { $0.id == id }
+        }
+        return items[idx]
     }
 
     /// burst_group -> member count, for the ×N stack badge on thumbnails.
