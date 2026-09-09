@@ -1,0 +1,16 @@
+# Slim runtime that ships INSIDE 选片工具.app: build_app.sh copies this file to
+# Contents/Resources/culling-poc/pyproject.toml, beside layer2.py. The app only
+# ever runs layer2.py, which needs requests + tqdm + pillow — not the
+# mediapipe/opencv/rawpy stack the dev project (../pyproject.toml) pulls in for
+# the retired Python layer1. Keep requires-python in step with ../pyproject.toml.
+# Regenerate the lock after editing: cd runtime && uv lock
+[project]
+name = "culling-runtime"
+version = "0.1.0"
+description = "VLM stage (layer2.py) runtime for 选片工具.app"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pillow>=12.3.0",
+    "requests>=2.34.2",
+    "tqdm>=4.68.4",
+]

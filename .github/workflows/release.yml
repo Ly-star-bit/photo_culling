@@ -8,23 +8,66 @@ on:
     tags: ['v*']
   workflow_dispatch: {}
 
+# 默认只读;只有 release job 拿 contents: write (见下)。
+permissions:
+  contents: read
+
+env:
+  # 固定 Xcode:macos-15 runner 镜像当前默认就是 16.4 (16F6),显式钉住是为了
+  # 镜像换默认 (26.x 已装在旁边) 时不会悄悄换编译器 —— Metrics.swift 的表达式
+  # 拆分等 CI 适配都是针对 Xcode 16 做的。升级时改这一行并重新跑 main 看绿。
+  DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+
 jobs:
   build:
     runs-on: macos-15
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # build_app.sh 用 git rev-list --count 生成 CFBundleVersion,浅克隆会数成 1。
+          fetch-depth: 0
 
       - uses: astral-sh/setup-uv@v6
+
+      - name: Swift 版本 (进缓存键)
+        id: swift
+        run: echo "version=$(swift --version 2>&1 | head -1 | tr -d ' ')" >> "$GITHUB_OUTPUT"
+
+      # LabelGUI 目前没有外部包 (Package.resolved 不存在,hashFiles 对缺失文件给空串),
+      # 缓存的是增量编译产物;键里带 Package.swift 和 swift 版本,换编译器就作废。
+      - name: 缓存 SwiftPM 构建
+        uses: actions/cache@v4
+        with:
+          path: culling-poc/LabelGUI/.build
+          key: swiftpm-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles('culling-poc/LabelGUI/Package.resolved', 'culling-poc/LabelGUI/Package.swift') }}
+          restore-keys: |
+            swiftpm-${{ runner.os }}-${{ steps.swift.outputs.version }}-
 
       - name: 构建 app + DMG
         run: ./build_app.sh
 
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhotoCulling-dmg
+          path: 选片工具.dmg
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: PhotoCulling-dmg
+
       - name: 发布 Release
-        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           # 资产名必须 ASCII — GitHub 会把非 ASCII 字符从文件名里剥掉
           # (选片工具-v1.1.2.dmg 上传后变成 -v1.1.2.dmg)。
@@ -38,10 +81,3 @@ jobs:
               --title "选片工具 $GITHUB_REF_NAME" \
               --generate-notes
           fi
-
-      - name: 上传构建产物 (手动触发时)
-        if: github.ref_type != 'tag'
-        uses: actions/upload-artifact@v4
-        with:
-          name: 选片工具-dmg
-          path: 选片工具.dmg
