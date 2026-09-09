@@ -12,6 +12,25 @@ enum Verdict: String, CaseIterable {
     case reject = "废片"
     case usable = "可用"
     case pick = "精选"
+
+    /// ONE place for the verdict palette — it used to be re-declared in four
+    /// views. Green/blue/red is the photographer convention; the symbol is the
+    /// colour-blind fallback (a red and a green dot look alike to 8% of men).
+    var color: Color {
+        switch self {
+        case .pick: return .green
+        case .usable: return .blue
+        case .reject: return .red
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .pick: return "star.fill"
+        case .usable: return "circle.fill"
+        case .reject: return "xmark"
+        }
+    }
 }
 
 extension Notification.Name {
@@ -67,6 +86,8 @@ struct BatchItem: Identifiable {
     /// Burst-relative eye decision computed by applyThresholds (nil = no
     /// judgment: no usable face, or all faces too small to read reliably).
     var dynamicEyeClosed: Bool?
+    /// Position in the manifest (folder listing order) — the 文件名 sort key.
+    var order: Int = 0
 
     /// Below the safety-shutter rule — motion blur likely; info badge, not a reject.
     var slowShutter: Bool { exif?.slowShutter ?? false }
@@ -140,6 +161,52 @@ final class BatchStore: ObservableObject {
     @Published var exposureThreshold: Double = 0.15 { didSet { onThresholdEdited() } }
     @Published var faceQualityThreshold: Double = 0 { didSet { onThresholdEdited() } }
 
+    // MARK: Threshold persistence (per shoot, plus a "last used" default)
+
+    /// Thresholds are a per-shoot decision (a dim banquet needs a looser
+    /// sharpness line than a studio day), so they live in the session dir and
+    /// come back with it. They used to reset to the defaults on every launch:
+    /// yesterday's 废片 count was different this morning and nobody knew why.
+    private struct ThresholdState: Codable {
+        var sharpness: Double
+        var exposure: Double
+        var faceQuality: Double
+    }
+
+    private var thresholdSaveTask: Task<Void, Never>?
+    /// Set while a preset/session load assigns all three at once, so the
+    /// didSet chain recomputes and saves once instead of three times.
+    private var batchingThresholds = false
+
+    private func thresholdsPath(in dir: URL) -> URL { dir.appendingPathComponent("thresholds.json") }
+
+    private func loadThresholds() {
+        let candidates = [thresholdsPath(in: sessionDir), thresholdsPath(in: dataDir)]
+        let state = candidates.lazy
+            .compactMap { try? Data(contentsOf: $0) }
+            .compactMap { try? JSONDecoder().decode(ThresholdState.self, from: $0) }
+            .first ?? ThresholdState(sharpness: 45, exposure: 0.15, faceQuality: 0)
+        batchingThresholds = true
+        sharpnessThreshold = state.sharpness
+        exposureThreshold = state.exposure
+        faceQualityThreshold = state.faceQuality
+        batchingThresholds = false
+    }
+
+    /// Debounced: a slider drag fires once per pixel. Writes the session copy
+    /// and the app-wide "last used" copy that seeds brand-new shoots.
+    private func scheduleThresholdSave() {
+        thresholdSaveTask?.cancel()
+        let state = ThresholdState(sharpness: sharpnessThreshold, exposure: exposureThreshold,
+                                   faceQuality: faceQualityThreshold)
+        let targets = [thresholdsPath(in: dataDir)] + (photoDir != nil ? [thresholdsPath(in: sessionDir)] : [])
+        thresholdSaveTask = Task { [targets] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled, let data = try? JSONEncoder().encode(state) else { return }
+            for url in targets { try? data.write(to: url, options: .atomic) }
+        }
+    }
+
     /// One-knob presets so a first-time user never faces three raw sliders with
     /// opaque units. Any manual slider move flips the selection to 自定义 (nil).
     enum CullPreset: String, CaseIterable {
@@ -162,22 +229,63 @@ final class BatchStore: ObservableObject {
         }
     }
 
-    @Published var currentPreset: CullPreset?
-    private var applyingPreset = false
+    /// Derived from the slider values (nil = 自定义) instead of stored: a stored
+    /// flag started every launch at 自定义 even when the numbers matched 标准.
+    var currentPreset: CullPreset? {
+        CullPreset.allCases.first {
+            $0.thresholds == (sharpnessThreshold, exposureThreshold, faceQualityThreshold)
+        }
+    }
 
     func applyPreset(_ preset: CullPreset) {
-        applyingPreset = true
+        batchingThresholds = true
         let (sharp, exposure, quality) = preset.thresholds
         sharpnessThreshold = sharp
         exposureThreshold = exposure
         faceQualityThreshold = quality
-        applyingPreset = false
-        currentPreset = preset
+        batchingThresholds = false
+        onThresholdEdited()
     }
 
     private func onThresholdEdited() {
-        if !applyingPreset { currentPreset = nil }
+        guard !batchingThresholds else { return }
         applyThresholds()
+        scheduleThresholdSave()
+    }
+
+    // MARK: - Derived snapshot (rebuilt once per verdict pass, read by every render)
+
+    /// Everything the status bar, top bar, chips and sliders display. These
+    /// were computed properties over `items`; a single body pass read
+    /// verdictCounts nine times and each arrow-key repeat re-filtered 3000
+    /// large structs a dozen times over. Now applyThresholds builds this once.
+    struct Derived {
+        var verdictCounts: (reject: Int, usable: Int, pick: Int) = (0, 0, 0)
+        var reasonCounts: [String: Int] = [:]
+        var chapterSegments: [ChapterSegment] = []
+        var chapterWarnings: [String] = []
+        var borderlineCount = 0
+        /// Rejects with no manual override — the appeal court's docket.
+        var autoRejectCount = 0
+        /// Photos with no burst sibling carrying a face-quality score: the only
+        /// ones the ABSOLUTE face-quality line applies to (grouped photos are
+        /// judged relative to their group's best), so the slider histogram
+        /// shows just these instead of implying the line kills burst frames.
+        var faceQualityAbsoluteValues: [Double] = []
+        var indexByID: [String: Int] = [:]
+    }
+
+    @Published private(set) var derived = Derived()
+
+    var verdictCounts: (reject: Int, usable: Int, pick: Int) { derived.verdictCounts }
+    var reasonCounts: [String: Int] { derived.reasonCounts }
+    var chapterSegments: [ChapterSegment] { derived.chapterSegments }
+    var chapterWarnings: [String] { derived.chapterWarnings }
+    var borderlineCount: Int { derived.borderlineCount }
+    var autoRejectCount: Int { derived.autoRejectCount }
+
+    func item(withID id: String) -> BatchItem? {
+        derived.indexByID[id].map { items[$0] }
     }
 
     /// burst_group -> member count, for the ×N stack badge on thumbnails.
@@ -189,6 +297,67 @@ final class BatchStore: ObservableObject {
         var sizes: [Int: Int] = [:]
         for item in items { sizes[item.burstGroup, default: 0] += 1 }
         groupSizes = sizes
+    }
+
+    private func rebuildDerived(groupQCount: [Int: Int]) {
+        var d = Derived()
+        var r = 0, u = 0, p = 0
+        d.indexByID.reserveCapacity(items.count)
+        for (idx, item) in items.enumerated() {
+            d.indexByID[item.id] = idx
+            switch item.verdict {
+            case .reject: r += 1
+            case .usable: u += 1
+            case .pick: p += 1
+            }
+            for reason in item.rejectReasons { d.reasonCounts[reason, default: 0] += 1 }
+            if isBorderline(item) { d.borderlineCount += 1 }
+            if item.verdict == .reject, overrides[item.id] == nil { d.autoRejectCount += 1 }
+            if let q = item.faceQuality, (groupQCount[item.burstGroup] ?? 0) < 2 {
+                d.faceQualityAbsoluteValues.append(q)
+            }
+        }
+        d.verdictCounts = (r, u, p)
+        (d.chapterSegments, d.chapterWarnings) = Self.chapterSummary(items)
+        derived = d
+    }
+
+    // MARK: - Sort order (拍摄时间 / 文件名)
+
+    enum SortOrder: String, CaseIterable {
+        case captureTime = "拍摄时间"
+        case filename = "文件名"
+    }
+
+    /// Two-camera weddings interleave DSCF/_DSC by filename; capture time is
+    /// what the photographer means by "in order". Persisted app-wide.
+    @Published var sortOrder: SortOrder = SortOrder(
+        rawValue: UserDefaults.standard.string(forKey: "batch.sortOrder") ?? "") ?? .captureTime {
+        didSet {
+            UserDefaults.standard.set(sortOrder.rawValue, forKey: "batch.sortOrder")
+            var sorted = items
+            Self.sort(&sorted, by: sortOrder)
+            items = sorted
+            applyThresholds()
+        }
+    }
+
+    /// Stable: ties (and undated photos, which sort last) fall back to the
+    /// manifest order so two runs never disagree.
+    private static func sort(_ array: inout [BatchItem], by order: SortOrder) {
+        switch order {
+        case .filename:
+            array.sort { $0.order < $1.order }
+        case .captureTime:
+            array.sort { a, b in
+                switch (a.captureTime, b.captureTime) {
+                case let (ta?, tb?) where ta != tb: return ta < tb
+                case (nil, .some): return false
+                case (.some, nil): return true
+                default: return a.order < b.order
+                }
+            }
+        }
     }
 
     /// App Support root (settings.json, runtime/, sessions/ live here).
@@ -241,6 +410,7 @@ final class BatchStore: ObservableObject {
         if let last = recentSessions.first {
             switchSession(to: URL(fileURLWithPath: last.path))
         } else {
+            loadThresholds()
             loadOverrides()
             loadResults()
             applyThresholds()
@@ -318,6 +488,7 @@ final class BatchStore: ObservableObject {
         verdictFilter = nil
         lastError = nil
         loadReviewPosition()
+        loadThresholds()
         loadOverrides()
         loadResults()
         applyThresholds()
@@ -336,7 +507,16 @@ final class BatchStore: ObservableObject {
         // forever, or evict (and delete) the oldest real session at the 15 cap.
         if !items.isEmpty { touchSessionIndex() }
         refreshSessionAvailability()
-        NotificationCenter.default.post(name: .analysisDidFinish, object: nil, userInfo: ["dir": sessionDir])
+        postResultsChanged(previewsChanged: false)
+    }
+
+    /// One notification for "results on disk changed". `previewsChanged` is
+    /// true only after an analysis rewrote previews/*.jpg — that is the only
+    /// case the thumbnail caches must be dropped (they used to be wiped on
+    /// every session switch, VLM pass and trash run, re-decoding everything).
+    private func postResultsChanged(previewsChanged: Bool) {
+        NotificationCenter.default.post(name: .analysisDidFinish, object: nil,
+                                        userInfo: ["dir": sessionDir, "previewsChanged": previewsChanged])
     }
 
     /// Register a session written outside the GUI (the `--analyze` CLI path) so
@@ -370,7 +550,7 @@ final class BatchStore: ObservableObject {
 
     private func saveSessionsIndex() {
         if let data = try? JSONEncoder().encode(recentSessions) {
-            try? data.write(to: sessionsIndexPath)
+            try? data.write(to: sessionsIndexPath, options: .atomic)
         }
     }
 
@@ -394,7 +574,7 @@ final class BatchStore: ObservableObject {
         recentSessions = Array(entries.prefix(15))
         saveSessionsIndex()
         pruneOrphanedSessions()
-        refreshSessionAvailability()
+        refreshSessionAvailability(force: true)
     }
 
     /// Delete session dirs that fell out of the recents index — one big shoot's
@@ -472,12 +652,20 @@ final class BatchStore: ObservableObject {
         return resolved
     }
 
-    /// Recompute which recents point at folders that no longer exist. Cheap at
-    /// 15 entries; call on launch, after analysis, and when the menu opens.
-    func refreshSessionAvailability() {
-        missingSessionKeys = Set(recentSessions
-            .filter { Self.liveFolder(for: $0) == nil }
-            .map(\.key))
+    private var lastAvailabilityRefresh = Date.distantPast
+
+    /// Recompute which recents point at folders that no longer exist. Runs off
+    /// the main thread: fileExists on an unmounted network volume can block for
+    /// seconds, and this fires on every app activation. Throttled so alt-tabbing
+    /// back and forth doesn't re-walk 15 session directories each time.
+    func refreshSessionAvailability(force: Bool = false) {
+        guard force || Date().timeIntervalSince(lastAvailabilityRefresh) > 20 else { return }
+        lastAvailabilityRefresh = Date()
+        let entries = recentSessions
+        Task.detached(priority: .utility) {
+            let missing = Set(entries.filter { Self.liveFolder(for: $0) == nil }.map(\.key))
+            await MainActor.run { [weak self] in self?.missingSessionKeys = missing }
+        }
         refreshSessionSizes()
     }
 
@@ -498,7 +686,7 @@ final class BatchStore: ObservableObject {
         }
         try? FileManager.default.removeItem(
             at: dataDir.appendingPathComponent("sessions/\(entry.key)"))
-        refreshSessionAvailability()
+        refreshSessionAvailability(force: true)
         progressText = "已从列表移除「\(entry.name)」(照片本身未动)"
     }
 
@@ -514,7 +702,7 @@ final class BatchStore: ObservableObject {
         saveSessionsIndex()
         resetToNoSession()
         pruneOrphanedSessions()     // empty keep-set: removes every session dir
-        refreshSessionAvailability()
+        refreshSessionAvailability(force: true)
         progressText = "已清除 \(count) 条历史记录 (照片本身未动)"
     }
 
@@ -534,6 +722,7 @@ final class BatchStore: ObservableObject {
         verdictFilter = nil
         lastError = nil
         loadReviewPosition()
+        loadThresholds()
         loadOverrides()
         loadResults()
         applyThresholds()
@@ -550,7 +739,7 @@ final class BatchStore: ObservableObject {
     func saveReviewPosition(_ id: String) {
         lastReviewedID = id
         if let data = try? JSONEncoder().encode(["last": id]) {
-            try? data.write(to: reviewStatePath)
+            try? data.write(to: reviewStatePath, options: .atomic)
         }
     }
 
@@ -663,7 +852,9 @@ final class BatchStore: ObservableObject {
     private func saveOverrides() {
         let raw = overrides.mapValues(\.rawValue)
         if let data = try? JSONEncoder().encode(raw) {
-            try? data.write(to: overridesPath)
+            // .atomic: a crash mid-write here used to cost every manual verdict
+            // of the shoot.
+            try? data.write(to: overridesPath, options: .atomic)
         }
     }
 
@@ -683,31 +874,6 @@ final class BatchStore: ObservableObject {
             if abs(quality - threshold) <= threshold * 0.15 { return true }
         }
         return false
-    }
-
-    var borderlineCount: Int { items.filter(isBorderline).count }
-
-    /// How many photos carry each reject reason under the CURRENT thresholds
-    /// (post-appeal, pre-override — the thresholds' own kill counts). Drives the
-    /// "此线淘汰 N 张" labels and the 废片 filter chips.
-    var reasonCounts: [String: Int] {
-        var counts: [String: Int] = [:]
-        for item in items {
-            for reason in item.rejectReasons { counts[reason, default: 0] += 1 }
-        }
-        return counts
-    }
-
-    var verdictCounts: (reject: Int, usable: Int, pick: Int) {
-        var r = 0, u = 0, p = 0
-        for item in items {
-            switch item.verdict {
-            case .reject: r += 1
-            case .usable: u += 1
-            case .pick: p += 1
-            }
-        }
-        return (r, u, p)
     }
 
     // MARK: - Pipeline invocation
@@ -731,8 +897,23 @@ final class BatchStore: ObservableObject {
         guard !provisionalBuffer.isEmpty else { return }
         // Re-analyzed photos replace their stale rows in place; new ones append.
         let incoming = Set(provisionalBuffer.map(\.id))
-        items.removeAll { incoming.contains($0.id) }
-        items.append(contentsOf: provisionalBuffer)
+        var updated = items
+        // Keep a re-analyzed photo's slot in the folder order; brand-new ones
+        // go after the last known position so the grid doesn't shuffle mid-run.
+        let oldOrder = Dictionary(updated.map { ($0.id, $0.order) }, uniquingKeysWith: { a, _ in a })
+        var nextOrder = (updated.map(\.order).max() ?? -1) + 1
+        updated.removeAll { incoming.contains($0.id) }
+        for var fresh in provisionalBuffer {
+            if let known = oldOrder[fresh.id] {
+                fresh.order = known
+            } else {
+                fresh.order = nextOrder
+                nextOrder += 1
+            }
+            updated.append(fresh)
+        }
+        Self.sort(&updated, by: sortOrder)
+        items = updated
         provisionalBuffer.removeAll()
         rebuildGroupSizes()
         applyThresholds()
@@ -823,26 +1004,24 @@ final class BatchStore: ObservableObject {
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
-                if summary.cancelled {
-                    self.progressText = "已取消"
-                    self.isRunning = false
-                    self.provisionalBuffer = []
-                    self.loadResults()      // drop provisional rows, restore disk state
-                    self.applyThresholds()
-                    return
-                }
                 self.provisionalBuffer = []
                 self.loadResults()          // authoritative results (real burst groups)
                 self.applyThresholds()
-                self.progressText = summary.reused > 0
-                    ? "完成: 分析 \(summary.analyzed) 张 · 复用 \(summary.reused) 张未变"
-                    : "完成: \(summary.analyzed) 张"
-                if !summary.failed.isEmpty {
-                    self.lastError = "\(summary.failed.count) 张无法解析被跳过: \(summary.failed.prefix(5).joined(separator: ", "))\(summary.failed.count > 5 ? "..." : "")"
+                if summary.cancelled {
+                    // The engine now writes what it finished, so the partial set
+                    // is on disk and reusable by the next run.
+                    self.progressText = "已取消: 已保存 \(summary.analyzed + summary.reused) 张结果，下次分析直接复用"
+                } else {
+                    self.progressText = summary.reused > 0
+                        ? "完成: 分析 \(summary.analyzed) 张 · 复用 \(summary.reused) 张未变"
+                        : "完成: \(summary.analyzed) 张"
+                    if !summary.failed.isEmpty {
+                        self.lastError = "\(summary.failed.count) 张无法解析被跳过 (文件损坏或仍在拷贝中): \(summary.failed.prefix(5).joined(separator: ", "))\(summary.failed.count > 5 ? "..." : "")"
+                    }
                 }
                 self.isRunning = false
-                self.touchSessionIndex()
-                NotificationCenter.default.post(name: .analysisDidFinish, object: nil, userInfo: ["dir": self.sessionDir])
+                if !self.items.isEmpty { self.touchSessionIndex() }
+                self.postResultsChanged(previewsChanged: true)
             }
         }
     }
@@ -860,6 +1039,7 @@ final class BatchStore: ObservableObject {
         let box = processBox
         let survivors = items.filter { $0.verdict != .reject }.map(\.id)
         let count = survivors.count
+        let summaryBox = SummaryBox()
         let backendArgs = ["--backend", "ollama",
                            "--base-url", "http://localhost:11434",
                            "--model", Self.ollamaModel]
@@ -900,6 +1080,7 @@ final class BatchStore: ObservableObject {
                 cwd: root,
                 box: box,
                 onStdoutLine: { line in
+                    if let s = Self.parseSummary(line) { summaryBox.set(s); return }
                     guard line.hasPrefix("PROGRESS ") else { return }
                     let parts = line.dropFirst("PROGRESS ".count).split(separator: "/")
                     guard parts.count == 2, let done = Int(parts[0]), let total = Int(parts[1]), total > 0 else { return }
@@ -909,6 +1090,7 @@ final class BatchStore: ObservableObject {
                     }
                 }
             )
+            let summary = summaryBox.value
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
@@ -917,7 +1099,8 @@ final class BatchStore: ObservableObject {
                     self.loadResults()
                     self.applyThresholds()
                     self.progressText = "VLM 完成"
-                    NotificationCenter.default.post(name: .analysisDidFinish, object: nil, userInfo: ["dir": self.sessionDir])
+                    self.warnOnPartialVLMFailure(summary, label: "VLM")
+                    self.postResultsChanged(previewsChanged: false)
                 case .failure(let message):
                     self.lastError = "VLM 分析失败 (服务在跑吗? 先点“启动 VLM 服务”): \(message)"
                 case .cancelled:
@@ -928,6 +1111,34 @@ final class BatchStore: ObservableObject {
                 self.isRunning = false
             }
         }
+    }
+
+    /// layer2.py's closing `SUMMARY ok=<n> err=<n> total=<n>` line. The exit
+    /// code alone only says "at least one photo worked": 199 of 200 failing
+    /// after Ollama fell over mid-run used to show as a clean "VLM 完成".
+    struct VLMSummary: Sendable { let ok: Int; let err: Int; let total: Int }
+
+    final class SummaryBox: @unchecked Sendable {
+        private var stored: VLMSummary?
+        private let lock = NSLock()
+        func set(_ s: VLMSummary) { lock.lock(); stored = s; lock.unlock() }
+        var value: VLMSummary? { lock.lock(); defer { lock.unlock() }; return stored }
+    }
+
+    nonisolated static func parseSummary(_ line: String) -> VLMSummary? {
+        guard line.hasPrefix("SUMMARY ") else { return nil }
+        var fields: [String: Int] = [:]
+        for token in line.dropFirst("SUMMARY ".count).split(separator: " ") {
+            let kv = token.split(separator: "=", maxSplits: 1)
+            if kv.count == 2, let n = Int(kv[1]) { fields[String(kv[0])] = n }
+        }
+        guard let ok = fields["ok"], let err = fields["err"], let total = fields["total"] else { return nil }
+        return VLMSummary(ok: ok, err: err, total: total)
+    }
+
+    private func warnOnPartialVLMFailure(_ summary: VLMSummary?, label: String) {
+        guard let summary, summary.err > 0 else { return }
+        lastError = "\(label): \(summary.ok) 张成功, \(summary.err) 张失败 (服务中途出错或超时?)。失败的照片保持原判决，可再点一次续跑"
     }
 
     /// Appeal court: re-examine AUTO-rejected photos (manual rejects are the
@@ -949,6 +1160,7 @@ final class BatchStore: ObservableObject {
         let root = pythonRoot
         let box = processBox
         let count = accused.count
+        let summaryBox = SummaryBox()
 
         Task.detached { [weak self] in
             guard let self else { return }
@@ -992,6 +1204,7 @@ final class BatchStore: ObservableObject {
                 cwd: root,
                 box: box,
                 onStdoutLine: { line in
+                    if let s = Self.parseSummary(line) { summaryBox.set(s); return }
                     guard line.hasPrefix("PROGRESS ") else { return }
                     let parts = line.dropFirst("PROGRESS ".count).split(separator: "/")
                     guard parts.count == 2, let done = Int(parts[0]), let total = Int(parts[1]), total > 0 else { return }
@@ -1001,6 +1214,7 @@ final class BatchStore: ObservableObject {
                     }
                 }
             )
+            let summary = summaryBox.value
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
@@ -1011,7 +1225,8 @@ final class BatchStore: ObservableObject {
                     self.applyThresholds()
                     let freed = before - self.verdictCounts.reject
                     self.progressText = freed > 0 ? "复审完成: 平反 \(freed) 张" : "复审完成: 维持原判"
-                    NotificationCenter.default.post(name: .analysisDidFinish, object: nil, userInfo: ["dir": self.sessionDir])
+                    self.warnOnPartialVLMFailure(summary, label: "复审")
+                    self.postResultsChanged(previewsChanged: false)
                 case .failure(let message):
                     self.lastError = "复审失败 (服务在跑吗? 先点“启动服务”): \(message)"
                 case .cancelled:
@@ -1094,12 +1309,20 @@ final class BatchStore: ObservableObject {
 
     // MARK: - Results loading
 
+    /// Photos in the manifest that have no usable layer1 row (decode failed,
+    /// or the file was mid-copy when analyzed). They are invisible in the
+    /// grid, so the count is shown permanently in the status bar — the
+    /// one-time "N 张无法解析" toast after analysis was easy to miss.
+    @Published private(set) var unparsedCount = 0
+
     func loadResults() {
         let decoder = JSONDecoder()
 
         guard let manifestData = try? Data(contentsOf: sessionDir.appendingPathComponent("manifest.json")),
               let manifest = try? decoder.decode(Manifest.self, from: manifestData) else {
             items = []
+            unparsedCount = 0
+            rebuildGroupSizes()
             return
         }
 
@@ -1125,10 +1348,10 @@ final class BatchStore: ObservableObject {
         isoParser.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
         isoParser.locale = Locale(identifier: "en_US_POSIX")
 
-        items = manifest.photos.compactMap { photo -> BatchItem? in
+        var loaded = manifest.photos.enumerated().compactMap { index, photo -> BatchItem? in
             guard let l1 = l1ById[photo.id], let sharpness = l1.sharpness, let group = l1.burstGroup else { return nil }
             let l2 = l2ById[photo.id]
-            return BatchItem(
+            var item = BatchItem(
                 id: photo.id,
                 previewPath: LabelStore.resolve(photo.previewPath, against: sessionDir),
                 rawPath: photo.rawPath,
@@ -1154,8 +1377,13 @@ final class BatchStore: ObservableObject {
                 exif: photo.exif,
                 horizonDeg: l1.horizonDeg
             )
+            item.order = index
+            return item
         }
-        assignChapters()
+        Self.assignChapters(&loaded)
+        Self.sort(&loaded, by: sortOrder)
+        items = loaded
+        unparsedCount = manifest.photos.count - loaded.count
         rebuildGroupSizes()
     }
 
@@ -1164,18 +1392,20 @@ final class BatchStore: ObservableObject {
     /// A shooting pause longer than this starts a new chapter (仪式→晚宴...).
     static let chapterGapSec: TimeInterval = 15 * 60
 
-    private func assignChapters() {
-        let datedIndices = items.indices
-            .filter { items[$0].captureTime != nil }
-            .sorted { items[$0].captureTime! < items[$1].captureTime! }
+    /// Works on a local array: element-wise writes into the @Published `items`
+    /// fired one objectWillChange per photo.
+    private static func assignChapters(_ array: inout [BatchItem]) {
+        let datedIndices = array.indices
+            .filter { array[$0].captureTime != nil }
+            .sorted { array[$0].captureTime! < array[$1].captureTime! }
         var chapter = 0
         var prevTime: Date?
         for idx in datedIndices {
-            let t = items[idx].captureTime!
-            if let prev = prevTime, t.timeIntervalSince(prev) > Self.chapterGapSec {
+            let t = array[idx].captureTime!
+            if let prev = prevTime, t.timeIntervalSince(prev) > chapterGapSec {
                 chapter += 1
             }
-            items[idx].chapter = chapter
+            array[idx].chapter = chapter
             prevTime = t
         }
         // Undated photos join chapter 0 rather than spawning fake chapters.
@@ -1203,14 +1433,20 @@ final class BatchStore: ObservableObject {
         var allRejected: Bool { pick + usable == 0 }
     }
 
-    var chapterSegments: [ChapterSegment] {
+    /// Segments plus the all-rejected warnings in one pass (they used to be two
+    /// computed properties doing the same grouping on every render). Warnings:
+    /// chapters where culling left NOTHING — losing a whole scene is a delivery
+    /// accident, a few extra keepers is just waste.
+    private static func chapterSummary(_ items: [BatchItem]) -> ([ChapterSegment], [String]) {
         var byChapter: [Int: [BatchItem]] = [:]
         for item in items { byChapter[item.chapter, default: []].append(item) }
-        guard byChapter.count > 1 else { return [] }
-        return byChapter.sorted { $0.key < $1.key }.map { chapter, members in
+        guard byChapter.count > 1 else { return ([], []) }
+        var segments: [ChapterSegment] = []
+        var warnings: [String] = []
+        for (chapter, members) in byChapter.sorted(by: { $0.key < $1.key }) {
             let times = members.compactMap(\.captureTime)
             let range = times.isEmpty ? "" :
-                "\(Self.chapterTimeFormatter.string(from: times.min()!))-\(Self.chapterTimeFormatter.string(from: times.max()!))"
+                "\(chapterTimeFormatter.string(from: times.min()!))-\(chapterTimeFormatter.string(from: times.max()!))"
             var pick = 0, usable = 0, reject = 0
             for member in members {
                 switch member.verdict {
@@ -1219,29 +1455,14 @@ final class BatchStore: ObservableObject {
                 case .reject: reject += 1
                 }
             }
-            return ChapterSegment(chapter: chapter, count: members.count,
-                                  pick: pick, usable: usable, reject: reject, timeRange: range)
-        }
-    }
-
-    /// Chapters where culling left NOTHING (all rejected) — losing a whole scene
-    /// is a delivery accident, a few extra keepers is just waste.
-    var chapterWarnings: [String] {
-        let formatter = Self.chapterTimeFormatter
-        var byChapter: [Int: [BatchItem]] = [:]
-        for item in items { byChapter[item.chapter, default: []].append(item) }
-        guard byChapter.count > 1 else { return [] }
-        var warnings: [String] = []
-        for (chapter, members) in byChapter.sorted(by: { $0.key < $1.key }) {
-            let survivors = members.filter { $0.verdict != .reject }
-            if survivors.isEmpty {
-                let times = members.compactMap(\.captureTime)
-                let range = times.isEmpty ? "" :
-                    " (\(formatter.string(from: times.min()!))-\(formatter.string(from: times.max()!)))"
-                warnings.append("章节\(chapter + 1)\(range) 的 \(members.count) 张全部被淘汰")
+            let segment = ChapterSegment(chapter: chapter, count: members.count,
+                                         pick: pick, usable: usable, reject: reject, timeRange: range)
+            segments.append(segment)
+            if segment.allRejected {
+                warnings.append("章节\(chapter + 1)\(range.isEmpty ? "" : " (\(range))") 的 \(members.count) 张全部被淘汰")
             }
         }
-        return warnings
+        return (segments, warnings)
     }
 
     // MARK: - Keeper-rate stats (拍摄复盘)
@@ -1295,41 +1516,89 @@ final class BatchStore: ObservableObject {
     /// WeChat as one file. Preview JPEGs are embedded base64 (they're already
     /// ~1024px files on disk; no re-encode).
     func exportContactSheet(to url: URL, includeUsable: Bool) {
+        guard !isRunning else { return }
         let chosen = items.filter { $0.verdict == .pick || (includeUsable && $0.verdict == .usable) }
+            .map { (id: $0.id, previewPath: $0.previewPath, pick: $0.verdict == .pick) }
         guard !chosen.isEmpty else {
             lastError = "没有可导出的照片"
             return
         }
-        var cells = ""
-        for (index, item) in chosen.enumerated() {
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: item.previewPath)) else { continue }
-            let b64 = data.base64EncodedString()
-            cells += """
-            <div class="cell"><img src="data:image/jpeg;base64,\(b64)">
-            <div class="cap">#\(index + 1) · \(item.id)\(item.verdict == .pick ? " ★" : "")</div></div>\n
+        isRunning = true
+        lastError = nil
+        cancelFlag = AnalysisEngine.CancelFlag()
+        let flag = cancelFlag
+        let title = photoDir?.lastPathComponent ?? ""
+        let total = chosen.count
+
+        // Off the main thread: reading + base64-encoding hundreds of ~190KB
+        // previews took seconds of beachball. The 1024px previews are
+        // re-encoded at 800px/q0.72 so a 300-photo sheet stays WeChat-sized.
+        Task.detached(priority: .userInitiated) { [weak self] in
+            var cells = ""
+            for (index, item) in chosen.enumerated() {
+                if flag.isSet { break }
+                guard let data = Self.contactSheetJPEG(path: item.previewPath) else { continue }
+                let b64 = data.base64EncodedString()
+                cells += """
+                <div class="cell"><img src="data:image/jpeg;base64,\(b64)">
+                <div class="cap">#\(index + 1) · \(item.id)\(item.pick ? " ★" : "")</div></div>\n
+                """
+                let done = index + 1
+                if done % 20 == 0 || done == total {
+                    await MainActor.run { [weak self] in
+                        self?.progressText = "生成选片确认表 \(done)/\(total)..."
+                        self?.progressFraction = Double(done) / Double(total)
+                    }
+                }
+            }
+            let dateString = DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .none)
+            let html = """
+            <!doctype html><html lang="zh"><head><meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>选片确认 · \(title)</title>
+            <style>
+            body{font-family:-apple-system,sans-serif;background:#111;color:#eee;margin:1rem}
+            h1{font-size:1.1rem} .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
+            .cell img{width:100%;border-radius:6px;display:block}
+            .cap{font-size:.8rem;color:#bbb;padding:4px 2px}
+            </style></head><body>
+            <h1>选片确认 · \(title) · \(total) 张 · \(dateString)</h1>
+            <p style="color:#999;font-size:.85rem">★ = 摄影师精选。请回复需要精修的编号。</p>
+            <div class="grid">\(cells)</div></body></html>
             """
+            let cancelled = flag.isSet
+            var writeError: String?
+            if !cancelled {
+                do { try html.write(to: url, atomically: true, encoding: .utf8) }
+                catch { writeError = error.localizedDescription }
+            }
+            let failure = writeError
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.progressFraction = nil
+                self.isRunning = false
+                if cancelled {
+                    self.progressText = "已取消导出选片确认表"
+                } else if let failure {
+                    self.lastError = "联系表导出失败: \(failure)"
+                } else {
+                    self.progressText = "选片确认表已导出: \(total) 张 → \(url.lastPathComponent)"
+                }
+            }
         }
-        let dateString = DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .none)
-        let html = """
-        <!doctype html><html lang="zh"><head><meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>选片确认 · \(photoDir?.lastPathComponent ?? "")</title>
-        <style>
-        body{font-family:-apple-system,sans-serif;background:#111;color:#eee;margin:1rem}
-        h1{font-size:1.1rem} .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
-        .cell img{width:100%;border-radius:6px;display:block}
-        .cap{font-size:.8rem;color:#bbb;padding:4px 2px}
-        </style></head><body>
-        <h1>选片确认 · \(photoDir?.lastPathComponent ?? "") · \(chosen.count) 张 · \(dateString)</h1>
-        <p style="color:#999;font-size:.85rem">★ = 摄影师精选。请回复需要精修的编号。</p>
-        <div class="grid">\(cells)</div></body></html>
-        """
-        do {
-            try html.write(to: url, atomically: true, encoding: .utf8)
-            progressText = "联系表已导出: \(chosen.count) 张"
-        } catch {
-            lastError = "联系表导出失败: \(error.localizedDescription)"
-        }
+    }
+
+    nonisolated private static func contactSheetJPEG(path: String) -> Data? {
+        guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceThumbnailMaxPixelSize: 800,
+              ] as CFDictionary) else { return nil }
+        let out = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dest, cg, [kCGImageDestinationLossyCompressionQuality: 0.72] as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return out as Data
     }
 
     // MARK: - Live verdict computation (port of rate.py logic)
@@ -1394,12 +1663,18 @@ final class BatchStore: ObservableObject {
     }
 
     func applyThresholds() {
+        // Everything below works on a LOCAL copy and assigns `items` once at the
+        // end. Writing `items[i].x = ...` on the @Published array fired one
+        // objectWillChange per write — five per photo, ~15k per slider tick on
+        // a 3000-photo shoot — which is what made the sliders feel sticky.
+        var updated = items
+
         // Pass 1: per-burst-group baselines (best EAR, best face quality).
         var groupBestEar: [Int: Double] = [:]
         var groupEarCount: [Int: Int] = [:]
         var groupBestQ: [Int: Double] = [:]
         var groupQCount: [Int: Int] = [:]
-        for item in items {
+        for item in updated {
             if let ear = Self.effectiveEar(item) {
                 groupBestEar[item.burstGroup] = max(groupBestEar[item.burstGroup] ?? 0, ear)
                 groupEarCount[item.burstGroup, default: 0] += 1
@@ -1411,24 +1686,25 @@ final class BatchStore: ObservableObject {
         }
 
         var rejected = Set<String>()
-        for i in items.indices {
-            let group = items[i].burstGroup
+        for i in updated.indices {
+            let group = updated[i].burstGroup
             let earCount = groupEarCount[group] ?? 0
 
             // Dynamic eye state: photo-level for the verdict, then the same rule
             // per face so the strip badges tell the same story.
             let eyeClosed: Bool?
-            if let ear = Self.effectiveEar(items[i]) {
+            if let ear = Self.effectiveEar(updated[i]) {
                 eyeClosed = Self.eyeVerdict(ear: ear, groupBest: groupBestEar[group],
                                             groupEarCount: earCount)
-            } else if items[i].faces.contains(where: { $0.ear != nil }) {
+            } else if updated[i].faces.contains(where: { $0.ear != nil }) {
                 eyeClosed = nil  // faces exist but all EAR-immune (too small)
             } else {
-                eyeClosed = items[i].eyeClosed  // legacy session without raw EARs
+                eyeClosed = updated[i].eyeClosed  // legacy session without raw EARs
             }
-            items[i].dynamicEyeClosed = eyeClosed
-            items[i].faces = items[i].faces.map { face in
-                guard let ear = face.ear else { return face }
+            updated[i].dynamicEyeClosed = eyeClosed
+            for f in updated[i].faces.indices {
+                let face = updated[i].faces[f]
+                guard let ear = face.ear else { continue }
                 let closed: Bool?
                 if let area = face.areaPct, area < Self.minEarFaceAreaPct {
                     closed = nil
@@ -1436,24 +1712,26 @@ final class BatchStore: ObservableObject {
                     closed = Self.eyeVerdict(ear: ear, groupBest: groupBestEar[group],
                                              groupEarCount: earCount)
                 }
-                return FaceInfo(bbox: face.bbox, eyeClosed: closed,
-                                ear: face.ear, areaPct: face.areaPct)
+                if closed != face.eyeClosed {
+                    updated[i].faces[f] = FaceInfo(bbox: face.bbox, eyeClosed: closed,
+                                                   ear: face.ear, areaPct: face.areaPct)
+                }
             }
 
             var reasons: [String] = []
             if eyeClosed == true { reasons.append("闭眼") }
-            if items[i].sharpness < sharpnessThreshold { reasons.append("虚焦") }
-            if items[i].worstClipPct >= exposureThreshold { reasons.append("曝光裁切") }
-            if faceQualityThreshold > 0, let q = items[i].faceQuality {
+            if updated[i].sharpness < sharpnessThreshold { reasons.append("虚焦") }
+            if updated[i].worstClipPct >= exposureThreshold { reasons.append("曝光裁切") }
+            if faceQualityThreshold > 0, let q = updated[i].faceQuality {
                 if (groupQCount[group] ?? 0) >= 2, let best = groupBestQ[group] {
                     // Burst siblings exist: only a clear intra-group loser is suspect.
                     if q < best - Self.qualityGroupGap { reasons.append("人脸质量低") }
                 } else if q < Self.compensatedQualityThreshold(slider: faceQualityThreshold,
-                                                               faceAreaPct: items[i].faceAreaPct) {
+                                                               faceAreaPct: updated[i].faceAreaPct) {
                     reasons.append("人脸质量低")
                 }
             }
-            if items[i].vlmReject { reasons.append("VLM建议淘汰") }
+            if updated[i].vlmReject { reasons.append("VLM建议淘汰") }
 
             // Appeal court: the VLM can only clear the SPECIFIC charge it
             // re-examined; a photo walks when no charges remain. Verdicts stay
@@ -1465,43 +1743,45 @@ final class BatchStore: ObservableObject {
                 reasons.removeAll { $0 == charge }
                 rescued.append(charge)
             }
-            clear("闭眼", when: items[i].appealClosedEyes.map { !$0 })
-            clear("虚焦", when: items[i].appealSubjectSharp)
-            clear("曝光裁切", when: items[i].appealIntentionalExposure)
-            items[i].vlmRescued = rescued
-            items[i].rejectReasons = reasons
+            clear("闭眼", when: updated[i].appealClosedEyes.map { !$0 })
+            clear("虚焦", when: updated[i].appealSubjectSharp)
+            clear("曝光裁切", when: updated[i].appealIntentionalExposure)
+            updated[i].vlmRescued = rescued
+            updated[i].rejectReasons = reasons
 
             // Manual override wins over every threshold: a manual non-reject keeps
             // the photo alive no matter what the sliders say, and vice versa.
             let auto: Verdict = reasons.isEmpty ? .usable : .reject
-            let effective = overrides[items[i].id] ?? auto
-            items[i].verdict = effective
-            if effective == .reject { rejected.insert(items[i].id) }
+            let effective = overrides[updated[i].id] ?? auto
+            updated[i].verdict = effective
+            if effective == .reject { rejected.insert(updated[i].id) }
         }
 
         // 精选 only within burst groups of 2+ survivors — a pick must have beaten
         // a real alternative, not merely been unopposed.
         var groups: [Int: [Int]] = [:]
-        for (idx, item) in items.enumerated() where !rejected.contains(item.id) {
+        for (idx, item) in updated.enumerated() where !rejected.contains(item.id) {
             groups[item.burstGroup, default: []].append(idx)
         }
         // Within-group ranking: VLM expression first, then Apple's FaceCaptureQuality
         // (its exact designed purpose — ranking captures of the same subject),
-        // Laplacian sharpness only as the final tiebreak / no-face fallback.
+        // sharpness only as the final tiebreak / no-face fallback.
         for (_, indices) in groups where indices.count >= 2 {
             // A manual 精选 in the group takes the slot; no auto-pick beside it.
-            if indices.contains(where: { overrides[items[$0].id] == .pick }) { continue }
-            let candidates = indices.filter { overrides[items[$0].id] == nil }
-            guard candidates.count >= 1, indices.count >= 2 else { continue }
+            if indices.contains(where: { overrides[updated[$0].id] == .pick }) { continue }
+            let candidates = indices.filter { overrides[updated[$0].id] == nil }
             let best = candidates.max { a, b in
-                let ea = items[a].expressionScore ?? -1
-                let eb = items[b].expressionScore ?? -1
-                let qa = items[a].faceQuality ?? -1
-                let qb = items[b].faceQuality ?? -1
-                return (ea, qa, items[a].sharpness) < (eb, qb, items[b].sharpness)
+                let ea = updated[a].expressionScore ?? -1
+                let eb = updated[b].expressionScore ?? -1
+                let qa = updated[a].faceQuality ?? -1
+                let qb = updated[b].faceQuality ?? -1
+                return (ea, qa, updated[a].sharpness) < (eb, qb, updated[b].sharpness)
             }
-            if let best { items[best].verdict = .pick }
+            if let best { updated[best].verdict = .pick }
         }
+
+        items = updated
+        rebuildDerived(groupQCount: groupQCount)
     }
 
     // MARK: - Trash rejects
@@ -1512,7 +1792,10 @@ final class BatchStore: ObservableObject {
     /// disappears from the session + persisted artifacts so it doesn't resurface
     /// as a broken entry.
     func trashRejects() {
-        guard !isRunning else { return }
+        guard !isRunning else {
+            lastError = "正在处理中，先点“取消”再移动废片"
+            return
+        }
         let rejects = items.filter { $0.verdict == .reject }
         guard !rejects.isEmpty else { return }
         // 照片文件夹不在了就别开工：一张也移不动，却会把这些 id 从结果里抹掉。
@@ -1529,12 +1812,15 @@ final class BatchStore: ObservableObject {
             (id: $0.id, rawPath: $0.rawPath, decodePath: $0.decodePath, previewPath: $0.previewPath)
         }
         let total = jobs.count
+        cancelFlag = AnalysisEngine.CancelFlag()
+        let flag = cancelFlag
 
         Task.detached { [weak self] in
             let fm = FileManager.default
             var trashedIDs: Set<String> = []
             var failed: [String] = []
             for (index, job) in jobs.enumerated() {
+                if flag.isSet { break }
                 var urls = [URL(fileURLWithPath: job.rawPath)]
                 if job.decodePath != job.rawPath {
                     urls.append(URL(fileURLWithPath: job.decodePath))
@@ -1578,10 +1864,13 @@ final class BatchStore: ObservableObject {
                 self.saveOverrides()
                 self.rebuildGroupSizes()
                 self.purgeFromArtifacts(ids: trashed)
+                self.applyThresholds()
                 self.touchSessionIndex()
                 self.isRunning = false
-                NotificationCenter.default.post(name: .analysisDidFinish, object: nil, userInfo: ["dir": self.sessionDir])
-                if failedIds.isEmpty {
+                self.postResultsChanged(previewsChanged: false)
+                if flag.isSet {
+                    self.progressText = "已取消: \(trashed.count) 张已移到废纸篓 (可恢复)，其余未动"
+                } else if failedIds.isEmpty {
                     self.progressText = "已把 \(trashed.count) 张废片移到废纸篓 (可恢复)"
                 } else {
                     self.lastError = "移到废纸篓: \(trashed.count) 成功, \(failedIds.count) 失败 (\(failedIds.prefix(3).joined(separator: ", ")))"
@@ -1603,7 +1892,7 @@ final class BatchStore: ObservableObject {
                 return !ids.contains(id)
             }
             if let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
-                try? out.write(to: url)
+                try? out.write(to: url, options: .atomic)
             }
         }
         filterFile("manifest.json", arrayKey: "photos")
@@ -1620,7 +1909,18 @@ final class BatchStore: ObservableObject {
     /// source metadata (EXIF/GPS/orientation) into the output.
     /// maxPixel nil = full resolution; otherwise long-edge cap (2048 for
     /// WeChat-able 选片小图, 4096 for screen delivery).
-    func exportJPEGs(to folder: URL, includeUsable: Bool, quality: Double, maxPixel: Int? = nil) {
+    /// Default JPG output folder: a subfolder of the shoot that listPhotos
+    /// skips, so exporting never feeds the outputs back into the next analysis.
+    var defaultJPEGExportFolder: URL? {
+        photoDir?.appendingPathComponent(ImageLoader.jpegExportSubfolder)
+    }
+
+    /// `overwrite` false = files already in the target are left alone and
+    /// counted (a re-export at another quality wants true; an accidental second
+    /// click, or a folder that already holds the client's retouched files, does
+    /// not).
+    func exportJPEGs(to folder: URL, includeUsable: Bool, quality: Double, maxPixel: Int? = nil,
+                     overwrite: Bool = false) {
         guard !isRunning else { return }
         let chosen = items.filter { $0.verdict == .pick || (includeUsable && $0.verdict == .usable) }
         guard !chosen.isEmpty else {
@@ -1634,26 +1934,45 @@ final class BatchStore: ObservableObject {
         let total = chosen.count
 
         Task.detached { [weak self] in
+            enum Outcome { case ok, skipped, failed }
+            do {
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            } catch {
+                await MainActor.run { [weak self] in
+                    self?.lastError = "无法创建导出文件夹: \(error.localizedDescription)"
+                    self?.isRunning = false
+                }
+                return
+            }
             await MainActor.run { [weak self] in self?.progressText = "导出 JPG 0/\(total)..." }
             // Full-res decodes are big (a 60MP RAW is ~160MB unpacked), so cap
             // concurrency lower than the analysis pass. Width-limited TaskGroup:
             // seed `workers` tasks, add one more as each finishes.
             let workers = min(4, max(2, ProcessInfo.processInfo.activeProcessorCount / 4))
             var failed: [String] = []
+            var skipped = 0
             var done = 0
             var iterator = chosen.makeIterator()
-            await withTaskGroup(of: (String, Bool).self) { group in
+            await withTaskGroup(of: (String, Outcome).self) { group in
                 func addNext() {
                     guard !flag.isSet, let item = iterator.next() else { return }
                     group.addTask {
-                        (item.id, Self.writeJPEG(from: URL(fileURLWithPath: item.decodePath),
-                                                 to: folder.appendingPathComponent("\(item.id).jpg"),
-                                                 quality: quality, maxPixel: maxPixel))
+                        let dest = folder.appendingPathComponent("\(item.id).jpg")
+                        if !overwrite, FileManager.default.fileExists(atPath: dest.path) {
+                            return (item.id, .skipped)
+                        }
+                        let ok = Self.writeJPEG(from: URL(fileURLWithPath: item.decodePath), to: dest,
+                                                quality: quality, maxPixel: maxPixel)
+                        return (item.id, ok ? .ok : .failed)
                     }
                 }
                 for _ in 0..<workers { addNext() }
-                for await (id, ok) in group {
-                    if !ok { failed.append(id) }
+                for await (id, outcome) in group {
+                    switch outcome {
+                    case .ok: break
+                    case .skipped: skipped += 1
+                    case .failed: failed.append(id)
+                    }
                     done += 1
                     let doneNow = done
                     await MainActor.run { [weak self] in
@@ -1665,16 +1984,20 @@ final class BatchStore: ObservableObject {
             }
 
             let failedIds = failed
+            let skippedCount = skipped
+            let doneCount = done
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
                 self.isRunning = false
+                let written = doneCount - skippedCount - failedIds.count
+                let skipNote = skippedCount > 0 ? " · \(skippedCount) 张已存在跳过" : ""
                 if flag.isSet {
-                    self.progressText = "导出已取消"
+                    self.progressText = "导出已取消: 已写出 \(written) 张\(skipNote)"
                 } else if failedIds.isEmpty {
-                    self.progressText = "JPG 导出完成: \(total) 张 → \(folder.lastPathComponent)"
+                    self.progressText = "JPG 导出完成: \(written) 张 → \(folder.lastPathComponent)\(skipNote)"
                 } else {
-                    self.lastError = "JPG 导出: \(total - failedIds.count) 成功, \(failedIds.count) 失败 (\(failedIds.prefix(3).joined(separator: ", ")))"
+                    self.lastError = "JPG 导出: \(written) 成功, \(failedIds.count) 失败 (\(failedIds.prefix(3).joined(separator: ", ")))\(skipNote)"
                 }
             }
         }
@@ -1754,6 +2077,8 @@ final class BatchStore: ObservableObject {
         let destDir = photoDir.appendingPathComponent(ImageLoader.denoiseSubfolder)
         let sources = raws.map { URL(fileURLWithPath: $0.rawPath) }
         let total = sources.count
+        cancelFlag = AnalysisEngine.CancelFlag()
+        let flag = cancelFlag
 
         Task.detached { [weak self] in
             let fm = FileManager.default
@@ -1765,6 +2090,7 @@ final class BatchStore: ObservableObject {
                     ((try? fm.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.intValue
                 }
                 for (index, src) in sources.enumerated() {
+                    if flag.isSet { break }
                     let dest = destDir.appendingPathComponent(src.lastPathComponent)
                     if fm.fileExists(atPath: dest.path), let s = size(src), size(dest) == s {
                         existed += 1  // complete copy from a previous run: skip
@@ -1802,7 +2128,7 @@ final class BatchStore: ObservableObject {
                 guard let self else { return }
                 self.progressFraction = nil
                 self.isRunning = false
-                var parts = ["已复制 \(copiedCount) 个 RAW → \(ImageLoader.denoiseSubfolder)/"]
+                var parts = [(flag.isSet ? "已取消: 已复制 " : "已复制 ") + "\(copiedCount) 个 RAW → \(ImageLoader.denoiseSubfolder)/"]
                 if existedCount > 0 { parts.append("\(existedCount) 个已存在跳过") }
                 if jpegOnly > 0 { parts.append("\(jpegOnly) 张只有 JPG 未复制") }
                 if summaryFailed.isEmpty {
@@ -1843,12 +2169,21 @@ final class BatchStore: ObservableObject {
             return (item.id, xmpURL, Self.xmpContent(rating: stars, label: label, reason: reason))
         }
         let total = jobs.count
+        // Lightroom Classic only reads .xmp sidecars for proprietary RAW; for
+        // JPEG/TIFF/DNG it expects the metadata embedded. Capture One reads
+        // sidecars for everything. Say so instead of reporting a clean success.
+        let jpegOnly = items.filter {
+            !ImageLoader.rawExtensions.contains(URL(fileURLWithPath: $0.rawPath).pathExtension.lowercased())
+        }.count
+        cancelFlag = AnalysisEngine.CancelFlag()
+        let flag = cancelFlag
 
         Task.detached { [weak self] in
             var written = 0
             var preserved: [String] = []
             var failed: [String] = []
             for (index, job) in jobs.enumerated() {
+                if flag.isSet { break }
                 // Lightroom 把调色参数、关键字、GPS 都存在同名 .xmp 里。别人的
                 // sidecar 一律不碰 —— 覆盖成我们这份只有星级的模板 = 整场调色报废。
                 if FileManager.default.fileExists(atPath: job.url.path),
@@ -1880,9 +2215,12 @@ final class BatchStore: ObservableObject {
                 self.progressFraction = nil
                 self.isRunning = false
                 if failedIds.isEmpty {
-                    var summary = "XMP 完成: \(writtenCount) 个已写入原图目录"
+                    var summary = flag.isSet ? "XMP 已取消: 已写入 \(writtenCount) 个" : "XMP 完成: \(writtenCount) 个已写入原图目录"
                     if !preservedIds.isEmpty {
                         summary += "；\(preservedIds.count) 个已有其它软件的 XMP (可能含 Lightroom 调色)，已保留未覆盖"
+                    }
+                    if jpegOnly > 0 {
+                        summary += "；注意 \(jpegOnly) 张是纯 JPG：Lightroom 不读 JPG 旁的 .xmp (Capture One 可读)"
                     }
                     self.progressText = summary
                 } else {
