@@ -9,6 +9,9 @@ struct WatermarkView: View {
     @ObservedObject var store: WatermarkStore
     @ObservedObject var batchStore: BatchStore
     @State private var presetName = ""
+    @State private var presetToDelete: String?
+    @State private var presetToOverwrite: String?
+    @State private var isDropTargeted = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,26 +35,40 @@ struct WatermarkView: View {
     private var topBar: some View {
         HStack(spacing: 10) {
             Button("导入照片...") { pickPhotos() }
+                .keyboardShortcut("o", modifiers: .command)
+                .help("导入照片或文件夹 (⌘O)")
             Button("导入选片结果 (\(keeperCount))") {
                 store.importFromBatch(batchStore, includeUsable: true)
             }
             .disabled(keeperCount == 0)
             .help("把批量处理页当前的精选+可用照片拉进来 (RAW 自动用配对 JPG)")
             Button("清空") { store.clearPhotos() }
-                .disabled(store.photos.isEmpty)
+                .disabled(store.photos.isEmpty || store.isExporting)
             Spacer()
             Button {
                 pickOutputDir()
             } label: {
-                Label(store.outputDir?.lastPathComponent ?? "输出目录...", systemImage: "folder")
+                Label {
+                    Text(store.outputDir?.lastPathComponent ?? "输出目录...")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                } icon: {
+                    Image(systemName: "folder")
+                }
+                .frame(maxWidth: 220)
             }
+            .help(store.outputDir?.path ?? "选择导出目录")
             if store.isExporting {
                 Button("取消") { store.cancelExport() }
                     .buttonStyle(.bordered)
+                    .keyboardShortcut(.escape, modifiers: [])
+                    .help("停止排新的照片，已写出的保留 (Esc)")
             }
             Button("批量导出 (\(store.photos.count))") { store.exportAll() }
                 .buttonStyle(.borderedProminent)
-                .disabled(store.photos.isEmpty || store.isExporting || store.outputDir == nil)
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(!store.canExport)
+                .help(store.exportBlockedReason ?? "把列表里的照片全部加水印后写到输出目录 (⌘⏎)")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -66,9 +83,22 @@ struct WatermarkView: View {
     private var statusBar: some View {
         HStack(spacing: 12) {
             if let error = store.lastError {
-                Text(error).font(.caption).foregroundStyle(.red).lineLimit(1).help(error)
+                HStack(spacing: 4) {
+                    Text(error).font(.caption).foregroundStyle(.red).lineLimit(1).help(error)
+                    Button {
+                        store.lastError = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill").font(.caption).foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("关闭")
+                }
             }
             Spacer()
+            if let notice = store.notice {
+                Text(notice).font(.caption).foregroundStyle(.secondary)
+                    .transition(.opacity)
+            }
             if !store.progressText.isEmpty {
                 Text(store.progressText).font(.caption).foregroundStyle(.secondary)
             }
@@ -76,6 +106,7 @@ struct WatermarkView: View {
                 ProgressView(value: fraction).frame(width: 140)
             }
         }
+        .animation(.default, value: store.notice)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(.bar)
@@ -104,6 +135,7 @@ struct WatermarkView: View {
                             .frame(width: 48, height: 34)
                             .clipShape(RoundedRectangle(cornerRadius: 3))
                         Text(url.lastPathComponent).font(.caption).lineLimit(1)
+                            .help(url.path)
                         Spacer()
                         Button {
                             store.removePhoto(url)
@@ -111,21 +143,43 @@ struct WatermarkView: View {
                             Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
                         }
                         .buttonStyle(.plain)
+                        .help("从列表移除 (Delete)")
                     }
                     .tag(url)
                 }
                 .listStyle(.sidebar)
-            }
-        }
-        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-            for provider in providers {
-                _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                    if let url {
-                        Task { @MainActor in store.addPhotos([url]) }
-                    }
+                .onDeleteCommand {
+                    if let selected = store.selectedPhoto { store.removePhoto(selected) }
                 }
             }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(Color.accentColor, lineWidth: 2)
+                .padding(3)
+                .opacity(isDropTargeted ? 1 : 0)
+                .allowsHitTesting(false)
+        }
+        .animation(.easeOut(duration: 0.12), value: isDropTargeted)
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            // 先把所有 provider 的 URL 收齐，按拖入顺序一次性导入：逐个回调会
+            // 触发 N 次导入 + N 次预览，而且回调顺序不保证。
+            Task { @MainActor in
+                var urls: [URL] = []
+                for provider in providers {
+                    if let url = await Self.loadURL(from: provider) { urls.append(url) }
+                }
+                store.addPhotos(urls)
+            }
             return true
+        }
+    }
+
+    private static func loadURL(from provider: NSItemProvider) async -> URL? {
+        await withCheckedContinuation { continuation in
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                continuation.resume(returning: url)
+            }
         }
     }
 
@@ -139,10 +193,24 @@ struct WatermarkView: View {
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .padding(12)
+                    .opacity(store.previewStale ? 0.55 : 1)
             } else if store.selectedPhoto != nil {
                 ProgressView()
             } else {
                 Text("导入照片后在这里实时预览").foregroundStyle(.secondary)
+            }
+            // 切换照片时旧图还在，新图在渲染：盖一层转圈而不是让人以为没反应。
+            if store.previewStale, store.previewImage != nil {
+                ProgressView().controlSize(.large)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if let hint = store.previewHint {
+                Label(hint, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(.thinMaterial, in: Capsule())
+                    .padding(.bottom, 14)
             }
         }
         .environment(\.colorScheme, .dark)
@@ -166,49 +234,75 @@ struct WatermarkView: View {
     }
 
     private var signatureBox: some View {
-        GroupBox("签名图水印") {
+        let tiling = store.config.tile.enabled
+        return GroupBox {
             VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Button(store.signatureURL == nil ? "选择 PNG 签名..." : store.signatureURL!.lastPathComponent) {
-                        pickSignature()
-                    }
-                    .lineLimit(1)
-                    if store.signatureURL != nil {
+                Toggle("签名图水印", isOn: $store.config.signatureEnabled).bold()
+                    .help("关掉后不画签名图，签名文件仍然记着")
+                if store.config.signatureEnabled {
+                    HStack {
                         Button {
-                            store.signatureURL = nil
-                        } label: { Image(systemName: "xmark.circle.fill") }
-                            .buttonStyle(.plain)
+                            pickSignature()
+                        } label: {
+                            Text(store.signatureURL?.lastPathComponent ?? "选择 PNG 签名...")
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .frame(maxWidth: 200)
+                        }
+                        .help(store.signatureURL?.path ?? "选择带透明通道的 PNG 签名图")
+                        if store.signatureURL != nil {
+                            Button {
+                                store.signatureURL = nil
+                            } label: { Image(systemName: "xmark.circle.fill") }
+                                .buttonStyle(.plain)
+                                .help("清除签名图")
+                        }
                     }
-                }
-                gridPicker(selection: $store.config.position)
-                labeledSlider("大小", value: $store.config.sizeRatio, in: 0.03...0.6,
-                              display: "\(Int(store.config.sizeRatio * 100))%")
-                labeledSlider("不透明度", value: $store.config.opacity, in: 0.05...1,
-                              display: "\(Int(store.config.opacity * 100))%")
-                labeledSlider("边距 X", value: $store.config.marginX, in: 0...300,
-                              display: "\(Int(store.config.marginX))px")
-                labeledSlider("边距 Y", value: $store.config.marginY, in: 0...300,
-                              display: "\(Int(store.config.marginY))px")
+                    // 平铺模式下九宫格/边距/横构图位置都不参与计算，灰掉说明。
+                    Group {
+                        gridPicker(selection: $store.config.position)
+                        labeledSlider("边距 X", value: $store.config.marginX, in: 0...300,
+                                      display: "\(Int(store.config.marginX))px")
+                        labeledSlider("边距 Y", value: $store.config.marginY, in: 0...300,
+                                      display: "\(Int(store.config.marginY))px")
+                    }
+                    .disabled(tiling)
+                    .opacity(tiling ? 0.45 : 1)
+                    .help(tiling ? "平铺开启时位置和边距不生效" : "")
+                    if tiling {
+                        Text("平铺开启中：位置、边距、横构图位置不生效")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                    }
+                    labeledSlider("大小", value: $store.config.sizeRatio, in: 0.03...0.6,
+                                  display: "\(Int(store.config.sizeRatio * 100))%")
+                    labeledSlider("不透明度", value: $store.config.opacity, in: 0.05...1,
+                                  display: "\(Int(store.config.opacity * 100))%")
 
-                // 着色: 原色 / 白 / 米白 / 灰 / 黑 / 自定义
-                HStack(spacing: 6) {
-                    Text("颜色").font(.caption)
-                    tintSwatch(nil, label: "原")
-                    tintSwatch(WatermarkEngine.RGB(r: 255, g: 255, b: 255), label: "白")
-                    tintSwatch(WatermarkEngine.RGB(r: 245, g: 240, b: 230), label: "米")
-                    tintSwatch(WatermarkEngine.RGB(r: 128, g: 128, b: 128), label: "灰")
-                    tintSwatch(WatermarkEngine.RGB(r: 0, g: 0, b: 0), label: "黑")
-                    ColorPicker("", selection: rgbBinding(
-                        get: { store.config.tint },
-                        set: { store.config.tint = $0; store.config.tintEnabled = true }
-                    ), supportsOpacity: false)
-                    .labelsHidden()
-                    .frame(width: 34)
-                }
-                Toggle("横构图用不同位置", isOn: $store.config.landscapeOverrideEnabled)
-                    .font(.caption)
-                if store.config.landscapeOverrideEnabled {
-                    gridPicker(selection: $store.config.landscapeOverride)
+                    // 着色: 原色 / 白 / 米白 / 灰 / 黑 / 自定义
+                    HStack(spacing: 6) {
+                        Text("颜色").font(.caption)
+                        tintSwatch(nil, label: "原", name: "签名原色")
+                        tintSwatch(WatermarkEngine.RGB(r: 255, g: 255, b: 255), label: "白", name: "白色")
+                        tintSwatch(WatermarkEngine.RGB(r: 245, g: 240, b: 230), label: "米", name: "米白")
+                        tintSwatch(WatermarkEngine.RGB(r: 128, g: 128, b: 128), label: "灰", name: "灰色")
+                        tintSwatch(WatermarkEngine.RGB(r: 0, g: 0, b: 0), label: "黑", name: "黑色")
+                        ColorPicker("", selection: rgbBinding(
+                            get: { store.config.tint },
+                            set: { store.config.tint = $0; store.config.tintEnabled = true }
+                        ), supportsOpacity: false)
+                        .labelsHidden()
+                        .frame(width: 34)
+                        .help("自定义着色")
+                    }
+                    Group {
+                        Toggle("横构图用不同位置", isOn: $store.config.landscapeOverrideEnabled)
+                            .font(.caption)
+                        if store.config.landscapeOverrideEnabled {
+                            gridPicker(selection: $store.config.landscapeOverride)
+                        }
+                    }
+                    .disabled(tiling)
+                    .opacity(tiling ? 0.45 : 1)
                 }
             }
             .padding(6)
@@ -222,7 +316,7 @@ struct WatermarkView: View {
                 if store.config.exifText.enabled {
                     TextField("模板", text: $store.config.exifText.template)
                         .font(.caption)
-                        .help("占位符: {make} {model} {lens} {fnumber} {shutter} {iso} {focal} {date}")
+                        .help("占位符: {make} {model} {lens} {fnumber} {shutter} {iso} {focal} {date}；照片里没有的字段会连同前面的标签一起省略")
                     TextField("自定义文字 (留空则用模板)", text: $store.config.exifText.customText)
                         .font(.caption)
                     gridPicker(selection: $store.config.exifText.position)
@@ -265,14 +359,26 @@ struct WatermarkView: View {
                     labeledSlider("参数条高", value: $store.config.frame.bottomBarRatio, in: 0.06...0.25,
                                   display: String(format: "%.0f%%", store.config.frame.bottomBarRatio * 100))
                     Toggle("显示品牌名", isOn: $store.config.frame.showBrand).font(.caption)
+                        .help("居中品牌名；三块文字挤不下时会自动先隐藏它")
                     Toggle("竖分隔线 (Canon 风)", isOn: $store.config.frame.showDivider).font(.caption)
-                    TextField("左上", text: $store.config.frame.leftLine1).font(.caption)
-                    TextField("左下", text: $store.config.frame.leftLine2).font(.caption)
-                    TextField("右上", text: $store.config.frame.rightLine1).font(.caption)
-                    TextField("右下", text: $store.config.frame.rightLine2).font(.caption)
+                    frameField("左上", $store.config.frame.leftLine1)
+                    frameField("左下", $store.config.frame.leftLine2)
+                    frameField("右上", $store.config.frame.rightLine1)
+                    frameField("右下", $store.config.frame.rightLine2)
+                    Text("支持 {model} {lens} {focal} {fnumber} {shutter} {iso} {date} 等占位符，留空不显示")
+                        .font(.caption2).foregroundStyle(.tertiary)
                 }
             }
             .padding(6)
+        }
+    }
+
+    /// 相框四个文本框：带位置标签，填了内容后也分得清哪个是哪个。
+    private func frameField(_ label: String, _ text: Binding<String>) -> some View {
+        HStack(spacing: 6) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+                .frame(width: 30, alignment: .leading)
+            TextField("留空不显示", text: text).font(.caption)
         }
     }
 
@@ -280,15 +386,28 @@ struct WatermarkView: View {
         GroupBox {
             VStack(alignment: .leading, spacing: 8) {
                 Toggle("全图平铺 (样片防盗)", isOn: $store.config.tile.enabled).bold()
+                    .help("用签名图铺满整张图；需要签名图水印开启")
                 if store.config.tile.enabled {
                     labeledSlider("角度", value: $store.config.tile.angleDeg, in: 0...90,
                                   display: "\(Int(store.config.tile.angleDeg))°")
                     labeledSlider("间距", value: $store.config.tile.gapRatio, in: 0...2,
                                   display: String(format: "%.1f", store.config.tile.gapRatio))
+                    if !store.config.signatureEnabled || store.signatureURL == nil {
+                        Text("平铺用的是签名图：请先开启签名图水印并选择 PNG")
+                            .font(.caption2).foregroundStyle(.orange)
+                    }
                 }
             }
             .padding(6)
         }
+    }
+
+    private static let ratioChoices = ["1:1", "2:3", "3:4", "4:5", "4:3", "9:16", "16:9"]
+    private static let customRatioTag = "自定义"
+
+    private var currentRatioKey: String {
+        let key = String(format: "%g:%g", store.config.canvasRatio.ratioW, store.config.canvasRatio.ratioH)
+        return Self.ratioChoices.contains(key) ? key : Self.customRatioTag
     }
 
     private var canvasRatioBox: some View {
@@ -297,18 +416,25 @@ struct WatermarkView: View {
                 Toggle("画布比例扩展 (补白)", isOn: $store.config.canvasRatio.enabled).bold()
                 if store.config.canvasRatio.enabled {
                     Picker("比例", selection: Binding(
-                        get: { "\(Int(store.config.canvasRatio.ratioW)):\(Int(store.config.canvasRatio.ratioH))" },
+                        get: { currentRatioKey },
                         set: { value in
                             let parts = value.split(separator: ":").compactMap { Double($0) }
-                            if parts.count == 2 {
+                            if parts.count == 2, parts[0] > 0, parts[1] > 0 {
                                 store.config.canvasRatio.ratioW = parts[0]
                                 store.config.canvasRatio.ratioH = parts[1]
                             }
                         }
                     )) {
-                        ForEach(["1:1", "3:4", "4:3", "9:16", "16:9"], id: \.self) { Text($0).tag($0) }
+                        ForEach(Self.ratioChoices, id: \.self) { Text($0).tag($0) }
+                        // 预设里带来的比例不在列表里时显示为"自定义"，而不是一个空白分段控件。
+                        if currentRatioKey == Self.customRatioTag {
+                            Text(String(format: "%g:%g (自定义)", store.config.canvasRatio.ratioW,
+                                        store.config.canvasRatio.ratioH))
+                                .tag(Self.customRatioTag)
+                        }
                     }
                     .pickerStyle(.segmented)
+                    .controlSize(.small)
                     Picker("底色", selection: Binding(
                         get: { store.config.canvasRatio.fillColor.r > 128 },
                         set: { store.config.canvasRatio.fillColor = $0 ? .white : .black }
@@ -332,10 +458,21 @@ struct WatermarkView: View {
                     Text("长边 4096").tag(4096)
                 }
                 .pickerStyle(.segmented)
+                .help("含相框/画布扩展后的成品长边")
                 labeledSlider("质量", value: $store.options.quality, in: 0.6...1,
                               display: "\(Int(store.options.quality * 100))")
-                TextField("文件名后缀", text: $store.options.filenameSuffix).font(.caption)
-                Text("输出 JPEG · EXIF/拍摄参数保留").font(.caption2).foregroundStyle(.tertiary)
+                HStack(spacing: 6) {
+                    Text("后缀").font(.caption).foregroundStyle(.secondary)
+                        .frame(width: 30, alignment: .leading)
+                    TextField("文件名后缀", text: $store.options.filenameSuffix).font(.caption)
+                        .help("追加在原文件名后；\"/\" 和 \":\" 会被去掉")
+                }
+                Toggle("去除位置信息 (GPS)", isOn: $store.options.stripGPS).font(.caption)
+                    .help("交付给客户或发到公开平台时去掉拍摄地点")
+                Text(store.options.stripGPS
+                     ? "输出 JPEG · 保留 EXIF 拍摄参数与 XMP 版权/关键词 · 去除 GPS · 方向已烘焙进像素"
+                     : "输出 JPEG · 保留 EXIF 拍摄参数、GPS 与 XMP 版权/关键词 · 方向已烘焙进像素")
+                    .font(.caption2).foregroundStyle(.tertiary)
             }
             .padding(6)
         }
@@ -346,25 +483,65 @@ struct WatermarkView: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     TextField("预设名 (社交/交付/展览...)", text: $presetName)
-                    Button("保存") {
-                        store.savePreset(named: presetName)
-                        presetName = ""
-                    }
-                    .disabled(presetName.trimmingCharacters(in: .whitespaces).isEmpty)
+                        .onSubmit { savePresetTapped() }
+                    Button("保存") { savePresetTapped() }
+                        .disabled(presetName.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
                 ForEach(store.presets.keys.sorted(), id: \.self) { name in
-                    HStack {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark")
+                            .font(.caption.bold())
+                            .foregroundStyle(Color.accentColor)
+                            .opacity(store.activePresetName == name ? 1 : 0)
+                            .frame(width: 12)
                         Button(name) { store.applyPreset(named: name) }
                             .buttonStyle(.link)
+                            .help(store.activePresetName == name ? "当前参数就是这个预设" : "应用预设「\(name)」")
                         Spacer()
                         Button {
-                            store.deletePreset(named: name)
+                            presetToDelete = name
                         } label: { Image(systemName: "trash").font(.caption) }
                             .buttonStyle(.plain)
+                            .help("删除预设")
                     }
+                }
+                if store.presets.isEmpty {
+                    Text("把当前全部参数存成预设，下次一键套用").font(.caption2).foregroundStyle(.tertiary)
                 }
             }
             .padding(6)
+        }
+        .confirmationDialog("删除预设？", isPresented: Binding(
+            get: { presetToDelete != nil },
+            set: { if !$0 { presetToDelete = nil } }
+        ), presenting: presetToDelete) { name in
+            Button("删除「\(name)」", role: .destructive) { store.deletePreset(named: name) }
+            Button("取消", role: .cancel) {}
+        } message: { name in
+            Text("预设「\(name)」删除后无法恢复。")
+        }
+        .alert("覆盖已有预设？", isPresented: Binding(
+            get: { presetToOverwrite != nil },
+            set: { if !$0 { presetToOverwrite = nil } }
+        ), presenting: presetToOverwrite) { name in
+            Button("覆盖", role: .destructive) {
+                store.savePreset(named: name)
+                presetName = ""
+            }
+            Button("取消", role: .cancel) {}
+        } message: { name in
+            Text("预设「\(name)」已存在，保存会用当前参数替换它。")
+        }
+    }
+
+    private func savePresetTapped() {
+        let name = presetName.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        if store.presets[name] != nil {
+            presetToOverwrite = name
+        } else {
+            store.savePreset(named: name)
+            presetName = ""
         }
     }
 
@@ -421,7 +598,7 @@ struct WatermarkView: View {
         }
     }
 
-    private func tintSwatch(_ rgb: WatermarkEngine.RGB?, label: String) -> some View {
+    private func tintSwatch(_ rgb: WatermarkEngine.RGB?, label: String, name: String) -> some View {
         let isActive = rgb == nil ? !store.config.tintEnabled
             : (store.config.tintEnabled && store.config.tint == rgb)
         return Button {
@@ -444,7 +621,8 @@ struct WatermarkView: View {
             }
         }
         .buttonStyle(.plain)
-        .help(rgb == nil ? "签名原色" : label)
+        .help(name)
+        .accessibilityLabel(name)
     }
 
     private func rgbBinding(get: @escaping () -> WatermarkEngine.RGB,
