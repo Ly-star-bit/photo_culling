@@ -10,19 +10,23 @@ struct BatchView: View {
     /// Keyboard focus in the grid: ←/→ move it, space opens the inspector,
     /// 1/2/3/0 apply verdicts without opening anything.
     @State private var focusedID: String?
-    @State private var thumbSize: Double = 140
+    // View preferences persist across launches (they reset to defaults every
+    // start before, so the thumbnail size and export settings were re-done
+    // every session).
+    @AppStorage("batch.thumbSize") private var thumbSize: Double = 140
     @State private var showTrashConfirm = false
     @State private var showClearRecentsConfirm = false
     /// JPG 交付导出设置 (Capture One 式质量档)。
-    @State private var jpegQuality: Double = 90
-    @State private var jpegIncludeUsable = true
+    @AppStorage("batch.jpegQuality") private var jpegQuality: Double = 90
+    @AppStorage("batch.jpegIncludeUsable") private var jpegIncludeUsable = true
+    @AppStorage("batch.jpegOverwrite") private var jpegOverwrite = false
     @State private var showJPEGSheet = false
     /// 高ISO RAW 导出 (降噪流程)。
     @State private var showISOSheet = false
-    @State private var isoThreshold = 3200
-    @State private var isoKeepersOnly = true
+    @AppStorage("batch.isoThreshold") private var isoThreshold = 3200
+    @AppStorage("batch.isoKeepersOnly") private var isoKeepersOnly = true
     /// JPG 导出长边 (0 = 原尺寸)。
-    @State private var jpegMaxPixel = 0
+    @AppStorage("batch.jpegMaxPixel") private var jpegMaxPixel = 0
     /// ⌘ 选中恰好 2 张时的任意对比。
     @State private var showComparePair = false
     /// 网格实际宽度 — ↑/↓ 换行导航需要估算列数。
@@ -34,15 +38,21 @@ struct BatchView: View {
     }
     /// 按分组 = Aftershoot-style stacks: one cover per burst group, expand by
     /// opening the inspector (its 同组 strip does the within-group picking).
-    @State private var gridMode: GridMode = .byVerdict
+    @AppStorage("batch.gridMode") private var gridMode: GridMode = .byVerdict
     @State private var showStatsPopover = false
     /// Fullscreen review: one big photo + filmstrip, digit-verdicts auto-advance.
     @State private var reviewMode = false
+    /// The grid order FROZEN when the inspector / review mode opened. Paging
+    /// used to follow the live `visibleItems`: re-judging a photo moved it to
+    /// another section (or out of the filtered list), so → jumped into the
+    /// reject section or the arrows died. Trash intersects this with the live
+    /// ids; a session switch clears it.
+    @State private var pagingOrder: [String] = []
 
     var body: some View {
         Group {
             if reviewMode {
-                ReviewView(store: store, visibleItems: visibleItems,
+                ReviewView(store: store, orderIDs: pagingOrder,
                            focusedID: $focusedID, reviewMode: $reviewMode)
             } else {
                 VStack(spacing: 0) {
@@ -52,9 +62,12 @@ struct BatchView: View {
                         bulkActionBar
                         Divider()
                     }
-                    HSplitView {
+                    // Plain HStack: the old HSplitView had a fixed-width right
+                    // pane, so its divider never moved anyway.
+                    HStack(spacing: 0) {
                         gridArea
-                            .frame(minWidth: 500)
+                            .frame(minWidth: 500, maxWidth: .infinity)
+                        Divider()
                         controlPanel
                             .frame(width: 300)
                     }
@@ -69,7 +82,7 @@ struct BatchView: View {
         )) {
             if let id = inspectedID {
                 PhotoInspector(store: store, inspectedID: $inspectedID,
-                               gridOrder: visibleItems.map(\.id), initialID: id)
+                               gridOrder: pagingOrder, initialID: id)
             }
         }
         // 换了一场拍摄就把选择/焦点全部丢掉。留着的话批量改判栏还显示"已选 3 张"，
@@ -78,15 +91,21 @@ struct BatchView: View {
             selectedIDs = []
             focusedID = nil
             inspectedID = nil
+            pagingOrder = []
         }
         // 重新分析会原地覆盖预览图 —— 不清缓存的话数值更新了、图还是旧的。
-        .onReceive(NotificationCenter.default.publisher(for: .analysisDidFinish)) { _ in
-            ThumbCache.invalidate()
+        // 只有分析真的重写了预览才清；切场次/VLM/废纸篓也发同一通知，
+        // 以前跟着一起清空，切回来整个网格重新解码一遍。
+        .onReceive(NotificationCenter.default.publisher(for: .analysisDidFinish)) { note in
+            if note.userInfo?["previewsChanged"] as? Bool == true {
+                ThumbCache.invalidate()
+            }
         }
         // 废片进废纸篓后这些 id 就没了，留着同样会写到不存在的照片上。
         .onChange(of: store.items.count) {
             let live = Set(store.items.map(\.id))
             selectedIDs.formIntersection(live)
+            pagingOrder.removeAll { !live.contains($0) }
             if let focused = focusedID, !live.contains(focused) { focusedID = nil }
             if let inspected = inspectedID, !live.contains(inspected) { inspectedID = nil }
         }
@@ -154,8 +173,12 @@ struct BatchView: View {
                 Label(store.photoDir?.lastPathComponent ?? "选择文件夹",
                       systemImage: "folder")
                     .lineLimit(1)
+                    .truncationMode(.middle)
             }
-            .fixedSize()
+            // Capped: `.fixedSize()` let a long Chinese folder name push 撤销/
+            // 审片/导出 off the right edge of a 1280pt window.
+            .frame(maxWidth: 260)
+            .fixedSize(horizontal: false, vertical: true)
             // 处理中换文件夹会污染网格并让"重新分析"卡死，store 里也有守卫兜底。
             .disabled(store.isRunning)
             .help(store.isRunning ? "正在处理中，先取消再切换文件夹"
@@ -197,6 +220,14 @@ struct BatchView: View {
                 .labelsHidden()
                 .frame(width: 220)
             }
+            Picker("排序", selection: $store.sortOrder) {
+                ForEach(BatchStore.SortOrder.allCases, id: \.self) { s in
+                    Text(s.rawValue).tag(s)
+                }
+            }
+            .pickerStyle(.menu)
+            .fixedSize()
+            .help("网格内的顺序：按拍摄时间 (双机位混排也按时间) 或按文件名")
 
             Spacer()
 
@@ -204,7 +235,7 @@ struct BatchView: View {
                 .keyboardShortcut("z", modifiers: .command)
                 .disabled(!store.canUndoOverride)
                 .help("撤销上一次改判 (⌘Z)")
-            Button("审片模式") { reviewMode = true }
+            Button("审片模式") { enterReview() }
                 .keyboardShortcut("f", modifiers: [])
                 .disabled(store.items.isEmpty)
                 .help("全屏逐张审片 · F 进入 · 1精选 2可用 3废片 0恢复")
@@ -261,14 +292,28 @@ struct BatchView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
+            if store.unparsedCount > 0 {
+                // Photos the engine couldn't read are invisible in the grid;
+                // without this the folder silently has more photos than shown.
+                Label("\(store.unparsedCount) 张未能解析", systemImage: "questionmark.square.dashed")
+                    .font(.caption).foregroundStyle(.orange).lineLimit(1)
+                    .help("文件夹里有 \(store.unparsedCount) 张照片无法解码 (文件损坏、格式不支持或分析时还在拷贝)，不在网格中。修复后重新分析即可")
+            }
             ForEach(store.chapterWarnings, id: \.self) { warning in
                 Label(warning, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(.orange).lineLimit(1)
                     .help(warning)
             }
             if let error = store.lastError {
-                Text(error).font(.caption).foregroundStyle(.red)
-                    .lineLimit(1).help(error)
+                HStack(spacing: 4) {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                        .lineLimit(1).help(error)
+                    Button { store.lastError = nil } label: {
+                        Image(systemName: "xmark.circle.fill").font(.caption)
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .help("关闭这条提示")
+                }
             }
             Spacer()
             if !store.progressText.isEmpty {
@@ -304,21 +349,28 @@ struct BatchView: View {
                 Slider(value: $jpegQuality, in: 60...100, step: 5)
                 Text("\(Int(jpegQuality))").monospacedDigit().frame(width: 30)
             }
-            Text("共 \(jpegExportCount) 张 · 重编码，保留 EXIF")
+            Toggle("覆盖已存在的同名文件", isOn: $jpegOverwrite)
+                .help("关闭时已有的文件跳过不动 (防止误点第二次或覆盖客户已精修的文件)")
+            Text("共 \(jpegExportCount) 张 · 重编码，保留 EXIF · 默认导出到 拍摄文件夹/\(ImageLoader.jpegExportSubfolder)/ (不参与分析)")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Spacer()
                 Button("取消") { showJPEGSheet = false }
-                Button("选择文件夹并导出...") {
+                Button("其他文件夹...") {
                     showJPEGSheet = false
-                    exportJPEGs()
+                    exportJPEGs(to: nil)
+                }
+                .disabled(jpegExportCount == 0)
+                Button("导出到 \(ImageLoader.jpegExportSubfolder)/") {
+                    showJPEGSheet = false
+                    exportJPEGs(to: store.defaultJPEGExportFolder)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(jpegExportCount == 0)
+                .disabled(jpegExportCount == 0 || store.defaultJPEGExportFolder == nil)
             }
         }
         .padding(20)
-        .frame(width: 360)
+        .frame(width: 420)
     }
 
     // MARK: - 高ISO RAW export sheet
@@ -397,14 +449,10 @@ struct BatchView: View {
                     } else if gridMode == .byGroup {
                         groupGrid
                     } else {
-                        if store.verdictFilter == nil || store.verdictFilter == .pick {
-                            verdictSection(.pick, color: .green)
-                        }
-                        if store.verdictFilter == nil || store.verdictFilter == .usable {
-                            verdictSection(.usable, color: .blue)
-                        }
-                        if store.verdictFilter == nil || store.verdictFilter == .reject {
-                            verdictSection(.reject, color: .red)
+                        ForEach(Verdict.allCases.reversed(), id: \.self) { verdict in
+                            if store.verdictFilter == nil || store.verdictFilter == verdict {
+                                verdictSection(verdict, color: verdict.color)
+                            }
                         }
                     }
                 }
@@ -413,7 +461,6 @@ struct BatchView: View {
                 }
             }
             .background(Color(white: 0.13))
-            .environment(\.colorScheme, .dark)
             .background(GeometryReader { geo in
                 Color.clear.onChange(of: geo.size.width, initial: true) {
                     gridWidth = geo.size.width
@@ -428,18 +475,70 @@ struct BatchView: View {
             .onKeyPress(.space) { openFocused(); return .handled }
             .onKeyPress(.return) { openFocused(); return .handled }
             .onKeyPress(characters: .init(charactersIn: "1230")) { press in
-                guard let id = focusedID else { return .ignored }
+                // A digit hits the whole ⌘/⇧ selection when there is one —
+                // "select five, press 3" used to reject only the focused photo.
+                let targets: [String] = !selectedIDs.isEmpty ? Array(selectedIDs)
+                    : (focusedID.map { [$0] } ?? [])
+                guard !targets.isEmpty else { return .ignored }
+                let verdict: Verdict?
+                switch press.characters {
+                case "1": verdict = .pick
+                case "2": verdict = .usable
+                case "3": verdict = .reject
+                default: verdict = nil
+                }
                 withAnimation(.easeInOut(duration: 0.2)) {
-                    switch press.characters {
-                    case "1": store.setOverride(id, .pick)
-                    case "2": store.setOverride(id, .usable)
-                    case "3": store.setOverride(id, .reject)
-                    default: store.setOverride(id, nil)
-                    }
+                    store.setOverrideBatch(targets, verdict)
                 }
                 return .handled
             }
         }
+    }
+
+    /// Freeze the current grid order, then open — see `pagingOrder`.
+    private func openInspector(_ id: String) {
+        pagingOrder = visibleItems.map(\.id)
+        inspectedID = id
+    }
+
+    private func enterReview() {
+        pagingOrder = visibleItems.map(\.id)
+        reviewMode = true
+    }
+
+    /// Finder-style selection. Plain click focuses one photo and drops any
+    /// selection; ⌘ toggles; ⇧ selects the run between the focused photo and
+    /// this one in grid order. (Before: once anything was ⌘-selected, EVERY
+    /// plain click toggled, and there was no range select at all.)
+    private func handleClick(ids: [String], anchorID: String) {
+        let flags = NSEvent.modifierFlags
+        if flags.contains(.shift), let anchor = focusedID {
+            let order = visibleItems.map(\.id)
+            if let a = order.firstIndex(of: anchor), let b = order.firstIndex(of: anchorID) {
+                let range = order[min(a, b)...max(a, b)]
+                // In group mode the visible ids are covers; expand to members.
+                let expanded = gridMode == .byGroup
+                    ? Set(range.flatMap { cover in groupMembers(ofCover: cover) })
+                    : Set(range)
+                selectedIDs.formUnion(expanded)
+                return
+            }
+        }
+        if flags.contains(.command) {
+            if ids.allSatisfy({ selectedIDs.contains($0) }) {
+                ids.forEach { selectedIDs.remove($0) }
+            } else {
+                ids.forEach { selectedIDs.insert($0) }
+            }
+            return
+        }
+        selectedIDs.removeAll()
+        focusedID = anchorID
+    }
+
+    private func groupMembers(ofCover coverID: String) -> [String] {
+        guard let cover = store.item(withID: coverID) else { return [coverID] }
+        return store.items.filter { $0.burstGroup == cover.burstGroup }.map(\.id)
     }
 
     /// Columns currently on screen, from the measured grid width — ↑/↓ moves
@@ -477,7 +576,7 @@ struct BatchView: View {
                     .foregroundStyle(.secondary)
                 Button("选择照片文件夹...") { pickFolder() }
             }
-            Text("点击=选中 · 空格=大图 · F=审片 · ←/→=移动 · 1精选 2可用 3废片 0恢复 · ⌘点击=多选")
+            Text("点击=选中 · 空格=大图 · F=审片 · ←/→=移动 · 1精选 2可用 3废片 0恢复 · ⌘点击=多选 · ⇧点击=连选")
                 .font(.caption2).foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity)
@@ -629,13 +728,14 @@ struct BatchView: View {
     }
 
     private func openFocused() {
-        if let id = focusedID { inspectedID = id }
+        if let id = focusedID { openInspector(id) }
     }
 
     // MARK: 按分组 (stack view)
 
     private var groupGrid: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: thumbSize), spacing: 10)], spacing: 12) {
+        // Same spacing as the verdict grid so the ↑/↓ column estimate holds.
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: thumbSize), spacing: 8)], spacing: 8) {
             ForEach(groupedItems, id: \.group) { entry in
                 groupStackCell(entry.members)
                     .id(Self.groupCover(entry.members).id)
@@ -689,41 +789,26 @@ struct BatchView: View {
                         }
                     }
             }
-            // One dot per member, colored by its verdict — the group's fate at a glance.
+            // One mark per member, colored AND shaped by its verdict (star /
+            // dot / cross) — the group's fate at a glance, also for colour-blind eyes.
             HStack(spacing: 3) {
                 ForEach(members.prefix(10)) { member in
-                    Circle()
-                        .fill(verdictColorStatic(member.verdict))
-                        .frame(width: 7, height: 7)
+                    Image(systemName: member.verdict.symbol)
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(member.verdict.color)
+                        .frame(width: 8, height: 8)
                 }
                 if members.count > 10 { Text("…").font(.caption2) }
             }
             Text(cover.id).font(.caption2).lineLimit(1)
         }
         .contentShape(Rectangle())
-        .gesture(TapGesture(count: 2).onEnded { inspectedID = cover.id })
+        .gesture(TapGesture(count: 2).onEnded { openInspector(cover.id) })
+        // ⌘-click on a stack toggles the WHOLE group — batch verdicts then
+        // apply to every member.
         .simultaneousGesture(TapGesture().onEnded {
-            if NSEvent.modifierFlags.contains(.command) || !selectedIDs.isEmpty {
-                // ⌘-click on a stack toggles the WHOLE group — batch verdicts
-                // then apply to every member.
-                let ids = members.map(\.id)
-                if isSelected {
-                    ids.forEach { selectedIDs.remove($0) }
-                } else {
-                    ids.forEach { selectedIDs.insert($0) }
-                }
-            } else {
-                focusedID = cover.id
-            }
+            handleClick(ids: members.map(\.id), anchorID: cover.id)
         })
-    }
-
-    private func verdictColorStatic(_ v: Verdict) -> Color {
-        switch v {
-        case .pick: return .green
-        case .usable: return .blue
-        case .reject: return .red
-        }
     }
 
     /// Reject reasons as compact icon badges — the text version wrapped and
@@ -757,7 +842,7 @@ struct BatchView: View {
         if !matching.isEmpty || (verdict == .reject && store.reasonFilter != nil) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
-                    Circle().fill(color).frame(width: 8, height: 8)
+                    Image(systemName: verdict.symbol).font(.caption.bold()).foregroundStyle(color)
                     Text(verdict.rawValue).font(.headline)
                     Text("\(matching.count)").font(.headline).foregroundStyle(.secondary)
                     if verdict == .reject {
@@ -862,7 +947,10 @@ struct BatchView: View {
                     }
                 }
             HStack(spacing: 4) {
-                Circle().fill(color).frame(width: 6, height: 6)
+                Image(systemName: item.verdict.symbol)
+                    .font(.system(size: 7, weight: .bold))
+                    .foregroundStyle(color)
+                    .frame(width: 8)
                 Text(item.id).font(.caption2).lineLimit(1)
                     .foregroundStyle(.secondary)
                 if let iso = item.exif?.iso {
@@ -878,17 +966,9 @@ struct BatchView: View {
         // that was the visible lag on selection. Simultaneous recognition fires
         // the single click instantly; during a double-click the first click just
         // sets focus (harmless) and the second opens the inspector.
-        .gesture(TapGesture(count: 2).onEnded { inspectedID = item.id })
+        .gesture(TapGesture(count: 2).onEnded { openInspector(item.id) })
         .simultaneousGesture(TapGesture().onEnded {
-            if NSEvent.modifierFlags.contains(.command) || !selectedIDs.isEmpty {
-                if isSelected {
-                    selectedIDs.remove(item.id)
-                } else {
-                    selectedIDs.insert(item.id)
-                }
-            } else {
-                focusedID = item.id
-            }
+            handleClick(ids: [item.id], anchorID: item.id)
         })
     }
 
@@ -948,9 +1028,12 @@ struct BatchView: View {
                                 ? String(format: "%.2f", store.faceQualityThreshold) : "关闭",
                             killCount: reasonCounts["人脸质量低"] ?? 0,
                             slider: Slider(value: $store.faceQualityThreshold, in: 0...1),
-                            help: "特写脸的质量下限;小脸按景别自动放宽，连拍组内改为相对比较。拉到 0 关闭",
+                            help: "特写脸的质量下限;小脸按景别自动放宽，连拍组内改为组内相对比较 (不看此线)。直方图只画单张照片的分布。拉到 0 关闭",
                             histogram: MetricHistogram(
-                                values: store.items.compactMap(\.faceQuality),
+                                // Only photos the absolute line actually
+                                // applies to; burst frames are judged
+                                // group-relative and were misleading here.
+                                values: store.derived.faceQualityAbsoluteValues,
                                 range: 0...1,
                                 threshold: store.faceQualityThreshold,
                                 killBelow: true
@@ -972,9 +1055,9 @@ struct BatchView: View {
                         }
                         Button("启动服务") { store.startVLMServer() }
                             .help("通过 Ollama 启动 MiniCPM-V 4.6")
-                        Button("复审废片 (\(autoRejectCount))") { store.runAppealOnRejects() }
+                        Button("复审废片 (\(store.autoRejectCount))") { store.runAppealOnRejects() }
                             .buttonStyle(.borderedProminent)
-                            .disabled(autoRejectCount == 0 || store.isRunning)
+                            .disabled(store.autoRejectCount == 0 || store.isRunning)
                             .help("给自动淘汰的照片一个平反机会：按各自的淘汰原因定向复查 (虚焦→主体清晰吗;闭眼→是否眯眼笑;曝光→是否刻意剪影/逆光)。洗清罪名的照片自动回到可用并带“平反”徽章;人工改判过的不复审")
                         Button("精审幸存照片") { store.runVLMOnSurvivors() }
                             .disabled(store.items.isEmpty || store.isRunning)
@@ -1053,23 +1136,25 @@ struct BatchView: View {
         return counts.pick + (jpegIncludeUsable ? counts.usable : 0)
     }
 
-    /// Auto-rejects only — manual rejects are the photographer's word, no appeal.
-    private var autoRejectCount: Int {
-        store.items.filter { $0.verdict == .reject && store.overrides[$0.id] == nil }.count
-    }
-
-    private func exportJPEGs() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.prompt = "导出到此文件夹"
-        if panel.runModal() == .OK, let url = panel.url {
-            store.exportJPEGs(to: url, includeUsable: jpegIncludeUsable,
-                              quality: jpegQuality / 100.0,
-                              maxPixel: jpegMaxPixel > 0 ? jpegMaxPixel : nil)
+    /// nil = ask for a folder; otherwise export straight into it.
+    private func exportJPEGs(to target: URL?) {
+        var folder = target
+        if folder == nil {
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            panel.canCreateDirectories = true
+            panel.allowsMultipleSelection = false
+            panel.prompt = "导出到此文件夹"
+            panel.directoryURL = store.photoDir
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            folder = url
         }
+        guard let folder else { return }
+        store.exportJPEGs(to: folder, includeUsable: jpegIncludeUsable,
+                          quality: jpegQuality / 100.0,
+                          maxPixel: jpegMaxPixel > 0 ? jpegMaxPixel : nil,
+                          overwrite: jpegOverwrite)
     }
 }
 
@@ -1082,9 +1167,17 @@ enum ThumbCache {
     /// Shared by the grid's 512px thumbs AND the review/inspector 1600px fit
     /// decodes (~7MB each) — a count limit alone let the 1600px entries grow to
     /// multiple GB on a 500-photo shoot, so the limit is bytes, not entries.
+    /// ~1/10 of physical RAM (8GB Air → 800MB, 16GB → 1.6GB, 32GB+ capped at
+    /// 2GB): the fixed 800MB plus the other two caches was 1.6GB on an 8GB
+    /// machine, which swapped.
+    static let physicalMemory = Int(ProcessInfo.processInfo.physicalMemory)
+    static func budget(fraction: Double, cap: Int) -> Int {
+        min(cap, Int(Double(physicalMemory) * fraction))
+    }
+
     static let cache: NSCache<NSString, NSImage> = {
         let c = NSCache<NSString, NSImage>()
-        c.totalCostLimit = 800_000_000
+        c.totalCostLimit = budget(fraction: 0.10, cap: 2_000_000_000)
         return c
     }()
 
@@ -1128,9 +1221,13 @@ struct ThumbnailView: View {
     @State private var image: NSImage?
 
     var body: some View {
-        Group {
-            if let image {
-                Image(nsImage: image).resizable().aspectRatio(contentMode: fit ? .fit : .fill)
+        // Read the cache synchronously in body: a cell scrolled back into view
+        // is a fresh struct with nil @State, and waiting for `.task` to copy
+        // the cached image over showed a gray flash on every scroll-back.
+        let shown = image ?? ThumbCache.cache.object(forKey: ThumbCache.key(path, maxPixel))
+        return Group {
+            if let shown {
+                Image(nsImage: shown).resizable().aspectRatio(contentMode: fit ? .fit : .fill)
             } else {
                 Rectangle().fill(.gray.opacity(0.2))
             }
@@ -1164,7 +1261,8 @@ enum FullResCache {
     static let cache: NSCache<NSString, NSImage> = {
         let c = NSCache<NSString, NSImage>()
         c.countLimit = 2
-        c.totalCostLimit = 600_000_000  // two ~40MP frames; a 61MP pair evicts down to one
+        // two ~40MP frames on a 16GB machine; a 61MP pair evicts down to one
+        c.totalCostLimit = ThumbCache.budget(fraction: 0.04, cap: 600_000_000)
         return c
     }()
 
@@ -1332,27 +1430,49 @@ final class CenteringClipView: NSClipView {
 
 // MARK: - Face crop strip
 
-/// Mid-size decodes for face crops: big enough (2560px) that a subject face crop
-/// shows real eye detail, cheap enough to produce per photo on the fly.
+/// Mid-size decodes for face crops when the 1024px preview is too small for
+/// the face: 2048px from the original, cached. Kept small — a 10-frame RAW
+/// burst used to trigger 10 concurrent 2560px RAW decodes on inspector open.
 enum FaceStripCache {
     static let cache: NSCache<NSString, NSImage> = {
         let c = NSCache<NSString, NSImage>()
         c.countLimit = 8
-        c.totalCostLimit = 200_000_000  // 8 × ~17MB (2560px) with headroom
+        c.totalCostLimit = ThumbCache.budget(fraction: 0.015, cap: 150_000_000)
         return c
     }()
 
+    /// Serialises original-file decodes: they are the expensive path (a RAW
+    /// demosaic each), and the strip asks for up to ten at once.
+    static let decodeQueue = DispatchQueue(label: "facestrip.decode", qos: .userInitiated)
+
     static func decode(path: String) -> NSImage? {
         if let hit = cache.object(forKey: path as NSString) { return hit }
-        guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
-              let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                  kCGImageSourceCreateThumbnailFromImageAlways: true,
-                  kCGImageSourceThumbnailMaxPixelSize: 2560,
-                  kCGImageSourceCreateThumbnailWithTransform: true,
-              ] as CFDictionary) else { return nil }
-        let image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
-        cache.setObject(image, forKey: path as NSString, cost: cg.width * cg.height * 4)
-        return image
+        return decodeQueue.sync {
+            if let hit = cache.object(forKey: path as NSString) { return hit }
+            guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+                  let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                      kCGImageSourceCreateThumbnailFromImageAlways: true,
+                      kCGImageSourceThumbnailMaxPixelSize: 2048,
+                      kCGImageSourceCreateThumbnailWithTransform: true,
+                  ] as CFDictionary) else { return nil }
+            let image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+            cache.setObject(image, forKey: path as NSString, cost: cg.width * cg.height * 4)
+            return image
+        }
+    }
+
+    /// Face wide enough on the 1024px preview to read eyes from it — then the
+    /// preview (already cached for the grid) is the source, no original decode.
+    static let previewFaceMinWidth = 110.0
+
+    static func source(previewPath: String, decodePath: String, bbox: [Double]) -> NSImage? {
+        guard bbox.count == 4 else { return nil }
+        let widthOnPreview = (bbox[2] - bbox[0]) * Double(ImageLoader.previewMaxPixel)
+        if widthOnPreview >= previewFaceMinWidth,
+           let preview = ThumbCache.load(path: previewPath, maxPixel: ImageLoader.previewMaxPixel) {
+            return preview
+        }
+        return decode(path: decodePath)
     }
 }
 
@@ -1360,6 +1480,7 @@ enum FaceStripCache {
 /// gray = undeterminable. The whole point is that the photographer never has to
 /// zoom manually just to check eyes.
 struct FaceCropView: View {
+    let previewPath: String
     let decodePath: String
     let face: FaceInfo
 
@@ -1394,10 +1515,11 @@ struct FaceCropView: View {
         }
         .task(id: decodePath + face.bbox.description) {
             let path = decodePath
+            let preview = previewPath
             let bbox = face.bbox
             let result = await Task.detached(priority: .userInitiated) { () -> NSImage? in
                 guard bbox.count == 4,
-                      let decoded = FaceStripCache.decode(path: path),
+                      let decoded = FaceStripCache.source(previewPath: preview, decodePath: path, bbox: bbox),
                       let cg = decoded.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
                 let w = CGFloat(cg.width), h = CGFloat(cg.height)
                 let rect = CGRect(x: bbox[0] * w, y: bbox[1] * h,
@@ -1439,7 +1561,7 @@ struct PhotoInspector: View {
     }
 
     private var item: BatchItem? {
-        store.items.first { $0.id == currentID }
+        store.item(withID: currentID)
     }
 
     /// Navigation order = what the grid shows under the current filter.
@@ -1466,11 +1588,16 @@ struct PhotoInspector: View {
         VStack(spacing: 0) {
             if let item {
                 header(item)
-                if compareOn, let other = compareTarget(item) {
-                    comparePane(item, other)
-                } else {
-                    imagePane(item)
+                Group {
+                    if compareOn, let other = compareTarget(item) {
+                        comparePane(item, other)
+                    } else {
+                        imagePane(item)
+                    }
                 }
+                // The photo wins the height fight against the strips below —
+                // on a 13" screen a group with faces squeezed it to a strip itself.
+                .layoutPriority(1)
                 if !item.faces.isEmpty {
                     faceStrip(item)
                 }
@@ -1487,7 +1614,7 @@ struct PhotoInspector: View {
                 Text("照片不存在").padding()
             }
         }
-        .frame(minWidth: 960, minHeight: 760)
+        .frame(minWidth: 960, idealWidth: 1240, minHeight: 700, idealHeight: 880)
     }
 
     // MARK: header
@@ -1496,7 +1623,7 @@ struct PhotoInspector: View {
         HStack {
             Text(item.id).font(.headline)
             Text("组 \(item.burstGroup)").foregroundStyle(.secondary)
-            Text(item.verdict.rawValue)
+            Label(item.verdict.rawValue, systemImage: item.verdict.symbol)
                 .font(.caption).bold()
                 .padding(.horizontal, 6).padding(.vertical, 2)
                 .background(verdictColor(item.verdict).opacity(0.2), in: Capsule())
@@ -1520,13 +1647,7 @@ struct PhotoInspector: View {
         .padding()
     }
 
-    private func verdictColor(_ v: Verdict) -> Color {
-        switch v {
-        case .pick: return .green
-        case .usable: return .blue
-        case .reject: return .red
-        }
-    }
+    private func verdictColor(_ v: Verdict) -> Color { v.color }
 
     // MARK: image panes
 
@@ -1588,7 +1709,7 @@ struct PhotoInspector: View {
         for offset in [1, -1] {
             let n = idx + offset
             guard ids.indices.contains(n),
-                  let neighbor = store.items.first(where: { $0.id == ids[n] }) else { continue }
+                  let neighbor = store.item(withID: ids[n]) else { continue }
             let path = neighbor.previewPath
             guard ThumbCache.cache.object(forKey: ThumbCache.key(path, 1600)) == nil else { continue }
             Task.detached(priority: .utility) {
@@ -1668,7 +1789,7 @@ struct PhotoInspector: View {
             HStack(spacing: 6) {
                 Text("人脸").font(.caption2).foregroundStyle(.secondary)
                 ForEach(Array(item.faces.enumerated()), id: \.offset) { _, face in
-                    FaceCropView(decodePath: item.decodePath, face: face)
+                    FaceCropView(previewPath: item.previewPath, decodePath: item.decodePath, face: face)
                 }
             }
             .padding(.horizontal)
@@ -1759,7 +1880,8 @@ struct PhotoInspector: View {
                     Text("组内表情").font(.caption2).foregroundStyle(.secondary)
                     ForEach(withFaces) { member in
                         VStack(spacing: 1) {
-                            FaceCropView(decodePath: member.decodePath, face: member.faces[0])
+                            FaceCropView(previewPath: member.previewPath, decodePath: member.decodePath,
+                                         face: member.faces[0])
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 6)
                                         .stroke(member.id == currentID ? Color.accentColor : .clear, lineWidth: 3)
@@ -1997,7 +2119,7 @@ struct ComparePairSheet: View {
             .padding()
             HStack(spacing: 2) {
                 ForEach(ids, id: \.self) { id in
-                    if let item = store.items.first(where: { $0.id == id }) {
+                    if let item = store.item(withID: id) {
                         side(item)
                     }
                 }
@@ -2007,13 +2129,7 @@ struct ComparePairSheet: View {
         .frame(minWidth: 1100, minHeight: 720)
     }
 
-    private func verdictColor(_ v: Verdict) -> Color {
-        switch v {
-        case .pick: return .green
-        case .usable: return .blue
-        case .reject: return .red
-        }
-    }
+    private func verdictColor(_ v: Verdict) -> Color { v.color }
 
     private func side(_ item: BatchItem) -> some View {
         VStack(spacing: 4) {
@@ -2058,7 +2174,9 @@ struct ComparePairSheet: View {
 /// arrows, left hand on digits — a digit verdict AUTO-ADVANCES to the next shot.
 struct ReviewView: View {
     @ObservedObject var store: BatchStore
-    let visibleItems: [BatchItem]
+    /// Paging order frozen when review mode opened (see BatchView.pagingOrder);
+    /// verdicts are read live from the store so the header/filmstrip update.
+    let orderIDs: [String]
     @Binding var focusedID: String?
     @Binding var reviewMode: Bool
     /// In-flow focus check: Z / double-click / pinch opens the full-res ZoomPane
@@ -2067,22 +2185,27 @@ struct ReviewView: View {
     @State private var zoomImage: NSImage?
     @State private var loadingZoom = false
 
+    private var visibleItems: [BatchItem] {
+        orderIDs.compactMap { store.item(withID: $0) }
+    }
+
     private var currentIndex: Int {
-        guard let id = focusedID, let idx = visibleItems.firstIndex(where: { $0.id == id }) else { return 0 }
+        guard let id = focusedID, let idx = orderIDs.firstIndex(of: id) else { return 0 }
         return idx
     }
 
     private var current: BatchItem? {
-        visibleItems.isEmpty ? nil : visibleItems[min(currentIndex, visibleItems.count - 1)]
+        guard !orderIDs.isEmpty else { return nil }
+        return store.item(withID: orderIDs[min(currentIndex, orderIDs.count - 1)])
     }
 
     var body: some View {
         VStack(spacing: 0) {
             if let item = current {
                 HStack {
-                    Text("\(currentIndex + 1) / \(visibleItems.count)").monospacedDigit()
+                    Text("\(currentIndex + 1) / \(orderIDs.count)").monospacedDigit()
                     Text(item.id).font(.headline)
-                    Text(item.verdict.rawValue).font(.caption).bold()
+                    Label(item.verdict.rawValue, systemImage: item.verdict.symbol).font(.caption).bold()
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(color(item.verdict).opacity(0.25), in: Capsule())
                         .foregroundStyle(color(item.verdict))
@@ -2132,7 +2255,8 @@ struct ReviewView: View {
                         // firing a decode at once, and each holding its NSImage
                         // in @State where the cache byte limits can't reclaim it.
                         LazyHStack(spacing: 4) {
-                            ForEach(visibleItems) { member in
+                            ForEach(orderIDs, id: \.self) { memberID in
+                                if let member = store.item(withID: memberID) {
                                 ThumbnailView(path: member.previewPath, maxPixel: 256)
                                     .frame(width: 92, height: 64)
                                     .clipShape(RoundedRectangle(cornerRadius: 4))
@@ -2143,6 +2267,7 @@ struct ReviewView: View {
                                     )
                                     .id(member.id)
                                     .onTapGesture { focusedID = member.id }
+                                }
                             }
                         }
                         .padding(6)
@@ -2163,11 +2288,10 @@ struct ReviewView: View {
             // Resume where the last review session stopped — 3000 photos get
             // reviewed across evenings. An explicit grid focus wins.
             if focusedID == nil {
-                if let last = store.lastReviewedID,
-                   visibleItems.contains(where: { $0.id == last }) {
+                if let last = store.lastReviewedID, orderIDs.contains(last) {
                     focusedID = last
                 } else {
-                    focusedID = visibleItems.first?.id
+                    focusedID = orderIDs.first
                 }
             }
             prefetchNeighbors()
@@ -2182,7 +2306,10 @@ struct ReviewView: View {
         }
         .onKeyPress(.leftArrow) { step(-1); return .handled }
         .onKeyPress(.rightArrow) { step(1); return .handled }
-        .onKeyPress(characters: .init(charactersIn: "zZ")) { _ in
+        .onKeyPress(characters: .init(charactersIn: "zZ")) { press in
+            // Bare Z only: ⌘Z is the undo shortcut on the button above and
+            // must not also toggle the zoom.
+            guard press.modifiers.isSubset(of: [.shift, .capsLock]) else { return .ignored }
             if let item = current { toggleZoom(item) }
             return .handled
         }
@@ -2230,8 +2357,8 @@ struct ReviewView: View {
 
     private func step(_ delta: Int) {
         let next = currentIndex + delta
-        if visibleItems.indices.contains(next) {
-            focusedID = visibleItems[next].id
+        if orderIDs.indices.contains(next) {
+            focusedID = orderIDs[next]
         }
     }
 
@@ -2241,8 +2368,8 @@ struct ReviewView: View {
         let idx = currentIndex
         for offset in [1, -1, 2] {
             let n = idx + offset
-            guard visibleItems.indices.contains(n) else { continue }
-            let path = visibleItems[n].previewPath
+            guard orderIDs.indices.contains(n), let neighbor = store.item(withID: orderIDs[n]) else { continue }
+            let path = neighbor.previewPath
             guard ThumbCache.cache.object(forKey: ThumbCache.key(path, 1600)) == nil else { continue }
             Task.detached(priority: .utility) {
                 _ = ThumbCache.load(path: path, maxPixel: 1600)
@@ -2250,11 +2377,5 @@ struct ReviewView: View {
         }
     }
 
-    private func color(_ v: Verdict) -> Color {
-        switch v {
-        case .pick: return .green
-        case .usable: return .blue
-        case .reject: return .red
-        }
-    }
+    private func color(_ v: Verdict) -> Color { v.color }
 }
