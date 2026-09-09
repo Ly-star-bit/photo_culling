@@ -30,7 +30,9 @@ enum CSV {
                 case ",":
                     row.append(field)
                     field = ""
-                case "\n":
+                // "\r\n" is a single Character in Swift — without this case a
+                // CRLF file (Excel/Numbers export) collapses into one row.
+                case "\n", "\r\n":
                     row.append(field)
                     field = ""
                     rows.append(row)
@@ -48,6 +50,12 @@ enum CSV {
             rows.append(row)
         }
         return rows.filter { !($0.count == 1 && $0[0].isEmpty) }
+    }
+
+    /// Header name -> column index. Duplicate column names keep the first
+    /// occurrence instead of trapping like `Dictionary(uniqueKeysWithValues:)`.
+    static func columnIndex(_ header: [String]) -> [String: Int] {
+        Dictionary(header.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
     static func escapeField(_ value: String) -> String {
