@@ -11,8 +11,8 @@
 - **对焦检测（五官 ROI）**：锐度只在眼+眉、嘴部区域计算（Tenengrad 梯度 + 高斯降噪），头发和背景纹理不参与投票；无人脸照片自动切换到原生抠图的主体区域
 - **曝光裁切检测**：死白/死黑像素占比（三通道同时裁切才算，红花不误报）
 - **连拍分组**：pHash + 时间窗聚类，组内自动挑最佳（表情 > 人脸质量 > 锐度），落单照片不发精选（精选必须赢过真实对手）
-- **VLM 废片复审（平反庭）**：MiniCPM-V 4.6（1.3B，Ollama 本地运行）只复审被自动淘汰的照片，按各自罪名定向提问——虚焦→"主体清晰吗"、闭眼→"是否眯眼笑"、曝光→"是否刻意剪影/逆光"。洗清罪名自动回到可用并带"平反"徽章；VLM 只能撤销它复查过的罪名，人工改判不受影响。断点续跑：中断后重跑只处理剩余照片
-- **VLM 幸存者精审（可选）**：给未淘汰照片打表情分（连拍组挑精选的首要排序依据）+ 构图提示（抢镜/切肢仅作徽章）
+- **VLM 废片复审（平反庭）**：MiniCPM-V 4.6（1.3B，Ollama 本地运行）只复审被自动淘汰的照片，按各自罪名定向提问——虚焦→"主体清晰吗"、闭眼→"是否眯眼笑"、曝光→"是否刻意剪影/逆光"。洗清罪名自动回到可用并带"平反"徽章；VLM 只能撤销它复查过的罪名，人工改判不受影响。闭眼复审裁的是被定罪的那张脸（多人合照里 EAR 最低的主体脸，与判决规则一致），VLM 答"看不清"时维持原判而不是平反。断点续跑按罪名记账：中断后重跑只处理剩余照片，调滑杆后新增的罪名只补问新罪名、保留已有结论
+- **VLM 幸存者精审（可选）**：给未淘汰照片打表情分（连拍组挑精选的首要排序依据）+ 构图提示（抢镜/切肢仅作徽章）；无人脸的照片不问表情，表情分留空
 - **阈值实时判决**：分析只存原始数值，拖滑杆即时重判，三档预设（宽松/标准/严格）
 - **人工优先**：键盘快速改判（1 精选 / 2 可用 / 3 废片 / 0 恢复）、全屏审片模式、⌘ 多选批量改判，人工决定永远压过算法
 - **交付出口**：XMP 星级+色标写回原图旁（LR/C1/Bridge 可读）、可调质量的全尺寸 JPG 导出（保留 EXIF）、单文件 HTML 选片确认表（发客户勾选精修）、废片一键进废纸篓（可恢复）
@@ -53,11 +53,17 @@ culling-poc/
 │       ├── BatchStore.swift   # 判决逻辑·会话管理·导出
 │       └── BatchView.swift    # 批量选片界面
 ├── layer1.py            # Python 版一阶段 (YuNet+MediaPipe, 已被原生引擎取代, 留作对照)
-├── layer2.py            # VLM 语义复核 (--backend ollama / openai)
-├── rate.py              # 命令行判决+XMP 导出
+├── layer2.py            # VLM 语义复核 (--backend ollama / openai)，app 里唯一会跑的 Python
 ├── evaluate.py          # 阈值扫描·与人工标注对比校准
-└── prompts/             # VLM 提示词
+├── prompts/             # VLM 提示词
+├── runtime/             # 打进 app 的精简运行时 (pyproject + uv.lock: 只有 requests/tqdm/pillow)
+└── pyproject.toml       # 开发环境 (含 layer1 的 mediapipe/opencv/rawpy，不进 app)
 ```
+
+`build_app.sh` 只把 `layer2.py`、`common.py`、`prompts/` 和 `runtime/` 里的 pyproject/锁文件装进
+`选片工具.app/Contents/Resources/culling-poc`，app 启动时同步到 `~/Library/Application Support/选片工具/runtime/culling-poc`
+并在那里 `uv run python layer2.py`。首次跑 VLM 时 uv 只装这三个包（几 MB），老安装里带着
+mediapipe/opencv 的 `.venv` 会被 uv 自动裁剪到同样的精简集合。
 
 ## 环境要求与安装
 
@@ -65,7 +71,15 @@ culling-poc/
 - 基础功能（分析/筛选/导出）**零外部依赖**，装 app 即用
 - VLM 语义复核（可选）需要：
   - [Ollama](https://ollama.com)：`ollama pull minicpm-v4.6`（q4 版约 1.6GB，无风扇机型更凉快）
-  - [uv](https://github.com/astral-sh/uv)：`brew install uv`（首次运行自动装 Python 依赖）
+  - [uv](https://github.com/astral-sh/uv)：`brew install uv`（首次运行自动装精简运行时：requests / tqdm / pillow，几 MB）
+
+### 安装
+
+1. 从 [Releases](../../releases) 下载 `PhotoCulling-vX.Y.Z.dmg`，打开后把 **选片工具** 拖到 **Applications**
+2. app 没有 Apple 开发者签名，首次打开会被 Gatekeeper 拦下。macOS 15 起「右键 → 打开」已不再绕过拦截，改走：
+   先双击一次让系统弹出拦截提示 → **系统设置 → 隐私与安全性** → 页面底部找到「已阻止使用"选片工具"」→ **仍要打开**（只需一次）
+   - macOS 14 仍可右键 app → 打开
+3. 之后从启动台 / Applications 正常打开即可
 
 ### 从源码构建
 
