@@ -30,44 +30,17 @@ enum Metrics {
 
     // MARK: - Sharpness
 
-    /// Variance of the 4-neighbor Laplacian over the region (x0,y0)-(x1,y1),
-    /// exclusive of the 1px border. Matches cv2.Laplacian(gray, CV_64F).var().
-    static func laplacianVariance(gray: [Float], width: Int, height: Int,
-                                  x0: Int = 0, y0: Int = 0, x1: Int? = nil, y1: Int? = nil) -> Double {
-        let xEnd = x1 ?? width
-        let yEnd = y1 ?? height
-        let xs = max(1, x0), xe = min(width - 1, xEnd)
-        let ys = max(1, y0), ye = min(height - 1, yEnd)
-        guard xe > xs, ye > ys else { return 0 }
-
-        var sum = 0.0
-        var sumSq = 0.0
-        var count = 0.0
-        for y in ys..<ye {
-            let row = y * width
-            for x in xs..<xe {
-                let i = row + x
-                let lap = Double(gray[i - width] + gray[i + width] + gray[i - 1] + gray[i + 1] - 4 * gray[i])
-                sum += lap
-                sumSq += lap * lap
-                count += 1
-            }
-        }
-        guard count > 0 else { return 0 }
-        let mean = sum / count
-        return sumSq / count - mean * mean
-    }
-
     /// RMS Sobel gradient magnitude (Tenengrad family) over the region, after a
     /// 3×3 Gaussian smoothing pass. Two deliberate departures from the Laplacian
-    /// variance above:
+    /// variance the Python layer used (cv2.Laplacian(gray).var()):
     /// - Sobel's first-derivative response degrades gracefully under sensor
     ///   noise, where the Laplacian's second derivative amplifies it — high-ISO
     ///   grain read as "sharpness" was the whole complaint.
     /// - The Gaussian pre-blur kills single-pixel ISO speckle outright; on a
     ///   feature-sized ROI its cost is invisible.
     /// sqrt of the mean keeps values in a slider-friendly range instead of raw
-    /// squared-gradient millions. NOT comparable to laplacianVariance numbers.
+    /// squared-gradient millions. NOT comparable to Laplacian-variance numbers
+    /// (253-647 on the same photos); this scale is what analysisVersion pins.
     static func tenengrad(gray: [Float], width: Int, height: Int,
                           x0: Int = 0, y0: Int = 0, x1: Int? = nil, y1: Int? = nil) -> Double {
         let xEnd = min(width, x1 ?? width)
@@ -90,21 +63,30 @@ enum Metrics {
             }
         }
 
-        // Separable 3×3 Gaussian [1 2 1]/4, horizontal then vertical.
-        var smooth = buf
+        // Separable 3×3 Gaussian [1 2 1]/4, horizontal then vertical. The
+        // passes write into fresh zeroed buffers and copy only the one-pixel
+        // border they don't compute (`var smooth = buf` used to copy the whole
+        // region twice, a full-frame copy each for the whole-image fallback).
+        var smooth = [Float](repeating: 0, count: rw * rh)
         buf.withUnsafeBufferPointer { src in
             smooth.withUnsafeMutableBufferPointer { dst in
                 for y in 0..<rh {
                     let row = y * rw
+                    dst[row] = src[row]
+                    dst[row + rw - 1] = src[row + rw - 1]
                     for x in 1..<(rw - 1) {
                         dst[row + x] = (src[row + x - 1] + 2 * src[row + x] + src[row + x + 1]) * 0.25
                     }
                 }
             }
         }
-        var final = smooth
+        var final = [Float](repeating: 0, count: rw * rh)
         smooth.withUnsafeBufferPointer { src in
             final.withUnsafeMutableBufferPointer { dst in
+                for x in 0..<rw {
+                    dst[x] = src[x]
+                    dst[(rh - 1) * rw + x] = src[(rh - 1) * rw + x]
+                }
                 for y in 1..<(rh - 1) {
                     let row = y * rw
                     for x in 0..<rw {

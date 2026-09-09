@@ -15,6 +15,9 @@ enum AnalysisEngine {
         let decodePath: String
         let previewRelPath: String
         let captureTime: Date?
+        /// Sub-second part of the capture time (0 when the camera didn't write
+        /// SubSecTimeOriginal) — orders same-second burst frames deterministically.
+        let captureSubsec: Double
         let cameraModel: String?
         let shutterSec: Double?
         let aperture: Double?
@@ -43,11 +46,17 @@ enum AnalysisEngine {
         /// Source file's modification time — the incremental-reuse key: same
         /// id + same mtime on the next run means the analysis is still valid.
         let srcMtime: Double?
+        let srcSize: Int?
         var burstGroup: Int = 0
     }
 
     static let hashThreshold = 10
     static let timeWindowSec = 2.0
+    /// Bump whenever a metric's scale changes (decode size, sharpness formula,
+    /// pHash construction). Old sessions carrying another version are re-analyzed
+    /// instead of silently mixing two scales under one slider. Files written
+    /// before this key existed are treated as version 1 (the current scale).
+    static let analysisVersion = 1
 
     struct Summary {
         let analyzed: Int
@@ -77,6 +86,11 @@ enum AnalysisEngine {
                               cancel: CancelFlag = CancelFlag(),
                               onPhoto: (@Sendable (PhotoAnalysis) -> Void)? = nil,
                               progress: @escaping @Sendable (String) -> Void) throws -> Summary {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: photoDir.path, isDirectory: &isDir), isDir.boolValue else {
+            throw NSError(domain: "AnalysisEngine", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "照片文件夹不存在或无法访问: \(photoDir.path) (被删除、改名或所在硬盘未挂载)"])
+        }
         let photos = ImageLoader.listPhotos(in: photoDir)
         guard !photos.isEmpty else {
             throw NSError(domain: "AnalysisEngine", code: 1,
@@ -100,26 +114,32 @@ enum AnalysisEngine {
            let lData = try? Data(contentsOf: dataDir.appendingPathComponent("layer1_results.json")),
            let lJson = try? JSONSerialization.jsonObject(with: lData) as? [String: Any],
            (lJson["engine"] as? String) == "native",
+           (lJson["analysis_version"] as? Int ?? 1) == analysisVersion,
            let lResults = lJson["results"] as? [[String: Any]] {
             for p in mPhotos { if let id = p["id"] as? String { oldManifestByID[id] = p } }
             for r in lResults where r["error"] == nil {
                 if let id = r["id"] as? String { oldLayer1ByID[id] = r }
             }
         }
-        func mtime(_ url: URL) -> Double? {
-            ((try? fm.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date)?
-                .timeIntervalSince1970
-        }
 
         var reusedEntries: [(id: String, manifest: [String: Any], layer1: [String: Any])] = []
         var todo: [ImageLoader.PhotoFile] = []
         for file in photos {
+            let previewURL = previewDir.appendingPathComponent("\(file.stem).jpg")
             if let l1 = oldLayer1ByID[file.stem],
-               let m = oldManifestByID[file.stem],
+               var m = oldManifestByID[file.stem],
                let saved = l1["src_mtime"] as? Double,
-               let current = mtime(file.decodeURL),
-               abs(saved - current) < 1.0,
-               fm.fileExists(atPath: previewDir.appendingPathComponent("\(file.stem).jpg").path) {
+               let current = ImageLoader.FileStamp.of(file.decodeURL),
+               abs(saved - current.mtime) < 1.0,
+               // Entries written before src_size existed match on mtime alone.
+               (l1["src_size"] as? Int).map({ $0 == current.size }) ?? true,
+               fm.fileExists(atPath: previewURL.path) {
+                // The analysis numbers are still valid, but the file layout may
+                // not be: a RAF copied in next to an analyzed JPG makes the RAW
+                // the primary (XMP goes beside it) — refresh paths every run.
+                m["raw_path"] = file.primaryURL.path
+                m["decode_path"] = file.decodeURL.path
+                m["preview_path"] = previewURL.path
                 reusedEntries.append((file.stem, m, l1))
             } else {
                 todo.append(file)
@@ -162,23 +182,28 @@ enum AnalysisEngine {
         }
         group.wait()
 
-        if cancel.isSet {
-            return Summary(analyzed: 0, reused: 0, failed: [], cancelled: true)
-        }
-
         var completed = results.compactMap { $0 }
         let completedIds = Set(completed.map(\.id))
-        let failed = todo.map(\.stem).filter { !completedIds.contains($0) }
+        // On cancel the never-started photos are not failures; on a full run
+        // anything that produced no result is.
+        let cancelled = cancel.isSet
+        let failed = cancelled ? [] : todo.map(\.stem).filter { !completedIds.contains($0) }
 
         // Burst grouping over the MERGED set: reused entries contribute their
         // stored capture time + phash so a new frame can join an old group.
+        // A phash that fails to parse must match NOTHING (nil), not everything
+        // (the old `?? 0` matched every neighbour within the time window).
         var slots: [GroupSlot] = reusedEntries.map { entry in
             GroupSlot(
+                id: entry.id,
                 captureTime: (entry.layer1["capture_time"] as? String).flatMap(isoFormatter.date(from:)),
-                phash: (entry.layer1["phash"] as? String).flatMap { UInt64($0, radix: 16) } ?? 0
+                subsec: entry.layer1["capture_subsec"] as? Double ?? 0,
+                phash: (entry.layer1["phash"] as? String).flatMap { UInt64($0, radix: 16) }
             )
         }
-        slots += completed.map { GroupSlot(captureTime: $0.captureTime, phash: $0.phash) }
+        slots += completed.map {
+            GroupSlot(id: $0.id, captureTime: $0.captureTime, subsec: $0.captureSubsec, phash: $0.phash)
+        }
         let groups = assignGroups(slots)
         var reusedFinal = reusedEntries
         for i in reusedFinal.indices { reusedFinal[i].layer1["burst_group"] = groups[i] }
@@ -196,28 +221,49 @@ enum AnalysisEngine {
             layer1ByID[p.id] = layer1Entry(p)
         }
         let orderedIds = photos.map(\.stem).filter { manifestByID[$0] != nil }
+        // Written even when cancelled: 2900 finished photos of a 3000-photo shoot
+        // used to be thrown away (previews on disk, no JSON rows), so the next
+        // run redid all of them. Now they become reusable entries.
         try writeManifest(orderedIds.compactMap { manifestByID[$0] }, photoDir: photoDir, dataDir: dataDir)
         try writeLayer1(orderedIds.compactMap { layer1ByID[$0] }, dataDir: dataDir)
         return Summary(analyzed: completed.count, reused: reusedFinal.count,
-                       failed: failed, cancelled: false)
+                       failed: failed, cancelled: cancelled)
     }
 
     // MARK: - Per-photo
 
     private static func analyzePhoto(_ file: ImageLoader.PhotoFile, previewDir: URL) -> PhotoAnalysis? {
         let start = Date()
-        guard let loaded = ImageLoader.load(file.decodeURL),
-              let (rgba, width, height) = ImageLoader.rgbaBuffer(loaded.image) else {
+        // Stamp before and after the decode: ImageIO happily decodes a file
+        // that is still being copied from the card (the missing part comes out
+        // gray, no error) and the mtime settles afterwards, so that gray frame
+        // would be reused forever. A stamp that moved means "not this time".
+        guard let stampBefore = ImageLoader.FileStamp.of(file.decodeURL),
+              let loaded = ImageLoader.load(file.decodeURL),
+              let stampAfter = ImageLoader.FileStamp.of(file.decodeURL),
+              stampAfter == stampBefore else {
             return nil
         }
 
         let id = file.stem
         let previewURL = previewDir.appendingPathComponent("\(id).jpg")
-        _ = ImageLoader.savePreview(loaded.image, to: previewURL)
+        // No preview = a gray cell in the grid and a photo the VLM can't see;
+        // count it as failed instead of pretending.
+        guard ImageLoader.savePreview(loaded.image, to: previewURL) else { return nil }
 
-        let hash = Metrics.phash(rgba: rgba, width: width, height: height)
-        let (highlightPct, shadowPct) = Metrics.exposureClipping(rgba: rgba, width: width, height: height)
-        let gray = Metrics.grayscale(rgba: rgba, width: width, height: height)
+        // The RGBA buffer (~38MB) is only needed for the pixel metrics; scope
+        // it so it's released before Vision runs alongside 7 other workers.
+        let hash: UInt64
+        let highlightPct: Double, shadowPct: Double
+        let gray: [Float]
+        let width: Int, height: Int
+        do {
+            guard let (rgba, w, h) = ImageLoader.rgbaBuffer(loaded.image) else { return nil }
+            width = w; height = h
+            hash = Metrics.phash(rgba: rgba, width: w, height: h)
+            (highlightPct, shadowPct) = Metrics.exposureClipping(rgba: rgba, width: w, height: h)
+            gray = Metrics.grayscale(rgba: rgba, width: w, height: h)
+        }
 
         let vision = FaceAnalyzer.analyze(in: loaded.image)
         let face = vision.face
@@ -266,6 +312,7 @@ enum AnalysisEngine {
             // "relative to the Python project cwd" no longer means anything.
             previewRelPath: previewURL.path,
             captureTime: loaded.captureTime,
+            captureSubsec: loaded.captureSubsec,
             cameraModel: loaded.cameraModel,
             shutterSec: loaded.shutterSec,
             aperture: loaded.aperture,
@@ -287,7 +334,8 @@ enum AnalysisEngine {
             highlightClipPct: highlightPct,
             shadowClipPct: shadowPct,
             elapsedSec: Date().timeIntervalSince(start),
-            srcMtime: ((try? FileManager.default.attributesOfItem(atPath: file.decodeURL.path))?[.modificationDate] as? Date)?.timeIntervalSince1970
+            srcMtime: stampAfter.mtime,
+            srcSize: stampAfter.size
         )
     }
 
@@ -296,26 +344,39 @@ enum AnalysisEngine {
     /// Grouping input decoupled from PhotoAnalysis so reused JSON entries and
     /// fresh analyses group together in one pass.
     struct GroupSlot {
+        let id: String
         let captureTime: Date?
-        let phash: UInt64
+        let subsec: Double
+        /// nil = unknown hash (unparseable legacy entry): never matches.
+        let phash: UInt64?
     }
 
     /// Group id per slot (chronological ids, undated photos get singletons).
+    /// Order is (time + subsecond, id): same-second burst frames used to be
+    /// compared in INPUT order, which differs between a full run (folder order)
+    /// and an incremental one (reused first, fresh last) — groups shifted
+    /// between two runs over the same photos.
     private static func assignGroups(_ slots: [GroupSlot]) -> [Int] {
         var result = [Int](repeating: 0, count: slots.count)
         var dated = slots.indices.filter { slots[$0].captureTime != nil }
         let undated = slots.indices.filter { slots[$0].captureTime == nil }
-        dated.sort { slots[$0].captureTime! < slots[$1].captureTime! }
+        dated.sort { a, b in
+            let ta = slots[a].captureTime!.timeIntervalSince1970 + slots[a].subsec
+            let tb = slots[b].captureTime!.timeIntervalSince1970 + slots[b].subsec
+            if ta != tb { return ta < tb }
+            return slots[a].id < slots[b].id
+        }
 
         var groupId = 0
         var prev: Int?
         for idx in dated {
             if let p = prev {
                 let dt = slots[idx].captureTime!.timeIntervalSince(slots[p].captureTime!)
-                let dist = Metrics.hammingDistance(slots[p].phash, slots[idx].phash)
-                if !(dt <= timeWindowSec && dist <= hashThreshold) {
-                    groupId += 1
+                var sameBurst = false
+                if let hp = slots[p].phash, let hi = slots[idx].phash {
+                    sameBurst = dt <= timeWindowSec && Metrics.hammingDistance(hp, hi) <= hashThreshold
                 }
+                if !sameBurst { groupId += 1 }
             } else {
                 groupId += 1
             }
@@ -363,7 +424,9 @@ enum AnalysisEngine {
             "id": p.id,
             "phash": Metrics.phashHex(p.phash),
             "capture_time": p.captureTime.map(isoFormatter.string(from:)) as Any,
+            "capture_subsec": p.captureSubsec,
             "src_mtime": p.srcMtime as Any,
+            "src_size": p.srcSize as Any,
             "face_found": p.faceFound,
             "eye_closed": p.eyeClosed as Any,
             // Vision path reports eye-aspect-ratio (LOWER = more closed), unlike
@@ -401,6 +464,7 @@ enum AnalysisEngine {
             "hash_threshold": hashThreshold,
             "time_window_sec": timeWindowSec,
             "engine": "native",
+            "analysis_version": analysisVersion,
             "results": entries,
         ]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])

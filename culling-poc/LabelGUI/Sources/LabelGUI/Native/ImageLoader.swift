@@ -28,9 +28,32 @@ enum ImageLoader {
     static let analysisMaxPixel = 3072
     static let previewMaxPixel = 1024
 
+    /// Output subfolders (inside the shoot folder) that must never be scanned
+    /// as photos: the 高ISO RAW copies for denoising, and the app's own JPG /
+    /// watermark exports. Without this, exporting into the shoot folder makes
+    /// the next 开始分析 pick the outputs up as new "_jpg" photos.
+    static let excludedSubfolders: Set<String> = [denoiseSubfolder, jpegExportSubfolder, "水印导出"]
+    static let jpegExportSubfolder = "导出JPG"
+
+    /// Size + modification time of a source file, the incremental-reuse key and
+    /// the "did this file change under us while we decoded it" guard.
+    struct FileStamp: Equatable {
+        let size: Int
+        let mtime: Double
+        static func of(_ url: URL) -> FileStamp? {
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
+            let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
+            guard let date = attrs[.modificationDate] as? Date else { return nil }
+            return FileStamp(size: size, mtime: date.timeIntervalSince1970)
+        }
+    }
+
     struct Loaded {
         let image: CGImage
         let captureTime: Date?
+        /// EXIF SubSecTimeOriginal as a fraction of a second (0 when absent):
+        /// burst frames share the same whole second, this breaks the tie.
+        let captureSubsec: Double
         let cameraModel: String?
         /// Shooting parameters — the photographer's own language for judging a
         /// frame ("1/60 for action, of course it's soft").
@@ -65,7 +88,7 @@ enum ImageLoader {
         if let enumerator = fm.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey],
                                           options: [.skipsHiddenFiles, .skipsPackageDescendants]) {
             for case let url as URL in enumerator {
-                if url.hasDirectoryPath, url.lastPathComponent == denoiseSubfolder {
+                if url.hasDirectoryPath, excludedSubfolders.contains(url.lastPathComponent) {
                     enumerator.skipDescendants()
                     continue
                 }
@@ -171,6 +194,7 @@ enum ImageLoader {
         }
 
         var captureTime: Date?
+        var captureSubsec = 0.0
         var cameraModel: String?
         var shutterSec: Double?
         var aperture: Double?
@@ -178,9 +202,25 @@ enum ImageLoader {
         var focal35: Int?
         var lensModel: String?
         if let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
+            let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
             if let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
-                if let dateString = exif[kCGImagePropertyExifDateTimeOriginal] as? String {
-                    captureTime = Self.exifDateFormatter.date(from: dateString)
+                // DateTimeOriginal first; scans/screenshots/some HEIC only carry
+                // Digitized or the TIFF DateTime — better than undated, which
+                // drops the photo out of chapters and time ordering entirely.
+                let candidates: [String?] = [
+                    exif[kCGImagePropertyExifDateTimeOriginal] as? String,
+                    exif[kCGImagePropertyExifDateTimeDigitized] as? String,
+                    tiff?[kCGImagePropertyTIFFDateTime] as? String,
+                ]
+                for case let dateString? in candidates {
+                    if let date = Self.exifDateFormatter.date(from: dateString) {
+                        captureTime = date
+                        break
+                    }
+                }
+                if let sub = exif[kCGImagePropertyExifSubsecTimeOriginal] as? String,
+                   let digits = Double("0." + sub.trimmingCharacters(in: .whitespaces)) {
+                    captureSubsec = digits
                 }
                 shutterSec = exif[kCGImagePropertyExifExposureTime] as? Double
                 aperture = exif[kCGImagePropertyExifFNumber] as? Double
@@ -191,12 +231,11 @@ enum ImageLoader {
                 }
                 lensModel = exif[kCGImagePropertyExifLensModel] as? String
             }
-            if let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
-                cameraModel = tiff[kCGImagePropertyTIFFModel] as? String
-            }
+            cameraModel = tiff?[kCGImagePropertyTIFFModel] as? String
         }
 
-        return Loaded(image: image, captureTime: captureTime, cameraModel: cameraModel,
+        return Loaded(image: image, captureTime: captureTime, captureSubsec: captureSubsec,
+                      cameraModel: cameraModel,
                       shutterSec: shutterSec, aperture: aperture, iso: iso,
                       focal35: focal35, lensModel: lensModel)
     }
@@ -224,11 +263,25 @@ enum ImageLoader {
         context.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
         guard let scaled = context.makeImage() else { return false }
 
-        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
+        // Write beside the target and rename: a crash mid-write used to leave a
+        // truncated preview that the reuse check ("file exists") trusted forever.
+        let tmp = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString.prefix(8)).tmp")
+        guard let dest = CGImageDestinationCreateWithURL(tmp as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
             return false
         }
         CGImageDestinationAddImage(dest, scaled, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
-        return CGImageDestinationFinalize(dest)
+        guard CGImageDestinationFinalize(dest) else {
+            try? FileManager.default.removeItem(at: tmp)
+            return false
+        }
+        do {
+            _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+            return true
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+            return false
+        }
     }
 
     /// Extract an 8-bit RGBA pixel buffer (4 bytes/px, alpha ignored) from a
@@ -237,13 +290,19 @@ enum ImageLoader {
     /// a full extra ~28MB copy per photo) is needed.
     static func rgbaBuffer(_ image: CGImage) -> (pixels: [UInt8], width: Int, height: Int)? {
         let w = image.width, h = image.height
+        guard w > 0, h > 0 else { return nil }
         var rgba = [UInt8](repeating: 0, count: w * h * 4)
-        guard let context = CGContext(
-            data: &rgba, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
-            space: CGColorSpace(name: CGColorSpace.sRGB)!,
-            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
-        ) else { return nil }
-        context.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
-        return (rgba, w, h)
+        // The context must be created AND drawn inside the pointer's scope — an
+        // inout `&rgba` handed to CGContext only stays valid for that one call.
+        let ok = rgba.withUnsafeMutableBytes { raw -> Bool in
+            guard let context = CGContext(
+                data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+            ) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        return ok ? (rgba, w, h) : nil
     }
 }
