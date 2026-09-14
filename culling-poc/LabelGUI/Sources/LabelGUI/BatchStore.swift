@@ -78,6 +78,22 @@ struct BatchItem: Identifiable {
     let horizonDeg: Double?
     /// Time-gap chapter (仪式/晚宴/外景...) — a >15min shooting pause starts a new one.
     var chapter: Int = 0
+    /// 机身型号。双机位婚礼两台机器同一秒各拍一张，是两个角度不是重复 —— 「场」
+    /// 必须按机身分开切，否则纯时间会把它们并进同一堆。
+    var camera: String?
+    /// 「场」(take)：连续按快门的一串，间隔超过 takeGapSec 就换一场。
+    ///
+    /// 和 `burstGroup` 是两个不同的东西，不要混用：
+    /// - `burstGroup`（引擎算的，2s + phash 汉明≤10）= **近似重复**，几乎同一张。
+    ///   组内相对闭眼基线、人脸质量对比、自动「只留最佳」都挂在它上面，动它会
+    ///   静默改掉所有历史场次的判决，所以它不动。
+    /// - `take`（这里，纯拍摄时间 + 机身）= **一场**，人在动、表情在变的那种重复。
+    ///   堆栈网格、只看待处理、保留选中·其余废片、检视器同组条都用它。
+    ///
+    /// 为什么不能用 phash 划场：64 位 DCT phash 在无关图像之间的期望汉明距离是 32，
+    /// 而实测同一场里相邻两张就能跑到 18-36（`photot`：时间窗内 10 对相邻照片，
+    /// 6 对被 phash 拦掉）。判别力恰好在"重复"这个区间饱和，划不动场。
+    var take: Int = 0
     var verdict: Verdict = .usable
     var rejectReasons: [String] = []
     /// Charges the VLM appeal cleared this photo of ("虚焦"/"闭眼"/"曝光裁切") —
@@ -161,6 +177,15 @@ final class BatchStore: ObservableObject {
     @Published var exposureThreshold: Double = 0.15 { didSet { onThresholdEdited() } }
     @Published var faceQualityThreshold: Double = 0 { didSet { onThresholdEdited() } }
 
+    /// 「同一场最大间隔」。超过这个间隔就算换了一场。
+    ///
+    /// 做成滑杆而不是写死常数，是因为它量的是**摄影师的按快门节奏**，不是画质
+    /// 严格度：宴会厅抓拍和影棚摆拍差一个数量级，而且 `photot`（21 张、单场）
+    /// 这点数据不足以支撑任何一个"科学的"固定值。所以给默认值 + 实时组数反馈，
+    /// 让用户自己拧。也正因为是节奏不是严格度，它不进 CullPreset。
+    static let defaultTakeGapSec: Double = 8
+    @Published var takeGapSec: Double = defaultTakeGapSec { didSet { onTakeGapEdited() } }
+
     /// 连拍去重：开启后每个连拍组只留下最佳的那张，组内其余**未被人工改判**的照片
     /// 自动带上「连拍重复」理由淘汰。这是规则式的（不写进 overrides），关掉开关
     /// 整组立刻全部回来——和手动的「保留选中·其余废片」正好互补，后者是永久的。
@@ -183,6 +208,8 @@ final class BatchStore: ObservableObject {
         var sharpness: Double
         var exposure: Double
         var faceQuality: Double
+        /// 可选：老的 thresholds.json 没有这个键，解码后回落到默认值。
+        var takeGap: Double?
     }
 
     private var thresholdSaveTask: Task<Void, Never>?
@@ -197,11 +224,12 @@ final class BatchStore: ObservableObject {
         let state = candidates.lazy
             .compactMap { try? Data(contentsOf: $0) }
             .compactMap { try? JSONDecoder().decode(ThresholdState.self, from: $0) }
-            .first ?? ThresholdState(sharpness: 45, exposure: 0.15, faceQuality: 0)
+            .first ?? ThresholdState(sharpness: 45, exposure: 0.15, faceQuality: 0, takeGap: nil)
         batchingThresholds = true
         sharpnessThreshold = state.sharpness
         exposureThreshold = state.exposure
         faceQualityThreshold = state.faceQuality
+        takeGapSec = state.takeGap ?? Self.defaultTakeGapSec
         batchingThresholds = false
     }
 
@@ -210,7 +238,7 @@ final class BatchStore: ObservableObject {
     private func scheduleThresholdSave() {
         thresholdSaveTask?.cancel()
         let state = ThresholdState(sharpness: sharpnessThreshold, exposure: exposureThreshold,
-                                   faceQuality: faceQualityThreshold)
+                                   faceQuality: faceQualityThreshold, takeGap: takeGapSec)
         let targets = [thresholdsPath(in: dataDir)] + (photoDir != nil ? [thresholdsPath(in: sessionDir)] : [])
         thresholdSaveTask = Task { [targets] in
             try? await Task.sleep(for: .milliseconds(500))
@@ -265,6 +293,20 @@ final class BatchStore: ObservableObject {
         scheduleThresholdSave()
     }
 
+    /// 换了间隔就地重切「场」。不碰 burstGroup，所以判决一个字都不会变 ——
+    /// 变的只有堆栈怎么分堆。
+    private func onTakeGapEdited() {
+        guard !batchingThresholds else { return }
+        var updated = items
+        Self.assignTakes(&updated, gapSec: takeGapSec)
+        items = updated
+        rebuildGroupSizes()
+        // 判决不受影响（场不参与任何判决规则），但 pendingTakeCount 住在 Derived
+        // 里，得跟着重算一次。
+        applyThresholds()
+        scheduleThresholdSave()
+    }
+
     // MARK: - Derived snapshot (rebuilt once per verdict pass, read by every render)
 
     /// Everything the status bar, top bar, chips and sliders display. These
@@ -277,6 +319,10 @@ final class BatchStore: ObservableObject {
         var chapterSegments: [ChapterSegment] = []
         var chapterWarnings: [String] = []
         var borderlineCount = 0
+        /// 还需要人取舍的「场」数：留下 2 张以上没被淘汰的。一场里已经定成
+        /// 1 张精选、其余废片的，活儿干完了，不该再占着网格。顶栏每次重绘都读它,
+        /// 所以和 verdictCounts 一起在 rebuildDerived 里算一次,别做成 O(n) 计算属性。
+        var pendingTakeCount = 0
         /// Rejects with no manual override — the appeal court's docket.
         var autoRejectCount = 0
         /// Photos with no burst sibling carrying a face-quality score: the only
@@ -294,6 +340,7 @@ final class BatchStore: ObservableObject {
     var chapterSegments: [ChapterSegment] { derived.chapterSegments }
     var chapterWarnings: [String] { derived.chapterWarnings }
     var borderlineCount: Int { derived.borderlineCount }
+    var pendingTakeCount: Int { derived.pendingTakeCount }
     var autoRejectCount: Int { derived.autoRejectCount }
 
     func item(withID id: String) -> BatchItem? {
@@ -305,15 +352,38 @@ final class BatchStore: ObservableObject {
         return items[idx]
     }
 
-    /// burst_group -> member count, for the ×N stack badge on thumbnails.
+    /// burst_group -> member count. 只给"近似重复"用（相对基线是否成立、自动
+    /// 只留最佳），堆栈的 ×N 角标看的是 takeSizes。
     /// Cached: group membership only changes when a new analysis loads, but the
     /// grid re-renders on every slider tick / focus change and reads this 3×.
     private(set) var groupSizes: [Int: Int] = [:]
+    /// take -> member count，堆栈 ×N 角标和「多张场」统计。
+    private(set) var takeSizes: [Int: Int] = [:]
+
+    /// 每台机身上相邻两张的拍摄间隔（秒），用来画「同一场最大间隔」滑杆下面那张
+    /// 直方图 —— 摄影师按快门的节奏分布，一眼能看出该把线画在哪。
+    private(set) var captureGaps: [Double] = []
 
     private func rebuildGroupSizes() {
         var sizes: [Int: Int] = [:]
-        for item in items { sizes[item.burstGroup, default: 0] += 1 }
+        var takes: [Int: Int] = [:]
+        for item in items {
+            sizes[item.burstGroup, default: 0] += 1
+            takes[item.take, default: 0] += 1
+        }
         groupSizes = sizes
+        takeSizes = takes
+
+        var gaps: [Double] = []
+        let byCamera = Dictionary(grouping: items.filter { $0.captureTime != nil },
+                                  by: { $0.camera ?? "" })
+        for (_, shots) in byCamera {
+            let times = shots.compactMap(\.captureTime).sorted()
+            for i in 1..<max(1, times.count) {
+                gaps.append(times[i].timeIntervalSince(times[i - 1]))
+            }
+        }
+        captureGaps = gaps
     }
 
     private func rebuildDerived(groupQCount: [Int: Int]) {
@@ -334,6 +404,9 @@ final class BatchStore: ObservableObject {
                 d.faceQualityAbsoluteValues.append(q)
             }
         }
+        var aliveByTake: [Int: Int] = [:]
+        for item in items where item.verdict != .reject { aliveByTake[item.take, default: 0] += 1 }
+        d.pendingTakeCount = aliveByTake.values.filter { $0 > 1 }.count
         d.verdictCounts = (r, u, p)
         (d.chapterSegments, d.chapterWarnings) = Self.chapterSummary(items)
         derived = d
@@ -883,13 +956,21 @@ final class BatchStore: ObservableObject {
         applyThresholds()
     }
 
-    /// 一个连拍组的全部成员 id，按当前网格顺序。
-    func groupMemberIDs(_ group: Int) -> [String] {
-        items.filter { $0.burstGroup == group }.map(\.id)
+    /// 一个「场」的全部成员 id，按当前网格顺序。
+    func takeMemberIDs(_ take: Int) -> [String] {
+        items.filter { $0.take == take }.map(\.id)
     }
 
-    /// 有 2 张以上成员的连拍组数 / 这些组里的照片总数 —— 控制面板上用来回答
-    /// "这场到底有多少重复要处理"。
+    /// 有 2 张以上的「场」数 / 这些场里的照片总数 —— 回答"这场拍摄到底有多少
+    /// 重复要取舍"。滑杆旁边实时显示，用户拧间隔时能立刻看到分堆变化。
+    var takeStats: (takes: Int, photos: Int) {
+        var t = 0, p = 0
+        for (_, count) in takeSizes where count > 1 { t += 1; p += count }
+        return (t, p)
+    }
+
+    /// 有 2 张以上成员的**近似重复**组数 / 照片数 —— 自动「只留最佳」作用的范围，
+    /// 和上面的「场」不是一回事。
     var burstGroupStats: (groups: Int, photos: Int) {
         var g = 0, p = 0
         for (_, count) in groupSizes where count > 1 { g += 1; p += count }
@@ -965,6 +1046,7 @@ final class BatchStore: ObservableObject {
             }
             updated.append(fresh)
         }
+        Self.assignTakes(&updated, gapSec: takeGapSec)
         Self.sort(&updated, by: sortOrder)
         items = updated
         provisionalBuffer.removeAll()
@@ -1003,7 +1085,8 @@ final class BatchStore: ObservableObject {
             captureTime: a.captureTime,
             exif: ExifMeta(shutterSec: a.shutterSec, aperture: a.aperture, iso: a.iso,
                            focal35: a.focal35, lens: a.lensModel),
-            horizonDeg: a.horizonDeg
+            horizonDeg: a.horizonDeg,
+            camera: a.cameraModel
         )
     }
 
@@ -1431,9 +1514,11 @@ final class BatchStore: ObservableObject {
                 horizonDeg: l1.horizonDeg
             )
             item.order = index
+            item.camera = photo.camera
             return item
         }
         Self.assignChapters(&loaded)
+        Self.assignTakes(&loaded, gapSec: takeGapSec)
         Self.sort(&loaded, by: sortOrder)
         items = loaded
         unparsedCount = manifest.photos.count - loaded.count
@@ -1462,6 +1547,56 @@ final class BatchStore: ObservableObject {
             prevTime = t
         }
         // Undated photos join chapter 0 rather than spawning fake chapters.
+    }
+
+    // MARK: - Takes (场)
+
+    /// 按拍摄时间把连续按快门的一串切成「场」，每台机身各切各的。
+    ///
+    /// 和 assignChapters 是同一套形状，只是粒度细一级（章节 15 分钟 / 场 ~8 秒），
+    /// 三层：章节 > 场 > 近似重复(burstGroup)。
+    ///
+    /// 只看时间不看画面：phash 在这个尺度上判别力已经饱和（见 BatchItem.take 的
+    /// 注释）。真正需要画面信号来拦的，是"没停快门就转向另一个主体"——但那种
+    /// 情况下机身和时间通常也一起变，先不为它加复杂度。
+    ///
+    /// 没有拍摄时间的照片（EXIF 缺失）各自成场，不会被塞进邻居那一堆。
+    ///
+    /// 切完再**按开始时间统一重新编号**：分桶是按机身的，边切边编会编成
+    /// "A 机全部的场，然后 B 机全部的场"，堆栈网格按 take 排序就变成两台机器
+    /// 各排一段，时间线整个乱掉 —— 而按机身分桶本来就是为双机位加的。
+    static func assignTakes(_ array: inout [BatchItem], gapSec: Double) {
+        var segments: [(start: Date, members: [Int])] = []
+        // 按机身分桶：双机位同一秒的两张是两个角度，不是重复。
+        let byCamera = Dictionary(grouping: array.indices.filter { array[$0].captureTime != nil },
+                                  by: { array[$0].camera ?? "" })
+        for key in byCamera.keys.sorted() {
+            let indices = byCamera[key]!.sorted { array[$0].captureTime! < array[$1].captureTime! }
+            var current: [Int] = []
+            var prevTime: Date?
+            for idx in indices {
+                let t = array[idx].captureTime!
+                if let prev = prevTime, t.timeIntervalSince(prev) <= gapSec {
+                    current.append(idx)
+                } else {
+                    if !current.isEmpty { segments.append((array[current[0]].captureTime!, current)) }
+                    current = [idx]
+                }
+                prevTime = t
+            }
+            if !current.isEmpty { segments.append((array[current[0]].captureTime!, current)) }
+        }
+        segments.sort { $0.start < $1.start }
+        var take = 0
+        for segment in segments {
+            take += 1
+            for idx in segment.members { array[idx].take = take }
+        }
+        // 没有拍摄时间的排在最后，各自成场。
+        for idx in array.indices where array[idx].captureTime == nil {
+            take += 1
+            array[idx].take = take
+        }
     }
 
     /// Recomputed on every status-bar render — DateFormatter construction is
@@ -1715,6 +1850,19 @@ final class BatchStore: ObservableObject {
         return ear < earSingleThreshold
     }
 
+    /// 组/场内排名：先看 VLM 表情分，再看 Apple 的 FaceCaptureQuality（它被设计出来
+    /// 就是干这个的——给同一个主体的多张抓拍排序），锐度只作最后的抢七 / 无人脸时的
+    /// 兜底。返回 nil = 没有候选。
+    private static func bestIndex(_ indices: [Int], in items: [BatchItem]) -> Int? {
+        indices.max { a, b in
+            let ea = items[a].expressionScore ?? -1
+            let eb = items[b].expressionScore ?? -1
+            let qa = items[a].faceQuality ?? -1
+            let qb = items[b].faceQuality ?? -1
+            return (ea, qa, items[a].sharpness) < (eb, qb, items[b].sharpness)
+        }
+    }
+
     func applyThresholds() {
         // Everything below works on a LOCAL copy and assigns `items` once at the
         // end. Writing `items[i].x = ...` on the @Published array fired one
@@ -1810,42 +1958,51 @@ final class BatchStore: ObservableObject {
             if effective == .reject { rejected.insert(updated[i].id) }
         }
 
-        // 精选 only within burst groups of 2+ survivors — a pick must have beaten
-        // a real alternative, not merely been unopposed.
-        var groups: [Int: [Int]] = [:]
-        for (idx, item) in updated.enumerated() where !rejected.contains(item.id) {
-            groups[item.burstGroup, default: []].append(idx)
-        }
-        // Within-group ranking: VLM expression first, then Apple's FaceCaptureQuality
-        // (its exact designed purpose — ranking captures of the same subject),
-        // sharpness only as the final tiebreak / no-face fallback.
-        for (_, indices) in groups where indices.count >= 2 {
-            // A manual 精选 in the group takes the slot; no auto-pick beside it.
-            let manualPicks = indices.filter { overrides[updated[$0].id] == .pick }
-            var winners = Set(manualPicks)
-            if manualPicks.isEmpty {
-                let candidates = indices.filter { overrides[updated[$0].id] == nil }
-                let best = candidates.max { a, b in
-                    let ea = updated[a].expressionScore ?? -1
-                    let eb = updated[b].expressionScore ?? -1
-                    let qa = updated[a].faceQuality ?? -1
-                    let qb = updated[b].faceQuality ?? -1
-                    return (ea, qa, updated[a].sharpness) < (eb, qb, updated[b].sharpness)
-                }
-                if let best {
-                    updated[best].verdict = .pick
+        // 两趟，作用在两个不同的层上 —— 别合并回一趟：
+        //   A. 去重挂在**近似重复**(burstGroup) 上：只有"几乎同一张"才敢自动扔。
+        //   B. 精选提名挂在**场**(take) 上：一场 10 张出 1 张最佳，才是摄影师说的
+        //      "这条里这张最好"。以前提名也挂在 burstGroup 上，于是 10 张的场里
+        //      会冒出 2 张精选（各自赢下自己那对近似重复），既不直观也没用。
+        // 顺序不能反：先去重，被扔掉的重复张就不该再参与本场的最佳评选。
+
+        // A. 近似重复去重。分组本来只用来"提名"，组内其余照片原封不动留在可用里
+        // ——一组全清晰全睁眼时等于什么都没做。开关打开后，没赢下这一组、又没被
+        // 人工改判过的，带着「连拍重复」进废片，和闭眼/虚焦一样能用理由 chip 回查。
+        // 人工改判过的一律不碰（手判永远压过规则）。
+        if rejectBurstDuplicates {
+            var dupGroups: [Int: [Int]] = [:]
+            for (idx, item) in updated.enumerated() where !rejected.contains(item.id) {
+                dupGroups[item.burstGroup, default: []].append(idx)
+            }
+            for (_, indices) in dupGroups where indices.count >= 2 {
+                // 组里有人工精选就以它为准，不另外自动挑一张。
+                let manualPicks = indices.filter { overrides[updated[$0].id] == .pick }
+                var winners = Set(manualPicks)
+                if manualPicks.isEmpty,
+                   let best = Self.bestIndex(indices.filter { overrides[updated[$0].id] == nil },
+                                             in: updated) {
                     winners.insert(best)
                 }
+                for idx in indices where !winners.contains(idx) && overrides[updated[idx].id] == nil {
+                    updated[idx].rejectReasons.append("连拍重复")
+                    updated[idx].verdict = .reject
+                    rejected.insert(updated[idx].id)
+                }
             }
+        }
 
-            // 连拍去重。分组以前只用来"提名"最佳的那张，组内其余照片原封不动地留在
-            // 可用里——一组 8 张全都清晰睁眼时，去重等于什么都没做。开关打开后，
-            // 没赢下这一组、又没被人工改判过的，带着「连拍重复」进废片，和闭眼/虚焦
-            // 一样能用理由 chip 回查。人工改判过的一律不碰（手判永远压过规则）。
-            guard rejectBurstDuplicates else { continue }
-            for idx in indices where !winners.contains(idx) && overrides[updated[idx].id] == nil {
-                updated[idx].rejectReasons.append("连拍重复")
-                updated[idx].verdict = .reject
+        // B. 精选提名，按「场」，且只在还剩 2 张以上存活时 —— 精选必须是赢过真实
+        // 对手来的，不能只是没人跟它抢。
+        var takeGroups: [Int: [Int]] = [:]
+        for (idx, item) in updated.enumerated() where !rejected.contains(item.id) {
+            takeGroups[item.take, default: []].append(idx)
+        }
+        for (_, indices) in takeGroups where indices.count >= 2 {
+            // 场里有人工精选就让给它，不在旁边再自动挑一张。
+            if indices.contains(where: { overrides[updated[$0].id] == .pick }) { continue }
+            if let best = Self.bestIndex(indices.filter { overrides[updated[$0].id] == nil },
+                                         in: updated) {
+                updated[best].verdict = .pick
             }
         }
 

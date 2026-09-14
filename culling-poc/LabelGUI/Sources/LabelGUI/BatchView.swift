@@ -39,9 +39,10 @@ struct BatchView: View {
     /// 按分组 = Aftershoot-style stacks: one cover per burst group, expand by
     /// opening the inspector (its 同组 strip does the within-group picking).
     @AppStorage("batch.gridMode") private var gridMode: GridMode = .byVerdict
-    /// 只看多张组 —— 一场 3000 张的婚礼里绝大多数是 ×1 的单张组，真正要处理的
-    /// 连拍堆栈本来全被它们淹掉，翻半天找不到一个 ×N。
-    @AppStorage("batch.multiGroupOnly") private var multiGroupOnly = false
+    /// 只看待处理的场 —— 3000 张的婚礼里绝大多数场只有 1 张，真正要取舍的堆栈
+    /// 本来全被它们淹掉。「待处理」= 还留着 2 张以上没淘汰的场；已经定成
+    /// 1 张精选、其余废片的，活儿干完了就自动从视野里消失。
+    @AppStorage("batch.pendingTakesOnly") private var pendingTakesOnly = false
     @State private var showStatsPopover = false
     /// Fullscreen review: one big photo + filmstrip, digit-verdicts auto-advance.
     @State private var reviewMode = false
@@ -213,12 +214,13 @@ struct BatchView: View {
             .labelsHidden()
             .frame(width: 150)
             if gridMode == .byGroup {
-                let stats = store.burstGroupStats
-                Toggle("只看多张组 (\(stats.groups))", isOn: $multiGroupOnly)
+                let stats = store.takeStats
+                Toggle("只看待处理 (\(store.pendingTakeCount))", isOn: $pendingTakesOnly)
                     .toggleStyle(.button)
-                    .help("只显示 2 张以上的连拍组 —— 这场共 \(stats.groups) 组、\(stats.photos) 张重复候选")
-            }
-            if gridMode == .byVerdict {
+                    .help("只显示还留着 2 张以上没淘汰的场 —— 定完一场它就自动消失，" +
+                          "剩下多少一眼可见。这场共 \(stats.takes) 个多张场、\(stats.photos) 张")
+            } else {
+                // 判决筛选以前只在「按判决」里出现，切到分组就没法只看废片/精选了。
                 Picker("筛选", selection: $store.verdictFilter) {
                     Text("全部").tag(Verdict?.none)
                     ForEach(Verdict.allCases, id: \.self) { v in
@@ -432,24 +434,26 @@ struct BatchView: View {
         return ordered.filter { $0.verdict == filter }
     }
 
-    /// Burst groups in capture order (group ids are assigned chronologically).
+    /// 「场」按拍摄顺序（take id 是按时间递增分配的）。
     private var groupedItems: [(group: Int, members: [BatchItem])] {
-        let dict = Dictionary(grouping: store.items, by: \.burstGroup)
-        let keys = multiGroupOnly ? dict.keys.filter { (dict[$0]?.count ?? 0) > 1 } : Array(dict.keys)
+        let dict = Dictionary(grouping: store.items, by: \.take)
+        let keys = pendingTakesOnly
+            ? dict.keys.filter { (dict[$0] ?? []).filter { $0.verdict != .reject }.count > 1 }
+            : Array(dict.keys)
         return keys.sorted().map { ($0, dict[$0]!) }
     }
 
-    /// 选中的照片牵扯到的**多张**连拍组的全部成员 —— 「保留选中·其余废片」的候选集。
-    /// 支持一次跨多组：每组挑一张，一次性把 5 组的重复全部定案。
-    /// 单张组要排除掉：选 4 张毫不相干的照片 + 1 张连拍，候选集里混进那 4 张单张，
+    /// 选中的照片牵扯到的**多张**场的全部成员 —— 「保留选中·其余废片」的候选集。
+    /// 支持一次跨多场：每场挑一张，一次性把 5 场的重复全部定案。
+    /// 单张场要排除掉：选 4 张毫不相干的照片 + 1 张连拍，候选集里混进那 4 张单张，
     /// 一点定案就把它们一起写成精选了 —— 用户根本没要求改它们的判决。
     private var selectionGroupMembers: [String] {
-        let sizes = store.groupSizes
-        let groups = Set(store.items
-            .filter { selectedIDs.contains($0.id) && (sizes[$0.burstGroup] ?? 1) > 1 }
-            .map(\.burstGroup))
-        guard !groups.isEmpty else { return [] }
-        return store.items.filter { groups.contains($0.burstGroup) }.map(\.id)
+        let sizes = store.takeSizes
+        let takes = Set(store.items
+            .filter { selectedIDs.contains($0.id) && (sizes[$0.take] ?? 1) > 1 }
+            .map(\.take))
+        guard !takes.isEmpty else { return [] }
+        return store.items.filter { takes.contains($0.take) }.map(\.id)
     }
 
     /// A stack's cover: the group's pick, else its first member.
@@ -563,7 +567,7 @@ struct BatchView: View {
 
     private func groupMembers(ofCover coverID: String) -> [String] {
         guard let cover = store.item(withID: coverID) else { return [coverID] }
-        return store.items.filter { $0.burstGroup == cover.burstGroup }.map(\.id)
+        return store.items.filter { $0.take == cover.take }.map(\.id)
     }
 
     /// Columns currently on screen, from the measured grid width — ↑/↓ moves
@@ -688,8 +692,8 @@ struct BatchView: View {
                 // 而按钮的 key equivalent 在 keyDown 之前就被吃掉 —— 只要选中了
                 // 照片，想按回车看大图就会变成"整组定案"。
                 .keyboardShortcut(.return, modifiers: .command)
-                .help("把选中这几张定为精选，它们所在连拍组里其余 \(dropCount) 张全部设为废片 (⌘⏎)。" +
-                      "整组算一次改判，⌘Z 一次撤销。可以跨多组：每组各挑一张，一次定案。")
+                .help("把选中这几张定为精选，它们所在的场里其余 \(dropCount) 张全部设为废片 (⌘⏎)。" +
+                      "整场算一次改判，⌘Z 一次撤销。可以跨多场：每场各挑一张，一次定案。")
             }
             if selectedIDs.count == 2 {
                 Divider().frame(height: 16)
@@ -883,7 +887,7 @@ struct BatchView: View {
     @ViewBuilder
     private func verdictSection(_ verdict: Verdict, color: Color) -> some View {
         let matching = sectionItems(verdict)
-        let groupSizes = store.groupSizes
+        let takeSizes = store.takeSizes
         if !matching.isEmpty || (verdict == .reject && store.reasonFilter != nil) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
@@ -896,7 +900,7 @@ struct BatchView: View {
                 }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: thumbSize), spacing: 8)], spacing: 8) {
                     ForEach(matching) { item in
-                        thumbnailCell(item, color: color, groupSize: groupSizes[item.burstGroup] ?? 1)
+                        thumbnailCell(item, color: color, groupSize: takeSizes[item.take] ?? 1)
                             .id(item.id)
                     }
                 }
@@ -1022,6 +1026,41 @@ struct BatchView: View {
     // MARK: - Right panel: thresholds + VLM only. Everything else lives in the
     // top bar / export menu; explanations live in .help tooltips, not captions.
 
+    /// 「同一场最大间隔」滑杆 + 按快门节奏直方图。
+    ///
+    /// 这是整个分组的主刻度：之前分组靠 phash 汉明距离≤10 把"同一场"切碎成
+    /// 一对一对（photot 实测最大组只有 2 张），堆栈界面因此根本没东西可堆。
+    /// 现在按拍摄时间切场，间隔交给用户拧 —— 宴会抓拍和影棚摆拍的节奏差一个
+    /// 数量级，没有哪个固定值是对的。
+    @ViewBuilder
+    private var takeGapRow: some View {
+        let stats = store.takeStats
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text("同一场最大间隔").font(.callout)
+                Spacer()
+                Text("\(stats.takes) 场多张").font(.caption).monospacedDigit()
+                    .foregroundStyle(.secondary)
+                Text("\(Int(store.takeGapSec)) 秒").font(.callout).monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            MetricHistogram(
+                values: store.captureGaps,
+                range: 0...60,
+                threshold: store.takeGapSec,
+                killBelow: true,
+                sqrtScale: true,
+                markColor: .green
+            )
+            Slider(value: $store.takeGapSec, in: 1...60, step: 1)
+            Text("绿色 = 会并进同一场的间隔。只改怎么分堆，不改任何判决。")
+                .font(.caption2).foregroundStyle(.tertiary)
+        }
+        .help("相邻两张间隔超过这个秒数就算换了一场。直方图是本场拍摄的按快门节奏分布," +
+              "白线就是当前这条线。双机位按机身各切各的 —— 两台机器同一秒各拍一张是" +
+              "两个角度,不是重复。")
+    }
+
     /// 连拍去重开关。分组本来只用来"提名"最佳的那张，组内其余照片原封不动留在
     /// 可用里 —— 一组 8 张全清晰全睁眼时等于没去重。这是规则，不写 overrides：
     /// 关掉开关整组立刻全部回来。
@@ -1029,17 +1068,18 @@ struct BatchView: View {
     private var burstDedupeRow: some View {
         let stats = store.burstGroupStats
         VStack(alignment: .leading, spacing: 2) {
-            Toggle("连拍组只留最佳 (\(store.reasonCounts["连拍重复"] ?? 0))",
+            Toggle("近似重复只留最佳 (\(store.reasonCounts["连拍重复"] ?? 0))",
                    isOn: $store.rejectBurstDuplicates)
                 .font(.caption)
-                .help("每个连拍组只保留最佳的一张，其余未被人工改判的带「连拍重复」进废片。" +
+                .help("只作用在「几乎同一张」这一层 (2秒内 + phash 汉明距离≤10)，不是整场。" +
+                      "场里人在动、表情在变，哪张好是审美判断，交给你在堆栈里勾选。" +
                       "这是可随时关掉的规则，不会覆盖你手动改判过的照片。" +
-                      "本场共 \(stats.groups) 组多张连拍、\(stats.photos) 张候选")
+                      "本场共 \(stats.groups) 组近似重复、\(stats.photos) 张候选")
                 .disabled(stats.groups == 0)
-            if stats.groups > 0 {
-                Text("本场 \(stats.groups) 组连拍 · \(stats.photos) 张")
-                    .font(.caption2).foregroundStyle(.tertiary)
-            }
+            Text(stats.groups > 0
+                 ? "\(stats.groups) 组近似重复 · \(stats.photos) 张（和上面的「场」是两层）"
+                 : "本场没有近似重复的照片")
+                .font(.caption2).foregroundStyle(.tertiary)
         }
     }
 
@@ -1105,6 +1145,7 @@ struct BatchView: View {
                                 killBelow: true
                             )
                         )
+                        takeGapRow
                         burstDedupeRow
                         Toggle("只看临界照片 (\(store.borderlineCount))", isOn: $store.borderlineFilter)
                             .font(.caption)
@@ -1628,8 +1669,8 @@ struct PhotoInspector: View {
     @State private var fitPinch: CGFloat = 1.0
     @State private var showOverlay = true
     @State private var compareOn = false
-    /// 组内定案的勾选集：⌘点击「同组」缩略条勾/取消，再按「保留勾选」把同组其余
-    /// 全部设为废片。换组就清空 —— 留着会把上一组的勾选算进这一组的定案里。
+    /// 场内定案的勾选集：⌘点击「同场」缩略条勾/取消，再按「保留勾选」把同场其余
+    /// 全部设为废片。换场就清空 —— 留着会把上一场的勾选算进这一场的定案里。
     @State private var keepSet: Set<String> = []
 
     init(store: BatchStore, inspectedID: Binding<String?>, gridOrder: [String], initialID: String) {
@@ -1651,12 +1692,12 @@ struct PhotoInspector: View {
     private var visibleIDs: [String] { gridOrder }
 
     private func groupMembers(_ item: BatchItem) -> [BatchItem] {
-        store.items.filter { $0.burstGroup == item.burstGroup }
+        store.items.filter { $0.take == item.take }
     }
 
-    /// The comparison partner: the group's pick if that's not the current photo,
-    /// else the next group member — "challenger vs incumbent" is the decision
-    /// photographers actually make inside a burst.
+    /// The comparison partner: the take's pick if that's not the current photo,
+    /// else the next member — "challenger vs incumbent" is the decision
+    /// photographers actually make inside a take.
     private func compareTarget(_ item: BatchItem) -> BatchItem? {
         let members = groupMembers(item).filter { $0.id != item.id }
         guard !members.isEmpty else { return nil }
@@ -1694,7 +1735,7 @@ struct PhotoInspector: View {
             }
         }
         .frame(minWidth: 960, idealWidth: 1240, minHeight: 700, idealHeight: 880)
-        .onChange(of: item?.burstGroup) { keepSet = [] }
+        .onChange(of: item?.take) { keepSet = [] }
         // 废纸篓清掉的 id 还留在勾选里的话，定案会写到不存在的照片上。
         .onChange(of: store.items.count) {
             keepSet.formIntersection(Set(store.items.map(\.id)))
@@ -1706,7 +1747,13 @@ struct PhotoInspector: View {
     private func header(_ item: BatchItem) -> some View {
         HStack {
             Text(item.id).font(.headline)
-            Text("组 \(item.burstGroup)").foregroundStyle(.secondary)
+            Text("场 \(item.take)").foregroundStyle(.secondary)
+            if (store.groupSizes[item.burstGroup] ?? 1) > 1 {
+                Label("近似重复", systemImage: "square.stack.3d.down.right")
+                    .font(.caption).foregroundStyle(.orange)
+                    .help("和同场的另一张几乎是同一张画面 (phash 汉明距离≤10)，" +
+                          "自动「只留最佳」作用的就是这一层")
+            }
             Label(item.verdict.rawValue, systemImage: item.verdict.symbol)
                 .font(.caption).bold()
                 .padding(.horizontal, 6).padding(.vertical, 2)
@@ -1881,12 +1928,12 @@ struct PhotoInspector: View {
         }
     }
 
-    /// All shots of the same burst group; click to switch, current highlighted.
+    /// 同一场的全部照片；点击切换，当前那张高亮。
     private func groupStrip(_ item: BatchItem, members: [BatchItem]) -> some View {
         VStack(spacing: 2) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
-                    Text("同组 \(members.count) 张").font(.caption2).foregroundStyle(.secondary)
+                    Text("同场 \(members.count) 张").font(.caption2).foregroundStyle(.secondary)
                     ForEach(members) { member in
                         groupStripCell(member)
                     }
@@ -1938,7 +1985,7 @@ struct PhotoInspector: View {
         if keepSet.contains(id) { keepSet.remove(id) } else { keepSet.insert(id) }
     }
 
-    /// 组内定案条。以前这里只能一张一张点开按 1/2/3 —— 一组 8 张要按 8 次，
+    /// 场内定案条。以前这里只能一张一张点开按 1/2/3 —— 一场 8 张要按 8 次，
     /// 还得自己记住哪几张已经判过了。
     @ViewBuilder
     private func groupKeepBar(_ members: [BatchItem]) -> some View {
@@ -1962,7 +2009,7 @@ struct PhotoInspector: View {
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.return, modifiers: [])
                 .disabled(drop == 0)
-                .help("勾选的定为精选，同组其余 \(drop) 张设为废片。整组算一次改判，⌘Z 一次撤销")
+                .help("勾选的定为精选，同场其余 \(drop) 张设为废片。整场算一次改判，⌘Z 一次撤销")
                 Button("清空勾选") { keepSet = [] }
                     .buttonStyle(.bordered)
             }
@@ -2026,7 +2073,7 @@ struct PhotoInspector: View {
         if withFaces.count > 1 {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
-                    Text("组内表情").font(.caption2).foregroundStyle(.secondary)
+                    Text("场内表情").font(.caption2).foregroundStyle(.secondary)
                     ForEach(withFaces) { member in
                         VStack(spacing: 1) {
                             FaceCropView(previewPath: member.previewPath, decodePath: member.decodePath,
@@ -2166,6 +2213,9 @@ struct MetricHistogram: View {
     /// Square-root x-axis for metrics bunched near zero (exposure clip) —
     /// linear would pile everything into the first bar.
     var sqrtScale: Bool = false
+    /// 被线选中那一侧的颜色。阈值滑杆是"会被淘汰"所以用红；「同一场最大间隔」
+    /// 选中的是"会并进同一场"，不是淘汰，用绿色，别让人误以为要删照片。
+    var markColor: Color = .red
 
     private func position(_ v: Double) -> Double {
         let span = range.upperBound - range.lowerBound
@@ -2190,7 +2240,7 @@ struct MetricHistogram: View {
                 let killed = killBelow ? (x + barW / 2) < tx : (x + barW / 2) >= tx
                 context.fill(
                     Path(CGRect(x: x, y: size.height - h, width: max(1, barW - 1), height: h)),
-                    with: .color(killed ? .red.opacity(0.8) : .gray.opacity(0.55))
+                    with: .color(killed ? markColor.opacity(0.8) : .gray.opacity(0.55))
                 )
             }
             var line = Path()

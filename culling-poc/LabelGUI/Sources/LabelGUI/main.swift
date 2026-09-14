@@ -103,23 +103,33 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
    CommandLine.arguments.count > flagIndex + 1 {
     let dir = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])
     let dedupe = CommandLine.arguments.contains("--dedupe")
+    // --gap <秒> 覆盖「同一场最大间隔」，用来扫参数而不必动 GUI 里的滑杆。
+    var gapOverride: Double?
+    if let gi = CommandLine.arguments.firstIndex(of: "--gap"), CommandLine.arguments.count > gi + 1 {
+        gapOverride = Double(CommandLine.arguments[gi + 1])
+    }
     MainActor.assumeIsolated {
         let store = BatchStore(dataDir: appDataDir,
                                pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         store.rejectBurstDuplicates = dedupe
         store.switchSession(to: dir)
+        if let gap = gapOverride { store.takeGapSec = gap }
         let counts = store.verdictCounts
         print("连拍去重: \(dedupe ? "开" : "关")")
         print("照片 \(store.items.count) · 精选 \(counts.pick) · 可用 \(counts.usable) · 废片 \(counts.reject)")
         let stats = store.burstGroupStats
-        print("多张连拍组 \(stats.groups) 组 / \(stats.photos) 张")
+        let takes = store.takeStats
+        print("近似重复 \(stats.groups) 组 / \(stats.photos) 张 (phash 层，自动规则作用范围)")
+        print("场 (间隔≤\(Int(store.takeGapSec))s) \(takes.takes) 个多张场 / \(takes.photos) 张 · 待处理 \(store.pendingTakeCount)")
         for reason in BatchStore.reasonOrder {
             if let n = store.reasonCounts[reason] { print("  理由 \(reason): \(n)") }
         }
-        let byGroup = Dictionary(grouping: store.items, by: \.burstGroup)
-        for group in byGroup.keys.sorted() where (byGroup[group]?.count ?? 0) > 1 {
-            let line = byGroup[group]!.map { "\($0.id)=\($0.verdict.rawValue)" }.joined(separator: " ")
-            print("  组 \(group): \(line)")
+        let byTake = Dictionary(grouping: store.items, by: \.take)
+        for take in byTake.keys.sorted() where (byTake[take]?.count ?? 0) > 1 {
+            let line = byTake[take]!
+                .sorted { ($0.captureTime ?? .distantPast) < ($1.captureTime ?? .distantPast) }
+                .map { "\($0.id)=\($0.verdict.rawValue)" }.joined(separator: " ")
+            print("  场 \(take) (\(byTake[take]!.count) 张): \(line)")
         }
     }
     exit(0)
