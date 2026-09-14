@@ -96,6 +96,35 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--watermark"),
     exit(ok ? 0 : 1)
 }
 
+// Headless verdict smoke test (连拍去重用):
+// LabelGUI --verdicts <photo_dir> [--dedupe]
+// 加载该场次的缓存结果，套用当前阈值，打印判决/理由统计和多张连拍组的组内判决。
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
+   CommandLine.arguments.count > flagIndex + 1 {
+    let dir = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])
+    let dedupe = CommandLine.arguments.contains("--dedupe")
+    MainActor.assumeIsolated {
+        let store = BatchStore(dataDir: appDataDir,
+                               pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
+        store.rejectBurstDuplicates = dedupe
+        store.switchSession(to: dir)
+        let counts = store.verdictCounts
+        print("连拍去重: \(dedupe ? "开" : "关")")
+        print("照片 \(store.items.count) · 精选 \(counts.pick) · 可用 \(counts.usable) · 废片 \(counts.reject)")
+        let stats = store.burstGroupStats
+        print("多张连拍组 \(stats.groups) 组 / \(stats.photos) 张")
+        for reason in BatchStore.reasonOrder {
+            if let n = store.reasonCounts[reason] { print("  理由 \(reason): \(n)") }
+        }
+        let byGroup = Dictionary(grouping: store.items, by: \.burstGroup)
+        for group in byGroup.keys.sorted() where (byGroup[group]?.count ?? 0) > 1 {
+            let line = byGroup[group]!.map { "\($0.id)=\($0.verdict.rawValue)" }.joined(separator: " ")
+            print("  组 \(group): \(line)")
+        }
+    }
+    exit(0)
+}
+
 struct LabelGUIApp: App {
     @StateObject private var batchStore: BatchStore
     @StateObject private var labelStore: LabelStore

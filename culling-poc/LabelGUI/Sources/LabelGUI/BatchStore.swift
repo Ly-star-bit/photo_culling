@@ -161,6 +161,18 @@ final class BatchStore: ObservableObject {
     @Published var exposureThreshold: Double = 0.15 { didSet { onThresholdEdited() } }
     @Published var faceQualityThreshold: Double = 0 { didSet { onThresholdEdited() } }
 
+    /// 连拍去重：开启后每个连拍组只留下最佳的那张，组内其余**未被人工改判**的照片
+    /// 自动带上「连拍重复」理由淘汰。这是规则式的（不写进 overrides），关掉开关
+    /// 整组立刻全部回来——和手动的「保留选中·其余废片」正好互补，后者是永久的。
+    /// 默认关：老场次重新打开时废片数不该无声无息地翻倍。
+    @Published var rejectBurstDuplicates: Bool =
+        UserDefaults.standard.bool(forKey: "batch.rejectBurstDuplicates") {
+        didSet {
+            UserDefaults.standard.set(rejectBurstDuplicates, forKey: "batch.rejectBurstDuplicates")
+            applyThresholds()
+        }
+    }
+
     // MARK: Threshold persistence (per shoot, plus a "last used" default)
 
     /// Thresholds are a per-shoot decision (a dim banquet needs a looser
@@ -848,6 +860,42 @@ final class BatchStore: ObservableObject {
         applyThresholds()
     }
 
+    /// 连拍组定案：`keepers` 留下，`candidates` 里其余的全部设为废片。
+    ///
+    /// 整组只压**一条**撤销记录——拆成两次 setOverrideBatch 的话 ⌘Z 要按两下才
+    /// 能把组恢复原状，中间那一步还是个没人想要的半成品状态。
+    ///
+    /// 留下的那几张明确写成 override（默认精选），而不是"恢复自动"：用户挑中的
+    /// 那张要是正好卡在闭眼/虚焦线下面，"恢复自动"会让它当场掉回废片里，
+    /// 等于这次定案白点了。
+    func keepOnly(_ keepers: some Collection<String>,
+                  among candidates: some Collection<String>,
+                  keeperVerdict: Verdict = .pick) {
+        let all = Array(candidates)
+        guard !all.isEmpty else { return }
+        let keep = Set(keepers)
+        overrideUndoStack.append(all.map { ($0, overrides[$0]) })
+        if overrideUndoStack.count > 100 { overrideUndoStack.removeFirst() }
+        for id in all {
+            overrides[id] = keep.contains(id) ? keeperVerdict : .reject
+        }
+        saveOverrides()
+        applyThresholds()
+    }
+
+    /// 一个连拍组的全部成员 id，按当前网格顺序。
+    func groupMemberIDs(_ group: Int) -> [String] {
+        items.filter { $0.burstGroup == group }.map(\.id)
+    }
+
+    /// 有 2 张以上成员的连拍组数 / 这些组里的照片总数 —— 控制面板上用来回答
+    /// "这场到底有多少重复要处理"。
+    var burstGroupStats: (groups: Int, photos: Int) {
+        var g = 0, p = 0
+        for (_, count) in groupSizes where count > 1 { g += 1; p += count }
+        return (g, p)
+    }
+
     private func loadOverrides() {
         guard let data = try? Data(contentsOf: overridesPath),
               let raw = try? JSONDecoder().decode([String: String].self, from: data) else { return }
@@ -864,7 +912,7 @@ final class BatchStore: ObservableObject {
     }
 
     /// Canonical display order for reject-reason chips and slider kill-counts.
-    static let reasonOrder = ["闭眼", "虚焦", "曝光裁切", "人脸质量低", "VLM建议淘汰"]
+    static let reasonOrder = ["连拍重复", "闭眼", "虚焦", "曝光裁切", "人脸质量低", "VLM建议淘汰"]
 
     /// Within ±15% of any ACTIVE threshold — the photos a small slider nudge
     /// would flip either way.
@@ -1773,16 +1821,32 @@ final class BatchStore: ObservableObject {
         // sharpness only as the final tiebreak / no-face fallback.
         for (_, indices) in groups where indices.count >= 2 {
             // A manual 精选 in the group takes the slot; no auto-pick beside it.
-            if indices.contains(where: { overrides[updated[$0].id] == .pick }) { continue }
-            let candidates = indices.filter { overrides[updated[$0].id] == nil }
-            let best = candidates.max { a, b in
-                let ea = updated[a].expressionScore ?? -1
-                let eb = updated[b].expressionScore ?? -1
-                let qa = updated[a].faceQuality ?? -1
-                let qb = updated[b].faceQuality ?? -1
-                return (ea, qa, updated[a].sharpness) < (eb, qb, updated[b].sharpness)
+            let manualPicks = indices.filter { overrides[updated[$0].id] == .pick }
+            var winners = Set(manualPicks)
+            if manualPicks.isEmpty {
+                let candidates = indices.filter { overrides[updated[$0].id] == nil }
+                let best = candidates.max { a, b in
+                    let ea = updated[a].expressionScore ?? -1
+                    let eb = updated[b].expressionScore ?? -1
+                    let qa = updated[a].faceQuality ?? -1
+                    let qb = updated[b].faceQuality ?? -1
+                    return (ea, qa, updated[a].sharpness) < (eb, qb, updated[b].sharpness)
+                }
+                if let best {
+                    updated[best].verdict = .pick
+                    winners.insert(best)
+                }
             }
-            if let best { updated[best].verdict = .pick }
+
+            // 连拍去重。分组以前只用来"提名"最佳的那张，组内其余照片原封不动地留在
+            // 可用里——一组 8 张全都清晰睁眼时，去重等于什么都没做。开关打开后，
+            // 没赢下这一组、又没被人工改判过的，带着「连拍重复」进废片，和闭眼/虚焦
+            // 一样能用理由 chip 回查。人工改判过的一律不碰（手判永远压过规则）。
+            guard rejectBurstDuplicates else { continue }
+            for idx in indices where !winners.contains(idx) && overrides[updated[idx].id] == nil {
+                updated[idx].rejectReasons.append("连拍重复")
+                updated[idx].verdict = .reject
+            }
         }
 
         items = updated

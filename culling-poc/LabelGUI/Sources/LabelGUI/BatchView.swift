@@ -39,6 +39,9 @@ struct BatchView: View {
     /// 按分组 = Aftershoot-style stacks: one cover per burst group, expand by
     /// opening the inspector (its 同组 strip does the within-group picking).
     @AppStorage("batch.gridMode") private var gridMode: GridMode = .byVerdict
+    /// 只看多张组 —— 一场 3000 张的婚礼里绝大多数是 ×1 的单张组，真正要处理的
+    /// 连拍堆栈本来全被它们淹掉，翻半天找不到一个 ×N。
+    @AppStorage("batch.multiGroupOnly") private var multiGroupOnly = false
     @State private var showStatsPopover = false
     /// Fullscreen review: one big photo + filmstrip, digit-verdicts auto-advance.
     @State private var reviewMode = false
@@ -209,6 +212,12 @@ struct BatchView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .frame(width: 150)
+            if gridMode == .byGroup {
+                let stats = store.burstGroupStats
+                Toggle("只看多张组 (\(stats.groups))", isOn: $multiGroupOnly)
+                    .toggleStyle(.button)
+                    .help("只显示 2 张以上的连拍组 —— 这场共 \(stats.groups) 组、\(stats.photos) 张重复候选")
+            }
             if gridMode == .byVerdict {
                 Picker("筛选", selection: $store.verdictFilter) {
                     Text("全部").tag(Verdict?.none)
@@ -426,7 +435,21 @@ struct BatchView: View {
     /// Burst groups in capture order (group ids are assigned chronologically).
     private var groupedItems: [(group: Int, members: [BatchItem])] {
         let dict = Dictionary(grouping: store.items, by: \.burstGroup)
-        return dict.keys.sorted().map { ($0, dict[$0]!) }
+        let keys = multiGroupOnly ? dict.keys.filter { (dict[$0]?.count ?? 0) > 1 } : Array(dict.keys)
+        return keys.sorted().map { ($0, dict[$0]!) }
+    }
+
+    /// 选中的照片牵扯到的**多张**连拍组的全部成员 —— 「保留选中·其余废片」的候选集。
+    /// 支持一次跨多组：每组挑一张，一次性把 5 组的重复全部定案。
+    /// 单张组要排除掉：选 4 张毫不相干的照片 + 1 张连拍，候选集里混进那 4 张单张，
+    /// 一点定案就把它们一起写成精选了 —— 用户根本没要求改它们的判决。
+    private var selectionGroupMembers: [String] {
+        let sizes = store.groupSizes
+        let groups = Set(store.items
+            .filter { selectedIDs.contains($0.id) && (sizes[$0.burstGroup] ?? 1) > 1 }
+            .map(\.burstGroup))
+        guard !groups.isEmpty else { return [] }
+        return store.items.filter { groups.contains($0.burstGroup) }.map(\.id)
     }
 
     /// A stack's cover: the group's pick, else its first member.
@@ -477,8 +500,10 @@ struct BatchView: View {
             .onKeyPress(characters: .init(charactersIn: "1230")) { press in
                 // A digit hits the whole ⌘/⇧ selection when there is one —
                 // "select five, press 3" used to reject only the focused photo.
+                // 分组模式下焦点落在**封面**上，直接按 3 以前只废掉封面那一张，
+                // 剩下 7 张连拍照样躺在可用里 —— 数字键必须作用于整组。
                 let targets: [String] = !selectedIDs.isEmpty ? Array(selectedIDs)
-                    : (focusedID.map { [$0] } ?? [])
+                    : (focusedID.map { gridMode == .byGroup ? groupMembers(ofCover: $0) : [$0] } ?? [])
                 guard !targets.isEmpty else { return .ignored }
                 let verdict: Verdict?
                 switch press.characters {
@@ -647,10 +672,29 @@ struct BatchView: View {
                 selectedIDs.removeAll()
             }
             .buttonStyle(.bordered)
+            let groupCandidates = selectionGroupMembers
+            // 选中的照片可能落在候选集之外 (单张组)，不能拿总数相减。
+            let dropCount = groupCandidates.filter { !selectedIDs.contains($0) }.count
+            if dropCount > 0 {
+                Divider().frame(height: 16)
+                Button("保留选中 · 其余 \(dropCount) 张设为废片") {
+                    withAnimation {
+                        store.keepOnly(selectedIDs, among: groupCandidates)
+                    }
+                    selectedIDs.removeAll()
+                }
+                .buttonStyle(.borderedProminent)
+                // ⌘⏎ 而不是光秃秃的 ⏎：网格自己用 .onKeyPress(.return) 开大图，
+                // 而按钮的 key equivalent 在 keyDown 之前就被吃掉 —— 只要选中了
+                // 照片，想按回车看大图就会变成"整组定案"。
+                .keyboardShortcut(.return, modifiers: .command)
+                .help("把选中这几张定为精选，它们所在连拍组里其余 \(dropCount) 张全部设为废片 (⌘⏎)。" +
+                      "整组算一次改判，⌘Z 一次撤销。可以跨多组：每组各挑一张，一次定案。")
+            }
             if selectedIDs.count == 2 {
                 Divider().frame(height: 16)
                 Button("对比这两张") { showComparePair = true }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.bordered)
                     .help("并排对比任意两张 (不限连拍组) — 两个机位/两个瞬间选一张")
             }
             Spacer()
@@ -814,6 +858,7 @@ struct BatchView: View {
     /// Reject reasons as compact icon badges — the text version wrapped and
     /// cluttered the grid. Full text lives in the tooltip and the inspector.
     static func reasonIcon(_ reason: String) -> String {
+        if reason.contains("连拍重复") { return "square.stack.3d.down.right" }
         if reason.contains("闭眼") { return "eye.slash" }
         if reason.contains("虚焦") { return "minus.magnifyingglass" }
         if reason.contains("曝光") { return "sun.max.fill" }
@@ -977,6 +1022,27 @@ struct BatchView: View {
     // MARK: - Right panel: thresholds + VLM only. Everything else lives in the
     // top bar / export menu; explanations live in .help tooltips, not captions.
 
+    /// 连拍去重开关。分组本来只用来"提名"最佳的那张，组内其余照片原封不动留在
+    /// 可用里 —— 一组 8 张全清晰全睁眼时等于没去重。这是规则，不写 overrides：
+    /// 关掉开关整组立刻全部回来。
+    @ViewBuilder
+    private var burstDedupeRow: some View {
+        let stats = store.burstGroupStats
+        VStack(alignment: .leading, spacing: 2) {
+            Toggle("连拍组只留最佳 (\(store.reasonCounts["连拍重复"] ?? 0))",
+                   isOn: $store.rejectBurstDuplicates)
+                .font(.caption)
+                .help("每个连拍组只保留最佳的一张，其余未被人工改判的带「连拍重复」进废片。" +
+                      "这是可随时关掉的规则，不会覆盖你手动改判过的照片。" +
+                      "本场共 \(stats.groups) 组多张连拍、\(stats.photos) 张候选")
+                .disabled(stats.groups == 0)
+            if stats.groups > 0 {
+                Text("本场 \(stats.groups) 组连拍 · \(stats.photos) 张")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+    }
+
     private var controlPanel: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
@@ -1039,6 +1105,7 @@ struct BatchView: View {
                                 killBelow: true
                             )
                         )
+                        burstDedupeRow
                         Toggle("只看临界照片 (\(store.borderlineCount))", isOn: $store.borderlineFilter)
                             .font(.caption)
                             .help("任一阈值 ±15% 区间内的照片 — 调完滑杆先过一眼刀口上的这些，误杀都藏在这里")
@@ -1561,6 +1628,9 @@ struct PhotoInspector: View {
     @State private var fitPinch: CGFloat = 1.0
     @State private var showOverlay = true
     @State private var compareOn = false
+    /// 组内定案的勾选集：⌘点击「同组」缩略条勾/取消，再按「保留勾选」把同组其余
+    /// 全部设为废片。换组就清空 —— 留着会把上一组的勾选算进这一组的定案里。
+    @State private var keepSet: Set<String> = []
 
     init(store: BatchStore, inspectedID: Binding<String?>, gridOrder: [String], initialID: String) {
         self.store = store
@@ -1624,6 +1694,11 @@ struct PhotoInspector: View {
             }
         }
         .frame(minWidth: 960, idealWidth: 1240, minHeight: 700, idealHeight: 880)
+        .onChange(of: item?.burstGroup) { keepSet = [] }
+        // 废纸篓清掉的 id 还留在勾选里的话，定案会写到不存在的照片上。
+        .onChange(of: store.items.count) {
+            keepSet.formIntersection(Set(store.items.map(\.id)))
+        }
     }
 
     // MARK: header
@@ -1808,28 +1883,93 @@ struct PhotoInspector: View {
 
     /// All shots of the same burst group; click to switch, current highlighted.
     private func groupStrip(_ item: BatchItem, members: [BatchItem]) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                Text("同组").font(.caption2).foregroundStyle(.secondary)
-                ForEach(members) { member in
-                    VStack(spacing: 1) {
-                        ThumbnailView(path: member.previewPath)
-                            .frame(width: 76, height: 54)
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .stroke(member.id == currentID ? Color.accentColor : verdictColor(member.verdict),
-                                            lineWidth: member.id == currentID ? 3 : 1.5)
-                            )
-                        Text(member.verdict.rawValue).font(.caption2)
-                            .foregroundStyle(verdictColor(member.verdict))
+        VStack(spacing: 2) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    Text("同组 \(members.count) 张").font(.caption2).foregroundStyle(.secondary)
+                    ForEach(members) { member in
+                        groupStripCell(member)
                     }
-                    .onTapGesture { currentID = member.id }
                 }
+                .padding(.horizontal)
+                .padding(.vertical, 4)
             }
-            .padding(.horizontal)
-            .padding(.vertical, 4)
+            groupKeepBar(members)
         }
+    }
+
+    /// 一张同组照片。点击切过去看，⌘点击把它勾进/踢出"要保留的"。
+    private func groupStripCell(_ member: BatchItem) -> some View {
+        let kept = keepSet.contains(member.id)
+        return VStack(spacing: 1) {
+            ThumbnailView(path: member.previewPath)
+                .frame(width: 76, height: 54)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(member.id == currentID ? Color.accentColor : verdictColor(member.verdict),
+                                lineWidth: member.id == currentID ? 3 : 1.5)
+                )
+                .overlay(alignment: .topLeading) {
+                    if kept {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                            .background(Circle().fill(.white))
+                            .padding(2)
+                    }
+                }
+                .opacity(keepSet.isEmpty || kept ? 1 : 0.45)
+            Text(member.verdict.rawValue).font(.caption2)
+                .foregroundStyle(verdictColor(member.verdict))
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if NSEvent.modifierFlags.contains(.command) {
+                toggleKeep(member.id)
+            } else {
+                currentID = member.id
+            }
+        }
+        .help("点击=看这张 · ⌘点击=勾选保留")
+    }
+
+    private func toggleKeep(_ id: String) {
+        if keepSet.contains(id) { keepSet.remove(id) } else { keepSet.insert(id) }
+    }
+
+    /// 组内定案条。以前这里只能一张一张点开按 1/2/3 —— 一组 8 张要按 8 次，
+    /// 还得自己记住哪几张已经判过了。
+    @ViewBuilder
+    private func groupKeepBar(_ members: [BatchItem]) -> some View {
+        let ids = members.map(\.id)
+        let keep = keepSet.intersection(ids)
+        let drop = ids.count - keep.count
+        HStack(spacing: 8) {
+            Button(keepSet.contains(currentID) ? "取消保留这张 (K)" : "保留这张 (K)") {
+                toggleKeep(currentID)
+            }
+            .buttonStyle(.bordered)
+            .keyboardShortcut("k", modifiers: [])
+            if keep.isEmpty {
+                Text("⌘点击缩略图勾选要留的，其余一键设为废片")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            } else {
+                Button("保留勾选 \(keep.count) 张 · 其余 \(drop) 张废片 (⏎)") {
+                    store.keepOnly(keep, among: ids)
+                    keepSet = []
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.return, modifiers: [])
+                .disabled(drop == 0)
+                .help("勾选的定为精选，同组其余 \(drop) 张设为废片。整组算一次改判，⌘Z 一次撤销")
+                Button("清空勾选") { keepSet = [] }
+                    .buttonStyle(.bordered)
+            }
+            Spacer()
+        }
+        .padding(.horizontal)
+        .padding(.bottom, 2)
     }
 
     // MARK: info rows
