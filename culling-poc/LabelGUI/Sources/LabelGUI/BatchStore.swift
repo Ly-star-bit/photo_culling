@@ -344,6 +344,14 @@ final class BatchStore: ObservableObject {
         /// 视图只做 O(n) 的筛选。下标指向 `items`，只在 rebuildDerived 之后有效。
         var takeRows: [(take: Int, indices: [Int])] = []
         var recommendationSummary: (takes: Int, rejects: Int) = (0, 0)
+        /// 按判决模式三个分区的成员下标（items 顺序）。以前 sectionItems 每次按键把
+        /// 3000 张过滤三遍；现在只对本分区做临界/理由筛选。
+        var byVerdict: [Verdict: [Int]] = [:]
+        /// 控制面板四张直方图的分箱。以前每次重绘 `store.items.map(\.sharpness)` 出
+        /// 3000 元素数组再进 Canvas 分箱 —— 按一下方向键就是 4 次。
+        var sharpnessBins: [Int] = []
+        var exposureBins: [Int] = []
+        var faceQualityBins: [Int] = []
         /// Rejects with no manual override — the appeal court's docket.
         var autoRejectCount = 0
         /// Photos with no burst sibling carrying a face-quality score: the only
@@ -365,6 +373,29 @@ final class BatchStore: ObservableObject {
     var takeRank: [String: Int] { derived.takeRank }
     var thresholdSuggestions: [ThresholdSuggestion] { derived.thresholdSuggestions }
     var takeRows: [(take: Int, indices: [Int])] { derived.takeRows }
+    var byVerdict: [Verdict: [Int]] { derived.byVerdict }
+    var sharpnessBins: [Int] { derived.sharpnessBins }
+    var exposureBins: [Int] { derived.exposureBins }
+    var faceQualityBins: [Int] { derived.faceQualityBins }
+
+    // 直方图的坐标轴。视图和分箱必须用同一组，否则线画错位置。
+    static let histogramBinCount = 40
+    static let sharpnessHistRange = 0.0...150.0
+    static let exposureHistRange = 0.005...0.5
+    static let faceQualityHistRange = 0.0...1.0
+    static let captureGapHistRange = 0.0...60.0
+
+    static func histogramBins(_ values: [Double], range: ClosedRange<Double>, sqrtScale: Bool) -> [Int] {
+        var bins = [Int](repeating: 0, count: histogramBinCount)
+        let span = range.upperBound - range.lowerBound
+        guard span > 0 else { return bins }
+        for v in values {
+            var f = max(0, min(1, (v - range.lowerBound) / span))
+            if sqrtScale { f = f.squareRoot() }
+            bins[min(histogramBinCount - 1, Int(f * Double(histogramBinCount)))] += 1
+        }
+        return bins
+    }
     var autoRejectCount: Int { derived.autoRejectCount }
 
     func item(withID id: String) -> BatchItem? {
@@ -387,6 +418,8 @@ final class BatchStore: ObservableObject {
     /// 每台机身上相邻两张的拍摄间隔（秒），用来画「同一场最大间隔」滑杆下面那张
     /// 直方图 —— 摄影师按快门的节奏分布，一眼能看出该把线画在哪。
     private(set) var captureGaps: [Double] = []
+    /// 拍摄间隔直方图的分箱，随 captureGaps 一起算。
+    private(set) var captureGapBins: [Int] = []
 
     private func rebuildGroupSizes() {
         var sizes: [Int: Int] = [:]
@@ -408,6 +441,7 @@ final class BatchStore: ObservableObject {
             }
         }
         captureGaps = gaps
+        captureGapBins = Self.histogramBins(gaps, range: Self.captureGapHistRange, sqrtScale: true)
     }
 
     private func rebuildDerived(groupQCount: [Int: Int]) {
@@ -436,6 +470,10 @@ final class BatchStore: ObservableObject {
             for (i, item) in ranked.prefix(3).enumerated() { d.takeRank[item.id] = i + 1 }
         }
         d.verdictCounts = (r, u, p)
+        for (idx, item) in items.enumerated() { d.byVerdict[item.verdict, default: []].append(idx) }
+        d.sharpnessBins = Self.histogramBins(items.map(\.sharpness), range: Self.sharpnessHistRange, sqrtScale: false)
+        d.exposureBins = Self.histogramBins(items.map(\.worstClipPct), range: Self.exposureHistRange, sqrtScale: true)
+        d.faceQualityBins = Self.histogramBins(d.faceQualityAbsoluteValues, range: Self.faceQualityHistRange, sqrtScale: false)
         (d.chapterSegments, d.chapterWarnings) = Self.chapterSummary(items, minKeepers: minKeepersPerChapter)
         d.thresholdSuggestions = computeThresholdSuggestions()
         let order = items.indices.sorted { a, b in

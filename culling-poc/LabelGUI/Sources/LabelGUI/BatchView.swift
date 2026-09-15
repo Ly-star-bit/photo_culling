@@ -73,6 +73,12 @@ struct BatchView: View {
                 VStack(spacing: 0) {
                     topBar
                     Divider()
+                    // 分组模式的工具自己一行。顶栏 27 个控件在 1280pt 必然溢出 ——
+                    // 长文件夹名把「撤销/审片」挤出窗口的工单已经出过一次。
+                    if gridMode == .byGroup && !store.items.isEmpty {
+                        groupToolbar
+                        Divider()
+                    }
                     if !selectedIDs.isEmpty {
                         bulkActionBar
                         Divider()
@@ -248,19 +254,6 @@ struct BatchView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .frame(width: 220)
-            if gridMode == .byGroup {
-                let stats = store.takeStats
-                Toggle("只看待处理 (\(store.pendingTakeCount))", isOn: $pendingTakesOnly)
-                    .toggleStyle(.button)
-                    .help("只显示还留着 2 张以上没淘汰的场 —— 定完一场它就自动消失，" +
-                          "剩下多少一眼可见。按 D 跳到下一个待处理场。这场共 \(stats.takes) 个多张场、\(stats.photos) 张")
-                Toggle("场内按评分", isOn: $takeSortByScore)
-                    .toggleStyle(.button)
-                    .help("每场里评分高的排前面 (表情 > 人脸质量 > 锐度)；关掉则按拍摄顺序。缩略图上的 #1 #2 #3 是同一把尺子")
-                Button("全部只留精选") { showAcceptAllConfirm = true }
-                    .disabled(store.recommendationSummary.takes == 0)
-                    .help("一键接受算法的推荐：每个有精选的待处理场，精选留下、其余可用设为废片。你手动标过可用的不动。⌘Z 一次全部撤销")
-            }
             Picker("排序", selection: $store.sortOrder) {
                 ForEach(BatchStore.SortOrder.allCases, id: \.self) { s in
                     Text(s.rawValue).tag(s)
@@ -561,7 +554,8 @@ struct BatchView: View {
                     chapterTimeline(proxy)
                 }
                 ScrollView {
-                LazyVStack(alignment: .leading, spacing: 16) {
+                // pinnedViews：滚到废片区中间也看得见"在哪个区、多少张、理由 chip"。
+                LazyVStack(alignment: .leading, spacing: 16, pinnedViews: [.sectionHeaders]) {
                     if store.items.isEmpty {
                         emptyState
                     } else if gridMode == .byGroup {
@@ -770,6 +764,37 @@ struct BatchView: View {
         .frame(minWidth: 320)
     }
 
+    private var groupToolbar: some View {
+        let stats = store.takeStats
+        let rec = store.recommendationSummary
+        return HStack(spacing: 10) {
+            if store.pendingTakeCount > 0 {
+                Label("待处理 \(store.pendingTakeCount) 场", systemImage: "rectangle.stack.badge.person.crop")
+                    .font(.caption).foregroundStyle(.orange)
+                Text("D 下一场").font(.caption2).foregroundStyle(.tertiary)
+            } else {
+                Label("没有待处理的场", systemImage: "checkmark.circle").font(.caption).foregroundStyle(.green)
+            }
+            Divider().frame(height: 14)
+            Toggle("只看待处理", isOn: $pendingTakesOnly)
+                .toggleStyle(.button).controlSize(.small)
+                .help("只显示还留着 2 张以上没淘汰的场 —— 定完一场它就自动消失。这场共 \(stats.takes) 个多张场、\(stats.photos) 张")
+            Toggle("场内按评分", isOn: $takeSortByScore)
+                .toggleStyle(.button).controlSize(.small)
+                .help("每场里评分高的排前面 (表情 > 人脸质量 > 锐度)；关掉则按拍摄顺序。缩略图上的 #1 #2 #3 是同一把尺子")
+            Spacer()
+            Button("全部只留精选" + (rec.takes > 0 ? " (\(rec.takes) 场 · \(rec.rejects) 张废片)" : "")) {
+                showAcceptAllConfirm = true
+            }
+            .controlSize(.small)
+            .disabled(rec.takes == 0)
+            .help("一键接受算法的推荐：每个有精选的待处理场，精选留下、其余可用设为废片。你手动标过可用的不动。⌘Z 一次全部撤销")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.bar)
+    }
+
     private var bulkActionBar: some View {
         HStack(spacing: 8) {
             Text("已选 \(selectedIDs.count) 张 → 批量改判:")
@@ -882,7 +907,8 @@ struct BatchView: View {
             next = ids[0]
         }
         focusedID = next
-        proxy.scrollTo(next)
+        // 单步 ←/→ 用最小滚动（不跳行）；按列跨行的 ↑/↓ 居中，别停在吸顶标题底下。
+        proxy.scrollTo(next, anchor: abs(delta) > 1 ? .center : nil)
     }
 
     /// ↑/↓。按判决模式按估算的列数跳一行；分组模式每场一行、行内自适应换行，
@@ -899,7 +925,7 @@ struct BatchView: View {
               let rowIdx = rows.firstIndex(where: { $0.members.contains { $0.id == current } }),
               let col = rows[rowIdx].members.firstIndex(where: { $0.id == current }) else {
             focusedID = rows[0].members.first?.id
-            if let id = focusedID { proxy.scrollTo(id) }
+            if let id = focusedID { proxy.scrollTo(id, anchor: .center) }
             return
         }
         let row = rows[rowIdx].members
@@ -913,7 +939,8 @@ struct BatchView: View {
             next = direction > 0 ? rows[adjacent].members[0].id : rows[adjacent].members.last!.id
         }
         focusedID = next
-        proxy.scrollTo(next)
+        // 吸顶的分区标题会盖住贴着顶边停下的目标；跨行跳转一律居中。
+        proxy.scrollTo(next, anchor: .center)
     }
 
     private func openFocused() {
@@ -979,10 +1006,10 @@ struct BatchView: View {
                     HStack(spacing: 6) {
                         Image(systemName: allSelected ? "checkmark.square.fill" : "square")
                             .foregroundStyle(allSelected ? Color.accentColor : .secondary)
-                        Text("场 \(take)").font(.headline)
-                        Text("\(members.count) 张").foregroundStyle(.secondary)
+                        Text("场 \(take)").font(.subheadline.bold())
+                        Text("\(members.count) 张").font(.caption).foregroundStyle(.secondary)
                         if let range = Self.timeRange(members) {
-                            Text(range).font(.caption).monospacedDigit().foregroundStyle(.tertiary)
+                            Text(range).font(.caption2).monospacedDigit().foregroundStyle(.tertiary)
                         }
                     }
                 }
@@ -1000,7 +1027,7 @@ struct BatchView: View {
                     Button("选可用 \(alive.count)") {
                         alive.forEach { selectedIDs.insert($0.id) }
                     }
-                    .buttonStyle(.plain).font(.caption).foregroundStyle(Color.accentColor)
+                    .buttonStyle(.plain).font(.caption2).foregroundStyle(Color.accentColor)
                     .help("选中本场还没淘汰的 \(alive.count) 张，再 ⌘点击去掉要留的，批量栏一键定案")
                 }
                 Spacer()
@@ -1025,8 +1052,14 @@ struct BatchView: View {
         .padding(10)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(pending ? Color.white.opacity(0.05) : Color.clear)
+                .fill(pending ? Color.white.opacity(0.04) : Color.clear)
         )
+        // 待处理的场左边一条橙线 —— 比 4% 的白底醒目得多，又不和照片争颜色。
+        .overlay(alignment: .leading) {
+            if pending {
+                RoundedRectangle(cornerRadius: 2).fill(Color.orange.opacity(0.8)).frame(width: 3).padding(.vertical, 8)
+            }
+        }
     }
 
     private static func timeRange(_ members: [BatchItem]) -> String? {
@@ -1034,6 +1067,26 @@ struct BatchView: View {
         guard let first = times.min(), let last = times.max() else { return nil }
         let a = takeTimeFormatter.string(from: first)
         return first == last ? a : "\(a)–\(takeTimeFormatter.string(from: last))"
+    }
+
+    /// 两条角标各一个 tooltip，代替以前每个小图标各挂一个（一格 8 个 .help）。
+    static func statusHelp(rank: Int?, manual: Bool, pick: Bool, groupSize: Int) -> String {
+        var parts: [String] = []
+        if let rank { parts.append("本场评分第 \(rank)") }
+        if manual { parts.append("人工改判") }
+        if pick { parts.append("精选") }
+        if groupSize > 1 { parts.append("同场 \(groupSize) 张") }
+        return parts.joined(separator: " · ")
+    }
+
+    static func infoHelp(_ item: BatchItem, closed: Int) -> String {
+        var parts: [String] = item.rejectReasons
+        if !item.vlmRescued.isEmpty { parts.append("VLM 平反: " + item.vlmRescued.joined(separator: "、")) }
+        if item.slowShutter { parts.append("快门低于安全快门 (1/焦距)，易糊") }
+        if item.tilted { parts.append(String(format: "水平线倾斜 %.1f°", item.horizonDeg ?? 0)) }
+        if closed > 0 { parts.append("\(item.faces.count) 张脸里 \(closed) 张闭眼") }
+        else if closed == 0 { parts.append("\(item.faces.count) 张脸全部睁眼") }
+        return parts.joined(separator: " · ")
     }
 
     /// Reject reasons as compact icon badges — the text version wrapped and
@@ -1051,7 +1104,12 @@ struct BatchView: View {
     /// Items of one verdict section, narrowed by the borderline filter and (for
     /// rejects) the active reason filter. Shared with keyboard navigation.
     private func sectionItems(_ verdict: Verdict) -> [BatchItem] {
-        var matching = store.items.filter { $0.verdict == verdict }
+        // 分区下标在 Derived 里；这里只对本分区做筛选（以前每个分区各扫一遍全部）。
+        let items = store.items
+        var matching = (store.byVerdict[verdict] ?? []).compactMap { idx -> BatchItem? in
+            guard idx < items.count, items[idx].verdict == verdict else { return nil }
+            return items[idx]
+        }
         if store.borderlineFilter {
             matching = matching.filter { store.isBorderline($0) }
         }
@@ -1066,7 +1124,14 @@ struct BatchView: View {
         let matching = sectionItems(verdict)
         let takeSizes = store.takeSizes
         if !matching.isEmpty || (verdict == .reject && store.reasonFilter != nil) {
-            VStack(alignment: .leading, spacing: 8) {
+            Section {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: thumbSize), spacing: 8)], spacing: 8) {
+                    ForEach(matching) { item in
+                        thumbnailCell(item, color: color, groupSize: takeSizes[item.take] ?? 1)
+                            .id(item.id)
+                    }
+                }
+            } header: {
                 HStack(spacing: 6) {
                     Image(systemName: verdict.symbol).font(.caption.bold()).foregroundStyle(color)
                     Text(verdict.rawValue).font(.headline)
@@ -1074,13 +1139,11 @@ struct BatchView: View {
                     if verdict == .reject {
                         reasonChips
                     }
+                    Spacer(minLength: 0)
                 }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: thumbSize), spacing: 8)], spacing: 8) {
-                    ForEach(matching) { item in
-                        thumbnailCell(item, color: color, groupSize: takeSizes[item.take] ?? 1)
-                            .id(item.id)
-                    }
-                }
+                .padding(.vertical, 6)
+                // 吸顶时要盖住下面滚过的缩略图。
+                .background(Color(white: 0.13))
             }
         }
     }
@@ -1114,92 +1177,84 @@ struct BatchView: View {
         let isSelected = selectedIDs.contains(item.id)
         let isFocused = focusedID == item.id
         VStack(spacing: 3) {
-            ThumbnailView(path: item.previewPath)
-                .frame(height: thumbSize * 0.72)
+            // 方格 + 整图 fit（Lightroom / Aftershoot 的做法）。以前是 .fill 塞进
+            // 140×100 的横框：一张竖拍只剩中间一条，52% 的画面被裁掉，看不到脚也
+            // 看不到构图 —— 而这类场次全是竖拍。
+            ThumbnailView(path: item.previewPath, fit: true)
+                .frame(maxWidth: .infinity, minHeight: thumbSize, maxHeight: thumbSize)
+                .background(Color(white: 0.10))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
-                // Border means ONE thing: selection/keyboard focus. Verdict
-                // lives in the caption dot — the grid stops being a christmas
-                // tree and the photos' own colors get judged on neutral ground.
+                // 焦点和选中分开：以前都是 3px accent，⌘多选之后分不清焦点在哪，
+                // 而数字键在没有选中时判的正是焦点那张。选中 = accent 粗框 + 左上 ✓，
+                // 焦点 = 白色细框，两者可以同时出现。
                 .overlay {
-                    if isSelected || isFocused {
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color.accentColor, lineWidth: 3)
+                    if isSelected {
+                        RoundedRectangle(cornerRadius: 6).stroke(Color.accentColor, lineWidth: 3)
+                    }
+                    if isFocused {
+                        RoundedRectangle(cornerRadius: 5).inset(by: isSelected ? 3 : 0)
+                            .stroke(Color.white.opacity(0.9), lineWidth: 1.5)
                     }
                 }
+                // 右上一条：状态（排名 · 手判 · ★精选 · ×N）。精选统一用绿星（和判决
+                // 小点、审片头部同一个符号同一个色），排名只用灰度 —— 以前四个角各挂
+                // 一坨、精选绿圆和 #1 黄字打架，代码里自己写着"别弄成圣诞树"。
                 .overlay(alignment: .topTrailing) {
-                    HStack(spacing: 3) {
-                        // 场内前三（同 scoreKey，和自动精选一把尺子）。#1 金、#2 银、#3 铜。
-                        if let rank = store.takeRank[item.id] {
-                            Text("#\(rank)").font(.caption2).bold().monospacedDigit()
-                                .foregroundStyle(rank == 1 ? Color.yellow : rank == 2 ? Color.white : Color.orange)
-                                .help("本场评分第 \(rank)")
-                        }
-                        if store.overrides[item.id] != nil {
-                            Image(systemName: "hand.raised.fill").font(.caption2)
-                        }
-                        if groupSize > 1 {
-                            Text("×\(groupSize)").font(.caption2).bold()
-                        }
-                    }
-                    .padding(3)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .padding(3)
-                }
-                // 精选角标（Aftershoot 那种被选中的照片角上一个醒目勾）：一行 10 张
-                // 里哪张是本场的最佳，扫一眼就看到，不用去找底下那个 7px 的小星。
-                .overlay(alignment: .bottomTrailing) {
-                    if item.verdict == .pick {
-                        Image(systemName: "star.fill")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(.white)
-                            .padding(5)
-                            .background(Verdict.pick.color, in: Circle())
-                            .padding(4)
-                            .shadow(radius: 2)
-                    }
-                }
-                .overlay(alignment: .bottomLeading) {
-                    HStack(spacing: 3) {
-                        ForEach(item.rejectReasons, id: \.self) { reason in
-                            Image(systemName: Self.reasonIcon(reason)).font(.caption2).foregroundStyle(.red)
-                        }
-                        // VLM cleared this photo of charges — green seal.
-                        if !item.vlmRescued.isEmpty {
-                            Image(systemName: "checkmark.seal.fill").font(.caption2).foregroundStyle(.green)
-                                .help("VLM 平反: \(item.vlmRescued.joined(separator: "、"))")
-                        }
-                        // Info-only badges (yellow): not rejections, just heads-ups.
-                        if item.slowShutter {
-                            Image(systemName: "tortoise.fill").font(.caption2).foregroundStyle(.yellow)
-                                .help("快门低于安全快门 (1/焦距)，易糊")
-                        }
-                        if item.tilted {
-                            Image(systemName: "level").font(.caption2).foregroundStyle(.yellow)
-                                .help(String(format: "水平线倾斜 %.1f°", item.horizonDeg ?? 0))
-                        }
-                        // 合影「全员睁眼」：每张脸的 EAR 都有，以前只在照片级标一个「闭眼」。
-                        // 合影选片最痛的就是这个 —— 5 个人里谁闭了、还剩几张全睁的。
-                        if item.faces.count >= 2 {
-                            let closed = item.faces.filter { $0.eyeClosed == true }.count
-                            HStack(spacing: 1) {
-                                Image(systemName: closed > 0 ? "eye.slash" : "eye").font(.caption2)
-                                Text("\(item.faces.count - closed)/\(item.faces.count)").font(.caption2).monospacedDigit()
+                    let rank = store.takeRank[item.id]
+                    let manual = store.overrides[item.id] != nil
+                    if rank != nil || manual || item.verdict == .pick || groupSize > 1 {
+                        HStack(spacing: 4) {
+                            if let rank {
+                                Text("#\(rank)").font(.caption2).bold().monospacedDigit()
+                                    .foregroundStyle(rank == 1 ? Color.white : Color.white.opacity(0.6))
                             }
-                            .foregroundStyle(closed > 0 ? .red : .green)
-                            .help(closed > 0 ? "\(item.faces.count) 张脸里 \(closed) 张闭眼" : "\(item.faces.count) 张脸全部睁眼")
+                            if manual { Image(systemName: "hand.raised.fill").font(.caption2) }
+                            if item.verdict == .pick {
+                                Image(systemName: "star.fill").font(.caption2).foregroundStyle(Verdict.pick.color)
+                            }
+                            if groupSize > 1 { Text("×\(groupSize)").font(.caption2).bold() }
                         }
+                        .padding(.horizontal, 5).padding(.vertical, 3)
+                        .background(.black.opacity(0.55), in: Capsule())
+                        .padding(4)
+                        .help(Self.statusHelp(rank: rank, manual: manual, pick: item.verdict == .pick, groupSize: groupSize))
                     }
-                    .padding(3)
-                    .background((item.rejectReasons.isEmpty && !item.slowShutter && !item.tilted && item.faces.count < 2) ? .clear : .black.opacity(0.6), in: Capsule())
-                    .padding(3)
-                    .help(item.rejectReasons.joined(separator: ", "))
+                }
+                // 左下一条：信息（淘汰理由 · VLM 平反 · 慢门 · 水平 · 合影睁眼）。
+                .overlay(alignment: .bottomLeading) {
+                    let closed = item.faces.count >= 2 ? item.faces.filter { $0.eyeClosed == true }.count : -1
+                    let hasInfo = !item.rejectReasons.isEmpty || !item.vlmRescued.isEmpty
+                        || item.slowShutter || item.tilted || closed >= 0
+                    if hasInfo {
+                        HStack(spacing: 4) {
+                            ForEach(item.rejectReasons, id: \.self) { reason in
+                                Image(systemName: Self.reasonIcon(reason)).font(.caption2).foregroundStyle(.red)
+                            }
+                            if !item.vlmRescued.isEmpty {
+                                Image(systemName: "checkmark.seal.fill").font(.caption2).foregroundStyle(.green)
+                            }
+                            if item.slowShutter { Image(systemName: "tortoise.fill").font(.caption2).foregroundStyle(.yellow) }
+                            if item.tilted { Image(systemName: "level").font(.caption2).foregroundStyle(.yellow) }
+                            if closed >= 0 {
+                                HStack(spacing: 1) {
+                                    Image(systemName: closed > 0 ? "eye.slash" : "eye").font(.caption2)
+                                    Text("\(item.faces.count - closed)/\(item.faces.count)").font(.caption2).monospacedDigit()
+                                }
+                                .foregroundStyle(closed > 0 ? .red : .green)
+                            }
+                        }
+                        .padding(.horizontal, 5).padding(.vertical, 3)
+                        .background(.black.opacity(0.55), in: Capsule())
+                        .padding(4)
+                        .help(Self.infoHelp(item, closed: closed))
+                    }
                 }
                 .overlay(alignment: .topLeading) {
                     if isSelected {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(Color.accentColor)
                             .background(Circle().fill(.white))
-                            .padding(3)
+                            .padding(4)
                     }
                 }
             HStack(spacing: 4) {
@@ -1252,8 +1307,8 @@ struct BatchView: View {
                     .foregroundStyle(.secondary)
             }
             MetricHistogram(
-                values: store.captureGaps,
-                range: 0...60,
+                bins: store.captureGapBins,
+                range: BatchStore.captureGapHistRange,
                 threshold: store.takeGapSec,
                 killBelow: true,
                 sqrtScale: true,
@@ -1315,8 +1370,8 @@ struct BatchView: View {
                             slider: Slider(value: $store.sharpnessThreshold, in: 0...150, step: 5),
                             help: "五官区域梯度锐度，低于此值判为虚焦 → 废片。清晰照片约 65-95。直方图 = 本场分布，红色 = 会被此线淘汰",
                             histogram: MetricHistogram(
-                                values: store.items.map(\.sharpness),
-                                range: 0...150,
+                                bins: store.sharpnessBins,
+                                range: BatchStore.sharpnessHistRange,
                                 threshold: store.sharpnessThreshold,
                                 killBelow: true
                             )
@@ -1328,8 +1383,8 @@ struct BatchView: View {
                             slider: Slider(value: $store.exposureThreshold, in: 0.005...0.5),
                             help: "死白/死黑像素占比超过此值 → 废片。直方图为开方刻度 (大多数照片裁切接近 0)",
                             histogram: MetricHistogram(
-                                values: store.items.map(\.worstClipPct),
-                                range: 0.005...0.5,
+                                bins: store.exposureBins,
+                                range: BatchStore.exposureHistRange,
                                 threshold: store.exposureThreshold,
                                 killBelow: false,
                                 sqrtScale: true
@@ -1346,8 +1401,8 @@ struct BatchView: View {
                                 // Only photos the absolute line actually
                                 // applies to; burst frames are judged
                                 // group-relative and were misleading here.
-                                values: store.derived.faceQualityAbsoluteValues,
-                                range: 0...1,
+                                bins: store.faceQualityBins,
+                                range: BatchStore.faceQualityHistRange,
                                 threshold: store.faceQualityThreshold,
                                 killBelow: true
                             )
@@ -2431,8 +2486,10 @@ struct PhotoInspector: View {
     private func groupStripCell(_ member: BatchItem) -> some View {
         let kept = keepSet.contains(member.id)
         return VStack(spacing: 1) {
-            ThumbnailView(path: member.previewPath)
-                .frame(width: 76, height: 54)
+            // 整图 fit：这一条正是挑选发生的地方，竖拍被裁掉一半就没法挑。
+            ThumbnailView(path: member.previewPath, fit: true)
+                .frame(width: 72, height: 72)
+                .background(Color(white: 0.10))
                 .clipShape(RoundedRectangle(cornerRadius: 4))
                 .overlay(
                     RoundedRectangle(cornerRadius: 4)
@@ -2700,7 +2757,8 @@ struct PhotoInspector: View {
 /// threshold line drawn on top — the slider stops being a blind drag: red bars
 /// are the photos this line kills, before you commit to it.
 struct MetricHistogram: View {
-    let values: [Double]
+    /// 预先分好的箱（BatchStore.histogramBins），不再每次重绘对 3000 个值分箱。
+    let bins: [Int]
     let range: ClosedRange<Double>
     let threshold: Double
     /// true = values BELOW the threshold are rejected (sharpness/quality);
@@ -2721,12 +2779,7 @@ struct MetricHistogram: View {
 
     var body: some View {
         Canvas { context, size in
-            guard !values.isEmpty else { return }
-            let binCount = 40
-            var bins = [Int](repeating: 0, count: binCount)
-            for v in values {
-                bins[min(binCount - 1, Int(position(v) * Double(binCount)))] += 1
-            }
+            let binCount = bins.count
             guard let maxBin = bins.max(), maxBin > 0 else { return }
             let barW = size.width / CGFloat(binCount)
             let tx = CGFloat(position(threshold)) * size.width
@@ -2954,8 +3007,9 @@ struct ReviewView: View {
                         LazyHStack(spacing: 4) {
                             ForEach(orderIDs, id: \.self) { memberID in
                                 if let member = store.item(withID: memberID) {
-                                ThumbnailView(path: member.previewPath, maxPixel: 256)
-                                    .frame(width: 92, height: 64)
+                                ThumbnailView(path: member.previewPath, maxPixel: 256, fit: true)
+                                    .frame(width: 72, height: 72)
+                                    .background(Color(white: 0.10))
                                     .clipShape(RoundedRectangle(cornerRadius: 4))
                                     .overlay(
                                         RoundedRectangle(cornerRadius: 4)
@@ -2969,7 +3023,7 @@ struct ReviewView: View {
                         }
                         .padding(6)
                     }
-                    .frame(height: 80)
+                    .frame(height: 88)
                     .onChange(of: focusedID) {
                         if let id = focusedID { proxy.scrollTo(id) }
                     }
