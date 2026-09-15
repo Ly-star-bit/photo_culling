@@ -51,6 +51,9 @@ struct BatchView: View {
     /// 场内按评分排（Aftershoot 的重复组里 AI 选中的排第一）。默认按拍摄顺序，
     /// 因为连拍的时间线本身就是信息（哪张是最后按的）。
     @AppStorage("batch.takeSortByScore") private var takeSortByScore = false
+    /// D 键上一次落在哪一场 —— 焦点丢了（比如废纸篓清掉了那张）时的回退。
+    @State private var lastVisitedTake: Int?
+    @State private var showAcceptAllConfirm = false
     @State private var showStatsPopover = false
     /// Fullscreen review: one big photo + filmstrip, digit-verdicts auto-advance.
     @State private var reviewMode = false
@@ -130,6 +133,18 @@ struct BatchView: View {
                 ids: store.items.filter { selectedIDs.contains($0.id) }.map(\.id),
                 isPresented: $showComparePair
             )
+        }
+        .confirmationDialog(
+            "把 \(store.recommendationSummary.takes) 场按推荐定案？",
+            isPresented: $showAcceptAllConfirm
+        ) {
+            Button("定案 · \(store.recommendationSummary.rejects) 张设为废片") {
+                withAnimation { store.acceptAllRecommendations() }
+                selectedIDs.removeAll()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("每个有精选的待处理场：精选留下，其余可用设为废片。你手动改判过的照片不动。整个操作 ⌘Z 一次撤销。")
         }
         .confirmationDialog(
             "把 \(store.verdictCounts.reject) 张废片移到废纸篓？",
@@ -242,6 +257,9 @@ struct BatchView: View {
                 Toggle("场内按评分", isOn: $takeSortByScore)
                     .toggleStyle(.button)
                     .help("每场里评分高的排前面 (表情 > 人脸质量 > 锐度)；关掉则按拍摄顺序。缩略图上的 #1 #2 #3 是同一把尺子")
+                Button("全部只留精选") { showAcceptAllConfirm = true }
+                    .disabled(store.recommendationSummary.takes == 0)
+                    .help("一键接受算法的推荐：每个有精选的待处理场，精选留下、其余可用设为废片。你手动标过可用的不动。⌘Z 一次全部撤销")
             }
             Picker("排序", selection: $store.sortOrder) {
                 ForEach(BatchStore.SortOrder.allCases, id: \.self) { s in
@@ -497,25 +515,27 @@ struct BatchView: View {
         return ordered.filter { $0.verdict == filter }
     }
 
-    /// 「场」按拍摄顺序（take id 是按时间递增分配的），场内成员也按拍摄顺序。
+    /// 每场一行的数据。分组本身在 store 的 Derived 里算好（takeRows），这里只做
+    /// 筛选：以前这是个计算属性，每次按键都对全部照片 Dictionary(grouping:) + 排序。
     private var groupedItems: [(group: Int, members: [BatchItem])] {
-        let dict = Dictionary(grouping: store.items, by: \.take)
-        let keys = pendingTakesOnly
-            ? dict.keys.filter { (dict[$0] ?? []).filter { $0.verdict != .reject }.count > 1 }
-            : Array(dict.keys)
-        return keys.sorted().compactMap { key in
-            var members = dict[key]!
+        let items = store.items
+        return store.takeRows.compactMap { row in
+            // 下标是上次 rebuildDerived 时的；items 换掉但还没重算的那一帧，靠这个
+            // 守卫别把照片画进错的场（和 item(withID:) 里那道守卫同一套约定）。
+            var members = row.indices.compactMap { idx -> BatchItem? in
+                guard idx < items.count, items[idx].take == row.take else { return nil }
+                return items[idx]
+            }
+            if pendingTakesOnly, members.filter({ $0.verdict != .reject }).count < 2 { return nil }
             if let filter = store.verdictFilter { members = members.filter { $0.verdict == filter } }
             guard !members.isEmpty else { return nil }
             if takeSortByScore {
-                return (key, members.sorted {
+                members.sort {
                     let ka = BatchStore.scoreKey($0), kb = BatchStore.scoreKey($1)
                     return ka == kb ? $0.id < $1.id : ka > kb
-                })
+                }
             }
-            return (key, members.sorted {
-                ($0.captureTime ?? .distantPast, $0.id) < ($1.captureTime ?? .distantPast, $1.id)
-            })
+            return (row.take, members)
         }
     }
 
@@ -725,7 +745,7 @@ struct BatchView: View {
                 Text("阈值建议（从你的改判反推）").font(.caption).foregroundStyle(.secondary)
                 ForEach(store.thresholdSuggestions) { sug in
                     HStack(spacing: 6) {
-                        Text("你放行了 \(sug.released) 张被「\(sug.kind.rawValue)」判死的 → 建议 \(sug.currentText) → \(sug.suggestedText)")
+                        Text("你放行了 \(sug.released) 张被「\(sug.kind.rawValue)」判死的 → 建议 \(sug.currentText) → \(sug.suggestedText)（能救回 \(sug.rescued)/\(sug.released)）")
                             .font(.caption)
                         Button("应用") { store.applySuggestion(sug) }
                             .controlSize(.small)
@@ -901,20 +921,20 @@ struct BatchView: View {
     }
 
     /// D：跳到下一个还没定的场（Aftershoot 过重复组的节奏：定完一组，一键下一组）。
-    /// 以前定完一场要自己滚动去找下一个橙色 pill。从焦点所在的场往后找，到底了
-    /// 绕回开头；不在分组模式就先切过去。
+    /// 按**场号**找"比当前场晚的第一个待处理"，不按行下标：开着「只看待处理」时，
+    /// 定完一场那行立刻消失，焦点那张不在任何行里，按下标找会跳回第一行。
+    /// 场号按时间递增，所以"比当前场号大"就是"后面的"。到底了绕回开头。
     private func jumpToNextPendingTake(_ proxy: ScrollViewProxy) {
         if gridMode != .byGroup { gridMode = .byGroup }
         let rows = groupedItems
-        let pending = rows.enumerated().filter { row in
-            row.element.members.filter { $0.verdict != .reject }.count > 1
+        let pending = rows.filter { row in
+            row.members.filter { $0.verdict != .reject }.count > 1
         }
         guard !pending.isEmpty else { return }
-        let currentRow = focusedID.flatMap { id in
-            rows.firstIndex { $0.members.contains { $0.id == id } }
-        } ?? -1
-        let next = pending.first { $0.offset > currentRow } ?? pending[0]
-        let target = next.element.members.first { $0.verdict != .reject } ?? next.element.members[0]
+        let currentTake = focusedID.flatMap { store.item(withID: $0)?.take } ?? lastVisitedTake ?? -1
+        let next = pending.first { $0.group > currentTake } ?? pending[0]
+        let target = next.members.first { $0.verdict != .reject } ?? next.members[0]
+        lastVisitedTake = next.group
         selectedIDs.removeAll()
         focusedID = target.id
         withAnimation { proxy.scrollTo(target.id, anchor: .top) }
@@ -1502,6 +1522,13 @@ enum ThumbCache {
     static func load(path: String, maxPixel: Int = 512) -> NSImage? {
         let cacheKey = key(path, maxPixel)
         if let hit = cache.object(forKey: cacheKey) { return hit }
+        guard let image = decode(path: path, maxPixel: maxPixel) else { return nil }
+        cache.setObject(image, forKey: cacheKey, cost: Int(image.size.width * image.size.height * 4))
+        return image
+    }
+
+    /// 纯解码，不进缓存 —— 大图那条线用自己的 FitCache，别把网格缩略图挤出去。
+    static func decode(path: String, maxPixel: Int) -> NSImage? {
         guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil) else { return nil }
         // RAW-only 场次的适应视图：先试相机内嵌的 JPEG 预览（相机自己锐化过，
         // 解码只要几十毫秒），够大才用；不够大（很多 RAW 只嵌了 160px 缩略图）
@@ -1515,9 +1542,7 @@ enum ThumbCache {
                kCGImageSourceCreateThumbnailWithTransform: true,
            ] as CFDictionary),
            max(embedded.width, embedded.height) >= min(2000, maxPixel / 2) {
-            let image = NSImage(cgImage: embedded, size: NSSize(width: embedded.width, height: embedded.height))
-            cache.setObject(image, forKey: cacheKey, cost: embedded.width * embedded.height * 4)
-            return image
+            return NSImage(cgImage: embedded, size: NSSize(width: embedded.width, height: embedded.height))
         }
         guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                   kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -1527,9 +1552,7 @@ enum ThumbCache {
                   // 清晰版，分析框还画错轴。对预览图是无操作。
                   kCGImageSourceCreateThumbnailWithTransform: true,
               ] as CFDictionary) else { return nil }
-        let image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
-        cache.setObject(image, forKey: cacheKey, cost: cg.width * cg.height * 4)
-        return image
+        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
     }
 }
 
@@ -1567,6 +1590,28 @@ struct ThumbnailView: View {
             guard !Task.isCancelled else { return }
             image = loaded
         }
+    }
+}
+
+// MARK: - 大图专用缓存
+
+/// 检视器 / 审片 / 对比的 4096 解码（~45MB/张）和锐化成品（~17MB/张）。以前和网格
+/// 缩略图塞同一个 ThumbCache：检视器里翻 20 张就是 1.2GB，回到网格全灰重解。
+/// 这里只留翻页前后够用的几张，网格那边不受影响。
+enum FitCache {
+    static let cache: NSCache<NSString, NSImage> = {
+        let c = NSCache<NSString, NSImage>()
+        c.countLimit = 12
+        c.totalCostLimit = ThumbCache.budget(fraction: 0.05, cap: 800_000_000)
+        return c
+    }()
+
+    static func load(path: String, maxPixel: Int) -> NSImage? {
+        let cacheKey = ThumbCache.key(path, maxPixel)
+        if let hit = cache.object(forKey: cacheKey) { return hit }
+        guard let image = ThumbCache.decode(path: path, maxPixel: maxPixel) else { return nil }
+        cache.setObject(image, forKey: cacheKey, cost: Int(image.size.width * image.size.height * 4))
+        return image
     }
 }
 
@@ -1649,8 +1694,8 @@ struct SharpImageView: View {
         let renderedKey = ThumbCache.key(decodePath + "#sharp", longEdge)
         let mine = loaded?.key == renderedKey || loaded?.key == decodedKey ? loaded?.image : nil
         let shown = mine
-            ?? ThumbCache.cache.object(forKey: renderedKey)
-            ?? ThumbCache.cache.object(forKey: decodedKey)
+            ?? FitCache.cache.object(forKey: renderedKey)
+            ?? FitCache.cache.object(forKey: decodedKey)
             ?? ThumbCache.cache.object(forKey: previewKey)
         return Group {
             if let shown {
@@ -1663,7 +1708,7 @@ struct SharpImageView: View {
             Color.clear.onChange(of: geo.size, initial: true) { displayed = geo.size }
         })
         .task(id: renderedKey) {
-            if let done = ThumbCache.cache.object(forKey: renderedKey) {
+            if let done = FitCache.cache.object(forKey: renderedKey) {
                 loaded = (renderedKey, done)
                 return
             }
@@ -1678,7 +1723,7 @@ struct SharpImageView: View {
             // 2. 4096 解码。
             let d = decodePath
             let px = Self.fitMaxPixel
-            guard let decoded = await Task.detached(priority: .userInitiated) { ThumbCache.load(path: d, maxPixel: px) }.value,
+            guard let decoded = await Task.detached(priority: .userInitiated) { FitCache.load(path: d, maxPixel: px) }.value,
                   !Task.isCancelled else { return }
             loaded = (decodedKey, decoded)
             // 3. 还没量到尺寸就先停在这，量到后 renderedKey 变化会再进来。
@@ -1688,10 +1733,10 @@ struct SharpImageView: View {
             guard !Task.isCancelled else { return }
             let edge = longEdge
             let rendered = await Task.detached(priority: .userInitiated) { () -> NSImage? in
-                if let hit = ThumbCache.cache.object(forKey: renderedKey) { return hit }
+                if let hit = FitCache.cache.object(forKey: renderedKey) { return hit }
                 guard let out = SharpRenderer.render(decoded, longEdge: edge) else { return nil }
-                ThumbCache.cache.setObject(out, forKey: renderedKey,
-                                           cost: Int(out.size.width * out.size.height * 4))
+                FitCache.cache.setObject(out, forKey: renderedKey,
+                                         cost: Int(out.size.width * out.size.height * 4))
                 return out
             }.value
             guard !Task.isCancelled, let rendered else { return }
@@ -2279,9 +2324,9 @@ struct PhotoInspector: View {
             // 预取的是 SharpImageView 要换上去的那张清晰版，翻到时直接命中缓存。
             let path = neighbor.decodePath
             let px = SharpImageView.fitMaxPixel
-            guard ThumbCache.cache.object(forKey: ThumbCache.key(path, px)) == nil else { continue }
+            guard FitCache.cache.object(forKey: ThumbCache.key(path, px)) == nil else { continue }
             Task.detached(priority: .utility) {
-                _ = ThumbCache.load(path: path, maxPixel: px)
+                _ = FitCache.load(path: path, maxPixel: px)
             }
         }
     }
@@ -3044,9 +3089,9 @@ struct ReviewView: View {
             // 预取的是 SharpImageView 要换上去的那张清晰版，翻到时直接命中缓存。
             let path = neighbor.decodePath
             let px = SharpImageView.fitMaxPixel
-            guard ThumbCache.cache.object(forKey: ThumbCache.key(path, px)) == nil else { continue }
+            guard FitCache.cache.object(forKey: ThumbCache.key(path, px)) == nil else { continue }
             Task.detached(priority: .utility) {
-                _ = ThumbCache.load(path: path, maxPixel: px)
+                _ = FitCache.load(path: path, maxPixel: px)
             }
         }
     }

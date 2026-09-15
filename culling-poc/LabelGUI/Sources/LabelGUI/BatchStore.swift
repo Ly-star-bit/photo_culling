@@ -339,6 +339,11 @@ final class BatchStore: ObservableObject {
         /// 纯展示，不碰判决。
         var takeRank: [String: Int] = [:]
         var thresholdSuggestions: [ThresholdSuggestion] = []
+        /// 每场的成员下标（场按 id 递增 = 时间序，场内按拍摄顺序）。分组网格以前每次
+        /// 按键都对 3000 张做一遍 Dictionary(grouping:) + 每场排序 —— 现在这里算一次，
+        /// 视图只做 O(n) 的筛选。下标指向 `items`，只在 rebuildDerived 之后有效。
+        var takeRows: [(take: Int, indices: [Int])] = []
+        var recommendationSummary: (takes: Int, rejects: Int) = (0, 0)
         /// Rejects with no manual override — the appeal court's docket.
         var autoRejectCount = 0
         /// Photos with no burst sibling carrying a face-quality score: the only
@@ -359,6 +364,7 @@ final class BatchStore: ObservableObject {
     var pendingTakeCount: Int { derived.pendingTakeCount }
     var takeRank: [String: Int] { derived.takeRank }
     var thresholdSuggestions: [ThresholdSuggestion] { derived.thresholdSuggestions }
+    var takeRows: [(take: Int, indices: [Int])] { derived.takeRows }
     var autoRejectCount: Int { derived.autoRejectCount }
 
     func item(withID id: String) -> BatchItem? {
@@ -432,6 +438,24 @@ final class BatchStore: ObservableObject {
         d.verdictCounts = (r, u, p)
         (d.chapterSegments, d.chapterWarnings) = Self.chapterSummary(items, minKeepers: minKeepersPerChapter)
         d.thresholdSuggestions = computeThresholdSuggestions()
+        let order = items.indices.sorted { a, b in
+            let ia = items[a], ib = items[b]
+            if ia.take != ib.take { return ia.take < ib.take }
+            let ta = ia.captureTime ?? .distantPast, tb = ib.captureTime ?? .distantPast
+            return ta != tb ? ta < tb : ia.id < ib.id
+        }
+        var rows: [(take: Int, indices: [Int])] = []
+        for idx in order {
+            if rows.last?.take == items[idx].take { rows[rows.count - 1].indices.append(idx) }
+            else { rows.append((items[idx].take, [idx])) }
+        }
+        d.takeRows = rows
+        var recTakes = 0, recRejects = 0
+        for (_, alive) in aliveByTake where alive.contains(where: { $0.verdict == .pick }) {
+            let losers = alive.filter { $0.verdict == .usable && overrides[$0.id] == nil }.count
+            if losers > 0 { recTakes += 1; recRejects += losers }
+        }
+        d.recommendationSummary = (recTakes, recRejects)
         derived = d
     }
 
@@ -2049,6 +2073,38 @@ final class BatchStore: ObservableObject {
         rebuildDerived(groupQCount: groupQCount)
     }
 
+    // MARK: - 接受全部推荐（Aftershoot 的一键过）
+
+    /// 还没定的场里，会被「接受全部推荐」动到的：场数 / 会变废片的张数。
+    /// 住 Derived：顶栏按钮的 disabled 和确认框标题都读它，每次重绘对 3000 张
+    /// 重新分组就是刚从 groupedItems 里清掉的那个坑。
+    var recommendationSummary: (takes: Int, rejects: Int) { derived.recommendationSummary }
+
+    /// 每个有精选的待处理场：精选留下（写成人工精选，否则砍完对手它会掉回可用），
+    /// 其余**没被人工改判**的可用设为废片。人工标过可用的一律不碰 —— 那是用户
+    /// 亲手做的决定。整个操作一条撤销记录，⌘Z 一次全部回来。
+    @discardableResult
+    func acceptAllRecommendations() -> Int {
+        var changes: [(id: String, verdict: Verdict)] = []
+        var takes = 0
+        for (_, members) in Dictionary(grouping: items, by: \.take) {
+            let picks = members.filter { $0.verdict == .pick }
+            guard !picks.isEmpty else { continue }
+            let losers = members.filter { $0.verdict == .usable && overrides[$0.id] == nil }
+            guard !losers.isEmpty else { continue }
+            takes += 1
+            for p in picks where overrides[p.id] != .pick { changes.append((p.id, .pick)) }
+            for l in losers { changes.append((l.id, .reject)) }
+        }
+        guard !changes.isEmpty else { return 0 }
+        overrideUndoStack.append(changes.map { ($0.id, overrides[$0.id]) })
+        if overrideUndoStack.count > 100 { overrideUndoStack.removeFirst() }
+        for c in changes { overrides[c.id] = c.verdict }
+        saveOverrides()
+        applyThresholds()
+        return takes
+    }
+
     // MARK: - 精华 Top N (Aftershoot 的 Sneak Peek)
 
     /// 全场评分最高的 N 张：精选优先，不够再从可用里按评分补。`fromUsable` 是补了
@@ -2069,6 +2125,8 @@ final class BatchStore: ObservableObject {
         let kind: Kind
         /// 被这条线判死、又被你放行的张数（放行 = 有人工改判且不是废片）。
         let released: Int
+        /// 建议的那条线能救回其中几张。不追求全救：一张硬留的纪念照会把线拖到地板。
+        let rescued: Int
         let current: Double
         let suggested: Double
         var id: String { kind.rawValue }
@@ -2083,35 +2141,52 @@ final class BatchStore: ObservableObject {
         }
     }
 
-    /// 至少 3 张样本才开口。建议值 = 刚好能把这批放行的全部救回来的那条线
-    /// （放行张里最差的那个值，再退一格滑杆步长）。
+    /// 至少 3 张样本才开口。建议值 = 能救回 ≥75% 放行张的那条线（再退一格滑杆
+    /// 步长），不是"救回全部"—— 第一版用放行里最差的那张，你放行的 4 张虚焦里
+    /// 有一张锐度 20 的纪念照，建议就变成"降到 15"，按这个拧全场虚焦全放进来。
     private func computeThresholdSuggestions() -> [ThresholdSuggestion] {
         func released(_ reason: String) -> [BatchItem] {
             items.filter { item in
                 item.rejectReasons.contains(reason) && overrides[item.id].map { $0 != .reject } == true
             }
         }
+        /// 排好序的值里，覆盖 ≥75% 的那个分位点。`lineIsMinimum` = 这条线是下限
+        /// （锐度/人脸质量：值 ≥ 线才放行），否则是上限（曝光：值 ≤ 线才放行）。
+        func robust(_ values: [Double], lineIsMinimum: Bool) -> Double {
+            let sorted = values.sorted()
+            let keep = Int((Double(sorted.count) * 0.75).rounded(.up))
+            return lineIsMinimum ? sorted[sorted.count - keep] : sorted[keep - 1]
+        }
         var out: [ThresholdSuggestion] = []
         let blur = released("虚焦")
-        if blur.count >= 3, let worst = blur.map(\.sharpness).min() {
-            let suggested = max(0, (worst / 5).rounded(.down) * 5 - 5)
+        if blur.count >= 3 {
+            let values = blur.map(\.sharpness)
+            let suggested = max(0, (robust(values, lineIsMinimum: true) / 5).rounded(.down) * 5 - 5)
             if suggested < sharpnessThreshold {
-                out.append(.init(kind: .sharpness, released: blur.count, current: sharpnessThreshold, suggested: suggested))
+                out.append(.init(kind: .sharpness, released: blur.count,
+                                 rescued: values.filter { $0 >= suggested }.count,
+                                 current: sharpnessThreshold, suggested: suggested))
             }
         }
         let clip = released("曝光裁切")
-        if clip.count >= 3, let worst = clip.map(\.worstClipPct).max() {
-            let suggested = min(0.5, (worst * 200).rounded(.up) / 200 + 0.005)  // 上取到 0.5% 再退一格
+        if clip.count >= 3 {
+            let values = clip.map(\.worstClipPct)
+            let suggested = min(0.5, (robust(values, lineIsMinimum: false) * 200).rounded(.up) / 200 + 0.005)
             if suggested > exposureThreshold {
-                out.append(.init(kind: .exposure, released: clip.count, current: exposureThreshold, suggested: suggested))
+                out.append(.init(kind: .exposure, released: clip.count,
+                                 rescued: values.filter { $0 < suggested }.count,
+                                 current: exposureThreshold, suggested: suggested))
             }
         }
         if faceQualityThreshold > 0 {
             let face = released("人脸质量低").filter { $0.faceQuality != nil }
-            if face.count >= 3, let worst = face.compactMap(\.faceQuality).min() {
-                let suggested = max(0, ((worst - 0.05) * 20).rounded(.down) / 20)
+            if face.count >= 3 {
+                let values = face.compactMap(\.faceQuality)
+                let suggested = max(0, ((robust(values, lineIsMinimum: true) - 0.05) * 20).rounded(.down) / 20)
                 if suggested < faceQualityThreshold {
-                    out.append(.init(kind: .faceQuality, released: face.count, current: faceQualityThreshold, suggested: suggested))
+                    out.append(.init(kind: .faceQuality, released: face.count,
+                                     rescued: values.filter { $0 >= suggested }.count,
+                                     current: faceQualityThreshold, suggested: suggested))
                 }
             }
         }

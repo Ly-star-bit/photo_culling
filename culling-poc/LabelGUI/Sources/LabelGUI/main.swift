@@ -6,6 +6,12 @@ import ImageIO
 /// live in Application Support — always writable by the app, no TCC prompt, works
 /// when launched from /Applications, independent of username.
 let appDataDir: URL = {
+    // CI 的无头回归用临时目录，别碰 runner 上的 Application Support。
+    if let override = ProcessInfo.processInfo.environment["LABELGUI_DATA_DIR"], !override.isEmpty {
+        let dir = URL(fileURLWithPath: override)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
     let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
     let dir = base.appendingPathComponent("选片工具")
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -97,6 +103,14 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--watermark"),
     exit(ok ? 0 : 1)
 }
 
+// LabelGUI --session-key <photo_dir>：打印该文件夹对应的 sessions/<key>，
+// 回归脚本用它把 fixture 放到 store 会去找的位置。
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--session-key"),
+   CommandLine.arguments.count > flagIndex + 1 {
+    print(BatchStore.sessionKey(for: URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])))
+    exit(0)
+}
+
 // Headless verdict smoke test (连拍去重用):
 // LabelGUI --verdicts <photo_dir> [--dedupe]
 // 加载该场次的缓存结果，套用当前阈值，打印判决/理由统计和多张连拍组的组内判决。
@@ -113,8 +127,20 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
         let store = BatchStore(dataDir: appDataDir,
                                pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         store.rejectBurstDuplicates = dedupe
+        // 章节警告受这个设置影响；固定成 0，CI 的期望输出不跟着 UserDefaults 漂。
+        store.minKeepersPerChapter = 0
         store.switchSession(to: dir)
         if let gap = gapOverride { store.takeGapSec = gap }
+        // --accept-all：跑一遍「全部只留精选」再打印（写进该数据目录的 overrides.json，
+        // 所以只在临时 LABELGUI_DATA_DIR 下用）。--undo 紧接着撤销一次，验证单条撤销记录。
+        if CommandLine.arguments.contains("--accept-all") {
+            let n = store.acceptAllRecommendations()
+            print("接受全部推荐: 动了 \(n) 场 · overrides \(store.overrides.count) 条")
+            if CommandLine.arguments.contains("--undo") {
+                store.undoLastOverride()
+                print("撤销一次后: overrides \(store.overrides.count) 条")
+            }
+        }
         let counts = store.verdictCounts
         print("连拍去重: \(dedupe ? "开" : "关")")
         print("照片 \(store.items.count) · 精选 \(counts.pick) · 可用 \(counts.usable) · 废片 \(counts.reject)")
@@ -127,7 +153,7 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
         }
         for w in store.chapterWarnings { print("  章节警告: \(w)") }
         for sug in store.thresholdSuggestions {
-            print("  阈值建议: 放行 \(sug.released) 张「\(sug.kind.rawValue)」→ \(sug.currentText) → \(sug.suggestedText)")
+            print("  阈值建议: 放行 \(sug.released) 张「\(sug.kind.rawValue)」→ \(sug.currentText) → \(sug.suggestedText) (能救回 \(sug.rescued)/\(sug.released))")
         }
         if store.manualRejectsWithoutReason > 0 { print("  滑杆漏掉(手动废且无理由): \(store.manualRejectsWithoutReason)") }
         let byTake = Dictionary(grouping: store.items, by: \.take)

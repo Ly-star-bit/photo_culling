@@ -1,0 +1,806 @@
+{
+  "analysis_version" : 1,
+  "engine" : "native",
+  "hash_threshold" : 10,
+  "results" : [
+    {
+      "blink_score" : 0.36060596883346341,
+      "burst_group" : 1,
+      "capture_time" : "2026-03-21T16:24:02",
+      "elapsed_sec" : 0.33066999912261963,
+      "eye_closed" : false,
+      "face_area_pct" : 0.0083983624403152213,
+      "face_bbox" : [
+        0.30981212034821509,
+        0.35238868445158006,
+        0.45572253391146661,
+        0.4496622934937477
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.6318359375,
+      "faces" : [
+        {
+          "area_pct" : 0.0083983624403152213,
+          "bbox" : [
+            0.30981212034821509,
+            0.35238868445158006,
+            0.45572253391146661,
+            0.4496622934937477
+          ],
+          "ear" : 0.36060596883346341,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 7.9472859700520837e-07,
+      "horizon_deg" : null,
+      "id" : "DSCF7207",
+      "phash" : "d8a306457e9097ed",
+      "shadow_clip_pct" : 0.0020658175150553384,
+      "sharpness" : 88.374912982512086,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101940
+    },
+    {
+      "blink_score" : 0.4453361507770397,
+      "burst_group" : 2,
+      "capture_time" : "2026-03-21T16:24:15",
+      "elapsed_sec" : 0.32594203948974609,
+      "eye_closed" : false,
+      "face_area_pct" : 0.0071656303009817179,
+      "face_bbox" : [
+        0.32825193107128142,
+        0.30856685042381288,
+        0.46302905380725862,
+        0.39841826558113097
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.681640625,
+      "faces" : [
+        {
+          "area_pct" : 0.0071656303009817179,
+          "bbox" : [
+            0.32825193107128142,
+            0.30856685042381288,
+            0.46302905380725862,
+            0.39841826558113097
+          ],
+          "ear" : 0.4453361507770397,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 1.5894571940104166e-07,
+      "horizon_deg" : 1.7500000131242845,
+      "id" : "DSCF7208",
+      "phash" : "d9a3264b5e90a54f",
+      "shadow_clip_pct" : 0.0029886563618977866,
+      "sharpness" : 70.844572484733632,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101940
+    },
+    {
+      "blink_score" : 0.42064146913563366,
+      "burst_group" : 3,
+      "capture_time" : "2026-03-21T16:24:17",
+      "elapsed_sec" : 0.32318902015686035,
+      "eye_closed" : false,
+      "face_area_pct" : 0.0041019914705286986,
+      "face_bbox" : [
+        0.33734839037060738,
+        0.38874097913503647,
+        0.43932166323065758,
+        0.4567231610417366
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.6220703125,
+      "faces" : [
+        {
+          "area_pct" : 0.0041019914705286986,
+          "bbox" : [
+            0.33734839037060738,
+            0.38874097913503647,
+            0.43932166323065758,
+            0.4567231610417366
+          ],
+          "ear" : 0.42064146913563366,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 0,
+      "horizon_deg" : null,
+      "id" : "DSCF7209",
+      "phash" : "f8833648f99c606f",
+      "shadow_clip_pct" : 0.0018506050109863281,
+      "sharpness" : 81.255912859946847,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101940
+    },
+    {
+      "blink_score" : 0.32235748641928591,
+      "burst_group" : 4,
+      "capture_time" : "2026-03-21T16:24:26",
+      "elapsed_sec" : 0.27623796463012695,
+      "eye_closed" : false,
+      "face_area_pct" : 0.004819268818628486,
+      "face_bbox" : [
+        0.33698598891496656,
+        0.3593793189153075,
+        0.44751583188772204,
+        0.43306588251143696
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.56005859375,
+      "faces" : [
+        {
+          "area_pct" : 0.004819268818628486,
+          "bbox" : [
+            0.33698598891496656,
+            0.3593793189153075,
+            0.44751583188772204,
+            0.43306588251143696
+          ],
+          "ear" : 0.32235748641928591,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 3.1789143880208332e-07,
+      "horizon_deg" : null,
+      "id" : "DSCF7211",
+      "phash" : "f8a33648eb95604f",
+      "shadow_clip_pct" : 0.0014826456705729167,
+      "sharpness" : 92.733913079434544,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1785409523.779475
+    },
+    {
+      "blink_score" : 0.34211193558147668,
+      "burst_group" : 4,
+      "capture_time" : "2026-03-21T16:24:27",
+      "elapsed_sec" : 0.32862091064453125,
+      "eye_closed" : false,
+      "face_area_pct" : 0.0049015150877593783,
+      "face_bbox" : [
+        0.31747547686100008,
+        0.35180271267890928,
+        0.42894448935985563,
+        0.42611538767814638
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.6064453125,
+      "faces" : [
+        {
+          "area_pct" : 0.0049015150877593783,
+          "bbox" : [
+            0.31747547686100008,
+            0.35180271267890928,
+            0.42894448935985563,
+            0.42611538767814638
+          ],
+          "ear" : 0.34211193558147668,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 1.5894571940104166e-07,
+      "horizon_deg" : null,
+      "id" : "DSCF7212",
+      "phash" : "f8a1174ce9977047",
+      "shadow_clip_pct" : 0.0046188036600748701,
+      "sharpness" : 93.387420600894856,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101939
+    },
+    {
+      "blink_score" : 0.28388886891784187,
+      "burst_group" : 5,
+      "capture_time" : "2026-03-21T16:25:17",
+      "elapsed_sec" : 0.34781599044799805,
+      "eye_closed" : false,
+      "face_area_pct" : 0.0048755744842106652,
+      "face_bbox" : [
+        0.44307836368679998,
+        0.41409805212169887,
+        0.55425201877951624,
+        0.48821382056921719
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.548828125,
+      "faces" : [
+        {
+          "area_pct" : 0.0048755744842106652,
+          "bbox" : [
+            0.44307836368679998,
+            0.41409805212169887,
+            0.55425201877951624,
+            0.48821382056921719
+          ],
+          "ear" : 0.28388886891784187,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 1.5894571940104166e-07,
+      "horizon_deg" : null,
+      "id" : "DSCF7213",
+      "phash" : "9e9b211a7965cea8",
+      "shadow_clip_pct" : 0.062936941782633468,
+      "sharpness" : 86.851150298621178,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101938
+    },
+    {
+      "blink_score" : 0.26226907516062958,
+      "burst_group" : 6,
+      "capture_time" : "2026-03-21T16:25:32",
+      "elapsed_sec" : 0.31245005130767822,
+      "eye_closed" : false,
+      "face_area_pct" : 0.0049722775823966003,
+      "face_bbox" : [
+        0.34741089344024656,
+        0.42547168731689455,
+        0.45968165397644045,
+        0.50031886100769041
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.49267578125,
+      "faces" : [
+        {
+          "area_pct" : 0.0049722775823966003,
+          "bbox" : [
+            0.34741089344024656,
+            0.42547168731689455,
+            0.45968165397644045,
+            0.50031886100769041
+          ],
+          "ear" : 0.26226907516062958,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 0,
+      "horizon_deg" : null,
+      "id" : "DSCF7214",
+      "phash" : "979c345b7c64f085",
+      "shadow_clip_pct" : 0.063804467519124344,
+      "sharpness" : 84.457562213302538,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101938
+    },
+    {
+      "blink_score" : 0.32701480519565285,
+      "burst_group" : 7,
+      "capture_time" : "2026-03-21T16:25:44",
+      "elapsed_sec" : 0.34938704967498779,
+      "eye_closed" : false,
+      "face_area_pct" : 0.0055641166614565085,
+      "face_bbox" : [
+        0.47758153490722177,
+        0.37721749916672709,
+        0.5963461581617594,
+        0.4563939146697521
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.56640625,
+      "faces" : [
+        {
+          "area_pct" : 0.0055641166614565085,
+          "bbox" : [
+            0.47758153490722177,
+            0.37721749916672709,
+            0.5963461581617594,
+            0.4563939146697521
+          ],
+          "ear" : 0.32701480519565285,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 3.1789143880208332e-07,
+      "horizon_deg" : null,
+      "id" : "DSCF7215",
+      "phash" : "be9b21107b2727b1",
+      "shadow_clip_pct" : 0.05083958307902018,
+      "sharpness" : 83.907325587022981,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101937
+    },
+    {
+      "blink_score" : 0.34086275732890092,
+      "burst_group" : 7,
+      "capture_time" : "2026-03-21T16:25:46",
+      "elapsed_sec" : 0.17098402976989746,
+      "eye_closed" : false,
+      "face_area_pct" : 0.0057898811723186006,
+      "face_bbox" : [
+        0.45243326835334302,
+        0.33282124176621436,
+        0.57358337678015237,
+        0.41358798071742059
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.5439453125,
+      "faces" : [
+        {
+          "area_pct" : 0.0057898811723186006,
+          "bbox" : [
+            0.45243326835334302,
+            0.33282124176621436,
+            0.57358337678015237,
+            0.41358798071742059
+          ],
+          "ear" : 0.34086275732890092,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 0,
+      "horizon_deg" : null,
+      "id" : "DSCF7216",
+      "phash" : "be9f29147923a331",
+      "shadow_clip_pct" : 0.032959143320719399,
+      "sharpness" : 82.283433110088183,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101936
+    },
+    {
+      "blink_score" : 0.4438799111177934,
+      "burst_group" : 8,
+      "capture_time" : "2026-03-21T16:27:50",
+      "elapsed_sec" : 0.21434903144836426,
+      "eye_closed" : false,
+      "face_area_pct" : 0.014745685436861944,
+      "face_bbox" : [
+        0.3290871284902096,
+        0.50492726117372511,
+        0.52242701724171636,
+        0.63382052034139635
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.7001953125,
+      "faces" : [
+        {
+          "area_pct" : 0.014745685436861944,
+          "bbox" : [
+            0.3290871284902096,
+            0.50492726117372511,
+            0.52242701724171636,
+            0.63382052034139635
+          ],
+          "ear" : 0.4438799111177934,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 4.76837158203125e-07,
+      "horizon_deg" : -4.2500075176386254,
+      "id" : "DSCF7221",
+      "phash" : "a837d3588eb4439e",
+      "shadow_clip_pct" : 0.15329519907633463,
+      "sharpness" : 67.985892046959478,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101934
+    },
+    {
+      "blink_score" : 0.4403035748396763,
+      "burst_group" : 9,
+      "capture_time" : "2026-03-21T16:27:56",
+      "elapsed_sec" : 0.21988201141357422,
+      "eye_closed" : false,
+      "face_area_pct" : 0.011471300048901067,
+      "face_bbox" : [
+        0.32360813841223718,
+        0.45283832699060439,
+        0.49413598254323005,
+        0.56652355641126628
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.673828125,
+      "faces" : [
+        {
+          "area_pct" : 0.011471300048901067,
+          "bbox" : [
+            0.32360813841223718,
+            0.45283832699060439,
+            0.49413598254323005,
+            0.56652355641126628
+          ],
+          "ear" : 0.4403035748396763,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 2.0662943522135415e-06,
+      "horizon_deg" : null,
+      "id" : "DSCF7222",
+      "phash" : "a536b3480ffd106b",
+      "shadow_clip_pct" : 0.076183954874674484,
+      "sharpness" : 74.55803282548267,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101933
+    },
+    {
+      "blink_score" : 0.46536684716146831,
+      "burst_group" : 9,
+      "capture_time" : "2026-03-21T16:27:58",
+      "elapsed_sec" : 0.21529591083526611,
+      "eye_closed" : false,
+      "face_area_pct" : 0.0099300866902520823,
+      "face_bbox" : [
+        0.3640486106276512,
+        0.45584386289119722,
+        0.52270789891481395,
+        0.56161672174930577
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.66650390625,
+      "faces" : [
+        {
+          "area_pct" : 0.0099300866902520823,
+          "bbox" : [
+            0.3640486106276512,
+            0.45584386289119722,
+            0.52270789891481395,
+            0.56161672174930577
+          ],
+          "ear" : 0.46536684716146831,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 7.9472859700520837e-07,
+      "horizon_deg" : -4.2500075176386254,
+      "id" : "DSCF7223",
+      "phash" : "a136b3c80bfd126d",
+      "shadow_clip_pct" : 0.07337411244710286,
+      "sharpness" : 77.25871637641059,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101932
+    },
+    {
+      "blink_score" : 0.33125837520575696,
+      "burst_group" : 10,
+      "capture_time" : "2026-03-21T16:28:01",
+      "elapsed_sec" : 0.23862504959106445,
+      "eye_closed" : false,
+      "face_area_pct" : 0.0095726626146042659,
+      "face_bbox" : [
+        0.41737489514052867,
+        0.38855591528117656,
+        0.52122671045362945,
+        0.54433364309370513
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.5966796875,
+      "faces" : [
+        {
+          "area_pct" : 0.0095726626146042659,
+          "bbox" : [
+            0.41737489514052867,
+            0.38855591528117656,
+            0.52122671045362945,
+            0.54433364309370513
+          ],
+          "ear" : 0.33125837520575696,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 4.76837158203125e-07,
+      "horizon_deg" : -2.7500002188213295,
+      "id" : "DSCF7224",
+      "phash" : "af32d27f6c1224c3",
+      "shadow_clip_pct" : 0.072985331217447921,
+      "sharpness" : 75.986752750748735,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101932
+    },
+    {
+      "blink_score" : 0.53250530133339447,
+      "burst_group" : 11,
+      "capture_time" : "2026-03-21T16:28:05",
+      "elapsed_sec" : 0.23892605304718018,
+      "eye_closed" : false,
+      "face_area_pct" : 0.00862573904275582,
+      "face_bbox" : [
+        0.42942237965762614,
+        0.28986578546464442,
+        0.52800398208200927,
+        0.43773819394409658
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.60595703125,
+      "faces" : [
+        {
+          "area_pct" : 0.00862573904275582,
+          "bbox" : [
+            0.42942237965762614,
+            0.28986578546464442,
+            0.52800398208200927,
+            0.43773819394409658
+          ],
+          "ear" : 0.53250530133339447,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 9.5367431640625e-07,
+      "horizon_deg" : null,
+      "id" : "DSCF7225",
+      "phash" : "bc32038b3fe4ba64",
+      "shadow_clip_pct" : 0.038162549336751304,
+      "sharpness" : 84.05763378009604,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101932
+    },
+    {
+      "blink_score" : 0.51419409375290204,
+      "burst_group" : 11,
+      "capture_time" : "2026-03-21T16:28:06",
+      "elapsed_sec" : 0.26250505447387695,
+      "eye_closed" : false,
+      "face_area_pct" : 0.0084812638686763142,
+      "face_bbox" : [
+        0.43106326237320902,
+        0.29197775237262247,
+        0.52881579324603079,
+        0.43860654868185522
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.61083984375,
+      "faces" : [
+        {
+          "area_pct" : 0.0084812638686763142,
+          "bbox" : [
+            0.43106326237320902,
+            0.29197775237262247,
+            0.52881579324603079,
+            0.43860654868185522
+          ],
+          "ear" : 0.51419409375290204,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 1.5894571940104167e-06,
+      "horizon_deg" : null,
+      "id" : "DSCF7226",
+      "phash" : "bc32038a3decba65",
+      "shadow_clip_pct" : 0.025531450907389324,
+      "sharpness" : 82.462900421568065,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101932
+    },
+    {
+      "blink_score" : 0.55281500731904254,
+      "burst_group" : 12,
+      "capture_time" : "2026-03-21T16:28:08",
+      "elapsed_sec" : 0.28673398494720459,
+      "eye_closed" : false,
+      "face_area_pct" : 0.0072944925975960695,
+      "face_bbox" : [
+        0.43759712651371957,
+        0.41973260380327704,
+        0.57358072623610501,
+        0.51038833372294901
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.6162109375,
+      "faces" : [
+        {
+          "area_pct" : 0.0072944925975960695,
+          "bbox" : [
+            0.43759712651371957,
+            0.41973260380327704,
+            0.57358072623610501,
+            0.51038833372294901
+          ],
+          "ear" : 0.55281500731904254,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 4.76837158203125e-07,
+      "horizon_deg" : -5.8750000211911617,
+      "id" : "DSCF7227",
+      "phash" : "bf2010cb7ff19223",
+      "shadow_clip_pct" : 0.054353713989257812,
+      "sharpness" : 90.015648389086223,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101932
+    },
+    {
+      "blink_score" : 0.54271483513343499,
+      "burst_group" : 13,
+      "capture_time" : "2026-03-21T16:28:10",
+      "elapsed_sec" : 0.19522106647491455,
+      "eye_closed" : false,
+      "face_area_pct" : 0.0064566440226401789,
+      "face_bbox" : [
+        0.43787473626434803,
+        0.36050299145281317,
+        0.56581062637269497,
+        0.44579358808696268
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.625,
+      "faces" : [
+        {
+          "area_pct" : 0.0064566440226401789,
+          "bbox" : [
+            0.43787473626434803,
+            0.36050299145281317,
+            0.56581062637269497,
+            0.44579358808696268
+          ],
+          "ear" : 0.54271483513343499,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 4.76837158203125e-07,
+      "horizon_deg" : -6.499999896287763,
+      "id" : "DSCF7228",
+      "phash" : "be2012dbcd3cd19a",
+      "shadow_clip_pct" : 0.037362893422444664,
+      "sharpness" : 90.929050115009332,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101932
+    },
+    {
+      "blink_score" : 0.50857558012205584,
+      "burst_group" : 14,
+      "capture_time" : "2026-03-21T16:28:12",
+      "elapsed_sec" : 0.15054404735565186,
+      "eye_closed" : false,
+      "face_area_pct" : 0.011172511214686764,
+      "face_bbox" : [
+        0.46959542930126191,
+        0.4483989581465721,
+        0.58179033100605015,
+        0.61669131070375438
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.63427734375,
+      "faces" : [
+        {
+          "area_pct" : 0.011172511214686764,
+          "bbox" : [
+            0.46959542930126191,
+            0.4483989581465721,
+            0.58179033100605015,
+            0.61669131070375438
+          ],
+          "ear" : 0.50857558012205584,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 9.5367431640625e-07,
+      "horizon_deg" : 6.7500001878358624,
+      "id" : "DSCF7229",
+      "phash" : "bf20967ad121c69b",
+      "shadow_clip_pct" : 0.035207589467366539,
+      "sharpness" : 76.472889210261343,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101932
+    },
+    {
+      "blink_score" : 0.52803481720504897,
+      "burst_group" : 15,
+      "capture_time" : "2026-03-21T16:28:14",
+      "elapsed_sec" : 0.17198801040649414,
+      "eye_closed" : false,
+      "face_area_pct" : 0.010826434564569332,
+      "face_bbox" : [
+        0.45768655724823476,
+        0.26550202593207362,
+        0.56813012920320038,
+        0.43116738870739935
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.60302734375,
+      "faces" : [
+        {
+          "area_pct" : 0.010826434564569332,
+          "bbox" : [
+            0.45768655724823476,
+            0.26550202593207362,
+            0.56813012920320038,
+            0.43116738870739935
+          ],
+          "ear" : 0.52803481720504897,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 1.2715657552083333e-06,
+      "horizon_deg" : null,
+      "id" : "DSCF7230",
+      "phash" : "af21a0163bfe3d60",
+      "shadow_clip_pct" : 0.023709297180175781,
+      "sharpness" : 75.917222380128521,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101932
+    },
+    {
+      "blink_score" : 0.36309412511477174,
+      "burst_group" : 16,
+      "capture_time" : "2026-03-21T16:28:38",
+      "elapsed_sec" : 0.19492602348327637,
+      "eye_closed" : false,
+      "face_area_pct" : 0.0091584204140330305,
+      "face_bbox" : [
+        0.226467389985919,
+        0.40315544381737711,
+        0.37883732058107855,
+        0.50473539754748342
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.6787109375,
+      "faces" : [
+        {
+          "area_pct" : 0.0091584204140330305,
+          "bbox" : [
+            0.226467389985919,
+            0.40315544381737711,
+            0.37883732058107855,
+            0.50473539754748342
+          ],
+          "ear" : 0.36309412511477174,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 4.76837158203125e-07,
+      "horizon_deg" : null,
+      "id" : "DSCF7231",
+      "phash" : "b0339dda1925ec6c",
+      "shadow_clip_pct" : 0.023429075876871746,
+      "sharpness" : 75.04301944274232,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101932
+    },
+    {
+      "blink_score" : 0.37420692215896156,
+      "burst_group" : 17,
+      "capture_time" : "2026-03-21T16:28:39",
+      "elapsed_sec" : 0.20872402191162109,
+      "eye_closed" : false,
+      "face_area_pct" : 0.0092205817809620783,
+      "face_bbox" : [
+        0.25003480911254883,
+        0.31113889105617998,
+        0.40292096138000488,
+        0.41306298933923247
+      ],
+      "face_count" : 1,
+      "face_found" : true,
+      "face_quality" : 0.7041015625,
+      "faces" : [
+        {
+          "area_pct" : 0.0092205817809620783,
+          "bbox" : [
+            0.25003480911254883,
+            0.31113889105617998,
+            0.40292096138000488,
+            0.41306298933923247
+          ],
+          "ear" : 0.37420692215896156,
+          "eye_closed" : false
+        }
+      ],
+      "highlight_clip_pct" : 4.76837158203125e-07,
+      "horizon_deg" : null,
+      "id" : "DSCF7232",
+      "phash" : "a0373fd8da198768",
+      "shadow_clip_pct" : 0.019256114959716797,
+      "sharpness" : 77.047116992564312,
+      "sharpness_scope" : "features",
+      "src_mtime" : 1774101932
+    }
+  ],
+  "time_window_sec" : 2
+}

@@ -1,0 +1,341 @@
+{
+  "photo_dir": "/tmp/labelgui-fixture-photot",
+  "photos": [
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:24:02",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7207.JPG",
+      "exif": {
+        "aperture": 5,
+        "focal_35": 36,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7207",
+      "orientation": null,
+      "preview_path": "previews/DSCF7207.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7207.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:24:15",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7208.JPG",
+      "exif": {
+        "aperture": 5,
+        "focal_35": 36,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7208",
+      "orientation": null,
+      "preview_path": "previews/DSCF7208.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7208.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:24:17",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7209.JPG",
+      "exif": {
+        "aperture": 5,
+        "focal_35": 26,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7209",
+      "orientation": null,
+      "preview_path": "previews/DSCF7209.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7209.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:24:26",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7211.JPG",
+      "exif": {
+        "aperture": 5,
+        "focal_35": 30,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7211",
+      "orientation": null,
+      "preview_path": "previews/DSCF7211.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7211.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:24:27",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7212.JPG",
+      "exif": {
+        "aperture": 5,
+        "focal_35": 30,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7212",
+      "orientation": null,
+      "preview_path": "previews/DSCF7212.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7212.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:25:17",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7213.JPG",
+      "exif": {
+        "aperture": 5,
+        "focal_35": 30,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7213",
+      "orientation": null,
+      "preview_path": "previews/DSCF7213.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7213.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:25:32",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7214.JPG",
+      "exif": {
+        "aperture": 5,
+        "focal_35": 30,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7214",
+      "orientation": null,
+      "preview_path": "previews/DSCF7214.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7214.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:25:44",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7215.JPG",
+      "exif": {
+        "aperture": 5,
+        "focal_35": 30,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7215",
+      "orientation": null,
+      "preview_path": "previews/DSCF7215.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7215.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:25:46",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7216.JPG",
+      "exif": {
+        "aperture": 5,
+        "focal_35": 30,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7216",
+      "orientation": null,
+      "preview_path": "previews/DSCF7216.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7216.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:27:50",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7221.JPG",
+      "exif": {
+        "aperture": 5,
+        "focal_35": 54,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7221",
+      "orientation": null,
+      "preview_path": "previews/DSCF7221.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7221.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:27:56",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7222.JPG",
+      "exif": {
+        "aperture": 4.5,
+        "focal_35": 50,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7222",
+      "orientation": null,
+      "preview_path": "previews/DSCF7222.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7222.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:27:58",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7223.JPG",
+      "exif": {
+        "aperture": 4.5,
+        "focal_35": 45,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7223",
+      "orientation": null,
+      "preview_path": "previews/DSCF7223.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7223.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:28:01",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7224.JPG",
+      "exif": {
+        "aperture": 4.5,
+        "focal_35": 45,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7224",
+      "orientation": null,
+      "preview_path": "previews/DSCF7224.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7224.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:28:05",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7225.JPG",
+      "exif": {
+        "aperture": 4.5,
+        "focal_35": 41,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7225",
+      "orientation": null,
+      "preview_path": "previews/DSCF7225.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7225.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:28:06",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7226.JPG",
+      "exif": {
+        "aperture": 4.5,
+        "focal_35": 41,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7226",
+      "orientation": null,
+      "preview_path": "previews/DSCF7226.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7226.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:28:08",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7227.JPG",
+      "exif": {
+        "aperture": 4.5,
+        "focal_35": 39,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7227",
+      "orientation": null,
+      "preview_path": "previews/DSCF7227.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7227.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:28:10",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7228.JPG",
+      "exif": {
+        "aperture": 4.5,
+        "focal_35": 38,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7228",
+      "orientation": null,
+      "preview_path": "previews/DSCF7228.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7228.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:28:12",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7229.JPG",
+      "exif": {
+        "aperture": 4.5,
+        "focal_35": 48,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7229",
+      "orientation": null,
+      "preview_path": "previews/DSCF7229.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7229.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:28:14",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7230.JPG",
+      "exif": {
+        "aperture": 4.5,
+        "focal_35": 48,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7230",
+      "orientation": null,
+      "preview_path": "previews/DSCF7230.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7230.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:28:38",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7231.JPG",
+      "exif": {
+        "aperture": 4.5,
+        "focal_35": 92,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7231",
+      "orientation": null,
+      "preview_path": "previews/DSCF7231.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7231.JPG"
+    },
+    {
+      "camera": "X-T50",
+      "capture_time": "2026-03-21T16:28:39",
+      "decode_path": "/tmp/labelgui-fixture-photot/DSCF7232.JPG",
+      "exif": {
+        "aperture": 4.5,
+        "focal_35": 92,
+        "iso": 500,
+        "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+        "shutter_sec": 0.0005
+      },
+      "id": "DSCF7232",
+      "orientation": null,
+      "preview_path": "previews/DSCF7232.jpg",
+      "raw_path": "/tmp/labelgui-fixture-photot/DSCF7232.JPG"
+    }
+  ]
+}

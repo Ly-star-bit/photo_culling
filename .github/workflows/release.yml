@@ -46,6 +46,11 @@ jobs:
       - name: 构建 app + DMG
         run: ./build_app.sh
 
+      # 判决层回归：Fixtures/photot-session 的分析结果灌进临时目录跑 --verdicts，和期望
+      # 逐字比对。改了分组/判决/提名逻辑而没更新期望值 → 这里红。
+      - name: 判决回归 (--verdicts)
+        run: culling-poc/LabelGUI/Scripts/verdict_regression.sh culling-poc/LabelGUI/.build/release/LabelGUI
+
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
