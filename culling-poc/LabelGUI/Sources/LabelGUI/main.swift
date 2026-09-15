@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import ImageIO
 
 /// Analysis artifacts (previews, manifest/layer JSONs, labels.csv, settings.json)
@@ -132,6 +133,32 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
             print("  场 \(take) (\(byTake[take]!.count) 张): \(line)")
         }
     }
+    exit(0)
+}
+
+// Headless sharpen smoke test (适应视图管线):
+// LabelGUI --sharp <photo> <out.jpg> [longEdge]
+// 走和检视器一模一样的 4096 解码 → Lanczos 缩到 longEdge → unsharp，落成 JPEG。
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--sharp"),
+   CommandLine.arguments.count > flagIndex + 2 {
+    let photo = CommandLine.arguments[flagIndex + 1]
+    let out = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 2])
+    let edge = CommandLine.arguments.count > flagIndex + 3 ? Int(CommandLine.arguments[flagIndex + 3]) ?? 2560 : 2560
+    let start = Date()
+    guard let decoded = ThumbCache.load(path: photo, maxPixel: SharpImageView.fitMaxPixel) else {
+        FileHandle.standardError.write("decode failed\n".data(using: .utf8)!); exit(1)
+    }
+    let t1 = Date()
+    guard let rendered = SharpRenderer.render(decoded, longEdge: edge),
+          let cg = rendered.cgImage(forProposedRect: nil, context: nil, hints: nil),
+          let dest = CGImageDestinationCreateWithURL(out as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
+        FileHandle.standardError.write("render failed\n".data(using: .utf8)!); exit(1)
+    }
+    CGImageDestinationAddImage(dest, cg, [kCGImageDestinationLossyCompressionQuality: 0.95] as CFDictionary)
+    guard CGImageDestinationFinalize(dest) else { exit(1) }
+    print(String(format: "decode %.0fx%.0f in %.2fs · render %dx%d in %.3fs · %@",
+                 decoded.size.width, decoded.size.height, t1.timeIntervalSince(start),
+                 cg.width, cg.height, Date().timeIntervalSince(t1), out.path))
     exit(0)
 }
 
