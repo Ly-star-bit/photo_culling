@@ -125,11 +125,17 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
         for reason in BatchStore.reasonOrder {
             if let n = store.reasonCounts[reason] { print("  理由 \(reason): \(n)") }
         }
+        for w in store.chapterWarnings { print("  章节警告: \(w)") }
+        for sug in store.thresholdSuggestions {
+            print("  阈值建议: 放行 \(sug.released) 张「\(sug.kind.rawValue)」→ \(sug.currentText) → \(sug.suggestedText)")
+        }
+        if store.manualRejectsWithoutReason > 0 { print("  滑杆漏掉(手动废且无理由): \(store.manualRejectsWithoutReason)") }
         let byTake = Dictionary(grouping: store.items, by: \.take)
         for take in byTake.keys.sorted() where (byTake[take]?.count ?? 0) > 1 {
             let line = byTake[take]!
                 .sorted { ($0.captureTime ?? .distantPast) < ($1.captureTime ?? .distantPast) }
-                .map { "\($0.id)=\($0.verdict.rawValue)" }.joined(separator: " ")
+                .map { "\($0.id)=\($0.verdict.rawValue)" + (store.takeRank[$0.id].map { "#\($0)" } ?? "") }
+                .joined(separator: " ")
             print("  场 \(take) (\(byTake[take]!.count) 张): \(line)")
         }
     }
@@ -159,6 +165,29 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--sharp"),
     print(String(format: "decode %.0fx%.0f in %.2fs · render %dx%d in %.3fs · %@",
                  decoded.size.width, decoded.size.height, t1.timeIntervalSince(start),
                  cg.width, cg.height, Date().timeIntervalSince(t1), out.path))
+    exit(0)
+}
+
+// Headless focus-peaking smoke test: LabelGUI --focus <photo> <out.png>
+// 把对焦高亮遮罩叠在 ≤2048 的缩图上落成 PNG，肉眼看合焦区域标得对不对。
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--focus"),
+   CommandLine.arguments.count > flagIndex + 2 {
+    let photo = CommandLine.arguments[flagIndex + 1]
+    let out = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 2])
+    guard let full = FullResCache.load(path: photo) else { FileHandle.standardError.write("decode failed\n".data(using: .utf8)!); exit(1) }
+    let t0 = Date()
+    guard let mask = FocusMask.compute(from: full, key: photo) else { FileHandle.standardError.write("mask failed\n".data(using: .utf8)!); exit(1) }
+    let dt = Date().timeIntervalSince(t0)
+    guard let base = ThumbCache.load(path: photo, maxPixel: FocusMask.maxEdge),
+          let bcg = base.cgImage(forProposedRect: nil, context: nil, hints: nil),
+          let ctx = CGContext(data: nil, width: bcg.width, height: bcg.height, bitsPerComponent: 8, bytesPerRow: 0,
+                              space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { exit(1) }
+    let rect = CGRect(x: 0, y: 0, width: bcg.width, height: bcg.height)
+    ctx.draw(bcg, in: rect); ctx.draw(mask, in: rect)
+    guard let composed = ctx.makeImage(),
+          let dest = CGImageDestinationCreateWithURL(out as CFURL, UTType.png.identifier as CFString, 1, nil) else { exit(1) }
+    CGImageDestinationAddImage(dest, composed, nil); CGImageDestinationFinalize(dest)
+    print(String(format: "mask %dx%d in %.2fs · %@", mask.width, mask.height, dt, out.path))
     exit(0)
 }
 

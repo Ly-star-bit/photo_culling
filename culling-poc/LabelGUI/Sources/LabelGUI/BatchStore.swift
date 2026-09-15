@@ -183,6 +183,17 @@ final class BatchStore: ObservableObject {
     /// 严格度：宴会厅抓拍和影棚摆拍差一个数量级，而且 `photot`（21 张、单场）
     /// 这点数据不足以支撑任何一个"科学的"固定值。所以给默认值 + 实时组数反馈，
     /// 让用户自己拧。也正因为是节奏不是严格度，它不进 CullPreset。
+    /// 每章节最少保留几张（0 = 只在全灭时警告，即以前的行为）。Aftershoot 的
+    /// "每场景最少选 N"；对我们来说是 coverage protection 的可调版本：仪式只留了
+    /// 2 张不是废片多，是交付事故。
+    @Published var minKeepersPerChapter: Int =
+        UserDefaults.standard.integer(forKey: "batch.minKeepersPerChapter") {
+        didSet {
+            UserDefaults.standard.set(minKeepersPerChapter, forKey: "batch.minKeepersPerChapter")
+            applyThresholds()
+        }
+    }
+
     static let defaultTakeGapSec: Double = 8
     @Published var takeGapSec: Double = defaultTakeGapSec { didSet { onTakeGapEdited() } }
 
@@ -323,6 +334,11 @@ final class BatchStore: ObservableObject {
         /// 1 张精选、其余废片的，活儿干完了，不该再占着网格。顶栏每次重绘都读它,
         /// 所以和 verdictCounts 一起在 rebuildDerived 里算一次,别做成 O(n) 计算属性。
         var pendingTakeCount = 0
+        /// 场内排名（1 起，只排没被淘汰的）：缩略图上的 #1 #2 #3。用户常从一场里
+        /// 挑 3 张 —— 这告诉他算法眼里的前三是哪几张，他只需要否决而不是从零找。
+        /// 纯展示，不碰判决。
+        var takeRank: [String: Int] = [:]
+        var thresholdSuggestions: [ThresholdSuggestion] = []
         /// Rejects with no manual override — the appeal court's docket.
         var autoRejectCount = 0
         /// Photos with no burst sibling carrying a face-quality score: the only
@@ -341,6 +357,8 @@ final class BatchStore: ObservableObject {
     var chapterWarnings: [String] { derived.chapterWarnings }
     var borderlineCount: Int { derived.borderlineCount }
     var pendingTakeCount: Int { derived.pendingTakeCount }
+    var takeRank: [String: Int] { derived.takeRank }
+    var thresholdSuggestions: [ThresholdSuggestion] { derived.thresholdSuggestions }
     var autoRejectCount: Int { derived.autoRejectCount }
 
     func item(withID id: String) -> BatchItem? {
@@ -404,11 +422,16 @@ final class BatchStore: ObservableObject {
                 d.faceQualityAbsoluteValues.append(q)
             }
         }
-        var aliveByTake: [Int: Int] = [:]
-        for item in items where item.verdict != .reject { aliveByTake[item.take, default: 0] += 1 }
-        d.pendingTakeCount = aliveByTake.values.filter { $0 > 1 }.count
+        var aliveByTake: [Int: [BatchItem]] = [:]
+        for item in items where item.verdict != .reject { aliveByTake[item.take, default: []].append(item) }
+        d.pendingTakeCount = aliveByTake.values.filter { $0.count > 1 }.count
+        for (_, alive) in aliveByTake where alive.count > 1 {
+            let ranked = alive.sorted { Self.scoreKey($0) > Self.scoreKey($1) }
+            for (i, item) in ranked.prefix(3).enumerated() { d.takeRank[item.id] = i + 1 }
+        }
         d.verdictCounts = (r, u, p)
-        (d.chapterSegments, d.chapterWarnings) = Self.chapterSummary(items)
+        (d.chapterSegments, d.chapterWarnings) = Self.chapterSummary(items, minKeepers: minKeepersPerChapter)
+        d.thresholdSuggestions = computeThresholdSuggestions()
         derived = d
     }
 
@@ -417,6 +440,9 @@ final class BatchStore: ObservableObject {
     enum SortOrder: String, CaseIterable {
         case captureTime = "拍摄时间"
         case filename = "文件名"
+        /// 评分高的在前（表情 > 人脸质量 > 锐度，同 scoreKey）—— 交付前过最终
+        /// 选片时精选区最好的排最前。
+        case score = "评分"
     }
 
     /// Two-camera weddings interleave DSCF/_DSC by filename; capture time is
@@ -438,6 +464,11 @@ final class BatchStore: ObservableObject {
         switch order {
         case .filename:
             array.sort { $0.order < $1.order }
+        case .score:
+            array.sort { a, b in
+                let ka = scoreKey(a), kb = scoreKey(b)
+                return ka == kb ? a.order < b.order : ka > kb
+            }
         case .captureTime:
             array.sort { a, b in
                 switch (a.captureTime, b.captureTime) {
@@ -1617,6 +1648,9 @@ final class BatchStore: ObservableObject {
         let usable: Int
         let reject: Int
         let timeRange: String
+        /// 留下的张数低于「每章节最少保留」。和 allRejected 分开：那个驱动时间轴
+        /// 上的红色"全灭"块，这个只是橙色提醒。
+        let underMin: Bool
         var id: Int { chapter }
         var allRejected: Bool { pick + usable == 0 }
     }
@@ -1625,7 +1659,7 @@ final class BatchStore: ObservableObject {
     /// computed properties doing the same grouping on every render). Warnings:
     /// chapters where culling left NOTHING — losing a whole scene is a delivery
     /// accident, a few extra keepers is just waste.
-    private static func chapterSummary(_ items: [BatchItem]) -> ([ChapterSegment], [String]) {
+    private static func chapterSummary(_ items: [BatchItem], minKeepers: Int) -> ([ChapterSegment], [String]) {
         var byChapter: [Int: [BatchItem]] = [:]
         for item in items { byChapter[item.chapter, default: []].append(item) }
         guard byChapter.count > 1 else { return ([], []) }
@@ -1643,11 +1677,16 @@ final class BatchStore: ObservableObject {
                 case .reject: reject += 1
                 }
             }
+            let keepers = pick + usable
             let segment = ChapterSegment(chapter: chapter, count: members.count,
-                                         pick: pick, usable: usable, reject: reject, timeRange: range)
+                                         pick: pick, usable: usable, reject: reject, timeRange: range,
+                                         underMin: keepers > 0 && keepers < minKeepers)
             segments.append(segment)
+            let where_ = "章节\(chapter + 1)\(range.isEmpty ? "" : " (\(range))")"
             if segment.allRejected {
-                warnings.append("章节\(chapter + 1)\(range.isEmpty ? "" : " (\(range))") 的 \(members.count) 张全部被淘汰")
+                warnings.append("\(where_) 的 \(members.count) 张全部被淘汰")
+            } else if segment.underMin {
+                warnings.append("\(where_) 只留了 \(keepers) 张 (<\(minKeepers))")
             }
         }
         return (segments, warnings)
@@ -1854,13 +1893,13 @@ final class BatchStore: ObservableObject {
     /// 就是干这个的——给同一个主体的多张抓拍排序），锐度只作最后的抢七 / 无人脸时的
     /// 兜底。返回 nil = 没有候选。
     private static func bestIndex(_ indices: [Int], in items: [BatchItem]) -> Int? {
-        indices.max { a, b in
-            let ea = items[a].expressionScore ?? -1
-            let eb = items[b].expressionScore ?? -1
-            let qa = items[a].faceQuality ?? -1
-            let qb = items[b].faceQuality ?? -1
-            return (ea, qa, items[a].sharpness) < (eb, qb, items[b].sharpness)
-        }
+        indices.max { scoreKey(items[$0]) < scoreKey(items[$1]) }
+    }
+
+    /// 同一把尺子给三处用：场内自动提名、「按评分」排序、缩略图上的 #1 #2 #3。
+    /// 三处用的不是同一个排序的话，标着 #1 的那张不是精选，用户会怀疑软件。
+    static func scoreKey(_ item: BatchItem) -> (Int, Double, Double) {
+        (item.expressionScore ?? -1, item.faceQuality ?? -1, item.sharpness)
     }
 
     func applyThresholds() {
@@ -2010,6 +2049,90 @@ final class BatchStore: ObservableObject {
         rebuildDerived(groupQCount: groupQCount)
     }
 
+    // MARK: - 精华 Top N (Aftershoot 的 Sneak Peek)
+
+    /// 全场评分最高的 N 张：精选优先，不够再从可用里按评分补。`fromUsable` 是补了
+    /// 几张 —— 界面上要说清楚，别让人以为精华全是精选。
+    func topPicks(_ n: Int) -> (ids: [String], fromUsable: Int) {
+        let picks = items.filter { $0.verdict == .pick }.sorted { Self.scoreKey($0) > Self.scoreKey($1) }
+        if picks.count >= n { return (picks.prefix(n).map(\.id), 0) }
+        let fill = items.filter { $0.verdict == .usable }.sorted { Self.scoreKey($0) > Self.scoreKey($1) }
+            .prefix(n - picks.count)
+        return (picks.map(\.id) + fill.map(\.id), fill.count)
+    }
+
+    // MARK: - 阈值建议（从你的改判反推，不是机器学习）
+
+    /// 只做三个有滑杆的理由。闭眼是组内相对 EAR、VLM 没有滑杆 —— 那两个不编建议。
+    struct ThresholdSuggestion: Identifiable {
+        enum Kind: String { case sharpness = "锐度下限", exposure = "曝光裁切上限", faceQuality = "人脸质量下限" }
+        let kind: Kind
+        /// 被这条线判死、又被你放行的张数（放行 = 有人工改判且不是废片）。
+        let released: Int
+        let current: Double
+        let suggested: Double
+        var id: String { kind.rawValue }
+        var currentText: String { Self.format(kind, current) }
+        var suggestedText: String { Self.format(kind, suggested) }
+        static func format(_ kind: Kind, _ v: Double) -> String {
+            switch kind {
+            case .sharpness: return "\(Int(v))"
+            case .exposure: return String(format: "%.1f%%", v * 100)
+            case .faceQuality: return String(format: "%.2f", v)
+            }
+        }
+    }
+
+    /// 至少 3 张样本才开口。建议值 = 刚好能把这批放行的全部救回来的那条线
+    /// （放行张里最差的那个值，再退一格滑杆步长）。
+    private func computeThresholdSuggestions() -> [ThresholdSuggestion] {
+        func released(_ reason: String) -> [BatchItem] {
+            items.filter { item in
+                item.rejectReasons.contains(reason) && overrides[item.id].map { $0 != .reject } == true
+            }
+        }
+        var out: [ThresholdSuggestion] = []
+        let blur = released("虚焦")
+        if blur.count >= 3, let worst = blur.map(\.sharpness).min() {
+            let suggested = max(0, (worst / 5).rounded(.down) * 5 - 5)
+            if suggested < sharpnessThreshold {
+                out.append(.init(kind: .sharpness, released: blur.count, current: sharpnessThreshold, suggested: suggested))
+            }
+        }
+        let clip = released("曝光裁切")
+        if clip.count >= 3, let worst = clip.map(\.worstClipPct).max() {
+            let suggested = min(0.5, (worst * 200).rounded(.up) / 200 + 0.005)  // 上取到 0.5% 再退一格
+            if suggested > exposureThreshold {
+                out.append(.init(kind: .exposure, released: clip.count, current: exposureThreshold, suggested: suggested))
+            }
+        }
+        if faceQualityThreshold > 0 {
+            let face = released("人脸质量低").filter { $0.faceQuality != nil }
+            if face.count >= 3, let worst = face.compactMap(\.faceQuality).min() {
+                let suggested = max(0, ((worst - 0.05) * 20).rounded(.down) / 20)
+                if suggested < faceQualityThreshold {
+                    out.append(.init(kind: .faceQuality, released: face.count, current: faceQualityThreshold, suggested: suggested))
+                }
+            }
+        }
+        return out
+    }
+
+    /// 「应用」：把滑杆拧到建议值。走 didSet → applyThresholds + 保存 + 预设变自定义。
+    func applySuggestion(_ s: ThresholdSuggestion) {
+        switch s.kind {
+        case .sharpness: sharpnessThreshold = s.suggested
+        case .exposure: exposureThreshold = s.suggested
+        case .faceQuality: faceQualityThreshold = s.suggested
+        }
+    }
+
+    /// 你手动废掉、但当前滑杆一个理由都没给的张数 —— 滑杆漏掉的。只报数，不编建议：
+    /// 没有信号说明是哪条线该收紧。
+    var manualRejectsWithoutReason: Int {
+        items.filter { overrides[$0.id] == .reject && $0.rejectReasons.isEmpty }.count
+    }
+
     // MARK: - Trash rejects
 
     /// Moves every 废片's files to the TRASH (never permanent deletion — a wrong
@@ -2145,10 +2268,13 @@ final class BatchStore: ObservableObject {
     /// counted (a re-export at another quality wants true; an accidental second
     /// click, or a folder that already holds the client's retouched files, does
     /// not).
+    /// `ids` 给定时只导这些（精华 Top N 走这里），否则按判决选。同一条通道：
+    /// isRunning 守卫、并发上限、跳过/覆盖、进度文字全部复用。
     func exportJPEGs(to folder: URL, includeUsable: Bool, quality: Double, maxPixel: Int? = nil,
-                     overwrite: Bool = false) {
+                     overwrite: Bool = false, ids: Set<String>? = nil) {
         guard !isRunning else { return }
-        let chosen = items.filter { $0.verdict == .pick || (includeUsable && $0.verdict == .usable) }
+        let chosen = ids.map { wanted in items.filter { wanted.contains($0.id) } }
+            ?? items.filter { $0.verdict == .pick || (includeUsable && $0.verdict == .usable) }
         guard !chosen.isEmpty else {
             lastError = "没有可导出的照片"
             return

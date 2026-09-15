@@ -24,6 +24,10 @@ struct BatchView: View {
     @State private var showJPEGSheet = false
     /// 高ISO RAW 导出 (降噪流程)。
     @State private var showISOSheet = false
+    /// 精华 Top N（Aftershoot 的 Sneak Peek）：当天发朋友圈用的那二十张。
+    @State private var showHighlightsSheet = false
+    @AppStorage("batch.highlightsCount") private var highlightsCount = 20
+    @AppStorage("batch.highlightsMaxPixel") private var highlightsMaxPixel = 2048
     @AppStorage("batch.isoThreshold") private var isoThreshold = 3200
     @AppStorage("batch.isoKeepersOnly") private var isoKeepersOnly = true
     /// JPG 导出长边 (0 = 原尺寸)。
@@ -44,6 +48,9 @@ struct BatchView: View {
     /// 本来全被它们淹掉。「待处理」= 还留着 2 张以上没淘汰的场；已经定成
     /// 1 张精选、其余废片的，活儿干完了就自动从视野里消失。
     @AppStorage("batch.pendingTakesOnly") private var pendingTakesOnly = false
+    /// 场内按评分排（Aftershoot 的重复组里 AI 选中的排第一）。默认按拍摄顺序，
+    /// 因为连拍的时间线本身就是信息（哪张是最后按的）。
+    @AppStorage("batch.takeSortByScore") private var takeSortByScore = false
     @State private var showStatsPopover = false
     /// Fullscreen review: one big photo + filmstrip, digit-verdicts auto-advance.
     @State private var reviewMode = false
@@ -116,6 +123,7 @@ struct BatchView: View {
         }
         .sheet(isPresented: $showJPEGSheet) { jpegExportSheet }
         .sheet(isPresented: $showISOSheet) { isoExportSheet }
+        .sheet(isPresented: $showHighlightsSheet) { highlightsSheet }
         .sheet(isPresented: $showComparePair) {
             ComparePairSheet(
                 store: store,
@@ -230,7 +238,10 @@ struct BatchView: View {
                 Toggle("只看待处理 (\(store.pendingTakeCount))", isOn: $pendingTakesOnly)
                     .toggleStyle(.button)
                     .help("只显示还留着 2 张以上没淘汰的场 —— 定完一场它就自动消失，" +
-                          "剩下多少一眼可见。这场共 \(stats.takes) 个多张场、\(stats.photos) 张")
+                          "剩下多少一眼可见。按 D 跳到下一个待处理场。这场共 \(stats.takes) 个多张场、\(stats.photos) 张")
+                Toggle("场内按评分", isOn: $takeSortByScore)
+                    .toggleStyle(.button)
+                    .help("每场里评分高的排前面 (表情 > 人脸质量 > 锐度)；关掉则按拍摄顺序。缩略图上的 #1 #2 #3 是同一把尺子")
             }
             Picker("排序", selection: $store.sortOrder) {
                 ForEach(BatchStore.SortOrder.allCases, id: \.self) { s in
@@ -247,6 +258,10 @@ struct BatchView: View {
                 .keyboardShortcut("z", modifiers: .command)
                 .disabled(!store.canUndoOverride)
                 .help("撤销上一次改判 (⌘Z)")
+            Button("全选") { selectedIDs = Set(visibleItems.map(\.id)) }
+                .keyboardShortcut("a", modifiers: .command)
+                .disabled(store.items.isEmpty)
+                .help("选中当前筛选下的全部照片 (⌘A)，配合批量栏一次改判")
             Button("审片模式") { enterReview() }
                 .keyboardShortcut("f", modifiers: [])
                 .disabled(store.items.isEmpty)
@@ -261,6 +276,8 @@ struct BatchView: View {
                     .disabled(store.items.isEmpty || store.isRunning)
                 Button("导出 JPG...") { showJPEGSheet = true }
                     .disabled(jpegExportCount == 0 || store.isRunning)
+                Button("精华 Top N (JPG)...") { showHighlightsSheet = true }
+                    .disabled(store.items.isEmpty || store.isRunning)
                 Button("导出高 ISO RAW (降噪)...") { showISOSheet = true }
                     .disabled(store.items.isEmpty || store.isRunning)
                 Menu("导出选片确认表 (HTML)") {
@@ -297,8 +314,13 @@ struct BatchView: View {
         let rejectPct = total > 0 ? Int(Double(counts.reject) / Double(total) * 100) : 0
         return HStack(spacing: 12) {
             if total > 0 {
-                Text("共 \(total) · 精选 \(counts.pick) · 可用 \(counts.usable) · 废片 \(counts.reject) (\(rejectPct)%)")
+                Text("共 \(total) · 精选 \(counts.pick) · 可用 \(counts.usable) · 废片 \(counts.reject) (\(rejectPct)%) · 出片 \(counts.pick + counts.usable) (\(100 - rejectPct)%)")
                     .font(.caption).monospacedDigit()
+                if store.pendingTakeCount > 0 {
+                    Text("待处理 \(store.pendingTakeCount) 场 · D 跳下一场")
+                        .font(.caption).foregroundStyle(.orange)
+                        .help("还留着 2 张以上没淘汰的场。按 D 跳到下一个")
+                }
                 if !store.overrides.isEmpty {
                     Text("人工改判 \(store.overrides.count)")
                         .font(.caption).foregroundStyle(.secondary)
@@ -385,6 +407,45 @@ struct BatchView: View {
         .frame(width: 420)
     }
 
+    // MARK: - 精华 Top N sheet
+
+    private var highlightsSheet: some View {
+        let top = store.topPicks(highlightsCount)
+        return VStack(alignment: .leading, spacing: 14) {
+            Text("精华 Top N").font(.headline)
+            Text("全场评分最高的 N 张（表情 > 人脸质量 > 锐度），精选优先、不够从可用里补。当天发客户/朋友圈的那一把。")
+                .font(.caption).foregroundStyle(.secondary)
+            Stepper("张数：\(highlightsCount)", value: $highlightsCount, in: 5...100, step: 5)
+            Picker("尺寸", selection: $highlightsMaxPixel) {
+                Text("长边 2048 (微信)").tag(2048)
+                Text("长边 4096").tag(4096)
+                Text("原尺寸").tag(0)
+            }
+            .pickerStyle(.radioGroup)
+            Text(top.fromUsable > 0
+                 ? "精选只有 \(top.ids.count - top.fromUsable) 张，从可用里按评分补了 \(top.fromUsable) 张"
+                 : "共 \(top.ids.count) 张，全部来自精选")
+                .font(.caption).foregroundStyle(top.fromUsable > 0 ? .orange : .secondary)
+            Text("导出到 拍摄文件夹/\(ImageLoader.jpegExportSubfolder)/精华/ · 已存在的同名文件跳过")
+                .font(.caption2).foregroundStyle(.tertiary)
+            HStack {
+                Spacer()
+                Button("取消") { showHighlightsSheet = false }
+                Button("导出 \(top.ids.count) 张") {
+                    showHighlightsSheet = false
+                    guard let base = store.defaultJPEGExportFolder else { return }
+                    store.exportJPEGs(to: base.appendingPathComponent("精华"), includeUsable: true,
+                                      quality: jpegQuality, maxPixel: highlightsMaxPixel == 0 ? nil : highlightsMaxPixel,
+                                      overwrite: false, ids: Set(top.ids))
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(top.ids.isEmpty || store.defaultJPEGExportFolder == nil)
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
+    }
+
     // MARK: - 高ISO RAW export sheet
 
     /// (RAW count, matching-but-JPEG-only count) under the sheet's current
@@ -446,6 +507,12 @@ struct BatchView: View {
             var members = dict[key]!
             if let filter = store.verdictFilter { members = members.filter { $0.verdict == filter } }
             guard !members.isEmpty else { return nil }
+            if takeSortByScore {
+                return (key, members.sorted {
+                    let ka = BatchStore.scoreKey($0), kb = BatchStore.scoreKey($1)
+                    return ka == kb ? $0.id < $1.id : ka > kb
+                })
+            }
             return (key, members.sorted {
                 ($0.captureTime ?? .distantPast, $0.id) < ($1.captureTime ?? .distantPast, $1.id)
             })
@@ -504,6 +571,11 @@ struct BatchView: View {
             .onKeyPress(.upArrow) { moveFocusVertically(-1, proxy: proxy); return .handled }
             .onKeyPress(.downArrow) { moveFocusVertically(1, proxy: proxy); return .handled }
             .onKeyPress(.space) { openFocused(); return .handled }
+            .onKeyPress(characters: .init(charactersIn: "dD")) { press in
+                guard press.modifiers.isSubset(of: [.shift, .capsLock]) else { return .ignored }
+                jumpToNextPendingTake(proxy)
+                return .handled
+            }
             .onKeyPress(.return) { openFocused(); return .handled }
             .onKeyPress(characters: .init(charactersIn: "1230")) { press in
                 // A digit hits the whole ⌘/⇧ selection when there is one —
@@ -646,6 +718,28 @@ struct BatchView: View {
                     .font(.caption)
                     .foregroundStyle(released * 2 > vlmSuggested.count ? .orange : .primary)
             }
+            // 从你的改判反推滑杆：你放行了哪些被这条线判死的，线就该退到哪。
+            // 不是机器学习，是算术 —— 但它是"学习你的风格"里诚实能做的那部分。
+            if !store.thresholdSuggestions.isEmpty || store.manualRejectsWithoutReason > 0 {
+                Divider()
+                Text("阈值建议（从你的改判反推）").font(.caption).foregroundStyle(.secondary)
+                ForEach(store.thresholdSuggestions) { sug in
+                    HStack(spacing: 6) {
+                        Text("你放行了 \(sug.released) 张被「\(sug.kind.rawValue)」判死的 → 建议 \(sug.currentText) → \(sug.suggestedText)")
+                            .font(.caption)
+                        Button("应用") { store.applySuggestion(sug) }
+                            .controlSize(.small)
+                    }
+                }
+                if store.thresholdSuggestions.contains(where: { $0.kind == .faceQuality }) {
+                    Text("人脸质量那条是近似值：小脸按景别自动放宽，连拍组内走相对比较，同一个数对不同照片不是同一条线")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+                if store.manualRejectsWithoutReason > 0 {
+                    Text("你手动废掉了 \(store.manualRejectsWithoutReason) 张滑杆一个理由都没给的 —— 滑杆漏掉的，没有信号说明该收紧哪条线")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
             let rescued = store.items.filter { !$0.vlmRescued.isEmpty }.count
             if rescued > 0 {
                 Text("复审平反 \(rescued) 张 (算法误杀被 VLM 纠正)")
@@ -741,7 +835,7 @@ struct BatchView: View {
                     .frame(width: width)
                     .contentShape(Rectangle())
                     .help("章节\(seg.chapter + 1) \(seg.timeRange) · 共\(seg.count) · 精选\(seg.pick) 可用\(seg.usable) 废片\(seg.reject)"
-                          + (seg.allRejected ? " ⚠️ 全部被淘汰" : ""))
+                          + (seg.allRejected ? " ⚠️ 全部被淘汰" : seg.underMin ? " ⚠️ 低于最少保留" : ""))
                     .onTapGesture {
                         if let target = visibleItems.first(where: { $0.chapter == seg.chapter }) {
                             focusedID = target.id
@@ -806,6 +900,26 @@ struct BatchView: View {
         if let id = focusedID { openInspector(id) }
     }
 
+    /// D：跳到下一个还没定的场（Aftershoot 过重复组的节奏：定完一组，一键下一组）。
+    /// 以前定完一场要自己滚动去找下一个橙色 pill。从焦点所在的场往后找，到底了
+    /// 绕回开头；不在分组模式就先切过去。
+    private func jumpToNextPendingTake(_ proxy: ScrollViewProxy) {
+        if gridMode != .byGroup { gridMode = .byGroup }
+        let rows = groupedItems
+        let pending = rows.enumerated().filter { row in
+            row.element.members.filter { $0.verdict != .reject }.count > 1
+        }
+        guard !pending.isEmpty else { return }
+        let currentRow = focusedID.flatMap { id in
+            rows.firstIndex { $0.members.contains { $0.id == id } }
+        } ?? -1
+        let next = pending.first { $0.offset > currentRow } ?? pending[0]
+        let target = next.element.members.first { $0.verdict != .reject } ?? next.element.members[0]
+        selectedIDs.removeAll()
+        focusedID = target.id
+        withAnimation { proxy.scrollTo(target.id, anchor: .top) }
+    }
+
     // MARK: 按分组 (每场一行)
 
     /// 每场一行，本场全部照片横向铺开（放不下自动换行）。不弹窗：以前是堆栈封面
@@ -861,6 +975,13 @@ struct BatchView: View {
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(pending ? Color.orange.opacity(0.25) : Color.green.opacity(0.2), in: Capsule())
                         .foregroundStyle(pending ? .orange : .green)
+                }
+                if pending {
+                    Button("选可用 \(alive.count)") {
+                        alive.forEach { selectedIDs.insert($0.id) }
+                    }
+                    .buttonStyle(.plain).font(.caption).foregroundStyle(Color.accentColor)
+                    .help("选中本场还没淘汰的 \(alive.count) 张，再 ⌘点击去掉要留的，批量栏一键定案")
                 }
                 Spacer()
                 // 一键接受算法的精选：精选留下，本场其余全废。快速过场用的。
@@ -987,6 +1108,12 @@ struct BatchView: View {
                 }
                 .overlay(alignment: .topTrailing) {
                     HStack(spacing: 3) {
+                        // 场内前三（同 scoreKey，和自动精选一把尺子）。#1 金、#2 银、#3 铜。
+                        if let rank = store.takeRank[item.id] {
+                            Text("#\(rank)").font(.caption2).bold().monospacedDigit()
+                                .foregroundStyle(rank == 1 ? Color.yellow : rank == 2 ? Color.white : Color.orange)
+                                .help("本场评分第 \(rank)")
+                        }
                         if store.overrides[item.id] != nil {
                             Image(systemName: "hand.raised.fill").font(.caption2)
                         }
@@ -1030,9 +1157,20 @@ struct BatchView: View {
                             Image(systemName: "level").font(.caption2).foregroundStyle(.yellow)
                                 .help(String(format: "水平线倾斜 %.1f°", item.horizonDeg ?? 0))
                         }
+                        // 合影「全员睁眼」：每张脸的 EAR 都有，以前只在照片级标一个「闭眼」。
+                        // 合影选片最痛的就是这个 —— 5 个人里谁闭了、还剩几张全睁的。
+                        if item.faces.count >= 2 {
+                            let closed = item.faces.filter { $0.eyeClosed == true }.count
+                            HStack(spacing: 1) {
+                                Image(systemName: closed > 0 ? "eye.slash" : "eye").font(.caption2)
+                                Text("\(item.faces.count - closed)/\(item.faces.count)").font(.caption2).monospacedDigit()
+                            }
+                            .foregroundStyle(closed > 0 ? .red : .green)
+                            .help(closed > 0 ? "\(item.faces.count) 张脸里 \(closed) 张闭眼" : "\(item.faces.count) 张脸全部睁眼")
+                        }
                     }
                     .padding(3)
-                    .background((item.rejectReasons.isEmpty && !item.slowShutter && !item.tilted) ? .clear : .black.opacity(0.6), in: Capsule())
+                    .background((item.rejectReasons.isEmpty && !item.slowShutter && !item.tilted && item.faces.count < 2) ? .clear : .black.opacity(0.6), in: Capsule())
                     .padding(3)
                     .help(item.rejectReasons.joined(separator: ", "))
                 }
@@ -1199,6 +1337,10 @@ struct BatchView: View {
                         Toggle("只看临界照片 (\(store.borderlineCount))", isOn: $store.borderlineFilter)
                             .font(.caption)
                             .help("任一阈值 ±15% 区间内的照片 — 调完滑杆先过一眼刀口上的这些，误杀都藏在这里")
+                        Stepper("每章节最少保留 \(store.minKeepersPerChapter == 0 ? "—" : "\(store.minKeepersPerChapter) 张")",
+                                value: $store.minKeepersPerChapter, in: 0...50)
+                            .font(.caption)
+                            .help("某个章节（仪式/晚宴…）留下的张数低于这个数就在状态栏和时间轴上提醒。0 = 只在整章全灭时提醒")
                         Text("拖动实时生效 · 红字 = 该项当前淘汰数")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
@@ -1360,8 +1502,24 @@ enum ThumbCache {
     static func load(path: String, maxPixel: Int = 512) -> NSImage? {
         let cacheKey = key(path, maxPixel)
         if let hit = cache.object(forKey: cacheKey) { return hit }
-        guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
-              let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+        guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil) else { return nil }
+        // RAW-only 场次的适应视图：先试相机内嵌的 JPEG 预览（相机自己锐化过，
+        // 解码只要几十毫秒），够大才用；不够大（很多 RAW 只嵌了 160px 缩略图）
+        // 就走下面的完整 demosaic。Photo Mechanic / LR 的"嵌入式预览"就是这么干的。
+        // 代价：适应视图（相机渲染）和 100%（Apple 的 RAW 渲染）色彩/反差会略有不同。
+        let ext = (path as NSString).pathExtension.lowercased()
+        if maxPixel >= 2000, ImageLoader.rawExtensions.contains(ext),
+           let embedded = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+               kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+               kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+               kCGImageSourceCreateThumbnailWithTransform: true,
+           ] as CFDictionary),
+           max(embedded.width, embedded.height) >= min(2000, maxPixel / 2) {
+            let image = NSImage(cgImage: embedded, size: NSSize(width: embedded.width, height: embedded.height))
+            cache.setObject(image, forKey: cacheKey, cost: embedded.width * embedded.height * 4)
+            return image
+        }
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                   kCGImageSourceCreateThumbnailFromImageAlways: true,
                   kCGImageSourceThumbnailMaxPixelSize: maxPixel,
                   // 以前只喂已经转正的预览图，没这个键也没事。SharpImageView 现在直接喂
@@ -1571,6 +1729,67 @@ enum FullResCache {
     }
 }
 
+// MARK: - 对焦高亮 (focus peaking)
+
+/// 100% 视图上叠一层红色：Laplacian（二阶导）在本图 97 分位以上的像素。看合焦落在
+/// 眼睛还是耳朵，C1 / Narrative 都有，Aftershoot 反而没有。
+/// - 用二阶导不用梯度：第一版用梯度幅值，把糊掉但反差大的整个背景全标红了。
+/// - 在 ≤4096 长边上算，不是 2048：缩到 2048 会把"稍软"和"锐利"都压成一像素过渡，
+///   区分度就没了。不从 1024 预览算。
+/// - 阈值用分位数不用绝对值：绝对值换一张曝光就失效。
+/// - 按 decodePath 缓存；调用方也要按 key 存，翻页后上一张的遮罩盖在这一张上
+///   比没有遮罩更糟。
+enum FocusMask {
+    static let cache: NSCache<NSString, CGImage> = {
+        let c = NSCache<NSString, CGImage>()
+        c.countLimit = 2  // 4096 长边的 RGBA 遮罩 ~45MB 一张
+        return c
+    }()
+    static let maxEdge = 4096
+    static let percentile = 0.97
+
+    static func compute(from image: NSImage, key: String) -> CGImage? {
+        if let hit = cache.object(forKey: key as NSString) { return hit }
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let scale = min(1, CGFloat(maxEdge) / CGFloat(max(cg.width, cg.height)))
+        let w = max(3, Int(CGFloat(cg.width) * scale)), h = max(3, Int(CGFloat(cg.height) * scale))
+        var rgba = [UInt8](repeating: 0, count: w * h * 4)
+        let ok: Bool = rgba.withUnsafeMutableBytes { buf in
+            guard let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8,
+                                      bytesPerRow: w * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return false }
+            ctx.interpolationQuality = .medium
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        guard ok else { return nil }
+        let gray = Metrics.grayscale(rgba: rgba, width: w, height: h)
+        let grad = Metrics.laplacianMagnitude(gray: gray, width: w, height: h)
+        // 每 8 个像素采一个算分位数，够准且快。
+        var sample: [Float] = []
+        sample.reserveCapacity(w * h / 8 + 1)
+        var i = 0
+        while i < grad.count { sample.append(grad[i]); i += 8 }
+        sample.sort()
+        guard !sample.isEmpty else { return nil }
+        let threshold = max(1, sample[min(sample.count - 1, Int(Double(sample.count) * percentile))])
+        var mask = [UInt8](repeating: 0, count: w * h * 4)
+        for p in 0..<(w * h) where grad[p] > threshold {
+            // premultipliedLast：红 × alpha(0.8)
+            mask[p * 4] = 204; mask[p * 4 + 3] = 204
+        }
+        let data = Data(mask)
+        guard let provider = CGDataProvider(data: data as CFData),
+              let out = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                                provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+        else { return nil }
+        cache.setObject(out, forKey: key as NSString)
+        return out
+    }
+}
+
 // MARK: - Native zoom pane (NSScrollView magnification)
 
 /// AppKit-native 1:1 viewer. NSScrollView's own magnification handles the
@@ -1591,10 +1810,13 @@ struct ZoomPane: NSViewRepresentable {
     /// Primary-face box (normalized top-left) drawn as a layer on the image.
     let faceBbox: [Double]?
     let boxColor: NSColor
+    /// 对焦高亮遮罩（和 image 同一张的，见 FocusMask），nil = 关。
+    var focusMask: CGImage? = nil
 
     final class Coordinator: NSObject {
         weak var scroll: NSScrollView?
         var overlayLayer: CALayer?
+        var maskLayer: CALayer?
 
         @objc func doubleClicked(_ gesture: NSClickGestureRecognizer) {
             guard let scroll, let doc = scroll.documentView else { return }
@@ -1694,6 +1916,19 @@ struct ZoomPane: NSViewRepresentable {
     private func syncOverlay(_ coordinator: Coordinator) {
         coordinator.overlayLayer?.removeFromSuperlayer()
         coordinator.overlayLayer = nil
+        // 遮罩铺满整个图层，跟着 magnification 一起缩放。
+        coordinator.maskLayer?.removeFromSuperlayer()
+        coordinator.maskLayer = nil
+        if let mask = focusMask, let imageView = coordinator.scroll?.documentView {
+            let layer = CALayer()
+            layer.frame = CGRect(origin: .zero, size: image.size)
+            layer.contents = mask
+            layer.contentsGravity = .resize
+            layer.minificationFilter = .trilinear
+            layer.isGeometryFlipped = false
+            imageView.layer?.addSublayer(layer)
+            coordinator.maskLayer = layer
+        }
         guard let bbox = faceBbox, bbox.count == 4,
               let imageView = coordinator.scroll?.documentView else { return }
         let w = image.size.width, h = image.size.height
@@ -1861,6 +2096,9 @@ struct PhotoInspector: View {
     /// 场内定案的勾选集：⌘点击「同场」缩略条勾/取消，再按「保留勾选」把同场其余
     /// 全部设为废片。换场就清空 —— 留着会把上一场的勾选算进这一场的定案里。
     @State private var keepSet: Set<String> = []
+    /// 对焦高亮开关 + 当前这张的遮罩（带 key，翻页不串图）。
+    @State private var focusPeak = false
+    @State private var focusMask: (key: String, image: CGImage)?
 
     init(store: BatchStore, inspectedID: Binding<String?>, gridOrder: [String], initialID: String) {
         self.store = store
@@ -1925,6 +2163,9 @@ struct PhotoInspector: View {
         }
         .frame(minWidth: 960, idealWidth: 1240, minHeight: 700, idealHeight: 880)
         .onChange(of: item?.take) { keepSet = [] }
+        .onChange(of: focusPeak) { refreshFocusMask() }
+        .onChange(of: zoomed) { refreshFocusMask() }
+        .onChange(of: currentID) { refreshFocusMask() }
         // 废纸篓清掉的 id 还留在勾选里的话，定案会写到不存在的照片上。
         .onChange(of: store.items.count) {
             keepSet.formIntersection(Set(store.items.map(\.id)))
@@ -1954,6 +2195,10 @@ struct PhotoInspector: View {
                     .keyboardShortcut("c", modifiers: [])
             }
             Toggle("分析框", isOn: $showOverlay).toggleStyle(.button)
+            Toggle("对焦高亮", isOn: $focusPeak).toggleStyle(.button)
+                .keyboardShortcut("p", modifiers: [])
+                .disabled(!zoomed)
+                .help("100% 视图上红色标出合焦区域（本图梯度 95 分位以上），看焦点落在眼睛还是耳朵 (P)")
             Button(zoomed ? "适应窗口" : (loadingFullRes ? "解码原图..." : "放大 100%")) {
                 toggleZoom(item)
             }
@@ -1983,7 +2228,8 @@ struct PhotoInspector: View {
                 ZoomPane(image: full,
                          entry: zoomEntry,
                          faceBbox: showOverlay ? item.faceBbox : nil,
-                         boxColor: item.dynamicEyeClosed == true ? .systemRed : .systemYellow)
+                         boxColor: item.dynamicEyeClosed == true ? .systemRed : .systemYellow,
+                         focusMask: focusPeak && focusMask?.key == item.decodePath ? focusMask?.image : nil)
             } else {
                 // Async cached decode — a synchronous NSImage(contentsOfFile:)
                 // here blocked the main thread on every open/photo switch.
@@ -2379,6 +2625,20 @@ struct PhotoInspector: View {
         }
     }
 
+    /// 放大 + 开关都亮着才算；算完核对 key，翻页了就丢掉。
+    private func refreshFocusMask() {
+        guard focusPeak, zoomed, let item, let full = fullResImage else { return }
+        let key = item.decodePath
+        if focusMask?.key == key { return }
+        Task.detached(priority: .userInitiated) {
+            let mask = FocusMask.compute(from: full, key: key)
+            await MainActor.run {
+                guard let mask, currentID == item.id else { return }
+                focusMask = (key, mask)
+            }
+        }
+    }
+
     private func step(_ delta: Int) {
         let ids = visibleIDs
         guard let idx = ids.firstIndex(of: currentID) else { return }
@@ -2574,6 +2834,8 @@ struct ReviewView: View {
     @State private var zoomed = false
     @State private var zoomImage: NSImage?
     @State private var loadingZoom = false
+    @State private var focusPeak = false
+    @State private var focusMask: (key: String, image: CGImage)?
 
     private var currentIndex: Int {
         guard let id = focusedID, let idx = orderIDs.firstIndex(of: id) else { return 0 }
@@ -2606,6 +2868,9 @@ struct ReviewView: View {
                         .font(.caption2).foregroundStyle(.tertiary)
                     Button(zoomed ? "适应窗口" : (loadingZoom ? "解码原图..." : "放大 (Z)")) { toggleZoom(item) }
                         .disabled(loadingZoom)
+                    Toggle("对焦高亮 (P)", isOn: $focusPeak).toggleStyle(.button)
+                        .disabled(!zoomed)
+                        .help("100% 视图上红色标出合焦区域")
                     Button("撤销") { store.undoLastOverride() }
                         .keyboardShortcut("z", modifiers: .command)
                         .disabled(!store.canUndoOverride)
@@ -2620,7 +2885,8 @@ struct ReviewView: View {
                 if zoomed, let full = zoomImage {
                     ZoomPane(image: full, entry: .hundred,
                              faceBbox: item.faceBbox,
-                             boxColor: item.dynamicEyeClosed == true ? .systemRed : .systemYellow)
+                             boxColor: item.dynamicEyeClosed == true ? .systemRed : .systemYellow,
+                             focusMask: focusPeak && focusMask?.key == item.decodePath ? focusMask?.image : nil)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     SharpImageView(previewPath: item.previewPath, decodePath: item.decodePath)
@@ -2692,6 +2958,13 @@ struct ReviewView: View {
         }
         .onKeyPress(.leftArrow) { step(-1); return .handled }
         .onKeyPress(.rightArrow) { step(1); return .handled }
+        .onChange(of: focusPeak) { refreshFocusMask() }
+        .onChange(of: zoomed) { refreshFocusMask() }
+        .onKeyPress(characters: .init(charactersIn: "pP")) { press in
+            guard press.modifiers.isSubset(of: [.shift, .capsLock]), zoomed else { return .ignored }
+            focusPeak.toggle()
+            return .handled
+        }
         .onKeyPress(characters: .init(charactersIn: "zZ")) { press in
             // Bare Z only: ⌘Z is the undo shortcut on the button above and
             // must not also toggle the zoom.
@@ -2709,6 +2982,19 @@ struct ReviewView: View {
             }
             if press.characters != "0" { step(1) }  // tag-and-advance
             return .handled
+        }
+    }
+
+    private func refreshFocusMask() {
+        guard focusPeak, zoomed, let item = current, let full = zoomImage else { return }
+        let key = item.decodePath
+        if focusMask?.key == key { return }
+        Task.detached(priority: .userInitiated) {
+            let mask = FocusMask.compute(from: full, key: key)
+            await MainActor.run {
+                guard let mask, focusedID == item.id else { return }
+                focusMask = (key, mask)
+            }
         }
     }
 

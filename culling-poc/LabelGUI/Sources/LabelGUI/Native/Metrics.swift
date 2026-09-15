@@ -125,6 +125,78 @@ enum Metrics {
         return (sum / count).squareRoot()
     }
 
+    /// 对焦高亮用的每像素梯度幅值（Gaussian 3×3 预模糊 + Sobel，和 tenengrad 同一套
+    /// 口径，只是不求均值）。边界一圈为 0。阈值由调用方按分位数定 —— 绝对阈值
+    /// 换一张曝光就失效。
+    static func gradientMagnitude(gray: [Float], width: Int, height: Int) -> [Float] {
+        let w = width, h = height
+        guard w >= 3, h >= 3 else { return [Float](repeating: 0, count: w * h) }
+        var smooth = [Float](repeating: 0, count: w * h)
+        gray.withUnsafeBufferPointer { src in
+            smooth.withUnsafeMutableBufferPointer { dst in
+                for y in 0..<h {
+                    let row = y * w
+                    dst[row] = src[row]; dst[row + w - 1] = src[row + w - 1]
+                    for x in 1..<(w - 1) {
+                        dst[row + x] = (src[row + x - 1] + 2 * src[row + x] + src[row + x + 1]) * 0.25
+                    }
+                }
+            }
+        }
+        var blurred = [Float](repeating: 0, count: w * h)
+        smooth.withUnsafeBufferPointer { src in
+            blurred.withUnsafeMutableBufferPointer { dst in
+                for x in 0..<w { dst[x] = src[x]; dst[(h - 1) * w + x] = src[(h - 1) * w + x] }
+                for y in 1..<(h - 1) {
+                    let row = y * w
+                    for x in 0..<w {
+                        dst[row + x] = (src[row - w + x] + 2 * src[row + x] + src[row + w + x]) * 0.25
+                    }
+                }
+            }
+        }
+        var out = [Float](repeating: 0, count: w * h)
+        blurred.withUnsafeBufferPointer { g in
+            out.withUnsafeMutableBufferPointer { dst in
+                for y in 1..<(h - 1) {
+                    let row = y * w
+                    for x in 1..<(w - 1) {
+                        let i = row + x
+                        let tl = g[i - w - 1], tc = g[i - w], tr = g[i - w + 1]
+                        let ml = g[i - 1], mr = g[i + 1]
+                        let bl = g[i + w - 1], bc = g[i + w], br = g[i + w + 1]
+                        let gx: Float = tr + 2 * mr + br - tl - 2 * ml - bl
+                        let gy: Float = bl + 2 * bc + br - tl - 2 * tc - tr
+                        dst[i] = (gx * gx + gy * gy).squareRoot()
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    /// 对焦高亮真正该用的量：3×3 Laplacian 的绝对值（二阶导），**不预模糊**。
+    /// 梯度幅值量的是反差 —— 深色木头对天空的边缘再糊也很大；二阶导量的是过渡有
+    /// 多陡 —— 糊掉的边缘二阶导就小。相机的峰值对焦本质上就是个高通滤波。
+    static func laplacianMagnitude(gray: [Float], width: Int, height: Int) -> [Float] {
+        let w = width, h = height
+        var out = [Float](repeating: 0, count: w * h)
+        guard w >= 3, h >= 3 else { return out }
+        gray.withUnsafeBufferPointer { g in
+            out.withUnsafeMutableBufferPointer { dst in
+                for y in 1..<(h - 1) {
+                    let row = y * w
+                    for x in 1..<(w - 1) {
+                        let i = row + x
+                        let v: Float = 4 * g[i] - g[i - 1] - g[i + 1] - g[i - w] - g[i + w]
+                        dst[i] = abs(v)
+                    }
+                }
+            }
+        }
+        return out
+    }
+
     // MARK: - Exposure clipping
 
     static let highlightClipValue: UInt8 = 250
