@@ -330,10 +330,12 @@ final class BatchStore: ObservableObject {
         var chapterSegments: [ChapterSegment] = []
         var chapterWarnings: [String] = []
         var borderlineCount = 0
-        /// 还需要人取舍的「场」数：留下 2 张以上没被淘汰的。一场里已经定成
-        /// 1 张精选、其余废片的，活儿干完了，不该再占着网格。顶栏每次重绘都读它,
+        /// 还需要人取舍的「场」数（定义见 isPendingTake）。一场里已经定成 1 张精选、
+        /// 其余废片的，活儿干完了，不该再占着网格。顶栏每次重绘都读它,
         /// 所以和 verdictCounts 一起在 rebuildDerived 里算一次,别做成 O(n) 计算属性。
         var pendingTakeCount = 0
+        /// 待处理的场号，升序（= 时间顺序）。对比模式的 ⏎/D 找下一场用，每次按键不再扫全部照片。
+        var pendingTakes: [Int] = []
         /// 场内排名（1 起，只排没被淘汰的）：缩略图上的 #1 #2 #3。用户常从一场里
         /// 挑 3 张 —— 这告诉他算法眼里的前三是哪几张，他只需要否决而不是从零找。
         /// 纯展示，不碰判决。
@@ -370,6 +372,14 @@ final class BatchStore: ObservableObject {
     var chapterWarnings: [String] { derived.chapterWarnings }
     var borderlineCount: Int { derived.borderlineCount }
     var pendingTakeCount: Int { derived.pendingTakeCount }
+    var pendingTakes: [Int] { derived.pendingTakes }
+
+    /// 「待处理」的场：还留着 2 张以上没淘汰，而且其中还有没经你手的（自动判的）。
+    /// 以前只看"存活 ≥2"：K 勾两张定案（两张手判精选、其余手判废片）的场永远算待处理，
+    /// D 和对比模式的 ⏎ 会一直绕回这些早就定完的场。全经你手定过的就是定完了。
+    func isPendingTake(alive: [BatchItem]) -> Bool {
+        alive.count >= 2 && alive.contains { overrides[$0.id] == nil }
+    }
     var takeRank: [String: Int] { derived.takeRank }
     var thresholdSuggestions: [ThresholdSuggestion] { derived.thresholdSuggestions }
     var takeRows: [(take: Int, indices: [Int])] { derived.takeRows }
@@ -464,7 +474,8 @@ final class BatchStore: ObservableObject {
         }
         var aliveByTake: [Int: [BatchItem]] = [:]
         for item in items where item.verdict != .reject { aliveByTake[item.take, default: []].append(item) }
-        d.pendingTakeCount = aliveByTake.values.filter { $0.count > 1 }.count
+        d.pendingTakes = aliveByTake.filter { isPendingTake(alive: $0.value) }.map(\.key).sorted()
+        d.pendingTakeCount = d.pendingTakes.count
         for (_, alive) in aliveByTake where alive.count > 1 {
             let ranked = alive.sorted { Self.scoreKey($0) > Self.scoreKey($1) }
             for (i, item) in ranked.prefix(3).enumerated() { d.takeRank[item.id] = i + 1 }
@@ -998,8 +1009,11 @@ final class BatchStore: ObservableObject {
 
     var canUndoOverride: Bool { !overrideUndoStack.isEmpty }
 
-    func undoLastOverride() {
-        guard let last = overrideUndoStack.popLast() else { return }
+    /// 返回这次撤销动到的照片 id —— 对比模式据此跳回出事的那一场、把刚淘汰的那张
+    /// 放回原来的格子。
+    @discardableResult
+    func undoLastOverride() -> [String] {
+        guard let last = overrideUndoStack.popLast() else { return [] }
         for (id, previous) in last {
             if let previous {
                 overrides[id] = previous
@@ -1009,6 +1023,7 @@ final class BatchStore: ObservableObject {
         }
         saveOverrides()
         applyThresholds()
+        return last.map(\.id)
     }
 
     /// Batch form (⌘-click multi-select): one save + one recompute for the lot.

@@ -217,6 +217,102 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--focus"),
     exit(0)
 }
 
+// Headless 场内对比：LabelGUI --compare <photo_dir> [--take N | --select id,id,...]
+//     [--keys "3,k,enter,undo,d,left,right,1,2,0,bring:<id>,cap:<n>"] [--capacity N] [--gap 秒]
+// 用和界面同一个 CompareSession 按键脚本跑一遍，每步打印台面/候场/⏎ 的文字。按键会写
+// overrides.json（--gap 写本场阈值文件）—— 只在临时 LABELGUI_DATA_DIR 下用。
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--compare"),
+   CommandLine.arguments.count > flagIndex + 1 {
+    let dir = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])
+    func option(_ flag: String) -> String? {
+        guard let i = CommandLine.arguments.firstIndex(of: flag), CommandLine.arguments.count > i + 1 else { return nil }
+        return CommandLine.arguments[i + 1]
+    }
+    MainActor.assumeIsolated {
+        // 不碰 minKeepersPerChapter 这类设置：它们写的是全局 UserDefaults，LABELGUI_DATA_DIR
+        // 隔离不了 —— 跑一次测试会把 GUI 里的设置改掉。
+        let store = BatchStore(dataDir: appDataDir,
+                               pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
+        store.switchSession(to: dir)
+        if let gap = option("--gap").flatMap(Double.init) { store.takeGapSec = gap }
+        let request: CompareRequest
+        if let list = option("--select") {
+            let ids = list.split(separator: ",").map { String($0) }
+            guard let r = CompareRequest.forSelection(ids, store: store) else {
+                print("--select 至少要 2 张"); exit(1)
+            }
+            request = r
+        } else if let take = option("--take").flatMap(Int.init) {
+            request = .take(take, preferred: [])
+        } else {
+            guard let first = store.pendingTakes.first else { print("没有待处理的场"); exit(0) }
+            request = .take(first, preferred: [])
+        }
+        let session = CompareSession(store: store, request: request,
+                                     capacity: option("--capacity").flatMap(Int.init) ?? CompareSession.defaultCapacity,
+                                     sortByScore: false)
+        print(session.describe())
+        for raw in (option("--keys") ?? "").split(separator: ",") {
+            let key = raw.trimmingCharacters(in: .whitespaces)
+            guard !key.isEmpty else { continue }
+            print("-- \(key)")
+            if !session.handle(key) { print("未知按键 \(key)"); continue }
+            print(session.describe())
+        }
+        // 台面排布：常见窗口里 1–6 张竖拍/横拍各摆成几行几列。
+        let size = CGSize(width: 1256, height: 560)
+        for aspect in [CGFloat(2.0 / 3.0), 1.5] {
+            let rows = (1...6).map { n -> String in
+                let g = CompareLayout.grid(count: n, in: size, aspect: aspect)
+                return "\(n)=\(g.rows)×\(g.cols)"
+            }
+            print("排布 \(Int(size.width))×\(Int(size.height)) \(aspect < 1 ? "竖拍" : "横拍"): " + rows.joined(separator: " "))
+        }
+    }
+    exit(0)
+}
+
+// Headless 对比放大裁块：LabelGUI --compare-crop <photo_dir> <id> <out.jpg>
+// 走和对比模式放大一模一样的"按人脸裁原图"，落成 JPEG，并打印锚点 —— 用来肉眼
+// 核对裁块居中在脸上、竖拍没转歪。
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--compare-crop"),
+   CommandLine.arguments.count > flagIndex + 3 {
+    let dir = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])
+    let id = CommandLine.arguments[flagIndex + 2]
+    let out = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 3])
+    MainActor.assumeIsolated {
+        let store = BatchStore(dataDir: appDataDir,
+                               pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
+        store.switchSession(to: dir)
+        guard let item = store.item(withID: id) else { print("没有这张: \(id)"); exit(1) }
+        let start = Date()
+        guard let crop = CompareZoom.crop(item),
+              let cg = crop.image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let dest = CGImageDestinationCreateWithURL(out as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
+            print("裁块失败"); exit(1)
+        }
+        // 在锚点（主脸中心）画一个十字，看是不是落在脸上。
+        let w = cg.width, h = cg.height
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { exit(1) }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let ax = crop.anchor.x * CGFloat(w), ay = (1 - crop.anchor.y) * CGFloat(h)
+        ctx.setStrokeColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        ctx.setLineWidth(max(4, CGFloat(w) / 300))
+        ctx.move(to: CGPoint(x: ax - 60, y: ay)); ctx.addLine(to: CGPoint(x: ax + 60, y: ay))
+        ctx.move(to: CGPoint(x: ax, y: ay - 60)); ctx.addLine(to: CGPoint(x: ax, y: ay + 60))
+        ctx.strokePath()
+        guard let marked = ctx.makeImage() else { exit(1) }
+        CGImageDestinationAddImage(dest, marked, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { exit(1) }
+        print(String(format: "裁块 %dx%d · 锚点 (%.2f, %.2f) · 人脸 %d · %.2fs · %@",
+                     w, h, crop.anchor.x, crop.anchor.y, item.faces.count,
+                     Date().timeIntervalSince(start), out.path))
+    }
+    exit(0)
+}
+
 struct LabelGUIApp: App {
     @StateObject private var batchStore: BatchStore
     @StateObject private var labelStore: LabelStore

@@ -32,8 +32,8 @@ struct BatchView: View {
     @AppStorage("batch.isoKeepersOnly") private var isoKeepersOnly = true
     /// JPG 导出长边 (0 = 原尺寸)。
     @AppStorage("batch.jpegMaxPixel") private var jpegMaxPixel = 0
-    /// ⌘ 选中恰好 2 张时的任意对比。
-    @State private var showComparePair = false
+    /// 场内对比模式（全窗口，占审片模式的位置）。nil = 在网格。
+    @State private var compareRequest: CompareRequest?
     /// 网格实际宽度 — ↑/↓ 换行导航需要估算列数。
     @State private var gridWidth: CGFloat = 800
 
@@ -41,8 +41,7 @@ struct BatchView: View {
         case byVerdict = "按判决"
         case byGroup = "按分组"
     }
-    /// 按分组 = Aftershoot-style stacks: one cover per burst group, expand by
-    /// opening the inspector (its 同组 strip does the within-group picking).
+    /// 按分组 = 每场一行（Aftershoot 的重复组视图）；场内细挑按 C 进对比模式。
     @AppStorage("batch.gridMode") private var gridMode: GridMode = .byVerdict
     /// 只看待处理的场 —— 3000 张的婚礼里绝大多数场只有 1 张，真正要取舍的堆栈
     /// 本来全被它们淹掉。「待处理」= 还留着 2 张以上没淘汰的场；已经定成
@@ -69,6 +68,15 @@ struct BatchView: View {
             if reviewMode {
                 ReviewView(store: store, orderIDs: pagingOrder,
                            focusedID: $focusedID, reviewMode: $reviewMode)
+            } else if let request = compareRequest {
+                CompareView(store: store, request: request, sortByScore: takeSortByScore) { focusID in
+                    if let focusID {
+                        focusedID = focusID
+                        lastVisitedTake = store.item(withID: focusID)?.take
+                    }
+                    compareRequest = nil
+                }
+                .id(request)
             } else {
                 VStack(spacing: 0) {
                     topBar
@@ -103,7 +111,12 @@ struct BatchView: View {
         )) {
             if let id = inspectedID {
                 PhotoInspector(store: store, inspectedID: $inspectedID,
-                               gridOrder: pagingOrder, initialID: id)
+                               gridOrder: pagingOrder, initialID: id) { currentID in
+                    inspectedID = nil
+                    if let item = store.item(withID: currentID) {
+                        compareTake(item.take, focus: currentID)
+                    }
+                }
             }
         }
         // 换了一场拍摄就把选择/焦点全部丢掉。留着的话批量改判栏还显示"已选 3 张"，
@@ -113,6 +126,7 @@ struct BatchView: View {
             focusedID = nil
             inspectedID = nil
             pagingOrder = []
+            compareRequest = nil
         }
         // 重新分析会原地覆盖预览图 —— 不清缓存的话数值更新了、图还是旧的。
         // 只有分析真的重写了预览才清；切场次/VLM/废纸篓也发同一通知，
@@ -133,13 +147,6 @@ struct BatchView: View {
         .sheet(isPresented: $showJPEGSheet) { jpegExportSheet }
         .sheet(isPresented: $showISOSheet) { isoExportSheet }
         .sheet(isPresented: $showHighlightsSheet) { highlightsSheet }
-        .sheet(isPresented: $showComparePair) {
-            ComparePairSheet(
-                store: store,
-                ids: store.items.filter { selectedIDs.contains($0.id) }.map(\.id),
-                isPresented: $showComparePair
-            )
-        }
         .confirmationDialog(
             "把 \(store.recommendationSummary.takes) 场按推荐定案？",
             isPresented: $showAcceptAllConfirm
@@ -519,7 +526,7 @@ struct BatchView: View {
                 guard idx < items.count, items[idx].take == row.take else { return nil }
                 return items[idx]
             }
-            if pendingTakesOnly, members.filter({ $0.verdict != .reject }).count < 2 { return nil }
+            if pendingTakesOnly, !store.isPendingTake(alive: members.filter { $0.verdict != .reject }) { return nil }
             if let filter = store.verdictFilter { members = members.filter { $0.verdict == filter } }
             guard !members.isEmpty else { return nil }
             if takeSortByScore {
@@ -578,6 +585,12 @@ struct BatchView: View {
                     gridWidth = geo.size.width
                 }
             })
+            // 从审片/对比模式回来，网格是重新建的，滚动位置归零 —— 滚回焦点那张。
+            // 异步一拍：嵌套的 Lazy 网格要先铺出来 scrollTo 才找得到。
+            .onAppear {
+                guard let id = focusedID else { return }
+                DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) }
+            }
             .focusable()
             .focusEffectDisabled()
             .onKeyPress(.leftArrow) { moveFocus(-1, proxy: proxy); return .handled }
@@ -589,6 +602,11 @@ struct BatchView: View {
                 guard press.modifiers.isSubset(of: [.shift, .capsLock]) else { return .ignored }
                 jumpToNextPendingTake(proxy)
                 return .handled
+            }
+            // C：进场内对比。⌘C（拷贝）之类放过去。
+            .onKeyPress(characters: .init(charactersIn: "cC")) { press in
+                guard press.modifiers.isSubset(of: [.shift, .capsLock]) else { return .ignored }
+                return compareFromKeyboard() ? .handled : .ignored
             }
             .onKeyPress(.return) { openFocused(); return .handled }
             .onKeyPress(characters: .init(charactersIn: "1230")) { press in
@@ -623,6 +641,38 @@ struct BatchView: View {
     private func enterReview() {
         pagingOrder = visibleItems.map(\.id)
         reviewMode = true
+    }
+
+    /// 进场内对比，比一整场。focus = 先摆上台、当前格落在它上面的那张。
+    private func compareTake(_ take: Int, focus: String?) {
+        guard (store.takeSizes[take] ?? 0) >= 2 else { return }
+        compareRequest = .take(take, preferred: focus.map { [$0] } ?? [])
+    }
+
+    /// 网格焦点正好在这一场里就返回它（进对比时先摆上台、当前格落在它上面）。
+    private func focus(in members: [BatchItem]) -> String? {
+        guard let id = focusedID, members.contains(where: { $0.id == id }) else { return nil }
+        return id
+    }
+
+    /// ⌘多选的几张：都在同一场就按整场对比（先摆选中的），跨场就只比这几张。
+    private func compareSelection() {
+        let ids = store.items.filter { selectedIDs.contains($0.id) }.map(\.id)
+        if let request = CompareRequest.forSelection(ids, store: store) {
+            compareRequest = request
+        }
+    }
+
+    /// C 键：选了 2 张以上比选中的，否则比焦点所在的那一场（单张场没得比，不响应）。
+    private func compareFromKeyboard() -> Bool {
+        if selectedIDs.count >= 2 {
+            compareSelection()
+            return true
+        }
+        guard let id = focusedID, let item = store.item(withID: id),
+              (store.takeSizes[item.take] ?? 0) >= 2 else { return false }
+        compareTake(item.take, focus: id)
+        return true
     }
 
     /// Finder-style selection. Plain click focuses one photo and drops any
@@ -686,7 +736,7 @@ struct BatchView: View {
                     .foregroundStyle(.secondary)
                 Button("选择照片文件夹...") { pickFolder() }
             }
-            Text("点击=选中 · 空格=大图 · F=审片 · ←/→=移动 · 1精选 2可用 3废片 0恢复 · ⌘点击=多选 · ⇧点击=连选 · 按分组=每场一行，点场标题选整场")
+            Text("点击=选中 · 空格=大图 · F=审片 · C=对比本场 · ←/→=移动 · 1精选 2可用 3废片 0恢复 · ⌘点击=多选 · ⇧点击=连选 · 按分组=每场一行，点场标题选整场")
                 .font(.caption2).foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity)
@@ -829,12 +879,13 @@ struct BatchView: View {
                 .help("把选中这几张定为精选，它们所在的场里其余 \(dropCount) 张全部设为废片 (⌘⏎)。" +
                       "整场算一次改判，⌘Z 一次撤销。可以跨多场：每场各挑一张，一次定案。")
             }
-            // 2–4 张：从一场 10 张里挑最好的，通常是 3–4 张决赛圈的事，只能比 2 张不够用。
-            if (2...4).contains(selectedIDs.count) {
+            // 不再卡 2–4 张：「选可用 9」之后按钮直接消失过。台面一屏摆不下的进候场条。
+            if selectedIDs.count >= 2 {
                 Divider().frame(height: 16)
-                Button("并排对比这 \(selectedIDs.count) 张") { showComparePair = true }
+                Button("对比这 \(selectedIDs.count) 张 (C)") { compareSelection() }
                     .buttonStyle(.bordered)
-                    .help("并排对比选中的 \(selectedIDs.count) 张 (不限同场)，为每张分别改判")
+                    .help("进场内对比。选中的都在同一场 = 整场对比（先摆选中的，⏎ 定案本场）；" +
+                          "跨场 = 只比这几张、逐张改判")
             }
             Spacer()
             Button("取消选择") { selectedIDs.removeAll() }
@@ -955,7 +1006,7 @@ struct BatchView: View {
         if gridMode != .byGroup { gridMode = .byGroup }
         let rows = groupedItems
         let pending = rows.filter { row in
-            row.members.filter { $0.verdict != .reject }.count > 1
+            store.isPendingTake(alive: row.members.filter { $0.verdict != .reject })
         }
         guard !pending.isEmpty else { return }
         let currentTake = focusedID.flatMap { store.item(withID: $0)?.take } ?? lastVisitedTake ?? -1
@@ -991,7 +1042,7 @@ struct BatchView: View {
     private func takeRow(_ take: Int, members: [BatchItem]) -> some View {
         let alive = members.filter { $0.verdict != .reject }
         let picks = members.filter { $0.verdict == .pick }
-        let pending = alive.count > 1
+        let pending = store.isPendingTake(alive: alive)
         let allSelected = members.allSatisfy { selectedIDs.contains($0.id) }
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
@@ -1031,6 +1082,12 @@ struct BatchView: View {
                     .help("选中本场还没淘汰的 \(alive.count) 张，再 ⌘点击去掉要留的，批量栏一键定案")
                 }
                 Spacer()
+                if members.count > 1 {
+                    Button("对比") { compareTake(take, focus: focus(in: members)) }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("本场照片并排上台比 (焦点在本场时按 C 也行)：3 淘汰下台、K 勾要留的、⏎ 定案并跳下一场、Z 一起放大到脸")
+                }
                 // 一键接受算法的精选：精选留下，本场其余全废。快速过场用的。
                 if pending, !picks.isEmpty, alive.count > picks.count {
                     Button("只留精选 · 其余 \(alive.count - picks.count) 张废片") {
@@ -1062,7 +1119,7 @@ struct BatchView: View {
         }
     }
 
-    private static func timeRange(_ members: [BatchItem]) -> String? {
+    static func timeRange(_ members: [BatchItem]) -> String? {
         let times = members.compactMap(\.captureTime)
         guard let first = times.min(), let last = times.max() else { return nil }
         let a = takeTimeFormatter.string(from: first)
@@ -1912,11 +1969,31 @@ struct ZoomPane: NSViewRepresentable {
     let boxColor: NSColor
     /// 对焦高亮遮罩（和 image 同一张的，见 FocusMask），nil = 关。
     var focusMask: CGImage? = nil
+    /// 进入时让这个点（归一化、左上原点）落在视图正中，而不是图片中心 —— 对比模式
+    /// 每格按各自的人脸居中。
+    var anchor: CGPoint? = nil
+    /// 对比模式几格联动（拖动/捏合/双击跟着走），nil = 独立。
+    var link: ZoomLink? = nil
+    /// 单击回调（对比模式用来切当前格）：SwiftUI 的点击手势落不到 NSScrollView 上。
+    var onClick: (() -> Void)? = nil
 
-    final class Coordinator: NSObject {
+    final class Coordinator: NSObject, NSGestureRecognizerDelegate {
         weak var scroll: NSScrollView?
         var overlayLayer: CALayer?
         var maskLayer: CALayer?
+        var boundsObserver: NSObjectProtocol?
+        weak var link: ZoomLink?
+        var onClick: (() -> Void)?
+
+        @objc func clicked(_ gesture: NSClickGestureRecognizer) {
+            onClick?()
+        }
+
+        /// 单击和双击都要：单击切当前格，双击照旧在适应/100% 之间切。
+        func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: NSGestureRecognizer) -> Bool {
+            true
+        }
 
         @objc func doubleClicked(_ gesture: NSClickGestureRecognizer) {
             guard let scroll, let doc = scroll.documentView else { return }
@@ -1971,8 +2048,29 @@ struct ZoomPane: NSViewRepresentable {
             target: context.coordinator, action: #selector(Coordinator.doubleClicked(_:)))
         doubleClick.numberOfClicksRequired = 2
         imageView.addGestureRecognizer(doubleClick)
+        if onClick != nil {
+            let click = NSClickGestureRecognizer(
+                target: context.coordinator, action: #selector(Coordinator.clicked(_:)))
+            click.numberOfClicksRequired = 1
+            click.delegate = context.coordinator
+            doubleClick.delegate = context.coordinator
+            imageView.addGestureRecognizer(click)
+        }
 
         context.coordinator.scroll = scroll
+        context.coordinator.onClick = onClick
+        context.coordinator.link = link
+        if link != nil {
+            scroll.contentView.postsBoundsChangedNotifications = true
+            // queue: nil = 在发通知的线程上同步回调。给 .main 会被排成异步，联动时的重入
+            // 保护就拦不住 A 带 B、B 又带回 A 的来回弹。
+            context.coordinator.boundsObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: nil
+            ) { [weak coordinator = context.coordinator] _ in
+                guard let coordinator, let scroll = coordinator.scroll else { return }
+                coordinator.link?.changed(scroll)
+            }
+        }
         // Bounds are zero until layout — apply the entry magnification after
         // the first pass.
         DispatchQueue.main.async { self.applyEntry(scroll) }
@@ -1981,12 +2079,21 @@ struct ZoomPane: NSViewRepresentable {
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
+        context.coordinator.onClick = onClick
         if let imageView = scroll.documentView as? NSImageView, imageView.image !== image {
             imageView.image = image
             imageView.frame = NSRect(origin: .zero, size: image.size)
             DispatchQueue.main.async { self.applyEntry(scroll) }
         }
         syncOverlay(context.coordinator)
+    }
+
+    static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+        if let observer = coordinator.boundsObserver {
+            NotificationCenter.default.removeObserver(observer)
+            coordinator.boundsObserver = nil
+        }
+        coordinator.link?.unregister(scroll)
     }
 
     private func applyEntry(_ scroll: NSScrollView) {
@@ -2003,14 +2110,38 @@ struct ZoomPane: NSViewRepresentable {
         case .hundred:
             target = 1.0 / backing
         }
-        // Centered on the image middle; the user pans/zooms from there.
-        if let doc = scroll.documentView {
+        guard let doc = scroll.documentView else {
+            scroll.magnification = target
+            return
+        }
+        if let anchor {
+            // setMagnification(_:centeredAt:) 只是让那个点在屏幕上不动，并不居中 ——
+            // 以前从图片中心进，恰好中心本来就在视图中间才看着像居中。指定点要自己滚过去。
+            let point = Self.docPoint(anchor, in: doc)
+            scroll.magnification = target
+            Self.center(scroll, on: point)
+            // 先按自己的人脸摆好再入伙：入伙时联动会把大家当前的倍率/偏移套过来。
+            link?.register(scroll, anchor: point)
+        } else {
+            // Centered on the image middle; the user pans/zooms from there.
             scroll.setMagnification(
                 target,
                 centeredAt: NSPoint(x: doc.frame.midX, y: doc.frame.midY))
-        } else {
-            scroll.magnification = target
+            link?.register(scroll, anchor: NSPoint(x: doc.frame.midX, y: doc.frame.midY))
         }
+    }
+
+    /// 归一化、左上原点 → 文档坐标（AppKit 左下原点，单位 = 图像像素）。
+    static func docPoint(_ point: CGPoint, in doc: NSView) -> NSPoint {
+        NSPoint(x: point.x * doc.frame.width, y: (1 - point.y) * doc.frame.height)
+    }
+
+    /// 把文档里的某一点滚到可视区正中（贴边时由 CenteringClipView 兜住）。
+    static func center(_ scroll: NSScrollView, on point: NSPoint) {
+        let clip = scroll.contentView
+        let size = clip.bounds.size
+        clip.scroll(to: NSPoint(x: point.x - size.width / 2, y: point.y - size.height / 2))
+        scroll.reflectScrolledClipView(clip)
     }
 
     private func syncOverlay(_ coordinator: Coordinator) {
@@ -2124,6 +2255,8 @@ struct FaceCropView: View {
     let previewPath: String
     let decodePath: String
     let face: FaceInfo
+    /// 边长（点）。检视器 84，对比模式每格底下放 56。
+    var size: CGFloat = 84
 
     @State private var crop: NSImage?
 
@@ -2143,7 +2276,7 @@ struct FaceCropView: View {
                 Rectangle().fill(.gray.opacity(0.2))
             }
         }
-        .frame(width: 84, height: 84)
+        .frame(width: size, height: size)
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(ringColor, lineWidth: 3))
         .overlay(alignment: .bottomTrailing) {
@@ -2192,19 +2325,21 @@ struct PhotoInspector: View {
     /// feedback so the gesture never feels dead before zoom mode takes over.
     @State private var fitPinch: CGFloat = 1.0
     @State private var showOverlay = true
-    @State private var compareOn = false
-    /// 场内定案的勾选集：⌘点击「同场」缩略条勾/取消，再按「保留勾选」把同场其余
-    /// 全部设为废片。换场就清空 —— 留着会把上一场的勾选算进这一场的定案里。
-    @State private var keepSet: Set<String> = []
     /// 对焦高亮开关 + 当前这张的遮罩（带 key，翻页不串图）。
     @State private var focusPeak = false
     @State private var focusMask: (key: String, image: CGImage)?
+    /// 「对比本场」：关掉检视器，进全窗口的场内对比模式（参数是当前这张的 id）。
+    /// 以前这里有个并排对比 + 勾选定案条，右边的对手只能是本场精选、对比时不能放大，
+    /// 现在场内的取舍全在对比模式里做。
+    let onCompareTake: (String) -> Void
 
-    init(store: BatchStore, inspectedID: Binding<String?>, gridOrder: [String], initialID: String) {
+    init(store: BatchStore, inspectedID: Binding<String?>, gridOrder: [String], initialID: String,
+         onCompareTake: @escaping (String) -> Void) {
         self.store = store
         self._inspectedID = inspectedID
         self.gridOrder = gridOrder
         self._currentID = State(initialValue: initialID)
+        self.onCompareTake = onCompareTake
     }
 
     private var item: BatchItem? {
@@ -2222,29 +2357,14 @@ struct PhotoInspector: View {
         store.items.filter { $0.take == item.take }
     }
 
-    /// The comparison partner: the take's pick if that's not the current photo,
-    /// else the next member — "challenger vs incumbent" is the decision
-    /// photographers actually make inside a take.
-    private func compareTarget(_ item: BatchItem) -> BatchItem? {
-        let members = groupMembers(item).filter { $0.id != item.id }
-        guard !members.isEmpty else { return nil }
-        return members.first { $0.verdict == .pick } ?? members.first
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             if let item {
                 header(item)
-                Group {
-                    if compareOn, let other = compareTarget(item) {
-                        comparePane(item, other)
-                    } else {
-                        imagePane(item)
-                    }
-                }
-                // The photo wins the height fight against the strips below —
-                // on a 13" screen a group with faces squeezed it to a strip itself.
-                .layoutPriority(1)
+                imagePane(item)
+                    // The photo wins the height fight against the strips below —
+                    // on a 13" screen a group with faces squeezed it to a strip itself.
+                    .layoutPriority(1)
                 if !item.faces.isEmpty {
                     faceStrip(item)
                 }
@@ -2262,14 +2382,9 @@ struct PhotoInspector: View {
             }
         }
         .frame(minWidth: 960, idealWidth: 1240, minHeight: 700, idealHeight: 880)
-        .onChange(of: item?.take) { keepSet = [] }
         .onChange(of: focusPeak) { refreshFocusMask() }
         .onChange(of: zoomed) { refreshFocusMask() }
         .onChange(of: currentID) { refreshFocusMask() }
-        // 废纸篓清掉的 id 还留在勾选里的话，定案会写到不存在的照片上。
-        .onChange(of: store.items.count) {
-            keepSet.formIntersection(Set(store.items.map(\.id)))
-        }
     }
 
     // MARK: header
@@ -2290,9 +2405,10 @@ struct PhotoInspector: View {
                 .background(verdictColor(item.verdict).opacity(0.2), in: Capsule())
                 .foregroundStyle(verdictColor(item.verdict))
             Spacer()
-            if compareTarget(item) != nil {
-                Toggle("并排对比", isOn: $compareOn).toggleStyle(.button)
+            if (store.takeSizes[item.take] ?? 1) > 1 {
+                Button("对比本场 (C)") { onCompareTake(item.id) }
                     .keyboardShortcut("c", modifiers: [])
+                    .help("进场内对比：本场照片并排上台，1/2/3 改判、K 勾要留的、⏎ 定案并跳下一场、Z 一起放大到脸")
             }
             Toggle("分析框", isOn: $showOverlay).toggleStyle(.button)
             Toggle("对焦高亮", isOn: $focusPeak).toggleStyle(.button)
@@ -2302,7 +2418,7 @@ struct PhotoInspector: View {
             Button(zoomed ? "适应窗口" : (loadingFullRes ? "解码原图..." : "放大 100%")) {
                 toggleZoom(item)
             }
-            .disabled(loadingFullRes || compareOn)
+            .disabled(loadingFullRes)
             Button("在访达中显示") {
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: item.rawPath)])
             }
@@ -2386,37 +2502,6 @@ struct PhotoInspector: View {
         }
     }
 
-    private func comparePane(_ item: BatchItem, _ other: BatchItem) -> some View {
-        HStack(spacing: 2) {
-            comparisonSide(item, label: "当前")
-            comparisonSide(other, label: other.verdict == .pick ? "组内精选" : "组内另一张")
-        }
-        .background(Color.black)
-    }
-
-    private func comparisonSide(_ item: BatchItem, label: String) -> some View {
-        VStack(spacing: 4) {
-            HStack {
-                Text("\(label) · \(item.id)").font(.caption).foregroundStyle(.white)
-                Text(item.verdict.rawValue).font(.caption2)
-                    .padding(.horizontal, 5)
-                    .background(verdictColor(item.verdict).opacity(0.4), in: Capsule())
-                    .foregroundStyle(.white)
-            }
-            .padding(.top, 6)
-            SharpImageView(previewPath: item.previewPath, decodePath: item.decodePath)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            HStack(spacing: 10) {
-                Text("锐度 \(Int(item.sharpness))")
-                if let q = item.faceQuality { Text(String(format: "质量 %.2f", q)) }
-                if let e = item.expressionScore { Text("表情 \(e)") }
-            }
-            .font(.caption2).foregroundStyle(.white.opacity(0.8))
-            .padding(.bottom, 6)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
     /// Draws the primary-face box + its metrics directly on the photo, so 对焦
     /// judgement (which face was measured, how it scored, eye state) is visible
     /// in place instead of in a separate row.
@@ -2465,28 +2550,25 @@ struct PhotoInspector: View {
         }
     }
 
-    /// 同一场的全部照片；点击切换，当前那张高亮。
+    /// 同一场的全部照片；点击切换，当前那张高亮。场内取舍（勾要留的、其余废片）在
+    /// 对比模式里做 —— 这里以前也有一套勾选定案条，同一个动作两套手势。
     private func groupStrip(_ item: BatchItem, members: [BatchItem]) -> some View {
-        VStack(spacing: 2) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    Text("同场 \(members.count) 张").font(.caption2).foregroundStyle(.secondary)
-                    ForEach(members) { member in
-                        groupStripCell(member)
-                    }
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                Text("同场 \(members.count) 张").font(.caption2).foregroundStyle(.secondary)
+                ForEach(members) { member in
+                    groupStripCell(member)
                 }
-                .padding(.horizontal)
-                .padding(.vertical, 4)
             }
-            groupKeepBar(members)
+            .padding(.horizontal)
+            .padding(.vertical, 4)
         }
     }
 
-    /// 一张同组照片。点击切过去看，⌘点击把它勾进/踢出"要保留的"。
+    /// 一张同场照片，点击切过去看。
     private func groupStripCell(_ member: BatchItem) -> some View {
-        let kept = keepSet.contains(member.id)
-        return VStack(spacing: 1) {
-            // 整图 fit：这一条正是挑选发生的地方，竖拍被裁掉一半就没法挑。
+        VStack(spacing: 1) {
+            // 整图 fit：竖拍被裁掉一半就看不出是哪一张。
             ThumbnailView(path: member.previewPath, fit: true)
                 .frame(width: 72, height: 72)
                 .background(Color(white: 0.10))
@@ -2496,66 +2578,12 @@ struct PhotoInspector: View {
                         .stroke(member.id == currentID ? Color.accentColor : verdictColor(member.verdict),
                                 lineWidth: member.id == currentID ? 3 : 1.5)
                 )
-                .overlay(alignment: .topLeading) {
-                    if kept {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.green)
-                            .background(Circle().fill(.white))
-                            .padding(2)
-                    }
-                }
-                .opacity(keepSet.isEmpty || kept ? 1 : 0.45)
             Text(member.verdict.rawValue).font(.caption2)
                 .foregroundStyle(verdictColor(member.verdict))
         }
         .contentShape(Rectangle())
-        .onTapGesture {
-            if NSEvent.modifierFlags.contains(.command) {
-                toggleKeep(member.id)
-            } else {
-                currentID = member.id
-            }
-        }
-        .help("点击=看这张 · ⌘点击=勾选保留")
-    }
-
-    private func toggleKeep(_ id: String) {
-        if keepSet.contains(id) { keepSet.remove(id) } else { keepSet.insert(id) }
-    }
-
-    /// 场内定案条。以前这里只能一张一张点开按 1/2/3 —— 一场 8 张要按 8 次，
-    /// 还得自己记住哪几张已经判过了。
-    @ViewBuilder
-    private func groupKeepBar(_ members: [BatchItem]) -> some View {
-        let ids = members.map(\.id)
-        let keep = keepSet.intersection(ids)
-        let drop = ids.count - keep.count
-        HStack(spacing: 8) {
-            Button(keepSet.contains(currentID) ? "取消保留这张 (K)" : "保留这张 (K)") {
-                toggleKeep(currentID)
-            }
-            .buttonStyle(.bordered)
-            .keyboardShortcut("k", modifiers: [])
-            if keep.isEmpty {
-                Text("⌘点击缩略图勾选要留的，其余一键设为废片")
-                    .font(.caption2).foregroundStyle(.tertiary)
-            } else {
-                Button("保留勾选 \(keep.count) 张 · 其余 \(drop) 张废片 (⏎)") {
-                    store.keepOnly(keep, among: ids)
-                    keepSet = []
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.return, modifiers: [])
-                .disabled(drop == 0)
-                .help("勾选的定为精选，同场其余 \(drop) 张设为废片。整场算一次改判，⌘Z 一次撤销")
-                Button("清空勾选") { keepSet = [] }
-                    .buttonStyle(.bordered)
-            }
-            Spacer()
-        }
-        .padding(.horizontal)
-        .padding(.bottom, 2)
+        .onTapGesture { currentID = member.id }
+        .help("点击=看这张 · 场内取舍按 C 进对比模式")
     }
 
     // MARK: info rows
@@ -2841,78 +2869,6 @@ struct HistogramView: View {
             guard !Task.isCancelled else { return }
             bins = computed
         }
-    }
-}
-
-// MARK: - Arbitrary two-photo compare (跨组对比)
-
-/// Side-by-side compare of any two ⌘-selected photos — the in-group compare
-/// answers "which frame of this burst", this answers "which of these two
-/// moments/angles gets delivered".
-struct ComparePairSheet: View {
-    @ObservedObject var store: BatchStore
-    let ids: [String]
-    @Binding var isPresented: Bool
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("并排对比").font(.headline)
-                Spacer()
-                Text("为每张分别改判后关闭")
-                    .font(.caption2).foregroundStyle(.tertiary)
-                Button("关闭") { isPresented = false }
-                    .keyboardShortcut(.escape, modifiers: [])
-            }
-            .padding()
-            HStack(spacing: 2) {
-                ForEach(ids, id: \.self) { id in
-                    if let item = store.item(withID: id) {
-                        side(item)
-                    }
-                }
-            }
-            .background(Color.black)
-        }
-        .frame(minWidth: 1100, minHeight: 720)
-    }
-
-    private func verdictColor(_ v: Verdict) -> Color { v.color }
-
-    private func side(_ item: BatchItem) -> some View {
-        VStack(spacing: 4) {
-            HStack {
-                Text(item.id).font(.caption).foregroundStyle(.white)
-                Text(item.verdict.rawValue).font(.caption2)
-                    .padding(.horizontal, 5)
-                    .background(verdictColor(item.verdict).opacity(0.4), in: Capsule())
-                    .foregroundStyle(.white)
-            }
-            .padding(.top, 6)
-            SharpImageView(previewPath: item.previewPath, decodePath: item.decodePath)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            HStack(spacing: 10) {
-                Text("锐度 \(Int(item.sharpness))")
-                if let q = item.faceQuality { Text(String(format: "质量 %.2f", q)) }
-                if let e = item.expressionScore { Text("表情 \(e)") }
-                if let exif = item.exif { Text(exif.summary) }
-            }
-            .font(.caption2).foregroundStyle(.white.opacity(0.8))
-            HStack(spacing: 6) {
-                let override = store.overrides[item.id]
-                Button("精选") { store.setOverride(item.id, .pick) }
-                    .buttonStyle(.bordered)
-                    .tint(override == .pick ? .green : nil)
-                Button("可用") { store.setOverride(item.id, .usable) }
-                    .buttonStyle(.bordered)
-                    .tint(override == .usable ? .blue : nil)
-                Button("废片") { store.setOverride(item.id, .reject) }
-                    .buttonStyle(.bordered)
-                    .tint(override == .reject ? .red : nil)
-            }
-            .padding(.bottom, 8)
-        }
-        .frame(maxWidth: .infinity)
     }
 }
 
