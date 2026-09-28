@@ -887,6 +887,13 @@ struct BatchView: View {
                     .help("进场内对比。选中的都在同一场 = 整场对比（先摆选中的，⏎ 定案本场）；" +
                           "跨场 = 只比这几张、逐张改判")
             }
+            Button("拼图 (\(selectedIDs.count))") {
+                // 按网格里的顺序递过去（Set 没有顺序）。
+                let order = store.items.map(\.id).filter { selectedIDs.contains($0) }
+                store.collageRequest = order
+            }
+            .buttonStyle(.bordered)
+            .help("把选中的照片带到「拼图」页，直接排一版（按人脸裁切、主图最大）")
             Spacer()
             Button("取消选择") { selectedIDs.removeAll() }
                 .keyboardShortcut(.escape, modifiers: [])

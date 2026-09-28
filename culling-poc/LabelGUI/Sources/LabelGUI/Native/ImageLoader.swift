@@ -32,8 +32,10 @@ enum ImageLoader {
     /// as photos: the 高ISO RAW copies for denoising, and the app's own JPG /
     /// watermark exports. Without this, exporting into the shoot folder makes
     /// the next 开始分析 pick the outputs up as new "_jpg" photos.
-    static let excludedSubfolders: Set<String> = [denoiseSubfolder, jpegExportSubfolder, "水印导出"]
+    static let excludedSubfolders: Set<String> = [denoiseSubfolder, jpegExportSubfolder, "水印导出", collageExportSubfolder]
     static let jpegExportSubfolder = "导出JPG"
+    /// 拼图 / 相册成品默认写这里（拼好的九宫格被当成新照片分析一遍就太荒唐了）。
+    static let collageExportSubfolder = "拼图导出"
 
     /// Size + modification time of a source file, the incremental-reuse key and
     /// the "did this file change under us while we decoded it" guard.

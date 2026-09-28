@@ -160,6 +160,9 @@ final class BatchStore: ObservableObject {
     /// When set, the 废片 section shows only rejects carrying this reason —
     /// "audit every 闭眼 kill in one pass" instead of hunting badges.
     @Published var reasonFilter: String?
+    /// 网格多选的「拼图」：把这几张的 id 交给拼图 tab（ContentView 收到后切过去、清空）。
+    /// 网格选中状态是 BatchView 私有的，只能这样递过去。
+    @Published var collageRequest: [String]?
     /// Show only photos within ±15% of an active threshold — the ones on the
     /// knife's edge, worth eyeballing after a slider change. Runtime hedge for
     /// thresholds that were never calibrated against real bad photos.

@@ -1,0 +1,586 @@
+import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
+
+/// 画布在视图里的摆放：成品像素 ↔ 视图坐标。
+struct CollageCanvasLayout {
+    /// 画布在视图里占的矩形（等比适应、四周留白）。
+    let rect: CGRect
+    /// 视图点 / 成品像素。
+    let scale: CGFloat
+
+    init(canvas: CollageCanvas, in size: CGSize, padding: CGFloat = 28) {
+        let availW = max(10, size.width - padding * 2)
+        let availH = max(10, size.height - padding * 2)
+        let cw = CGFloat(max(1, canvas.width))
+        let ch = CGFloat(max(1, canvas.height))
+        let s = min(availW / cw, availH / ch)
+        let w = cw * s
+        let h = ch * s
+        rect = CGRect(x: (size.width - w) / 2, y: (size.height - h) / 2, width: w, height: h)
+        scale = s
+    }
+
+    func toCanvas(_ p: CGPoint) -> CGPoint {
+        CGPoint(x: (p.x - rect.minX) / scale, y: (p.y - rect.minY) / scale)
+    }
+
+    func toView(_ r: CGRect) -> CGRect {
+        CGRect(x: rect.minX + r.minX * scale, y: rect.minY + r.minY * scale,
+               width: r.width * scale, height: r.height * scale)
+    }
+}
+
+/// 拖进画布时落在哪：哪个格子、中间（替换/互换）还是哪条边（劈开插入）。
+struct CollageDropTarget: Equatable {
+    var path: [Int]
+    var edge: CollageLayout.Edge?
+}
+
+enum CollageHit {
+    case gutter(CollageLayout.Gutter)
+    case cell(CollageLayout.Frame)
+    case none
+
+    /// 点到哪：缝优先（缝很窄，按视图点外扩几个点），再是格子。
+    static func at(_ p: CGPoint, geometry: CollageLayout.Geometry, layout: CollageCanvasLayout) -> CollageHit {
+        let c = layout.toCanvas(p)
+        let slop = 6 / max(0.01, layout.scale)
+        for g in geometry.gutters {
+            let r = g.rect.cgRect
+            let hitRect = g.axis == .row ? r.insetBy(dx: -slop, dy: 0) : r.insetBy(dx: 0, dy: -slop)
+            if hitRect.contains(c) { return .gutter(g) }
+        }
+        for f in geometry.frames where f.rect.cgRect.contains(c) {
+            return .cell(f)
+        }
+        return .none
+    }
+
+    /// 落点：格子外圈 22% 算边（劈开插入），中间算替换。
+    static func dropTarget(_ p: CGPoint, geometry: CollageLayout.Geometry, layout: CollageCanvasLayout,
+                           excluding source: [Int]?) -> CollageDropTarget? {
+        let c = layout.toCanvas(p)
+        guard let f = geometry.frames.first(where: { $0.rect.cgRect.contains(c) }), f.path != source else { return nil }
+        let r = f.rect.cgRect
+        let u = Double((c.x - r.minX) / max(1, r.width))
+        let v = Double((c.y - r.minY) / max(1, r.height))
+        let edges: [(CollageLayout.Edge, Double)] = [(.left, u), (.right, 1 - u), (.top, v), (.bottom, 1 - v)]
+        let nearest = edges.min { $0.1 < $1.1 }!
+        if nearest.1 < 0.22 { return CollageDropTarget(path: f.path, edge: nearest.0) }
+        return CollageDropTarget(path: f.path, edge: nil)
+    }
+}
+
+struct CollageCanvasView: View {
+    @ObservedObject var store: CollageStore
+    /// 双击文字格：让检视器切到「文字」。
+    var onEditText: () -> Void = {}
+
+    private enum DragMode {
+        case gutter(CollageLayout.Gutter)
+        case move([Int])
+        case pan([Int], CollageCropOverride, CollageLayout.Frame)
+    }
+
+    @State private var dragMode: DragMode?
+    @State private var dropTarget: CollageDropTarget?
+    @State private var hoverGutter: CollageLayout.Gutter?
+    @State private var magnifyBase: CollageCropOverride?
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            let layout = CollageCanvasLayout(canvas: store.project.canvas, in: geo.size)
+            let geometry = store.geometry
+            ZStack(alignment: .topLeading) {
+                Color(white: 0.14)
+                canvasImage(layout)
+                CollageCanvasOverlay(store: store, layout: layout, geometry: geometry,
+                                     dropTarget: dropTarget, hoverGutter: hoverGutter)
+                    .allowsHitTesting(false)
+                if store.root == nil {
+                    emptyHint
+                        .frame(width: geo.size.width, height: geo.size.height)
+                }
+            }
+            .contentShape(Rectangle())
+            .gesture(tapGesture(layout: layout, geometry: geometry))
+            .simultaneousGesture(dragGesture(layout: layout, geometry: geometry))
+            .simultaneousGesture(magnifyGesture(geometry: geometry))
+            .onContinuousHover { phase in
+                hover(phase, layout: layout, geometry: geometry)
+            }
+            .onDrop(of: [.text, .fileURL], delegate: CollageCanvasDropDelegate(
+                store: store, layout: layout, geometry: geometry, target: $dropTarget))
+            .onAppear { reportViewport(layout) }
+            .onChange(of: geo.size) { _, _ in reportViewport(layout) }
+            .onChange(of: store.project.canvas) { _, _ in reportViewport(layout) }
+        }
+        .focusable()
+        .focusEffectDisabled()
+        .focused($focused)
+        .onKeyPress(.leftArrow) { keyArrow(-1) }
+        .onKeyPress(.rightArrow) { keyArrow(1) }
+        .onKeyPress(.upArrow) { keyNudge(dx: 0, dy: -1) }
+        .onKeyPress(.downArrow) { keyNudge(dx: 0, dy: 1) }
+        .onKeyPress(.escape) { keyEscape() }
+        .onKeyPress(.delete) { keyDelete() }
+        .onKeyPress(.deleteForward) { keyDelete() }
+        .onKeyPress(characters: CharacterSet(charactersIn: "+=-")) { press in
+            keyZoom(press.characters)
+        }
+    }
+
+    // MARK: - 画面
+
+    @ViewBuilder
+    private func canvasImage(_ layout: CollageCanvasLayout) -> some View {
+        if let image = store.preview {
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: layout.rect.width, height: layout.rect.height)
+                .shadow(color: .black.opacity(0.35), radius: 10, y: 3)
+                .offset(x: layout.rect.minX, y: layout.rect.minY)
+        } else {
+            Rectangle()
+                .fill(Color(white: 0.22))
+                .frame(width: layout.rect.width, height: layout.rect.height)
+                .offset(x: layout.rect.minX, y: layout.rect.minY)
+        }
+    }
+
+    private var emptyHint: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "rectangle.3.offgrid")
+                .font(.system(size: 38))
+                .foregroundStyle(.secondary)
+            Text("把托盘里的照片拖进来，或点「自动排版」")
+                .foregroundStyle(.secondary)
+            Text("批量页多选后点「拼图」也能直接带过来")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private func reportViewport(_ layout: CollageCanvasLayout) {
+        let backing = NSScreen.main?.backingScaleFactor ?? 2
+        store.setViewport(pixels: CGSize(width: layout.rect.width * backing, height: layout.rect.height * backing))
+    }
+
+    // MARK: - 点击
+
+    private func tapGesture(layout: CollageCanvasLayout, geometry: CollageLayout.Geometry) -> some Gesture {
+        SpatialTapGesture(count: 2)
+            .onEnded { value in doubleTap(value.location, layout: layout, geometry: geometry) }
+            .exclusively(before: SpatialTapGesture(count: 1)
+                .onEnded { value in singleTap(value.location, layout: layout, geometry: geometry) })
+    }
+
+    private func singleTap(_ p: CGPoint, layout: CollageCanvasLayout, geometry: CollageLayout.Geometry) {
+        focused = true
+        switch CollageHit.at(p, geometry: geometry, layout: layout) {
+        case .gutter(let g):
+            if NSEvent.modifierFlags.contains(.option) { store.flipGutter(g.path) }
+        case .cell(let f):
+            if store.cropEditing, store.selection != f.path { store.exitCropEdit() }
+            store.selection = f.path
+        case .none:
+            store.exitCropEdit()
+            store.selection = nil
+        }
+    }
+
+    private func doubleTap(_ p: CGPoint, layout: CollageCanvasLayout, geometry: CollageLayout.Geometry) {
+        focused = true
+        guard case .cell(let f) = CollageHit.at(p, geometry: geometry, layout: layout) else { return }
+        switch f.cell.kind {
+        case .photo:
+            if f.cell.photoID != nil { store.enterCropEdit(f.path) }
+        case .text:
+            store.selection = f.path
+            onEditText()
+        case .empty:
+            store.selection = f.path
+        }
+    }
+
+    // MARK: - 拖动：拖缝 / 挪格子 / 裁切平移
+
+    private func dragGesture(layout: CollageCanvasLayout, geometry: CollageLayout.Geometry) -> some Gesture {
+        DragGesture(minimumDistance: 3, coordinateSpace: .local)
+            .onChanged { value in
+                if dragMode == nil { dragMode = beginDrag(at: value.startLocation, layout: layout, geometry: geometry) }
+                updateDrag(value, layout: layout, geometry: geometry)
+            }
+            .onEnded { _ in endDrag() }
+    }
+
+    private func beginDrag(at p: CGPoint, layout: CollageCanvasLayout,
+                           geometry: CollageLayout.Geometry) -> DragMode? {
+        focused = true
+        // 裁切模式：在选中格里起手一律算平移（缝的命中区外扩了几个点，贴着格子边拖会误拖缝）。
+        if store.cropEditing, let path = store.selection,
+           let f = geometry.frames.first(where: { $0.path == path }),
+           f.rect.cgRect.contains(layout.toCanvas(p)), let base = store.cropBaseline(for: f) {
+            return .pan(f.path, base, f)
+        }
+        let hit = CollageHit.at(p, geometry: geometry, layout: layout)
+        switch hit {
+        case .gutter(let g):
+            store.beginContinuousEdit()
+            return .gutter(g)
+        case .cell(let f):
+            guard f.cell.kind != .empty || f.cell.photoID != nil else { return nil }
+            if store.cropEditing { store.exitCropEdit() }
+            store.selection = f.path
+            return .move(f.path)
+        case .none:
+            return nil
+        }
+    }
+
+    private func updateDrag(_ value: DragGesture.Value, layout: CollageCanvasLayout, geometry: CollageLayout.Geometry) {
+        guard let mode = dragMode else { return }
+        switch mode {
+        case .gutter(let g):
+            let c = layout.toCanvas(value.location)
+            let position = g.axis == .row ? Double(c.x) : Double(c.y)
+            let gutterWidth = CollageLayout.gutterPixels(canvas: store.project.canvas, style: store.project.style)
+            let minPixels = store.project.canvas.shortSide * 0.06
+            let ratio = CollageLayout.ratio(forDrag: position, gutter: g, gutterWidth: gutterWidth, minPixels: minPixels)
+            store.setRatio(ratio, at: g.path)
+        case .move(let source):
+            dropTarget = CollageHit.dropTarget(value.location, geometry: geometry, layout: layout, excluding: source)
+        case .pan(let path, let base, let frame):
+            pan(path: path, base: base, frame: frame, translation: value.translation, layout: layout)
+        }
+    }
+
+    /// 拖动方向 = 画面跟手：往右拖，照片往右走，取景窗口往左挪。
+    private func pan(path: [Int], base: CollageCropOverride, frame: CollageLayout.Frame, translation: CGSize,
+                     layout: CollageCanvasLayout) {
+        guard let id = frame.cell.photoID, let photo = store.photoMap[id] else { return }
+        let area = store.photoArea(for: frame)
+        let maxW = CollageCrop.maxWindow(photoAspect: photo.aspect, cellAspect: CollageCrop.aspect(of: area))
+        let zoom = max(1, base.zoom)
+        let winW = maxW.w / zoom
+        let winH = maxW.h / zoom
+        let cellW = Double(area.width) * Double(layout.scale)
+        let cellH = Double(area.height) * Double(layout.scale)
+        let dx = Double(translation.width) / max(1, cellW) * winW
+        let dy = Double(translation.height) / max(1, cellH) * winH
+        let cx = min(1 - winW / 2, max(winW / 2, base.cx - dx))
+        let cy = min(1 - winH / 2, max(winH / 2, base.cy - dy))
+        store.setCrop(CollageCropOverride(cx: cx, cy: cy, zoom: zoom), at: path)
+    }
+
+    private func endDrag() {
+        defer {
+            dragMode = nil
+            dropTarget = nil
+        }
+        guard let mode = dragMode else { return }
+        switch mode {
+        case .gutter:
+            store.endContinuousEdit()
+        case .move(let source):
+            guard let target = dropTarget else { return }
+            if let edge = target.edge {
+                store.move(from: source, to: target.path, edge: edge)
+            } else {
+                store.swap(source, target.path)
+            }
+        case .pan:
+            break
+        }
+    }
+
+    // MARK: - 捏合缩放（裁切模式）
+
+    private func magnifyGesture(geometry: CollageLayout.Geometry) -> some Gesture {
+        MagnifyGesture()
+            .onChanged { value in
+                guard store.cropEditing, let path = store.selection,
+                      let frame = geometry.frames.first(where: { $0.path == path }) else { return }
+                if magnifyBase == nil { magnifyBase = store.cropBaseline(for: frame) }
+                guard let base = magnifyBase else { return }
+                let zoom = min(8, max(1, base.zoom * Double(value.magnification)))
+                store.setCrop(CollageCropOverride(cx: base.cx, cy: base.cy, zoom: zoom), at: path)
+            }
+            .onEnded { _ in magnifyBase = nil }
+    }
+
+    // MARK: - 悬停：缝上换光标
+
+    private func hover(_ phase: HoverPhase, layout: CollageCanvasLayout, geometry: CollageLayout.Geometry) {
+        switch phase {
+        case .active(let p):
+            if case .gutter(let g) = CollageHit.at(p, geometry: geometry, layout: layout) {
+                if hoverGutter != g {
+                    hoverGutter = g
+                    (g.axis == .row ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown).set()
+                }
+            } else if hoverGutter != nil {
+                hoverGutter = nil
+                NSCursor.arrow.set()
+            }
+        case .ended:
+            if hoverGutter != nil {
+                hoverGutter = nil
+                NSCursor.arrow.set()
+            }
+        }
+    }
+
+    // MARK: - 键盘
+
+    private func keyArrow(_ delta: Int) -> KeyPress.Result {
+        if store.cropEditing { return keyNudge(dx: Double(delta), dy: 0) }
+        if delta > 0 { store.nextAlternative() } else { store.previousAlternative() }
+        return .handled
+    }
+
+    private func keyNudge(dx: Double, dy: Double) -> KeyPress.Result {
+        guard store.cropEditing, let path = store.selection,
+              let frame = store.geometry.frames.first(where: { $0.path == path }),
+              let base = store.cropBaseline(for: frame) else { return .ignored }
+        // 和拖动同一个方向：按 → 照片往右走（取景窗口往左挪）。
+        let step = 0.02 / max(1, base.zoom)
+        store.setCrop(CollageCropOverride(cx: base.cx - dx * step, cy: base.cy - dy * step, zoom: base.zoom), at: path)
+        return .handled
+    }
+
+    private func keyZoom(_ chars: String) -> KeyPress.Result {
+        guard store.cropEditing, let path = store.selection,
+              let frame = store.geometry.frames.first(where: { $0.path == path }),
+              let base = store.cropBaseline(for: frame) else { return .ignored }
+        let factor = chars == "-" ? 1 / 1.12 : 1.12
+        let zoom = min(8, max(1, base.zoom * factor))
+        store.setCrop(CollageCropOverride(cx: base.cx, cy: base.cy, zoom: zoom), at: path)
+        return .handled
+    }
+
+    private func keyEscape() -> KeyPress.Result {
+        if store.cropEditing {
+            store.exitCropEdit()
+            return .handled
+        }
+        if store.selection != nil {
+            store.selection = nil
+            return .handled
+        }
+        return .ignored
+    }
+
+    private func keyDelete() -> KeyPress.Result {
+        guard let path = store.selection, !store.cropEditing else { return .ignored }
+        store.removeCell(path)
+        return .handled
+    }
+}
+
+/// 叠加层：选中框、缝的拖动提示、落点、切脸/路人/锁定角标、裁切模式的人脸框和三分线。
+/// 不接收点击（点击全在画布上统一命中测试）。
+struct CollageCanvasOverlay: View {
+    @ObservedObject var store: CollageStore
+    let layout: CollageCanvasLayout
+    let geometry: CollageLayout.Geometry
+    let dropTarget: CollageDropTarget?
+    let hoverGutter: CollageLayout.Gutter?
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(geometry.frames, id: \.path) { frame in
+                badges(for: frame)
+            }
+            if let g = hoverGutter {
+                gutterHighlight(g)
+            }
+            if let path = store.selection, let frame = geometry.frames.first(where: { $0.path == path }) {
+                selectionOutline(frame)
+                if store.cropEditing { cropGuides(frame) }
+            }
+            if let target = dropTarget, let frame = geometry.frames.first(where: { $0.path == target.path }) {
+                dropHighlight(frame, edge: target.edge)
+            }
+        }
+    }
+
+    private func viewRect(_ frame: CollageLayout.Frame) -> CGRect {
+        layout.toView(frame.rect.cgRect)
+    }
+
+    private func selectionOutline(_ frame: CollageLayout.Frame) -> some View {
+        let r = viewRect(frame)
+        return Rectangle()
+            .strokeBorder(Color.accentColor, lineWidth: 2.5)
+            .frame(width: r.width + 4, height: r.height + 4)
+            .offset(x: r.minX - 2, y: r.minY - 2)
+    }
+
+    private func gutterHighlight(_ g: CollageLayout.Gutter) -> some View {
+        let r = layout.toView(g.rect.cgRect)
+        let isRow = g.axis == .row
+        let w = isRow ? max(3, r.width) : r.width
+        let h = isRow ? r.height : max(3, r.height)
+        return Rectangle()
+            .fill(Color.accentColor.opacity(0.55))
+            .frame(width: w, height: h)
+            .offset(x: r.midX - w / 2, y: r.midY - h / 2)
+    }
+
+    @ViewBuilder
+    private func dropHighlight(_ frame: CollageLayout.Frame, edge: CollageLayout.Edge?) -> some View {
+        let r = viewRect(frame)
+        if let edge {
+            let bar = edgeBar(r, edge: edge)
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color.accentColor)
+                .frame(width: bar.width, height: bar.height)
+                .offset(x: bar.minX, y: bar.minY)
+        } else {
+            Rectangle()
+                .fill(Color.accentColor.opacity(0.22))
+                .overlay(Rectangle().strokeBorder(Color.accentColor, lineWidth: 3))
+                .frame(width: r.width, height: r.height)
+                .offset(x: r.minX, y: r.minY)
+        }
+    }
+
+    private func edgeBar(_ r: CGRect, edge: CollageLayout.Edge) -> CGRect {
+        let t: CGFloat = 6
+        switch edge {
+        case .left: return CGRect(x: r.minX, y: r.minY, width: t, height: r.height)
+        case .right: return CGRect(x: r.maxX - t, y: r.minY, width: t, height: r.height)
+        case .top: return CGRect(x: r.minX, y: r.minY, width: r.width, height: t)
+        case .bottom: return CGRect(x: r.minX, y: r.maxY - t, width: r.width, height: t)
+        }
+    }
+
+    @ViewBuilder
+    private func badges(for frame: CollageLayout.Frame) -> some View {
+        let r = viewRect(frame)
+        let window = store.window(for: frame)
+        let cut = window?.cutsFace ?? false
+        let bystander = window?.hitsBystander ?? false
+        if cut || bystander || frame.cell.locked {
+            HStack(spacing: 4) {
+                if frame.cell.locked { badge("lock.fill", nil, .white) }
+                if cut { badge("exclamationmark.triangle.fill", "切脸", .red) }
+                if bystander { badge("person.2.fill", "路人", .orange) }
+            }
+            .offset(x: r.minX + 6, y: r.minY + 6)
+        }
+    }
+
+    private func badge(_ symbol: String, _ text: String?, _ color: Color) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: symbol)
+            if let text { Text(text) }
+        }
+        .font(.caption2.bold())
+        .foregroundStyle(color)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 2)
+        .background(.black.opacity(0.6), in: Capsule())
+    }
+
+    /// 裁切模式：三分线 + 人脸框，照着摆构图。
+    @ViewBuilder
+    private func cropGuides(_ frame: CollageLayout.Frame) -> some View {
+        let r = viewRect(frame)
+        ZStack(alignment: .topLeading) {
+            Path { path in
+                for k in 1...2 {
+                    let x = r.minX + r.width * CGFloat(k) / 3
+                    let y = r.minY + r.height * CGFloat(k) / 3
+                    path.move(to: CGPoint(x: x, y: r.minY))
+                    path.addLine(to: CGPoint(x: x, y: r.maxY))
+                    path.move(to: CGPoint(x: r.minX, y: y))
+                    path.addLine(to: CGPoint(x: r.maxX, y: y))
+                }
+            }
+            .stroke(Color.white.opacity(0.55), lineWidth: 1)
+            ForEach(Array(faceRects(frame, in: r).enumerated()), id: \.offset) { item in
+                Rectangle()
+                    .strokeBorder(Color.yellow, lineWidth: 1.5)
+                    .frame(width: item.element.width, height: item.element.height)
+                    .offset(x: item.element.minX, y: item.element.minY)
+            }
+            Text("拖动平移 · 捏合或 +/- 缩放 · 方向键微调 · Esc 完成")
+                .font(.caption2)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(.black.opacity(0.6), in: Capsule())
+                .offset(x: r.minX + 6, y: r.maxY - 26)
+        }
+    }
+
+    private func faceRects(_ frame: CollageLayout.Frame, in r: CGRect) -> [CGRect] {
+        guard let id = frame.cell.photoID, let photo = store.photoMap[id],
+              let window = store.window(for: frame) else { return [] }
+        let area = layout.toView(store.photoArea(for: frame))
+        let drawn = CollageCrop.drawnRect(window: window, photo: photo, cell: frame.cell, in: area)
+        return CollageCrop.faceBoxes(photo: photo, window: window, in: drawn)
+    }
+}
+
+/// 托盘里的照片（文字 = 照片 id）、Finder 里的文件拖进画布。
+struct CollageCanvasDropDelegate: DropDelegate {
+    let store: CollageStore
+    let layout: CollageCanvasLayout
+    let geometry: CollageLayout.Geometry
+    @Binding var target: CollageDropTarget?
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [.text, .fileURL])
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        if info.hasItemsConforming(to: [.text]) {
+            target = CollageHit.dropTarget(info.location, geometry: geometry, layout: layout, excluding: nil)
+        }
+        return DropProposal(operation: .copy)
+    }
+
+    func dropExited(info: DropInfo) {
+        target = nil
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        let where_ = target
+        target = nil
+        if let provider = info.itemProviders(for: [.text]).first {
+            _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+                guard let id = object as? String else { return }
+                Task { @MainActor in
+                    if let where_ {
+                        store.place(photoID: id, at: where_.path, edge: where_.edge)
+                    } else if store.root == nil {
+                        store.solve(photoIDs: [id])
+                    }
+                }
+            }
+            return true
+        }
+        let providers = info.itemProviders(for: [.fileURL])
+        guard !providers.isEmpty else { return false }
+        Task { @MainActor in
+            var urls: [URL] = []
+            for p in providers {
+                if let url = await Self.loadURL(p) { urls.append(url) }
+            }
+            store.addFiles(urls)
+        }
+        return true
+    }
+
+    static func loadURL(_ provider: NSItemProvider) async -> URL? {
+        await withCheckedContinuation { continuation in
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in continuation.resume(returning: url) }
+        }
+    }
+}

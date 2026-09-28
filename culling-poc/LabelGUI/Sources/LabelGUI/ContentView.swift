@@ -4,17 +4,39 @@ struct ContentView: View {
     @ObservedObject var store: LabelStore
     @ObservedObject var batchStore: BatchStore
     @StateObject private var watermarkStore = WatermarkStore(dataDir: appDataDir)
+    @StateObject private var collageStore = CollageStore(dataDir: appDataDir)
+    @State private var tab: AppTab = .batch
+
+    enum AppTab: Hashable {
+        case batch, watermark, collage, labeling
+    }
 
     var body: some View {
-        TabView {
+        TabView(selection: $tab) {
             BatchView(store: batchStore)
                 .tabItem { Label("批量处理", systemImage: "square.grid.3x3") }
+                .tag(AppTab.batch)
 
             WatermarkView(store: watermarkStore, batchStore: batchStore)
                 .tabItem { Label("水印", systemImage: "signature") }
+                .tag(AppTab.watermark)
+
+            CollageView(store: collageStore, batchStore: batchStore)
+                .tabItem { Label("拼图", systemImage: "rectangle.3.offgrid") }
+                .tag(AppTab.collage)
 
             labelingTab
                 .tabItem { Label("标注校准", systemImage: "checklist") }
+                .tag(AppTab.labeling)
+        }
+        // 批量页多选「拼图」：切到拼图页、带照片进托盘、直接排一版。
+        .onChange(of: batchStore.collageRequest) { _, request in
+            guard let ids = request, !ids.isEmpty else { return }
+            batchStore.collageRequest = nil
+            collageStore.attach(sessionDir: batchStore.photoDir == nil ? nil : batchStore.sessionDir,
+                                photoDir: batchStore.photoDir)
+            collageStore.importFromBatch(ids: ids, batch: batchStore, layout: true)
+            tab = .collage
         }
     }
 

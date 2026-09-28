@@ -272,6 +272,32 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--compare"),
     exit(0)
 }
 
+// Headless 拼图 / 相册：LabelGUI --collage <photo_dir> [选项]（选项见 CollageCLI.swift）。
+// 只读分析结果、只写 --out —— 界面不开也能逐像素看版式和裁切。
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--collage"),
+   CommandLine.arguments.count > flagIndex + 1 {
+    MainActor.assumeIsolated {
+        CollageCLI.run(flagIndex: flagIndex)
+    }
+}
+
+// 拼图界面离屏快照：LabelGUI --collage-ui <photo_dir> <out.png> [...]（见 CollageCLI.swift）。
+// 禁止激活、窗口从不显示 —— 不开 GUI 也能看界面排布。
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--collage-ui"),
+   CommandLine.arguments.count > flagIndex + 2 {
+    MainActor.assumeIsolated {
+        CollageUISnapshot.run(flagIndex: flagIndex)
+    }
+}
+
+// 拼图编辑操作脚本：LabelGUI --collage-ops <photo_dir> --ops "..."（见 CollageCLI.swift）。
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--collage-ops"),
+   CommandLine.arguments.count > flagIndex + 1 {
+    MainActor.assumeIsolated {
+        CollageOpsScript.run(flagIndex: flagIndex)
+    }
+}
+
 // Headless 对比放大裁块：LabelGUI --compare-crop <photo_dir> <id> <out.jpg>
 // 走和对比模式放大一模一样的"按人脸裁原图"，落成 JPEG，并打印锚点 —— 用来肉眼
 // 核对裁块居中在脸上、竖拍没转歪。
