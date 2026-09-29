@@ -256,6 +256,8 @@ enum CollageLayout {
         /// 结构 + 照片排列：同分时按它排，同一 seed 每次出同一组备选。
         var key: String = ""
         var shapeClass: String = ""
+        /// 散落版：整页的自由图层（root 是一个空叶子）。
+        var items: [CollageItem]?
     }
 
     /// 分数越低越好。m 为 nil 表示不是按比例解出来的（模板、手动），不计裁切项。
@@ -685,6 +687,24 @@ enum CollageLayout {
             best[key] = scored
         }
         return diverse(Array(best.values), keep: keep)
+    }
+
+    /// 换一批、换备选之后：原来压在哪张照片上的字，跟着那张照片走到新位置
+    /// （求解器按照片重新建格子，不带这些）。
+    static func carryOverlays(from old: CollageNode, into new: CollageNode) -> CollageNode {
+        var overlays: [String: CollageOverlay] = [:]
+        for cell in old.leaves where cell.kind == .photo {
+            if let id = cell.photoID, let o = cell.overlay { overlays[id] = o }
+        }
+        guard !overlays.isEmpty else { return new }
+        var out = new
+        for path in new.leafPaths() {
+            out.update(at: path) { node in
+                guard let id = node.cell?.photoID, let o = overlays[id], node.cell?.overlay == nil else { return }
+                node.cell?.overlay = o
+            }
+        }
+        return out
     }
 
     // MARK: - 编辑操作（纯函数，Store 包一层撤销）

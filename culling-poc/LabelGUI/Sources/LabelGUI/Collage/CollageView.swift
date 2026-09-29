@@ -103,6 +103,13 @@ struct CollageView: View {
             }
             .fixedSize()
             .help("自动排版用几张")
+            Picker("", selection: Binding(get: { store.effectiveLayoutStyle }, set: { store.setLayoutStyle($0) })) {
+                ForEach(CollageStore.LayoutStyle.allCases, id: \.self) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 104)
+            .help("网格：照片按原比例拼满；散落：像拍立得撒在桌上（斜放、叠放、胶带），脸不会被压住")
             Button("自动排版") { store.autoLayout(count: autoCount) }
                 .disabled(store.project.photos.isEmpty || store.isSolving)
                 .help("从托盘按分数和多样性挑 \(autoCount) 张，排出一批备选版式")
@@ -291,9 +298,9 @@ struct CollageTray: View {
         if let path = store.selection, store.root?.node(at: path)?.isLeaf == true {
             Button("放进选中的格子") { store.place(photoID: photo.id, at: path, edge: nil) }
         }
-        Button("只用这张重新排一版") { store.solve(photoIDs: [photo.id]) }
-        if let root = store.root, !root.photoIDs.contains(photo.id) {
-            Button("加进当前版（重排）") { store.solve(photoIDs: root.photoIDs + [photo.id]) }
+        Button("只用这张重新排一版") { store.relayout(photoIDs: [photo.id]) }
+        if let page = store.page, !page.photoIDs.contains(photo.id) {
+            Button("加进当前版（重排）") { store.relayout(photoIDs: page.photoIDs + [photo.id]) }
         }
         Divider()
         Button("从托盘移除", role: .destructive) { store.removeFromTray(photo.id) }

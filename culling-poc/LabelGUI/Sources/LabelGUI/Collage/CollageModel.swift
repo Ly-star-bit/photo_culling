@@ -143,6 +143,8 @@ struct CollageCell: Codable, Hashable {
     var role: CollageRole = .auto
     /// 完整显示、不裁：照片按原比例放进格子正中，四周留底色（单张竖图占一页、「这张不许裁」）。
     var contain = false
+    /// 压在这张照片上的字（跟着照片走：互换、挪格子、换一批都带着）。
+    var overlay: CollageOverlay?
 
     init(kind: Kind = .empty) { self.kind = kind }
 
@@ -244,6 +246,7 @@ struct CollageNode: Codable, Hashable {
 
 enum CollageFont: String, Codable, CaseIterable, Hashable {
     case songti, kaiti, pingfang, didot, bodoni, newYork, baskerville, optima, avenir, gillSans, futura
+    case hanzipen, bradley, snell, typewriter
 
     var label: String {
         switch self {
@@ -258,6 +261,10 @@ enum CollageFont: String, Codable, CaseIterable, Hashable {
         case .avenir: return "Avenir"
         case .gillSans: return "Gill Sans"
         case .futura: return "Futura"
+        case .hanzipen: return "手写"
+        case .bradley: return "Bradley 手写"
+        case .snell: return "Snell 花体"
+        case .typewriter: return "打字机"
         }
     }
 }
@@ -339,6 +346,83 @@ struct CollageText: Codable, Hashable {
     }
 }
 
+
+// MARK: - 压字：照片上的字
+
+/// 字块贴在照片的哪一处。auto = 按人脸、画面空处自动挑；custom = 拖过，按 x/y 放。
+enum CollageAnchor: String, Codable, CaseIterable, Hashable {
+    case auto
+    case topLeading, top, topTrailing
+    case leading, center, trailing
+    case bottomLeading, bottom, bottomTrailing
+    case custom
+
+    var label: String {
+        switch self {
+        case .auto: return "自动"
+        case .topLeading: return "左上"
+        case .top: return "上"
+        case .topTrailing: return "右上"
+        case .leading: return "左"
+        case .center: return "中"
+        case .trailing: return "右"
+        case .bottomLeading: return "左下"
+        case .bottom: return "下"
+        case .bottomTrailing: return "右下"
+        case .custom: return "手动"
+        }
+    }
+
+    /// 九宫格位置（列, 行），0…2。
+    var cell: (col: Int, row: Int)? {
+        switch self {
+        case .topLeading: return (0, 0)
+        case .top: return (1, 0)
+        case .topTrailing: return (2, 0)
+        case .leading: return (0, 1)
+        case .center: return (1, 1)
+        case .trailing: return (2, 1)
+        case .bottomLeading: return (0, 2)
+        case .bottom: return (1, 2)
+        case .bottomTrailing: return (2, 2)
+        case .auto, .custom: return nil
+        }
+    }
+
+    static let grid: [CollageAnchor] = [.topLeading, .top, .topTrailing, .leading, .center, .trailing,
+                                        .bottomLeading, .bottom, .bottomTrailing]
+}
+
+/// 字色：自动 = 看字块底下的画面亮暗换深字/浅字。
+enum CollageTone: String, Codable, CaseIterable, Hashable {
+    case auto, light, dark
+
+    var label: String {
+        switch self {
+        case .auto: return "自动"
+        case .light: return "浅字"
+        case .dark: return "深字"
+        }
+    }
+}
+
+struct CollageOverlay: Codable, Hashable {
+    var text: CollageText
+    var anchor: CollageAnchor = .auto
+    /// custom：字块中心在照片区里的位置（0…1）。
+    var x = 0.5
+    var y = 0.5
+    /// 离照片边多远，相对照片区短边。
+    var inset = 0.06
+    var tone: CollageTone = .auto
+    /// 浅字的投影 0…1（深字不加）。
+    var shadow = 0.45
+    /// 字块最宽占照片区多少，放不下整体缩。
+    var maxWidth = 0.86
+
+    init(text: CollageText) { self.text = text }
+}
+
 // MARK: - 样式
 
 enum CollageBorder: String, Codable, CaseIterable, Hashable {
@@ -350,6 +434,24 @@ enum CollageBorder: String, Codable, CaseIterable, Hashable {
         case .hairline: return "细线"
         case .polaroid: return "相纸"
         case .film: return "胶片"
+        }
+    }
+}
+
+/// 整组统一的色调（程序生成的 3D LUT，不带任何胶片/滤镜品牌名）。
+enum CollageLook: String, Codable, CaseIterable, Hashable {
+    case none, film, airy, faded, cinema, cool, mono, sepia
+
+    var label: String {
+        switch self {
+        case .none: return "原色"
+        case .film: return "胶片"
+        case .airy: return "日系"
+        case .faded: return "复古"
+        case .cinema: return "电影"
+        case .cool: return "冷淡"
+        case .mono: return "黑白"
+        case .sepia: return "旧照"
         }
     }
 }
@@ -381,6 +483,12 @@ struct CollageStyle: Codable, Hashable {
     var sharpen: Double = 0.4
     /// 自动景别：面积排在后一半的小格按人脸收成半身近景（原型里明显更高级的那一版）。
     var tightSmallCells = true
+    /// 整组照片套同一个色调。
+    var look: CollageLook = .none
+    /// 色调强度 0…1。
+    var lookStrength = 0.8
+    /// 统一到主图：其余照片的色温、明暗往主图靠，0 = 不动。
+    var harmonize = 0.0
 
     init() {}
 }
@@ -465,6 +573,121 @@ struct CollageCanvas: Codable, Hashable {
     ]
 }
 
+
+// MARK: - 自由图层（手账：斜放的相纸、胶带、贴纸、手写字）
+//
+// 切分树之外的一层，按数组顺序从下往上画。散落版的页面整页都是这一层（freeform）；
+// 网格版上面也可以贴胶带、加手写字。位置用画布比例、大小用画布短边，换画布比例不变形。
+
+enum CollageItemKind: String, Codable, Hashable {
+    case photo, text, sticker
+}
+
+enum CollageItemFrame: String, Codable, CaseIterable, Hashable {
+    case polaroid, white, none, film, mounts
+
+    var label: String {
+        switch self {
+        case .polaroid: return "相纸"
+        case .white: return "白边"
+        case .none: return "无框"
+        case .film: return "胶片"
+        case .mounts: return "相角"
+        }
+    }
+}
+
+enum CollageSticker: String, Codable, CaseIterable, Hashable {
+    case washi, stripe, dots, kraft, label, postmark, clip
+
+    var label: String {
+        switch self {
+        case .washi: return "和纸胶带"
+        case .stripe: return "条纹胶带"
+        case .dots: return "圆点胶带"
+        case .kraft: return "牛皮纸胶带"
+        case .label: return "标签"
+        case .postmark: return "邮戳"
+        case .clip: return "回形针"
+        }
+    }
+
+    var isTape: Bool { self == .washi || self == .stripe || self == .dots || self == .kraft }
+
+    /// 默认宽、高（相对画布短边）。
+    var defaultSize: (w: Double, h: Double) {
+        switch self {
+        case .washi, .stripe, .dots, .kraft: return (0.16, 0.042)
+        case .label: return (0.2, 0.05)
+        case .postmark: return (0.17, 0.17)
+        case .clip: return (0.035, 0.1)
+        }
+    }
+
+    var defaultColor: CollageColor {
+        switch self {
+        case .washi: return CollageColor(hex: 0xE9C8B8)
+        case .stripe: return CollageColor(hex: 0x9FB4C7)
+        case .dots: return CollageColor(hex: 0xEFD9A7)
+        case .kraft: return CollageColor(hex: 0xC4A27A)
+        case .label: return CollageColor(hex: 0xF7F3EA)
+        case .postmark: return CollageColor(hex: 0x3F5A86)
+        case .clip: return CollageColor(hex: 0x9A9EA3)
+        }
+    }
+}
+
+struct CollageItem: Codable, Hashable, Identifiable {
+    var id = UUID()
+    var kind: CollageItemKind = .sticker
+    /// 中心，相对画布宽、高（0…1，可以略出界）。
+    var cx = 0.5
+    var cy = 0.5
+    /// 外框宽、高，相对画布短边。
+    var width = 0.3
+    var height = 0.3
+    /// 顺时针，度。
+    var rotation = 0.0
+    // 照片
+    var photoID: String?
+    var frame: CollageItemFrame = .polaroid
+    var framing: CollageFraming = .auto
+    /// 相纸下沿的手写字（支持占位符）。
+    var caption = ""
+    /// 投影 0…1。
+    var shadow = 0.5
+    var role: CollageRole = .auto
+    // 文字
+    var text: CollageText?
+    // 贴纸
+    var sticker: CollageSticker = .washi
+    var color = CollageColor(hex: 0xE9C8B8)
+    /// 标签、邮戳上的字（支持占位符）。
+    var label = ""
+
+    init(kind: CollageItemKind = .sticker) { self.kind = kind }
+}
+
+/// 散落版的生成参数：模板带着它，「换一批」按它重新撒。
+struct CollageScatterSpec: Codable, Hashable {
+    var frame: CollageItemFrame = .polaroid
+    /// 最大倾斜角（度）。
+    var tilt = 6.0
+    /// 贴胶带的照片比例 0…1。
+    var tape = 0.6
+    var tapes: [CollageSticker] = [.washi, .stripe, .kraft]
+    /// 主图相纸下沿的手写字；空 = 不写。
+    var caption = "{date}"
+    /// 松散：1 = 刚好铺开、几乎不叠；越大叠得越多。
+    var spread = 1.12
+    /// 模板用：几张照片。
+    var count = 5
+    /// 底部留给模板固定文字的高度（画布比例）。
+    var reserveBottom = 0.0
+
+    init() {}
+}
+
 // MARK: - 项目 / 页 / 模板
 
 enum CollageMode: String, Codable, Hashable {
@@ -474,8 +697,27 @@ enum CollageMode: String, Codable, Hashable {
 struct CollagePage: Codable, Hashable, Identifiable {
     var id = UUID()
     var root: CollageNode
+    /// 切分树上面的自由图层（从下往上）。
+    var items: [CollageItem] = []
+    /// 散落版：整页都是自由图层，切分树不画。
+    var freeform = false
+    /// 散落版「换一批」用的参数。
+    var scatter: CollageScatterSpec?
 
     init(root: CollageNode) { self.root = root }
+
+    init(root: CollageNode, items: [CollageItem], freeform: Bool, scatter: CollageScatterSpec? = nil) {
+        self.root = root
+        self.items = items
+        self.freeform = freeform
+        self.scatter = scatter
+    }
+
+    /// 这一页用到的照片：散落版只看图层，网格版是格子 + 图层里的照片。
+    var photoIDs: [String] {
+        let fromItems = items.compactMap { $0.kind == .photo ? $0.photoID : nil }
+        return freeform ? fromItems : root.photoIDs + fromItems
+    }
 }
 
 struct CollageProject: Codable, Hashable {
@@ -487,6 +729,8 @@ struct CollageProject: Codable, Hashable {
     var style = CollageStyle()
     /// {title} 占位符。
     var title = ""
+    /// {subtitle} 占位符：地点、系列名。
+    var subtitle = ""
 
     init() {}
 
@@ -495,8 +739,8 @@ struct CollageProject: Codable, Hashable {
         return photos.first { $0.id == id }
     }
 
-    /// 已经上了任何一页的照片 id。
-    var usedPhotoIDs: Set<String> { Set(pages.flatMap { $0.root.photoIDs }) }
+    /// 已经上了任何一页的照片 id（格子和自由图层）。
+    var usedPhotoIDs: Set<String> { Set(pages.flatMap(\.photoIDs)) }
 }
 
 struct CollageTemplate: Codable, Hashable, Identifiable {
@@ -509,18 +753,38 @@ struct CollageTemplate: Codable, Hashable, Identifiable {
     /// 套用时按照片原比例重算 ratio（智能模板）；false = 固定比例、照片按格裁（严格网格、月洞门）。
     var fitAspects = true
     var builtin = false
+    /// 模板库里的分组（小红书封面、日系杂志……）。
+    var category = ""
+    /// 固定的自由图层（胶带、贴纸、手写字；自己存的散落版连照片位置一起）。
+    var items: [CollageItem] = []
+    /// 散落版：套用时按这组参数现撒（照片张数、比例随你的照片）。
+    var scatter: CollageScatterSpec?
+    /// 存的是散落版（items 里的照片就是版面）。
+    var freeform = false
+    /// 自己存的散落版原来的撒法：套用时照原样摆，之后「换一批」按它重撒（相角、不贴胶带、底部留字）。
+    var pageScatter: CollageScatterSpec?
 
     init(name: String, root: CollageNode, style: CollageStyle? = nil, canvas: CollageCanvas? = nil,
-         fitAspects: Bool = true, builtin: Bool = false) {
+         fitAspects: Bool = true, builtin: Bool = false, category: String = "",
+         items: [CollageItem] = [], scatter: CollageScatterSpec? = nil, freeform: Bool = false) {
         self.name = name
         self.root = root
         self.style = style
         self.canvas = canvas
         self.fitAspects = fitAspects
         self.builtin = builtin
+        self.category = category
+        self.items = items
+        self.scatter = scatter
+        self.freeform = freeform || scatter != nil
     }
 
-    var photoSlots: Int { root.leaves.filter { $0.kind == .photo }.count }
+    var photoSlots: Int {
+        if let scatter { return scatter.count }
+        let inItems = items.filter { $0.kind == .photo }.count
+        if freeform { return inItems }
+        return root.leaves.filter { $0.kind == .photo }.count + inItems
+    }
 }
 
 // MARK: - 容错解码
@@ -593,6 +857,7 @@ extension CollageCell {
         shape = c.softOptional(.shape)
         role = c.soft(.role, .auto)
         contain = c.soft(.contain, false)
+        overlay = c.softOptional(.overlay)
     }
 }
 
@@ -663,6 +928,63 @@ extension CollageStyle {
         shadow = c.soft(.shadow, d.shadow)
         sharpen = c.soft(.sharpen, d.sharpen)
         tightSmallCells = c.soft(.tightSmallCells, d.tightSmallCells)
+        look = c.soft(.look, d.look)
+        lookStrength = min(1, max(0, c.soft(.lookStrength, d.lookStrength)))
+        harmonize = min(1, max(0, c.soft(.harmonize, d.harmonize)))
+    }
+}
+
+extension CollageOverlay {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        text = c.soft(.text, CollageText())
+        anchor = c.soft(.anchor, .auto)
+        x = min(1, max(0, c.soft(.x, 0.5)))
+        y = min(1, max(0, c.soft(.y, 0.5)))
+        inset = min(0.3, max(0, c.soft(.inset, 0.06)))
+        tone = c.soft(.tone, .auto)
+        shadow = min(1, max(0, c.soft(.shadow, 0.45)))
+        maxWidth = min(1, max(0.2, c.soft(.maxWidth, 0.86)))
+    }
+}
+
+extension CollageItem {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = c.soft(.id, UUID())
+        kind = c.soft(.kind, .sticker)
+        let finite: (Double, Double) -> Double = { v, d in v.isFinite ? v : d }
+        cx = min(1.5, max(-0.5, finite(c.soft(.cx, 0.5), 0.5)))
+        cy = min(1.5, max(-0.5, finite(c.soft(.cy, 0.5), 0.5)))
+        width = min(3, max(0.005, finite(c.soft(.width, 0.3), 0.3)))
+        height = min(3, max(0.005, finite(c.soft(.height, 0.3), 0.3)))
+        rotation = finite(c.soft(.rotation, 0), 0).truncatingRemainder(dividingBy: 360)
+        photoID = c.softOptional(.photoID)
+        frame = c.soft(.frame, .polaroid)
+        framing = c.soft(.framing, .auto)
+        caption = c.soft(.caption, "")
+        shadow = min(1, max(0, c.soft(.shadow, 0.5)))
+        role = c.soft(.role, .auto)
+        text = c.softOptional(.text)
+        sticker = c.soft(.sticker, .washi)
+        color = c.soft(.color, sticker.defaultColor)
+        label = c.soft(.label, "")
+    }
+}
+
+extension CollageScatterSpec {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = CollageScatterSpec()
+        frame = c.soft(.frame, d.frame)
+        tilt = min(25, max(0, c.soft(.tilt, d.tilt)))
+        tape = min(1, max(0, c.soft(.tape, d.tape)))
+        tapes = c.soft(.tapes, [Failable<CollageSticker>]()).compactMap(\.value).filter(\.isTape)
+        if tapes.isEmpty { tapes = d.tapes }
+        caption = c.soft(.caption, d.caption)
+        spread = min(1.6, max(0.8, c.soft(.spread, d.spread)))
+        count = min(16, max(1, c.soft(.count, d.count)))
+        reserveBottom = min(0.4, max(0, c.soft(.reserveBottom, d.reserveBottom)))
     }
 }
 
@@ -687,6 +1009,9 @@ extension CollagePage {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = c.soft(.id, UUID())
         root = c.soft(.root, CollageNode.leaf(CollageCell()))
+        items = c.soft(.items, [Failable<CollageItem>]()).compactMap(\.value)
+        freeform = c.soft(.freeform, false)
+        scatter = c.softOptional(.scatter)
     }
 }
 
@@ -699,6 +1024,7 @@ extension CollageProject {
         canvas = c.soft(.canvas, CollageCanvas())
         style = c.soft(.style, CollageStyle())
         title = c.soft(.title, "")
+        subtitle = c.soft(.subtitle, "")
     }
 }
 
@@ -711,5 +1037,10 @@ extension CollageTemplate {
         canvas = c.softOptional(.canvas)
         fitAspects = c.soft(.fitAspects, true)
         builtin = false   // 读回来的一律是用户模板；内置的在代码里
+        category = c.soft(.category, "")
+        items = c.soft(.items, [Failable<CollageItem>]()).compactMap(\.value)
+        scatter = c.softOptional(.scatter)
+        freeform = c.soft(.freeform, false) || scatter != nil
+        pageScatter = c.softOptional(.pageScatter)
     }
 }

@@ -58,6 +58,20 @@ enum CollageTypeset {
         case .futura:
             if italic { return ["Futura-MediumItalic", "Futura-Medium"] }
             return weight == .bold ? ["Futura-Bold", "Futura-Medium"] : ["Futura-Medium"]
+        case .hanzipen:
+            // 翩翩体在部分 Mac 上要在字体册里另行下载：没有就落到楷体、宋体。
+            let pen = weight == .bold ? ["HanziPenSC-W5", "HanziPenSC-W3"] : ["HanziPenSC-W3", "HanziPenSC-W5"]
+            return pen + postScriptNames(.kaiti, weight == .bold ? .bold : .regular, italic: false)
+        case .bradley:
+            return ["BradleyHandITCTT-Bold", "Noteworthy-Light"]
+        case .snell:
+            return weight == .bold ? ["SnellRoundhand-Bold", "SnellRoundhand"] : ["SnellRoundhand", "SnellRoundhand-Bold"]
+        case .typewriter:
+            switch weight {
+            case .light: return ["AmericanTypewriter-Light", "AmericanTypewriter", "Courier"]
+            case .regular: return ["AmericanTypewriter", "Courier"]
+            case .bold: return ["AmericanTypewriter-Semibold", "AmericanTypewriter-Bold", "Courier-Bold"]
+            }
         }
     }
 
@@ -93,7 +107,7 @@ enum CollageTypeset {
             if let f = NSFont(descriptor: descriptor, size: size) { return f as CTFont }
         }
         // 中文字体全缺时：苹方一定在。
-        if family == .songti || family == .kaiti || family == .pingfang {
+        if family == .songti || family == .kaiti || family == .pingfang || family == .hanzipen {
             let f = CTFontCreateWithName("PingFangSC-Regular" as CFString, size, nil)
             return f
         }
@@ -120,11 +134,18 @@ enum CollageTypeset {
         return values
     }
 
-    static func variables(project: CollageProject, root: CollageNode, photos: [String: CollagePhotoRef]) -> [String: String] {
+    static func variables(project: CollageProject, root: CollageNode, photos: [String: CollagePhotoRef],
+                          pagePhotoIDs: [String]? = nil, pageID: UUID? = nil) -> [String: String] {
         var vars: [String: String] = [:]
         // 没起标题时模板里的 {title} 也要有字：「拾光」是个不挑场合的占位。
         vars["title"] = project.title.isEmpty ? "拾光" : project.title
-        let onPage = root.photoIDs.compactMap { photos[$0] }
+        vars["subtitle"] = project.subtitle
+        // 期号 = 第几页（备选缩略图、单张都是 01）。按页 id 找；散落页的树全是同一个空叶子，
+        // 按树比较会把第 2、3 页都认成第 1 页。
+        let byID = pageID.flatMap { id in project.pages.firstIndex { $0.id == id } }
+        let pageIndex = byID ?? project.pages.firstIndex { $0.root == root } ?? 0
+        vars["no"] = String(format: "%02d", pageIndex + 1)
+        let onPage = (pagePhotoIDs ?? root.photoIDs).compactMap { photos[$0] }
         vars["count"] = "\(onPage.count)"
         let pool = onPage.isEmpty ? project.photos : onPage
         if let hero = pool.max(by: { $0.score < $1.score }) {
@@ -236,6 +257,37 @@ enum CollageTypeset {
         let trimmed = max(0, width - spec.tracking * size)
         return Run(line: line, width: trimmed, ascent: Double(ascent), descent: Double(descent),
                    size: size, indent: spec.indent * size)
+    }
+
+    /// 字块在 1 倍（字号按 short 换算）时的外包尺寸。
+    static func measure(_ text: CollageText, short: Double, vars: [String: String]) -> CGSize {
+        text.vertical ? measureVertical(text, short: short, vars: vars) : measureHorizontal(text, short: short, vars: vars)
+    }
+
+    /// 放进 size 里要缩到多少：返回缩放后的 short 和字块尺寸（放得下就是原样）。
+    static func fit(_ text: CollageText, in size: CGSize, short: Double, vars: [String: String]) -> (short: Double, size: CGSize) {
+        var fitScale = 1.0
+        var measured = measure(text, short: short, vars: vars)
+        for _ in 0..<3 {
+            let fx = Double(size.width) / max(1, Double(measured.width))
+            let fy = Double(size.height) / max(1, Double(measured.height))
+            let f = min(fx, fy)
+            if f >= 1 { break }
+            fitScale *= f * 0.98
+            measured = measure(text, short: short * fitScale, vars: vars)
+        }
+        return (short * fitScale, measured)
+    }
+
+    /// 已经按 fit 算好字号：原样画进 rect（不再缩）。
+    static func drawFitted(_ text: CollageText, in rect: CGRect, ctx: CGContext, short: Double,
+                           vars: [String: String], canvasHeight: Int) {
+        guard rect.width > 1, rect.height > 1 else { return }
+        if text.vertical {
+            drawVertical(text, in: rect, ctx: ctx, short: short, vars: vars, canvasHeight: canvasHeight)
+        } else {
+            drawHorizontal(text, in: rect, ctx: ctx, short: short, vars: vars, canvasHeight: canvasHeight)
+        }
     }
 
     static func draw(_ text: CollageText, in rect: CGRect, ctx: CGContext, short: Double,

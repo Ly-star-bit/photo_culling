@@ -82,6 +82,12 @@ enum CollageRender {
 
     static func render(root: CollageNode, project: CollageProject, hints: [String: CollageCrop.Hints],
                        options: Options) -> CGImage? {
+        render(page: CollagePage(root: root), project: project, hints: hints, options: options)
+    }
+
+    static func render(page: CollagePage, project: CollageProject, hints: [String: CollageCrop.Hints],
+                       options: Options) -> CGImage? {
+        let root = page.root
         let canvas = project.canvas
         let style = project.style
         let scale = options.scale
@@ -98,8 +104,9 @@ enum CollageRender {
         let short = canvas.shortSide * scale
         var photos: [String: CollagePhotoRef] = [:]
         for p in project.photos where photos[p.id] == nil { photos[p.id] = p }
+        let pagePhotoIDs = page.photoIDs
 
-        let bg = backgroundColor(project: project, root: root, photos: photos)
+        let bg = backgroundColor(project: project, pagePhotoIDs: pagePhotoIDs, photos: photos)
         ctx.setFillColor(bg.cgColor)
         ctx.fill(CGRect(x: 0, y: 0, width: fullW, height: fullH))
         if style.grain > 0 {
@@ -110,51 +117,138 @@ enum CollageRender {
         content = offset(content, bleed)
         let gutter = CollageLayout.gutterPixels(canvas: canvas, style: style, scale: scale)
         let geo = CollageLayout.geometry(root, in: content, gutter: gutter)
-        // 自动景别按成品尺寸的几何判（缩略图里整数面积四舍五入会让半身/全身翻转）。
+        // 自动景别、压字位置都按成品尺寸的几何判（缩略图里整数面积四舍五入会让半身/全身翻转）。
         let framingFrames = CollageLayout.geometry(root, in: CollageLayout.contentRect(canvas: canvas, style: style),
                                                    gutter: CollageLayout.gutterPixels(canvas: canvas, style: style)).frames
         let trim = CollageLayout.IntRect(x0: bleed, y0: bleed, x1: bleed + trimW, y1: bleed + trimH)
         let fullBleed = bleed > 0 && style.margin <= 0.0001
-        let vars = CollageTypeset.variables(project: project, root: root, photos: photos)
+        let vars = CollageTypeset.variables(project: project, root: root, photos: photos, pagePhotoIDs: pagePhotoIDs,
+                                            pageID: page.id)
         let sharpenRadius = canvas.dpi >= 200 ? 1.3 * scale : 0.8
+        let colorOps = CollageLooks.ops(style: style, pagePhotoIDs: pagePhotoIDs, photos: photos)
 
-        for frame in geo.frames {
-            guard !frame.rect.isEmpty else { continue }
-            let rect = frame.rect.cgRect
-            switch frame.cell.kind {
-            case .photo:
-                guard let id = frame.cell.photoID, let photo = photos[id] else {
-                    if options.placeholders { drawPlaceholder(ctx, rect: rect, short: short, dark: bg.luminance < 0.4) }
-                    continue
+        if !page.freeform {
+            for frame in geo.frames {
+                guard !frame.rect.isEmpty else { continue }
+                let rect = frame.rect.cgRect
+                switch frame.cell.kind {
+                case .photo:
+                    let unscaled = framingFrames.first { $0.path == frame.path }
+                    guard let id = frame.cell.photoID, let photo = photos[id] else {
+                        if options.placeholders { drawPlaceholder(ctx, rect: rect, short: short, dark: bg.luminance < 0.4) }
+                        if let overlay = frame.cell.overlay, let unscaled {
+                            drawOverlay(overlay, cell: frame.cell, unscaled: unscaled, ctx: ctx, project: project,
+                                        photo: nil, framing: .auto, hints: nil, vars: vars, background: bg,
+                                        scale: scale, bleed: bleed, canvasHeight: fullH)
+                        }
+                        continue
+                    }
+                    let framing = CollageLayout.effectiveFraming(path: frame.path, cell: frame.cell, in: framingFrames,
+                                                                 photos: photos, tight: style.tightSmallCells)
+                    // 零边距印刷：只有普通矩形照片格铺进出血；文字、月洞门/拱窗、带框的格子不动。
+                    let extend = fullBleed && canBleed(frame.cell, style: style)
+                        ? bleedEdges(rect, trim: trim.cgRect, bleed: CGFloat(bleed)) : nil
+                    drawPhoto(ctx, cell: frame.cell, rect: rect, photo: photo, framing: framing, style: style,
+                              short: short, hints: hints[id], background: bg, sharpenRadius: sharpenRadius,
+                              options: options, extend: extend, color: colorOps[id])
+                    if let overlay = frame.cell.overlay, let unscaled {
+                        drawOverlay(overlay, cell: frame.cell, unscaled: unscaled, ctx: ctx, project: project,
+                                    photo: photo, framing: framing, hints: hints[id], vars: vars, background: bg,
+                                    scale: scale, bleed: bleed, canvasHeight: fullH)
+                    }
+                case .text:
+                    if let text = frame.cell.text {
+                        // 印刷：文字格贴着成品边时退进安全区（裁切有 ±1mm 误差，字贴边会被切掉）。
+                        let safe = CGFloat(Double(canvas.safe) * scale)
+                        let area = safe > 0 ? insetFromTrim(rect, trim: trim.cgRect, by: safe) : rect
+                        CollageTypeset.draw(text, in: area, ctx: ctx, short: short, vars: vars, canvasHeight: fullH)
+                    }
+                case .empty:
+                    // 留白格是版式的一部分（错落、电影黑边），不画「待放照片」的虚线框。
+                    break
                 }
-                let framing = CollageLayout.effectiveFraming(path: frame.path, cell: frame.cell, in: framingFrames,
-                                                             photos: photos, tight: style.tightSmallCells)
-                // 零边距印刷：只有普通矩形照片格铺进出血；文字、月洞门/拱窗、带框的格子不动。
-                let extend = fullBleed && canBleed(frame.cell, style: style)
-                    ? bleedEdges(rect, trim: trim.cgRect, bleed: CGFloat(bleed)) : nil
-                drawPhoto(ctx, cell: frame.cell, rect: rect, photo: photo, framing: framing, style: style,
-                          short: short, hints: hints[id], background: bg, sharpenRadius: sharpenRadius,
-                          options: options, extend: extend)
-            case .text:
-                if let text = frame.cell.text {
-                    // 印刷：文字格贴着成品边时退进安全区（裁切有 ±1mm 误差，字贴边会被切掉）。
-                    let safe = CGFloat(Double(canvas.safe) * scale)
-                    let area = safe > 0 ? insetFromTrim(rect, trim: trim.cgRect, by: safe) : rect
-                    CollageTypeset.draw(text, in: area, ctx: ctx, short: short, vars: vars, canvasHeight: fullH)
-                }
-            case .empty:
-                if options.placeholders { drawPlaceholder(ctx, rect: rect, short: short, dark: bg.luminance < 0.4) }
             }
+        }
+
+        if !page.items.isEmpty {
+            let dc = CollageItems.DrawContext(canvas: canvas, scale: scale, bleed: Double(bleed), photos: photos,
+                                              hints: hints, colorOps: colorOps, vars: vars, options: options,
+                                              sharpenRadius: sharpenRadius, sharpen: style.sharpen, canvasHeight: fullH)
+            CollageItems.draw(page.items, ctx: ctx, dc: dc)
         }
 
         if options.guides {
             drawGuides(ctx, canvas: canvas, scale: scale, trim: trim.cgRect, bleed: bleed)
         }
         if options.debug {
-            drawDebug(ctx, geo: geo, framingFrames: framingFrames, photos: photos, hints: hints, style: style,
-                      canvas: canvas, scale: scale, trim: trim.cgRect, bleed: bleed)
+            drawDebug(ctx, geo: page.freeform ? CollageLayout.Geometry() : geo, framingFrames: framingFrames,
+                      photos: photos, hints: hints, style: style, canvas: canvas, scale: scale, trim: trim.cgRect,
+                      bleed: bleed)
         }
         return ctx.makeImage()
+    }
+
+    // MARK: - 压字
+
+    /// 压字的位置按成品尺寸（unscaled 那一格）算，再按缩放映射到这次渲染。
+    static func overlayPlacement(_ overlay: CollageOverlay, cell: CollageCell, frameRect: CGRect,
+                                 project: CollageProject, photo: CollagePhotoRef?, framing: CollageFraming,
+                                 hints: CollageCrop.Hints?, vars: [String: String],
+                                 background: CollageColor) -> CollageOverlays.Placement? {
+        let area = CollageCrop.photoArea(cell: cell, rect: frameRect, style: project.style)
+        var window: CollageCrop.Window?
+        var drawn = area
+        if let photo {
+            let w = CollageCrop.window(for: photo, cell: cell, cellAspect: CollageCrop.aspect(of: area),
+                                       framing: framing, hints: hints)
+            window = w
+            drawn = CollageCrop.drawnRect(window: w, photo: photo, cell: cell, in: area)
+        }
+        // 月洞门、拱窗：字只放在形状里面最大的那个矩形里（方形的四角是被裁掉的纸面）。
+        let textArea = inscribed(area, shape: cell.shape ?? project.style.shape)
+        return CollageOverlays.place(overlay, area: textArea, drawn: drawn, canvas: project.canvas, photo: photo,
+                                     window: window, hints: hints, vars: vars, background: background,
+                                     look: project.style.look, lookStrength: project.style.lookStrength)
+    }
+
+    /// 形状里面最大的轴对齐矩形（和 shapePath 同一套几何）。
+    static func inscribed(_ rect: CGRect, shape: CollageShape) -> CGRect {
+        let k: CGFloat = 1 - 1 / CGFloat(2).squareRoot()
+        switch shape {
+        case .circle:
+            let d = min(rect.width, rect.height)
+            let inset = d * k / 2
+            let square = CGRect(x: rect.midX - d / 2, y: rect.midY - d / 2, width: d, height: d)
+            return square.insetBy(dx: inset, dy: inset)
+        case .arch:
+            let r = min(rect.width / 2, rect.height)
+            let drop = r * k
+            return CGRect(x: rect.minX, y: rect.minY + drop, width: rect.width, height: max(1, rect.height - drop))
+        case .rect, .rounded:
+            return rect
+        }
+    }
+
+    private static func drawOverlay(_ overlay: CollageOverlay, cell: CollageCell, unscaled: CollageLayout.Frame,
+                                    ctx: CGContext, project: CollageProject, photo: CollagePhotoRef?,
+                                    framing: CollageFraming, hints: CollageCrop.Hints?, vars: [String: String],
+                                    background: CollageColor, scale: Double, bleed: Int, canvasHeight: Int) {
+        guard let p = overlayPlacement(overlay, cell: cell, frameRect: unscaled.rect.cgRect, project: project,
+                                       photo: photo, framing: framing, hints: hints, vars: vars,
+                                       background: background) else { return }
+        let s = CGFloat(scale)
+        let rect = CGRect(x: p.rect.minX * s + CGFloat(bleed), y: p.rect.minY * s + CGFloat(bleed),
+                          width: p.rect.width * s, height: p.rect.height * s)
+        ctx.saveGState()
+        if p.light, overlay.shadow > 0 {
+            let k = CGFloat(overlay.shadow)
+            let short = CGFloat(project.canvas.shortSide * scale)
+            ctx.setShadow(offset: CGSize(width: 0, height: -short * 0.0015 * k), blur: short * 0.012 * k,
+                          color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.55 * Double(k)))
+        }
+        CollageTypeset.drawFitted(p.text, in: rect, ctx: ctx, short: p.short * scale, vars: vars,
+                                  canvasHeight: canvasHeight)
+        ctx.restoreGState()
     }
 
     // MARK: - 照片格
@@ -162,7 +256,7 @@ enum CollageRender {
     private static func drawPhoto(_ ctx: CGContext, cell: CollageCell, rect: CGRect, photo: CollagePhotoRef,
                                   framing: CollageFraming, style: CollageStyle, short: Double,
                                   hints: CollageCrop.Hints?, background: CollageColor, sharpenRadius: Double,
-                                  options: Options, extend: Edges?) {
+                                  options: Options, extend: Edges?, color: CollageLooks.Ops?) {
         let shape = cell.shape ?? style.shape
         let outer = CollageCrop.outerArea(cell: cell, rect: rect, style: style)
         let framed = CollageCrop.isFramed(cell: cell, style: style)
@@ -215,7 +309,8 @@ enum CollageRender {
         let pw = max(1, Int(drawn.width.rounded()))
         let ph = max(1, Int(drawn.height.rounded()))
         guard let tile = cellImage(photo: photo, window: window, width: pw, height: ph, sharpen: style.sharpen,
-                                   radius: sharpenRadius, export: options.export, report: options.report) else { return }
+                                   radius: sharpenRadius, export: options.export, report: options.report,
+                                   color: color) else { return }
         ctx.saveGState()
         let clip = framed ? CGPath(rect: drawn, transform: nil) : shapePath(shape, rect: drawn, corner: corner)
         ctx.addPath(clip)
@@ -342,7 +437,8 @@ enum CollageRender {
     }
 
     static func cellImage(photo: CollagePhotoRef, window: CollageCrop.Window, width: Int, height: Int,
-                          sharpen: Double, radius: Double, export: Bool, report: RenderReport? = nil) -> CGImage? {
+                          sharpen: Double, radius: Double, export: Bool, report: RenderReport? = nil,
+                          color: CollageLooks.Ops? = nil) -> CGImage? {
         guard width > 0, height > 0 else { return nil }
         let need = neededLongEdge(photo: photo, window: window, width: width, height: height)
         var decoded = export ? CollageImages.full(photo, need: need) : CollageImages.preview(photo, need: need)
@@ -375,6 +471,8 @@ enum CollageRender {
         lanczos.setValue(scaleY, forKey: kCIInputScaleKey)
         lanczos.setValue(scaleX / scaleY, forKey: kCIInputAspectRatioKey)
         guard var output = lanczos.outputImage?.cropped(to: target) else { return nil }
+        // 调色在锐化之前（锐化放大的是调完色的边缘）。
+        output = CollageLooks.apply(output, ops: color).cropped(to: target)
         if sharpen > 0, let usm = CIFilter(name: "CIUnsharpMask") {
             usm.setValue(output.clampedToExtent(), forKey: kCIInputImageKey)
             usm.setValue(radius, forKey: kCIInputRadiusKey)
@@ -386,11 +484,10 @@ enum CollageRender {
 
     // MARK: - 背景
 
-    static func backgroundColor(project: CollageProject, root: CollageNode,
+    static func backgroundColor(project: CollageProject, pagePhotoIDs ids: [String],
                                 photos: [String: CollagePhotoRef]) -> CollageColor {
         let style = project.style
         guard style.backgroundMode == .fromPhoto else { return style.background }
-        let ids = root.photoIDs
         let hero = ids.compactMap { photos[$0] }.max { $0.score < $1.score }
         guard let hero, let avg = averageColor(hero) else { return style.background }
         // 往纸白靠、压饱和：只要一点点色温呼应，不能把底色染成照片的颜色。

@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import PDFKit
+import CoreText
 import SwiftUI
 
 /// 无头拼图：LabelGUI --collage <photo_dir> [选项]
@@ -10,6 +11,12 @@ import SwiftUI
 ///   版式   --template <名字> | --alt K（第 K 个备选，默认 0）| --list（打印前 12 个备选）
 ///   样式   --style grid|white|dark|editorial|chinese|film|polaroid|gallery|tinted
 ///          --margin 0.045 --gutter 0.011 --no-tight --title 标题 --seed N --tries N
+///   色调   --look film|airy|faded|cinema|cool|mono|sepia [--look-strength 0.8] [--harmonize 0.6]
+///   压字   --overlay masthead|corner|subtitle|vertical|number|script|handwrite [--overlay-at 路径] [--anchor top…]
+///          --subtitle 副标题
+///   散落   --scatter [--frame polaroid|white|none|film|mounts] [--tilt 6] [--tape 0.6]
+///   贴纸   --sticker washi@0.5,0.1,20（种类@中心x,y,旋转；可多次）
+///   模板册 --template-sheet 出图.jpg（全部内置模板套这组照片，拼成一张总览）
 ///   相册   --album [--spreads N] [--pdf] [--marks] [--no-dedupe]
 ///   输出   --out 文件或目录（九宫格/轮播/相册写目录）  --debug 叠人脸框/安全区/路人/切缝
 ///
@@ -39,7 +46,9 @@ enum CollageCLI {
         if let v = option("--margin").flatMap(Double.init) { project.style.margin = v }
         if let v = option("--gutter").flatMap(Double.init) { project.style.gutter = v }
         if args.contains("--no-tight") { project.style.tightSmallCells = false }
+        applyLookOptions(&project.style, option: option)
         project.title = option("--title") ?? ""
+        project.subtitle = option("--subtitle") ?? ""
         let out = URL(fileURLWithPath: option("--out") ?? "collage.jpg")
         let debug = args.contains("--debug")
         let seed = UInt64(option("--seed") ?? "7") ?? 7
@@ -91,19 +100,57 @@ enum CollageCLI {
         let context = CollageLayout.Context(canvas: project.canvas, style: project.style, photos: photoMap,
                                             hints: hints, heroID: nil)
 
+        if let sheet = option("--look-sheet") {
+            lookSheet(project: project, photos: chosen, hints: hints, out: URL(fileURLWithPath: sheet))
+        }
+        if let sheet = option("--template-sheet") {
+            templateSheet(project: project, photos: chosen, photoMap: photoMap, hints: hints,
+                          out: URL(fileURLWithPath: sheet), only: option("--only"))
+        }
+
+        var page = CollagePage(root: .leaf(CollageCell()))
         let root: CollageNode
         if let name = option("--template") {
-            guard let template = CollageTemplates.builtin.first(where: { $0.name.contains(name) }) else {
+            guard let template = CollageTemplates.find(name) else {
                 print("没有模板「\(name)」：" + CollageTemplates.builtin.map(\.name).joined(separator: " / "))
                 exit(1)
             }
-            if let s = template.style, option("--style") == nil { project.style = s }
+            if let s = template.style, option("--style") == nil {
+                project.style = s
+                applyLookOptions(&project.style, option: option)
+            }
             if let c = template.canvas, option("--canvas") == nil { project.canvas = c }
             let ctx = CollageLayout.Context(canvas: project.canvas, style: project.style, photos: photoMap,
                                             hints: hints, heroID: nil)
-            root = CollageTemplates.apply(template, photos: chosen, context: ctx)
-            let s = CollageLayout.score(root, m: nil, context: ctx)
+            page = CollageTemplates.apply(template, photos: chosen, context: ctx, seed: seed)
+            root = page.root
+            let s = page.freeform
+                ? CollageLayout.Scored(root: root, score: CollageScatter.score(page.items, canvas: project.canvas,
+                                                                              photos: photoMap, hints: hints).score,
+                                       m: 1, signature: "S", cutFaces: 0, seamFaces: 0)
+                : CollageLayout.score(root, m: nil, context: ctx)
             print("模板「\(template.name)」 分 \(fmt(s.score)) · 切脸 \(s.cutFaces) · 缝压脸 \(s.seamFaces)")
+        } else if args.contains("--scatter") {
+            var spec = CollageScatterSpec()
+            if let f = option("--frame").flatMap(CollageItemFrame.init(rawValue:)) { spec.frame = f }
+            if let v = option("--tilt").flatMap(Double.init) { spec.tilt = v }
+            if let v = option("--tape").flatMap(Double.init) { spec.tape = v }
+            let t2 = Date()
+            let results = CollageScatter.generate(photos: chosen, spec: spec, context: context, seed: seed)
+            guard !results.isEmpty else {
+                print("散落版没生成出来")
+                exit(1)
+            }
+            print(String(format: "散落 %.2fs · 备选 %d 个 · 最优分 %.3f · 脸被压 %d · 脸压缝 %d", Date().timeIntervalSince(t2),
+                         results.count, results[0].score, results[0].cutFaces, results[0].seamFaces))
+            if args.contains("--list") {
+                for (i, r) in results.prefix(12).enumerated() {
+                    print(String(format: "  #%d 分 %.3f 被压 %d  %@", i, r.score, r.cutFaces, r.signature))
+                }
+            }
+            let alt = max(0, min(results.count - 1, Int(option("--alt") ?? "0") ?? 0))
+            root = results[alt].root
+            page = CollagePage(root: root, items: results[alt].items ?? [], freeform: true, scatter: spec)
         } else {
             let t2 = Date()
             let results = CollageLayout.solve(CollageLayout.Request(photos: chosen, context: context,
@@ -126,18 +173,41 @@ enum CollageCLI {
             }
             let alt = max(0, min(results.count - 1, Int(option("--alt") ?? "0") ?? 0))
             root = results[alt].root
+            page = CollagePage(root: root)
         }
-        project.pages = [CollagePage(root: root)]
-        printTable(root, project: project, hints: hints)
+        // 压字：放在主图那一格（或 --overlay-at 指定的格）。
+        if let key = option("--overlay"), var overlay = CollageOverlays.preset(key), !page.freeform {
+            if let a = option("--anchor").flatMap(CollageAnchor.init(rawValue:)) { overlay.anchor = a }
+            let target = option("--overlay-at").map { $0.compactMap { $0.wholeNumberValue } }
+                ?? heroPath(page.root, photoMap: photoMap)
+            if let target { page.root.update(at: target) { $0.cell?.overlay = overlay } }
+        }
+        for raw in args.indices.filter({ args[$0] == "--sticker" && $0 + 1 < args.count }).map({ args[$0 + 1] }) {
+            let parts = raw.split(separator: "@").map(String.init)
+            guard let kind = CollageSticker(rawValue: parts[0]) else { continue }
+            let nums = (parts.count > 1 ? parts[1] : "").split(separator: ",").compactMap { Double($0) }
+            var item = CollageItem(kind: .sticker)
+            item.sticker = kind
+            item.color = kind.defaultColor
+            item.width = kind.defaultSize.w
+            item.height = kind.defaultSize.h
+            item.cx = nums.count > 0 ? nums[0] : 0.5
+            item.cy = nums.count > 1 ? nums[1] : 0.5
+            item.rotation = nums.count > 2 ? nums[2] : 0
+            page.items.append(item)
+        }
+        project.pages = [page]
+        printTable(page.root, project: project, hints: hints)
+        if !page.items.isEmpty { printItems(page.items, project: project, hints: hints) }
 
         // --bench N：界面预览同款渲染（缓存预热后、半尺寸、不走导出解码）跑 N 次的平均耗时。
         if let n = option("--bench").flatMap(Int.init), n > 0 {
             for scale in [0.5, 0.8] {
                 var preview = CollageRender.Options(scale: scale)
                 preview.includeBleed = false
-                _ = CollageRender.render(root: root, project: project, hints: hints, options: preview)
+                _ = CollageRender.render(page: page, project: project, hints: hints, options: preview)
                 let t = Date()
-                for _ in 0..<n { _ = CollageRender.render(root: root, project: project, hints: hints, options: preview) }
+                for _ in 0..<n { _ = CollageRender.render(page: page, project: project, hints: hints, options: preview) }
                 print(String(format: "预览渲染 scale %.1f · 平均 %.1f ms", scale, Date().timeIntervalSince(t) / Double(n) * 1000))
             }
         }
@@ -146,7 +216,7 @@ enum CollageCLI {
         opts.debug = debug
         opts.export = true
         let t3 = Date()
-        guard let image = CollageRender.render(root: root, project: project, hints: hints, options: opts) else {
+        guard let image = CollageRender.render(page: page, project: project, hints: hints, options: opts) else {
             print("渲染失败")
             exit(1)
         }
@@ -307,6 +377,158 @@ enum CollageCLI {
 
     private static func fmt(_ v: Double) -> String { String(format: "%.2f", v) }
 
+    static func applyLookOptions(_ style: inout CollageStyle, option: (String) -> String?) {
+        if let look = option("--look").flatMap(CollageLook.init(rawValue:)) { style.look = look }
+        if let v = option("--look-strength").flatMap(Double.init) { style.lookStrength = v }
+        if let v = option("--harmonize").flatMap(Double.init) { style.harmonize = v }
+    }
+
+    /// 面积最大的照片格。
+    static func heroPath(_ root: CollageNode, photoMap: [String: CollagePhotoRef]) -> [Int]? {
+        let geo = CollageLayout.geometry(root, in: CollageLayout.IntRect(x0: 0, y0: 0, x1: 10000, y1: 10000), gutter: 0)
+        return geo.frames.filter { $0.cell.kind == .photo }.max { $0.rect.area < $1.rect.area }?.path
+    }
+
+    /// 自由图层：每个一行（种类、位置、大小、角度；照片带脸有没有被压）。
+    private static func printItems(_ items: [CollageItem], project: CollageProject, hints: [String: CollageCrop.Hints]) {
+        var photos: [String: CollagePhotoRef] = [:]
+        for p in project.photos { photos[p.id] = p }
+        for (i, item) in items.enumerated() {
+            let kind: String
+            switch item.kind {
+            case .photo: kind = "照片 \(item.photoID ?? "空") \(item.frame.label)" + (item.role == .hero ? " 主图" : "")
+            case .text: kind = "文字"
+            case .sticker: kind = item.sticker.label
+            }
+            var flag = ""
+            if item.kind == .photo {
+                let faces = CollageItems.faceSamples(item, canvas: project.canvas, photos: photos, hints: hints)
+                let hidden = faces.flatMap { $0 }.filter { p in
+                    items[(i + 1)...].contains { CollageItems.contains($0, point: p, canvas: project.canvas) }
+                }.count
+                if hidden > 0 { flag = " !!脸被压 \(hidden) 点" }
+            }
+            print(String(format: "  #%d %@ 中心(%.2f,%.2f) %.2fx%.2f %.1f°%@", i, kind, item.cx, item.cy,
+                         item.width, item.height, item.rotation, flag))
+        }
+    }
+
+    /// 全部内置模板套同一组照片，拼成一张总览（每格下面写模板名）。
+    @MainActor
+    private static func templateSheet(project base: CollageProject, photos: [CollagePhotoRef],
+                                      photoMap: [String: CollagePhotoRef], hints: [String: CollageCrop.Hints],
+                                      out: URL, only: String?) -> Never {
+        let templates = CollageTemplates.builtin.filter { t in
+            guard let only else { return true }
+            return t.category.contains(only) || t.name.contains(only)
+        }
+        let cellW = 560
+        let cellH = 700
+        let cols = 5
+        let rows = (templates.count + cols - 1) / cols
+        let labelH = 44
+        guard let ctx = CollageRender.makeContext(width: cellW * cols, height: (cellH + labelH) * rows) else { exit(1) }
+        ctx.setFillColor(CGColor(gray: 0.16, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: cellW * cols, height: (cellH + labelH) * rows))
+        let pool = project(base, photos: photos)
+        for (i, template) in templates.enumerated() {
+            var project = pool
+            if let s = template.style { project.style = s }
+            if let c = template.canvas { project.canvas = c }
+            let ctxLayout = CollageLayout.Context(canvas: project.canvas, style: project.style, photos: photoMap,
+                                                  hints: hints, heroID: nil)
+            let ordered = photos.count >= template.photoSlots ? photos
+                : photos + base.photos.filter { p in !photos.contains { $0.id == p.id } }.sorted { $0.score > $1.score }
+            let page = CollageTemplates.apply(template, photos: Array(ordered.prefix(max(template.photoSlots, 1))),
+                                              context: ctxLayout, seed: 7)
+            project.pages = [page]
+            let scale = min(Double(cellW - 20) / Double(project.canvas.width),
+                            Double(cellH - 20) / Double(project.canvas.height))
+            var opts = CollageRender.Options(scale: scale)
+            opts.includeBleed = false
+            opts.placeholders = true
+            let t0 = Date()
+            guard let image = CollageRender.render(page: page, project: project, hints: hints, options: opts) else { continue }
+            let col = i % cols
+            let row = i / cols
+            // CG 左下原点：第 0 行在最上面。
+            let x = col * cellW + (cellW - image.width) / 2
+            let yTop = row * (cellH + labelH) + (cellH - image.height) / 2
+            let y = (cellH + labelH) * rows - yTop - image.height
+            ctx.draw(image, in: CGRect(x: x, y: y, width: image.width, height: image.height))
+            let label = "\(i + 1). [\(template.category)] \(template.name) · \(template.photoSlots) 张"
+            let spec = CollageTextLine(label, font: .pingfang, weight: .regular, size: 1, color: .white)
+            let font = CollageTypeset.font(spec.font, spec.weight, italic: false, size: 20)
+            let attrs: [NSAttributedString.Key: Any] = [
+                NSAttributedString.Key(kCTFontAttributeName as String): font,
+                NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(gray: 0.9, alpha: 1),
+            ]
+            let line = CTLineCreateWithAttributedString(NSAttributedString(string: label, attributes: attrs))
+            ctx.textPosition = CGPoint(x: col * cellW + 14, y: (cellH + labelH) * rows - (row + 1) * (cellH + labelH) + 12)
+            CTLineDraw(line, ctx)
+            print(String(format: "%2d %@ · %@ · %.0fms", i + 1, template.category, template.name,
+                         Date().timeIntervalSince(t0) * 1000))
+        }
+        guard let image = ctx.makeImage() else { exit(1) }
+        try? CollageExport.write(image, to: out, format: .jpeg, quality: 0.86, dpi: 72)
+        print("模板总览 \(templates.count) 个 → \(out.path)")
+        exit(0)
+    }
+
+    /// 每个色调套在同一组照片上并排（调色调用）。
+    private static func lookSheet(project base: CollageProject, photos: [CollagePhotoRef],
+                                  hints: [String: CollageCrop.Hints], out: URL) -> Never {
+        let looks = CollageLook.allCases
+        let cellW = 520
+        var project = base
+        project.canvas = CollageCanvas(name: "look", width: 1200, height: 1500)
+        project.style.margin = 0
+        project.style.gutter = 0.006
+        let ids = photos.prefix(2).map(\.id)
+        let root: CollageNode = ids.count >= 2
+            ? .split(.column, 0.5, .leaf(.photo(ids[0])), .leaf(.photo(ids[1])))
+            : .leaf(.photo(ids.first))
+        let page = CollagePage(root: root)
+        project.pages = [page]
+        let scale = Double(cellW) / 1200
+        let cellH = Int(1500 * scale)
+        let cols = 4
+        let rows = (looks.count + cols - 1) / cols
+        let labelH = 36
+        guard let ctx = CollageRender.makeContext(width: cellW * cols, height: (cellH + labelH) * rows) else { exit(1) }
+        ctx.setFillColor(CGColor(gray: 0.16, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: cellW * cols, height: (cellH + labelH) * rows))
+        for (i, look) in looks.enumerated() {
+            project.style.look = look
+            var opts = CollageRender.Options(scale: scale)
+            opts.includeBleed = false
+            guard let image = CollageRender.render(page: page, project: project, hints: hints, options: opts) else { continue }
+            let col = i % cols
+            let row = i / cols
+            let y = (cellH + labelH) * rows - row * (cellH + labelH) - image.height
+            ctx.draw(image, in: CGRect(x: col * cellW, y: y, width: image.width, height: image.height))
+            let font = CollageTypeset.font(.pingfang, .regular, italic: false, size: 20)
+            let attrs: [NSAttributedString.Key: Any] = [
+                NSAttributedString.Key(kCTFontAttributeName as String): font,
+                NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(gray: 0.9, alpha: 1),
+            ]
+            let text = "\(look.label) \(look.rawValue) · 强度 \(String(format: "%.1f", project.style.lookStrength))"
+            let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs))
+            ctx.textPosition = CGPoint(x: col * cellW + 12, y: y - 26)
+            CTLineDraw(line, ctx)
+        }
+        guard let image = ctx.makeImage() else { exit(1) }
+        try? CollageExport.write(image, to: out, format: .jpeg, quality: 0.88, dpi: 72)
+        print("色调总览 → \(out.path)")
+        exit(0)
+    }
+
+    private static func project(_ base: CollageProject, photos: [CollagePhotoRef]) -> CollageProject {
+        var p = base
+        p.pages = []
+        return p
+    }
+
     static func canvas(_ spec: String) -> CollageCanvas {
         let social = CollageCanvas.social
         switch spec.lowercased() {
@@ -378,12 +600,26 @@ enum CollageUISnapshot {
             store.autoLayout(count: Int(option("--count") ?? "6") ?? 6)
             spin(60) { store.root != nil && !store.isSolving && store.busyText == nil }
         }
-        if let name = option("--template"),
-           let template = CollageTemplates.builtin.first(where: { $0.name.contains(name) }) {
+        if let style = option("--layout") {
+            store.setLayoutStyle(style == "scatter" ? .scatter : .grid)
+            spin(60) { !store.isSolving }
+        }
+        if let name = option("--template"), let template = CollageTemplates.find(name) {
             store.applyTemplate(template)
             spin(3)
         }
         if let title = option("--title") { store.setTitle(title) }
+        if let sub = option("--subtitle") { store.setSubtitle(sub) }
+        if let look = option("--look").flatMap(CollageLook.init(rawValue:)) {
+            var st = store.project.style
+            st.look = look
+            store.setStyle(st)
+        }
+        if let key = option("--overlay"), let overlay = CollageOverlays.preset(key), let root = store.root,
+           let hero = CollageCLI.heroPath(root, photoMap: store.photoMap) {
+            store.setOverlay(overlay, at: hero)
+            store.selection = hero
+        }
         if let root = store.root {
             let kinds = root.leafPaths().map { p -> String in
                 let cell = root.node(at: p)?.cell
@@ -395,6 +631,9 @@ enum CollageUISnapshot {
         if let sel = option("--select") {
             store.selection = sel.compactMap { $0.wholeNumberValue }
             if args.contains("--crop"), let path = store.selection { store.enterCropEdit(path) }
+        }
+        if let i = option("--select-item").flatMap(Int.init), store.items.indices.contains(i) {
+            store.selectItem(store.items[i].id)
         }
         let tab: CollageInspector.Tab = CollageInspector.Tab.allCases.first { $0.rawValue == option("--tab") } ?? .layout
         let sizeParts = (option("--size") ?? "1440x900").split(separator: "x").compactMap { Double($0) }
@@ -487,16 +726,35 @@ enum CollageOpsScript {
                 if let s = cell?.shape { tag += "/" + s.label }
                 if cell?.contain == true { tag += "/完整" }
                 if let c = cell?.crop { tag += String(format: "/裁%.2f,%.2f×%.1f", c.cx, c.cy, c.zoom) }
+                if let o = cell?.overlay { tag += "/压字(\(o.anchor.label))" }
                 return (p.isEmpty ? "r" : p.map(String.init).joined()) + "=" + tag
             }
-            return root.signature + "  |  " + leaves.joined(separator: " ")
+            let items = store.items.enumerated().map { (i, it) -> String in
+                let name: String
+                switch it.kind {
+                case .photo: name = (it.photoID.map { String($0.suffix(4)) } ?? "空") + it.frame.label
+                case .text: name = "手写"
+                case .sticker: name = it.sticker.label
+                }
+                let sel = it.id == store.selectedItem ? "*" : ""
+                return String(format: "%@%d:%@(%.2f,%.2f %.0f°)", sel, i, name, it.cx, it.cy, it.rotation)
+            }
+            let head = store.isFreeform ? "散落" : root.signature + "  |  " + leaves.joined(separator: " ")
+            return head + (items.isEmpty ? "" : "  || 图层 " + items.joined(separator: " "))
+        }
+        func itemID(_ s: String) -> UUID? {
+            guard let i = Int(s), store.items.indices.contains(i) else { return nil }
+            return store.items[i].id
         }
 
         // 起手：单张 3:4、托盘 = 精选+可用，排一版（每次都从头来，脚本结果可复现）。
         store.clearTray()
         store.setMode(.single)
+        store.setLayoutStyle(.grid)
         store.setCanvas(CollageCanvas.social[0])
         store.setStyle(CollageStyle())
+        store.setTitle(option("--title") ?? "")
+        store.setSubtitle(option("--subtitle") ?? "")
         store.importVerdicts(batch: batch, includeUsable: true)
         spin(20) { !store.project.photos.isEmpty && store.busyText == nil }
         store.solve(photoIDs: ["DSCF7232", "DSCF7208", "DSCF7222", "DSCF7215", "DSCF7212", "DSCF7214"]
@@ -564,6 +822,78 @@ enum CollageOpsScript {
                 store.selection = kv[0] == "none" ? nil : path(kv[0])
                 let edge: CollageLayout.Edge = ["left": .left, "right": .right, "top": .top, "bottom": .bottom][kv[1]] ?? .bottom
                 store.addTextCell(edge: edge, vertical: edge == .left || edge == .right)
+            case "overlay":
+                let kv = arg.split(separator: "=").map(String.init)
+                store.selection = path(kv[0])
+                store.setOverlay(kv.count > 1 && kv[1] != "none" ? CollageOverlays.preset(kv[1]) : nil, at: path(kv[0]))
+            case "anchor":
+                let kv = arg.split(separator: "=").map(String.init)
+                if let a = CollageAnchor(rawValue: kv[1]) { store.updateOverlay(at: path(kv[0])) { $0.anchor = a } }
+            case "overlaypos":
+                let kv = arg.split(separator: "=").map(String.init)
+                let nums = kv[1].split(separator: ";").compactMap { Double($0) }
+                store.beginContinuousEdit()
+                store.setOverlayPosition(x: nums[0], y: nums[1], at: path(kv[0]))
+                store.endContinuousEdit()
+            case "overlaytext":
+                let kv = arg.split(separator: "=", maxSplits: 1).map(String.init)
+                if let o = store.root?.node(at: path(kv[0]))?.cell?.overlay {
+                    var t = o.text
+                    if !t.lines.isEmpty { t.lines[0].text = kv[1] }
+                    let pid = store.root?.node(at: path(kv[0]))?.cell?.photoID
+                    store.updateText(t, target: .overlay(path(kv[0]), pid))
+                }
+            case "look":
+                var st = store.project.style
+                st.look = CollageLook(rawValue: arg) ?? .none
+                store.setStyle(st)
+            case "harmonize":
+                var st = store.project.style
+                st.harmonize = Double(arg) ?? 0
+                store.setStyle(st)
+            case "subtitle":
+                store.setSubtitle(arg)
+            case "layout":
+                store.setLayoutStyle(arg == "scatter" ? .scatter : .grid)
+                idle()
+            case "layoutnowait":
+                store.setLayoutStyle(arg == "scatter" ? .scatter : .grid)
+            case "wait":
+                idle()
+            case "relayout":
+                store.relayout(photoIDs: (store.page?.photoIDs ?? []) + arg.split(separator: ";").map(String.init))
+                idle()
+            case "sticker":
+                if let k = CollageSticker(rawValue: arg) { store.addSticker(k) }
+            case "itemtext":
+                store.addItemText()
+            case "additem":
+                let ab = arg.split(separator: "@").map(String.init)
+                let nums = (ab.count > 1 ? ab[1] : "0.5;0.5").split(separator: ";").compactMap { Double($0) }
+                store.addPhotoItem(ab[0], at: CGPoint(x: nums[0], y: nums[1]))
+            case "selitem":
+                store.selectItem(itemID(arg))
+            case "itemmove":
+                let kv = arg.split(separator: "=").map(String.init)
+                let nums = kv[1].split(separator: ";").compactMap { Double($0) }
+                if let id = itemID(kv[0]) {
+                    store.beginContinuousEdit()
+                    store.setItemGeometry(id) { $0.cx = nums[0]; $0.cy = nums[1] }
+                    store.endContinuousEdit()
+                }
+            case "itemrot":
+                let kv = arg.split(separator: "=").map(String.init)
+                if let id = itemID(kv[0]) { store.updateItem(id) { $0.rotation = Double(kv[1]) ?? 0 } }
+            case "itemfront":
+                if let id = itemID(arg) { store.moveItemInStack(id, toFront: true) }
+            case "itemdel":
+                if let id = itemID(arg) { store.deleteItem(id) }
+            case "itemdup":
+                if let id = itemID(arg) { store.duplicateItem(id) }
+            case "tplthumbs":
+                store.renderTemplateThumbs()
+                spin(120) { store.templateThumbs.count >= store.allTemplates.count }
+                print("  模板缩略图 \(store.templateThumbs.count)/\(store.allTemplates.count)")
             case "undo":
                 store.undo()
             case "redo":
@@ -606,11 +936,13 @@ enum CollageOpsScript {
                 var opts = CollageRender.Options(scale: 0.5)
                 opts.includeBleed = false
                 opts.debug = true
-                if let root = store.root,
-                   let image = CollageRender.render(root: root, project: store.project, hints: store.hints, options: opts) {
+                if let page = store.page,
+                   let image = CollageRender.render(page: page, project: store.project, hints: store.hints, options: opts) {
                     let url = outDir.appendingPathComponent(arg + ".jpg")
                     try? CollageExport.write(image, to: url, format: .jpeg, quality: 0.85, dpi: 72)
-                    print("  出图 \(url.lastPathComponent)")
+                    let vars = CollageTypeset.variables(project: store.project, root: page.root, photos: store.photoMap,
+                                                        pagePhotoIDs: page.photoIDs, pageID: page.id)
+                    print("  出图 \(url.lastPathComponent) · 第 \(store.pageIndex + 1)/\(store.project.pages.count) 页 · {no}=\(vars["no"] ?? "")")
                 }
             default:
                 print("未知操作 \(op)")
@@ -618,7 +950,7 @@ enum CollageOpsScript {
             }
             let flags = "撤销\(store.canUndo ? "✓" : "✗") 重做\(store.canRedo ? "✓" : "✗")"
             let pages = store.isAlbum
-                ? "  跨页 \(store.pageIndex + 1)/\(store.project.pages.count): " + store.project.pages.map { "\($0.root.photoIDs.count)" }.joined(separator: "-")
+                ? "  跨页 \(store.pageIndex + 1)/\(store.project.pages.count): " + store.project.pages.map { "\($0.photoIDs.count)" }.joined(separator: "-")
                 : ""
             print("\(op)  →  " + describe() + "  [\(flags)]" + pages + (store.lastError.map { "  错误: \($0)" } ?? ""))
         }

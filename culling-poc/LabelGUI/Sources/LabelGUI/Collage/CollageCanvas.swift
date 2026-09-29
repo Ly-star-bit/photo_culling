@@ -29,6 +29,32 @@ struct CollageCanvasLayout {
         CGRect(x: rect.minX + r.minX * scale, y: rect.minY + r.minY * scale,
                width: r.width * scale, height: r.height * scale)
     }
+
+    func toView(_ p: CGPoint) -> CGPoint {
+        CGPoint(x: rect.minX + p.x * scale, y: rect.minY + p.y * scale)
+    }
+}
+
+/// 选中图层的两个把手（视图坐标）：上方的旋转、右下角的缩放。
+struct CollageItemHandles {
+    let center: CGPoint
+    let topCenter: CGPoint
+    let rotate: CGPoint
+    let resize: CGPoint
+    let corners: [CGPoint]
+
+    init(item: CollageItem, canvas: CollageCanvas, layout: CollageCanvasLayout) {
+        let pts = CollageItems.corners(item, canvas: canvas).map { layout.toView($0) }
+        corners = pts
+        center = layout.toView(CollageItems.center(item, canvas: canvas))
+        let top = CGPoint(x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2)
+        topCenter = top
+        let dx = top.x - center.x
+        let dy = top.y - center.y
+        let len = max(1, (dx * dx + dy * dy).squareRoot())
+        rotate = CGPoint(x: top.x + dx / len * 24, y: top.y + dy / len * 24)
+        resize = pts[2]
+    }
 }
 
 /// 拖进画布时落在哪：哪个格子、中间（替换/互换）还是哪条边（劈开插入）。
@@ -40,7 +66,35 @@ struct CollageDropTarget: Equatable {
 enum CollageHit {
     case gutter(CollageLayout.Gutter)
     case cell(CollageLayout.Frame)
+    case item(CollageItem)
+    case rotateHandle(CollageItem)
+    case resizeHandle(CollageItem)
+    /// 选中格子上压的字（拖它换位置）。
+    case overlay(CollageLayout.Frame, CGRect)
     case none
+
+    /// 图层在格子、缝之上：先看选中图层的把手，再从最上面一层往下找，再看压字，最后才是缝和格子。
+    @MainActor
+    static func at(_ p: CGPoint, store: CollageStore, geometry: CollageLayout.Geometry,
+                   layout: CollageCanvasLayout) -> CollageHit {
+        let canvas = store.project.canvas
+        if let selected = store.selectedItemValue {
+            let h = CollageItemHandles(item: selected, canvas: canvas, layout: layout)
+            if hypot(p.x - h.rotate.x, p.y - h.rotate.y) < 10 { return .rotateHandle(selected) }
+            if hypot(p.x - h.resize.x, p.y - h.resize.y) < 10 { return .resizeHandle(selected) }
+        }
+        let c = layout.toCanvas(p)
+        let slop = 3 / max(0.01, layout.scale)
+        for item in store.items.reversed() where CollageItems.contains(item, point: c, canvas: canvas, slop: slop) {
+            return .item(item)
+        }
+        if let path = store.selection, let frame = geometry.frames.first(where: { $0.path == path }),
+           frame.cell.overlay != nil, let placement = store.overlayPlacement(for: frame),
+           placement.rect.insetBy(dx: -slop * 2, dy: -slop * 2).contains(c) {
+            return .overlay(frame, placement.rect)
+        }
+        return at(p, geometry: geometry, layout: layout)
+    }
 
     /// 点到哪：缝优先（缝很窄，按视图点外扩几个点），再是格子。
     static func at(_ p: CGPoint, geometry: CollageLayout.Geometry, layout: CollageCanvasLayout) -> CollageHit {
@@ -81,6 +135,10 @@ struct CollageCanvasView: View {
         case gutter(CollageLayout.Gutter)
         case move([Int])
         case pan([Int], CollageCropOverride, CollageLayout.Frame)
+        case item(CollageItem)
+        case rotate(CollageItem, CGPoint)
+        case resize(CollageItem, CGPoint, CGFloat)
+        case overlay([Int], CGRect, CGPoint)
     }
 
     @State private var dragMode: DragMode?
@@ -112,7 +170,8 @@ struct CollageCanvasView: View {
                 hover(phase, layout: layout, geometry: geometry)
             }
             .onDrop(of: [.text, .fileURL], delegate: CollageCanvasDropDelegate(
-                store: store, layout: layout, geometry: geometry, target: $dropTarget))
+                store: store, layout: layout, geometry: geometry, isFreeform: store.isFreeform,
+                canvas: store.project.canvas, target: $dropTarget))
             .onAppear { reportViewport(layout) }
             .onChange(of: geo.size) { _, _ in reportViewport(layout) }
             .onChange(of: store.project.canvas) { _, _ in reportViewport(layout) }
@@ -129,6 +188,9 @@ struct CollageCanvasView: View {
         .onKeyPress(.deleteForward) { keyDelete() }
         .onKeyPress(characters: CharacterSet(charactersIn: "+=-")) { press in
             keyZoom(press.characters)
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "[]")) { press in
+            keyRotate(press.characters)
         }
     }
 
@@ -180,7 +242,11 @@ struct CollageCanvasView: View {
 
     private func singleTap(_ p: CGPoint, layout: CollageCanvasLayout, geometry: CollageLayout.Geometry) {
         focused = true
-        switch CollageHit.at(p, geometry: geometry, layout: layout) {
+        switch CollageHit.at(p, store: store, geometry: geometry, layout: layout) {
+        case .item(let item), .rotateHandle(let item), .resizeHandle(let item):
+            store.selectItem(item.id)
+        case .overlay(let f, _):
+            store.selection = f.path
         case .gutter(let g):
             if NSEvent.modifierFlags.contains(.option) { store.flipGutter(g.path) }
         case .cell(let f):
@@ -189,12 +255,24 @@ struct CollageCanvasView: View {
         case .none:
             store.exitCropEdit()
             store.selection = nil
+            store.selectItem(nil)
         }
     }
 
     private func doubleTap(_ p: CGPoint, layout: CollageCanvasLayout, geometry: CollageLayout.Geometry) {
         focused = true
-        guard case .cell(let f) = CollageHit.at(p, geometry: geometry, layout: layout) else { return }
+        let hit = CollageHit.at(p, store: store, geometry: geometry, layout: layout)
+        if case .item(let item) = hit {
+            store.selectItem(item.id)
+            if item.kind == .text { onEditText() }
+            return
+        }
+        if case .overlay(let f, _) = hit {
+            store.selection = f.path
+            onEditText()
+            return
+        }
+        guard case .cell(let f) = hit else { return }
         switch f.cell.kind {
         case .photo:
             if f.cell.photoID != nil { store.enterCropEdit(f.path) }
@@ -226,8 +304,23 @@ struct CollageCanvasView: View {
            f.rect.cgRect.contains(layout.toCanvas(p)), let base = store.cropBaseline(for: f) {
             return .pan(f.path, base, f)
         }
-        let hit = CollageHit.at(p, geometry: geometry, layout: layout)
+        let hit = CollageHit.at(p, store: store, geometry: geometry, layout: layout)
         switch hit {
+        case .item(let item):
+            store.selectItem(item.id)
+            store.beginContinuousEdit()
+            return .item(item)
+        case .rotateHandle(let item):
+            store.beginContinuousEdit()
+            return .rotate(item, CollageItemHandles(item: item, canvas: store.project.canvas, layout: layout).center)
+        case .resizeHandle(let item):
+            store.beginContinuousEdit()
+            let center = CollageItemHandles(item: item, canvas: store.project.canvas, layout: layout).center
+            return .resize(item, center, max(4, hypot(p.x - center.x, p.y - center.y)))
+        case .overlay(let f, let rect):
+            store.selection = f.path
+            store.beginContinuousEdit()
+            return .overlay(f.path, store.overlayArea(for: f), CGPoint(x: rect.midX, y: rect.midY))
         case .gutter(let g):
             store.beginContinuousEdit()
             return .gutter(g)
@@ -255,6 +348,34 @@ struct CollageCanvasView: View {
             dropTarget = CollageHit.dropTarget(value.location, geometry: geometry, layout: layout, excluding: source)
         case .pan(let path, let base, let frame):
             pan(path: path, base: base, frame: frame, translation: value.translation, layout: layout)
+        case .item(let base):
+            let canvas = store.project.canvas
+            let dx = Double(value.translation.width / layout.scale) / Double(canvas.width)
+            let dy = Double(value.translation.height / layout.scale) / Double(canvas.height)
+            store.setItemGeometry(base.id) { item in
+                item.cx = min(1.3, max(-0.3, base.cx + dx))
+                item.cy = min(1.3, max(-0.3, base.cy + dy))
+            }
+        case .rotate(let base, let center):
+            let a0 = atan2(value.startLocation.y - center.y, value.startLocation.x - center.x)
+            let a1 = atan2(value.location.y - center.y, value.location.x - center.x)
+            var deg = base.rotation + Double(a1 - a0) * 180 / .pi
+            // 靠近 0° 吸一下：摆正比摆斜难。
+            if abs(deg) < 1.5 { deg = 0 }
+            store.setItemGeometry(base.id) { $0.rotation = deg.rounded() }
+        case .resize(let base, let center, let startDist):
+            let d = hypot(value.location.x - center.x, value.location.y - center.y)
+            let k = Double(max(0.15, min(6, d / startDist)))
+            store.setItemGeometry(base.id) { item in
+                item.width = max(0.015, base.width * k)
+                item.height = max(0.008, base.height * k)
+            }
+        case .overlay(let path, let area, let startCenter):
+            let cx = startCenter.x + value.translation.width / layout.scale
+            let cy = startCenter.y + value.translation.height / layout.scale
+            let x = Double((cx - area.minX) / max(1, area.width))
+            let y = Double((cy - area.minY) / max(1, area.height))
+            store.setOverlayPosition(x: x, y: y, at: path)
         }
     }
 
@@ -283,7 +404,7 @@ struct CollageCanvasView: View {
         }
         guard let mode = dragMode else { return }
         switch mode {
-        case .gutter:
+        case .gutter, .item, .rotate, .resize, .overlay:
             store.endContinuousEdit()
         case .move(let source):
             guard let target = dropTarget else { return }
@@ -317,7 +438,7 @@ struct CollageCanvasView: View {
     private func hover(_ phase: HoverPhase, layout: CollageCanvasLayout, geometry: CollageLayout.Geometry) {
         switch phase {
         case .active(let p):
-            if case .gutter(let g) = CollageHit.at(p, geometry: geometry, layout: layout) {
+            if case .gutter(let g) = CollageHit.at(p, store: store, geometry: geometry, layout: layout) {
                 if hoverGutter != g {
                     hoverGutter = g
                     (g.axis == .row ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown).set()
@@ -337,12 +458,20 @@ struct CollageCanvasView: View {
     // MARK: - 键盘
 
     private func keyArrow(_ delta: Int) -> KeyPress.Result {
-        if store.cropEditing { return keyNudge(dx: Double(delta), dy: 0) }
+        if store.cropEditing || store.selectedItem != nil { return keyNudge(dx: Double(delta), dy: 0) }
         if delta > 0 { store.nextAlternative() } else { store.previousAlternative() }
         return .handled
     }
 
     private func keyNudge(dx: Double, dy: Double) -> KeyPress.Result {
+        if let id = store.selectedItem {
+            // 选中图层：方向键挪 0.4%（和拖动同方向）。
+            store.updateItem(id, coalesce: true) { item in
+                item.cx += dx * 0.004
+                item.cy += dy * 0.004
+            }
+            return .handled
+        }
         guard store.cropEditing, let path = store.selection,
               let frame = store.geometry.frames.first(where: { $0.path == path }),
               let base = store.cropBaseline(for: frame) else { return .ignored }
@@ -362,7 +491,18 @@ struct CollageCanvasView: View {
         return .handled
     }
 
+    private func keyRotate(_ chars: String) -> KeyPress.Result {
+        guard let id = store.selectedItem else { return .ignored }
+        let step: Double = chars == "[" ? -2 : 2
+        store.updateItem(id, coalesce: true) { $0.rotation += step }
+        return .handled
+    }
+
     private func keyEscape() -> KeyPress.Result {
+        if store.selectedItem != nil {
+            store.selectItem(nil)
+            return .handled
+        }
         if store.cropEditing {
             store.exitCropEdit()
             return .handled
@@ -375,6 +515,10 @@ struct CollageCanvasView: View {
     }
 
     private func keyDelete() -> KeyPress.Result {
+        if let id = store.selectedItem {
+            store.deleteItem(id)
+            return .handled
+        }
         guard let path = store.selection, !store.cropEditing else { return .ignored }
         store.removeCell(path)
         return .handled
@@ -405,7 +549,49 @@ struct CollageCanvasOverlay: View {
             if let target = dropTarget, let frame = geometry.frames.first(where: { $0.path == target.path }) {
                 dropHighlight(frame, edge: target.edge)
             }
+            if let path = store.selection, !store.cropEditing,
+               let frame = geometry.frames.first(where: { $0.path == path }), frame.cell.overlay != nil,
+               let placement = store.overlayPlacement(for: frame) {
+                overlayBox(layout.toView(placement.rect))
+            }
+            if let item = store.selectedItemValue {
+                itemSelection(CollageItemHandles(item: item, canvas: store.project.canvas, layout: layout))
+            }
         }
+    }
+
+    /// 压字的范围：黑白双线虚框（深浅照片上都看得见）。
+    private func overlayBox(_ r: CGRect) -> some View {
+        let box = r.insetBy(dx: -4, dy: -4)
+        return ZStack {
+            Rectangle().stroke(Color.black.opacity(0.55), style: StrokeStyle(lineWidth: 2.5, dash: [5, 4]))
+            Rectangle().stroke(Color.white, style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+        }
+        .frame(width: box.width, height: box.height)
+        .offset(x: box.minX, y: box.minY)
+    }
+
+    /// 选中图层：旋转后的外框 + 旋转把手（上）+ 缩放把手（右下）。
+    private func itemSelection(_ h: CollageItemHandles) -> some View {
+        ZStack(alignment: .topLeading) {
+            Path { path in
+                path.addLines(h.corners)
+                path.closeSubpath()
+                path.move(to: h.topCenter)
+                path.addLine(to: h.rotate)
+            }
+            .stroke(Color.accentColor, lineWidth: 2)
+            handle(at: h.rotate)
+            handle(at: h.resize)
+        }
+    }
+
+    private func handle(at p: CGPoint) -> some View {
+        Circle()
+            .fill(Color.white)
+            .overlay(Circle().stroke(Color.accentColor, lineWidth: 2))
+            .frame(width: 12, height: 12)
+            .offset(x: p.x - 6, y: p.y - 6)
     }
 
     private func viewRect(_ frame: CollageLayout.Frame) -> CGRect {
@@ -533,6 +719,9 @@ struct CollageCanvasDropDelegate: DropDelegate {
     let store: CollageStore
     let layout: CollageCanvasLayout
     let geometry: CollageLayout.Geometry
+    /// 建 delegate 时（主线程）取好：拖放回调在旧 SDK 上不保证在主 actor，不能同步读 store。
+    let isFreeform: Bool
+    let canvas: CollageCanvas
     @Binding var target: CollageDropTarget?
 
     func validateDrop(info: DropInfo) -> Bool {
@@ -540,7 +729,7 @@ struct CollageCanvasDropDelegate: DropDelegate {
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        if info.hasItemsConforming(to: [.text]) {
+        if info.hasItemsConforming(to: [.text]), !isFreeform {
             target = CollageHit.dropTarget(info.location, geometry: geometry, layout: layout, excluding: nil)
         }
         return DropProposal(operation: .copy)
@@ -553,11 +742,16 @@ struct CollageCanvasDropDelegate: DropDelegate {
     func performDrop(info: DropInfo) -> Bool {
         let where_ = target
         target = nil
+        let c = layout.toCanvas(info.location)
+        let point = CGPoint(x: c.x / CGFloat(max(1, canvas.width)), y: c.y / CGFloat(max(1, canvas.height)))
         if let provider = info.itemProviders(for: [.text]).first {
             _ = provider.loadObject(ofClass: NSString.self) { object, _ in
                 guard let id = object as? String else { return }
                 Task { @MainActor in
-                    if let where_ {
+                    // 散落版：落点放一张相纸。
+                    if store.isFreeform {
+                        store.addPhotoItem(id, at: point)
+                    } else if let where_ {
                         store.place(photoID: id, at: where_.path, edge: where_.edge)
                     } else if store.root == nil {
                         store.solve(photoIDs: [id])

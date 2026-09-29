@@ -78,8 +78,13 @@ struct CollageLayoutPanel: View {
 
     var body: some View {
         canvasBox
-        if store.selectedCell != nil { cellBox }
-        layoutBox
+        if let item = store.selectedItemValue {
+            CollageItemBox(store: store, item: item)
+        } else if store.selectedCell != nil {
+            cellBox
+        }
+        if !store.isFreeform { layoutBox }
+        CollageDecorBox(store: store)
         templateBox
     }
 
@@ -150,6 +155,9 @@ struct CollageLayoutPanel: View {
                     Text(cellTitle(cell)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     if cell.kind == .photo, cell.photoID != nil {
                         photoCellControls(cell)
+                        Text(cell.overlay == nil ? "要在这张照片上压字：到「文字」里选一个样式" : "照片上压了字：在「文字」里改内容、位置、深浅")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
                     } else if cell.kind == .text {
                         Text("在「文字」里编辑内容和字体").font(.caption).foregroundStyle(.secondary)
                     } else {
@@ -265,10 +273,8 @@ struct CollageLayoutPanel: View {
 
     private var templateBox: some View {
         GroupBox("模板") {
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(store.allTemplates, id: \.name) { t in
-                    templateRow(t)
-                }
+            VStack(alignment: .leading, spacing: 8) {
+                CollageTemplateGallery(store: store) { templateToDelete = $0 }
                 Divider()
                 HStack {
                     TextField("把当前版存成模板…", text: $templateName)
@@ -278,7 +284,7 @@ struct CollageLayoutPanel: View {
                 }
                 Toggle("套用时按照片比例自适应", isOn: $templateFits)
                     .font(.caption)
-                    .help("关掉 = 固定比例，照片按格子裁（严格网格、月洞门这种）")
+                    .help("关掉 = 固定比例，照片按格子裁（严格网格、月洞门这种）；散落版总是原样摆放")
                 HStack {
                     Button("导入模板…") { importTemplates() }
                     Button("导出我的模板…") { exportTemplates() }
@@ -294,31 +300,6 @@ struct CollageLayoutPanel: View {
         ), presenting: templateToDelete) { name in
             Button("删除「\(name)」", role: .destructive) { store.deleteTemplate(name) }
             Button("取消", role: .cancel) {}
-        }
-    }
-
-    private func templateRow(_ t: CollageTemplate) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: t.builtin ? "sparkles.rectangle.stack" : "rectangle.stack.badge.person.crop")
-                .foregroundStyle(.secondary)
-                .frame(width: 18)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(t.name).font(.caption)
-                Text("\(t.photoSlots) 张" + (t.canvas.map { " · \($0.name)" } ?? ""))
-                    .font(.caption2).foregroundStyle(.tertiary)
-            }
-            Spacer()
-            Button("套用") { store.applyTemplate(t) }
-                .font(.caption)
-                .disabled(store.project.photos.isEmpty)
-            if !t.builtin {
-                Button {
-                    templateToDelete = t.name
-                } label: {
-                    Image(systemName: "trash").font(.caption)
-                }
-                .buttonStyle(.plain)
-            }
         }
     }
 
@@ -353,6 +334,7 @@ struct CollageStylePanel: View {
 
     var body: some View {
         presetBox
+        CollageLookBox(store: store)
         spacingBox
         backgroundBox
         frameBox
@@ -505,6 +487,7 @@ struct CollageStylePanel: View {
 struct CollageTextPanel: View {
     @ObservedObject var store: CollageStore
     @State private var title = ""
+    @State private var subtitle = ""
 
     var body: some View {
         GroupBox("标题") {
@@ -512,34 +495,71 @@ struct CollageTextPanel: View {
                 TextField("拾光", text: $title)
                     .onSubmit { store.setTitle(title) }
                     .onChange(of: title) { _, v in store.setTitle(v) }
-                Text("模板里的 {title} 就是它。其他占位符：{date} {date_cn} {date_cn_full} {year_roman} {month_en} {model} {lens} {focal} {fnumber} {shutter} {iso}")
+                TextField("副标题 / 地点（{subtitle}）", text: $subtitle)
+                    .onChange(of: subtitle) { _, v in store.setSubtitle(v) }
+                Text("模板里的 {title} {subtitle} 就是这两行。其他占位符：{no} 期号 {date} {date_cn} {date_cn_full} {year_roman} {month_en} {model} {lens} {focal} {fnumber} {shutter} {iso}")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(4)
         }
-        .onAppear { title = store.project.title }
+        .onAppear {
+            title = store.project.title
+            subtitle = store.project.subtitle
+        }
         .onChange(of: store.project.title) { _, v in if v != title { title = v } }
+        .onChange(of: store.project.subtitle) { _, v in if v != subtitle { subtitle = v } }
 
-        if let path = store.selection, let cell = store.selectedCell, cell.kind == .text, let text = cell.text {
-            // 编辑器绑定到这一格的路径；换了格子就换一个编辑器实例（旧的文字框迟到的提交
-            // 只会写回它自己那一格）。
-            CollageTextEditor(store: store, text: text, path: path)
-                .id(path)
+        if let item = store.selectedItemValue {
+            if item.kind == .text, let text = item.text {
+                CollageTextEditor(store: store, text: text, target: .item(item.id))
+                    .id(CollageTextTarget.item(item.id))
+            } else {
+                hint("选中的是贴纸 / 相纸：在「版式」里调")
+            }
+        } else if let path = store.selection, let cell = store.selectedCell {
+            if cell.kind == .text, let text = cell.text {
+                // 编辑器绑定到这一格的路径；换了格子就换一个编辑器实例（旧的文字框迟到的提交
+                // 只会写回它自己那一格）。
+                CollageTextEditor(store: store, text: text, target: .cell(path))
+                    .id(CollageTextTarget.cell(path))
+            } else if cell.kind == .photo {
+                CollageOverlayBox(store: store, path: path, overlay: cell.overlay)
+                if let overlay = cell.overlay {
+                    CollageTextEditor(store: store, text: overlay.text, target: .overlay(path, cell.photoID),
+                                      alignFollowsAnchor: overlay.anchor != .custom)
+                        .id(CollageTextTarget.overlay(path, cell.photoID))
+                }
+            } else {
+                addBox
+            }
         } else {
-            GroupBox("文字格") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("在画布上选中一个文字格来编辑；或者加一个：")
-                        .font(.caption).foregroundStyle(.secondary)
-                    HStack(spacing: 6) {
+            addBox
+        }
+    }
+
+    private func hint(_ text: String) -> some View {
+        Text(text).font(.caption).foregroundStyle(.secondary)
+    }
+
+    private var addBox: some View {
+        GroupBox("文字格") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("选中一张照片可以在照片上压字；选中文字格编辑内容；或者加一个：")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 6) {
+                    Group {
                         Button("上方横排") { store.addTextCell(edge: .top, vertical: false) }
                         Button("右侧竖排") { store.addTextCell(edge: .right, vertical: true) }
                     }
-                    .font(.caption)
-                    .disabled(store.root == nil)
+                    .disabled(store.root == nil || store.isFreeform)
+                    .help(store.isFreeform ? "散落版没有格子：用「手写字」" : "")
+                    Button("手写字") { store.addItemText() }
                 }
-                .padding(4)
+                .font(.caption)
             }
+            .padding(4)
         }
     }
 }
@@ -548,30 +568,27 @@ struct CollageTextPanel: View {
 struct CollageTextEditor: View {
     @ObservedObject var store: CollageStore
     let text: CollageText
-    let path: [Int]
+    let target: CollageTextTarget
+    /// 压字：对齐跟着位置走（贴左边就左对齐），没手动拖过时不给调。
+    var alignFollowsAnchor = false
 
     private func update(_ body: (inout CollageText) -> Void) {
         var t = text
         body(&t)
-        store.updateText(t, at: path)
+        store.updateText(t, target: target)
     }
 
     var body: some View {
         GroupBox("排版") {
             VStack(alignment: .leading, spacing: 8) {
                 Toggle("竖排（右起）", isOn: Binding(get: { text.vertical }, set: { v in update { $0.vertical = v } }))
-                Picker("水平", selection: Binding(get: { text.alignH }, set: { v in update { $0.alignH = v } })) {
-                    Text("左").tag(CollageAlign.leading)
-                    Text("中").tag(CollageAlign.center)
-                    Text("右").tag(CollageAlign.trailing)
+                if alignFollowsAnchor {
+                    Text("对齐跟着字的位置走：贴左边左对齐、居中居中、贴右边右对齐")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    alignPickers
                 }
-                .pickerStyle(.segmented)
-                Picker("垂直", selection: Binding(get: { text.alignV }, set: { v in update { $0.alignV = v } })) {
-                    Text("上").tag(CollageAlign.leading)
-                    Text("中").tag(CollageAlign.center)
-                    Text("下").tag(CollageAlign.trailing)
-                }
-                .pickerStyle(.segmented)
                 CollageSlider(label: text.vertical ? "列距" : "行距",
                               value: Binding(get: { text.lineSpacing }, set: { v in update { $0.lineSpacing = v } }),
                               range: 0...2, display: String(format: "%.2f", text.lineSpacing))
@@ -593,6 +610,22 @@ struct CollageTextEditor: View {
             Spacer()
         }
         .font(.caption)
+    }
+
+    @ViewBuilder
+    private var alignPickers: some View {
+        Picker("水平", selection: Binding(get: { text.alignH }, set: { v in update { $0.alignH = v } })) {
+            Text("左").tag(CollageAlign.leading)
+            Text("中").tag(CollageAlign.center)
+            Text("右").tag(CollageAlign.trailing)
+        }
+        .pickerStyle(.segmented)
+        Picker("垂直", selection: Binding(get: { text.alignV }, set: { v in update { $0.alignV = v } })) {
+            Text("上").tag(CollageAlign.leading)
+            Text("中").tag(CollageAlign.center)
+            Text("下").tag(CollageAlign.trailing)
+        }
+        .pickerStyle(.segmented)
     }
 
     @ViewBuilder
