@@ -95,8 +95,9 @@ swift build -c release
 #   [--look film --harmonize 0.6] [--overlay masthead] [--scatter --frame polaroid] [--sticker postmark@0.7,0.1,-8]
 #   模板总览: --template-sheet sheet.jpg [--only 手账]   色调总览: --look-sheet looks.jpg
 # 相册出图(测试用): LabelGUI --collage <照片文件夹> --album --pdf --marks --out 目录
-# 拼图编辑脚本(测试用): LabelGUI --collage-ops <照片文件夹> --ops "swap:00>11,move:010>11:left,lock:00,regen,undo" --out 目录
-# 拼图界面离屏快照(测试用): LabelGUI --collage-ui <照片文件夹> out.png [--album] [--tab 文字] [--light]
+# 下面两个会改写拼图工程和设置，必须指定临时数据目录（不设直接拒绝运行）:
+# 拼图编辑脚本(测试用): LABELGUI_DATA_DIR=/tmp/lg LabelGUI --collage-ops <照片文件夹> --ops "swap:00>11,move:010>11:left,lock:00,regen,undo" --out 目录
+# 拼图界面离屏快照(测试用): LABELGUI_DATA_DIR=/tmp/lg LabelGUI --collage-ui <照片文件夹> out.png [--album] [--tab 文字] [--light]
 ```
 
 ## 使用流程

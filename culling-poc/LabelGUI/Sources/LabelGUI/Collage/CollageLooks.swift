@@ -15,7 +15,8 @@ enum CollageLooks {
         var look: CollageLook = .none
         var strength = 0.8
 
-        var isIdentity: Bool { gains == nil && (look == .none || strength <= 0.001) }
+        /// 黑白、旧照强度拖到 0 也还是黑白（以前 0 就变回彩色，1% 又全去色，滑杆在 0 附近跳）。
+        var isIdentity: Bool { gains == nil && (look == .none || (strength <= 0.001 && !look.isMonochrome)) }
     }
 
     // MARK: - 每页每张照片的调色参数
@@ -132,7 +133,8 @@ enum CollageLooks {
             matrix.setValue(CIVector(x: 0, y: 0, z: CGFloat(g[2]), w: 0), forKey: "inputBVector")
             if let o = matrix.outputImage { out = o }
         }
-        if ops.look != .none, ops.strength > 0.001, let data = cube(ops.look, strength: ops.strength),
+        if ops.look != .none, ops.strength > 0.001 || ops.look.isMonochrome,
+           let data = cube(ops.look, strength: ops.strength),
            let filter = CIFilter(name: "CIColorCubeWithColorSpace") {
             filter.setValue(out, forKey: kCIInputImageKey)
             filter.setValue(cubeSize, forKey: "inputCubeDimension")
@@ -169,16 +171,10 @@ enum CollageLooks {
                     let r = Double(ri) / Double(n - 1)
                     let g = Double(gi) / Double(n - 1)
                     let b = Double(bi) / Double(n - 1)
-                    let m = map(look, r, g, b)
-                    // 黑白、旧照：强度只管影调，去色永远是全的（半黑白的照片看起来像坏了）。
-                    let monochrome = look == .mono || look == .sepia
-                    let l = luma(r, g, b)
-                    let r0 = monochrome ? l : r
-                    let g0 = monochrome ? l : g
-                    let b0 = monochrome ? l : b
-                    values[i] = Float(clamp01(r0 + (m.0 - r0) * s))
-                    values[i + 1] = Float(clamp01(g0 + (m.1 - g0) * s))
-                    values[i + 2] = Float(clamp01(b0 + (m.2 - b0) * s))
+                    let out = grade(r, g, b, look: look, strength: s)
+                    values[i] = Float(out.0)
+                    values[i + 1] = Float(out.1)
+                    values[i + 2] = Float(out.2)
                     values[i + 3] = 1
                     i += 4
                 }
@@ -186,9 +182,25 @@ enum CollageLooks {
         }
         let data = values.withUnsafeBufferPointer { Data(buffer: $0) }
         cubeLock.lock()
+        // 一张 LUT 512KB：几个色调来回拖强度会攒到七八十 MB，攒多了清掉重生成（几毫秒一张）。
+        if cubeCache.count >= 24 { cubeCache.removeAll() }
         cubeCache[key] = data
         cubeLock.unlock()
         return data
+    }
+
+    /// 一个颜色套上色调（sRGB 伽马值 0…1）：LUT 的每个格点、「主图取色」的底色都用它。
+    /// 黑白、旧照：强度只管影调，去色永远是全的（半黑白的照片看起来像坏了）。
+    static func grade(_ r: Double, _ g: Double, _ b: Double, look: CollageLook,
+                      strength: Double) -> (Double, Double, Double) {
+        guard look != .none else { return (r, g, b) }
+        let s = min(1, max(0, strength))
+        let m = map(look, r, g, b)
+        let l = luma(r, g, b)
+        let r0 = look.isMonochrome ? l : r
+        let g0 = look.isMonochrome ? l : g
+        let b0 = look.isMonochrome ? l : b
+        return (clamp01(r0 + (m.0 - r0) * s), clamp01(g0 + (m.1 - g0) * s), clamp01(b0 + (m.2 - b0) * s))
     }
 
     /// 每个色调：输入输出都是 sRGB 伽马值 0…1。

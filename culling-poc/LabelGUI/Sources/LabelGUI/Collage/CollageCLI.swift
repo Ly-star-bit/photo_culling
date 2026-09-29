@@ -184,7 +184,10 @@ enum CollageCLI {
         }
         for raw in args.indices.filter({ args[$0] == "--sticker" && $0 + 1 < args.count }).map({ args[$0 + 1] }) {
             let parts = raw.split(separator: "@").map(String.init)
-            guard let kind = CollageSticker(rawValue: parts[0]) else { continue }
+            guard let first = parts.first, let kind = CollageSticker(rawValue: first) else {
+                print("--sticker 参数不对，跳过: \(raw)")
+                continue
+            }
             let nums = (parts.count > 1 ? parts[1] : "").split(separator: ",").compactMap { Double($0) }
             var item = CollageItem(kind: .sticker)
             item.sticker = kind
@@ -223,6 +226,15 @@ enum CollageCLI {
         print(String(format: "渲染 %dx%d · %.2fs", image.width, image.height, Date().timeIntervalSince(t3)))
         write(image, project: project, out: out)
         exit(0)
+    }
+
+    /// --collage-ui / --collage-ops 会改拼图工程（清托盘、换模式、存全局设置）：只在 LABELGUI_DATA_DIR
+    /// 指的临时目录里跑 —— 照 README 直接跑会把这个文件夹真实的拼图工程清掉。
+    static func requireIsolatedDataDir(_ flag: String) {
+        let dir = ProcessInfo.processInfo.environment["LABELGUI_DATA_DIR"] ?? ""
+        guard dir.isEmpty else { return }
+        print("\(flag) 会改写拼图工程和全局设置：先设 LABELGUI_DATA_DIR=<临时目录> 再跑（不能碰真实数据）")
+        exit(2)
     }
 
     // MARK: - 相册
@@ -572,6 +584,7 @@ enum CollageUISnapshot {
             print("用法: --collage-ui <photo_dir> <out.png>")
             exit(1)
         }
+        CollageCLI.requireIsolatedDataDir("--collage-ui")
         NSApplication.shared.setActivationPolicy(.prohibited)
         let dir = URL(fileURLWithPath: args[flagIndex + 1])
         let out = URL(fileURLWithPath: args[flagIndex + 2])
@@ -686,11 +699,13 @@ private struct CollageSnapshotHost: View {
 
 // MARK: - 编辑操作脚本（验证拖缝/换位/劈开/锁定/撤销这些手势背后的逻辑）
 
-/// LabelGUI --collage-ops <photo_dir> --ops "swap:00>10,move:00>11:left,remove:10,flip:r,ratio:0=0.4,
-///     lock:00,regen,framing:10=half,shape:10=circle,contain:10,crop:10=0.5,0.4,2,text:00=bottom,
-///     place:DSCF7209>11:top,undo,redo,savetpl:名字,applytpl:名字,exporttpl:/path.json,importtpl:/path.json,
-///     render:文件名" [--out 目录] [--count 6]
-/// 路径写成数字串（"10" = 根的第二个孩子的第一个孩子），根节点写 r。每步打印版式树和撤销栈。
+/// LABELGUI_DATA_DIR=<临时目录> LabelGUI --collage-ops <photo_dir> --ops "swap:00>10,move:00>11:left,remove:10,
+///     flip:r,ratio:0=0.4,lock:00,regen,framing:10=half,shape:10=circle,contain:10,crop:10=0.5;0.4;2,
+///     text:00=bottom,place:DSCF7209>11:top,undo,redo,savetpl:名字,applytpl:名字,exporttpl:/path.json,
+///     importtpl:/path.json,render:文件名" [--out 目录] [--count 6]
+/// 路径写成数字串（"10" = 根的第二个孩子的第一个孩子），根节点写 r；一步里的几个数用分号分（逗号分步）。
+/// 每步打印版式树、图层（~ 自动撒的，@7232 贴在那张相纸上）和撤销栈。出图不走导出：renderclean = 界面
+/// 预览同款，renderexport = 导出同款（成品尺寸带出血）。必须设 LABELGUI_DATA_DIR（起手会清托盘）。
 enum CollageOpsScript {
     @MainActor
     static func run(flagIndex: Int) -> Never {
@@ -699,6 +714,7 @@ enum CollageOpsScript {
             guard let i = args.firstIndex(of: flag), args.count > i + 1 else { return nil }
             return args[i + 1]
         }
+        CollageCLI.requireIsolatedDataDir("--collage-ops")
         let dir = URL(fileURLWithPath: args[flagIndex + 1])
         let outDir = URL(fileURLWithPath: option("--out") ?? ".")
         try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
@@ -729,17 +745,27 @@ enum CollageOpsScript {
                 if let o = cell?.overlay { tag += "/压字(\(o.anchor.label))" }
                 return (p.isEmpty ? "r" : p.map(String.init).joined()) + "=" + tag
             }
-            let items = store.items.enumerated().map { (i, it) -> String in
-                let name: String
+            let all = store.items
+            let items = all.enumerated().map { (i, it) -> String in
+                var name: String
                 switch it.kind {
                 case .photo: name = (it.photoID.map { String($0.suffix(4)) } ?? "空") + it.frame.label
-                case .text: name = "手写"
+                case .text: name = it.sourceCell.map { "字格\($0)" } ?? "手写"
                 case .sticker: name = it.sticker.label
+                }
+                // ~ = 自动撒的；@7232 = 贴在那张相纸上
+                if it.generated { name = "~" + name }
+                if let a = it.attach {
+                    let host = all.first { $0.id == a.to }?.photoID.map { String($0.suffix(4)) } ?? "?"
+                    name += "@" + host
                 }
                 let sel = it.id == store.selectedItem ? "*" : ""
                 return String(format: "%@%d:%@(%.2f,%.2f %.0f°)", sel, i, name, it.cx, it.cy, it.rotation)
             }
-            let head = store.isFreeform ? "散落" : root.signature + "  |  " + leaves.joined(separator: " ")
+            var head = store.isFreeform ? "散落" : root.signature + "  |  " + leaves.joined(separator: " ")
+            if store.isFreeform, let spec = store.page?.scatter { head += "[\(spec.frame.label)]" }
+            if store.page?.gridRoot != nil { head += "(记着网格)" }
+            if store.layoutStyle != store.effectiveLayoutStyle { head += "(偏好\(store.layoutStyle.label))" }
             return head + (items.isEmpty ? "" : "  || 图层 " + items.joined(separator: " "))
         }
         func itemID(_ s: String) -> UUID? {
@@ -762,90 +788,111 @@ enum CollageOpsScript {
         idle()
         print("起始  " + describe())
 
+        // 参数写错一个字：打印出来跳过这一步，不能下标越界整个崩掉。
+        func at(_ a: [String], _ i: Int) -> String? { a.indices.contains(i) ? a[i] : nil }
+        func nums(_ s: String?) -> [Double] { (s ?? "").split(separator: ";").compactMap { Double($0) } }
+        func pair(_ s: String, _ sep: Character) -> (String, String)? {
+            let kv = s.split(separator: sep, maxSplits: 1).map(String.init)
+            return kv.count == 2 ? (kv[0], kv[1]) : nil
+        }
+        let edges: [String: CollageLayout.Edge] = ["left": .left, "right": .right, "top": .top, "bottom": .bottom]
+
         for raw in (option("--ops") ?? "").split(separator: ",") {
             let op = raw.trimmingCharacters(in: .whitespaces)
             guard !op.isEmpty else { continue }
             let parts = op.split(separator: ":", maxSplits: 1).map(String.init)
             let name = parts[0]
             let arg = parts.count > 1 ? parts[1] : ""
+            var ok = true
             switch name {
             case "swap":
-                let ab = arg.split(separator: ">").map(String.init)
-                store.swap(path(ab[0]), path(ab[1]))
+                if let (a, b) = pair(arg, ">") { store.swap(path(a), path(b)) } else { ok = false }
             case "move":
-                let ab = arg.split(separator: ">").map(String.init)
-                let tail = ab[1].split(separator: ":").map(String.init)
-                let edge: CollageLayout.Edge = ["left": .left, "right": .right, "top": .top, "bottom": .bottom][tail[1]] ?? .left
-                store.move(from: path(ab[0]), to: path(tail[0]), edge: edge)
+                if let (a, rest) = pair(arg, ">"), let (b, e) = pair(rest, ":"), let edge = edges[e] {
+                    store.move(from: path(a), to: path(b), edge: edge)
+                } else { ok = false }
             case "place":
-                let ab = arg.split(separator: ">").map(String.init)
-                let tail = ab[1].split(separator: ":").map(String.init)
-                let edge: CollageLayout.Edge? = tail.count > 1 ? (["left": .left, "right": .right, "top": .top, "bottom": .bottom][tail[1]]) : nil
-                store.place(photoID: ab[0], at: path(tail[0]), edge: edge)
+                if let (id, rest) = pair(arg, ">"), let target = at(rest.split(separator: ":").map(String.init), 0) {
+                    let tail = rest.split(separator: ":").map(String.init)
+                    store.place(photoID: id, at: path(target), edge: at(tail, 1).flatMap { edges[$0] })
+                } else { ok = false }
             case "remove":
                 store.removeCell(path(arg))
             case "flip":
                 store.flipGutter(path(arg))
             case "ratio":
-                let kv = arg.split(separator: "=").map(String.init)
-                store.beginContinuousEdit()
-                store.setRatio(Double(kv[1]) ?? 0.5, at: path(kv[0]))
-                store.endContinuousEdit()
+                if let (p, v) = pair(arg, "="), let r = Double(v) {
+                    store.beginContinuousEdit()
+                    store.setRatio(r, at: path(p))
+                    store.endContinuousEdit()
+                } else { ok = false }
             case "lock":
                 store.selection = path(arg)
                 store.toggleLock()
+            case "sel":
+                store.selection = path(arg)
             case "regen":
                 store.regenerate()
                 idle()
             case "framing":
-                let kv = arg.split(separator: "=").map(String.init)
-                store.selection = path(kv[0])
-                let f: CollageFraming = ["auto": .auto, "full": .full, "half": .half, "close": .close][kv[1]] ?? .auto
-                store.setFraming(f)
+                if let (p, v) = pair(arg, "="),
+                   let f = ["auto": CollageFraming.auto, "full": .full, "half": .half, "close": .close][v] {
+                    store.selection = path(p)
+                    store.setFraming(f)
+                } else { ok = false }
             case "shape":
-                let kv = arg.split(separator: "=").map(String.init)
-                store.selection = path(kv[0])
-                store.setShape(CollageShape(rawValue: kv[1]))
+                if let (p, v) = pair(arg, "=") {
+                    store.selection = path(p)
+                    store.setShape(CollageShape(rawValue: v))
+                } else { ok = false }
             case "contain":
                 store.selection = path(arg)
                 store.setContain(true)
             case "crop":
-                let kv = arg.split(separator: "=").map(String.init)
-                let nums = kv[1].split(separator: ";").compactMap { Double($0) }
-                store.enterCropEdit(path(kv[0]))
-                if nums.count == 3 {
-                    store.setCrop(CollageCropOverride(cx: nums[0], cy: nums[1], zoom: nums[2]), at: path(kv[0]))
-                }
-                store.exitCropEdit()
+                let n = nums(pair(arg, "=")?.1)
+                if let (p, _) = pair(arg, "="), n.count == 3 {
+                    store.enterCropEdit(path(p))
+                    store.setCrop(CollageCropOverride(cx: n[0], cy: n[1], zoom: n[2]), at: path(p))
+                    store.exitCropEdit()
+                } else { ok = false }
             case "text":
-                let kv = arg.split(separator: "=").map(String.init)
-                store.selection = kv[0] == "none" ? nil : path(kv[0])
-                let edge: CollageLayout.Edge = ["left": .left, "right": .right, "top": .top, "bottom": .bottom][kv[1]] ?? .bottom
-                store.addTextCell(edge: edge, vertical: edge == .left || edge == .right)
+                if let (p, e) = pair(arg, "=") {
+                    store.selection = p == "none" ? nil : path(p)
+                    let edge = edges[e] ?? .bottom
+                    store.addTextCell(edge: edge, vertical: edge == .left || edge == .right)
+                } else { ok = false }
             case "overlay":
-                let kv = arg.split(separator: "=").map(String.init)
-                store.selection = path(kv[0])
-                store.setOverlay(kv.count > 1 && kv[1] != "none" ? CollageOverlays.preset(kv[1]) : nil, at: path(kv[0]))
-            case "anchor":
-                let kv = arg.split(separator: "=").map(String.init)
-                if let a = CollageAnchor(rawValue: kv[1]) { store.updateOverlay(at: path(kv[0])) { $0.anchor = a } }
-            case "overlaypos":
-                let kv = arg.split(separator: "=").map(String.init)
-                let nums = kv[1].split(separator: ";").compactMap { Double($0) }
-                store.beginContinuousEdit()
-                store.setOverlayPosition(x: nums[0], y: nums[1], at: path(kv[0]))
-                store.endContinuousEdit()
-            case "overlaytext":
                 let kv = arg.split(separator: "=", maxSplits: 1).map(String.init)
-                if let o = store.root?.node(at: path(kv[0]))?.cell?.overlay {
+                if let p = at(kv, 0) {
+                    store.selection = path(p)
+                    let key = at(kv, 1) ?? "none"
+                    store.setOverlay(key != "none" ? CollageOverlays.preset(key) : nil, at: path(p))
+                } else { ok = false }
+            case "anchor":
+                if let (p, v) = pair(arg, "="), let a = CollageAnchor(rawValue: v) {
+                    store.updateOverlay(at: path(p)) { $0.anchor = a }
+                } else { ok = false }
+            case "overlaypos":
+                let n = nums(pair(arg, "=")?.1)
+                if let (p, _) = pair(arg, "="), n.count == 2 {
+                    store.beginContinuousEdit()
+                    store.setOverlayPosition(x: n[0], y: n[1], at: path(p))
+                    store.endContinuousEdit()
+                } else { ok = false }
+            case "overlaytext":
+                if let (p, v) = pair(arg, "="), let o = store.root?.node(at: path(p))?.cell?.overlay {
                     var t = o.text
-                    if !t.lines.isEmpty { t.lines[0].text = kv[1] }
-                    let pid = store.root?.node(at: path(kv[0]))?.cell?.photoID
-                    store.updateText(t, target: .overlay(path(kv[0]), pid))
-                }
+                    if !t.lines.isEmpty { t.lines[0].text = v }
+                    let pid = store.root?.node(at: path(p))?.cell?.photoID
+                    store.updateText(t, target: .overlay(path(p), pid, store.page?.id))
+                } else { ok = false }
             case "look":
                 var st = store.project.style
                 st.look = CollageLook(rawValue: arg) ?? .none
+                store.setStyle(st)
+            case "strength":
+                var st = store.project.style
+                st.lookStrength = Double(arg) ?? st.lookStrength
                 store.setStyle(st)
             case "harmonize":
                 var st = store.project.style
@@ -860,40 +907,71 @@ enum CollageOpsScript {
                 store.setLayoutStyle(arg == "scatter" ? .scatter : .grid)
             case "wait":
                 idle()
+            case "autolayout":
+                store.autoLayout(count: Int(arg) ?? 6)
+                idle()
+            case "autolayoutnowait":
+                store.autoLayout(count: Int(arg) ?? 6)
             case "relayout":
                 store.relayout(photoIDs: (store.page?.photoIDs ?? []) + arg.split(separator: ";").map(String.init))
                 idle()
+            case "untray":
+                store.removeFromTray(arg)
             case "sticker":
-                if let k = CollageSticker(rawValue: arg) { store.addSticker(k) }
+                if let k = CollageSticker(rawValue: arg) { store.addSticker(k) } else { ok = false }
             case "itemtext":
                 store.addItemText()
             case "additem":
                 let ab = arg.split(separator: "@").map(String.init)
-                let nums = (ab.count > 1 ? ab[1] : "0.5;0.5").split(separator: ";").compactMap { Double($0) }
-                store.addPhotoItem(ab[0], at: CGPoint(x: nums[0], y: nums[1]))
+                let n = nums(at(ab, 1) ?? "0.5;0.5")
+                if let id = at(ab, 0), n.count == 2 {
+                    store.addPhotoItem(id, at: CGPoint(x: n[0], y: n[1]))
+                } else { ok = false }
             case "selitem":
                 store.selectItem(itemID(arg))
             case "itemmove":
-                let kv = arg.split(separator: "=").map(String.init)
-                let nums = kv[1].split(separator: ";").compactMap { Double($0) }
-                if let id = itemID(kv[0]) {
+                let n = nums(pair(arg, "=")?.1)
+                if let (i, _) = pair(arg, "="), let id = itemID(i), n.count == 2 {
                     store.beginContinuousEdit()
-                    store.setItemGeometry(id) { $0.cx = nums[0]; $0.cy = nums[1] }
+                    store.setItemGeometry(id) { $0.cx = n[0]; $0.cy = n[1] }
                     store.endContinuousEdit()
-                }
+                } else { ok = false }
             case "itemrot":
-                let kv = arg.split(separator: "=").map(String.init)
-                if let id = itemID(kv[0]) { store.updateItem(id) { $0.rotation = Double(kv[1]) ?? 0 } }
+                if let (i, v) = pair(arg, "="), let id = itemID(i), let deg = Double(v) {
+                    store.updateItem(id) { $0.rotation = deg }
+                } else { ok = false }
+            case "itemsize":
+                if let (i, v) = pair(arg, "="), let id = itemID(i), let k = Double(v) {
+                    store.updateItem(id) { $0.width *= k; $0.height *= k }
+                } else { ok = false }
             case "itemfront":
-                if let id = itemID(arg) { store.moveItemInStack(id, toFront: true) }
+                if let id = itemID(arg) { store.moveItemInStack(id, toFront: true) } else { ok = false }
+            case "itemback":
+                if let id = itemID(arg) { store.moveItemInStack(id, toFront: false) } else { ok = false }
             case "itemdel":
-                if let id = itemID(arg) { store.deleteItem(id) }
+                if let id = itemID(arg) { store.deleteItem(id) } else { ok = false }
             case "itemdup":
-                if let id = itemID(arg) { store.duplicateItem(id) }
+                if let id = itemID(arg) { store.duplicateItem(id) } else { ok = false }
             case "tplthumbs":
                 store.renderTemplateThumbs()
-                spin(120) { store.templateThumbs.count >= store.allTemplates.count }
+                spin(120) { !store.templateThumbsBusy && store.templateThumbs.count >= store.allTemplates.count }
                 print("  模板缩略图 \(store.templateThumbs.count)/\(store.allTemplates.count)")
+                // 抽两个自带画布的模板看比例（相册里应该是跨页的比例）。
+                for name in ["封面 · 刊头大图", "手账 · 黑卡相角"] {
+                    if let img = store.templateThumbs[name] {
+                        print("  「\(name)」缩略图 \(Int(img.size.width))x\(Int(img.size.height))")
+                    }
+                }
+            case "altthumb":
+                // altthumb:序号=文件名：把第几个备选的缩略图存下来（核对和点下去的一致）。
+                let kv = arg.split(separator: "=", maxSplits: 1).map(String.init)
+                spin(15) { !store.alternatives.isEmpty && store.alternativeThumbs.count == store.alternatives.count }
+                if let i = at(kv, 0).flatMap(Int.init), let file = at(kv, 1), store.alternativeThumbs.indices.contains(i),
+                   let cg = store.alternativeThumbs[i].cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                    try? CollageExport.write(cg, to: outDir.appendingPathComponent(file + ".png"), format: .png,
+                                             quality: 1, dpi: 72)
+                    print("  备选缩略图 \(i) → \(file).png（共 \(store.alternativeThumbs.count) 个）")
+                } else { ok = false }
             case "undo":
                 store.undo()
             case "redo":
@@ -901,7 +979,7 @@ enum CollageOpsScript {
             case "savetpl":
                 store.saveTemplate(named: arg, fitAspects: true)
             case "applytpl":
-                if let t = store.allTemplates.first(where: { $0.name == arg }) { store.applyTemplate(t) }
+                if let t = store.allTemplates.first(where: { $0.name == arg }) { store.applyTemplate(t) } else { ok = false }
             case "exporttpl":
                 store.exportTemplates(to: URL(fileURLWithPath: arg))
             case "importtpl":
@@ -920,22 +998,26 @@ enum CollageOpsScript {
             case "delpage":
                 store.deletePage(Int(arg) ?? 0)
             case "movepage":
-                let kv = arg.split(separator: "=").map(String.init)
-                store.movePage(Int(kv[0]) ?? 0, by: Int(kv[1]) ?? 1)
+                if let (a, b) = pair(arg, "="), let i = Int(a), let d = Int(b) { store.movePage(i, by: d) } else { ok = false }
             case "tonext":
                 store.selection = path(arg)
                 store.moveSelectedPhoto(toPage: store.pageIndex + 1)
             case "export":
+                // 走导出全流程（无头模式下不会在访达里弹窗口）。
                 store.exportOptions.outputPath = arg
                 store.export()
                 spin(300) { !store.isExporting }
                 print("  " + store.progressText)
                 let found = (try? FileManager.default.subpathsOfDirectory(atPath: arg)) ?? []
                 print("  输出: " + found.sorted().joined(separator: " "))
-            case "render":
-                var opts = CollageRender.Options(scale: 0.5)
-                opts.includeBleed = false
-                opts.debug = true
+            case "render", "renderclean", "renderexport":
+                // render = 半尺寸 + 调试框；renderclean = 和界面预览一样（占位、不带出血）；
+                // renderexport = 和导出一样（成品尺寸、带出血、不画占位）。
+                var opts = CollageRender.Options(scale: name == "renderexport" ? 1 : 0.5)
+                opts.includeBleed = name == "renderexport"
+                opts.debug = name == "render"
+                opts.placeholders = name == "renderclean"
+                opts.export = name == "renderexport"
                 if let page = store.page,
                    let image = CollageRender.render(page: page, project: store.project, hints: store.hints, options: opts) {
                     let url = outDir.appendingPathComponent(arg + ".jpg")
@@ -948,12 +1030,17 @@ enum CollageOpsScript {
                 print("未知操作 \(op)")
                 continue
             }
-            let flags = "撤销\(store.canUndo ? "✓" : "✗") 重做\(store.canRedo ? "✓" : "✗")"
+            if !ok {
+                print("参数不对，跳过: \(op)")
+                continue
+            }
+            let flags = "撤销\(store.undoDepth) 重做\(store.canRedo ? "✓" : "✗")"
             let pages = store.isAlbum
                 ? "  跨页 \(store.pageIndex + 1)/\(store.project.pages.count): " + store.project.pages.map { "\($0.photoIDs.count)" }.joined(separator: "-")
                 : ""
             print("\(op)  →  " + describe() + "  [\(flags)]" + pages + (store.lastError.map { "  错误: \($0)" } ?? ""))
         }
+        store.flushSaves()
         exit(0)
     }
 }

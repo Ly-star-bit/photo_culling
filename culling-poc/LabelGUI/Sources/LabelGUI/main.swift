@@ -43,6 +43,9 @@ func syncEmbeddedPipeline(to dataDir: URL) {
     }
 }
 
+// 无头参数在任何分派之前认出来：之后走到的共用代码（导出完「在访达里显示」之类）一律不弹界面。
+AppRuntime.headless = CommandLine.arguments.contains { AppRuntime.headlessFlags.contains($0) }
+
 syncEmbeddedPipeline(to: appDataDir)
 
 let appConfig = AppConfig.load(from: appDataDir)

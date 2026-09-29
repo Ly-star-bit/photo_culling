@@ -566,11 +566,22 @@ enum CollageTemplates {
     /// 主图角色的格子先拿分数最高的，其余按给定顺序填；照片不够的格子留空（占位）。
     static func apply(_ template: CollageTemplate, photos: [CollagePhotoRef],
                       context: CollageLayout.Context, seed: UInt64 = 7) -> CollagePage {
+        // 模板自带的图层每次套用都换新 id（同一个模板套在两个跨页上，图层 id 不能撞）；
+        // 相册里按整本的底色和中缝调一下。
+        let decor = adapted(freshIDs(template.items), template: template, context: context)
         if let spec = template.scatter {
-            let use = Array(photos.prefix(max(1, spec.count)))
-            let results = CollageScatter.generate(photos: use, spec: spec, context: context, seed: seed, keep: 4)
-            let items = (results.first?.items ?? []) + template.items
-            return CollagePage(root: .leaf(CollageCell()), items: items, freeform: true, scatter: spec)
+            return scattered(photos: photos, spec: spec, count: spec.count, decor: decor, context: context,
+                             seed: seed, pageSpec: spec)
+        }
+        // 自己存的散落版存的时候是别的画布比例（单张存的套进相册跨页）：照原样摆会扯散、压中缝 ——
+        // 按它的撒法现撒一版，只带上字和没贴在相纸上的贴纸。
+        if template.freeform, let saved = template.savedAspect ?? template.canvas?.aspect,
+           abs(saved - context.canvas.aspect) > 0.05 {
+            var spec = template.pageScatter ?? CollageScatterSpec()
+            spec.count = max(1, template.photoSlots)
+            let loose = decor.filter { $0.kind != .photo && $0.attach == nil }
+            return scattered(photos: photos, spec: spec, count: spec.count, decor: loose, context: context,
+                             seed: seed, pageSpec: template.pageScatter)
         }
         var remaining = photos
         func takeBest() -> String? {
@@ -582,13 +593,16 @@ enum CollageTemplates {
             guard !remaining.isEmpty else { return nil }
             return remaining.removeFirst().id
         }
-        var items = template.items
+        var items = decor
         if template.freeform {
             let photoIndices = items.indices.filter { items[$0].kind == .photo }
             // 主图 = 最大的那张相纸。
             let heroIndex = photoIndices.max { items[$0].width * items[$0].height < items[$1].width * items[$1].height }
             if let h = heroIndex { items[h].photoID = takeBest() }
             for i in photoIndices where i != heroIndex { items[i].photoID = takeNext() }
+            // 照片不够：没分到照片的相纸不留（散落版上拖不进去，导出也只是一张白卡），贴在上面的胶带一起拿掉。
+            items.removeAll { $0.kind == .photo && $0.photoID == nil }
+            items = CollageItems.pinAll(items, canvas: context.canvas)
             return CollagePage(root: .leaf(CollageCell()), items: items, freeform: true, scatter: template.pageScatter)
         }
         var root = template.root
@@ -612,9 +626,84 @@ enum CollageTemplates {
         return CollagePage(root: root, items: items, freeform: false)
     }
 
+    /// 按撒法现撒一版：分数最高的那张一定上版（先挑主图再截张数），页上的字占着的上下一截让开。
+    private static func scattered(photos: [CollagePhotoRef], spec: CollageScatterSpec, count: Int,
+                                  decor: [CollageItem], context: CollageLayout.Context, seed: UInt64,
+                                  pageSpec: CollageScatterSpec?) -> CollagePage {
+        let use = withHero(photos, count: count)
+        let loose = decor.filter { $0.kind != .photo }
+        let reserve = CollageScatter.reserveBands(for: loose, canvas: context.canvas)
+        let results = CollageScatter.generate(photos: use, spec: spec, context: context, seed: seed, keep: 4,
+                                              reserve: reserve)
+        let items = (results.first?.items ?? []) + loose
+        return CollagePage(root: .leaf(CollageCell()), items: items, freeform: true, scatter: pageSpec)
+    }
+
+    /// 取 count 张：分数最高的那张一定在里面，其余按给定顺序（以前先截前几张再挑主图，主图排在
+    /// 后面就被截掉了）。
+    static func withHero(_ photos: [CollagePhotoRef], count: Int) -> [CollagePhotoRef] {
+        let n = max(1, count)
+        guard photos.count > n, let hero = photos.max(by: { $0.score < $1.score }) else {
+            return Array(photos.prefix(n))
+        }
+        let others = Set(photos.filter { $0.id != hero.id }.prefix(n - 1).map(\.id))
+        return photos.filter { $0.id == hero.id || others.contains($0.id) }
+    }
+
+    /// 图层换新 id；贴在相纸上的贴纸跟着换指向。
+    static func freshIDs(_ items: [CollageItem]) -> [CollageItem] {
+        var map: [UUID: UUID] = [:]
+        for it in items { map[it.id] = UUID() }
+        return items.map { it in
+            var out = it
+            out.id = map[it.id] ?? UUID()
+            if let a = it.attach { out.attach?.to = map[a.to] ?? a.to }
+            return out
+        }
+    }
+
+    /// 相册里套模板：模板的样式不套（整本统一），可模板自带的字是按模板自己的底色配的色 ——
+    /// 底色深浅对不上就把字的深浅翻过来；横在正中的字和贴纸挪到右半页（中缝会吃掉），太宽的先缩到半页里。
+    static func adapted(_ items: [CollageItem], template: CollageTemplate,
+                        context: CollageLayout.Context) -> [CollageItem] {
+        var out = items
+        if let own = template.style {
+            let wasDark = own.background.luminance < 0.5
+            let isDark = context.style.background.luminance < 0.5
+            if wasDark != isDark {
+                for i in out.indices where out[i].kind == .text {
+                    guard var t = out[i].text else { continue }
+                    t.lines = t.lines.map { line in
+                        var l = line
+                        l.color = CollageOverlays.toned(line.color, light: isDark)
+                        return l
+                    }
+                    out[i].text = t
+                }
+            }
+        }
+        let canvas = context.canvas
+        guard canvas.seams == .fold else { return out }
+        let w = Double(canvas.width)
+        let band: Double = canvas.shortSide * 0.02
+        for i in out.indices where out[i].kind != .photo && out[i].attach == nil {
+            let b = CollageItems.bounds(out[i], canvas: canvas)
+            guard Double(b.minX) < w / 2 + band, Double(b.maxX) > w / 2 - band else { continue }
+            let maxW: Double = w * 0.42
+            if Double(b.width) > maxW {
+                let k: Double = maxW / Double(b.width)
+                out[i].width *= k
+                out[i].height *= k
+            }
+            out[i].cx = 0.75
+        }
+        return out
+    }
+
     /// 把当前页存成模板：去掉照片，只留结构、角色、文字、压字、贴纸（散落版连位置一起）。
+    /// `aspect`：存的时候画布的宽高比（相册里存的不带画布，也要记下比例）。
     static func template(from page: CollagePage, name: String, style: CollageStyle?, canvas: CollageCanvas?,
-                         fitAspects: Bool) -> CollageTemplate {
+                         aspect: Double, fitAspects: Bool) -> CollageTemplate {
         var stripped = page.root
         for path in page.root.leafPaths() {
             stripped.update(at: path) { node in
@@ -624,16 +713,19 @@ enum CollageTemplates {
                 node.cell?.locked = false
             }
         }
-        let items = page.items.map { item -> CollageItem in
+        // 换新 id 时贴纸的指向跟着换（以前各换各的，胶带和相纸的关系就断了）。
+        let items = freshIDs(page.items).map { item -> CollageItem in
             var out = item
-            out.id = UUID()
             out.photoID = nil
+            // 模板里没有「切过来之前的网格」：文字格转来的字就是普通手写字。
+            out.sourceCell = nil
             return out
         }
         var t = CollageTemplate(name: name, root: stripped, style: style, canvas: canvas,
                                 fitAspects: page.freeform ? false : fitAspects, category: "我的",
                                 items: items, freeform: page.freeform)
         t.pageScatter = page.freeform ? page.scatter : nil
+        t.savedAspect = page.freeform ? aspect : nil
         return t
     }
 }

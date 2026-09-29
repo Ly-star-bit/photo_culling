@@ -37,6 +37,8 @@ struct CollageTemplateGallery: View {
         .onChange(of: store.hintsVersion) { _, _ in refresh() }
         .onChange(of: store.project.style) { _, _ in refresh() }
         .onChange(of: store.project.canvas) { _, _ in refresh() }
+        .onChange(of: store.project.mode) { _, _ in refresh() }
+        .onChange(of: (store.page?.photoIDs ?? []).sorted()) { _, _ in refresh() }
     }
 
     private func refresh() { store.renderTemplateThumbs() }
@@ -58,8 +60,9 @@ struct CollageTemplateTile: View {
     let template: CollageTemplate
     let onDelete: () -> Void
 
+    /// 相册里套模板不换画布：占位的比例也按相册跨页。
     private var aspect: CGFloat {
-        let c = template.canvas ?? store.project.canvas
+        let c = (store.isAlbum ? nil : template.canvas) ?? store.project.canvas
         return CGFloat(c.width) / CGFloat(max(1, c.height))
     }
 
@@ -149,7 +152,7 @@ struct CollageLookBox: View {
         return Button {
             var s = store.project.style
             s.look = look
-            store.setStyle(s)
+            store.setStyle(s, coalesce: false)
         } label: {
             VStack(spacing: 3) {
                 Group {
@@ -204,8 +207,9 @@ struct CollageOverlayBox: View {
         }
     }
 
-    private func update(_ body: @escaping (inout CollageOverlay) -> Void) {
-        store.updateOverlay(at: path, coalesce: true, body)
+    /// 滑杆连续拖动合成一步撤销；点按钮、选选项每次一步（两次点选挨得近也不能并成一步）。
+    private func update(coalesce: Bool = false, _ body: @escaping (inout CollageOverlay) -> Void) {
+        store.updateOverlay(at: path, coalesce: coalesce, body)
     }
 
     @ViewBuilder
@@ -225,12 +229,15 @@ struct CollageOverlayBox: View {
             ForEach(CollageTone.allCases, id: \.self) { Text($0.label).tag($0) }
         }
         .pickerStyle(.segmented)
-        CollageSlider(label: "投影", value: Binding(get: { overlay.shadow }, set: { v in update { $0.shadow = v } }),
+        CollageSlider(label: "投影",
+                      value: Binding(get: { overlay.shadow }, set: { v in update(coalesce: true) { $0.shadow = v } }),
                       range: 0...1, display: String(format: "%.2f", overlay.shadow))
             .help("浅字底下的柔和投影（深字不加）")
-        CollageSlider(label: "边距", value: Binding(get: { overlay.inset }, set: { v in update { $0.inset = v } }),
+        CollageSlider(label: "边距",
+                      value: Binding(get: { overlay.inset }, set: { v in update(coalesce: true) { $0.inset = v } }),
                       range: 0...0.2, display: percentText(overlay.inset))
-        CollageSlider(label: "最宽", value: Binding(get: { overlay.maxWidth }, set: { v in update { $0.maxWidth = v } }),
+        CollageSlider(label: "最宽",
+                      value: Binding(get: { overlay.maxWidth }, set: { v in update(coalesce: true) { $0.maxWidth = v } }),
                       range: 0.3...1, display: percentText(overlay.maxWidth))
             .help("字块最多占照片多宽，放不下整体缩小")
         HStack {
@@ -293,8 +300,8 @@ struct CollageDecorBox: View {
                     Spacer()
                 }
                 Text(store.isFreeform
-                     ? "散落版：托盘里的照片拖进画布 = 放一张相纸。选中后拖动挪位置，拖上方圆点旋转、右下圆点缩放；[ ] 微调角度。"
-                     : "贴纸浮在版面上。先选中一张相纸再加胶带，会贴在它的上沿。")
+                     ? "散落版：托盘里的照片拖进画布 = 放一张相纸。选中后拖动挪位置，拖上方圆点旋转、右下圆点缩放；[ ] 微调角度。先选中一张相纸再加胶带、回形针，会贴在它上沿并跟着它走。"
+                     : "贴纸浮在版面上。先选中一个照片格再加胶带，会贴在那一格的上沿。")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -309,8 +316,9 @@ struct CollageItemBox: View {
     @ObservedObject var store: CollageStore
     let item: CollageItem
 
-    private func update(_ body: @escaping (inout CollageItem) -> Void) {
-        store.updateItem(item.id, coalesce: true, body)
+    /// 滑杆、输入框连续改合成一步撤销；点选项每次一步。
+    private func update(coalesce: Bool = false, _ body: @escaping (inout CollageItem) -> Void) {
+        store.updateItem(item.id, coalesce: coalesce, body)
     }
 
     private var title: String {
@@ -338,8 +346,9 @@ struct CollageItemBox: View {
                 CollageSlider(label: "角度", value: rotationBinding, range: -45...45,
                               display: String(format: "%.0f°", item.rotation))
                 if item.kind == .photo {
-                    CollageSlider(label: "投影", value: Binding(get: { item.shadow }, set: { v in update { $0.shadow = v } }),
-                                  range: 0...1, display: String(format: "%.2f", item.shadow))
+                    CollageSlider(label: "投影",
+                              value: Binding(get: { item.shadow }, set: { v in update(coalesce: true) { $0.shadow = v } }),
+                              range: 0...1, display: String(format: "%.2f", item.shadow))
                 }
                 HStack(spacing: 6) {
                     Button("置顶") { store.moveItemInStack(item.id, toFront: true) }
@@ -358,7 +367,7 @@ struct CollageItemBox: View {
     private var sizeBinding: Binding<Double> {
         Binding(get: { item.width }, set: { w in
             let ratio = item.height / max(1e-6, item.width)
-            update { it in
+            update(coalesce: true) { it in
                 it.width = w
                 it.height = w * ratio
             }
@@ -366,7 +375,7 @@ struct CollageItemBox: View {
     }
 
     private var rotationBinding: Binding<Double> {
-        Binding(get: { max(-45, min(45, item.rotation)) }, set: { v in update { $0.rotation = v.rounded() } })
+        Binding(get: { max(-45, min(45, item.rotation)) }, set: { v in update(coalesce: true) { $0.rotation = v.rounded() } })
     }
 
     @ViewBuilder
@@ -392,7 +401,7 @@ struct CollageItemBox: View {
             .pickerStyle(.segmented)
             if item.frame == .polaroid {
                 TextField("相纸下沿的字（{date} {title}…）", text: Binding(get: { item.caption },
-                                                                    set: { v in update { $0.caption = v } }))
+                                                                    set: { v in update(coalesce: true) { $0.caption = v } }))
             }
         } else if item.kind == .sticker {
             Picker("种类", selection: Binding(get: { item.sticker }, set: { v in
@@ -406,11 +415,12 @@ struct CollageItemBox: View {
                 ForEach(CollageSticker.allCases, id: \.self) { Text($0.label).tag($0) }
             }
             ColorPicker("颜色", selection: Binding(get: { item.color.swiftUIColor },
-                                                 set: { c in update { $0.color = CollageColor(c) } }),
+                                                 set: { c in update(coalesce: true) { $0.color = CollageColor(c) } }),
                         supportsOpacity: false)
                 .font(.caption)
             if item.sticker == .label || item.sticker == .postmark {
-                TextField("上面的字（默认 {date}）", text: Binding(get: { item.label }, set: { v in update { $0.label = v } }))
+                TextField("上面的字（默认 {date}）",
+                          text: Binding(get: { item.label }, set: { v in update(coalesce: true) { $0.label = v } }))
             }
         } else {
             Text("内容和字体在「文字」里改").font(.caption).foregroundStyle(.secondary)

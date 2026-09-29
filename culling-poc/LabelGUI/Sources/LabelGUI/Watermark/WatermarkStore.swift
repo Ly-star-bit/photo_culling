@@ -411,7 +411,7 @@ final class WatermarkStore: ObservableObject {
                     self.progressText = "导出已取消 (已写出 \(succeeded)/\(total) 张，保留在输出目录)"
                 } else if failed.isEmpty {
                     self.progressText = "导出完成: \(total) 张 → \(outputDir.lastPathComponent)"
-                    NSWorkspace.shared.activateFileViewerSelecting([outputDir])
+                    AppRuntime.revealInFinder([outputDir])
                 } else {
                     self.progressText = "导出结束: \(succeeded) 成功, \(failed.count) 失败"
                     let names = failed.prefix(3).map(\.name).joined(separator: ", ")

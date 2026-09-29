@@ -52,6 +52,106 @@ enum CollageItems {
                       width: (xs.max() ?? 0) - (xs.min() ?? 0), height: (ys.max() ?? 0) - (ys.min() ?? 0))
     }
 
+    // MARK: - 贴在相纸上
+
+    /// 按贴纸现在的位置记下它贴在相纸的哪儿（相纸局部坐标，相对相纸宽高）。
+    static func attachment(of sticker: CollageItem, to photo: CollageItem, canvas: CollageCanvas) -> CollageAttachment {
+        let s = size(photo, canvas: canvas)
+        let local = center(sticker, canvas: canvas).applying(transform(photo, canvas: canvas).inverted())
+        let x: Double = Double(local.x) / Double(max(1, s.width))
+        let y: Double = Double(local.y) / Double(max(1, s.height))
+        return CollageAttachment(to: photo.id, x: x, y: y, angle: sticker.rotation - photo.rotation)
+    }
+
+    /// 按相纸现在的位置、角度、大小把贴在上面的贴纸摆回去。
+    static func pinned(_ sticker: CollageItem, to photo: CollageItem, canvas: CollageCanvas) -> CollageItem {
+        guard let a = sticker.attach else { return sticker }
+        let s = size(photo, canvas: canvas)
+        let local = CGPoint(x: CGFloat(a.x) * s.width, y: CGFloat(a.y) * s.height)
+        let p = local.applying(transform(photo, canvas: canvas))
+        var out = sticker
+        out.cx = Double(p.x) / Double(max(1, canvas.width))
+        out.cy = Double(p.y) / Double(max(1, canvas.height))
+        out.rotation = photo.rotation + a.angle
+        return out
+    }
+
+    /// 贴着的贴纸全部跟着自己的相纸摆好；相纸已经不在这一页上的，贴纸一起拿掉。
+    static func pinAll(_ items: [CollageItem], canvas: CollageCanvas) -> [CollageItem] {
+        var photos: [UUID: CollageItem] = [:]
+        for it in items where it.kind == .photo { photos[it.id] = it }
+        return items.compactMap { it -> CollageItem? in
+            guard let a = it.attach else { return it }
+            guard let photo = photos[a.to] else { return nil }
+            return pinned(it, to: photo, canvas: canvas)
+        }
+    }
+
+    /// 图层改完之后：`moved` 是贴着的贴纸自己被挪/转了 → 按新位置重新记它贴在哪儿（拖离相纸就不再
+    /// 贴着）；其余贴着的跟着相纸摆好。
+    static func normalized(_ input: [CollageItem], moved: UUID?, canvas: CollageCanvas) -> [CollageItem] {
+        var items = input
+        if let moved, let i = items.firstIndex(where: { $0.id == moved }), items[i].kind == .sticker {
+            let slop = CGFloat(canvas.shortSide * 0.05)
+            let c = center(items[i], canvas: canvas)
+            let canStick = items[i].sticker.isTape || items[i].sticker == .clip
+            if let a = items[i].attach, let photo = items.first(where: { $0.id == a.to }),
+               contains(photo, point: c, canvas: canvas, slop: slop) {
+                // 还在原来那张上：记新位置。
+                items[i].attach = attachment(of: items[i], to: photo, canvas: canvas)
+            } else if canStick, let photo = items[..<i].last(where: {
+                $0.kind == .photo && contains($0, point: c, canvas: canvas, slop: slop)
+            }) {
+                // 胶带、回形针拖到了（叠放顺序在它下面的）另一张相纸上：贴到那一张。
+                items[i].attach = attachment(of: items[i], to: photo, canvas: canvas)
+            } else {
+                items[i].attach = nil
+            }
+        }
+        return pinAll(items, canvas: canvas)
+    }
+
+    /// 一张相纸和贴在它上面的贴纸（叠放顺序里一起挪）。
+    static func group(of id: UUID, in items: [CollageItem]) -> [Int] {
+        items.indices.filter { items[$0].id == id || items[$0].attach?.to == id }
+    }
+
+    /// 换画布比例：整页图层按外接框等比缩放、居中放进新画布，四周留和原来一样的边（按短边比例）——
+    /// 摆法、叠放、相对大小都不变，也不会出画；按外接框算，来回切比例能缩回原来的大小
+    /// （位置按画布比例、大小按短边存，直接换比例会把散落版扯散、甩出画外）。
+    static func refit(_ items: [CollageItem], from old: CollageCanvas, to new: CollageCanvas) -> [CollageItem] {
+        guard let first = items.first else { return items }
+        var box = bounds(first, canvas: old)
+        for it in items.dropFirst() { box = box.union(bounds(it, canvas: old)) }
+        guard box.width > 1, box.height > 1 else { return items }
+        let ow = Double(old.width)
+        let oh = Double(old.height)
+        let nw = Double(max(1, new.width))
+        let nh = Double(max(1, new.height))
+        // 原来离画布边最近的那一边留了多少（按短边比例），新画布照留。
+        let edges: [Double] = [Double(box.minX), ow - Double(box.maxX), Double(box.minY), oh - Double(box.maxY)]
+        let margin: Double = max(0, min(0.2, (edges.min() ?? 0) / old.shortSide)) * new.shortSide
+        let availW: Double = max(1, nw - 2 * margin)
+        let availH: Double = max(1, nh - 2 * margin)
+        // 跨页换跨页：以中缝为轴缩放，左半页的还在左半页（按外接框中心缩，不对称的摆法会被推过中缝）。
+        let foldAnchor = old.seams == .fold && new.seams == .fold
+        let bx: Double = foldAnchor ? ow / 2 : Double(box.midX)
+        let halfW: Double = foldAnchor ? max(bx - Double(box.minX), Double(box.maxX) - bx) : Double(box.width) / 2
+        let s: Double = min(availW / max(1, 2 * halfW), availH / Double(box.height))
+        let sizeScale: Double = old.shortSide * s / new.shortSide
+        let by = Double(box.midY)
+        return items.map { it in
+            var out = it
+            let x: Double = (it.cx * ow - bx) * s + nw / 2
+            let y: Double = (it.cy * oh - by) * s + nh / 2
+            out.cx = x / nw
+            out.cy = y / nh
+            out.width = it.width * sizeScale
+            out.height = it.height * sizeScale
+            return out
+        }
+    }
+
     /// 照片在框里实际画的区域（局部坐标）。
     static func photoArea(_ frame: CollageItemFrame, outer: CGRect) -> CGRect {
         let m = min(outer.width, outer.height)
@@ -109,7 +209,17 @@ enum CollageItems {
     }
 
     static func draw(_ items: [CollageItem], ctx: CGContext, dc: DrawContext) {
+        // 没分到照片的相纸（照片不够、从托盘拿掉了）：预览里画成灰色占位提醒，导出不印空白相纸，
+        // 贴在它上面的胶带也不印。
+        var skipped = Set<UUID>()
+        if !dc.options.placeholders {
+            for it in items where it.kind == .photo && it.photoID.flatMap({ dc.photos[$0] }) == nil {
+                skipped.insert(it.id)
+            }
+        }
         for item in items {
+            if skipped.contains(item.id) { continue }
+            if let a = item.attach, skipped.contains(a.to) { continue }
             ctx.saveGState()
             // 成品坐标 → 缩放 + 出血偏移 → 旋转到局部。
             ctx.translateBy(x: CGFloat(dc.bleed), y: CGFloat(dc.bleed))
@@ -524,8 +634,11 @@ enum CollageItems {
 /// 格子之间就自然叠上了。然后检查：谁的脸被上面那张压住、胶带压到脸 —— 扣分或换位置。
 enum CollageScatter {
 
+    /// `reserve`：页上已有的横排标题（手写字、网格文字格转来的）占着最上/最下一截，照片让开
+    /// （画布高度比例；和模板写死的 reserveBottom 取大的）。
     static func generate(photos: [CollagePhotoRef], spec: CollageScatterSpec, context: CollageLayout.Context,
-                         seed: UInt64, keep: Int = 12) -> [CollageLayout.Scored] {
+                         seed: UInt64, keep: Int = 12,
+                         reserve: (top: Double, bottom: Double) = (0, 0)) -> [CollageLayout.Scored] {
         guard !photos.isEmpty else { return [] }
         let canvas = context.canvas
         // 外框比例：相纸下沿宽，照片比例太极端的收一收（相纸本来就不是 2:3）。
@@ -544,12 +657,14 @@ enum CollageScatter {
         style.margin = photos.count <= 2 ? 0.1 : 0.075
         style.gutter = 0.03
         style.tightSmallCells = false
-        // 模板在底部固定写了字：照片的网格只排在上面那一截，最后整体平移回画布坐标。
-        let reserve = min(0.4, max(0, spec.reserveBottom))
+        // 上下有标题（模板固定写的字、页上的手写字）：照片的网格只排在中间那一截，最后整体平移回画布坐标。
+        let reserveTop: Double = min(0.35, max(0, reserve.top))
+        let reserveBottom: Double = min(0.4, max(0, max(spec.reserveBottom, reserve.bottom)))
+        let offsetY: Double = Double(canvas.height) * reserveTop
         var gridCanvas = canvas
-        gridCanvas.height = max(64, Int((Double(canvas.height) * (1 - reserve)).rounded()))
-        // 九宫格的横切线跟着高度变了位置，留了底就不按它排；中缝、轮播页缝是竖线，照旧避开。
-        if reserve > 0, gridCanvas.seams == .grid9 { gridCanvas.seams = .none }
+        gridCanvas.height = max(64, Int((Double(canvas.height) * (1 - reserveTop - reserveBottom)).rounded()))
+        // 九宫格的横切线跟着高度变了位置，留了上下就不按它排；中缝、轮播页缝是竖线，照旧避开。
+        if reserveTop + reserveBottom > 0, gridCanvas.seams == .grid9 { gridCanvas.seams = .none }
         let gridContext = CollageLayout.Context(canvas: gridCanvas, style: style, photos: fake, hints: [:], heroID: nil)
         let grids = CollageLayout.solve(CollageLayout.Request(photos: photos.compactMap { fake[$0.id] },
                                                               context: gridContext, tries: 4000, keep: 10, seed: seed))
@@ -581,8 +696,9 @@ enum CollageScatter {
                     var item = CollageItem(kind: .photo)
                     item.photoID = id
                     item.frame = spec.frame
+                    item.generated = true
                     item.cx = (Double(r.midX) + jx) / Double(canvas.width)
-                    item.cy = (Double(r.midY) + jy) / Double(canvas.height)
+                    item.cy = (offsetY + Double(r.midY) + jy) / Double(canvas.height)
                     item.width = w / canvas.shortSide
                     item.height = h / canvas.shortSide
                     let tilt = spec.tilt * (0.35 + 0.65 * CollageItems.unit(&rng))
@@ -602,6 +718,7 @@ enum CollageScatter {
                     items.append(h)
                 }
                 items = relieve(items, canvas: canvas, photos: context.photos, hints: context.hints)
+                items = clearOfFold(items, canvas: canvas)
                 items = withTapes(items, spec: spec, canvas: canvas, photos: context.photos, hints: context.hints,
                                   rng: &rng)
                 let s = score(items, canvas: canvas, photos: context.photos, hints: context.hints)
@@ -614,6 +731,34 @@ enum CollageScatter {
             if let b = bestForGrid { results.append(b) }
         }
         return CollageLayout.diverse(results, keep: keep)
+    }
+
+    /// 相册跨页：放大、挪动之后相纸边伸进中缝那一条（装订会吃掉）就往自己那一侧挪出来；
+    /// 挪了会出画的不动，整张横跨中缝的交给打分。
+    static func clearOfFold(_ items: [CollageItem], canvas: CollageCanvas) -> [CollageItem] {
+        guard canvas.seams == .fold else { return items }
+        let w = Double(canvas.width)
+        let fold: Double = w / 2
+        let band: Double = canvas.shortSide * 0.02
+        return items.map { it -> CollageItem in
+            guard it.kind == .photo else { return it }
+            let b = CollageItems.bounds(it, canvas: canvas)
+            let minX = Double(b.minX)
+            let maxX = Double(b.maxX)
+            guard minX < fold + band, maxX > fold - band else { return it }
+            let center: Double = it.cx * w
+            var out = it
+            if center < fold {
+                let dx: Double = maxX - (fold - band)
+                guard minX - dx >= 0 else { return it }
+                out.cx = (center - dx) / w
+            } else {
+                let dx: Double = (fold + band) - minX
+                guard maxX + dx <= w else { return it }
+                out.cx = (center + dx) / w
+            }
+            return out
+        }
     }
 
     /// 压脸的：把压在上面的那张往外推一点、再不行就把被压的那张提到上面。
@@ -723,6 +868,8 @@ enum CollageScatter {
                 tp.width = w
                 tp.height = h
                 tp.rotation = item.rotation + angle
+                tp.generated = true
+                tp.attach = CollageItems.attachment(of: tp, to: item, canvas: canvas)
                 return tp
             }
             func clear(_ tp: CollageItem) -> Bool {
@@ -810,5 +957,57 @@ enum CollageScatter {
         let emptyFrac = Double(empty) / Double(n * n)
         s += 2.5 * max(0, emptyFrac - 0.18)
         return Score(score: s, covered: covered, seam: seam)
+    }
+
+    /// 页上横排的字（手写标题、网格文字格转来的）占着最上或最下一截：撒照片时让开这一截，
+    /// 不然照片会压在标题上。窄的（竖排、角落小字）不算。返回画布高度比例。
+    static func reserveBands(for items: [CollageItem], canvas: CollageCanvas) -> (top: Double, bottom: Double) {
+        let w = Double(canvas.width)
+        let h = Double(max(1, canvas.height))
+        let gap: Double = canvas.shortSide * 0.015
+        var top = 0.0
+        var bottom = 0.0
+        for it in items where it.kind == .text {
+            let b = CollageItems.bounds(it, canvas: canvas)
+            guard Double(b.width) >= 0.3 * w else { continue }
+            if Double(b.maxY) <= 0.35 * h {
+                top = max(top, (Double(b.maxY) + gap) / h)
+            } else if Double(b.minY) >= 0.65 * h {
+                bottom = max(bottom, (h - Double(b.minY) + gap) / h)
+            }
+        }
+        return (min(0.35, top), min(0.35, bottom))
+    }
+
+    /// 换一批（散落）：新撒的相纸和胶带 + 留下来的手写字、手动加的贴纸。贴在相纸上的手动贴纸换到
+    /// 同一张照片的新相纸上，叠放顺序紧跟在那一组后面；那张照片这次没上版，贴纸也不要了。
+    static func merge(fresh: [CollageItem], kept: [CollageItem], old: [CollageItem],
+                      canvas: CollageCanvas) -> [CollageItem] {
+        var photoOfOld: [UUID: String] = [:]
+        for it in old where it.kind == .photo {
+            if let p = it.photoID { photoOfOld[it.id] = p }
+        }
+        var freshByPhoto: [String: UUID] = [:]
+        for it in fresh where it.kind == .photo {
+            if let p = it.photoID, freshByPhoto[p] == nil { freshByPhoto[p] = it.id }
+        }
+        // 手动贴过胶带的照片：新撒的自动胶带不要了（两条叠在同一个上沿）。
+        var hasManualTape = Set<UUID>()
+        for it in kept where it.kind == .sticker && it.sticker.isTape {
+            if let a = it.attach, let pid = photoOfOld[a.to], let target = freshByPhoto[pid] { hasManualTape.insert(target) }
+        }
+        var out = fresh.filter { !($0.generated && $0.kind == .sticker && $0.attach.map { hasManualTape.contains($0.to) } == true) }
+        var loose: [CollageItem] = []
+        for var it in kept {
+            guard let a = it.attach else {
+                loose.append(it)
+                continue
+            }
+            guard let pid = photoOfOld[a.to], let target = freshByPhoto[pid] else { continue }
+            it.attach?.to = target
+            let end = out.lastIndex { $0.id == target || $0.attach?.to == target } ?? (out.count - 1)
+            out.insert(it, at: min(out.count, end + 1))
+        }
+        return CollageItems.pinAll(out + loose, canvas: canvas)
     }
 }

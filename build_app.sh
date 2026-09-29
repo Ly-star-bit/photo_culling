@@ -168,7 +168,11 @@ fi
 
 # Finder 排版在无 GUI 的 CI runner 上可能失败 — 失败就跳过,DMG 照样能装,
 # 只是没有自定义布局/背景。
-if ! osascript - "$VOL" <<'EOF'
+# NO_FINDER=1:本机打包不碰 Finder(排版要让 Finder 打开卷窗口,会弹到正在用电脑的人屏幕上)。
+# 发布用的 DMG 由 CI 打,本机的只是自测用,默认布局就够了。
+if [ "${NO_FINDER:-}" = "1" ]; then
+    echo "==> NO_FINDER=1:跳过 Finder 排版(默认布局)"
+elif ! osascript - "$VOL" <<'EOF'
 on run argv
     set volPath to item 1 of argv
     tell application "Finder"
@@ -196,11 +200,13 @@ then
     echo "!! Finder 排版失败 (CI 常见) — 继续打包默认布局的 DMG"
 fi
 
-# Finder 关窗后才把布局写进 .DS_Store:等它落地 (最多 5 秒) 再卸载。
-for _ in $(seq 1 10); do
-    [ -f "$VOL/.DS_Store" ] && break
-    sleep 0.5
-done
+# Finder 关窗后才把布局写进 .DS_Store:等它落地 (最多 5 秒) 再卸载(没排版就不用等)。
+if [ "${NO_FINDER:-}" != "1" ]; then
+    for _ in $(seq 1 10); do
+        [ -f "$VOL/.DS_Store" ] && break
+        sleep 0.5
+    done
+fi
 # Finder/Spotlight 可能还捏着卷:先礼貌重试几次,再 -force —— set -e 下一次
 # Resource busy 就会退出并把卷留在那里毒害下一次构建。
 detached=0

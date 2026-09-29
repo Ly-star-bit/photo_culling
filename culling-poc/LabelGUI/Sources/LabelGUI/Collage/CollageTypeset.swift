@@ -213,9 +213,10 @@ enum CollageTypeset {
         return out
     }
 
-    private static let placeholderRegex = try! NSRegularExpression(pattern: "\\{([a-z_0-9]+)\\}")
+    private static let placeholderRegex = try! NSRegularExpression(pattern: "\\{([a-z_0-9]+)(?:\\|([^{}]*))?\\}")
 
-    /// {key} 换成值；没有的键换成空串（不留 "{lens}" 这种字样）。
+    /// {key} 换成值；没有的键换成空串（不留 "{lens}" 这种字样）。{key|默认} = 没有值时用默认那句
+    /// （电影字幕：没填副标题也有一句字，不然点了什么都不出）。
     static func fill(_ template: String, vars: [String: String]) -> String {
         let ns = template as NSString
         var out = ""
@@ -223,7 +224,12 @@ enum CollageTypeset {
         for match in placeholderRegex.matches(in: template, range: NSRange(location: 0, length: ns.length)) {
             out += ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
             let key = ns.substring(with: match.range(at: 1))
-            out += vars[key] ?? ""
+            let value = vars[key] ?? ""
+            if value.isEmpty, match.range(at: 2).location != NSNotFound {
+                out += ns.substring(with: match.range(at: 2))
+            } else {
+                out += value
+            }
             cursor = match.range.location + match.range.length
         }
         out += ns.substring(from: cursor)

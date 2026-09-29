@@ -47,6 +47,7 @@ enum CollageOverlays {
 
         let grid = photo.flatMap { p in window.flatMap { w in luminanceGrid(p, window: w) } }
         let mapper = Mapper(drawn: drawn, window: window)
+        let seams = CollageLayout.seamLines(canvas)
 
         var chosen: CollageAnchor
         var rect: CGRect
@@ -61,14 +62,16 @@ enum CollageOverlays {
             var best = (anchor: CollageAnchor.top, rect: CGRect.zero, cost: Double.infinity)
             for a in CollageAnchor.grid {
                 let r = anchored(a, size: size, in: inner)
-                let c = cost(r, anchor: a, vertical: vertical, photo: photo, hints: hints, grid: grid, mapper: mapper)
+                let face: Double = cost(r, anchor: a, vertical: vertical, photo: photo, hints: hints, grid: grid,
+                                        mapper: mapper)
+                let c: Double = face + seamCost(r, seams: seams)
                 if c < best.cost { best = (a, r, c) }
             }
             chosen = best.anchor
             rect = best.rect
         default:
             chosen = overlay.anchor
-            rect = anchored(overlay.anchor, size: size, in: inner)
+            rect = clearOfSeams(anchored(overlay.anchor, size: size, in: inner), canvas: canvas, within: inner)
         }
 
         // 字贴着哪条边就向哪边对齐（左下角的字左对齐、右上角的右对齐）；手动拖的保留原对齐。
@@ -78,9 +81,11 @@ enum CollageOverlays {
         }
         text.alignV = .leading
 
-        var lum = meanLuminance(rect, grid: grid, mapper: mapper) ?? background.luminance
+        let sampled = meanLuminance(rect, grid: grid, mapper: mapper)
+        var lum = sampled ?? background.luminance
         // 网格是调色前的亮度：套了色调（日系提亮、复古抬黑位）要按调完的亮度判深字浅字。
-        if grid != nil, look != .none, lookStrength > 0 {
+        // 字落在留白底色上（取不到照片）时不调：底色本身不过色调。
+        if sampled != nil, look != .none, lookStrength > 0 {
             let m = CollageLooks.map(look, lum, lum, lum)
             let after: Double = 0.2126 * m.0 + 0.7152 * m.1 + 0.0722 * m.2
             lum += (after - lum) * min(1, lookStrength)
@@ -183,6 +188,34 @@ enum CollageOverlays {
             c += 5 * stats.busy + 2 * stats.spread
         }
         return c
+    }
+
+    /// 压到相册中缝、轮播切缝、九宫格切线：印出来被书脊吃掉，或者一句字被切在两张图上。
+    private static func seamCost(_ r: CGRect, seams: [CGRect]) -> Double {
+        let area = max(1e-9, Double(r.width * r.height))
+        var c = 0.0
+        for band in seams {
+            let hit = intersectionArea(r, band)
+            if hit > 0 { c += 3 + 30 * hit / area }
+        }
+        return c
+    }
+
+    /// 固定位置的字（下方字幕、上方居中）压在竖的切缝上：往字块中心那一侧挪开；两边都挪不开
+    /// （字比半边还宽）就不动。手动拖的不管 —— 用户放哪就是哪。
+    private static func clearOfSeams(_ r: CGRect, canvas: CollageCanvas, within box: CGRect) -> CGRect {
+        guard canvas.seams == .fold || canvas.seams == .carousel else { return r }
+        var out = r
+        for band in CollageLayout.seamLines(canvas) where out.intersects(band) {
+            let toLeft = band.minX - out.width
+            let toRight = band.maxX
+            let order = out.midX < band.midX ? [toLeft, toRight] : [toRight, toLeft]
+            for x in order where x >= box.minX - 0.5 && x + out.width <= box.maxX + 0.5 {
+                out.origin.x = x
+                break
+            }
+        }
+        return out
     }
 
     private static func intersectionArea(_ a: CGRect, _ b: CGRect) -> Double {
@@ -353,7 +386,9 @@ enum CollageOverlays {
         }()),
         Preset(key: "subtitle", name: "电影字幕", overlay: {
             let t = CollageText(lines: [
-                CollageTextLine("{subtitle}", font: .pingfang, weight: .regular, size: 0.03, tracking: 0.06, color: .white),
+                // 没填副标题时先放一句（以前空着，点了什么都不出、也没有框可拖）。
+                CollageTextLine("{subtitle|那天的风，吹得很温柔}", font: .pingfang, weight: .regular, size: 0.03,
+                                tracking: 0.06, color: .white),
             ], vertical: false, alignH: .center, alignV: .leading)
             var o = CollageOverlay(text: t)
             o.anchor = .bottom

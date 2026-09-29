@@ -754,7 +754,8 @@ struct CollageCanvasDropDelegate: DropDelegate {
                     } else if let where_ {
                         store.place(photoID: id, at: where_.path, edge: where_.edge)
                     } else if store.root == nil {
-                        store.solve(photoIDs: [id])
+                        // 空画布拖进第一张：按开关上的网格 / 散落排。
+                        store.layoutFresh(photoIDs: [id])
                     }
                 }
             }

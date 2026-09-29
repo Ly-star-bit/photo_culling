@@ -453,6 +453,6 @@ struct CollagePageStrip: View {
             Divider()
             Button("删除这个跨页", role: .destructive) { store.deletePage(index) }
         }
-        .help("跨页 \(index + 1) · \(page.root.photoIDs.count) 张（右键挪动/删除）")
+        .help("跨页 \(index + 1) · \(page.photoIDs.count) 张（右键挪动/删除）")
     }
 }

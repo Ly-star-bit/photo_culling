@@ -2616,7 +2616,7 @@ final class BatchStore: ObservableObject {
                 if jpegOnly > 0 { parts.append("\(jpegOnly) 张只有 JPG 未复制") }
                 if summaryFailed.isEmpty {
                     self.progressText = parts.joined(separator: " · ")
-                    NSWorkspace.shared.activateFileViewerSelecting([destDir])
+                    AppRuntime.revealInFinder([destDir])
                 } else {
                     self.lastError = "高ISO RAW: \(copiedCount) 成功, \(summaryFailed.count) 失败 (\(summaryFailed.prefix(3).joined(separator: ", ")))"
                 }

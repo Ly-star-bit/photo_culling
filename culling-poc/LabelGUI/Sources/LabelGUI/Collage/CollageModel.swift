@@ -442,6 +442,9 @@ enum CollageBorder: String, Codable, CaseIterable, Hashable {
 enum CollageLook: String, Codable, CaseIterable, Hashable {
     case none, film, airy, faded, cinema, cool, mono, sepia
 
+    /// 黑白、旧照：去色永远是全的，强度只管影调（强度 0 也是黑白）。
+    var isMonochrome: Bool { self == .mono || self == .sepia }
+
     var label: String {
         switch self {
         case .none: return "原色"
@@ -664,8 +667,24 @@ struct CollageItem: Codable, Hashable, Identifiable {
     var color = CollageColor(hex: 0xE9C8B8)
     /// 标签、邮戳上的字（支持占位符）。
     var label = ""
+    /// 散落版自动撒出来的相纸、胶带：「换一批」时换新的；手动加的留着。
+    var generated = false
+    /// 贴在哪张相纸上（胶带、回形针）：相纸挪、转、缩放、换一批，它都跟着走。
+    var attach: CollageAttachment?
+    /// 网格切散落时由第几个文字格转来的字：切回网格时变回那个文字格。
+    var sourceCell: Int?
 
     init(kind: CollageItemKind = .sticker) { self.kind = kind }
+}
+
+/// 贴纸贴在一张相纸上的位置：相纸局部坐标里的中心（相对相纸宽、高）和相对角度。
+struct CollageAttachment: Codable, Hashable {
+    /// 那张相纸的图层 id。
+    var to: UUID
+    var x: Double
+    var y: Double
+    /// 相对相纸的角度（度）。
+    var angle: Double
 }
 
 /// 散落版的生成参数：模板带着它，「换一批」按它重新撒。
@@ -701,16 +720,20 @@ struct CollagePage: Codable, Hashable, Identifiable {
     var items: [CollageItem] = []
     /// 散落版：整页都是自由图层，切分树不画。
     var freeform = false
-    /// 散落版「换一批」用的参数。
+    /// 散落版「换一批」用的参数（切回网格也留着，再切散落照原来的撒法）。
     var scatter: CollageScatterSpec?
+    /// 散落版记着切过来之前的网格：切回网格时文字格、照片上的字照着恢复。
+    var gridRoot: CollageNode?
 
     init(root: CollageNode) { self.root = root }
 
-    init(root: CollageNode, items: [CollageItem], freeform: Bool, scatter: CollageScatterSpec? = nil) {
+    init(root: CollageNode, items: [CollageItem], freeform: Bool, scatter: CollageScatterSpec? = nil,
+         gridRoot: CollageNode? = nil) {
         self.root = root
         self.items = items
         self.freeform = freeform
         self.scatter = scatter
+        self.gridRoot = gridRoot
     }
 
     /// 这一页用到的照片：散落版只看图层，网格版是格子 + 图层里的照片。
@@ -763,6 +786,8 @@ struct CollageTemplate: Codable, Hashable, Identifiable {
     var freeform = false
     /// 自己存的散落版原来的撒法：套用时照原样摆，之后「换一批」按它重撒（相角、不贴胶带、底部留字）。
     var pageScatter: CollageScatterSpec?
+    /// 存的时候画布的宽高比：散落版套到比例差得多的画布上（单张存的套进相册跨页）要按撒法重撒。
+    var savedAspect: Double?
 
     init(name: String, root: CollageNode, style: CollageStyle? = nil, canvas: CollageCanvas? = nil,
          fitAspects: Bool = true, builtin: Bool = false, category: String = "",
@@ -969,6 +994,11 @@ extension CollageItem {
         sticker = c.soft(.sticker, .washi)
         color = c.soft(.color, sticker.defaultColor)
         label = c.soft(.label, "")
+        // v1.12.0 存的没有这个键：那时的胶带基本都是撒出来的（手动贴的换一批也会被换掉）——
+        // 按「自动」算，换一批时照旧换新，不会悬空留在新版面上。
+        generated = c.contains(.generated) ? c.soft(.generated, false) : (kind == .sticker && sticker.isTape)
+        attach = c.softOptional(.attach)
+        sourceCell = c.softOptional(.sourceCell)
     }
 }
 
@@ -1012,6 +1042,7 @@ extension CollagePage {
         items = c.soft(.items, [Failable<CollageItem>]()).compactMap(\.value)
         freeform = c.soft(.freeform, false)
         scatter = c.softOptional(.scatter)
+        gridRoot = c.softOptional(.gridRoot)
     }
 }
 
@@ -1042,5 +1073,7 @@ extension CollageTemplate {
         scatter = c.softOptional(.scatter)
         freeform = c.soft(.freeform, false) || scatter != nil
         pageScatter = c.softOptional(.pageScatter)
+        let aspect: Double? = c.softOptional(.savedAspect)
+        savedAspect = aspect.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
     }
 }

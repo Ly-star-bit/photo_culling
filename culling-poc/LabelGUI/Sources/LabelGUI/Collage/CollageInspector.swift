@@ -79,7 +79,9 @@ struct CollageLayoutPanel: View {
     var body: some View {
         canvasBox
         if let item = store.selectedItemValue {
+            // 换了图层就换一个面板实例：输入框迟到的提交只会写回它自己那张（按 id 认）。
             CollageItemBox(store: store, item: item)
+                .id(item.id)
         } else if store.selectedCell != nil {
             cellBox
         }
@@ -354,7 +356,7 @@ struct CollageStylePanel: View {
                 set: { v in
                     var s = store.project.style
                     s[keyPath: keyPath] = v
-                    store.setStyle(s)
+                    store.setStyle(s, coalesce: false)
                 })
     }
 
@@ -363,7 +365,7 @@ struct CollageStylePanel: View {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 6)], spacing: 6) {
                 ForEach(CollageStyles.all) { preset in
                     Button {
-                        store.setStyle(preset.style)
+                        store.setStyle(preset.style, coalesce: false)
                     } label: {
                         Text(preset.name)
                             .font(.caption)
@@ -376,26 +378,38 @@ struct CollageStylePanel: View {
         }
     }
 
+    /// 散落版没有格子：外边距、缝宽、形状、圆角、小格近景、边框、投影都不起作用 —— 灰掉，别让人拖了
+    /// 半天画面不动还记一堆撤销。相框和投影在选中的相纸上按张调。
+    private func gridOnlyHint(_ text: String) -> some View {
+        Text(text)
+            .font(.caption2).foregroundStyle(.tertiary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
     private var spacingBox: some View {
         GroupBox("留白与形状") {
             VStack(alignment: .leading, spacing: 8) {
-                CollageSlider(label: "外边距", value: styleBinding(\.margin), range: 0...0.14,
-                              display: percent(store.project.style.margin))
-                CollageSlider(label: "缝宽", value: styleBinding(\.gutter), range: 0...0.05,
-                              display: percent(store.project.style.gutter))
-                Picker("形状", selection: Binding(get: { store.project.style.shape }, set: { v in
-                    var s = store.project.style
-                    s.shape = v
-                    store.setStyle(s)
-                })) {
-                    ForEach(CollageShape.allCases, id: \.self) { Text($0.label).tag($0) }
+                Group {
+                    CollageSlider(label: "外边距", value: styleBinding(\.margin), range: 0...0.14,
+                                  display: percent(store.project.style.margin))
+                    CollageSlider(label: "缝宽", value: styleBinding(\.gutter), range: 0...0.05,
+                                  display: percent(store.project.style.gutter))
+                    Picker("形状", selection: Binding(get: { store.project.style.shape }, set: { v in
+                        var s = store.project.style
+                        s.shape = v
+                        store.setStyle(s, coalesce: false)
+                    })) {
+                        ForEach(CollageShape.allCases, id: \.self) { Text($0.label).tag($0) }
+                    }
+                    if store.project.style.shape == .rounded {
+                        CollageSlider(label: "圆角", value: styleBinding(\.corner), range: 0...0.06,
+                                      display: percent(store.project.style.corner))
+                    }
+                    Toggle("小格自动收近景", isOn: styleBool(\.tightSmallCells))
+                        .help("小格子里的全身照隔一张收成半身：一张远景配几张近景，版面有节奏")
                 }
-                if store.project.style.shape == .rounded {
-                    CollageSlider(label: "圆角", value: styleBinding(\.corner), range: 0...0.06,
-                                  display: percent(store.project.style.corner))
-                }
-                Toggle("小格自动收近景", isOn: styleBool(\.tightSmallCells))
-                    .help("小格子里的全身照隔一张收成半身：一张远景配几张近景，版面有节奏")
+                .disabled(store.isFreeform)
+                if store.isFreeform { gridOnlyHint("散落版没有格子：上面几项只管网格版。") }
                 CollageSlider(label: "输出锐化", value: styleBinding(\.sharpen), range: 0...1,
                               display: String(format: "%.2f", store.project.style.sharpen))
             }
@@ -426,7 +440,7 @@ struct CollageStylePanel: View {
                     set: { on in
                         var s = store.project.style
                         s.backgroundMode = on ? .fromPhoto : .solid
-                        store.setStyle(s)
+                        store.setStyle(s, coalesce: false)
                     }))
                     .help("底色往主图的色调上靠一点（压低饱和，不会染成照片的颜色）")
                 CollageSlider(label: "纸纹", value: styleBinding(\.grain), range: 0...1,
@@ -442,7 +456,7 @@ struct CollageStylePanel: View {
             var s = store.project.style
             s.background = color
             s.backgroundMode = .solid
-            store.setStyle(s)
+            store.setStyle(s, coalesce: false)
         } label: {
             Circle()
                 .fill(color.swiftUIColor)
@@ -456,29 +470,35 @@ struct CollageStylePanel: View {
     private var frameBox: some View {
         GroupBox("边框与投影") {
             VStack(alignment: .leading, spacing: 8) {
-                Picker("边框", selection: Binding(get: { store.project.style.border }, set: { v in
-                    var s = store.project.style
-                    s.border = v
-                    store.setStyle(s)
-                })) {
-                    ForEach(CollageBorder.allCases, id: \.self) { Text($0.label).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                if store.project.style.border == .hairline || store.project.style.border == .polaroid {
-                    ColorPicker("边框颜色", selection: Binding(
-                        get: { store.project.style.borderColor.swiftUIColor },
-                        set: { c in
-                            var s = store.project.style
-                            s.borderColor = CollageColor(c)
-                            store.setStyle(s)
-                        }), supportsOpacity: false)
-                        .font(.caption)
-                }
-                CollageSlider(label: "投影", value: styleBinding(\.shadow), range: 0...1,
-                              display: String(format: "%.2f", store.project.style.shadow))
+                if store.isFreeform { gridOnlyHint("散落版的相框、投影在「版式 › 选中的图层」里按张调。") }
+                frameControls.disabled(store.isFreeform)
             }
             .padding(4)
         }
+    }
+
+    @ViewBuilder
+    private var frameControls: some View {
+        Picker("边框", selection: Binding(get: { store.project.style.border }, set: { v in
+            var s = store.project.style
+            s.border = v
+            store.setStyle(s, coalesce: false)
+        })) {
+            ForEach(CollageBorder.allCases, id: \.self) { Text($0.label).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        if store.project.style.border == .hairline || store.project.style.border == .polaroid {
+            ColorPicker("边框颜色", selection: Binding(
+                get: { store.project.style.borderColor.swiftUIColor },
+                set: { c in
+                    var s = store.project.style
+                    s.borderColor = CollageColor(c)
+                    store.setStyle(s)
+                }), supportsOpacity: false)
+                .font(.caption)
+        }
+        CollageSlider(label: "投影", value: styleBinding(\.shadow), range: 0...1,
+                      display: String(format: "%.2f", store.project.style.shadow))
     }
 }
 
@@ -521,14 +541,15 @@ struct CollageTextPanel: View {
             if cell.kind == .text, let text = cell.text {
                 // 编辑器绑定到这一格的路径；换了格子就换一个编辑器实例（旧的文字框迟到的提交
                 // 只会写回它自己那一格）。
-                CollageTextEditor(store: store, text: text, target: .cell(path))
-                    .id(CollageTextTarget.cell(path))
+                CollageTextEditor(store: store, text: text, target: .cell(path, store.page?.id))
+                    .id(CollageTextTarget.cell(path, store.page?.id))
             } else if cell.kind == .photo {
                 CollageOverlayBox(store: store, path: path, overlay: cell.overlay)
                 if let overlay = cell.overlay {
-                    CollageTextEditor(store: store, text: overlay.text, target: .overlay(path, cell.photoID),
-                                      alignFollowsAnchor: overlay.anchor != .custom)
-                        .id(CollageTextTarget.overlay(path, cell.photoID))
+                    CollageTextEditor(store: store, text: overlay.text,
+                                      target: .overlay(path, cell.photoID, store.page?.id),
+                                      alignFollowsAnchor: overlay.anchor != .custom, isOverlay: true)
+                        .id(CollageTextTarget.overlay(path, cell.photoID, store.page?.id))
                 }
             } else {
                 addBox
@@ -571,6 +592,8 @@ struct CollageTextEditor: View {
     let target: CollageTextTarget
     /// 压字：对齐跟着位置走（贴左边就左对齐），没手动拖过时不给调。
     var alignFollowsAnchor = false
+    /// 压字的字框就是字本身那么大：没有「垂直对齐」可言，横排多行才有「水平对齐」。
+    var isOverlay = false
 
     private func update(_ body: (inout CollageText) -> Void) {
         var t = text
@@ -586,6 +609,8 @@ struct CollageTextEditor: View {
                     Text("对齐跟着字的位置走：贴左边左对齐、居中居中、贴右边右对齐")
                         .font(.caption2).foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)
+                } else if isOverlay {
+                    if !text.vertical { horizontalPicker }
                 } else {
                     alignPickers
                 }
@@ -612,14 +637,18 @@ struct CollageTextEditor: View {
         .font(.caption)
     }
 
-    @ViewBuilder
-    private var alignPickers: some View {
+    private var horizontalPicker: some View {
         Picker("水平", selection: Binding(get: { text.alignH }, set: { v in update { $0.alignH = v } })) {
             Text("左").tag(CollageAlign.leading)
             Text("中").tag(CollageAlign.center)
             Text("右").tag(CollageAlign.trailing)
         }
         .pickerStyle(.segmented)
+    }
+
+    @ViewBuilder
+    private var alignPickers: some View {
+        horizontalPicker
         Picker("垂直", selection: Binding(get: { text.alignV }, set: { v in update { $0.alignV = v } })) {
             Text("上").tag(CollageAlign.leading)
             Text("中").tag(CollageAlign.center)

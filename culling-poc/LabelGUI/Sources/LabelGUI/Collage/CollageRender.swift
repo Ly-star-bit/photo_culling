@@ -135,8 +135,9 @@ enum CollageRender {
                 case .photo:
                     let unscaled = framingFrames.first { $0.path == frame.path }
                     guard let id = frame.cell.photoID, let photo = photos[id] else {
+                        // 空格子：预览画占位（压字也画上，提醒这里有字），导出不印孤零零的一行字。
                         if options.placeholders { drawPlaceholder(ctx, rect: rect, short: short, dark: bg.luminance < 0.4) }
-                        if let overlay = frame.cell.overlay, let unscaled {
+                        if let overlay = frame.cell.overlay, let unscaled, options.placeholders {
                             drawOverlay(overlay, cell: frame.cell, unscaled: unscaled, ctx: ctx, project: project,
                                         photo: nil, framing: .auto, hints: nil, vars: vars, background: bg,
                                         scale: scale, bleed: bleed, canvasHeight: fullH)
@@ -195,7 +196,25 @@ enum CollageRender {
                                  project: CollageProject, photo: CollagePhotoRef?, framing: CollageFraming,
                                  hints: CollageCrop.Hints?, vars: [String: String],
                                  background: CollageColor) -> CollageOverlays.Placement? {
-        let area = CollageCrop.photoArea(cell: cell, rect: frameRect, style: project.style)
+        let g = overlayGeometry(cell: cell, frameRect: frameRect, style: project.style, photo: photo,
+                                framing: framing, hints: hints)
+        return CollageOverlays.place(overlay, area: g.textArea, drawn: g.drawn, canvas: project.canvas, photo: photo,
+                                     window: g.window, hints: hints, vars: vars, background: background,
+                                     look: project.style.look, lookStrength: project.style.lookStrength)
+    }
+
+    /// 压字的几何：字能放的范围、照片实际画在哪、取景窗口。渲染器和画布上的拖字、虚线框共用这一个函数。
+    struct OverlayGeometry {
+        var textArea: CGRect
+        var drawn: CGRect
+        var window: CollageCrop.Window?
+    }
+
+    /// 字能放的范围 = 形状里面最大的矩形 ∩ 照片实际画出来的区域。形状裁在哪和 drawPhoto 一样：
+    /// 有边框裁外框，没边框裁照片实际画的区域（「完整显示」时比格子小 —— 以前按整格算，字会跑到圆外）。
+    static func overlayGeometry(cell: CollageCell, frameRect: CGRect, style: CollageStyle, photo: CollagePhotoRef?,
+                                framing: CollageFraming, hints: CollageCrop.Hints?) -> OverlayGeometry {
+        let area = CollageCrop.photoArea(cell: cell, rect: frameRect, style: style)
         var window: CollageCrop.Window?
         var drawn = area
         if let photo {
@@ -204,26 +223,41 @@ enum CollageRender {
             window = w
             drawn = CollageCrop.drawnRect(window: w, photo: photo, cell: cell, in: area)
         }
-        // 月洞门、拱窗：字只放在形状里面最大的那个矩形里（方形的四角是被裁掉的纸面）。
-        let textArea = inscribed(area, shape: cell.shape ?? project.style.shape)
-        return CollageOverlays.place(overlay, area: textArea, drawn: drawn, canvas: project.canvas, photo: photo,
-                                     window: window, hints: hints, vars: vars, background: background,
-                                     look: project.style.look, lookStrength: project.style.lookStrength)
+        let shape = cell.shape ?? style.shape
+        let framed = CollageCrop.isFramed(cell: cell, style: style)
+        let shapeRect = framed ? CollageCrop.outerArea(cell: cell, rect: frameRect, style: style) : drawn
+        let inside = inscribed(shapeRect, shape: shape)
+        var textArea = inside.intersection(drawn)
+        if textArea.isNull || textArea.width < 8 || textArea.height < 8 { textArea = inside }
+        return OverlayGeometry(textArea: textArea, drawn: drawn, window: window)
     }
 
     /// 形状里面最大的轴对齐矩形（和 shapePath 同一套几何）。
     static func inscribed(_ rect: CGRect, shape: CollageShape) -> CGRect {
-        let k: CGFloat = 1 - 1 / CGFloat(2).squareRoot()
         switch shape {
         case .circle:
+            let k: CGFloat = 1 - 1 / CGFloat(2).squareRoot()
             let d = min(rect.width, rect.height)
             let inset = d * k / 2
             let square = CGRect(x: rect.midX - d / 2, y: rect.midY - d / 2, width: d, height: d)
             return square.insetBy(dx: inset, dy: inset)
         case .arch:
+            // 拱顶两角是半径 r 的圆弧：顶边往下 t，两边就得往里收 r − √(r² − (r − t)²)。
+            // 在 t ∈ [0, r] 里挑面积最大的那个（以前只把顶边往下挪、两边不收，上面两个角在拱外面）。
             let r = min(rect.width / 2, rect.height)
-            let drop = r * k
-            return CGRect(x: rect.minX, y: rect.minY + drop, width: rect.width, height: max(1, rect.height - drop))
+            var best = CGRect(x: rect.minX, y: rect.minY + r, width: rect.width, height: max(1, rect.height - r))
+            var bestArea: CGFloat = best.width * best.height
+            for i in 0..<16 {
+                let t = r * CGFloat(i) / 16
+                let dy = r - t
+                let inset = r - max(0, r * r - dy * dy).squareRoot()
+                let w = rect.width - 2 * inset
+                let h = rect.height - t
+                guard w > 1, h > 1, w * h > bestArea else { continue }
+                bestArea = w * h
+                best = CGRect(x: rect.minX + inset, y: rect.minY + t, width: w, height: h)
+            }
+            return best
         case .rect, .rounded:
             return rect
         }
@@ -245,9 +279,15 @@ enum CollageRender {
             let short = CGFloat(project.canvas.shortSide * scale)
             ctx.setShadow(offset: CGSize(width: 0, height: -short * 0.0015 * k), blur: short * 0.012 * k,
                           color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.55 * Double(k)))
+            // 整块字画完再落一次投影：逐行（竖排逐字）各投各的，后一行的影子会压到前一行的字上。
+            ctx.beginTransparencyLayer(auxiliaryInfo: nil)
+            CollageTypeset.drawFitted(p.text, in: rect, ctx: ctx, short: p.short * scale, vars: vars,
+                                      canvasHeight: canvasHeight)
+            ctx.endTransparencyLayer()
+        } else {
+            CollageTypeset.drawFitted(p.text, in: rect, ctx: ctx, short: p.short * scale, vars: vars,
+                                      canvasHeight: canvasHeight)
         }
-        CollageTypeset.drawFitted(p.text, in: rect, ctx: ctx, short: p.short * scale, vars: vars,
-                                  canvasHeight: canvasHeight)
         ctx.restoreGState()
     }
 
@@ -489,7 +529,10 @@ enum CollageRender {
         let style = project.style
         guard style.backgroundMode == .fromPhoto else { return style.background }
         let hero = ids.compactMap { photos[$0] }.max { $0.score < $1.score }
-        guard let hero, let avg = averageColor(hero) else { return style.background }
+        guard let hero, let raw = averageColor(hero) else { return style.background }
+        // 取的是调色之后的主图颜色（套了黑白，底色不能还带着原图的暖色）。
+        let graded = CollageLooks.grade(raw.r, raw.g, raw.b, look: style.look, strength: style.lookStrength)
+        let avg = CollageColor(r: graded.0, g: graded.1, b: graded.2)
         // 往纸白靠、压饱和：只要一点点色温呼应，不能把底色染成照片的颜色。
         let grey = (avg.r + avg.g + avg.b) / 3
         let muted = avg.mixed(with: CollageColor(r: grey, g: grey, b: grey), 0.45)
@@ -499,7 +542,25 @@ enum CollageRender {
         return style.background.mixed(with: muted, 0.16)
     }
 
+    private static let averageLock = NSLock()
+    private static var averageCache: [String: CollageColor] = [:]
+
+    /// 主图平均色（按照片缓存：画布上移动鼠标、拖字每一帧都会问到底色）。
     private static func averageColor(_ photo: CollagePhotoRef) -> CollageColor? {
+        let key = CollageVision.cacheKey(photo)
+        averageLock.lock()
+        let hit = averageCache[key]
+        averageLock.unlock()
+        if let hit { return hit }
+        guard let color = computeAverageColor(photo) else { return nil }
+        averageLock.lock()
+        if averageCache.count > 512 { averageCache.removeAll() }
+        averageCache[key] = color
+        averageLock.unlock()
+        return color
+    }
+
+    private static func computeAverageColor(_ photo: CollagePhotoRef) -> CollageColor? {
         guard let image = CollageImages.preview(photo, need: 256) else { return nil }
         let side = 8
         var pixels = [UInt8](repeating: 0, count: side * side * 4)
