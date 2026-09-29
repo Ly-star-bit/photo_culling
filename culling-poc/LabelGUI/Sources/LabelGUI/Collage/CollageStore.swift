@@ -108,6 +108,8 @@ final class CollageStore: ObservableObject {
     }
 
     @Published var exportOptions = ExportOptions() { didSet { scheduleStateSave() } }
+    /// 导出的文件名（不带扩展名）；空 = 导出那一刻的时间，精确到秒。每次导出自己填，不存盘。
+    @Published var exportName = ""
     @Published private(set) var isExporting = false
     @Published private(set) var progressText = ""
     @Published private(set) var progressFraction: Double?
@@ -1927,16 +1929,15 @@ final class CollageStore: ObservableObject {
         let snapshot = project
         let hints = self.hints
         let options = exportOptions
-        let stamp = Self.stampFormatter.string(from: Date())
-        let base = (project.title.isEmpty ? (isAlbum ? "相册" : "拼图") : project.title)
-            .filter { $0 != "/" && $0 != ":" }
-        let dir = folder.appendingPathComponent("\(base)_\(stamp)")
+        // 直接写进输出目录（以前每次先建一个「标题_时间」子目录再往里写）。
         do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         } catch {
             lastError = "无法创建输出目录: \(error.localizedDescription)"
             return
         }
+        let base = exportBase(in: folder, project: snapshot, options: options)
+        let plan = Self.exportPlan(base: base, project: snapshot, options: options)
         isExporting = true
         exportCancelled = false
         lastError = nil
@@ -1961,8 +1962,8 @@ final class CollageStore: ObservableObject {
                         return PageResult(pdfData: nil, error: "第 \(i + 1) 页渲染失败", lowRes: [], missing: [])
                     }
                     do {
-                        let data = try Self.writePage(image, index: i, count: snapshot.pages.count, project: snapshot,
-                                                      options: options, dir: dir, wantPDF: wantPDF)
+                        let data = try Self.writePage(image, files: plan.pages[i], project: snapshot,
+                                                      options: options, dir: folder, wantPDF: wantPDF)
                         return PageResult(pdfData: data, error: nil, lowRes: report.lowRes, missing: report.missing)
                     } catch {
                         return PageResult(pdfData: nil, error: error.localizedDescription, lowRes: [], missing: [])
@@ -1976,9 +1977,9 @@ final class CollageStore: ObservableObject {
                 self.progressFraction = Double(i + 1) / Double(snapshot.pages.count)
                 self.progressText = "导出 \(i + 1)/\(snapshot.pages.count)…"
             }
-            if wantPDF, !pdfPages.isEmpty, !(self?.exportCancelled ?? true) {
+            if wantPDF, let pdfName = plan.pdf, !pdfPages.isEmpty, !(self?.exportCancelled ?? true) {
                 self?.progressText = "生成 PDF…"
-                let pdfURL = dir.appendingPathComponent("\(base).pdf")
+                let pdfURL = folder.appendingPathComponent(pdfName)
                 let pages = pdfPages
                 let pdfError = await Task.detached(priority: .userInitiated) { () -> String? in
                     do {
@@ -2000,8 +2001,10 @@ final class CollageStore: ObservableObject {
                 self.progressText = ""
                 self.lastError = "导出失败: \(failure)"
             } else {
-                self.progressText = "导出完成 → \(dir.lastPathComponent)"
-                AppRuntime.revealInFinder([dir])
+                let files = plan.pages.flatMap { $0 } + (plan.pdf.map { [$0] } ?? [])
+                let main = plan.pdf ?? files.first ?? base
+                self.progressText = "导出完成 → \(main)" + (files.count > 1 ? "（共 \(files.count) 个文件）" : "")
+                AppRuntime.revealInFinder(files.map { folder.appendingPathComponent($0) })
             }
             // 成品里有退化的格子：说清楚是哪几张（导出本身不算失败）。
             if !missing.isEmpty {
@@ -2020,7 +2023,7 @@ final class CollageStore: ObservableObject {
 
     /// 固定格式必须钉 en_US_POSIX：系统偏好 12 小时制时，"HH" 会被换成「上午9」，
     /// 文件夹名就成了「春日宴_20260928-上午90228」。
-    private static let stampFormatter: DateFormatter = {
+    static let stampFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyyMMdd-HHmmss"
@@ -2036,12 +2039,77 @@ final class CollageStore: ObservableObject {
 
     /// 一页落盘：单张按画布切缝写九宫格/轮播；相册每个跨页一张（带出血）。
     /// `wantPDF` 时返回这一页进 PDF 用的 JPEG 数据（JPEG 格式就是写盘的同一份）。
-    nonisolated private static func writePage(_ image: CGImage, index: Int, count: Int, project: CollageProject,
+    /// 文件名：手动填的，或者导出那一刻的时间（精确到秒）。输出目录里已经有同名的就加 -2、-3……
+    /// （按这次要写的每一个文件查，不覆盖以前导出的）。
+    private func exportBase(in folder: URL, project: CollageProject, options: ExportOptions) -> String {
+        let typed = Self.cleanFileName(exportName, ext: options.format.ext)
+        let root = typed.isEmpty ? Self.stampFormatter.string(from: Date()) : typed
+        var candidate = root
+        var n = 2
+        while n < 1000 {
+            let plan = Self.exportPlan(base: candidate, project: project, options: options)
+            let names = plan.pages.flatMap { $0 } + (plan.pdf.map { [$0] } ?? [])
+            let taken = names.contains { FileManager.default.fileExists(atPath: folder.appendingPathComponent($0).path) }
+            if !taken { break }
+            candidate = "\(root)-\(n)"
+            n += 1
+        }
+        return candidate
+    }
+
+    /// 手填的名字：去掉路径符号、首尾空白、开头的点；顺手去掉多打的扩展名。
+    nonisolated static func cleanFileName(_ raw: String, ext: String) -> String {
+        var name = raw.filter { $0 != "/" && $0 != ":" && !$0.isNewline }
+            .trimmingCharacters(in: .whitespaces)
+        for suffix in [".\(ext)", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".pdf"]
+        where name.lowercased().hasSuffix(suffix) {
+            name = String(name.dropLast(suffix.count))
+            break
+        }
+        while name.hasPrefix(".") { name.removeFirst() }
+        return String(name.prefix(100)).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// 这次导出每一页写哪几个文件（都直接在输出目录里，同一个名字开头），相册另有一份 PDF。
+    /// 写文件和查重名用同一份清单。
+    struct ExportPlan: Sendable {
+        var pages: [[String]]
+        var pdf: String?
+    }
+
+    nonisolated static func exportPlan(base: String, project: CollageProject, options: ExportOptions) -> ExportPlan {
+        let ext = options.format.ext
+        let count = project.pages.count
+        var pages: [[String]] = []
+        for i in 0..<count {
+            let two = String(format: "%02d", i + 1)
+            if project.mode == .album {
+                pages.append(["\(base)_跨页_\(two).\(ext)"])
+                continue
+            }
+            let name = count > 1 ? "\(base)_\(two)" : base
+            var files = ["\(name).\(ext)"]
+            switch project.canvas.seams {
+            case .grid9:
+                files += (1...9).map { "\(name)_九宫格_\($0).\(ext)" }
+            case .carousel:
+                files += (1...max(1, project.canvas.slides)).map { "\(name)_轮播_\($0).\(ext)" }
+            default:
+                break
+            }
+            pages.append(files)
+        }
+        let pdf: String? = project.mode == .album && options.pdf ? "\(base).pdf" : nil
+        return ExportPlan(pages: pages, pdf: pdf)
+    }
+
+    /// `files`：这一页的文件名（exportPlan 给的：第一个是整张，后面是九宫格 / 轮播切片）。
+    nonisolated private static func writePage(_ image: CGImage, files: [String], project: CollageProject,
                                               options: ExportOptions, dir: URL, wantPDF: Bool) throws -> Data? {
         let canvas = project.canvas
-        let ext = options.format.ext
+        guard let mainName = files.first else { return nil }
         if project.mode == .album {
-            let url = dir.appendingPathComponent(String(format: "跨页_%02d.%@", index + 1, ext))
+            let url = dir.appendingPathComponent(mainName)
             if options.format == .jpeg {
                 guard let data = CollageExport.encode(image, format: .jpeg, quality: options.quality, dpi: canvas.dpi) else {
                     throw CollageExport.ExportError.encode(url.lastPathComponent)
@@ -2054,23 +2122,22 @@ final class CollageStore: ObservableObject {
             try CollageExport.write(image, to: url, format: options.format, quality: options.quality, dpi: canvas.dpi)
             return wantPDF ? CollageExport.encode(image, format: .jpeg, quality: 0.93, dpi: canvas.dpi) : nil
         }
-        let name = count > 1 ? String(format: "拼图_%02d", index + 1) : "拼图"
         let trimmed = CollageExport.trimmed(image, bleed: canvas.bleed) ?? image
-        try CollageExport.write(image, to: dir.appendingPathComponent("\(name).\(ext)"), format: options.format,
+        try CollageExport.write(image, to: dir.appendingPathComponent(mainName), format: options.format,
                                 quality: options.quality, dpi: canvas.dpi)
+        let tileNames = Array(files.dropFirst())
+        var tiles: [CGImage] = []
         switch canvas.seams {
         case .grid9:
-            for (i, tile) in CollageExport.split(trimmed, rows: 3, cols: 3).enumerated() {
-                try CollageExport.write(tile, to: dir.appendingPathComponent("\(name)_九宫格_\(i + 1).\(ext)"),
-                                        format: options.format, quality: options.quality, dpi: canvas.dpi)
-            }
+            tiles = CollageExport.split(trimmed, rows: 3, cols: 3)
         case .carousel:
-            for (i, tile) in CollageExport.split(trimmed, rows: 1, cols: max(1, canvas.slides)).enumerated() {
-                try CollageExport.write(tile, to: dir.appendingPathComponent("\(name)_轮播_\(i + 1).\(ext)"),
-                                        format: options.format, quality: options.quality, dpi: canvas.dpi)
-            }
+            tiles = CollageExport.split(trimmed, rows: 1, cols: max(1, canvas.slides))
         default:
             break
+        }
+        for (tile, name) in zip(tiles, tileNames) {
+            try CollageExport.write(tile, to: dir.appendingPathComponent(name), format: options.format,
+                                    quality: options.quality, dpi: canvas.dpi)
         }
         return nil
     }

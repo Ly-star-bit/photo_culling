@@ -737,6 +737,9 @@ struct CollageExportPanel: View {
     var body: some View {
         GroupBox("文件") {
             VStack(alignment: .leading, spacing: 8) {
+                TextField("文件名（留空 = 导出时间，精确到秒）", text: $store.exportName)
+                    .textFieldStyle(.roundedBorder)
+                    .help("直接写进输出目录，不另建文件夹；目录里有同名的自动加 -2、-3，不会覆盖")
                 Picker("格式", selection: $store.exportOptions.format) {
                     ForEach(CollageExport.Format.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
@@ -783,13 +786,18 @@ struct CollageExportPanel: View {
 
     private var summary: String {
         let c = store.project.canvas
+        let ext = store.exportOptions.format.ext
+        let typed = CollageStore.cleanFileName(store.exportName, ext: ext)
+        let name = typed.isEmpty ? CollageStore.stampFormatter.string(from: Date()) : typed
+        let example = typed.isEmpty ? "（例）" : ""
         if store.isAlbum {
-            return "每个跨页一张 \(c.width + c.bleed * 2)×\(c.height + c.bleed * 2)px（含出血）\(store.exportOptions.pdf ? "，另出一份印刷 PDF" : "")；sRGB"
+            let pdf = store.exportOptions.pdf ? " + \(name).pdf" : ""
+            return "\(name)_跨页_01.\(ext)…\(pdf)\(example)：每个跨页 \(c.width + c.bleed * 2)×\(c.height + c.bleed * 2)px（含出血）；sRGB"
         }
         switch c.seams {
-        case .grid9: return "整张 \(c.width)×\(c.height)px + 九宫格 9 张；sRGB"
-        case .carousel: return "整张 + 轮播 \(c.slides) 张（每张 \(c.width / max(1, c.slides))×\(c.height)px）；sRGB"
-        default: return "\(c.width)×\(c.height)px；sRGB"
+        case .grid9: return "\(name).\(ext) + \(name)_九宫格_1…9\(example)：整张 \(c.width)×\(c.height)px + 九宫格 9 张；sRGB"
+        case .carousel: return "\(name).\(ext) + \(name)_轮播_1…\(c.slides)\(example)：每张 \(c.width / max(1, c.slides))×\(c.height)px；sRGB"
+        default: return "\(name).\(ext)\(example)：\(c.width)×\(c.height)px；sRGB"
         }
     }
 

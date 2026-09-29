@@ -1002,6 +1002,8 @@ enum CollageOpsScript {
             case "tonext":
                 store.selection = path(arg)
                 store.moveSelectedPhoto(toPage: store.pageIndex + 1)
+            case "exportname":
+                store.exportName = arg
             case "export":
                 // 走导出全流程（无头模式下不会在访达里弹窗口）。
                 store.exportOptions.outputPath = arg
