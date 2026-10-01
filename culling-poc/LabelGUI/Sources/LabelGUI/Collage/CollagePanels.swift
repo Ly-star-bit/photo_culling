@@ -32,16 +32,31 @@ struct CollageTemplateGallery: View {
             }
         }
         .onAppear(perform: refresh)
-        .onChange(of: store.project.photos.count) { _, _ in refresh() }
-        .onChange(of: store.userTemplates) { _, _ in refresh() }
-        .onChange(of: store.hintsVersion) { _, _ in refresh() }
-        .onChange(of: store.project.style) { _, _ in refresh() }
-        .onChange(of: store.project.canvas) { _, _ in refresh() }
-        .onChange(of: store.project.mode) { _, _ in refresh() }
-        .onChange(of: (store.page?.photoIDs ?? []).sorted()) { _, _ in refresh() }
+        .onChange(of: refreshKey) { _, _ in refresh() }
     }
 
     private func refresh() { store.renderTemplateThumbs() }
+
+    /// 什么变了要问一次重渲（每个模板还要不要重渲，store 按它自己的键判）。合成一个键：一长串
+    /// onChange 让 Xcode 16 的类型检查慢得要命。
+    private struct RefreshKey: Equatable {
+        var photos: Int
+        var templates: [CollageTemplate]
+        var hints: Int
+        var style: CollageStyle
+        var canvas: CollageCanvas
+        var mode: CollageMode
+        var title: String
+        var subtitle: String
+        var pagePhotos: [String]
+    }
+
+    private var refreshKey: RefreshKey {
+        let p = store.project
+        return RefreshKey(photos: p.photos.count, templates: store.userTemplates, hints: store.hintsVersion,
+                          style: p.style, canvas: p.canvas, mode: p.mode, title: p.title, subtitle: p.subtitle,
+                          pagePhotos: (store.page?.photoIDs ?? []).sorted())
+    }
 
     private func section(_ title: String, _ templates: [CollageTemplate]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -70,26 +85,36 @@ struct CollageTemplateTile: View {
         Button {
             store.applyTemplate(template)
         } label: {
-            VStack(spacing: 3) {
-                thumb
-                    .frame(height: 104)
-                    .frame(maxWidth: .infinity)
-                Text(template.name)
-                    .font(.caption2)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            .contentShape(Rectangle())
+            tile
         }
         .buttonStyle(.plain)
         .disabled(store.project.photos.isEmpty)
-        .help("\(template.name) · \(template.photoSlots) 张" + (template.canvas.map { " · \($0.name)" } ?? "")
-              + (store.project.photos.isEmpty ? "（先带照片进托盘）" : ""))
+        .help(helpText)
         .contextMenu {
             if !template.builtin {
                 Button("删除「\(template.name)」", role: .destructive, action: onDelete)
             }
         }
+    }
+
+    private var tile: some View {
+        VStack(spacing: 3) {
+            // 高度跟着比例走：相册里的缩略图是 2:1 的跨页，固定 104 高上下空出一大截。
+            thumb
+                .frame(maxWidth: .infinity, maxHeight: 104)
+            Text(template.name)
+                .font(.caption2)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .contentShape(Rectangle())
+    }
+
+    private var helpText: String {
+        let canvas = template.canvas.map { " · \($0.name)" } ?? ""
+        let empty = store.project.photos.isEmpty ? "（先带照片进托盘）" : ""
+        return "\(template.name) · \(template.photoSlots) 张" + canvas + empty
     }
 
     @ViewBuilder
@@ -140,6 +165,7 @@ struct CollageLookBox: View {
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
         .onAppear { store.renderLookThumbs() }
@@ -193,6 +219,7 @@ struct CollageOverlayBox: View {
                     presetGrid
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
     }
@@ -229,10 +256,10 @@ struct CollageOverlayBox: View {
             ForEach(CollageTone.allCases, id: \.self) { Text($0.label).tag($0) }
         }
         .pickerStyle(.segmented)
-        CollageSlider(label: "投影",
+        CollageSlider(label: "衬底",
                       value: Binding(get: { overlay.shadow }, set: { v in update(coalesce: true) { $0.shadow = v } }),
                       range: 0...1, display: String(format: "%.2f", overlay.shadow))
-            .help("浅字底下的柔和投影（深字不加）")
+            .help("浅字的柔和投影；字底下画面太花时再垫一层雾面（深字衬白、浅字衬黑，干净的天空上不垫）。拖到 0 都不加")
         CollageSlider(label: "边距",
                       value: Binding(get: { overlay.inset }, set: { v in update(coalesce: true) { $0.inset = v } }),
                       range: 0...0.2, display: percentText(overlay.inset))
@@ -305,6 +332,7 @@ struct CollageDecorBox: View {
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
     }
@@ -360,6 +388,7 @@ struct CollageItemBox: View {
                 }
                 .font(.caption)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
     }

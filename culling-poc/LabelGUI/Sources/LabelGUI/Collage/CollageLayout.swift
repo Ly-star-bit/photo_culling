@@ -465,6 +465,11 @@ enum CollageLayout {
             let root = CollageNode.leaf(cells[0])
             return [score(root, m: nil, context: req.context)]
         }
+        // 相册跨页：中缝那一刀固定在正中，照片分到左右两页各自排 —— 整张跨页一起解，照片常常
+        // 横跨中缝、被书脊吃掉一条（扣分压不住裁切项）。换一批、散落版的底稿、编排都走这里。
+        if req.context.canvas.seams == .fold {
+            return solveSpread(cells: cells, aspects: aspects, width: width, height: height, g: g, req: req)
+        }
 
         let indices = Array(0..<cells.count)
         func search(_ lo: Double, _ hi: Double, tries: Int) -> [String: Scored] {
@@ -488,6 +493,62 @@ enum CollageLayout {
         // 相册那边拿到空结果会把整个跨页连照片一起弄丢。
         if best.isEmpty { best = search(0.2, 5, tries: max(2000, req.tries / 2)) }
         return diverse(Array(best.values), keep: req.keep)
+    }
+
+    /// 跨页：根是一刀 0.5 的竖切（缝正好压在中缝上），左右两页各自随机切分、各自按比例解。
+    /// 一页只有一张照片时比例和页面差得多就完整显示（四周留白），不把竖图硬裁成方的。
+    private static func solveSpread(cells: [CollageCell], aspects: [Double], width: Double, height: Double,
+                                    g: Double, req: Request) -> [Scored] {
+        let n = cells.count
+        let pageW = max(1, (width - g) / 2)
+        var rng = SeededRandom(seed: req.seed)
+        func page(_ slice: [Int], _ lo: Double, _ hi: Double) -> CollageNode? {
+            if slice.count == 1 {
+                var cell = cells[slice[0]]
+                if cell.kind == .photo, let id = cell.photoID, let p = req.context.photos[id] {
+                    let win = CollageCrop.maxWindow(photoAspect: p.aspect, cellAspect: pageW / max(1, height))
+                    if 1 - win.w * win.h > 0.12 { cell.contain = true }
+                }
+                return .leaf(cell)
+            }
+            let shape = randomShape(slice, using: &rng)
+            let k = coeff(shape, aspects, g)
+            guard let m = fitM(k, width: pageW, height: height), m > lo, m < hi else { return nil }
+            return node(shape, aspects, g, m: m, width: pageW, height: height, cells: cells)
+        }
+        func search(_ lo: Double, _ hi: Double, tries: Int) -> [String: Scored] {
+            var best: [String: Scored] = [:]
+            for _ in 0..<max(1, tries) {
+                let order = Array(0..<n).shuffled(using: &rng)
+                let k = Int.random(in: 1..<n, using: &rng)
+                guard let left = page(Array(order[..<k]), lo, hi),
+                      let right = page(Array(order[k...]), lo, hi) else { continue }
+                let root = CollageNode.split(.row, 0.5, left, right)
+                let scored = score(root, m: nil, context: req.context)
+                let key = arrangementKey(root)
+                if let existing = best[key], existing.score <= scored.score { continue }
+                best[key] = scored
+            }
+            return best
+        }
+        var best = search(0.62, 1.6, tries: req.tries)
+        if best.isEmpty { best = search(0.2, 5, tries: max(2000, req.tries / 2)) }
+        return diverse(Array(best.values), keep: req.keep)
+    }
+
+    /// 跨页的根是不是「中缝那一刀」（左右两页）。
+    static func isFoldSplit(_ root: CollageNode) -> Bool {
+        !root.isLeaf && root.axis == .row && abs(root.ratio - 0.5) < 0.01
+    }
+
+    /// 中缝那一刀在哪：根本身，或者根上下加了一条文字 / 留白横条之后，横条旁边那棵子树。
+    static func foldPath(_ root: CollageNode) -> [Int]? {
+        if isFoldSplit(root) { return [] }
+        guard !root.isLeaf, root.axis == .column else { return nil }
+        for i in 0..<2 where !root.children[i].hasPhotoLeaf {
+            if let sub = foldPath(root.children[1 - i]) { return [1 - i] + sub }
+        }
+        return nil
     }
 
     /// 结构 + 照片排列：同一结构换了照片位置也算不同的版。
@@ -517,6 +578,23 @@ enum CollageLayout {
         return out
     }
 
+    /// 换一批：头一版别再是最近出过的形状 —— 挑分数差不太多（+1 以内）的另一种形状放到最前面；
+    /// 最近几种都避不开就只避开现在这一种；还没有就原样（只换照片位置）。
+    static func preferringNewShape(_ results: [Scored], avoiding recent: [String]) -> [Scored] {
+        guard let best = results.first, recent.contains(best.shapeClass) else { return results }
+        let limit = best.score + 1.0
+        let current: Set<String> = recent.last.map { [$0] } ?? []
+        for avoid in [Set(recent), current] {
+            guard let i = results.firstIndex(where: { !avoid.contains($0.shapeClass) && $0.score <= limit }) else {
+                continue
+            }
+            var out = results
+            out.insert(out.remove(at: i), at: 0)
+            return out
+        }
+        return results
+    }
+
     /// 贴合原比例：结构不变，按照片原比例重算 ratio。
     ///
     /// 文字/留白子树是弹性的：和照片子树并排或堆叠时，照片先按原比例（m = 1）排满
@@ -525,14 +603,43 @@ enum CollageLayout {
     static func refit(_ root: CollageNode, context: Context) -> CollageNode {
         let content = contentRect(canvas: context.canvas, style: context.style)
         let g = Double(gutterPixels(canvas: context.canvas, style: context.style))
-        return refitNode(root, width: Double(content.width), height: Double(content.height), g: g, photos: context.photos)
+        let width = Double(content.width)
+        let height = Double(content.height)
+        // 相册跨页：中缝那一刀不动，两页各自贴合（整版一起解会把这一刀挪走，照片又横跨中缝）。
+        if context.canvas.seams == .fold, let path = foldPath(root) {
+            return refitSpread(root, path: path[...], width: width, height: height, g: g, photos: context.photos)
+        }
+        return refitNode(root, width: width, height: height, g: g, photos: context.photos)
+    }
+
+    /// 沿着 foldPath 往下：上下的文字横条比例不动，到了中缝那一刀两页各自贴合。
+    private static func refitSpread(_ n: CollageNode, path: ArraySlice<Int>, width: Double, height: Double,
+                                    g: Double, photos: [String: CollagePhotoRef]) -> CollageNode {
+        var out = n
+        guard let i = path.first else {
+            let pageW = max(1, (width - g) / 2)
+            out.ratio = 0.5
+            out.children[0] = refitNode(n.children[0], width: pageW, height: height, g: g, photos: photos)
+            out.children[1] = refitNode(n.children[1], width: pageW, height: height, g: g, photos: photos)
+            return out
+        }
+        let avail = max(1, height - g)
+        let first = avail * min(1 - minRatio, max(minRatio, n.ratio))
+        out.children[i] = refitSpread(n.children[i], path: path.dropFirst(), width: width,
+                                      height: i == 0 ? first : avail - first, g: g, photos: photos)
+        return out
+    }
+
+    /// 子树里全是照片格（留白格、文字格都是弹性的，不能当一张方照片一起按比例解）。
+    private static func isPurePhoto(_ n: CollageNode) -> Bool {
+        n.leaves.allSatisfy { $0.kind == .photo }
     }
 
     private static func refitNode(_ n: CollageNode, width: Double, height: Double, g: Double,
                                   photos: [String: CollagePhotoRef]) -> CollageNode {
         if n.isLeaf { return n }
         // 纯照片子树：统一伸缩一次解完。
-        if !n.hasTextLeaf {
+        if isPurePhoto(n) {
             let (shape, cells) = self.shape(of: n)
             let aspects = cells.map { preferredAspect($0, photos: photos) }
             let k = coeff(shape, aspects, g)
@@ -547,7 +654,7 @@ enum CollageLayout {
         if flexFirst != flexSecond {
             let photoIndex = flexFirst ? 1 : 0
             let photoChild = n.children[photoIndex]
-            if !photoChild.hasTextLeaf {
+            if isPurePhoto(photoChild) {
                 let (shape, cells) = self.shape(of: photoChild)
                 let aspects = cells.map { preferredAspect($0, photos: photos) }
                 let k = coeff(shape, aspects, g)
@@ -737,6 +844,17 @@ enum CollageLayout {
         var out = root
         out.update(at: path) { $0 = split }
         return out
+    }
+
+    /// 相册跨页上删掉（挪走）一页里唯一的那一格：那一页留一个空格占位，不让另一页顶过中缝铺满
+    /// 整个跨页（照片又横跨中缝）。其余情况同 remove。
+    static func remove(at path: [Int], from root: CollageNode, canvas: CollageCanvas) -> CollageNode {
+        if canvas.seams == .fold, let fold = foldPath(root), path.count == fold.count + 1, path.starts(with: fold) {
+            var out = root
+            out.update(at: path) { $0 = .leaf(CollageCell(kind: .photo)) }
+            return out
+        }
+        return remove(at: path, from: root)
     }
 
     /// 删掉一个叶子：父节点被兄弟子树顶替（其余自动回流）。

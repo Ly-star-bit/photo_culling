@@ -684,15 +684,15 @@ enum CollageScatter {
                 for f in frames {
                     guard let id = f.cell.photoID, let outerAspect = outerAspects[id] else { continue }
                     let r = f.rect.cgRect
-                    let grow = spec.spread * (0.96 + 0.08 * CollageItems.unit(&rng))
+                    let grow = spec.spread * (0.95 + 0.1 * CollageItems.unit(&rng))
                     var w = Double(r.width) * grow
                     var h = w / outerAspect
                     if h > Double(r.height) * grow {
                         h = Double(r.height) * grow
                         w = h * outerAspect
                     }
-                    let jx = (CollageItems.unit(&rng) - 0.5) * 0.08 * Double(r.width)
-                    let jy = (CollageItems.unit(&rng) - 0.5) * 0.08 * Double(r.height)
+                    let jx = (CollageItems.unit(&rng) - 0.5) * 0.11 * Double(r.width)
+                    let jy = (CollageItems.unit(&rng) - 0.5) * 0.11 * Double(r.height)
                     var item = CollageItem(kind: .photo)
                     item.photoID = id
                     item.frame = spec.frame
@@ -717,8 +717,9 @@ enum CollageScatter {
                     let h = items.remove(at: heroIndex)
                     items.append(h)
                 }
+                items = keepInside(items, canvas: canvas)
                 items = relieve(items, canvas: canvas, photos: context.photos, hints: context.hints)
-                items = clearOfFold(items, canvas: canvas)
+                items = clearOfFold(keepInside(items, canvas: canvas), canvas: canvas)
                 items = withTapes(items, spec: spec, canvas: canvas, photos: context.photos, hints: context.hints,
                                   rng: &rng)
                 let s = score(items, canvas: canvas, photos: context.photos, hints: context.hints)
@@ -731,6 +732,28 @@ enum CollageScatter {
             if let b = bestForGrid { results.append(b) }
         }
         return CollageLayout.diverse(results, keep: keep)
+    }
+
+    /// 相纸整张留在画布里、离边至少一小截（放大、挪动、推开压脸之后常常一角伸出画外，胶带也跟着出去）。
+    /// 比画布还大的放不下就居中。
+    static func keepInside(_ items: [CollageItem], canvas: CollageCanvas) -> [CollageItem] {
+        let w = Double(canvas.width)
+        let h = Double(canvas.height)
+        let edge: Double = canvas.shortSide * 0.022
+        func shift(_ lo: Double, _ hi: Double, _ size: Double) -> Double {
+            if hi - lo > size - 2 * edge { return size / 2 - (lo + hi) / 2 }
+            if lo < edge { return edge - lo }
+            if hi > size - edge { return size - edge - hi }
+            return 0
+        }
+        return items.map { it -> CollageItem in
+            guard it.kind == .photo else { return it }
+            let b = CollageItems.bounds(it, canvas: canvas)
+            var out = it
+            out.cx += shift(Double(b.minX), Double(b.maxX), w) / w
+            out.cy += shift(Double(b.minY), Double(b.maxY), h) / h
+            return out
+        }
     }
 
     /// 相册跨页：放大、挪动之后相纸边伸进中缝那一条（装订会吃掉）就往自己那一侧挪出来；
@@ -872,28 +895,22 @@ enum CollageScatter {
                 tp.attach = CollageItems.attachment(of: tp, to: item, canvas: canvas)
                 return tp
             }
+            // 不压脸、不压相纸上的字，也不伸出画外（贴在画外的半截胶带像是被裁掉了）。
+            let frame = CGRect(x: 0, y: 0, width: canvas.width, height: canvas.height)
             func clear(_ tp: CollageItem) -> Bool {
-                !allFaces.contains { CollageItems.contains(tp, point: $0, canvas: canvas, slop: 2) }
+                frame.contains(CollageItems.bounds(tp, canvas: canvas))
+                    && !allFaces.contains { CollageItems.contains(tp, point: $0, canvas: canvas, slop: 2) }
             }
             let jitter = (CollageItems.unit(&rng) - 0.5) * 14
-            var placed: [CollageItem] = []
-            if corners {
-                let a = tape(at: CGPoint(x: -half.width / 2 + CGFloat(w * canvas.shortSide) * 0.2,
-                                         y: -half.height / 2 + CGFloat(h * canvas.shortSide) * 0.3), angle: -38 + jitter * 0.3)
-                let b = tape(at: CGPoint(x: half.width / 2 - CGFloat(w * canvas.shortSide) * 0.2,
-                                         y: -half.height / 2 + CGFloat(h * canvas.shortSide) * 0.3), angle: 38 + jitter * 0.3)
-                if clear(a), clear(b) { placed = [a, b] }
-            }
-            if placed.isEmpty {
-                let top = tape(at: CGPoint(x: 0, y: -half.height / 2), angle: jitter)
-                let bottom = tape(at: CGPoint(x: 0, y: half.height / 2), angle: -jitter)
-                if clear(top) {
-                    placed = [top]
-                } else if clear(bottom) {
-                    placed = [bottom]
-                }
-            }
-            if !placed.isEmpty { out[item.id] = placed }
+            let cornerA = tape(at: CGPoint(x: -half.width / 2 + CGFloat(w * canvas.shortSide) * 0.2,
+                                           y: -half.height / 2 + CGFloat(h * canvas.shortSide) * 0.3), angle: -38 + jitter * 0.3)
+            let cornerB = tape(at: CGPoint(x: half.width / 2 - CGFloat(w * canvas.shortSide) * 0.2,
+                                           y: -half.height / 2 + CGFloat(h * canvas.shortSide) * 0.3), angle: 38 + jitter * 0.3)
+            let top = tape(at: CGPoint(x: 0, y: -half.height / 2), angle: jitter)
+            // 两个上角 → 上沿正中 → 不贴（以前退到下沿：只在底边贴一条像是倒挂着）。
+            var options: [[CollageItem]] = [[top]]
+            if corners { options.insert([cornerA, cornerB], at: 0) } else { options.append([cornerA, cornerB]) }
+            if let placed = options.first(where: { $0.allSatisfy(clear) }) { out[item.id] = placed }
         }
         return out
     }
@@ -942,6 +959,14 @@ enum CollageScatter {
                 let band = canvas.shortSide * 0.02
                 if Double(b.minX) < fold - band, Double(b.maxX) > fold + band { s += 1.5 }
             }
+        }
+        // 大小悬殊：一张特别大、旁边一溜缩略图那么小的，撒出来不像一桌照片（最小的不到中位数一半、
+        // 最大的超过中位数 2.6 倍开始扣）。
+        let areas = items.filter { $0.kind == .photo }.map { $0.width * $0.height }.sorted()
+        if areas.count >= 3 {
+            let median = areas[areas.count / 2]
+            s += 6 * max(0, 0.5 - areas[0] / max(1e-9, median))
+            s += 1.5 * max(0, (areas[areas.count - 1] / max(1e-9, median)) - 2.6)
         }
         // 空处：画布上 12×12 个点有多少没被任何照片盖住。
         let n = 12

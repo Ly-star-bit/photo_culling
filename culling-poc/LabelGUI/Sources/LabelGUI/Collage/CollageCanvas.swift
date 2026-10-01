@@ -163,7 +163,8 @@ struct CollageCanvasView: View {
                 }
             }
             .contentShape(Rectangle())
-            .gesture(tapGesture(layout: layout, geometry: geometry))
+            .gesture(singleTapGesture(layout: layout, geometry: geometry))
+            .simultaneousGesture(doubleTapGesture(layout: layout, geometry: geometry))
             .simultaneousGesture(dragGesture(layout: layout, geometry: geometry))
             .simultaneousGesture(magnifyGesture(geometry: geometry))
             .onContinuousHover { phase in
@@ -233,11 +234,27 @@ struct CollageCanvasView: View {
 
     // MARK: - 点击
 
-    private func tapGesture(layout: CollageCanvasLayout, geometry: CollageLayout.Geometry) -> some Gesture {
-        SpatialTapGesture(count: 2)
-            .onEnded { value in doubleTap(value.location, layout: layout, geometry: geometry) }
-            .exclusively(before: SpatialTapGesture(count: 1)
-                .onEnded { value in singleTap(value.location, layout: layout, geometry: geometry) })
+    /// 单击立刻选中：以前「双击优先、单击排在后面」，每一下单击都要等双击超时（0.3–0.5 秒）才选上。
+    /// 双击的第二下（clickCount = 2）在这里就按双击处理，另外还挂了一个同时识别的双击手势兜底 ——
+    /// 两边都可能走到 doubleTap，它是幂等的（进裁切、切到文字页，做两次和一次一样）。
+    private func singleTapGesture(layout: CollageCanvasLayout, geometry: CollageLayout.Geometry) -> some Gesture {
+        SpatialTapGesture(count: 1).onEnded { value in
+            if Self.currentClickCount() >= 2 {
+                doubleTap(value.location, layout: layout, geometry: geometry)
+            } else {
+                singleTap(value.location, layout: layout, geometry: geometry)
+            }
+        }
+    }
+
+    private func doubleTapGesture(layout: CollageCanvasLayout, geometry: CollageLayout.Geometry) -> some Gesture {
+        SpatialTapGesture(count: 2).onEnded { value in doubleTap(value.location, layout: layout, geometry: geometry) }
+    }
+
+    /// 正在处理的这下鼠标是第几击（双击的第二下 = 2）。只读鼠标按键事件 —— 别的事件读 clickCount 会抛异常。
+    private static func currentClickCount() -> Int {
+        guard let e = NSApp.currentEvent, e.type == .leftMouseDown || e.type == .leftMouseUp else { return 1 }
+        return e.clickCount
     }
 
     private func singleTap(_ p: CGPoint, layout: CollageCanvasLayout, geometry: CollageLayout.Geometry) {
@@ -650,7 +667,8 @@ struct CollageCanvasOverlay: View {
         let r = viewRect(frame)
         let window = store.window(for: frame)
         let cut = window?.cutsFace ?? false
-        let bystander = window?.hitsBystander ?? false
+        // 路人只在选中的那一格标（景区照片几乎格格有路人，以前满屏橙色角标）；切脸一直标。
+        let bystander = (window?.hitsBystander ?? false) && store.selection == frame.path
         if cut || bystander || frame.cell.locked {
             HStack(spacing: 4) {
                 if frame.cell.locked { badge("lock.fill", nil, .white) }

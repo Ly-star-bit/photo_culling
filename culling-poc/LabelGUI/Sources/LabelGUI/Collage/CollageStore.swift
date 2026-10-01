@@ -78,6 +78,10 @@ final class CollageStore: ObservableObject {
     /// 色调样张（这一页的主图套每个色调）。
     @Published private(set) var lookThumbs: [CollageLook: NSImage] = [:]
     private var lookThumbKey = ""
+    /// 风格预设样张（这一页套每个预设的样子；按预设 key）。
+    @Published private(set) var styleThumbs: [String: NSImage] = [:]
+    private var styleThumbKey = ""
+    private var styleThumbTask: Task<Void, Never>?
     private var hintTask: Task<Void, Never>?
     @Published private(set) var userTemplates: [CollageTemplate] = []
     /// 模板库缩略图（按模板名；用托盘里的照片现套现渲）。
@@ -254,6 +258,9 @@ final class CollageStore: ObservableObject {
         albumDropped = []
         lookThumbKey = ""
         lookThumbs = [:]
+        styleThumbTask?.cancel()
+        styleThumbKey = ""
+        styleThumbs = [:]
         templateThumbKeys = [:]
         templateThumbTask?.cancel()
         templateThumbsBusy = false
@@ -318,9 +325,34 @@ final class CollageStore: ObservableObject {
             self.mergeIntoTray(refs)
             if case .solve(let ids) = layout, let ticket, ticket.generation == self.solveGeneration {
                 self.isSolving = false
-                self.solve(photoIDs: ids.filter { id in refs.contains { $0.id == id } })
+                self.layoutRequested(ids.filter { id in refs.contains { $0.id == id } })
             }
         }
+    }
+
+    /// 批量页「拼图 (N)」带进来的这几张：单张拼图按开关上的网格 / 散落排（以前一律排成网格）；相册在
+    /// 当前跨页后面新开一个跨页放它们（以前直接把当前跨页换掉 —— 那一页原来的照片从书里没了，已经在
+    /// 别的跨页上的照片还会出现两次），已经在相册里的不重复放。
+    private func layoutRequested(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        guard isAlbum else {
+            layoutFresh(photoIDs: ids)
+            return
+        }
+        let used = usedPhotoIDs
+        let fresh = Self.unique(ids).filter { !used.contains($0) }
+        guard !fresh.isEmpty else {
+            setNotice("这几张已经都在相册的跨页里了")
+            return
+        }
+        pushUndo()
+        let at = min(project.pages.count, pageIndex + 1)
+        project.pages.insert(CollagePage(root: .leaf(CollageCell(kind: .photo))), at: at)
+        pageIndex = at
+        commitEdit()
+        // 新跨页和排版算同一步撤销。
+        solve(photoIDs: fresh, recordUndo: false)
+        setNotice("在第 \(at + 1) 个跨页放了 \(fresh.count) 张" + (fresh.count < ids.count ? "（其余已经在相册里）" : ""))
     }
 
     func addFiles(_ urls: [URL]) {
@@ -652,16 +684,17 @@ final class CollageStore: ObservableObject {
 
     /// 用这些照片（按给定顺序）求解一批备选，当前页换成最好的那版。这一页的文字格（散落页记着的
     /// 网格文字格）一起排进去 —— 以前托盘菜单「加进当前版」、切回网格都会把标题格丢掉。
-    func solve(photoIDs: [String]) {
+    func solve(photoIDs: [String], recordUndo: Bool = true) {
         let map = photoMap
         let photos = Self.unique(photoIDs).compactMap { map[$0] }
         guard !photos.isEmpty else { return }
         solveSeed &+= 1
         let texts = page.map { textCellsForGrid(from: $0) } ?? []
-        runSolve(photos: photos, texts: texts, seed: solveSeed, replacePage: true)
+        runSolve(photos: photos, texts: texts, seed: solveSeed, recordUndo: recordUndo)
     }
 
-    /// 换一批：同一组照片、新的随机种子；有锁定的格子就只重排没锁的区域。
+    /// 换一批：同一组照片、新的随机种子；有锁定的格子就只重排没锁的区域。最优解常常还是现在这个
+    /// 结构（只换了照片位置，看起来等于没换）—— 落版时避开这一页最近出过的几种形状。
     func regenerate() {
         guard let root, let page else { return }
         if page.freeform {
@@ -669,6 +702,7 @@ final class CollageStore: ObservableObject {
             return
         }
         solveSeed &+= 1
+        let avoid = noteShape(root)
         let hasLocks = root.leaves.contains { $0.locked }
         if hasLocks {
             let ctx = context
@@ -678,25 +712,39 @@ final class CollageStore: ObservableObject {
                 let results = await Task.detached(priority: .userInitiated) {
                     CollageLayout.solveKeepingLocks(current: root, context: ctx, tries: 6000, keep: 16, seed: seed)
                 }.value
-                self?.finishSolve(ticket, results)
+                self?.finishSolve(ticket, results, avoiding: avoid)
             }
         } else {
             let map = photoMap
             let photos = Self.unique(root.photoIDs).compactMap { map[$0] }
             let texts = root.leaves.filter { $0.kind == .text }
-            runSolve(photos: photos, texts: texts, seed: solveSeed, replacePage: true)
+            runSolve(photos: photos, texts: texts, seed: solveSeed, avoiding: avoid)
         }
     }
 
-    private func runSolve(photos: [CollagePhotoRef], texts: [CollageCell], seed: UInt64, replacePage: Bool) {
+    /// 换一批最近出过的形状（按页记；换了页重记）：连按几次不在同两版之间来回跳。
+    private var recentShapes: (pageID: UUID?, classes: [String]) = (nil, [])
+
+    private func noteShape(_ root: CollageNode) -> [String] {
+        let id = page?.id
+        if recentShapes.pageID != id { recentShapes = (id, []) }
+        let shape = root.shapeClass
+        recentShapes.classes.removeAll { $0 == shape }
+        recentShapes.classes.append(shape)
+        if recentShapes.classes.count > 3 { recentShapes.classes.removeFirst() }
+        return recentShapes.classes
+    }
+
+    private func runSolve(photos: [CollagePhotoRef], texts: [CollageCell], seed: UInt64, avoiding: [String] = [],
+                          recordUndo: Bool = true) {
         let ctx = context
-        let ticket = beginSolve()
+        let ticket = beginSolve(recordUndo: recordUndo)
         Task { [weak self] in
             let results = await Task.detached(priority: .userInitiated) {
                 CollageLayout.solve(CollageLayout.Request(photos: photos, textCells: texts, context: ctx,
                                                           tries: 16000, keep: 18, seed: seed))
             }.value
-            self?.finishSolve(ticket, results)
+            self?.finishSolve(ticket, results, avoiding: avoiding)
         }
     }
 
@@ -732,11 +780,12 @@ final class CollageStore: ObservableObject {
     }
 
     private func finishSolve(_ ticket: SolveTicket, _ results: [CollageLayout.Scored],
-                             scatter: CollageScatterSpec? = nil) {
+                             scatter: CollageScatterSpec? = nil, avoiding: [String] = []) {
         guard ticket.generation == solveGeneration else { return }   // 更新的一次还在算
         isSolving = false
         guard ticket.session == sessionToken, ticket.pageID == page?.id else { return }
-        adopt(results, scatter: scatter, recordUndo: ticket.recordUndo)
+        let ordered = avoiding.isEmpty ? results : CollageLayout.preferringNewShape(results, avoiding: avoiding)
+        adopt(ordered, scatter: scatter, recordUndo: ticket.recordUndo)
     }
 
     private func adopt(_ results: [CollageLayout.Scored], scatter: CollageScatterSpec? = nil, recordUndo: Bool = true) {
@@ -845,7 +894,9 @@ final class CollageStore: ObservableObject {
         let pageID = alternativesPageID
         var snapshot = project
         let hints = self.hints
-        let scale = min(1, 150 / Double(max(project.canvas.width, project.canvas.height)))
+        // 备选条上 64pt 高：按长边 150 渲，相册跨页（2:1）只有 75px 高，放到 128px 是糊的 —— 高度也要够。
+        let c = project.canvas
+        let scale = min(1, max(150 / Double(max(c.width, c.height)), 136 / Double(max(1, c.height))))
         Task { [weak self] in
             let thumbs = await Task.detached(priority: .utility) { () -> [NSImage] in
                 // 渲染失败也占个位：下标必须和 alternatives 一一对应，点第 5 张就是第 5 版。
@@ -1004,7 +1055,7 @@ final class CollageStore: ObservableObject {
         // source 的路径不变；删 source 时它的兄弟子树（可能含刚插入的格子）整体上移。
         let inserted = CollageLayout.insert(cell, at: target, edge: edge, into: root)
         pushUndo()
-        setRoot(CollageLayout.remove(at: source, from: inserted))
+        setRoot(CollageLayout.remove(at: source, from: inserted, canvas: project.canvas))
         selection = nil
         commitEdit()
     }
@@ -1049,7 +1100,7 @@ final class CollageStore: ObservableObject {
         if root.isLeaf {
             mutateRoot { _ in CollageNode.leaf(CollageCell(kind: .photo)) }
         } else {
-            mutateRoot { CollageLayout.remove(at: path, from: $0) }
+            mutateRoot { CollageLayout.remove(at: path, from: $0, canvas: project.canvas) }
         }
         selection = nil
         cropEditing = false
@@ -1436,16 +1487,30 @@ final class CollageStore: ObservableObject {
         let text = vertical ? CollageTemplates.verticalTitle(size: 0.06, seal: "光", date: true)
                             : CollageTemplates.centeredTitle()
         let target = selection ?? []
+        let canvas = project.canvas
         mutateRoot { root in
-            if target.isEmpty {
-                let axis: CollageAxis = (edge == .left || edge == .right) ? .row : .column
-                let newFirst = edge == .left || edge == .top
-                let leaf = CollageNode.leaf(.text(text))
-                let ratio = axis == .row ? (newFirst ? 0.22 : 0.78) : (newFirst ? 0.14 : 0.86)
-                return newFirst ? .split(axis, ratio, leaf, root) : .split(axis, ratio, root, leaf)
+            guard target.isEmpty else { return CollageLayout.insert(.text(text), at: target, edge: edge, into: root) }
+            // 相册跨页：字只加在一页上（上、下横排加在右页，竖排加在那一边的那一页）—— 整个跨页加一条，
+            // 居中的标题正好压在书脊上。
+            if canvas.seams == .fold, let fold = CollageLayout.foldPath(root) {
+                var out = root
+                out.update(at: fold + [edge == .left ? 0 : 1]) { page in
+                    page = Self.textBand(text, edge: edge, around: page, verticalShare: 0.3)
+                }
+                return out
             }
-            return CollageLayout.insert(.text(text), at: target, edge: edge, into: root)
+            return Self.textBand(text, edge: edge, around: root, verticalShare: 0.22)
         }
+    }
+
+    /// 在一棵子树的一边加一条文字：横排占一成四高，竖排占 verticalShare 宽。
+    private static func textBand(_ text: CollageText, edge: CollageLayout.Edge, around node: CollageNode,
+                                 verticalShare: Double) -> CollageNode {
+        let axis: CollageAxis = (edge == .left || edge == .right) ? .row : .column
+        let newFirst = edge == .left || edge == .top
+        let leaf = CollageNode.leaf(.text(text))
+        let share = axis == .row ? verticalShare : 0.14
+        return newFirst ? .split(axis, share, leaf, node) : .split(axis, 1 - share, node, leaf)
     }
 
     /// `coalesce`：滑杆、取色器连续拖动合成一步；点色块、选预设、切开关每次一步。
@@ -1617,7 +1682,7 @@ final class CollageStore: ObservableObject {
             pushUndo()
             project.pages[target].items.append(item)
             project.pages[pageIndex].root = root.isLeaf ? CollageNode.leaf(CollageCell(kind: .photo))
-                                                        : CollageLayout.remove(at: selection, from: root)
+                                                        : CollageLayout.remove(at: selection, from: root, canvas: project.canvas)
             self.selection = nil
             commitEdit()
             setNotice("已移到第 \(target + 1) 个跨页（放在照片少的那半页，拖到想要的位置）")
@@ -1639,7 +1704,7 @@ final class CollageStore: ObservableObject {
         pushUndo()
         project.pages[target].root = newTarget
         project.pages[pageIndex].root = root.isLeaf ? CollageNode.leaf(CollageCell(kind: .photo))
-                                                    : CollageLayout.remove(at: selection, from: root)
+                                                    : CollageLayout.remove(at: selection, from: root, canvas: project.canvas)
         self.selection = nil
         commitEdit()
         setNotice("已移到第 \(target + 1) 个跨页（插在最大那张旁边，想重排点「换一批」）")
@@ -1681,6 +1746,53 @@ final class CollageStore: ObservableObject {
         }
     }
 
+    // MARK: - 风格预设样张
+
+    /// 预设样张该不该重渲：这一页的版式和照片、画布、标题、路人信息。样式滑杆不算（每个预设有自己的样式）。
+    var styleThumbSource: String {
+        guard let page else { return "" }
+        let c = project.canvas
+        return "\(sessionToken)|\(page.id)|\(page.root.signature)|\(page.photoIDs.joined(separator: ","))|"
+            + "\(page.items.count)|\(page.freeform)|\(c.width)x\(c.height)|\(hintsVersion)|\(project.title)"
+    }
+
+    /// 这一页套每个风格预设渲一张小图：预设按钮上直接看到「纸白、墨黑、相纸、画廊」是什么样（以前只有名字，
+    /// 点了才知道）。停手 0.3 秒再渲，十几张小图一共几十毫秒。
+    func renderStyleThumbs() {
+        let key = styleThumbSource
+        guard key != styleThumbKey else { return }
+        styleThumbKey = key
+        styleThumbTask?.cancel()
+        guard let page else {
+            styleThumbs = [:]
+            return
+        }
+        var base = project
+        base.pages = [page]
+        let hints = self.hints
+        let scale = min(1, 170 / Double(max(project.canvas.width, project.canvas.height)))
+        styleThumbTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            let thumbs = await Task.detached(priority: .utility) { () -> [String: NSImage] in
+                var out: [String: NSImage] = [:]
+                for preset in CollageStyles.all {
+                    var p = base
+                    p.style = preset.style
+                    var opts = CollageRender.Options(scale: scale)
+                    opts.includeBleed = false
+                    opts.placeholders = true
+                    if let cg = CollageRender.render(page: page, project: p, hints: hints, options: opts) {
+                        out[preset.key] = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+                    }
+                }
+                return out
+            }.value
+            guard let self, !Task.isCancelled, self.styleThumbKey == key else { return }
+            self.styleThumbs = thumbs
+        }
+    }
+
     // MARK: - 模板库缩略图
 
     /// 用这一页（不够从托盘按分数补）的照片把每个模板套一遍、渲小图。和点下去一样：相册里不套模板
@@ -1699,8 +1811,10 @@ final class CollageStore: ObservableObject {
             .sorted { $0.score > $1.score }.map(\.id)
         let map = photoMap
         let photos = ids.prefix(16).compactMap { map[$0] }
-        // 按照片集合认（换一批、置顶只改顺序，不用整批重渲）。
+        // 按照片集合认（换一批、置顶只改顺序，不用整批重渲）；标题、副标题也算（模板里的 {title}，
+        // 以前填了标题缩略图还写着「拾光」）。
         let photoKey = photos.map(\.id).sorted().joined(separator: ",") + "|\(hintsVersion)|\(album)"
+            + "|\(project.title)|\(project.subtitle)"
         let styleKey = "|s\(project.style.hashValue)"
         let canvasKey = "|c\(project.canvas.hashValue)"
         var todo: [(CollageTemplate, String)] = []

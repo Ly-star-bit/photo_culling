@@ -218,25 +218,41 @@ enum CollageCrop {
         var x = clamp(prefX, loX, hiX)
         var y = clamp(prefY, loY, hiY)
 
-        // 路人：在允许范围内挪到压得最少的位置（挪动本身也算一点代价）。
+        // 路人：在允许范围内挪到压得最少的位置（挪动本身也算一点代价）。主体的构图优先 —— 眼线只在
+        // 窗口高度的两成到四成半之间挪（再往上挪就是把人压到画面底下、身子切在胸口），而且要真躲开
+        // 一大半才挪；躲不开就按原来的构图，角标标出路人，让人自己裁。
         let bystanders = hints?.bystanders ?? []
         var hits = false
-        if !bystanders.isEmpty, overlap(CGRect(x: x, y: y, width: w, height: h), bystanders) > 0.0005 {
-            var best = (x: x, y: y, cost: Double.infinity)
+        let before = overlap(CGRect(x: x, y: y, width: w, height: h), bystanders)
+        if !bystanders.isEmpty, before > 0.0005 {
+            var bandLo = loY
+            var bandHi = hiY
+            if let f = primary {
+                let eye = f[1] + 0.42 * (f[3] - f[1])
+                bandLo = max(loY, eye - 0.45 * h)
+                bandHi = min(hiY, eye - 0.2 * h)
+                if bandLo > bandHi {
+                    bandLo = y
+                    bandHi = y
+                }
+            }
+            var best = (x: x, y: y, cost: Double.infinity, area: before)
             let steps = 12
             for i in 0...steps {
                 for j in 0...steps {
                     let cx = hiX > loX ? loX + (hiX - loX) * Double(i) / Double(steps) : loX
-                    let cy = hiY > loY ? loY + (hiY - loY) * Double(j) / Double(steps) : loY
+                    let cy = bandHi > bandLo ? bandLo + (bandHi - bandLo) * Double(j) / Double(steps) : bandLo
                     let area = overlap(CGRect(x: cx, y: cy, width: w, height: h), bystanders)
                     let cost = area * 40 + abs(cx - x) + abs(cy - y)
-                    if cost < best.cost { best = (cx, cy, cost) }
-                    if hiY <= loY { break }
+                    if cost < best.cost { best = (cx, cy, cost, area) }
+                    if bandHi <= bandLo { break }
                 }
                 if hiX <= loX { break }
             }
-            x = best.x
-            y = best.y
+            if best.area <= before * 0.5 {
+                x = best.x
+                y = best.y
+            }
             hits = overlap(CGRect(x: x, y: y, width: w, height: h), bystanders) > 0.0005
         }
 

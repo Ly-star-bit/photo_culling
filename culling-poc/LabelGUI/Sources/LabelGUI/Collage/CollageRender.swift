@@ -273,6 +273,21 @@ enum CollageRender {
         let s = CGFloat(scale)
         let rect = CGRect(x: p.rect.minX * s + CGFloat(bleed), y: p.rect.minY * s + CGFloat(bleed),
                           width: p.rect.width * s, height: p.rect.height * s)
+        // 底下太花、反差不够（栏杆石雕、屋檐）：字后面先垫一块羽化的雾面，深字衬白、浅字衬黑；
+        // 干净的天空上 halo = 0，什么都不垫。「衬底」滑杆管它的深浅，拖到 0 就不垫。只垫在照片上
+        // （剪到照片实际画的区域和形状里），不漫到缝和边距上。
+        if overlay.shadow > 0, p.halo > 0.05 {
+            let g = overlayGeometry(cell: cell, frameRect: unscaled.rect.cgRect, style: project.style, photo: photo,
+                                    framing: framing, hints: hints)
+            let drawn = CGRect(x: g.drawn.minX * s + CGFloat(bleed), y: g.drawn.minY * s + CGFloat(bleed),
+                               width: g.drawn.width * s, height: g.drawn.height * s)
+            let corner = CGFloat(project.style.corner * project.canvas.shortSide * scale)
+            ctx.saveGState()
+            ctx.addPath(shapePath(cell.shape ?? project.style.shape, rect: drawn, corner: corner))
+            ctx.clip()
+            drawScrim(ctx, around: rect, light: p.light, strength: p.halo * overlay.shadow / 0.45)
+            ctx.restoreGState()
+        }
         ctx.saveGState()
         if p.light, overlay.shadow > 0 {
             let k = CGFloat(overlay.shadow)
@@ -287,6 +302,27 @@ enum CollageRender {
         } else {
             CollageTypeset.drawFitted(p.text, in: rect, ctx: ctx, short: p.short * scale, vars: vars,
                                       canvasHeight: canvasHeight)
+        }
+        ctx.restoreGState()
+    }
+
+    /// 字后面的羽化雾面：一层层由外往里叠，中心最实、边缘渐隐（不用模糊滤镜：预览、导出同一套几何，
+    /// 缩放多少都一样）。strength 0…1+，深字衬白最多六成、浅字衬黑最多四成。
+    private static func drawScrim(_ ctx: CGContext, around rect: CGRect, light: Bool, strength: Double) {
+        let peak: Double = light ? min(0.42, 0.6 * strength) : min(0.62, 0.85 * strength)
+        guard peak > 0.01, rect.width > 1, rect.height > 1 else { return }
+        let pad: CGFloat = min(rect.width, rect.height) * 0.18 + 1
+        let feather: CGFloat = min(rect.width, rect.height) * 0.55 + 2
+        let steps = 14
+        let layer: Double = 1 - pow(1 - peak, 1 / Double(steps))
+        ctx.saveGState()
+        ctx.setFillColor(light ? CGColor(gray: 0, alpha: layer) : CGColor(gray: 1, alpha: layer))
+        for i in 0..<steps {
+            let grow: CGFloat = pad + feather * CGFloat(steps - 1 - i) / CGFloat(steps)
+            let r = rect.insetBy(dx: -grow, dy: -grow)
+            let corner: CGFloat = min(r.width, r.height) * 0.45
+            ctx.addPath(CGPath(roundedRect: r, cornerWidth: corner, cornerHeight: corner, transform: nil))
+            ctx.fillPath()
         }
         ctx.restoreGState()
     }

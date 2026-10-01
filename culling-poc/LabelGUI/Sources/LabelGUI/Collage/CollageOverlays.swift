@@ -16,6 +16,8 @@ enum CollageOverlays {
         var text: CollageText
         var light: Bool
         var anchor: CollageAnchor
+        /// 字底下画面太花、反差不够时字后面垫的雾面有多实（0 = 不垫）：深字衬白、浅字衬黑。
+        var halo: Double = 0
     }
 
     /// area = 照片实际画的区域（成品坐标）；window/drawn 用来把字块映射回照片坐标看底下是什么。
@@ -51,6 +53,7 @@ enum CollageOverlays {
 
         var chosen: CollageAnchor
         var rect: CGRect
+        var fit = fitted
         switch overlay.anchor {
         case .custom:
             chosen = .custom
@@ -59,16 +62,25 @@ enum CollageOverlays {
             rect = clampRect(CGRect(x: cx - Double(size.width) / 2, y: cy - Double(size.height) / 2,
                                     width: Double(size.width), height: Double(size.height)), into: avail)
         case .auto:
-            var best = (anchor: CollageAnchor.top, rect: CGRect.zero, cost: Double.infinity)
-            for a in CollageAnchor.grid {
-                let r = anchored(a, size: size, in: inner)
-                let face: Double = cost(r, anchor: a, vertical: vertical, photo: photo, hints: hints, grid: grid,
-                                        mapper: mapper)
-                let c: Double = face + seamCost(r, seams: seams)
-                if c < best.cost { best = (a, r, c) }
+            // 九个位置 × 三档大小里挑：上方只剩一小块干净的天空时，小一号放在天上比大字压在栏杆花纹上
+            // 好认（缩小有代价，不会无故缩）。
+            var best = (anchor: CollageAnchor.top, rect: CGRect.zero, fit: fitted, cost: Double.infinity)
+            for s in autoScales {
+                let f = s == 1 ? fitted : CollageTypeset.fit(overlay.text, in: CGSize(width: maxW, height: maxH),
+                                                            short: short * s, vars: vars)
+                let sz = CGSize(width: ceil(f.size.width) + 1, height: ceil(f.size.height) + 1)
+                let shrink: Double = max(0, 1 - f.short / max(1e-6, fitted.short))
+                for a in CollageAnchor.grid {
+                    let r = anchored(a, size: sz, in: inner)
+                    let base: Double = cost(r, anchor: a, vertical: vertical, photo: photo, hints: hints, grid: grid,
+                                            mapper: mapper, tone: overlay.tone)
+                    let c: Double = base + seamCost(r, seams: seams) + shrinkCost * shrink
+                    if c < best.cost { best = (a, r, f, c) }
+                }
             }
             chosen = best.anchor
             rect = best.rect
+            fit = best.fit
         default:
             chosen = overlay.anchor
             rect = clearOfSeams(anchored(overlay.anchor, size: size, in: inner), canvas: canvas, within: inner)
@@ -101,7 +113,40 @@ enum CollageOverlays {
             l.color = toned(line.color, light: light)
             return l
         }
-        return Placement(rect: rect, short: fitted.short, text: text, light: light, anchor: chosen)
+        // 衬：按最后落的位置底下有多花、反差够不够定（干净的天空上 = 0，什么都不加）。
+        var halo = 0.0
+        if let box = mapper.toPhoto(rect), let stats = grid?.stats(in: box) {
+            let busy: Double = min(1, max(0, (stats.busy - 0.22) / 0.4))
+            halo = max(busy, illegibility(stats, light: light))
+        }
+        return Placement(rect: rect, short: fit.short, text: text, light: light, anchor: chosen, halo: halo)
+    }
+
+    /// 自动位置试的几档大小、缩小的代价（缩到 0.72 ≈ 1.7）。
+    private static let autoScales: [Double] = [1, 0.85, 0.72]
+    private static let shrinkCost = 6.0
+
+    /// 自动字色：底下平均亮度 0.56 以下用浅字（和最后真正上色用同一条线）。
+    private static func tone(_ mean: Double, _ tone: CollageTone) -> Bool {
+        switch tone {
+        case .auto: return mean < 0.56
+        case .light: return true
+        case .dark: return false
+        }
+    }
+
+    /// 字和底的对比度（WCAG 那种，1…21），按底下最不利的那一片算：浅字看底下偏亮的、深字看偏暗的。
+    static func contrast(_ stats: Grid.Stats, light: Bool) -> Double {
+        let sigma: Double = stats.spread / 2
+        let bg: Double = light ? min(1, stats.mean + sigma) : max(0, stats.mean - sigma)
+        let lb: Double = CollageLooks.linear(bg)
+        let lt: Double = light ? 0.9 : 0.02
+        return (max(lb, lt) + 0.05) / (min(lb, lt) + 0.05)
+    }
+
+    /// 0 = 反差足够（≥ 4.5），1 = 几乎看不清（≤ 1.5）。
+    static func illegibility(_ stats: Grid.Stats, light: Bool) -> Double {
+        min(1, max(0, (4.5 - contrast(stats, light: light)) / 3))
     }
 
     // MARK: - 候选位置
@@ -160,7 +205,7 @@ enum CollageOverlays {
 
     /// 越低越好：压脸最重，压身体次之，底下越乱、明暗越不均越差。
     private static func cost(_ r: CGRect, anchor: CollageAnchor, vertical: Bool, photo: CollagePhotoRef?,
-                             hints: CollageCrop.Hints?, grid: Grid?, mapper: Mapper) -> Double {
+                             hints: CollageCrop.Hints?, grid: Grid?, mapper: Mapper, tone: CollageTone) -> Double {
         var c = prior(anchor, vertical: vertical)
         guard let photo, let box = mapper.toPhoto(r) else { return c }
         let boxArea = max(1e-9, Double(box.width * box.height))
@@ -186,6 +231,7 @@ enum CollageOverlays {
         }
         if let grid, let stats = grid.stats(in: box) {
             c += 5 * stats.busy + 2 * stats.spread
+            c += 3 * illegibility(stats, light: self.tone(stats.mean, tone))
         }
         return c
     }
@@ -259,10 +305,12 @@ enum CollageOverlays {
         }
     }
 
-    // MARK: - 亮度网格（取景窗口里 24×24 的亮度，从 256 预览算，和渲染尺寸无关）
+    // MARK: - 亮度网格（取景窗口里 48×48 的亮度，从 256 预览算，和渲染尺寸无关）
+    //
+    // 48 而不是 24：栏杆石雕、窗格这种笔画粗细的花纹，24 格一平均就看不出来了（字压上去照样难认）。
 
     struct Grid {
-        static let side = 24
+        static let side = 48
         /// 照片坐标里网格覆盖的范围（= 取景窗口）。
         var window: CGRect
         var lum: [Double]

@@ -120,9 +120,13 @@ enum CollageCLI {
                 applyLookOptions(&project.style, option: option)
             }
             if let c = template.canvas, option("--canvas") == nil { project.canvas = c }
+            // 照片不够模板的格子：和界面里套模板一样，从池子里按分数补（九宫格要 8、9 张）。
+            let extra = Array(pool.filter { p in !chosen.contains { $0.id == p.id } }
+                .sorted { $0.score > $1.score }.prefix(max(0, template.photoSlots - chosen.count)))
+            for p in extra { hints[p.id] = CollageVision.hints(for: p) }
             let ctx = CollageLayout.Context(canvas: project.canvas, style: project.style, photos: photoMap,
                                             hints: hints, heroID: nil)
-            page = CollageTemplates.apply(template, photos: chosen, context: ctx, seed: seed)
+            page = CollageTemplates.apply(template, photos: chosen + extra, context: ctx, seed: seed)
             root = page.root
             let s = page.freeform
                 ? CollageLayout.Scored(root: root, score: CollageScatter.score(page.items, canvas: project.canvas,
@@ -702,7 +706,7 @@ private struct CollageSnapshotHost: View {
 /// LABELGUI_DATA_DIR=<临时目录> LabelGUI --collage-ops <photo_dir> --ops "swap:00>10,move:00>11:left,remove:10,
 ///     flip:r,ratio:0=0.4,lock:00,regen,framing:10=half,shape:10=circle,contain:10,crop:10=0.5;0.4;2,
 ///     text:00=bottom,place:DSCF7209>11:top,undo,redo,savetpl:名字,applytpl:名字,exporttpl:/path.json,
-///     importtpl:/path.json,render:文件名" [--out 目录] [--count 6]
+///     importtpl:/path.json,frombatch:DSCF7209;DSCF7211,render:文件名" [--out 目录] [--count 6]
 /// 路径写成数字串（"10" = 根的第二个孩子的第一个孩子），根节点写 r；一步里的几个数用分号分（逗号分步）。
 /// 每步打印版式树、图层（~ 自动撒的，@7232 贴在那张相纸上）和撤销栈。出图不走导出：renderclean = 界面
 /// 预览同款，renderexport = 导出同款（成品尺寸带出血）。必须设 LABELGUI_DATA_DIR（起手会清托盘）。
@@ -820,6 +824,8 @@ enum CollageOpsScript {
                 store.removeCell(path(arg))
             case "flip":
                 store.flipGutter(path(arg))
+            case "refit":
+                store.refit()
             case "ratio":
                 if let (p, v) = pair(arg, "="), let r = Double(v) {
                     store.beginContinuousEdit()
@@ -917,6 +923,11 @@ enum CollageOpsScript {
                 idle()
             case "untray":
                 store.removeFromTray(arg)
+            case "frombatch":
+                // 批量页多选「拼图 (N)」：frombatch:DSCF7209;DSCF7211（相册里应该新开一个跨页）。
+                store.importFromBatch(ids: arg.split(separator: ";").map(String.init), batch: batch, layout: true)
+                spin(20) { store.busyText == nil }
+                idle()
             case "sticker":
                 if let k = CollageSticker(rawValue: arg) { store.addSticker(k) } else { ok = false }
             case "itemtext":

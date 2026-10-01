@@ -126,6 +126,8 @@ struct CollageLayoutPanel: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }
             }
+            // 每一块都撑满检视器的宽（以前「画布」「输出目录」两块按内容收窄，和别的块对不齐）。
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
     }
@@ -157,6 +159,11 @@ struct CollageLayoutPanel: View {
                     Text(cellTitle(cell)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     if cell.kind == .photo, cell.photoID != nil {
                         photoCellControls(cell)
+                        if selectedWindow?.hitsBystander == true {
+                            Label("取景里有路人：双击格子拖一拖，或者换「半身」「特写」", systemImage: "person.2.fill")
+                                .font(.caption2).foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                         Text(cell.overlay == nil ? "要在这张照片上压字：到「文字」里选一个样式" : "照片上压了字：在「文字」里改内容、位置、深浅")
                             .font(.caption2).foregroundStyle(.tertiary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -185,8 +192,17 @@ struct CollageLayoutPanel: View {
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
+    }
+
+    /// 选中那一格现在的取景（看有没有路人）。
+    private var selectedWindow: CollageCrop.Window? {
+        guard let path = store.selection, let frame = store.geometry.frames.first(where: { $0.path == path }) else {
+            return nil
+        }
+        return store.window(for: frame)
     }
 
     private func cellTitle(_ cell: CollageCell) -> String {
@@ -267,6 +283,7 @@ struct CollageLayoutPanel: View {
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
     }
@@ -294,6 +311,7 @@ struct CollageLayoutPanel: View {
                 }
                 .font(.caption)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
         .confirmationDialog("删除模板？", isPresented: Binding(
@@ -360,22 +378,48 @@ struct CollageStylePanel: View {
                 })
     }
 
+    /// 风格预设：这一页套上去的样子当按钮，正在用的那个描边（拖过滑杆就哪个都不是了）。
     private var presetBox: some View {
         GroupBox("风格") {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 6)], spacing: 6) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 8)], spacing: 8) {
                 ForEach(CollageStyles.all) { preset in
-                    Button {
-                        store.setStyle(preset.style, coalesce: false)
-                    } label: {
-                        Text(preset.name)
-                            .font(.caption)
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
+                    presetTile(preset)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
+        .onAppear { store.renderStyleThumbs() }
+        .onChange(of: store.styleThumbSource) { _, _ in store.renderStyleThumbs() }
+    }
+
+    private func presetTile(_ preset: CollageStyles.Preset) -> some View {
+        let active = store.project.style == preset.style
+        return Button {
+            store.setStyle(preset.style, coalesce: false)
+        } label: {
+            VStack(spacing: 3) {
+                Group {
+                    if let image = store.styleThumbs[preset.key] {
+                        Image(nsImage: image).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+                    } else {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Color.gray.opacity(0.18))
+                            .aspectRatio(store.project.canvas.aspect, contentMode: .fit)
+                    }
+                }
+                .overlay(RoundedRectangle(cornerRadius: 2)
+                    .strokeBorder(active ? Color.accentColor : Color.gray.opacity(0.25), lineWidth: active ? 2.5 : 0.5))
+                .frame(maxWidth: .infinity, maxHeight: 72)
+                Text(preset.name)
+                    .font(.caption2)
+                    .foregroundStyle(active ? .primary : .secondary)
+                    .lineLimit(1)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(active ? "正在用「\(preset.name)」" : "整页换成「\(preset.name)」的纸、边距、缝、边框、色调")
     }
 
     /// 散落版没有格子：外边距、缝宽、形状、圆角、小格近景、边框、投影都不起作用 —— 灰掉，别让人拖了
@@ -413,6 +457,7 @@ struct CollageStylePanel: View {
                 CollageSlider(label: "输出锐化", value: styleBinding(\.sharpen), range: 0...1,
                               display: String(format: "%.2f", store.project.style.sharpen))
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
     }
@@ -446,6 +491,7 @@ struct CollageStylePanel: View {
                 CollageSlider(label: "纸纹", value: styleBinding(\.grain), range: 0...1,
                               display: String(format: "%.2f", store.project.style.grain))
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
     }
@@ -473,6 +519,7 @@ struct CollageStylePanel: View {
                 if store.isFreeform { gridOnlyHint("散落版的相框、投影在「版式 › 选中的图层」里按张调。") }
                 frameControls.disabled(store.isFreeform)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
     }
@@ -521,6 +568,7 @@ struct CollageTextPanel: View {
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
         .onAppear {
@@ -580,6 +628,7 @@ struct CollageTextPanel: View {
                 }
                 .font(.caption)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
     }
@@ -620,6 +669,7 @@ struct CollageTextEditor: View {
                 Toggle("细线", isOn: Binding(get: { text.rule }, set: { v in update { $0.rule = v } }))
                 sealControls
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
         ForEach(Array(text.lines.enumerated()), id: \.offset) { item in
@@ -724,6 +774,7 @@ struct CollageTextEditor: View {
                     .help("删掉这一行")
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
     }
@@ -751,6 +802,7 @@ struct CollageExportPanel: View {
                 Text(summary).font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
         if store.isAlbum || store.project.canvas.bleed > 0 {
@@ -771,6 +823,7 @@ struct CollageExportPanel: View {
                 }
                 .font(.caption)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
         Button {
@@ -817,6 +870,7 @@ struct CollageExportPanel: View {
                      Double(store.project.canvas.height) / store.project.canvas.dpi * 2.54))
                     .font(.caption2).foregroundStyle(.secondary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
     }

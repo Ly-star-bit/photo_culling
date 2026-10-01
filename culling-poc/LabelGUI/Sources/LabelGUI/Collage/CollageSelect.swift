@@ -228,6 +228,9 @@ enum CollageSelect {
                         // 低于中位数的 80% 开始扣，到 40% 扣满：同场连拍 ≈ 扣满，同姿势 ≈ 扣一半。
                         let closeness = min(1, max(0, (0.8 - norm) / 0.4))
                         v -= 1.4 * closeness
+                        // 同地同姿势（和相册去重同一条线：中位数的 76% 以下）再扣一截：两张几乎一样的精选
+                        // 并排，不如换一张不一样的可用（photot 7208 / 7212 以前就这样挨在一起）。
+                        if norm < 0.76 { v -= 1.0 }
                     }
                     if let t = p.take, usedTakes.contains(t) { v -= 0.35 }
                 }
