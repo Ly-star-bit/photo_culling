@@ -98,7 +98,12 @@ struct CollageLayoutPanel: View {
                 Menu {
                     let presets = store.isAlbum ? CollageCanvas.albums : CollageCanvas.social
                     ForEach(presets, id: \.name) { preset in
-                        Button(preset.name) { store.setCanvas(preset) }
+                        Button(preset.name) {
+                            // 相册换尺寸不换装订方式。
+                            var c = preset
+                            if store.isAlbum { c.binding = store.project.canvas.binding }
+                            store.setCanvas(c)
+                        }
                     }
                 } label: {
                     Text(store.project.canvas.name).lineLimit(1)
@@ -116,14 +121,13 @@ struct CollageLayoutPanel: View {
                 .onAppear { syncCustomFields() }
                 .onChange(of: store.project.canvas) { _, _ in syncCustomFields() }
                 if store.project.canvas.seams == .grid9 {
-                    Text("导出时另存 3×3 九张，发朋友圈按顺序选图；脸不会压在切线上")
+                    Text("导出时另存 3×3 九张（每张 \(store.project.canvas.width / 3)×\(store.project.canvas.height / 3)），发朋友圈按顺序选图；脸不会压在切线上")
                         .font(.caption2).foregroundStyle(.secondary)
                 } else if store.project.canvas.seams == .carousel {
                     Text("导出时切成 \(store.project.canvas.slides) 张轮播，照片可以跨页连着；脸不会压在页缝上")
                         .font(.caption2).foregroundStyle(.secondary)
                 } else if store.project.canvas.seams == .fold {
-                    Text("跨页：中缝两侧不放脸；出血 \(mm(store.project.canvas.bleed)) · 安全区 \(mm(store.project.canvas.safe))")
-                        .font(.caption2).foregroundStyle(.secondary)
+                    foldControls
                 }
             }
             // 每一块都撑满检视器的宽（以前「画布」「输出目录」两块按内容收窄，和别的块对不齐）。
@@ -134,6 +138,31 @@ struct CollageLayoutPanel: View {
 
     private func mm(_ px: Int) -> String {
         String(format: "%.0fmm", Double(px) / max(1, store.project.canvas.dpi) * 25.4)
+    }
+
+    /// 相册跨页：装订方式 + 中缝说明；胶装下还有照片压中缝的页报出来。
+    @ViewBuilder
+    private var foldControls: some View {
+        let canvas = store.project.canvas
+        Picker("装订", selection: Binding(get: { canvas.binding }, set: { store.setBinding($0) })) {
+            ForEach(CollageBinding.allCases, id: \.self) { Text($0.label).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        .help("平铺对裱：摊开是平的，横图可以铺满两页；胶装锁线：书脊会吃掉中间一条，照片不跨中缝")
+        let band = String(format: "%.0fmm", canvas.foldBand / max(1, canvas.dpi) * 25.4)
+        let rule = canvas.binding == .glued ? "照片不跨中缝，中缝两侧各 \(band) 不放脸" : "横图可以铺满两页，中缝两侧各 \(band) 不放脸"
+        Text("\(rule)；出血 \(mm(canvas.bleed)) · 安全区 \(mm(canvas.safe))")
+            .font(.caption2).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        if canvas.binding == .glued {
+            let crossing = store.crossFoldPages()
+            if !crossing.isEmpty {
+                Label("第 " + crossing.map { "\($0 + 1)" }.joined(separator: "、") + " 页有照片压在中缝上：到那一页点「换一批」",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     private func syncCustomFields() {
@@ -161,6 +190,12 @@ struct CollageLayoutPanel: View {
                         photoCellControls(cell)
                         if selectedWindow?.hitsBystander == true {
                             Label("取景里有路人：双击格子拖一拖，或者换「半身」「特写」", systemImage: "person.2.fill")
+                                .font(.caption2).foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if store.project.canvas.isPrint, let up = selectedUpscale, up > CollageStore.upscaleLimit {
+                            Label("这张要放大到 \(Int((up * 100).rounded()))% 才铺得满，超过 120% 印出来会软：少裁一点、换「完整显示」，或者给它小一点的格子",
+                                  systemImage: "plus.magnifyingglass")
                                 .font(.caption2).foregroundStyle(.orange)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -197,6 +232,14 @@ struct CollageLayoutPanel: View {
         }
     }
 
+    /// 选中那一格印出来要放大多少。
+    private var selectedUpscale: Double? {
+        guard let path = store.selection, let frame = store.geometry.frames.first(where: { $0.path == path }) else {
+            return nil
+        }
+        return store.upscale(for: frame)
+    }
+
     /// 选中那一格现在的取景（看有没有路人）。
     private var selectedWindow: CollageCrop.Window? {
         guard let path = store.selection, let frame = store.geometry.frames.first(where: { $0.path == path }) else {
@@ -226,6 +269,10 @@ struct CollageLayoutPanel: View {
         }
         Toggle("完整显示，不裁", isOn: Binding(get: { cell.contain }, set: { store.setContain($0) }))
             .help("照片按原比例整张放进格子，四周留底色")
+        if cell.contain {
+            Toggle("四周用本图模糊填", isOn: Binding(get: { cell.containBlur }, set: { store.setContainBlur($0) }))
+                .help("不留底色：这张照片自己大幅模糊铺满整格，清楚的那张浮在正中（横格放竖图常用）")
+        }
         HStack {
             if store.cropEditing {
                 Button("完成裁切") { store.exitCropEdit() }
@@ -474,20 +521,27 @@ struct CollageStylePanel: View {
                         set: { c in
                             var s = store.project.style
                             s.background = CollageColor(c)
-                            s.backgroundMode = .solid
+                            // 模糊底、渐变底时这是盖在上面的纸色，不切回纯色。
+                            if !s.backgroundMode.usesPaperTint { s.backgroundMode = .solid }
                             store.setStyle(s)
                         }), supportsOpacity: false)
                         .labelsHidden()
                         .frame(width: 34)
                 }
-                Toggle("从主图取色", isOn: Binding(
-                    get: { store.project.style.backgroundMode == .fromPhoto },
-                    set: { on in
+                Picker("底", selection: Binding(
+                    get: { store.project.style.backgroundMode },
+                    set: { mode in
                         var s = store.project.style
-                        s.backgroundMode = on ? .fromPhoto : .solid
+                        s.backgroundMode = mode
                         store.setStyle(s, coalesce: false)
-                    }))
-                    .help("底色往主图的色调上靠一点（压低饱和，不会染成照片的颜色）")
+                    })) {
+                    ForEach(CollageBackgroundMode.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Text(backgroundHint)
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 CollageSlider(label: "纸纹", value: styleBinding(\.grain), range: 0...1,
                               display: String(format: "%.2f", store.project.style.grain))
             }
@@ -496,12 +550,23 @@ struct CollageStylePanel: View {
         }
     }
 
+    private var backgroundHint: String {
+        switch store.project.style.backgroundMode {
+        case .solid: return "整页一个颜色（上面的色块）"
+        case .fromPhoto: return "底色往主图的色调上靠一点（压低饱和，不会染成照片的颜色）"
+        case .blurPhoto: return "主图大幅模糊铺满整页，上面盖一层所选纸色；照片太暗或太亮时自动多盖一点，版面上的字照样看得清"
+        case .gradient: return "主图上、下两截的颜色做竖向渐变（压低饱和、往所选纸色靠）"
+        }
+    }
+
     private func swatch(_ name: String, _ color: CollageColor) -> some View {
-        let active = store.project.style.background == color && store.project.style.backgroundMode == .solid
+        let mode = store.project.style.backgroundMode
+        let active = store.project.style.background == color && mode != .fromPhoto
         return Button {
             var s = store.project.style
             s.background = color
-            s.backgroundMode = .solid
+            // 模糊底、渐变底时色块换的是盖在上面的纸色。
+            if !s.backgroundMode.usesPaperTint { s.backgroundMode = .solid }
             store.setStyle(s, coalesce: false)
         } label: {
             Circle()
@@ -773,10 +838,122 @@ struct CollageTextEditor: View {
                     .disabled(text.lines.count <= 1)
                     .help("删掉这一行")
                 }
+                effectControls(index: index, line: line)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
+    }
+
+    // MARK: 花字
+
+    /// 花字：四个开关（描边 / 投影 / 底条 / 渐变）+ 现成搭配；开了哪个露出哪个的参数。全关 = 普通字，
+    /// 打字从来不用先选样式。
+    @ViewBuilder
+    private func effectControls(index: Int, line: CollageTextLine) -> some View {
+        let fx = line.effect ?? CollageTextEffect()
+        HStack(spacing: 4) {
+            Text("花字").frame(width: 30, alignment: .leading)
+            effectToggle("描边", on: fx.stroke > 0.0001, index: index) { e, color, on in
+                e.stroke = on ? 0.08 : 0
+                if on { e.strokeColor = color.luminance > 0.5 ? .charcoal : .white }
+            }
+            effectToggle("投影", on: fx.shadow > 0.0001, index: index) { e, _, on in
+                e.shadow = on ? 0.6 : 0
+                if on {
+                    e.shadowColor = CollageColor(r: 0, g: 0, b: 0)
+                    e.shadowBlur = 0.12
+                    e.shadowOffset = 0.06
+                }
+            }
+            effectToggle("底条", on: fx.hasBand, index: index) { e, color, on in
+                e.band = on ? 0.85 : 0
+                if on {
+                    e.bandColor = color.luminance > 0.5 ? .charcoal : .white
+                    e.bandRound = 0.3
+                }
+            }
+            effectToggle("渐变", on: fx.gradient != nil, index: index) { e, color, on in
+                e.gradient = on ? (color.luminance > 0.5 ? CollageColor(hex: 0xE2B657) : CollageColor(hex: 0x3B5B8C)) : nil
+            }
+            Spacer(minLength: 0)
+            Menu("样式") {
+                ForEach(CollageTextEffects.presets) { preset in
+                    Button(preset.name) { store.applyTextEffect(preset, line: index, target: target) }
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("套一个现成搭配（有的会换字色）；套完每一项还能单独调")
+        }
+        .font(.caption)
+        if fx.stroke > 0.0001 {
+            effectRow(CollageSlider(label: "描边", value: effectValue(index, \.stroke, fx), range: 0.02...0.3,
+                                    display: percent(fx.stroke)),
+                      color: effectColor(index, \.strokeColor, fx))
+        }
+        if fx.shadow > 0.0001 {
+            effectRow(CollageSlider(label: "投影", value: effectValue(index, \.shadow, fx), range: 0.05...1,
+                                    display: String(format: "%.2f", fx.shadow)),
+                      color: effectColor(index, \.shadowColor, fx))
+            CollageSlider(label: "模糊", value: effectValue(index, \.shadowBlur, fx), range: 0...0.6,
+                          display: percent(fx.shadowBlur))
+            CollageSlider(label: "下落", value: effectValue(index, \.shadowOffset, fx), range: 0...0.3,
+                          display: fx.shadowOffset < 0.005 ? "发光" : percent(fx.shadowOffset))
+                .help("拖到 0 = 四周一圈（发光），配浅色更像霓虹")
+        }
+        if fx.hasBand {
+            effectRow(CollageSlider(label: "底条", value: effectValue(index, \.band, fx), range: 0.1...1,
+                                    display: String(format: "%.2f", fx.band)),
+                      color: effectColor(index, \.bandColor, fx))
+            CollageSlider(label: "圆角", value: effectValue(index, \.bandRound, fx), range: 0...1,
+                          display: String(format: "%.2f", fx.bandRound))
+        }
+        if let to = fx.gradient {
+            ColorPicker("渐变到（下端）", selection: Binding(get: { to.swiftUIColor }, set: { c in
+                updateEffect(index) { e, _ in e.gradient = CollageColor(c) }
+            }), supportsOpacity: false)
+            .font(.caption)
+        }
+    }
+
+    private func effectRow(_ slider: CollageSlider, color: Binding<Color>) -> some View {
+        HStack(spacing: 4) {
+            slider
+            ColorPicker("", selection: color, supportsOpacity: false)
+                .labelsHidden()
+                .frame(width: 34)
+        }
+    }
+
+    private func effectToggle(_ title: String, on: Bool, index: Int,
+                              _ body: @escaping (inout CollageTextEffect, CollageColor, Bool) -> Void) -> some View {
+        Toggle(title, isOn: Binding(get: { on }, set: { v in
+            updateEffect(index) { e, color in body(&e, color, v) }
+        }))
+        .toggleStyle(.button)
+        .controlSize(.small)
+    }
+
+    /// 改这一行的花字（全关了就存成 nil，工程里不留一串 0）。
+    private func updateEffect(_ index: Int, _ body: (inout CollageTextEffect, CollageColor) -> Void) {
+        update { t in
+            guard t.lines.indices.contains(index) else { return }
+            var e = t.lines[index].effect ?? CollageTextEffect()
+            body(&e, t.lines[index].color)
+            t.lines[index].effect = e.isEmpty ? nil : e
+        }
+    }
+
+    private func effectValue(_ index: Int, _ keyPath: WritableKeyPath<CollageTextEffect, Double>,
+                             _ fx: CollageTextEffect) -> Binding<Double> {
+        Binding(get: { fx[keyPath: keyPath] }, set: { v in updateEffect(index) { e, _ in e[keyPath: keyPath] = v } })
+    }
+
+    private func effectColor(_ index: Int, _ keyPath: WritableKeyPath<CollageTextEffect, CollageColor>,
+                             _ fx: CollageTextEffect) -> Binding<Color> {
+        Binding(get: { fx[keyPath: keyPath].swiftUIColor },
+                set: { c in updateEffect(index) { e, _ in e[keyPath: keyPath] = CollageColor(c) } })
     }
 }
 
@@ -848,7 +1025,7 @@ struct CollageExportPanel: View {
             return "\(name)_跨页_01.\(ext)…\(pdf)\(example)：每个跨页 \(c.width + c.bleed * 2)×\(c.height + c.bleed * 2)px（含出血）；sRGB"
         }
         switch c.seams {
-        case .grid9: return "\(name).\(ext) + \(name)_九宫格_1…9\(example)：整张 \(c.width)×\(c.height)px + 九宫格 9 张；sRGB"
+        case .grid9: return "\(name).\(ext) + \(name)_九宫格_1…9\(example)：整张 \(c.width)×\(c.height)px + 九宫格 9 张（每张 \(c.width / 3)×\(c.height / 3)）；sRGB"
         case .carousel: return "\(name).\(ext) + \(name)_轮播_1…\(c.slides)\(example)：每张 \(c.width / max(1, c.slides))×\(c.height)px；sRGB"
         default: return "\(name).\(ext)\(example)：\(c.width)×\(c.height)px；sRGB"
         }
@@ -869,9 +1046,27 @@ struct CollageExportPanel: View {
                      Double(store.project.canvas.width) / store.project.canvas.dpi * 2.54,
                      Double(store.project.canvas.height) / store.project.canvas.dpi * 2.54))
                     .font(.caption2).foregroundStyle(.secondary)
+                if store.project.canvas.isPrint { upscaleSummary }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
+        }
+    }
+
+    /// 印刷前的分辨率检查：放大超过 120% 的照片有几张、在哪几页（画布上那几格也标了「放大」）。
+    @ViewBuilder
+    private var upscaleSummary: some View {
+        let issues = store.upscaleIssues()
+        if issues.isEmpty {
+            Text("照片都没有放大到 120% 以上，印出来不会软")
+                .font(.caption2).foregroundStyle(.secondary)
+        } else {
+            let pages = Set(issues.map(\.page)).sorted().map { "\($0 + 1)" }.joined(separator: "、")
+            let worst = Int(((issues.first?.factor ?? 1) * 100).rounded())
+            Label("\(issues.count) 张照片要放大到 120% 以上（最多 \(worst)%，在第 \(pages) 页）：印出来会软，少裁一点或缩小那一格",
+                  systemImage: "plus.magnifyingglass")
+                .font(.caption2).foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

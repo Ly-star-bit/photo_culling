@@ -107,8 +107,13 @@ enum CollageRender {
         let pagePhotoIDs = page.photoIDs
 
         let bg = backgroundColor(project: project, pagePhotoIDs: pagePhotoIDs, photos: photos)
+        let colorOps = CollageLooks.ops(style: style, pagePhotoIDs: pagePhotoIDs, photos: photos)
         ctx.setFillColor(bg.cgColor)
         ctx.fill(CGRect(x: 0, y: 0, width: fullW, height: fullH))
+        // 照片做底（模糊、渐变）：盖在纯色上、纸纹下面，铺满出血；和照片同一套调色。
+        if style.backgroundMode.usesPaperTint, let hero = heroPhoto(pagePhotoIDs, photos: photos) {
+            drawBackdrop(ctx, style: style, hero: hero, ops: colorOps[hero.id], width: fullW, height: fullH)
+        }
         if style.grain > 0 {
             drawGrain(ctx, width: fullW, height: fullH, intensity: style.grain, scale: scale)
         }
@@ -125,7 +130,6 @@ enum CollageRender {
         let vars = CollageTypeset.variables(project: project, root: root, photos: photos, pagePhotoIDs: pagePhotoIDs,
                                             pageID: page.id)
         let sharpenRadius = canvas.dpi >= 200 ? 1.3 * scale : 0.8
-        let colorOps = CollageLooks.ops(style: style, pagePhotoIDs: pagePhotoIDs, photos: photos)
 
         if !page.freeform {
             for frame in geo.frames {
@@ -360,7 +364,14 @@ enum CollageRender {
             drawn = grown.integral
         }
         let corner = CGFloat(style.corner * short)
-        let outerPath = shapePath(shape, rect: framed ? outer : drawn, corner: corner)
+        // 完整显示 + 本图模糊填：整格（含铺出血的那几条边）都是这张照片的模糊底，清楚的那张居中浮在上面。
+        let blurFill = cell.contain && cell.containBlur
+        var fillRect = inner
+        if blurFill, let e = extend {
+            fillRect = CGRect(x: inner.minX - e.left, y: inner.minY - e.top,
+                              width: inner.width + e.left + e.right, height: inner.height + e.top + e.bottom)
+        }
+        let outerPath = shapePath(shape, rect: framed ? outer : (blurFill ? fillRect : drawn), corner: corner)
 
         // 投影：先用底色/边框色把形状填一遍带阴影，照片再盖上去。CG 的阴影偏移在设备空间
         // （y 朝上），不跟翻转的 CTM 走：往下落要给负值。
@@ -382,6 +393,23 @@ enum CollageRender {
             if style.border == .film { drawSprockets(ctx, outer: outer, inner: inner, background: background) }
         }
 
+        if blurFill, let backdrop = blurredBackdrop(photo, ops: color) {
+            ctx.saveGState()
+            ctx.addPath(framed ? CGPath(rect: inner, transform: nil) : shapePath(shape, rect: fillRect, corner: corner))
+            ctx.clip()
+            ctx.interpolationQuality = .high
+            drawImageTopLeft(ctx, backdrop, aspectFill(Double(backdrop.width) / Double(max(1, backdrop.height)), in: fillRect))
+            // 盖一层很薄的底色：模糊底退后一点，清楚的那张更跳。
+            ctx.setFillColor(background.cgColor(alpha: 0.16))
+            ctx.fill(fillRect)
+            // 清楚的那张落一点影子，从模糊底上浮起来（照片马上盖住填的底色，只剩影子）。
+            ctx.setShadow(offset: CGSize(width: 0, height: -CGFloat(short) * 0.003), blur: CGFloat(short) * 0.014,
+                          color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.3))
+            ctx.setFillColor(background.cgColor)
+            ctx.fill(drawn)
+            ctx.restoreGState()
+        }
+
         let pw = max(1, Int(drawn.width.rounded()))
         let ph = max(1, Int(drawn.height.rounded()))
         guard let tile = cellImage(photo: photo, window: window, width: pw, height: ph, sharpen: style.sharpen,
@@ -397,7 +425,7 @@ enum CollageRender {
         if style.border == .hairline {
             let lw = max(1, CGFloat(short) / 1400)
             ctx.saveGState()
-            ctx.addPath(shapePath(shape, rect: drawn.insetBy(dx: lw / 2, dy: lw / 2), corner: corner))
+            ctx.addPath(shapePath(shape, rect: (blurFill ? inner : drawn).insetBy(dx: lw / 2, dy: lw / 2), corner: corner))
             ctx.setStrokeColor(style.borderColor.cgColor(alpha: 0.9))
             ctx.setLineWidth(lw)
             ctx.strokePath()
@@ -412,9 +440,10 @@ enum CollageRender {
         var bottom: CGFloat = 0
     }
 
-    /// 能铺出血的：普通矩形照片格，没有相纸/胶片框、细线（细线会被裁掉），不是完整显示。
+    /// 能铺出血的：普通矩形照片格，没有相纸/胶片框、细线（细线会被裁掉），不是完整显示 ——
+    /// 完整显示 + 本图模糊填可以：铺进出血的是模糊底，清楚的照片还在成品区里。
     private static func canBleed(_ cell: CollageCell, style: CollageStyle) -> Bool {
-        (cell.shape ?? style.shape) == .rect && style.border == .none && !cell.contain
+        (cell.shape ?? style.shape) == .rect && style.border == .none && (!cell.contain || cell.containBlur)
     }
 
     /// 贴着成品边（或离得比安全区还近）的那几条边往里收到安全区。
@@ -560,26 +589,253 @@ enum CollageRender {
 
     // MARK: - 背景
 
+    /// 这一页的主图 = 分数最高的那张（底色取色、模糊底、渐变底、统一色调都认它）。
+    static func heroPhoto(_ ids: [String], photos: [String: CollagePhotoRef]) -> CollagePhotoRef? {
+        ids.compactMap { photos[$0] }.max { $0.score < $1.score }
+    }
+
+    /// 页面底色（模糊底、渐变底时是它们的代表色）：占位框深浅、压字落在留白上时判深字浅字、
+    /// 投影底下垫的颜色都按它。拖缝、拖字每一帧都会问，只用缓存过的小样统计。
     static func backgroundColor(project: CollageProject, pagePhotoIDs ids: [String],
                                 photos: [String: CollagePhotoRef]) -> CollageColor {
         let style = project.style
-        guard style.backgroundMode == .fromPhoto else { return style.background }
-        let hero = ids.compactMap { photos[$0] }.max { $0.score < $1.score }
-        guard let hero, let raw = averageColor(hero) else { return style.background }
-        // 取的是调色之后的主图颜色（套了黑白，底色不能还带着原图的暖色）。
-        let graded = CollageLooks.grade(raw.r, raw.g, raw.b, look: style.look, strength: style.lookStrength)
-        let avg = CollageColor(r: graded.0, g: graded.1, b: graded.2)
-        // 往纸白靠、压饱和：只要一点点色温呼应，不能把底色染成照片的颜色。
-        let grey = (avg.r + avg.g + avg.b) / 3
-        let muted = avg.mixed(with: CollageColor(r: grey, g: grey, b: grey), 0.45)
-        if style.background.luminance < 0.4 {
-            return style.background.mixed(with: muted, 0.22)
+        guard style.backgroundMode != .solid, let hero = heroPhoto(ids, photos: photos) else { return style.background }
+        switch style.backgroundMode {
+        case .solid:
+            return style.background
+        case .fromPhoto:
+            // 取的是调色之后的主图颜色（套了黑白，底色不能还带着原图的暖色）。
+            guard let avg = gradedAverage(hero, style: style) else { return style.background }
+            // 往纸白靠、压饱和：只要一点点色温呼应，不能把底色染成照片的颜色。
+            let grey = (avg.r + avg.g + avg.b) / 3
+            let muted = avg.mixed(with: CollageColor(r: grey, g: grey, b: grey), 0.45)
+            if style.background.luminance < 0.4 {
+                return style.background.mixed(with: muted, 0.22)
+            }
+            return style.background.mixed(with: muted, 0.16)
+        case .blurPhoto:
+            guard let avg = gradedAverage(hero, style: style) else { return style.background }
+            return avg.mixed(with: style.background, washShare(paper: style.background, photo: avg,
+                                                              minimum: blurWashMinimum))
+        case .gradient:
+            guard let colors = gradientColors(hero, style: style) else { return style.background }
+            return colors.top.mixed(with: colors.bottom, 0.5)
         }
-        return style.background.mixed(with: muted, 0.16)
+    }
+
+    /// 模糊底上至少盖多少纸色（再少照片就抢戏了）。
+    static let blurWashMinimum = 0.35
+
+    /// 照片色上要盖多少纸色（0…0.9）：至少 minimum；照片比浅纸暗太多、或比深纸亮太多时多盖一点 ——
+    /// 版面上的字是按纸色配的（浅纸深字、深纸浅字），换成照片底也得看得清。
+    static func washShare(paper: CollageColor, photo: CollageColor, minimum: Double) -> Double {
+        let p = paper.luminance
+        let c = photo.luminance
+        let tolerance = 0.2
+        var share = minimum
+        if p >= 0.5 {
+            let target = p - tolerance
+            if c < target { share = max(share, (target - c) / max(1e-3, p - c)) }
+        } else {
+            let target = p + tolerance
+            if c > target { share = max(share, (c - target) / max(1e-3, c - p)) }
+        }
+        return min(0.9, max(0, share))
+    }
+
+    /// 照片做底（盖在纯色上、纸纹下面，铺满出血）：主图大幅模糊 + 一层纸色（毛玻璃），或主图上下两截
+    /// 颜色的竖向渐变。
+    private static func drawBackdrop(_ ctx: CGContext, style: CollageStyle, hero: CollagePhotoRef,
+                                     ops: CollageLooks.Ops?, width: Int, height: Int) {
+        let full = CGRect(x: 0, y: 0, width: width, height: height)
+        switch style.backgroundMode {
+        case .blurPhoto:
+            guard let blurred = blurredBackdrop(hero, ops: ops) else { return }
+            ctx.saveGState()
+            ctx.interpolationQuality = .high
+            drawImageTopLeft(ctx, blurred, aspectFill(Double(blurred.width) / Double(max(1, blurred.height)), in: full))
+            ctx.restoreGState()
+            if let avg = gradedAverage(hero, style: style) {
+                let wash = washShare(paper: style.background, photo: avg, minimum: blurWashMinimum)
+                ctx.setFillColor(style.background.cgColor(alpha: wash))
+                ctx.fill(full)
+            }
+        case .gradient:
+            guard let colors = gradientColors(hero, style: style),
+                  let gradient = CGGradient(colorsSpace: srgb, colors: [colors.top.cgColor, colors.bottom.cgColor] as CFArray,
+                                            locations: [0, 1]) else { return }
+            ctx.saveGState()
+            ctx.clip(to: full)
+            // 左上原点：y = 0 是上沿。
+            ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: 0), end: CGPoint(x: 0, y: CGFloat(height)),
+                                   options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+            ctx.restoreGState()
+        case .solid, .fromPhoto:
+            break
+        }
+    }
+
+    /// 铺满 rect（多出来的裁掉），居中。
+    static func aspectFill(_ aspect: Double, in rect: CGRect) -> CGRect {
+        guard rect.width > 0, rect.height > 0, aspect > 0 else { return rect }
+        let rectAspect = Double(rect.width / rect.height)
+        if aspect > rectAspect {
+            let w = Double(rect.height) * aspect
+            return CGRect(x: Double(rect.midX) - w / 2, y: Double(rect.minY), width: w, height: Double(rect.height))
+        }
+        let h = Double(rect.width) / aspect
+        return CGRect(x: Double(rect.minX), y: Double(rect.midY) - h / 2, width: Double(rect.width), height: h)
+    }
+
+    private static let backdropLock = NSLock()
+    private static var backdropCache: [String: CGImage] = [:]
+
+    /// 主图（调过色）缩到 512、大幅高斯模糊、稍微降饱和 —— 整页模糊底和「完整显示」格子的模糊填充共用。
+    /// 只在小图上算：预览、导出一个样子；放大铺满也看不出颗粒（模糊半径比放大倍数大得多）。按照片 +
+    /// 调色缓存：拖缝、拖字每一帧重画都不会重新解码。
+    static func blurredBackdrop(_ photo: CollagePhotoRef, ops: CollageLooks.Ops?) -> CGImage? {
+        let key = CollageVision.cacheKey(photo) + "#" + opsKey(ops)
+        backdropLock.lock()
+        let hit = backdropCache[key]
+        backdropLock.unlock()
+        if let hit { return hit }
+        guard let image = CollageImages.preview(photo, need: 512) else { return nil }
+        let extent = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        let sigma = Double(max(image.width, image.height)) * 0.045
+        let graded = CollageLooks.apply(CIImage(cgImage: image), ops: ops)
+        let blurred = graded.clampedToExtent().applyingGaussianBlur(sigma: sigma).cropped(to: extent)
+            .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.85])
+        guard let out = ciContext.createCGImage(blurred, from: extent, format: .RGBA8, colorSpace: srgb) else { return nil }
+        backdropLock.lock()
+        if backdropCache.count > 24 { backdropCache.removeAll() }
+        backdropCache[key] = out
+        backdropLock.unlock()
+        return out
+    }
+
+    private static func opsKey(_ ops: CollageLooks.Ops?) -> String {
+        guard let ops, !ops.isIdentity else { return "-" }
+        let gains = ops.gains.map { $0.map { String(Int(($0 * 1000).rounded())) }.joined(separator: ",") } ?? ""
+        return "\(ops.look.rawValue)|\(Int((ops.strength * 20).rounded()))|\(gains)"
+    }
+
+    /// 主图（调过色）的平均色。
+    private static func gradedAverage(_ hero: CollagePhotoRef, style: CollageStyle) -> CollageColor? {
+        guard let raw = averageColor(hero) else { return nil }
+        let g = CollageLooks.grade(raw.r, raw.g, raw.b, look: style.look, strength: style.lookStrength)
+        return CollageColor(r: g.0, g: g.1, b: g.2)
+    }
+
+    /// 渐变的上下两色：主图上、下两截的代表色（调过色），压一点饱和，再按「字看得清」往纸色靠。
+    static func gradientColors(_ hero: CollagePhotoRef, style: CollageStyle) -> (top: CollageColor, bottom: CollageColor)? {
+        guard let bands = bandColors(hero) else { return nil }
+        func prepare(_ c: CollageColor) -> CollageColor {
+            let g = CollageLooks.grade(c.r, c.g, c.b, look: style.look, strength: style.lookStrength)
+            var color = CollageColor(r: g.0, g: g.1, b: g.2)
+            let grey = (color.r + color.g + color.b) / 3
+            color = color.mixed(with: CollageColor(r: grey, g: grey, b: grey), 0.15)
+            return color.mixed(with: style.background, washShare(paper: style.background, photo: color, minimum: 0.35))
+        }
+        return (prepare(bands.top), prepare(bands.bottom))
+    }
+
+    /// 一截画面的代表色：有颜色的像素按色相分 12 档、按色度平方投票，取最重的一档（连两边邻档）的平均，
+    /// 再和整截的平均色按 6:4 混 —— 成片的天空、衣服的颜色出得来，不会被灰石头平均成一片泥灰；
+    /// 整截都是灰的就是平均色。
+    private static func representative(_ px: [(Double, Double, Double)]) -> CollageColor {
+        var mean = (0.0, 0.0, 0.0)
+        for p in px {
+            mean.0 += p.0
+            mean.1 += p.1
+            mean.2 += p.2
+        }
+        let n = Double(max(1, px.count))
+        let avg = CollageColor(r: mean.0 / n, g: mean.1 / n, b: mean.2 / n)
+        var weight = [Double](repeating: 0, count: 12)
+        var sum = [[Double]](repeating: [0, 0, 0], count: 12)
+        for (r, g, b) in px {
+            let mx = max(r, g, b)
+            let mn = min(r, g, b)
+            let c = mx - mn
+            guard c > 0.08 else { continue }
+            var h: Double
+            if mx == r {
+                h = ((g - b) / c).truncatingRemainder(dividingBy: 6)
+            } else if mx == g {
+                h = (b - r) / c + 2
+            } else {
+                h = (r - g) / c + 4
+            }
+            if h < 0 { h += 6 }
+            let bin = min(11, max(0, Int(h * 2)))
+            let w = c * c
+            weight[bin] += w
+            sum[bin][0] += r * w
+            sum[bin][1] += g * w
+            sum[bin][2] += b * w
+        }
+        guard let best = weight.indices.max(by: { weight[$0] < weight[$1] }), weight[best] > 0 else { return avg }
+        var total = 0.0
+        var acc = [0.0, 0.0, 0.0]
+        for d in [-1, 0, 1] {
+            let i = (best + d + 12) % 12
+            total += weight[i]
+            for k in 0..<3 { acc[k] += sum[i][k] }
+        }
+        let dominant = CollageColor(r: acc[0] / total, g: acc[1] / total, b: acc[2] / total)
+        return avg.mixed(with: dominant, 0.6)
     }
 
     private static let averageLock = NSLock()
     private static var averageCache: [String: CollageColor] = [:]
+    private static var bandCache: [String: (top: CollageColor, bottom: CollageColor)] = [:]
+
+    /// 主图上、下两截（各约三分之一）的代表色（按照片缓存）。
+    private static func bandColors(_ photo: CollagePhotoRef) -> (top: CollageColor, bottom: CollageColor)? {
+        let key = CollageVision.cacheKey(photo)
+        averageLock.lock()
+        let hit = bandCache[key]
+        averageLock.unlock()
+        if let hit { return hit }
+        let side = 16
+        guard let pixels = sampleGrid(photo, side: side) else { return nil }
+        // 位图内存第 0 行是图的上沿。
+        func band(_ rows: Range<Int>) -> CollageColor {
+            var px: [(Double, Double, Double)] = []
+            for y in rows {
+                for x in 0..<side {
+                    let i = (y * side + x) * 4
+                    px.append((Double(pixels[i]) / 255, Double(pixels[i + 1]) / 255, Double(pixels[i + 2]) / 255))
+                }
+            }
+            return representative(px)
+        }
+        let bands = (top: band(0..<5), bottom: band((side - 5)..<side))
+        averageLock.lock()
+        if bandCache.count > 512 { bandCache.removeAll() }
+        bandCache[key] = bands
+        averageLock.unlock()
+        return bands
+    }
+
+    /// 主图缩成 8×8 的 RGBA 小样（256 预览来的）。
+    private static func sample8(_ photo: CollagePhotoRef) -> [UInt8]? {
+        sampleGrid(photo, side: 8)
+    }
+
+    private static func sampleGrid(_ photo: CollagePhotoRef, side: Int) -> [UInt8]? {
+        guard let image = CollageImages.preview(photo, need: 256) else { return nil }
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        let ok: Bool = pixels.withUnsafeMutableBytes { buf in
+            guard let ctx = CGContext(data: buf.baseAddress, width: side, height: side, bitsPerComponent: 8,
+                                      bytesPerRow: side * 4, space: srgb,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return false }
+            ctx.interpolationQuality = .medium
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
+            return true
+        }
+        return ok ? pixels : nil
+    }
 
     /// 主图平均色（按照片缓存：画布上移动鼠标、拖字每一帧都会问到底色）。
     private static func averageColor(_ photo: CollagePhotoRef) -> CollageColor? {
@@ -597,18 +853,8 @@ enum CollageRender {
     }
 
     private static func computeAverageColor(_ photo: CollagePhotoRef) -> CollageColor? {
-        guard let image = CollageImages.preview(photo, need: 256) else { return nil }
+        guard let pixels = sample8(photo) else { return nil }
         let side = 8
-        var pixels = [UInt8](repeating: 0, count: side * side * 4)
-        let ok: Bool = pixels.withUnsafeMutableBytes { buf in
-            guard let ctx = CGContext(data: buf.baseAddress, width: side, height: side, bitsPerComponent: 8,
-                                      bytesPerRow: side * 4, space: srgb,
-                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return false }
-            ctx.interpolationQuality = .medium
-            ctx.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
-            return true
-        }
-        guard ok else { return nil }
         var r = 0.0
         var g = 0.0
         var b = 0.0
@@ -679,6 +925,17 @@ enum CollageRender {
             }
         }
         ctx.strokePath()
+        // 相册中缝：避让带的两条边（淡一点）—— 脸、字、相纸都不进这条带；胶装比平铺宽。
+        if canvas.seams == .fold, let fold = CollageLayout.seamLines(canvas).first {
+            let s = fold.applying(CGAffineTransform(scaleX: CGFloat(scale), y: CGFloat(scale)))
+                .offsetBy(dx: CGFloat(bleed), dy: CGFloat(bleed))
+            ctx.setStrokeColor(CGColor(srgbRed: 0.2, green: 0.75, blue: 0.9, alpha: 0.38))
+            for x in [s.minX, s.maxX] {
+                ctx.move(to: CGPoint(x: x, y: s.minY))
+                ctx.addLine(to: CGPoint(x: x, y: s.maxY))
+            }
+            ctx.strokePath()
+        }
         if canvas.safe > 0 {
             let inset = CGFloat(Double(canvas.safe) * scale)
             ctx.setStrokeColor(CGColor(srgbRed: 0.3, green: 0.8, blue: 0.4, alpha: 0.75))

@@ -111,6 +111,13 @@ enum CollageOverlays {
         text.lines = text.lines.map { line in
             var l = line
             l.color = toned(line.color, light: light)
+            // 花字跟着翻：描边、底条和字反着来（浅字配深边深底、深字配浅边浅底），渐变下端跟字一起翻。
+            if var fx = l.effect {
+                fx.strokeColor = toned(fx.strokeColor, light: !light)
+                fx.bandColor = toned(fx.bandColor, light: !light)
+                if let g = fx.gradient { fx.gradient = toned(g, light: light) }
+                l.effect = fx
+            }
             return l
         }
         // 衬：按最后落的位置底下有多花、反差够不够定（干净的天空上 = 0，什么都不加）。

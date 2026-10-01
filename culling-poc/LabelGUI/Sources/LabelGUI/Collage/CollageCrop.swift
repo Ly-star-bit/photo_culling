@@ -268,6 +268,15 @@ enum CollageCrop {
         return aspectFit(photo.aspect, in: rect)
     }
 
+    /// 这张照片在成品上放大了多少：画出来的像素 / 取景窗口里原图的像素，横竖取大的那个（SmartAlbums 的
+    /// 分辨率警告也是这么算）。> 1 = 放大；印刷超过 1.2 开始发软。drawn 用成品像素（scale 1）。
+    static func upscale(photo: CollagePhotoRef, window: Window, drawn: CGRect) -> Double {
+        let srcW = window.w * Double(photo.width)
+        let srcH = window.h * Double(photo.height)
+        guard srcW > 0, srcH > 0, drawn.width > 0, drawn.height > 0 else { return 1 }
+        return max(Double(drawn.width) / srcW, Double(drawn.height) / srcH)
+    }
+
     static func aspectFit(_ aspect: Double, in rect: CGRect) -> CGRect {
         guard rect.width > 0, rect.height > 0, aspect > 0 else { return rect }
         let cellAspect = Double(rect.width / rect.height)

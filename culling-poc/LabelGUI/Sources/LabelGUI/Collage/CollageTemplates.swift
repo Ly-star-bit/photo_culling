@@ -57,6 +57,20 @@ enum CollageStyles {
             s.backgroundMode = .fromPhoto
             s.grain = 0.15
         }),
+        Preset(key: "frosted", name: "毛玻璃", style: make { s in
+            s.backgroundMode = .blurPhoto
+            s.background = .white
+            s.margin = 0.06
+            s.gutter = 0.014
+            s.shadow = 0.4
+        }),
+        Preset(key: "gradient", name: "主图渐变", style: make { s in
+            s.backgroundMode = .gradient
+            s.margin = 0.06
+            s.gutter = 0.016
+            s.shadow = 0.25
+            s.grain = 0.12
+        }),
         Preset(key: "airy", name: "日系清透", style: make { s in
             s.background = CollageColor(hex: 0xF8F7F4)
             s.margin = 0.07
@@ -685,7 +699,7 @@ enum CollageTemplates {
         let canvas = context.canvas
         guard canvas.seams == .fold else { return out }
         let w = Double(canvas.width)
-        let band: Double = canvas.shortSide * 0.02
+        let band: Double = canvas.foldBand
         for i in out.indices where out[i].kind != .photo && out[i].attach == nil {
             let b = CollageItems.bounds(out[i], canvas: canvas)
             guard Double(b.minX) < w / 2 + band, Double(b.maxX) > w / 2 - band else { continue }

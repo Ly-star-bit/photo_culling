@@ -347,7 +347,7 @@ final class CollageStore: ObservableObject {
         }
         pushUndo()
         let at = min(project.pages.count, pageIndex + 1)
-        project.pages.insert(CollagePage(root: .leaf(CollageCell(kind: .photo))), at: at)
+        project.pages.insert(CollagePage(root: CollageLayout.blankRoot(for: project.canvas)), at: at)
         pageIndex = at
         commitEdit()
         // 新跨页和排版算同一步撤销。
@@ -520,7 +520,7 @@ final class CollageStore: ObservableObject {
             } else {
                 // 记着的网格对不上了（照片全删了）：文字格回不去，那些字留成手写字。
                 p.items = decorationsForGrid(from: page, consumed: [])
-                p.root = .leaf(CollageCell(kind: .photo))
+                p.root = CollageLayout.blankRoot(for: project.canvas)
                 p.gridRoot = nil
             }
             setPage(p)
@@ -1078,6 +1078,14 @@ final class CollageStore: ObservableObject {
         }
         if let edge {
             mutateRoot { CollageLayout.insert(CollageCell.photo(photoID), at: target, edge: edge, into: $0) }
+        } else if root.isLeaf, root.cell?.kind != .text, !project.canvas.allowsCrossFold {
+            // 胶装跨页整页只有一个格：照片放右页，左页留空格（放进整页那一格就横跨中缝了）。
+            mutateRoot { _ in
+                var out = CollageLayout.blankRoot(for: project.canvas)
+                out.update(at: [1]) { $0.cell = CollageCell.photo(photoID) }
+                return out
+            }
+            selection = [1]
         } else {
             mutateRoot { r in
                 var out = r
@@ -1098,7 +1106,7 @@ final class CollageStore: ObservableObject {
     func removeCell(_ path: [Int]) {
         guard let root else { return }
         if root.isLeaf {
-            mutateRoot { _ in CollageNode.leaf(CollageCell(kind: .photo)) }
+            mutateRoot { _ in CollageLayout.blankRoot(for: project.canvas) }
         } else {
             mutateRoot { CollageLayout.remove(at: path, from: $0, canvas: project.canvas) }
         }
@@ -1149,7 +1157,23 @@ final class CollageStore: ObservableObject {
     }
 
     func setShape(_ shape: CollageShape?) { updateSelectedCell { $0.shape = shape } }
-    func setContain(_ on: Bool) { updateSelectedCell { $0.contain = on; if on { $0.crop = nil } } }
+    func setContain(_ on: Bool) {
+        updateSelectedCell { cell in
+            cell.contain = on
+            if on { cell.crop = nil } else { cell.containBlur = false }
+        }
+    }
+
+    /// 完整显示时四周用这张照片自己的模糊填（打开它就是完整显示）。
+    func setContainBlur(_ on: Bool) {
+        updateSelectedCell { cell in
+            cell.containBlur = on
+            if on {
+                cell.contain = true
+                cell.crop = nil
+            }
+        }
+    }
     func toggleLock() { updateSelectedCell { $0.locked.toggle() } }
     func resetCrop() { updateSelectedCell { $0.crop = nil } }
 
@@ -1244,6 +1268,36 @@ final class CollageStore: ObservableObject {
         }
     }
 
+    /// 一行字套花字预设（点一下记一步撤销）。照片上的字：预设换了字色就把深浅从「自动」定成跟它一致 ——
+    /// 不然点了「白字黑边」，亮天空上又被自动翻成黑字白边。
+    func applyTextEffect(_ preset: CollageTextEffects.Preset, line index: Int, target: CollageTextTarget) {
+        switch target {
+        case .cell(let path, let pageID):
+            guard page?.id == pageID, root?.node(at: path)?.cell?.kind == .text,
+                  var t = root?.node(at: path)?.cell?.text, t.lines.indices.contains(index) else { return }
+            preset.apply(&t.lines[index])
+            let updated = t
+            mutateRoot { r in
+                var out = r
+                out.update(at: path) { node in node.cell?.text = updated }
+                return out
+            }
+        case .overlay(let path, let photoID, let pageID):
+            guard page?.id == pageID, let cell = root?.node(at: path)?.cell, cell.photoID == photoID,
+                  let o = cell.overlay, o.text.lines.indices.contains(index) else { return }
+            updateOverlay(at: path) { o in
+                preset.apply(&o.text.lines[index])
+                if let tone = preset.tone { o.tone = tone }
+            }
+        case .item(let id):
+            guard let item = page?.items.first(where: { $0.id == id && $0.kind == .text }),
+                  var t = item.text, t.lines.indices.contains(index) else { return }
+            preset.apply(&t.lines[index])
+            let updated = t
+            updateItem(id) { $0.text = updated }
+        }
+    }
+
     // MARK: - 照片上的字
 
     func setOverlay(_ overlay: CollageOverlay?, at path: [Int]) {
@@ -1305,7 +1359,7 @@ final class CollageStore: ObservableObject {
             pushUndo(coalesce: coalesce)
             project.pages = [layoutStyle == .scatter && !isAlbum
                 ? CollagePage(root: .leaf(CollageCell()), items: [], freeform: true, scatter: CollageScatterSpec())
-                : CollagePage(root: .leaf(CollageCell(kind: .photo)))]
+                : CollagePage(root: CollageLayout.blankRoot(for: project.canvas))]
             pageIndex = 0
         } else {
             guard project.pages.indices.contains(pageIndex) else { return }
@@ -1420,7 +1474,7 @@ final class CollageStore: ObservableObject {
         guard canvas.seams == .fold else { return item }
         let b = CollageItems.bounds(item, canvas: canvas)
         let w = Double(canvas.width)
-        let band: Double = canvas.shortSide * 0.02
+        let band: Double = canvas.foldBand
         guard Double(b.minX) < w / 2 + band, Double(b.maxX) > w / 2 - band else { return item }
         let half = Double(b.width) / 2
         let x: Double = item.cx < 0.5 ? (w / 2 - band - half) : (w / 2 + band + half)
@@ -1544,6 +1598,143 @@ final class CollageStore: ObservableObject {
         }
     }
 
+    /// 相册装订方式。换成胶装：整版铺满两页的单张改成「左页日期 + 右页大图」（同一步撤销），散落页的相纸
+    /// 挪出更宽的中缝带；别的跨页里还压着中缝的照片报出来，让人点「换一批」。
+    func setBinding(_ binding: CollageBinding) {
+        guard project.canvas.seams == .fold, binding != project.canvas.binding else { return }
+        cancelSolveIfRunning()
+        pushUndo()
+        project.canvas.binding = binding
+        var fixed = 0
+        if binding == .glued {
+            let ctx = context   // 已经是新的装订方式：CollageAlbum.layout 不会再给整版跨页
+            let map = photoMap
+            for i in project.pages.indices {
+                if project.pages[i].freeform {
+                    project.pages[i].items = CollageScatter.clearOfFold(project.pages[i].items, canvas: project.canvas)
+                    continue
+                }
+                let root = project.pages[i].root
+                guard root.isLeaf, let cell = root.cell, cell.kind == .photo,
+                      let id = cell.photoID, let photo = map[id] else { continue }
+                var solo = CollageAlbum.layout(CollageAlbum.Spread(kind: .solo, photos: [photo]),
+                                               previousSignature: "", context: ctx, seed: UInt64(i + 1))
+                // 照片上压的字跟着照片走。
+                if let overlay = cell.overlay,
+                   let p = solo.leafPaths().first(where: { solo.node(at: $0)?.cell?.photoID == id }) {
+                    solo.update(at: p) { $0.cell?.overlay = overlay }
+                }
+                project.pages[i].root = solo
+                fixed += 1
+            }
+        }
+        clearAlternatives()
+        selection = nil
+        commitEdit()
+        let crossing = crossFoldPages()
+        var text = binding == .glued ? "胶装：照片不跨中缝，中缝两侧各留 12mm" : "平铺对裱：横图可以铺满两页"
+        if fixed > 0 { text += "；\(fixed) 个整版跨页改成了单页大图" }
+        if binding == .glued, !crossing.isEmpty {
+            text += "；第 " + crossing.map { "\($0 + 1)" }.joined(separator: "、") + " 页还有照片压在中缝上，点「换一批」重排"
+        }
+        setNotice(text)
+    }
+
+    // MARK: - 印刷放大
+
+    /// 一张照片在成品上要放大多少。
+    struct UpscaleIssue: Hashable {
+        var page: Int
+        var photoID: String
+        var factor: Double
+    }
+
+    /// 超过这个倍数印出来会软（SmartAlbums 默认也是 120%；建议别过 150%、绝不过 200%）。
+    nonisolated static let upscaleLimit = 1.2
+
+    /// 当前页这一格的放大倍数（和渲染器同一个取景、同一块画出来的区域，成品像素）。
+    func upscale(for frame: CollageLayout.Frame) -> Double? {
+        guard frame.cell.kind == .photo, let id = frame.cell.photoID, let photo = photoMap[id],
+              let window = window(for: frame) else { return nil }
+        let drawn = CollageCrop.drawnRect(window: window, photo: photo, cell: frame.cell, in: photoArea(for: frame))
+        return CollageCrop.upscale(photo: photo, window: window, drawn: drawn)
+    }
+
+    /// 全部页里放大超过 limit 的照片（网格格子 + 散落相纸），倍数大的在前。
+    func upscaleIssues(limit: Double = CollageStore.upscaleLimit) -> [UpscaleIssue] {
+        Self.upscaleIssues(project: project, hints: hints, limit: limit)
+    }
+
+    static func upscaleIssues(project: CollageProject, hints: [String: CollageCrop.Hints],
+                              limit: Double = upscaleLimit) -> [UpscaleIssue] {
+        let canvas = project.canvas
+        let style = project.style
+        var photos: [String: CollagePhotoRef] = [:]
+        for p in project.photos where photos[p.id] == nil { photos[p.id] = p }
+        let content = CollageLayout.contentRect(canvas: canvas, style: style)
+        let gutter = CollageLayout.gutterPixels(canvas: canvas, style: style)
+        var out: [UpscaleIssue] = []
+        for (i, page) in project.pages.enumerated() {
+            if !page.freeform {
+                let frames = CollageLayout.geometry(page.root, in: content, gutter: gutter).frames
+                for f in frames where f.cell.kind == .photo {
+                    guard let id = f.cell.photoID, let photo = photos[id] else { continue }
+                    let framing = CollageLayout.effectiveFraming(path: f.path, cell: f.cell, in: frames, photos: photos,
+                                                                 tight: style.tightSmallCells)
+                    let area = CollageCrop.photoArea(cell: f.cell, rect: f.rect.cgRect, style: style)
+                    let window = CollageCrop.window(for: photo, cell: f.cell, cellAspect: CollageCrop.aspect(of: area),
+                                                    framing: framing, hints: hints[id])
+                    let drawn = CollageCrop.drawnRect(window: window, photo: photo, cell: f.cell, in: area)
+                    let k = CollageCrop.upscale(photo: photo, window: window, drawn: drawn)
+                    if k > limit { out.append(UpscaleIssue(page: i, photoID: id, factor: k)) }
+                }
+            }
+            // 相纸（散落版整页、网格版上贴的）：和 CollageItems.drawPhotoItem 同一个取景。
+            for item in page.items where item.kind == .photo {
+                guard let id = item.photoID, let photo = photos[id] else { continue }
+                let inner = CollageItems.photoArea(item.frame, outer: CollageItems.localRect(item, canvas: canvas))
+                let framing: CollageFraming = item.framing == .auto ? .full : item.framing
+                let window = CollageCrop.window(for: photo, cellAspect: CollageCrop.aspect(of: inner), framing: framing,
+                                                override: nil, hints: hints[id])
+                let k = CollageCrop.upscale(photo: photo, window: window, drawn: inner)
+                if k > limit { out.append(UpscaleIssue(page: i, photoID: id, factor: k)) }
+            }
+        }
+        return out.sorted { $0.factor > $1.factor }
+    }
+
+    /// 有照片压在中缝上的跨页（页号从 0 起）：网格页看照片实际画的区域（完整显示按画出来的那块），
+    /// 散落页看相纸外框。
+    func crossFoldPages() -> [Int] {
+        let canvas = project.canvas
+        guard canvas.seams == .fold else { return [] }
+        let mid = CGFloat(canvas.width) / 2
+        let map = photoMap
+        let content = CollageLayout.contentRect(canvas: canvas, style: project.style)
+        let gutter = CollageLayout.gutterPixels(canvas: canvas, style: project.style)
+        func crosses(_ r: CGRect) -> Bool { r.minX < mid - 1 && r.maxX > mid + 1 }
+        var out: [Int] = []
+        for (i, page) in project.pages.enumerated() {
+            if page.freeform {
+                let hit = page.items.contains { it in
+                    it.kind == .photo && it.photoID.flatMap { map[$0] } != nil
+                        && crosses(CollageItems.bounds(it, canvas: canvas))
+                }
+                if hit { out.append(i) }
+                continue
+            }
+            let frames = CollageLayout.geometry(page.root, in: content, gutter: gutter).frames
+            let hit = frames.contains { f in
+                guard f.cell.kind == .photo, let id = f.cell.photoID, let photo = map[id] else { return false }
+                let area = CollageCrop.photoArea(cell: f.cell, rect: f.rect.cgRect, style: project.style)
+                let drawn = f.cell.contain ? CollageCrop.aspectFit(photo.aspect, in: area) : area
+                return crosses(drawn)
+            }
+            if hit { out.append(i) }
+        }
+        return out
+    }
+
     /// 画布比例变了：散落页整页等比缩放放进新画布（摆法不变、不会出画）。网格页的切分树本来就按比例缩放。
     private func refitFreeformPages(from old: CollageCanvas) {
         let canvas = project.canvas
@@ -1628,7 +1819,7 @@ final class CollageStore: ObservableObject {
 
     func addPage() {
         pushUndo()
-        let blank = CollagePage(root: CollageNode.leaf(CollageCell(kind: .photo)))
+        let blank = CollagePage(root: CollageLayout.blankRoot(for: project.canvas))
         let at = min(project.pages.count, pageIndex + 1)
         project.pages.insert(blank, at: at)
         pageIndex = at
@@ -1681,7 +1872,7 @@ final class CollageStore: ObservableObject {
                                       at: CGPoint(x: x, y: 0.5))
             pushUndo()
             project.pages[target].items.append(item)
-            project.pages[pageIndex].root = root.isLeaf ? CollageNode.leaf(CollageCell(kind: .photo))
+            project.pages[pageIndex].root = root.isLeaf ? CollageLayout.blankRoot(for: project.canvas)
                                                         : CollageLayout.remove(at: selection, from: root, canvas: project.canvas)
             self.selection = nil
             commitEdit()
@@ -1693,8 +1884,21 @@ final class CollageStore: ObservableObject {
         let gutter = CollageLayout.gutterPixels(canvas: project.canvas, style: project.style)
         let frames = CollageLayout.geometry(targetRoot, in: content, gutter: gutter).frames
         let newTarget: CollageNode
-        if targetRoot.isLeaf, targetRoot.cell?.kind != .text, targetRoot.cell?.photoID == nil {
-            newTarget = .leaf(moved)
+        var filledEmptySlot = false
+        // 那一页有待放照片的空格（新开的跨页、胶装的空半页）：放进最大的那个空格，不在空格旁边再劈一刀。
+        let emptySlot = frames.filter { $0.cell.kind == .photo && $0.cell.photoID == nil }
+            .max(by: { $0.rect.area < $1.rect.area })
+        if let slot = emptySlot {
+            var t = targetRoot
+            var path = slot.path
+            // 整页一个空格、又是胶装：先按中缝分成左右两页，照片放右页（不能横跨中缝）。
+            if t.isLeaf, !project.canvas.allowsCrossFold {
+                t = CollageLayout.blankRoot(for: project.canvas)
+                path = [1]
+            }
+            t.update(at: path) { $0.cell = moved }
+            newTarget = t
+            filledEmptySlot = true
         } else {
             let photoFrames = frames.filter { $0.cell.kind != .text }
             guard let anchor = (photoFrames.isEmpty ? frames : photoFrames).max(by: { $0.rect.area < $1.rect.area }) else { return }
@@ -1703,11 +1907,12 @@ final class CollageStore: ObservableObject {
         }
         pushUndo()
         project.pages[target].root = newTarget
-        project.pages[pageIndex].root = root.isLeaf ? CollageNode.leaf(CollageCell(kind: .photo))
+        project.pages[pageIndex].root = root.isLeaf ? CollageLayout.blankRoot(for: project.canvas)
                                                     : CollageLayout.remove(at: selection, from: root, canvas: project.canvas)
         self.selection = nil
         commitEdit()
-        setNotice("已移到第 \(target + 1) 个跨页（插在最大那张旁边，想重排点「换一批」）")
+        setNotice(filledEmptySlot ? "已移到第 \(target + 1) 个跨页（放进了那一页的空位）"
+                                  : "已移到第 \(target + 1) 个跨页（插在最大那张旁边，想重排点「换一批」）")
     }
 
     // MARK: - 色调样张

@@ -143,6 +143,8 @@ struct CollageCell: Codable, Hashable {
     var role: CollageRole = .auto
     /// 完整显示、不裁：照片按原比例放进格子正中，四周留底色（单张竖图占一页、「这张不许裁」）。
     var contain = false
+    /// 完整显示时四周不留底色，用这张照片自己大幅模糊铺满（横格里放竖图的常见做法）。
+    var containBlur = false
     /// 压在这张照片上的字（跟着照片走：互换、挪格子、换一批都带着）。
     var overlay: CollageOverlay?
 
@@ -289,6 +291,32 @@ enum CollageAlign: String, Codable, CaseIterable, Hashable {
     case trailing
 }
 
+/// 花字：描边、投影 / 发光、底条、渐变。每一项 0（渐变 nil）= 不加，可以叠。尺寸都相对本行字号。
+struct CollageTextEffect: Codable, Hashable {
+    /// 描边粗细；描在字外面一圈（字本身不变细）。
+    var stroke = 0.0
+    var strokeColor: CollageColor = .white
+    /// 投影 / 发光的浓淡 0…1。
+    var shadow = 0.0
+    var shadowColor = CollageColor(r: 0, g: 0, b: 0)
+    /// 投影的模糊。
+    var shadowBlur = 0.12
+    /// 投影往右下落多远；0 = 四周一圈（发光）。
+    var shadowOffset = 0.06
+    /// 底条不透明度 0…1。
+    var band = 0.0
+    var bandColor: CollageColor = .white
+    /// 底条圆角 0…1：1 = 两头全圆。
+    var bandRound = 0.3
+    /// 渐变：字色在上、这个颜色在下。
+    var gradient: CollageColor?
+
+    init() {}
+
+    var isEmpty: Bool { stroke <= 0.0001 && shadow <= 0.0001 && band <= 0.0001 && gradient == nil }
+    var hasBand: Bool { band > 0.0001 }
+}
+
 struct CollageTextLine: Codable, Hashable {
     /// 支持 {title} {date} {date_cn} {year} {month} {model} {lens} 等占位符。
     var text: String
@@ -302,10 +330,12 @@ struct CollageTextLine: Codable, Hashable {
     var color: CollageColor = .ink
     /// 沿阅读方向的起始缩进，相对本行字号（竖排的小字往下错开一截）。
     var indent: Double = 0
+    /// 花字；nil = 普通字。
+    var effect: CollageTextEffect?
 
     init(_ text: String, font: CollageFont = .songti, weight: CollageWeight = .regular,
          size: Double = 0.04, tracking: Double = 0, color: CollageColor = .ink,
-         italic: Bool = false, indent: Double = 0) {
+         italic: Bool = false, indent: Double = 0, effect: CollageTextEffect? = nil) {
         self.text = text
         self.font = font
         self.weight = weight
@@ -314,6 +344,7 @@ struct CollageTextLine: Codable, Hashable {
         self.color = color
         self.italic = italic
         self.indent = indent
+        self.effect = effect
     }
 }
 
@@ -464,6 +495,22 @@ enum CollageBackgroundMode: String, Codable, CaseIterable, Hashable {
     case solid
     /// 从主图取色（压低饱和、往纸白靠）
     case fromPhoto
+    /// 主图大幅模糊铺满整页，上面盖一层底色（毛玻璃）；盖多少按版面上的字看得清自动定。
+    case blurPhoto
+    /// 主图上下两截的颜色做竖向渐变（压低饱和、往底色靠）。
+    case gradient
+
+    var label: String {
+        switch self {
+        case .solid: return "纯色"
+        case .fromPhoto: return "主图取色"
+        case .blurPhoto: return "主图模糊"
+        case .gradient: return "主图渐变"
+        }
+    }
+
+    /// 底色块（纸白、墨黑……）在这个模式里是不是还起作用：模糊、渐变时它是盖在上面的那层纸色。
+    var usesPaperTint: Bool { self == .blurPhoto || self == .gradient }
 }
 
 struct CollageStyle: Codable, Hashable {
@@ -509,6 +556,21 @@ enum CollageSeams: String, Codable, CaseIterable, Hashable {
     case fold
 }
 
+/// 相册装订：决定照片能不能跨中缝、中缝两边让出多宽。
+enum CollageBinding: String, Codable, CaseIterable, Hashable {
+    /// 平铺对裱 / 对裱精装：整个跨页摊平，全景大图可以铺满两页（中缝两侧仍不放脸）。
+    case layflat
+    /// 胶装 / 锁线：书脊会吃掉中间一条，照片不跨缝，中缝两侧各让 12mm。
+    case glued
+
+    var label: String {
+        switch self {
+        case .layflat: return "平铺对裱"
+        case .glued: return "胶装锁线"
+        }
+    }
+}
+
 struct CollageCanvas: Codable, Hashable {
     var name: String = "小红书 3:4"
     /// 成品（裁切后）像素。
@@ -522,6 +584,8 @@ struct CollageCanvas: Codable, Hashable {
     var seams: CollageSeams = .none
     /// 轮播张数。
     var slides: Int = 1
+    /// 相册跨页的装订方式（只对 seams == .fold 有意义）。
+    var binding: CollageBinding = .layflat
 
     init() {}
 
@@ -541,6 +605,20 @@ struct CollageCanvas: Codable, Hashable {
     var aspect: Double { Double(width) / Double(max(1, height)) }
     var isPrint: Bool { dpi >= 150 }
 
+    /// 毫米 → 成品像素（按这张画布的 dpi）。
+    func pixels(mm: Double) -> Double { mm / 25.4 * dpi }
+
+    /// 中缝每一侧让出多宽（成品像素）：脸、相纸、字都不压进这条带。平铺 = 短边 2%（30×30cm 约 6mm）；
+    /// 胶装再放宽到至少 12mm（书脊吃掉的一条加裁切误差）。只对相册跨页有意义。
+    var foldBand: Double {
+        let base = shortSide * 0.02
+        guard binding == .glued else { return base }
+        return max(base, pixels(mm: 12))
+    }
+
+    /// 照片能不能横跨中缝（整版全景大图）：只有平铺对裱可以。
+    var allowsCrossFold: Bool { seams != .fold || binding == .layflat }
+
     /// 厘米 → 像素。
     static func px(cm: Double, dpi: Double) -> Int { Int((cm / 2.54 * dpi).rounded()) }
 
@@ -559,7 +637,8 @@ struct CollageCanvas: Codable, Hashable {
     static let social: [CollageCanvas] = [
         CollageCanvas(name: "小红书 3:4", width: 1440, height: 1920),
         CollageCanvas(name: "朋友圈 1:1", width: 2160, height: 2160),
-        CollageCanvas(name: "九宫格 1:1", width: 2160, height: 2160, seams: .grid9),
+        // 3240² 切出来每张 1080×1080：微信朋友圈超过 1080 才压，以前 2160² 每张只有 720。
+        CollageCanvas(name: "九宫格 1:1", width: 3240, height: 3240, seams: .grid9),
         CollageCanvas(name: "Instagram 4:5", width: 1728, height: 2160),
         CollageCanvas(name: "故事 9:16", width: 1440, height: 2560),
         CollageCanvas(name: "横幅 16:9", width: 2560, height: 1440),
@@ -882,6 +961,7 @@ extension CollageCell {
         shape = c.softOptional(.shape)
         role = c.soft(.role, .auto)
         contain = c.soft(.contain, false)
+        containBlur = c.soft(.containBlur, false)
         overlay = c.softOptional(.overlay)
     }
 }
@@ -912,6 +992,26 @@ extension CollageTextLine {
         tracking = c.soft(.tracking, 0)
         color = c.soft(.color, .ink)
         indent = c.soft(.indent, 0)
+        let fx: CollageTextEffect? = c.softOptional(.effect)
+        effect = fx.flatMap { $0.isEmpty ? nil : $0 }
+    }
+}
+
+extension CollageTextEffect {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = CollageTextEffect()
+        let finite: (Double, Double) -> Double = { v, fallback in v.isFinite ? v : fallback }
+        stroke = min(0.5, max(0, finite(c.soft(.stroke, d.stroke), 0)))
+        strokeColor = c.soft(.strokeColor, d.strokeColor)
+        shadow = min(1, max(0, finite(c.soft(.shadow, d.shadow), 0)))
+        shadowColor = c.soft(.shadowColor, d.shadowColor)
+        shadowBlur = min(1, max(0, finite(c.soft(.shadowBlur, d.shadowBlur), d.shadowBlur)))
+        shadowOffset = min(0.5, max(0, finite(c.soft(.shadowOffset, d.shadowOffset), d.shadowOffset)))
+        band = min(1, max(0, finite(c.soft(.band, d.band), 0)))
+        bandColor = c.soft(.bandColor, d.bandColor)
+        bandRound = min(1, max(0, finite(c.soft(.bandRound, d.bandRound), d.bandRound)))
+        gradient = c.softOptional(.gradient)
     }
 }
 
@@ -1031,6 +1131,14 @@ extension CollageCanvas {
         safe = min(4000, max(0, c.soft(.safe, d.safe)))
         seams = c.soft(.seams, d.seams)
         slides = min(24, max(1, c.soft(.slides, d.slides)))
+        // 旧工程没有这个键：按平铺算（和以前的行为一样）。
+        binding = c.soft(.binding, d.binding)
+        // v1.13 以前的九宫格预设是 2160²（每张只有 720）：存下来的工程、模板、默认画布读回来升到 3240²。
+        // 版式都按比例存，画布等比放大不改任何摆法；手填的「自定义」尺寸名字不一样，不动。
+        if seams == .grid9, name == "九宫格 1:1", width == 2160, height == 2160 {
+            width = 3240
+            height = 3240
+        }
     }
 }
 

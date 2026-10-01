@@ -440,7 +440,8 @@ enum CollageAlbum {
             return CollageTemplates.row(0.5, .leaf(a), .leaf(b))
         case .solo:
             let p = spread.photos[0]
-            if p.aspect >= 1.4 {
+            // 横图铺满整个跨页只在平铺对裱时做：胶装、锁线的书脊会吃掉中间一条。
+            if p.aspect >= 1.4, context.canvas.allowsCrossFold {
                 var cell = CollageCell.photo(p.id, role: .hero)
                 cell.framing = .full
                 let root = CollageNode.leaf(cell)

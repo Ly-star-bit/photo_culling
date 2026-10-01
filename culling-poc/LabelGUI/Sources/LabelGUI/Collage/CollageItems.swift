@@ -762,7 +762,7 @@ enum CollageScatter {
         guard canvas.seams == .fold else { return items }
         let w = Double(canvas.width)
         let fold: Double = w / 2
-        let band: Double = canvas.shortSide * 0.02
+        let band: Double = canvas.foldBand
         return items.map { it -> CollageItem in
             guard it.kind == .photo else { return it }
             let b = CollageItems.bounds(it, canvas: canvas)
@@ -953,11 +953,12 @@ enum CollageScatter {
             let insideArea = inside.isNull ? 0 : Double(inside.width * inside.height)
             let out = 1 - insideArea / area
             if out > 0.1 { s += 4 * (out - 0.1) }
-            // 相册：照片横跨中缝会被书脊吃掉一条。
+            // 相册：照片横跨中缝会被书脊吃掉一条（胶装根本不许跨，扣得重）。
             if canvas.seams == .fold {
                 let fold = Double(canvas.width) / 2
-                let band = canvas.shortSide * 0.02
-                if Double(b.minX) < fold - band, Double(b.maxX) > fold + band { s += 1.5 }
+                let band = canvas.foldBand
+                let penalty: Double = canvas.allowsCrossFold ? 1.5 : 6
+                if Double(b.minX) < fold - band, Double(b.maxX) > fold + band { s += penalty }
             }
         }
         // 大小悬殊：一张特别大、旁边一溜缩略图那么小的，撒出来不像一桌照片（最小的不到中位数一半、

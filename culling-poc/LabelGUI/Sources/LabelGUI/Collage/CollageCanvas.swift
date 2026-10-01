@@ -669,11 +669,15 @@ struct CollageCanvasOverlay: View {
         let cut = window?.cutsFace ?? false
         // 路人只在选中的那一格标（景区照片几乎格格有路人，以前满屏橙色角标）；切脸一直标。
         let bystander = (window?.hitsBystander ?? false) && store.selection == frame.path
-        if cut || bystander || frame.cell.locked {
+        // 印刷画布：放大超过 120% 的格子一直标（印出来会软）。
+        let up = store.project.canvas.isPrint ? store.upscale(for: frame) : nil
+        let soft = (up ?? 0) > CollageStore.upscaleLimit
+        if cut || bystander || soft || frame.cell.locked {
             HStack(spacing: 4) {
                 if frame.cell.locked { badge("lock.fill", nil, .white) }
                 if cut { badge("exclamationmark.triangle.fill", "切脸", .red) }
                 if bystander { badge("person.2.fill", "路人", .orange) }
+                if soft, let up { badge("plus.magnifyingglass", "放大\(Int((up * 100).rounded()))%", .orange) }
             }
             .offset(x: r.minX + 6, y: r.minY + 6)
         }

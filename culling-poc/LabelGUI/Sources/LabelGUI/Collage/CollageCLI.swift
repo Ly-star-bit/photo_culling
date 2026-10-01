@@ -47,6 +47,7 @@ enum CollageCLI {
         if let v = option("--gutter").flatMap(Double.init) { project.style.gutter = v }
         if args.contains("--no-tight") { project.style.tightSmallCells = false }
         applyLookOptions(&project.style, option: option)
+        if let m = option("--bg").flatMap(CollageBackgroundMode.init(rawValue:)) { project.style.backgroundMode = m }
         project.title = option("--title") ?? ""
         project.subtitle = option("--subtitle") ?? ""
         let out = URL(fileURLWithPath: option("--out") ?? "collage.jpg")
@@ -60,7 +61,8 @@ enum CollageCLI {
             runAlbum(project: project, photoMap: photoMap, out: out, debug: debug, seed: seed,
                      spreads: Int(option("--spreads") ?? "0") ?? 0,
                      pdf: args.contains("--pdf"), marks: args.contains("--marks"),
-                     dedupe: !args.contains("--no-dedupe"))
+                     dedupe: !args.contains("--no-dedupe"),
+                     binding: option("--binding").flatMap(CollageBinding.init(rawValue:)) ?? .layflat)
         }
 
         // --sim：打印候选两两的画面距离（校准相似度扣分用）。
@@ -246,9 +248,10 @@ enum CollageCLI {
     @MainActor
     private static func runAlbum(project base: CollageProject, photoMap: [String: CollagePhotoRef], out: URL,
                                  debug: Bool, seed: UInt64, spreads limit: Int, pdf: Bool, marks: Bool,
-                                 dedupe: Bool) -> Never {
+                                 dedupe: Bool, binding: CollageBinding) -> Never {
         var project = base
         if project.canvas.seams != .fold { project.canvas = CollageCanvas.albums[0] }
+        project.canvas.binding = binding
         var hints: [String: CollageCrop.Hints] = [:]
         for p in project.photos { hints[p.id] = CollageVision.hints(for: p) }
         let context = CollageLayout.Context(canvas: project.canvas, style: project.style, photos: photoMap,
@@ -645,6 +648,10 @@ enum CollageUISnapshot {
             }
             print("格子: " + kinds.joined(separator: " "))
         }
+        // --page N：相册看第 N 个跨页（从 0 起）；选格子要在换页之后（换页会清掉选中）。
+        if let p = option("--page").flatMap(Int.init), store.project.pages.indices.contains(p) {
+            store.pageIndex = p
+        }
         if let sel = option("--select") {
             store.selection = sel.compactMap { $0.wholeNumberValue }
             if args.contains("--crop"), let path = store.selection { store.enterCropEdit(path) }
@@ -744,7 +751,7 @@ enum CollageOpsScript {
                 if cell?.locked == true { tag += "🔒" }
                 if let f = cell?.framing, f != .auto { tag += "/" + f.label }
                 if let s = cell?.shape { tag += "/" + s.label }
-                if cell?.contain == true { tag += "/完整" }
+                if cell?.contain == true { tag += cell?.containBlur == true ? "/完整+模糊" : "/完整" }
                 if let c = cell?.crop { tag += String(format: "/裁%.2f,%.2f×%.1f", c.cx, c.cy, c.zoom) }
                 if let o = cell?.overlay { tag += "/压字(\(o.anchor.label))" }
                 return (p.isEmpty ? "r" : p.map(String.init).joined()) + "=" + tag
@@ -776,6 +783,10 @@ enum CollageOpsScript {
             guard let i = Int(s), store.items.indices.contains(i) else { return nil }
             return store.items[i].id
         }
+
+        // 读回来的工程是什么画布（核对旧工程的容错解码 / 升级，下面马上会重置）。
+        let loaded = store.project.canvas
+        print("载入  \(loaded.name) \(loaded.width)x\(loaded.height) seams=\(loaded.seams.rawValue) · \(store.project.pages.count) 页")
 
         // 起手：单张 3:4、托盘 = 精选+可用，排一版（每次都从头来，脚本结果可复现）。
         store.clearTray()
@@ -854,6 +865,42 @@ enum CollageOpsScript {
             case "contain":
                 store.selection = path(arg)
                 store.setContain(true)
+            case "effect":
+                // effect:路径=预设[@行号]：文字格（或照片上压的字）第几行（默认 0）套花字。预设：none outline
+                // outline-dark shadow glow neon tape pill gold
+                let kv = arg.split(separator: "=", maxSplits: 1).map(String.init)
+                let spec = (at(kv, 1) ?? "").split(separator: "@").map(String.init)
+                let lineIndex = Int(at(spec, 1) ?? "0") ?? 0
+                if let p = at(kv, 0), let preset = at(spec, 0).flatMap(CollageTextEffects.preset),
+                   let cell = store.root?.node(at: path(p))?.cell {
+                    // 和界面里点预设走同一个入口（照片上的字会连深浅一起定）。
+                    if cell.kind == .text {
+                        store.applyTextEffect(preset, line: lineIndex, target: .cell(path(p), store.page?.id))
+                    } else if cell.overlay != nil {
+                        store.applyTextEffect(preset, line: lineIndex,
+                                              target: .overlay(path(p), cell.photoID, store.page?.id))
+                    } else { ok = false }
+                } else { ok = false }
+            case "margin":
+                // margin:0（外边距，相对短边；0 = 零边距，照片铺进出血）
+                if let v = Double(arg) {
+                    var st = store.project.style
+                    st.margin = v
+                    store.setStyle(st, coalesce: false)
+                } else { ok = false }
+            case "containblur":
+                // containblur:10 = 那一格完整显示，四周用本图模糊填
+                store.selection = path(arg)
+                store.setContainBlur(true)
+            case "bg":
+                // bg:solid | fromPhoto | blurPhoto | gradient（可带纸色 bg:blurPhoto=FFFFFF）
+                let kv = arg.split(separator: "=", maxSplits: 1).map(String.init)
+                if let m = at(kv, 0).flatMap(CollageBackgroundMode.init(rawValue:)) {
+                    var st = store.project.style
+                    st.backgroundMode = m
+                    if let hex = at(kv, 1).flatMap({ UInt32($0, radix: 16) }) { st.background = CollageColor(hex: hex) }
+                    store.setStyle(st, coalesce: false)
+                } else { ok = false }
             case "crop":
                 let n = nums(pair(arg, "=")?.1)
                 if let (p, _) = pair(arg, "="), n.count == 3 {
@@ -999,6 +1046,25 @@ enum CollageOpsScript {
                 store.setMode(arg == "album" ? .album : .single)
             case "canvas":
                 store.setCanvas(CollageCLI.canvas(arg))
+            case "binding":
+                // binding:glued | binding:layflat（相册装订方式）
+                if let b = CollageBinding(rawValue: arg) {
+                    store.setBinding(b)
+                    print("  装订 \(store.project.canvas.binding.label) · 中缝带每侧 "
+                          + String(format: "%.0fpx（%.1fmm）", store.project.canvas.foldBand,
+                                   store.project.canvas.foldBand / store.project.canvas.dpi * 25.4)
+                          + (store.notice.map { " · 提示: \($0)" } ?? ""))
+                } else { ok = false }
+            case "upscale":
+                // upscale 或 upscale:1.0（阈值，默认 1.2）：打印放大超过阈值的照片（全部页）。
+                let limit = Double(arg) ?? CollageStore.upscaleLimit
+                let issues = store.upscaleIssues(limit: limit)
+                print("  放大超过 \(Int((limit * 100).rounded()))%: " + (issues.isEmpty ? "无" : issues.map {
+                    "第\($0.page + 1)页 \($0.photoID.suffix(4)) \(Int(($0.factor * 100).rounded()))%"
+                }.joined(separator: " · ")))
+            case "crossfold":
+                let pages = store.crossFoldPages()
+                print("  压中缝的跨页: " + (pages.isEmpty ? "无" : pages.map { "\($0 + 1)" }.joined(separator: " ")))
             case "arrange":
                 store.autoArrangeAlbum(dedupe: arg != "all")
                 spin(60) { store.busyText == nil && !store.project.pages.isEmpty }

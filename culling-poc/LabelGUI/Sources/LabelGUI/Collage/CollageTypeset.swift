@@ -3,6 +3,89 @@ import AppKit
 import CoreText
 import ImageIO
 
+/// 花字的现成搭配：只是可选的第一步 —— 直接打字不用先选它，套完每一项还能单独调。
+enum CollageTextEffects {
+    struct Preset: Identifiable {
+        let key: String
+        let name: String
+        /// 换了字色的预设：照片上的字深浅定成这个（nil = 不换字色，深浅还按原来的）。
+        var tone: CollageTone? = nil
+        /// 改这一行（花字，有的连字色一起换）。
+        let apply: (inout CollageTextLine) -> Void
+        var id: String { key }
+    }
+
+    static let presets: [Preset] = [
+        Preset(key: "none", name: "无花字") { $0.effect = nil },
+        Preset(key: "outline", name: "白字黑边", tone: .light) { line in
+            line.color = .white
+            var fx = CollageTextEffect()
+            fx.stroke = 0.09
+            fx.strokeColor = .charcoal
+            line.effect = fx
+        },
+        Preset(key: "outline-dark", name: "黑字白边", tone: .dark) { line in
+            line.color = .ink
+            var fx = CollageTextEffect()
+            fx.stroke = 0.11
+            fx.strokeColor = .white
+            line.effect = fx
+        },
+        Preset(key: "shadow", name: "柔和投影") { line in
+            var fx = line.effect ?? CollageTextEffect()
+            fx.shadow = 0.55
+            fx.shadowColor = CollageColor(r: 0, g: 0, b: 0)
+            fx.shadowBlur = 0.15
+            fx.shadowOffset = 0.05
+            line.effect = fx
+        },
+        Preset(key: "glow", name: "发光") { line in
+            var fx = line.effect ?? CollageTextEffect()
+            fx.shadow = 0.9
+            fx.shadowColor = line.color.luminance > 0.5 ? CollageColor(hex: 0xFFD27A) : .white
+            fx.shadowBlur = 0.35
+            fx.shadowOffset = 0
+            line.effect = fx
+        },
+        Preset(key: "neon", name: "霓虹", tone: .light) { line in
+            line.color = .white
+            var fx = CollageTextEffect()
+            fx.shadow = 1
+            fx.shadowColor = CollageColor(hex: 0xFF4FA3)
+            fx.shadowBlur = 0.35
+            fx.shadowOffset = 0
+            line.effect = fx
+        },
+        Preset(key: "tape", name: "胶带底条", tone: .dark) { line in
+            line.color = .ink
+            var fx = CollageTextEffect()
+            fx.band = 0.9
+            fx.bandColor = CollageColor(hex: 0xF2D4C9)
+            fx.bandRound = 0.08
+            line.effect = fx
+        },
+        Preset(key: "pill", name: "黑底白字", tone: .light) { line in
+            line.color = .white
+            var fx = CollageTextEffect()
+            fx.band = 0.85
+            fx.bandColor = .charcoal
+            fx.bandRound = 1
+            line.effect = fx
+        },
+        Preset(key: "gold", name: "金色渐变", tone: .light) { line in
+            line.color = CollageColor(hex: 0xF6E2A8)
+            var fx = CollageTextEffect()
+            fx.gradient = CollageColor(hex: 0xB8862B)
+            fx.shadow = 0.35
+            fx.shadowBlur = 0.1
+            fx.shadowOffset = 0.04
+            line.effect = fx
+        },
+    ]
+
+    static func preset(_ key: String) -> Preset? { presets.first { $0.key == key } }
+}
+
 /// 拼图里的文字：字体解析、占位符、横排/竖排、细线、印章。
 ///
 /// 画在「已翻转成左上原点」的 context 里；CTLineDraw 需要未翻转的坐标系，
@@ -245,6 +328,14 @@ enum CollageTypeset {
         let descent: Double
         let size: Double
         let indent: Double
+        /// 花字（nil = 普通字）；color = 字色（渐变的上端）。
+        var effect: CollageTextEffect? = nil
+        var color: CollageColor = .ink
+
+        var hasBand: Bool { effect?.hasBand ?? false }
+        /// 底条比字左右各宽出、上下各高出多少（横排）。量字块尺寸和画都算上，fit 不会把放得下的字缩小。
+        var bandPadX: Double { hasBand ? size * 0.32 : 0 }
+        var bandPadY: Double { hasBand ? size * 0.14 : 0 }
     }
 
     private static func makeRun(_ string: String, _ spec: CollageTextLine, size: Double) -> Run {
@@ -262,7 +353,8 @@ enum CollageTypeset {
         // 末字后面的字距不算宽度，否则居中/右对齐会偏。
         let trimmed = max(0, width - spec.tracking * size)
         return Run(line: line, width: trimmed, ascent: Double(ascent), descent: Double(descent),
-                   size: size, indent: spec.indent * size)
+                   size: size, indent: spec.indent * size,
+                   effect: spec.effect.flatMap { $0.isEmpty ? nil : $0 }, color: spec.color)
     }
 
     /// 字块在 1 倍（字号按 short 换算）时的外包尺寸。
@@ -312,7 +404,9 @@ enum CollageTypeset {
             fitScale *= f * 0.98
         }
         ctx.saveGState()
-        ctx.clip(to: rect.insetBy(dx: -2, dy: -2))
+        // 只防字溢到隔壁格；花字的描边、投影、发光往外伸多少就多留多少，不能被切成一刀齐。
+        let overhang = effectOverhang(text, short: short * fitScale)
+        ctx.clip(to: rect.insetBy(dx: -2 - overhang, dy: -2 - overhang))
         if text.vertical {
             drawVertical(text, in: rect, ctx: ctx, short: short * fitScale, vars: vars, canvasHeight: canvasHeight)
         } else {
@@ -336,9 +430,9 @@ enum CollageTypeset {
         var h = 0.0
         var w = 0.0
         for (i, r) in runs.enumerated() {
-            h += r.ascent + r.descent
+            h += r.ascent + r.descent + 2 * r.bandPadY
             if i < runs.count - 1 { h += text.lineSpacing * r.size }
-            w = max(w, r.width + r.indent)
+            w = max(w, r.width + r.indent + 2 * r.bandPadX)
         }
         let first = runs.first?.size ?? short * 0.04
         if text.rule { h += first * 0.9 }
@@ -364,9 +458,16 @@ enum CollageTypeset {
             }
         }
         for (i, r) in runs.enumerated() {
-            let baseline = y + r.ascent
-            drawLine(r.line, x: x(for: r.width, indent: r.indent), baseline: baseline, ctx: ctx, canvasHeight: canvasHeight)
-            y += r.ascent + r.descent
+            // 一行的外框 = 字 + 底条的边（没有底条就是字本身）。
+            let boxW = r.width + 2 * r.bandPadX
+            let boxH = r.ascent + r.descent + 2 * r.bandPadY
+            let boxX = x(for: boxW, indent: r.indent)
+            if let fx = r.effect, fx.hasBand {
+                drawBand(fx, rect: CGRect(x: boxX, y: y, width: boxW, height: boxH), ctx: ctx)
+            }
+            drawStyledLine(r, x: boxX + r.bandPadX, baseline: y + r.bandPadY + r.ascent, ctx: ctx,
+                           canvasHeight: canvasHeight)
+            y += boxH
             if i < runs.count - 1 { y += text.lineSpacing * r.size }
         }
         let first = runs.first?.size ?? short * 0.04
@@ -395,6 +496,16 @@ enum CollageTypeset {
         let advance: Double
         let indent: Double
         var height: Double { indent + Double(chars.count) * advance }
+        /// 一列的字是同一行拆出来的，花字也是同一个。
+        var effect: CollageTextEffect? { chars.first?.effect }
+        var hasBand: Bool { effect?.hasBand ?? false }
+        /// 竖排底条：列左右各宽出、上下各高出多少。
+        var padX: Double { hasBand ? size * 0.24 : 0 }
+        var padY: Double { hasBand ? size * 0.3 : 0 }
+        /// 这一列占的宽（字宽 + 底条两边）。
+        var width: Double { size + 2 * padX }
+        /// 这一列从顶到底（下沉 + 字 + 底条上下）。
+        var extent: Double { height + 2 * padY }
     }
 
     private static func columns(_ text: CollageText, short: Double, vars: [String: String]) -> [Column] {
@@ -413,12 +524,12 @@ enum CollageTypeset {
         var w = 0.0
         var h = 0.0
         for (i, c) in cols.enumerated() {
-            w += c.size
+            w += c.width
             if i < cols.count - 1 { w += text.lineSpacing * c.size }
-            h = max(h, c.height)
+            h = max(h, c.extent)
         }
         if let first = cols.first {
-            var tail = first.height
+            var tail = first.extent
             if text.rule { tail += first.size * 1.9 }
             if let seal = text.seal { tail += first.size * 0.35 + sealSide(seal, short: short) }
             h = max(h, tail)
@@ -444,21 +555,25 @@ enum CollageTypeset {
         case .center: top = Double(rect.midY) - Double(block.height) / 2
         case .trailing: top = Double(rect.maxY) - Double(block.height)
         }
-        var firstCenter = right - cols[0].size / 2
+        var firstCenter = right - cols[0].width / 2
         for (i, col) in cols.enumerated() {
-            let center = right - col.size / 2
+            let center = right - col.width / 2
             if i == 0 { firstCenter = center }
-            var y = top + col.indent
+            if let fx = col.effect, fx.hasBand {
+                drawBand(fx, rect: CGRect(x: right - col.width, y: top + col.indent, width: col.width,
+                                          height: Double(col.chars.count) * col.advance + 2 * col.padY), ctx: ctx)
+            }
+            var y = top + col.indent + col.padY
             for ch in col.chars {
                 let glyphH = ch.ascent + ch.descent
                 let baseline = y + (col.advance - glyphH) / 2 + ch.ascent
-                drawLine(ch.line, x: center - ch.width / 2, baseline: baseline, ctx: ctx, canvasHeight: canvasHeight)
+                drawStyledLine(ch, x: center - ch.width / 2, baseline: baseline, ctx: ctx, canvasHeight: canvasHeight)
                 y += col.advance
             }
-            right -= col.size + text.lineSpacing * col.size
+            right -= col.width + text.lineSpacing * col.size
         }
         let first = cols[0]
-        var y = top + first.height
+        var y = top + first.extent
         let color = text.lines.first?.color ?? .rule
         if text.rule {
             y += first.size * 0.3
@@ -521,6 +636,107 @@ enum CollageTypeset {
             let baseline = Double(cell.midY) - (run.ascent + run.descent) / 2 + run.ascent
             drawLine(run.line, x: Double(cell.midX) - run.width / 2, baseline: baseline, ctx: ctx, canvasHeight: canvasHeight)
         }
+        ctx.restoreGState()
+    }
+
+    // MARK: - 花字
+
+    /// 花字往字形外面伸出多少（描边 + 投影的模糊和下落），裁剪框要多留出来。
+    private static func effectOverhang(_ text: CollageText, short: Double) -> CGFloat {
+        let reach = text.lines.compactMap { line -> Double? in
+            guard let fx = line.effect, !fx.isEmpty else { return nil }
+            let shadow = fx.shadow > 0.0001 ? fx.shadowBlur + fx.shadowOffset : 0
+            return (fx.stroke + shadow) * line.size * short
+        }.max() ?? 0
+        return CGFloat(reach)
+    }
+
+    /// 带花字的一行（竖排是一个字）：投影 / 发光 → 描边（字形外面一圈）→ 字（纯色或上下渐变）。
+    /// 没有花字就是原来的 drawLine。投影套在透明图层上落一次：描边和字不会各投各的。
+    private static func drawStyledLine(_ run: Run, x: Double, baseline: Double, ctx: CGContext, canvasHeight: Int) {
+        guard let fx = run.effect else {
+            drawLine(run.line, x: x, baseline: baseline, ctx: ctx, canvasHeight: canvasHeight)
+            return
+        }
+        let size = run.size
+        ctx.saveGState()
+        // 回到 CoreText 的坐标（y 朝上），原点放在这一行的基线起点。
+        ctx.translateBy(x: 0, y: CGFloat(canvasHeight))
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.translateBy(x: CGFloat(x), y: CGFloat(Double(canvasHeight) - baseline))
+        let shadowed = fx.shadow > 0.0001
+        if shadowed {
+            // 阴影偏移在设备空间（y 朝上）：往右下落 = (+, −)。
+            let off = CGFloat(fx.shadowOffset * size)
+            ctx.setShadow(offset: CGSize(width: off * 0.6, height: -off), blur: CGFloat(fx.shadowBlur * size),
+                          color: fx.shadowColor.cgColor(alpha: min(1, fx.shadow)))
+            ctx.beginTransparencyLayer(auxiliaryInfo: nil)
+        }
+        let outline = (fx.stroke > 0.0001 || fx.gradient != nil) ? glyphPath(run.line) : nil
+        if fx.stroke > 0.0001, let outline, !outline.path.isEmpty {
+            // 线宽 2× 描边粗细、居中描在轮廓上：里面那半被后画的字盖住，看到的就是字外面一圈。
+            ctx.addPath(outline.path)
+            ctx.setLineWidth(CGFloat(fx.stroke * size * 2))
+            ctx.setLineJoin(.round)
+            ctx.setLineCap(.round)
+            ctx.setStrokeColor(fx.strokeColor.cgColor)
+            ctx.strokePath()
+        }
+        if let to = fx.gradient, let outline, outline.complete, !outline.path.isEmpty,
+           let gradient = CGGradient(colorsSpace: CollageRender.srgb, colors: [run.color.cgColor, to.cgColor] as CFArray,
+                                     locations: [0, 1]) {
+            ctx.saveGState()
+            ctx.addPath(outline.path)
+            ctx.clip()
+            ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: run.ascent), end: CGPoint(x: 0, y: -run.descent),
+                                   options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+            ctx.restoreGState()
+        } else {
+            // 纯色；或者行里有彩色字形（emoji，没有轮廓剪不出渐变）就按原样画。
+            ctx.textPosition = .zero
+            CTLineDraw(run.line, ctx)
+        }
+        if shadowed { ctx.endTransparencyLayer() }
+        ctx.restoreGState()
+    }
+
+    /// 一行字的字形轮廓（CoreText 坐标：基线 y = 0、y 朝上）。complete = false：有彩色 / 位图字形没有轮廓。
+    private static func glyphPath(_ line: CTLine) -> (path: CGPath, complete: Bool) {
+        let path = CGMutablePath()
+        var complete = true
+        for run in CTLineGetGlyphRuns(line) as! [CTRun] {
+            let count = CTRunGetGlyphCount(run)
+            guard count > 0 else { continue }
+            let attrs = CTRunGetAttributes(run) as NSDictionary
+            guard let value = attrs[kCTFontAttributeName as String] else {
+                complete = false
+                continue
+            }
+            let font = value as! CTFont
+            var glyphs = [CGGlyph](repeating: 0, count: count)
+            var positions = [CGPoint](repeating: .zero, count: count)
+            CTRunGetGlyphs(run, CFRange(location: 0, length: 0), &glyphs)
+            CTRunGetPositions(run, CFRange(location: 0, length: 0), &positions)
+            for i in 0..<count {
+                var t = CGAffineTransform(translationX: positions[i].x, y: positions[i].y)
+                if let g = CTFontCreatePathForGlyph(font, glyphs[i], &t) {
+                    path.addPath(g)
+                } else {
+                    complete = false
+                }
+            }
+        }
+        return (path, complete)
+    }
+
+    /// 底条（左上原点坐标里的外框）。
+    private static func drawBand(_ fx: CollageTextEffect, rect: CGRect, ctx: CGContext) {
+        guard fx.hasBand, rect.width > 0, rect.height > 0 else { return }
+        let r = min(rect.width, rect.height) / 2 * CGFloat(min(1, max(0, fx.bandRound)))
+        ctx.saveGState()
+        ctx.setFillColor(fx.bandColor.cgColor(alpha: min(1, fx.band)))
+        ctx.addPath(CGPath(roundedRect: rect, cornerWidth: r, cornerHeight: r, transform: nil))
+        ctx.fillPath()
         ctx.restoreGState()
     }
 

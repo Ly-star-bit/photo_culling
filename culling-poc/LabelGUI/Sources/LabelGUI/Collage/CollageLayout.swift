@@ -410,8 +410,8 @@ enum CollageLayout {
                 }
             }
         case .fold:
-            // 装订中缝：两边各让出一截，脸进去就被书脊吃掉。
-            let fold = max(band, canvas.shortSide * 0.02)
+            // 装订中缝：两边各让出一截，脸进去就被书脊吃掉（胶装让得更宽，见 CollageCanvas.foldBand）。
+            let fold = max(band, canvas.foldBand)
             out.append(CGRect(x: w / 2 - fold, y: 0, width: fold * 2, height: h))
         }
         return out
@@ -462,6 +462,18 @@ enum CollageLayout {
         var rng = SeededRandom(seed: req.seed)
 
         if cells.count == 1 {
+            // 胶装跨页只排一张：放右页（左页留一个空位），不让它横跨中缝；和右页比例差得多就完整显示。
+            let canvas = req.context.canvas
+            if canvas.seams == .fold, !canvas.allowsCrossFold {
+                var cell = cells[0]
+                let pageW = max(1, (width - g) / 2)
+                if cell.kind == .photo, let id = cell.photoID, let p = req.context.photos[id] {
+                    let win = CollageCrop.maxWindow(photoAspect: p.aspect, cellAspect: pageW / max(1, height))
+                    if 1 - win.w * win.h > 0.12 { cell.contain = true }
+                }
+                let root = CollageNode.split(.row, 0.5, .leaf(CollageCell(kind: .photo)), .leaf(cell))
+                return [score(root, m: nil, context: req.context)]
+            }
             let root = CollageNode.leaf(cells[0])
             return [score(root, m: nil, context: req.context)]
         }
@@ -534,6 +546,13 @@ enum CollageLayout {
         var best = search(0.62, 1.6, tries: req.tries)
         if best.isEmpty { best = search(0.2, 5, tries: max(2000, req.tries / 2)) }
         return diverse(Array(best.values), keep: req.keep)
+    }
+
+    /// 一页空版：一个待放照片的空格。胶装跨页从一开始就是左右两页各一个空格（中缝那一刀），
+    /// 往里放照片、挪照片都不会横跨中缝。
+    static func blankRoot(for canvas: CollageCanvas) -> CollageNode {
+        guard canvas.seams == .fold, !canvas.allowsCrossFold else { return .leaf(CollageCell(kind: .photo)) }
+        return .split(.row, 0.5, .leaf(CollageCell(kind: .photo)), .leaf(CollageCell(kind: .photo)))
     }
 
     /// 跨页的根是不是「中缝那一刀」（左右两页）。
