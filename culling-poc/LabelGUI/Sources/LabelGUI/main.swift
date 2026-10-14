@@ -220,9 +220,9 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--focus"),
     exit(0)
 }
 
-// Headless 场内对比：LabelGUI --compare <photo_dir> [--take N | --select id,id,...]
-//     [--keys "3,k,enter,undo,d,left,right,1,2,0,bring:<id>,cap:<n>"] [--capacity N] [--gap 秒]
-// 用和界面同一个 CompareSession 按键脚本跑一遍，每步打印台面/候场/⏎ 的文字。按键会写
+// Headless 连拍挑选：LabelGUI --compare <photo_dir> [--take N | --select id,id,...]
+//     [--keys "3,cmd:<id>,click:<id>,space,shift-space,left,right,up,down,enter,undo,0"] [--auto] [--gap 秒]
+// 用和界面同一个 PickSession 按键脚本跑一遍，每步打印这一组的草稿和 ⏎ 会怎么定。⏎ 会写
 // overrides.json（--gap 写本场阈值文件）—— 只在临时 LABELGUI_DATA_DIR 下用。
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--compare"),
    CommandLine.arguments.count > flagIndex + 1 {
@@ -238,22 +238,27 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--compare"),
                                pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         store.switchSession(to: dir)
         if let gap = option("--gap").flatMap(Double.init) { store.takeGapSec = gap }
-        let request: CompareRequest
+        let request: PickRequest
         if let list = option("--select") {
             let ids = list.split(separator: ",").map { String($0) }
-            guard let r = CompareRequest.forSelection(ids, store: store) else {
+            guard let r = PickRequest.forSelection(ids, store: store) else {
                 print("--select 至少要 2 张"); exit(1)
             }
             request = r
         } else if let take = option("--take").flatMap(Int.init) {
-            request = .take(take, preferred: [])
+            request = .take(take, chapter: option("--chapter").flatMap(Int.init).map { $0 - 1 })
         } else {
-            guard let first = store.pendingTakes.first else { print("没有待处理的场"); exit(0) }
-            request = .take(first, preferred: [])
+            // --chapter N：和界面「只看这一章」时一样，这一轮只过第 N 章（从 1 数）的待处理场。
+            let chapter = option("--chapter").flatMap(Int.init).map { $0 - 1 }
+            let pending = store.pendingTakes.filter { t in
+                chapter == nil || store.members(ofTake: t).first.map(BatchStore.timelineChapter(of:)) == chapter
+            }
+            guard let first = pending.first else { print("没有待处理的场"); exit(0) }
+            request = .take(first, chapter: chapter)
         }
-        let session = CompareSession(store: store, request: request,
-                                     capacity: option("--capacity").flatMap(Int.init) ?? CompareSession.defaultCapacity,
-                                     sortByScore: false)
+        let session = PickSession(store: store, request: request, sortByScore: false)
+        // --auto：数字键选完直接下一组（界面上那个勾）。
+        session.autoAdvance = CommandLine.arguments.contains("--auto")
         print(session.describe())
         for raw in (option("--keys") ?? "").split(separator: ",") {
             let key = raw.trimmingCharacters(in: .whitespaces)
@@ -262,14 +267,18 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--compare"),
             if !session.handle(key) { print("未知按键 \(key)"); continue }
             print(session.describe())
         }
-        // 台面排布：常见窗口里 1–6 张竖拍/横拍各摆成几行几列。
-        let size = CGSize(width: 1256, height: 560)
-        for aspect in [CGFloat(2.0 / 3.0), 1.5] {
-            let rows = (1...6).map { n -> String in
-                let g = CompareLayout.grid(count: n, in: size, aspect: aspect)
-                return "\(n)=\(g.rows)×\(g.cols)"
+        // 台面排布：常见窗口里 1–12 张竖拍/横拍是一屏铺满（行×列）还是单行左右滚。
+        for size in [CGSize(width: 1256, height: 640), CGSize(width: 1416, height: 720)] {
+            for aspect in [CGFloat(2.0 / 3.0), 1.5] {
+                let rows = (1...12).map { n -> String in
+                    let r = PickLayout.compute(count: n, in: size, aspect: aspect, hasFaces: true)
+                    switch r.arrangement {
+                    case .grid(let rows, let cols): return "\(n)=\(rows)×\(cols)(\(Int(r.image.width))×\(Int(r.image.height)))"
+                    case .strip: return "\(n)=滚(\(Int(r.image.width))×\(Int(r.image.height)))"
+                    }
+                }
+                print("排布 \(Int(size.width))×\(Int(size.height)) \(aspect < 1 ? "竖拍" : "横拍"): " + rows.joined(separator: " "))
             }
-            print("排布 \(Int(size.width))×\(Int(size.height)) \(aspect < 1 ? "竖拍" : "横拍"): " + rows.joined(separator: " "))
         }
     }
     exit(0)
@@ -293,6 +302,88 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--collage-ui"),
     }
 }
 
+// 网格「改判后保持位置」自检：LabelGUI --ux-selftest。
+if CommandLine.arguments.contains("--ux-selftest") {
+    MainActor.assumeIsolated {
+        // (说明, 改判前顺序, 改判后顺序, 焦点那张, 期望新焦点 / nil = 不动)
+        let cases: [(String, [String], [String], String, String?)] = [
+            ("精选区里按 3：跳到废片区 → 焦点落到原来的下一张", ["p1", "p2", "p3", "u1", "r1"], ["p1", "p3", "u1", "r1", "p2"], "p2", "p3"),
+            ("分组行里按 2：位置没变 → 不动", ["a1", "a2", "a3", "b1"], ["a1", "a2", "a3", "b1"], "a2", nil),
+            ("定完一场被叠起来：这张藏了 → 下一场第一张", ["a1", "a2", "b1", "b2"], ["a1", "b1", "b2"], "a2", "b1"),
+            ("只看精选时废掉最后一张 → 往前找", ["p1", "p2", "p3"], ["p1", "p2"], "p3", "p2"),
+            ("唯一一张被筛掉 → 没得落", ["p1"], [], "p1", nil),
+            ("这张前后的邻居变了（排序挪动）→ 落到原来的下一张", ["p1", "u1", "u2", "u3"], ["p1", "u2", "u1", "u3"], "u1", "u2"),
+            ("同一场里别的照片被叠掉、它自己没动 → 不动", ["a", "r", "b", "c1"], ["a", "b", "c1"], "b", nil),
+            ("按 0 让定完的场重新展开、废片冒出来围着它 → 不动", ["k", "n1"], ["r1", "k", "r2", "n1"], "k", nil),
+        ]
+        var failed = 0
+        for (name, before, after, id, expected) in cases {
+            let got = BatchView.placeAfterChange(of: id, before: before, after: after)
+            let ok = got == expected
+            if !ok { failed += 1 }
+            // 拆开拼：一长串 + 和三元在 CI 的 Xcode 16 上类型检查会慢。
+            let head: String = ok ? "PASS " : "FAIL "
+            let result: String = got ?? "不动"
+            let want: String = ok ? "" : "（期望 \(expected ?? "不动")）"
+            print(head + name + " → " + result + want)
+        }
+        exit(failed == 0 ? 0 : 1)
+    }
+}
+
+// XMP 写入 + 「XMP 过期」提醒的端到端检查：LABELGUI_DATA_DIR=<临时> LabelGUI --export-xmp <photo_dir> [--then id=精选|可用|废片]
+// 会在 photo_dir 里原图旁边写 .xmp —— 只对拷出来的临时文件夹跑。
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--export-xmp"),
+   CommandLine.arguments.count > flagIndex + 1 {
+    MainActor.assumeIsolated {
+        guard !(ProcessInfo.processInfo.environment["LABELGUI_DATA_DIR"] ?? "").isEmpty else {
+            print("--export-xmp 会改这一场的 xmp_state.json，还会在照片旁边写 .xmp：先设 LABELGUI_DATA_DIR=<临时目录>，" +
+                  "并且只对拷出来的临时照片文件夹跑")
+            exit(2)
+        }
+        let dir = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])
+        let store = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
+        store.switchSession(to: dir)
+        print("写之前：XMP 过期 \(store.xmpStaleCount) 张（从没写过 = 0）")
+        store.exportXMP()
+        let deadline = Date().addingTimeInterval(30)
+        while store.isRunning && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let exportError = store.lastError
+        print(exportError ?? store.progressText)
+        print("写完：XMP 过期 \(store.xmpStaleCount) 张")
+        if let i = CommandLine.arguments.firstIndex(of: "--then"), CommandLine.arguments.count > i + 1 {
+            let parts = CommandLine.arguments[i + 1].split(separator: "=").map(String.init)
+            if parts.count == 2, let v = Verdict(rawValue: parts[1]) {
+                store.setOverride(parts[0], v)
+                print("改判 \(parts[0]) → \(v.rawValue)：XMP 过期 \(store.xmpStaleCount) 张")
+                store.undoLastOverride()
+                print("撤销后：XMP 过期 \(store.xmpStaleCount) 张")
+            }
+        }
+        // 重开这一场：过期状态要从 xmp_state.json 读回来。
+        let reopened = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
+        reopened.switchSession(to: dir)
+        print("重开后：XMP 过期 \(reopened.xmpStaleCount) 张")
+        if exportError != nil { exit(1) }
+    }
+    exit(0)
+}
+
+// 时间轴布局自检：LabelGUI --timeline-selftest（随机章节数/张数/宽度，验证不出界、不重叠）。
+if CommandLine.arguments.contains("--timeline-selftest") {
+    MainActor.assumeIsolated { ChapterTimelineSelfTest.run() }
+}
+
+// 批量页 / 连拍挑选离屏快照：LabelGUI --batch-ui|--compare-ui <photo_dir> <out.png> [...]（见 UISnapshot.swift）。
+for flag in ["--batch-ui", "--compare-ui"] {
+    if let flagIndex = CommandLine.arguments.firstIndex(of: flag),
+       CommandLine.arguments.count > flagIndex + 2 {
+        MainActor.assumeIsolated {
+            BatchUISnapshot.run(flagIndex: flagIndex, compare: flag == "--compare-ui")
+        }
+    }
+}
+
 // 拼图编辑操作脚本：LabelGUI --collage-ops <photo_dir> --ops "..."（见 CollageCLI.swift）。
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--collage-ops"),
    CommandLine.arguments.count > flagIndex + 1 {
@@ -301,8 +392,8 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--collage-ops"),
     }
 }
 
-// Headless 对比放大裁块：LabelGUI --compare-crop <photo_dir> <id> <out.jpg>
-// 走和对比模式放大一模一样的"按人脸裁原图"，落成 JPEG，并打印锚点 —— 用来肉眼
+// Headless 放大裁块：LabelGUI --compare-crop <photo_dir> <id> <out.jpg>
+// 走和连拍挑选放大一模一样的"按人脸裁原图"，落成 JPEG，并打印锚点 —— 用来肉眼
 // 核对裁块居中在脸上、竖拍没转歪。
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--compare-crop"),
    CommandLine.arguments.count > flagIndex + 3 {

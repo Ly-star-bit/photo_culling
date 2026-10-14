@@ -160,6 +160,16 @@ final class BatchStore: ObservableObject {
     /// When set, the 废片 section shows only rejects carrying this reason —
     /// "audit every 闭眼 kill in one pass" instead of hunting badges.
     @Published var reasonFilter: String?
+    /// 时间轴「只看这一章」（ChapterSegment.chapter；nil = 全部章节）。只管网格显示和连拍挑选的范围，
+    /// 不碰判决、不碰导出。换场次清掉。
+    @Published var chapterFilter: Int?
+
+    /// 生效中的「只看这一章」：那一章已经不在了（重新分析后章节变了、单章拍摄没有时间轴）就当没有，
+    /// 不然网格会莫名其妙一张都不剩。
+    var activeChapterFilter: Int? {
+        guard let f = chapterFilter, chapterSegments.contains(where: { $0.chapter == f }) else { return nil }
+        return f
+    }
     /// 网格多选的「拼图」：把这几张的 id 交给拼图 tab（ContentView 收到后切过去、清空）。
     /// 网格选中状态是 BatchView 私有的，只能这样递过去。
     @Published var collageRequest: [String]?
@@ -337,7 +347,7 @@ final class BatchStore: ObservableObject {
         /// 其余废片的，活儿干完了，不该再占着网格。顶栏每次重绘都读它,
         /// 所以和 verdictCounts 一起在 rebuildDerived 里算一次,别做成 O(n) 计算属性。
         var pendingTakeCount = 0
-        /// 待处理的场号，升序（= 时间顺序）。对比模式的 ⏎/D 找下一场用，每次按键不再扫全部照片。
+        /// 待处理的场号，升序（= 时间顺序）。连拍挑选的 ⏎ 找下一组、网格的 D 跳场用，每次按键不再扫全部照片。
         var pendingTakes: [Int] = []
         /// 场内排名（1 起，只排没被淘汰的）：缩略图上的 #1 #2 #3。用户常从一场里
         /// 挑 3 张 —— 这告诉他算法眼里的前三是哪几张，他只需要否决而不是从零找。
@@ -359,6 +369,9 @@ final class BatchStore: ObservableObject {
         var faceQualityBins: [Int] = []
         /// Rejects with no manual override — the appeal court's docket.
         var autoRejectCount = 0
+        /// 上次写 XMP 之后判决变了的张数（从没写过 = 0，不提醒）。Lightroom / C1 看的是 XMP，
+        /// 在这里改完忘了重写，那边还是旧结果。
+        var xmpStaleCount = 0
         /// Photos with no burst sibling carrying a face-quality score: the only
         /// ones the ABSOLUTE face-quality line applies to (grouped photos are
         /// judged relative to their group's best), so the slider histogram
@@ -379,7 +392,7 @@ final class BatchStore: ObservableObject {
 
     /// 「待处理」的场：还留着 2 张以上没淘汰，而且其中还有没经你手的（自动判的）。
     /// 以前只看"存活 ≥2"：K 勾两张定案（两张手判精选、其余手判废片）的场永远算待处理，
-    /// D 和对比模式的 ⏎ 会一直绕回这些早就定完的场。全经你手定过的就是定完了。
+    /// D 和连拍挑选的 ⏎ 会一直绕回这些早就定完的场。全经你手定过的就是定完了。
     func isPendingTake(alive: [BatchItem]) -> Bool {
         alive.count >= 2 && alive.contains { overrides[$0.id] == nil }
     }
@@ -410,6 +423,64 @@ final class BatchStore: ObservableObject {
         return bins
     }
     var autoRejectCount: Int { derived.autoRejectCount }
+    var xmpStaleCount: Int { derived.xmpStaleCount }
+
+    /// 写进 XMP 的那两样：判决（色标 / -1 废片）和星级（精选、可用的星级跟着 VLM 表情分走）。
+    struct XMPMark: Codable, Equatable {
+        let v: String
+        let s: Int
+    }
+
+    /// 这一场写过的 XMP（xmp_state.json）：每张最后一次**真正写进去**的样子，加上别的软件写的、
+    /// 我们没碰的那些。nil = 这一场还没写过，不提醒。
+    private struct XMPState: Codable {
+        var marks: [String: XMPMark] = [:]
+        var foreign: Set<String> = []
+    }
+    private var xmpState: XMPState?
+    private var xmpStatePath: URL { sessionDir.appendingPathComponent("xmp_state.json") }
+
+    private func loadXMPState() {
+        guard let data = try? Data(contentsOf: xmpStatePath) else {
+            xmpState = nil
+            return
+        }
+        xmpState = try? JSONDecoder().decode(XMPState.self, from: data)
+    }
+
+    private func saveXMPState(_ state: XMPState) {
+        xmpState = state
+        if let data = try? JSONEncoder().encode(state) {
+            try? data.write(to: xmpStatePath, options: .atomic)
+        }
+    }
+
+    /// 和 XMP 对不上的张数：写过的按「判决 + 星级」比；从没写进去的（新照片、上次写失败的）也算；
+    /// 别的软件的 XMP 我们不碰，不算。
+    private func xmpStale(in items: [BatchItem]) -> Int {
+        guard let state = xmpState else { return 0 }
+        var n = 0
+        for item in items where !state.foreign.contains(item.id) {
+            if state.marks[item.id] != Self.xmpMark(item) { n += 1 }
+        }
+        return n
+    }
+
+    /// XMP 里的星级和色标。导出和「XMP 过期」比对共用这一份，两边不会算岔。
+    static func xmpRating(_ item: BatchItem) -> (stars: Int, label: String?) {
+        switch item.verdict {
+        case .reject:
+            return (-1, "Red")    // Bridge/LR read -1 as "rejected"; C1 filters by the red label instead
+        case .pick:
+            return (item.expressionScore ?? 4, "Green")
+        case .usable:
+            return (item.expressionScore.map { max(1, $0 - 1) } ?? 3, nil)
+        }
+    }
+
+    static func xmpMark(_ item: BatchItem) -> XMPMark {
+        XMPMark(v: item.verdict.rawValue, s: xmpRating(item).stars)
+    }
 
     func item(withID id: String) -> BatchItem? {
         // The index is rebuilt by applyThresholds; guard against an `items`
@@ -488,7 +559,16 @@ final class BatchStore: ObservableObject {
         d.sharpnessBins = Self.histogramBins(items.map(\.sharpness), range: Self.sharpnessHistRange, sqrtScale: false)
         d.exposureBins = Self.histogramBins(items.map(\.worstClipPct), range: Self.exposureHistRange, sqrtScale: true)
         d.faceQualityBins = Self.histogramBins(d.faceQualityAbsoluteValues, range: Self.faceQualityHistRange, sqrtScale: false)
-        (d.chapterSegments, d.chapterWarnings) = Self.chapterSummary(items, minKeepers: minKeepersPerChapter)
+        // 时间轴上每章标「还有几场连拍没定」：场不会跨章（场内相邻两张 ≤ 几十秒，章节之间
+        // 隔着 15 分钟以上），所以拿任意一张成员的章节就是整场的章节。
+        var takeChapter: [Int: Int] = [:]
+        for item in items { takeChapter[item.take] = Self.timelineChapter(of: item) }
+        var pendingByChapter: [Int: Int] = [:]
+        for take in d.pendingTakes {
+            if let chapter = takeChapter[take] { pendingByChapter[chapter, default: 0] += 1 }
+        }
+        (d.chapterSegments, d.chapterWarnings) = Self.chapterSummary(items, minKeepers: minKeepersPerChapter,
+                                                                     pendingByChapter: pendingByChapter)
         d.thresholdSuggestions = computeThresholdSuggestions()
         let order = items.indices.sorted { a, b in
             let ia = items[a], ib = items[b]
@@ -508,6 +588,7 @@ final class BatchStore: ObservableObject {
             if losers > 0 { recTakes += 1; recRejects += losers }
         }
         d.recommendationSummary = (recTakes, recRejects)
+        d.xmpStaleCount = xmpStale(in: items)
         derived = d
     }
 
@@ -609,6 +690,7 @@ final class BatchStore: ObservableObject {
         } else {
             loadThresholds()
             loadOverrides()
+            loadXMPState()
             loadResults()
             applyThresholds()
         }
@@ -680,6 +762,7 @@ final class BatchStore: ObservableObject {
         overrideUndoStack = []
         reasonFilter = nil
         borderlineFilter = false
+        chapterFilter = nil
         // 判决筛选也要跟着清：留着"只看废片"切到新场次，网格里只有废片，
         // 看起来像是"照片少了一大半"。
         verdictFilter = nil
@@ -687,6 +770,7 @@ final class BatchStore: ObservableObject {
         loadReviewPosition()
         loadThresholds()
         loadOverrides()
+        loadXMPState()
         loadResults()
         applyThresholds()
         // Cached results load happily from a folder that no longer exists — say
@@ -916,11 +1000,13 @@ final class BatchStore: ObservableObject {
         overrideUndoStack = []
         reasonFilter = nil
         borderlineFilter = false
+        chapterFilter = nil
         verdictFilter = nil
         lastError = nil
         loadReviewPosition()
         loadThresholds()
         loadOverrides()
+        loadXMPState()
         loadResults()
         applyThresholds()
     }
@@ -1012,8 +1098,7 @@ final class BatchStore: ObservableObject {
 
     var canUndoOverride: Bool { !overrideUndoStack.isEmpty }
 
-    /// 返回这次撤销动到的照片 id —— 对比模式据此跳回出事的那一场、把刚淘汰的那张
-    /// 放回原来的格子。
+    /// 返回这次撤销动到的照片 id —— 连拍挑选据此跳回出事的那一组。
     @discardableResult
     func undoLastOverride() -> [String] {
         guard let last = overrideUndoStack.popLast() else { return [] }
@@ -1065,6 +1150,55 @@ final class BatchStore: ObservableObject {
         }
         saveOverrides()
         applyThresholds()
+    }
+
+    /// 一组判决一次写进去：一条撤销记录、一次保存、一次重算。连拍挑选的 ⏎、分组行的
+    /// 「接受推荐」/「只留这张」都走这里 —— 一组 8 张拆成 8 次 setOverride 的话，⌘Z 要按 8 下。
+    func applyOverrides(_ changes: [String: Verdict]) {
+        guard !changes.isEmpty else { return }
+        let ids = changes.keys.sorted()
+        overrideUndoStack.append(ids.map { ($0, overrides[$0]) })
+        if overrideUndoStack.count > 100 { overrideUndoStack.removeFirst() }
+        for id in ids { overrides[id] = changes[id] }
+        saveOverrides()
+        applyThresholds()
+    }
+
+    /// 一场的「推荐结果」：现在的精选留（自动提名的或你按 1 的），你手动标过可用的留作可用，
+    /// 其余废。连拍挑选的初始草稿和分组行的「接受推荐」是同一个结果（「全部接受推荐」判决上也一样，
+    /// 只是它不给本来就废的照片补写人工判决）。
+    func recommendedDecision(for members: [BatchItem]) -> [String: Verdict] {
+        var decision: [String: Verdict] = [:]
+        for m in members {
+            if m.verdict == .pick {
+                decision[m.id] = .pick
+            } else if m.verdict == .usable, overrides[m.id] == .usable {
+                decision[m.id] = .usable
+            } else {
+                decision[m.id] = .reject
+            }
+        }
+        return decision
+    }
+
+    /// 一场的全部成员，按拍摄顺序。走 Derived 里分好的 takeRows（二分找到这一场）：连拍挑选和
+    /// 分组行每次重绘都要问，每次对全部照片 filter + sort 就是之前从网格里清掉的那个坑。
+    func members(ofTake take: Int) -> [BatchItem] {
+        let rows = takeRows
+        var lo = 0, hi = rows.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if rows[mid].take < take { lo = mid + 1 } else { hi = mid }
+        }
+        if lo < rows.count, rows[lo].take == take,
+           rows[lo].indices.allSatisfy({ $0 < items.count && items[$0].take == take }) {
+            return rows[lo].indices.map { items[$0] }
+        }
+        // 下标和 items 对不上（换了 items 还没重算的那一帧）就老老实实扫一遍。
+        return items.filter { $0.take == take }.sorted { a, b in
+            let ta = a.captureTime ?? .distantPast, tb = b.captureTime ?? .distantPast
+            return ta != tb ? ta < tb : a.id < b.id
+        }
     }
 
     /// 一个「场」的全部成员 id，按当前网格顺序。
@@ -1712,56 +1846,115 @@ final class BatchStore: ObservableObject {
 
     /// Recomputed on every status-bar render — DateFormatter construction is
     /// milliseconds-expensive, so it must not happen per call.
-    private static let chapterTimeFormatter: DateFormatter = {
+    /// 固定格式必须钉 en_US_POSIX：系统偏好 12 小时制时 "HH" 会变成「下午5」，时间轴上
+    /// 一段写成「上午8:32-下午5:08」，又长又被截断。
+    static let chapterTimeFormatter: DateFormatter = {
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "HH:mm"
         return f
     }()
 
+    /// 时间轴上这张照片算哪一段。没有拍摄时间的照片在数据上归章节 0（assignChapters
+    /// 不给它们造假章节），可网格把它们排在最后 —— 时间轴上也单独一段放最后，
+    /// 别让它们混进第一章的张数和时间里。
+    static func timelineChapter(of item: BatchItem) -> Int {
+        item.captureTime == nil ? ChapterSegment.undatedID : item.chapter
+    }
+
     /// One timeline segment per chapter: size + verdict makeup + time range.
     /// Backs the clickable chapter bar above the grid (empty unless the shoot
     /// actually has 2+ chapters).
-    struct ChapterSegment: Identifiable {
+    struct ChapterSegment: Identifiable, Equatable {
+        /// 没有拍摄时间的那一段的编号（排在最后）。
+        static let undatedID = -1
+
         let chapter: Int
         let count: Int
         let pick: Int
         let usable: Int
         let reject: Int
+        /// 这一章第一张 / 最后一张的拍摄时间（无时间那段为 nil）。
+        let start: Date?
+        let end: Date?
         let timeRange: String
         /// 留下的张数低于「每章节最少保留」。和 allRejected 分开：那个驱动时间轴
         /// 上的红色"全灭"块，这个只是橙色提醒。
         let underMin: Bool
+        /// 这一章里还没定的连拍场数（定义同 isPendingTake）。
+        let pendingTakes: Int
+        /// 悬停卡片上的代表照片（预览路径，最多 4 张）：精选优先、再可用，各自按评分 —— 和照片 App
+        /// 按日期分组时给的那几张缩略图一样，一眼认出是仪式还是晚宴。
+        let covers: [String]
         var id: Int { chapter }
         var allRejected: Bool { pick + usable == 0 }
+        var undated: Bool { chapter == Self.undatedID }
+    }
+
+    private static func coverRank(_ v: Verdict) -> Int {
+        switch v {
+        case .pick: return 2
+        case .usable: return 1
+        case .reject: return 0
+        }
     }
 
     /// Segments plus the all-rejected warnings in one pass (they used to be two
     /// computed properties doing the same grouping on every render). Warnings:
     /// chapters where culling left NOTHING — losing a whole scene is a delivery
     /// accident, a few extra keepers is just waste.
-    private static func chapterSummary(_ items: [BatchItem], minKeepers: Int) -> ([ChapterSegment], [String]) {
+    private static func chapterSummary(_ items: [BatchItem], minKeepers: Int,
+                                       pendingByChapter: [Int: Int]) -> ([ChapterSegment], [String]) {
         var byChapter: [Int: [BatchItem]] = [:]
-        for item in items { byChapter[item.chapter, default: []].append(item) }
+        for item in items { byChapter[timelineChapter(of: item), default: []].append(item) }
         guard byChapter.count > 1 else { return ([], []) }
         var segments: [ChapterSegment] = []
         var warnings: [String] = []
-        for (chapter, members) in byChapter.sorted(by: { $0.key < $1.key }) {
+        // 有时间的章节按编号（= 时间顺序），无时间那段（-1）放最后。
+        let order = byChapter.keys.sorted { a, b in
+            if (a == ChapterSegment.undatedID) != (b == ChapterSegment.undatedID) { return b == ChapterSegment.undatedID }
+            return a < b
+        }
+        for chapter in order {
+            let members = byChapter[chapter]!
             let times = members.compactMap(\.captureTime)
-            let range = times.isEmpty ? "" :
-                "\(chapterTimeFormatter.string(from: times.min()!))-\(chapterTimeFormatter.string(from: times.max()!))"
+            let start = times.min(), end = times.max()
+            let range = start.map { "\(chapterTimeFormatter.string(from: $0))-\(chapterTimeFormatter.string(from: end!))" } ?? ""
             var pick = 0, usable = 0, reject = 0
+            // 代表照片：线性挑前 4（每次滑杆都会重算，别为它整章排序）。
+            var top: [BatchItem] = []
+            func better(_ a: BatchItem, _ b: BatchItem) -> Bool {
+                let ra = coverRank(a.verdict), rb = coverRank(b.verdict)
+                return ra != rb ? ra > rb : scoreKey(a) > scoreKey(b)
+            }
             for member in members {
                 switch member.verdict {
                 case .pick: pick += 1
                 case .usable: usable += 1
                 case .reject: reject += 1
                 }
+                // 每场最多一张：前 4 名很可能是同一个连拍的 4 帧，那样卡片上四张长得一样。
+                if let same = top.firstIndex(where: { $0.take == member.take }) {
+                    guard better(member, top[same]) else { continue }
+                    top.remove(at: same)
+                } else if top.count >= 4, !better(member, top[top.count - 1]) {
+                    continue
+                }
+                let at = top.firstIndex { better(member, $0) } ?? top.count
+                top.insert(member, at: at)
+                if top.count > 4 { top.removeLast() }
             }
             let keepers = pick + usable
+            let undated = chapter == ChapterSegment.undatedID
             let segment = ChapterSegment(chapter: chapter, count: members.count,
-                                         pick: pick, usable: usable, reject: reject, timeRange: range,
-                                         underMin: keepers > 0 && keepers < minKeepers)
+                                         pick: pick, usable: usable, reject: reject,
+                                         start: start, end: end, timeRange: range,
+                                         // 无时间的那堆不是一个场景，「整章全灭」的漏交保护不适用。
+                                         underMin: !undated && keepers > 0 && keepers < minKeepers,
+                                         pendingTakes: pendingByChapter[chapter] ?? 0,
+                                         covers: top.map(\.previewPath))
             segments.append(segment)
+            guard !undated else { continue }
             let where_ = "章节\(chapter + 1)\(range.isEmpty ? "" : " (\(range))")"
             if segment.allRejected {
                 warnings.append("\(where_) 的 \(members.count) 张全部被淘汰")
@@ -2634,24 +2827,15 @@ final class BatchStore: ObservableObject {
         // derived here; the detached task is pure file IO (thousands of atomic
         // writes on a big shoot would otherwise freeze the UI for seconds).
         let jobs: [(id: String, url: URL, content: String)] = items.map { item in
-            let stars: Int
-            let label: String?
-            switch item.verdict {
-            case .reject:
-                stars = -1        // Bridge/LR read -1 as "rejected"; C1 filters by the red label instead
-                label = "Red"     // the cross-app 淘汰 color — filterable in LR AND Capture One
-            case .pick:
-                stars = item.expressionScore ?? 4
-                label = "Green"
-            case .usable:
-                stars = item.expressionScore.map { max(1, $0 - 1) } ?? 3
-                label = nil
-            }
+            // Red = the cross-app 淘汰 color — filterable in LR AND Capture One.
+            let (stars, label) = Self.xmpRating(item)
             let xmpURL = URL(fileURLWithPath: item.rawPath).deletingPathExtension().appendingPathExtension("xmp")
             let reason = item.verdict == .reject ? item.rejectReasons.joined(separator: "; ") : ""
             return (item.id, xmpURL, Self.xmpContent(rating: stars, label: label, reason: reason))
         }
         let total = jobs.count
+        // 写完记下「每张这次写进去的是什么」，之后判决 / 星级再变就提醒重写（状态栏）。
+        let marks = Dictionary(items.map { ($0.id, Self.xmpMark($0)) }, uniquingKeysWith: { first, _ in first })
         // Lightroom Classic only reads .xmp sidecars for proprietary RAW; for
         // JPEG/TIFF/DNG it expects the metadata embedded. Capture One reads
         // sidecars for everything. Say so instead of reporting a clean success.
@@ -2663,6 +2847,7 @@ final class BatchStore: ObservableObject {
 
         Task.detached { [weak self] in
             var written = 0
+            var writtenIDs: [String] = []
             var preserved: [String] = []
             var failed: [String] = []
             for (index, job) in jobs.enumerated() {
@@ -2678,6 +2863,7 @@ final class BatchStore: ObservableObject {
                 do {
                     try job.content.write(to: job.url, atomically: true, encoding: .utf8)
                     written += 1
+                    writtenIDs.append(job.id)
                 } catch {
                     failed.append(job.id)
                 }
@@ -2691,12 +2877,28 @@ final class BatchStore: ObservableObject {
             }
 
             let writtenCount = written
+            let writtenIds = writtenIDs
             let preservedIds = preserved
             let failedIds = failed
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
                 self.isRunning = false
+                // 只记真正写进去的（取消、个别写失败也照记已写的那些）；别的软件的 XMP 记成「不归我们管」。
+                if !writtenIds.isEmpty || !preservedIds.isEmpty {
+                    var state = self.xmpState ?? XMPState()
+                    for id in writtenIds {
+                        state.marks[id] = marks[id]
+                        state.foreign.remove(id)
+                    }
+                    for id in preservedIds {
+                        state.marks[id] = nil
+                        state.foreign.insert(id)
+                    }
+                    self.saveXMPState(state)
+                }
+                // 写的这段时间里判决可能又变了：按现在的判决重数一遍。
+                self.derived.xmpStaleCount = self.xmpStale(in: self.items)
                 if failedIds.isEmpty {
                     var summary = flag.isSet ? "XMP 已取消: 已写入 \(writtenCount) 个" : "XMP 完成: \(writtenCount) 个已写入原图目录"
                     if !preservedIds.isEmpty {

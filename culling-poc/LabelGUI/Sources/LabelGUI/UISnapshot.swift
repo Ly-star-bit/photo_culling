@@ -1,0 +1,152 @@
+import SwiftUI
+import AppKit
+
+// MARK: - 批量页 / 连拍挑选离屏快照（不开 GUI：禁止激活、窗口从不显示）
+
+/// LabelGUI --batch-ui <photo_dir> <out.png> [--size 1440x900] [--light]
+/// LabelGUI --compare-ui <photo_dir> <out.png> [--take N | --select a,b] [--keys "2,cmd:<id>,..."] [--zoom [--person N]] [--size 1440x900] [--light]
+/// LabelGUI --batch-ui <photo_dir> <out.png> --timeline-only [--hover N] [--pending]   （只画时间轴 + 悬停卡片）
+///
+/// 和 --collage-ui 同一套：用 app 里一模一样的视图在一个从不显示的无边框窗口里布局、
+/// 渲染成 PNG。界面不能开，排布有没有挤、时间轴会不会压到别的区域，只能这样看。
+/// 视图偏好（@AppStorage）用命令行参数域传，比如 `-batch.gridMode 按分组` —— 参数域只活在
+/// 这个进程里，不会写进任何人的设置。
+enum BatchUISnapshot {
+    @MainActor
+    static func run(flagIndex: Int, compare: Bool) -> Never {
+        let args = CommandLine.arguments
+        let flag = compare ? "--compare-ui" : "--batch-ui"
+        func option(_ name: String) -> String? {
+            guard let i = args.firstIndex(of: name), args.count > i + 1 else { return nil }
+            return args[i + 1]
+        }
+        guard args.count > flagIndex + 2 else {
+            print("用法: \(flag) <photo_dir> <out.png>")
+            exit(1)
+        }
+        // switchSession 会写 sessions.json、清掉索引外的场次目录：只在临时数据目录里跑。
+        CollageCLI.requireIsolatedDataDir(flag)
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        let dir = URL(fileURLWithPath: args[flagIndex + 1])
+        let out = URL(fileURLWithPath: args[flagIndex + 2])
+        let store = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
+        store.switchSession(to: dir)
+        if let gap = option("--gap").flatMap(Double.init) { store.takeGapSec = gap }
+        // --chapter N：先开「只看这一章」（章节号从 1 数，和界面上一样）。
+        if let n = option("--chapter").flatMap(Int.init) { store.chapterFilter = n - 1 }
+
+        func spin(_ seconds: Double) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.03)) }
+        }
+
+        let sizeParts = (option("--size") ?? "1440x900").split(separator: "x").compactMap { Double($0) }
+        let size = NSSize(width: sizeParts.first ?? 1440, height: sizeParts.count > 1 ? sizeParts[1] : 900)
+        let light = args.contains("--light")
+
+        let viewport = GridViewport()
+        let root: AnyView
+        // --review-ui / --inspector-ui：审片模式 / 检视器，停在 --id 那张（默认第一张）。
+        let order = [Verdict.pick, .usable, .reject].flatMap { v in store.items.filter { $0.verdict == v }.map(\.id) }
+        let startID = option("--id") ?? order.first ?? ""
+        if args.contains("--review-ui") {
+            let skippable = order.contains { store.item(withID: $0).map { $0.verdict != .reject } ?? false }
+            root = AnyView(ReviewView(store: store, orderIDs: order, rejectsSkippable: skippable,
+                                      focusedID: .constant(startID), reviewMode: .constant(true)))
+        } else if args.contains("--inspector-ui") {
+            root = AnyView(PhotoInspector(store: store, inspectedID: .constant(startID), gridOrder: order,
+                                          initialID: startID, onPickTake: { _ in }))
+        } else if args.contains("--timeline-only") {
+            // 只画时间轴 + 悬停卡片（--hover N = 第 N 段），下面垫一块网格色看卡片压在网格上的样子。
+            let hover = option("--hover").flatMap(Int.init)
+            root = AnyView(VStack(spacing: 0) {
+                ChapterTimeline(segments: store.chapterSegments, viewport: GridViewport(),
+                                showPending: args.contains("--pending"), minKeepers: store.minKeepersPerChapter,
+                                filtered: store.activeChapterFilter, previewHover: hover) { _ in true }
+                    .padding(.horizontal, 14).padding(.top, 8)
+                    .zIndex(1)
+                Color(white: 0.13)
+            }.background(Color(white: 0.13)))
+            for (i, seg) in store.chapterSegments.enumerated() {
+                print("段 \(i): 章节 \(seg.chapter) · \(seg.count) 张 · \(seg.timeRange) · 待处理 \(seg.pendingTakes)\(seg.undated ? " · 无时间" : "")")
+            }
+        } else if compare {
+            let request: PickRequest
+            if let list = option("--select") {
+                guard let r = PickRequest.forSelection(list.split(separator: ",").map(String.init), store: store) else {
+                    print("--select 至少要 2 张")
+                    exit(1)
+                }
+                request = r
+            } else if let take = option("--take").flatMap(Int.init) {
+                request = .take(take)
+            } else if let first = store.pendingTakes.first {
+                request = .take(first)
+            } else {
+                print("没有待处理的场")
+                exit(1)
+            }
+            let session = PickSession(store: store, request: request, sortByScore: false)
+            for raw in (option("--keys") ?? "").split(separator: ",") {
+                let key = raw.trimmingCharacters(in: .whitespaces)
+                if !key.isEmpty { session.handle(key) }
+            }
+            print(session.describe())
+            root = AnyView(PickView(store: store, session: session, zoom: args.contains("--zoom"),
+                                    person: option("--person").flatMap(Int.init), onExit: { _ in }))
+        } else {
+            root = AnyView(BatchView(store: store, viewport: viewport))
+        }
+        let view = root
+            .frame(width: size.width, height: size.height)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .environment(\.colorScheme, light ? .light : .dark)
+        let host = NSHostingView(rootView: view)
+        host.frame = NSRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        // 缩略图 / 大图都是后台解的，等它们回来。
+        spin(Double(option("--wait") ?? "3") ?? 3)
+        host.layoutSubtreeIfNeeded()
+        spin(1)
+        // --scroll-test：把网格（最高的那个 NSScrollView）滚到几个位置，打印时间轴认为「看得见」的章节 ——
+        // 验证 Lazy 网格把滚出去的格子注销了（onDisappear），白线不会只增不减。
+        if args.contains("--scroll-test") {
+            func scrollViews(_ v: NSView) -> [NSScrollView] {
+                (v as? NSScrollView).map { [$0] } ?? [] + v.subviews.flatMap(scrollViews)
+            }
+            let grids = scrollViews(host).filter { ($0.documentView?.frame.height ?? 0) > $0.bounds.height }
+            guard let grid = grids.max(by: { ($0.documentView?.frame.height ?? 0) < ($1.documentView?.frame.height ?? 0) }),
+                  let doc = grid.documentView else {
+                print("没找到可滚的网格")
+                exit(1)
+            }
+            let maxY = max(0, doc.frame.height - grid.contentView.bounds.height)
+            print("网格内容高 \(Int(doc.frame.height))pt，可视 \(Int(grid.contentView.bounds.height))pt")
+            for fraction in [0.0, 0.25, 0.5, 0.75, 1.0, 0.0] {
+                let y = doc.isFlipped ? maxY * fraction : maxY * (1 - fraction)
+                grid.contentView.scroll(to: NSPoint(x: 0, y: y))
+                grid.reflectScrolledClipView(grid.contentView)
+                for _ in 0..<4 { host.layoutSubtreeIfNeeded(); spin(0.3) }
+                let chapters = viewport.chapters.sorted().map { $0 == BatchStore.ChapterSegment.undatedID ? "无时间" : "\($0 + 1)" }
+                print(String(format: "滚到 %3.0f%%：看得见的章节 ", fraction * 100) + chapters.joined(separator: ","))
+            }
+        }
+        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
+            print("快照失败")
+            exit(1)
+        }
+        host.cacheDisplay(in: host.bounds, to: rep)
+        guard let data = rep.representation(using: .png, properties: [:]) else { exit(1) }
+        do {
+            try data.write(to: out)
+        } catch {
+            print("写不出 \(out.path)")
+            exit(1)
+        }
+        print("界面快照 \(Int(size.width))x\(Int(size.height)) · \(store.items.count) 张 · 章节 \(store.chapterSegments.count) · \(out.path)")
+        exit(0)
+    }
+}

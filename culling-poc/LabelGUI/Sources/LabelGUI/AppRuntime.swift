@@ -5,7 +5,7 @@ enum AppRuntime {
     /// 命令行无头参数；main.swift 分派之前按它们设 `headless`。
     static let headlessFlags: Set<String> = [
         "--analyze", "--watermark", "--session-key", "--verdicts", "--sharp", "--focus", "--compare",
-        "--collage", "--collage-ui", "--collage-ops", "--compare-crop",
+        "--collage", "--collage-ui", "--collage-ops", "--compare-crop", "--batch-ui", "--compare-ui", "--timeline-selftest", "--ux-selftest", "--export-xmp",
     ]
 
     /// true = 无头跑（测试、自动化）。
