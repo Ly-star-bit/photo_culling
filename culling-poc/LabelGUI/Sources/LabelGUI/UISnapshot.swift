@@ -11,6 +11,11 @@ import AppKit
 /// 渲染成 PNG。界面不能开，排布有没有挤、时间轴会不会压到别的区域，只能这样看。
 /// 视图偏好（@AppStorage）用命令行参数域传，比如 `-batch.gridMode 按分组` —— 参数域只活在
 /// 这个进程里，不会写进任何人的设置。
+/// 离屏快照里假装鼠标停在这张上（离屏窗口收不到鼠标，悬停才出现的按钮只能这样看）。界面运行时永远是 nil。
+enum SnapshotPreview {
+    @MainActor static var hoverID: String?
+}
+
 enum BatchUISnapshot {
     @MainActor
     static func run(flagIndex: Int, compare: Bool) -> Never {
@@ -34,6 +39,14 @@ enum BatchUISnapshot {
         if let gap = option("--gap").flatMap(Double.init) { store.takeGapSec = gap }
         // --chapter N：先开「只看这一章」（章节号从 1 数，和界面上一样）。
         if let n = option("--chapter").flatMap(Int.init) { store.chapterFilter = n - 1 }
+        // 存储卡导入的两条横幅：--import-notice "文字" 假装有导入提醒；--finished-import 假装导完一批还没打开
+        // （同时假装有任务在跑，不然 BatchView 一出来就把它打开了）。
+        if let notice = option("--import-notice") { store.importNotice = notice }
+        if args.contains("--finished-import") {
+            store.finishedImport = CardImporter.FinishedImport(folder: dir, analyze: true, shots: 128)
+            store.isRunning = true
+            store.progressText = "导出 JPG 12/40"
+        }
 
         func spin(_ seconds: Double) {
             let deadline = Date().addingTimeInterval(seconds)
@@ -45,11 +58,16 @@ enum BatchUISnapshot {
         let light = args.contains("--light")
 
         let viewport = GridViewport()
+        SnapshotPreview.hoverID = option("--hover-tile")
         let root: AnyView
         // --review-ui / --inspector-ui：审片模式 / 检视器，停在 --id 那张（默认第一张）。
-        let order = [Verdict.pick, .usable, .reject].flatMap { v in store.items.filter { $0.verdict == v }.map(\.id) }
+        let sections: [Verdict] = [.pick, .usable, .reject]
+        var order: [String] = []
+        for v in sections { order += store.items.filter { $0.verdict == v }.map(\.id) }
         let startID = option("--id") ?? order.first ?? ""
-        if args.contains("--review-ui") {
+        if args.contains("--shortcuts-ui") {
+            root = AnyView(ShortcutsPanel().background(Color(white: 0.16)))
+        } else if args.contains("--review-ui") {
             let skippable = order.contains { store.item(withID: $0).map { $0.verdict != .reject } ?? false }
             root = AnyView(ReviewView(store: store, orderIDs: order, rejectsSkippable: skippable,
                                       focusedID: .constant(startID), reviewMode: .constant(true)))
@@ -87,6 +105,7 @@ enum BatchUISnapshot {
                 exit(1)
             }
             let session = PickSession(store: store, request: request, sortByScore: false)
+            SnapshotPreview.hoverID = option("--hover-tile")
             for raw in (option("--keys") ?? "").split(separator: ",") {
                 let key = raw.trimmingCharacters(in: .whitespaces)
                 if !key.isEmpty { session.handle(key) }

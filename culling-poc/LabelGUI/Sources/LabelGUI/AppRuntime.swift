@@ -6,6 +6,7 @@ enum AppRuntime {
     static let headlessFlags: Set<String> = [
         "--analyze", "--watermark", "--session-key", "--verdicts", "--sharp", "--focus", "--compare",
         "--collage", "--collage-ui", "--collage-ops", "--compare-crop", "--batch-ui", "--compare-ui", "--timeline-selftest", "--ux-selftest", "--export-xmp",
+        "--ingest", "--card-ui", "--card-queue-selftest",
     ]
 
     /// true = 无头跑（测试、自动化）。

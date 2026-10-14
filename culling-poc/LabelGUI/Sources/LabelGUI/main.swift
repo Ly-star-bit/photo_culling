@@ -106,6 +106,30 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--watermark"),
     exit(ok ? 0 : 1)
 }
 
+// 存储卡导入确认框离屏快照：LabelGUI --card-ui <card_dir> <out.png> --dest <dir> [--reimport] [--running]
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--card-ui"),
+   CommandLine.arguments.count > flagIndex + 2 {
+    MainActor.assumeIsolated {
+        CardImportSnapshot.run(flagIndex: flagIndex)
+    }
+}
+
+// 存储卡排队自检：两张假卡走 CardImportCenter 的确认 / 排队 / 停下分析，看都导全了、分析在最后跑一次。
+// LABELGUI_DATA_DIR=<临时> LabelGUI --card-queue-selftest <cardA> <cardB> --dest <dir>
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--card-queue-selftest"),
+   CommandLine.arguments.count > flagIndex + 2 {
+    MainActor.assumeIsolated {
+        CardImportQueueSelftest.run(flagIndex: flagIndex)
+    }
+}
+
+// 存储卡导入无头测试（账本在 LABELGUI_DATA_DIR，目标必须用 --dest 给）：
+// LabelGUI --ingest <card_dir> --dest <dir> [--reimport] [--plan-only] [--cancel-after N]
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--ingest"),
+   CommandLine.arguments.count > flagIndex + 1 {
+    CardImportCLI.run(flagIndex: flagIndex)
+}
+
 // LabelGUI --session-key <photo_dir>：打印该文件夹对应的 sessions/<key>，
 // 回归脚本用它把 fixture 放到 store 会去找的位置。
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--session-key"),
@@ -245,6 +269,9 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--compare"),
                 print("--select 至少要 2 张"); exit(1)
             }
             request = r
+        } else if let take = option("--only").flatMap(Int.init) {
+            // 审片里按 C：只挑这一场，⏎ 定完就结束（界面上自动回审片）。
+            request = .only(take, focus: nil)
         } else if let take = option("--take").flatMap(Int.init) {
             request = .take(take, chapter: option("--chapter").flatMap(Int.init).map { $0 - 1 })
         } else {
@@ -433,9 +460,18 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--compare-crop"),
     exit(0)
 }
 
+// 走到这里就要开界面了。命令行里带着不认识的 `--参数`（拼错了、或者拿新的测试脚本跑旧版程序）时
+// 不开：测试 / 自动化以为自己在无头跑，结果弹出一个窗口。系统自己传的参数是单横线（-NSDocument…、-psn_…）。
+if let unknown = CommandLine.arguments.dropFirst().first(where: { $0.hasPrefix("--") }) {
+    FileHandle.standardError.write("不认识的参数 \(unknown)，不开界面（无头参数见 README「从源码构建」）\n".data(using: .utf8)!)
+    exit(2)
+}
+
 struct LabelGUIApp: App {
     @StateObject private var batchStore: BatchStore
     @StateObject private var labelStore: LabelStore
+    /// 插卡检测：跟着 app 活（不放在某个 tab 里 —— 没打开的 tab 不一定被建出来）。
+    @StateObject private var cardCenter: CardImportCenter
 
     init() {
         let batch = BatchStore(
@@ -444,11 +480,12 @@ struct LabelGUIApp: App {
         )
         _batchStore = StateObject(wrappedValue: batch)
         _labelStore = StateObject(wrappedValue: LabelStore(dataDir: batch.sessionDir))
+        _cardCenter = StateObject(wrappedValue: CardImportCenter(store: batch))
     }
 
     var body: some Scene {
         WindowGroup {
-            ContentView(store: labelStore, batchStore: batchStore)
+            ContentView(store: labelStore, batchStore: batchStore, cardCenter: cardCenter)
                 // 深色是产品的一部分，不跟随系统外观：照片必须在中性深底上
                 // 判断，浅色系统下半白半黑的窗口曾被当成"主题坏了"报障。
                 .preferredColorScheme(.dark)

@@ -151,6 +151,22 @@ final class BatchStore: ObservableObject {
     @Published var photoDir: URL?
     @Published var items: [BatchItem] = []
     @Published var isRunning = false
+    /// isRunning 里具体是哪两种（存储卡确认框据此决定：分析可以「停下并导入」，另一张卡在导就等它）。
+    /// 只有 runAnalysis 写（离屏快照 --card-ui --running 也写，假装在分析）。
+    @Published var analyzing = false
+    @Published var importing = false
+    /// 存储卡导入出的问题（有文件没导进来、卡上有读不出来的地方）：「先别格式化存储卡」这句话不能被
+    /// 随后的切场次、分析清掉（lastError 会被清 —— 审查发现），单独放、用户自己点掉才没。
+    @Published var importNotice: String?
+    /// 导完、还没打开的那批（BatchView 闲着就马上打开；正在挑片 / 审片就留一条横幅等用户点）。
+    @Published var finishedImport: CardImporter.FinishedImport?
+    /// 还在排队等着导的卡（CardImportCenter 维护）：有排队的，导完这张先不打开、不分析，等最后一张导完再一起。
+    @Published var queuedCardImports = 0
+    /// 正在导的那张卡（CardImportCenter 据此不再为同一张卡弹确认框）。
+    @Published var importingSource: URL?
+    /// 每导完（或导失败）一张加一：BatchView 按这个时刻决定要不要打开 finishedImport。不按 isRunning 落下来
+    /// 判断 —— 用户自己跑完一次分析也会落下来，那时候把他拽去导入的文件夹就莫名其妙了。
+    @Published var importCompletions = 0
     @Published var progressText = ""
     /// 0...1 while a long task reports progress; nil hides the bar.
     @Published var progressFraction: Double?
@@ -900,7 +916,7 @@ final class BatchStore: ObservableObject {
         return total
     }
 
-    static func sizeText(_ bytes: Int64) -> String {
+    nonisolated static func sizeText(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
@@ -1080,6 +1096,12 @@ final class BatchStore: ObservableObject {
         cancelFlag.set()
         processBox.terminate()
         progressText = "正在取消..."
+    }
+
+    /// 别的长任务（存储卡导入）共用顶栏的「取消」：换一面新旗子交出去。
+    func freshCancelFlag() -> AnalysisEngine.CancelFlag {
+        cancelFlag = AnalysisEngine.CancelFlag()
+        return cancelFlag
     }
 
     // MARK: - Manual overrides
@@ -1339,6 +1361,7 @@ final class BatchStore: ObservableObject {
         guard let dir = photoDir else { return }
         guard !isRunning else { return }
         isRunning = true
+        analyzing = true
         lastError = nil
         cancelFlag = AnalysisEngine.CancelFlag()
         let flag = cancelFlag
@@ -1375,6 +1398,7 @@ final class BatchStore: ObservableObject {
                     guard let self else { return }
                     self.lastError = "分析失败: \(error.localizedDescription)"
                     self.isRunning = false
+                    self.analyzing = false
                     self.provisionalBuffer = []
                     self.loadResults()      // restore whatever the disk still has
                     self.applyThresholds()
@@ -1401,6 +1425,7 @@ final class BatchStore: ObservableObject {
                     }
                 }
                 self.isRunning = false
+                self.analyzing = false
                 if !self.items.isEmpty { self.touchSessionIndex() }
                 self.postResultsChanged(previewsChanged: true)
             }
@@ -2332,11 +2357,13 @@ final class BatchStore: ObservableObject {
     /// 每个有精选的待处理场：精选留下（写成人工精选，否则砍完对手它会掉回可用），
     /// 其余**没被人工改判**的可用设为废片。人工标过可用的一律不碰 —— 那是用户
     /// 亲手做的决定。整个操作一条撤销记录，⌘Z 一次全部回来。
+    /// chapter 非 nil = 只动这一章（时间轴「只看这一章」开着时的「本章接受推荐」）。
     @discardableResult
-    func acceptAllRecommendations() -> Int {
+    func acceptAllRecommendations(inChapter chapter: Int? = nil) -> Int {
         var changes: [(id: String, verdict: Verdict)] = []
         var takes = 0
-        for (_, members) in Dictionary(grouping: items, by: \.take) {
+        let scope = chapter.map { c in items.filter { Self.timelineChapter(of: $0) == c } } ?? items
+        for (_, members) in Dictionary(grouping: scope, by: \.take) {
             let picks = members.filter { $0.verdict == .pick }
             guard !picks.isEmpty else { continue }
             let losers = members.filter { $0.verdict == .usable && overrides[$0.id] == nil }
@@ -2352,6 +2379,21 @@ final class BatchStore: ObservableObject {
         saveOverrides()
         applyThresholds()
         return takes
+    }
+
+    /// 某一章里「接受推荐」会动到的：场数 / 会变废片的张数（和 Derived 里全场那份同一个算法）。
+    /// 只在「只看这一章」开着时算，不进 Derived。
+    func recommendationSummary(inChapter chapter: Int) -> (takes: Int, rejects: Int) {
+        var alive: [Int: [BatchItem]] = [:]
+        for item in items where item.verdict != .reject && Self.timelineChapter(of: item) == chapter {
+            alive[item.take, default: []].append(item)
+        }
+        var takes = 0, rejects = 0
+        for (_, members) in alive where members.contains(where: { $0.verdict == .pick }) {
+            let losers = members.filter { $0.verdict == .usable && overrides[$0.id] == nil }.count
+            if losers > 0 { takes += 1; rejects += losers }
+        }
+        return (takes, rejects)
     }
 
     // MARK: - 精华 Top N (Aftershoot 的 Sneak Peek)

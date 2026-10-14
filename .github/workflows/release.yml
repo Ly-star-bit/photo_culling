@@ -51,6 +51,11 @@ jobs:
       - name: 判决回归 (--verdicts)
         run: culling-poc/LabelGUI/Scripts/verdict_regression.sh culling-poc/LabelGUI/.build/release/LabelGUI
 
+      # 存储卡导入回归：随机字节造一张假卡跑 --ingest 的各种情况 —— 卡上文件前后逐字节不变、目标里
+      # 绝不覆盖（同名不同内容整组改名）、复制后校验、取消不留半截、再插只导新的。
+      - name: 存储卡导入回归 (--ingest)
+        run: python3 culling-poc/LabelGUI/Scripts/card_import_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
+
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:

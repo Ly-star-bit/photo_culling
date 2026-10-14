@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @ObservedObject var store: LabelStore
     @ObservedObject var batchStore: BatchStore
+    @ObservedObject var cardCenter: CardImportCenter
     @StateObject private var watermarkStore = WatermarkStore(dataDir: appDataDir)
     @StateObject private var collageStore = CollageStore(dataDir: appDataDir)
     @State private var tab: AppTab = .batch
@@ -38,6 +39,11 @@ struct ContentView: View {
             collageStore.importFromBatch(ids: ids, batch: batchStore, layout: true)
             tab = .collage
         }
+        // 插了相机存储卡：问要不要导入（导入的进度在批量页顶栏，点「导入」就切过去）。
+        .sheet(item: $cardCenter.offer) { _ in
+            CardImportSheet(center: cardCenter, store: batchStore) { tab = .batch }
+        }
+        .onAppear { cardCenter.start() }
     }
 
     private var labelingTab: some View {

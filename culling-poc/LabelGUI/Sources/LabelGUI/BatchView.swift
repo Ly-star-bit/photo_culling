@@ -70,7 +70,18 @@ struct BatchView: View {
     /// D 键上一次落在哪一场 —— 焦点丢了（比如废纸篓清掉了那张）时的回退。
     @State private var lastVisitedTake: Int?
     @State private var showAcceptAllConfirm = false
+    /// 这次「接受推荐」的范围：nil = 全部章节，否则只这一章（确认框的字跟着它）。
+    @State private var acceptScope: Int?
+    @State private var acceptPreview: (takes: Int, rejects: Int) = (0, 0)
     @State private var showStatsPopover = false
+    /// 快捷键一览（状态栏右下角的键盘图标，或网格里按 ?）。
+    @State private var showShortcuts = false
+    /// 从访达拖文件夹进来时的高亮。
+    @State private var folderDropTargeted = false
+    /// 「选择文件夹…」的面板 / 提示框开着（runModal 期间）：存储卡导完别在这时候切场次。
+    @State private var modalPanelOpen = false
+    /// 审片里按 C 去挑连拍的：挑完回到审片（同一个顺序、停在挑完那张），不是回网格。
+    @State private var reviewAfterPick = false
     /// Fullscreen review: one big photo + filmstrip, digit-verdicts auto-advance.
     @State private var reviewMode = false
     /// The grid order FROZEN when the inspector / review mode opened. Paging
@@ -87,14 +98,29 @@ struct BatchView: View {
         Group {
             if reviewMode {
                 ReviewView(store: store, orderIDs: pagingOrder, rejectsSkippable: reviewSkippable,
-                           focusedID: $focusedID, reviewMode: $reviewMode)
+                           focusedID: $focusedID, reviewMode: $reviewMode) { id in
+                    // 审到一组连拍：C 直接去挑这一场，挑完回到审片接着往下。
+                    // 只挑这一场（.only）：⏎ 定完自动回来，不会顺着去挑别的组。
+                    guard let item = store.item(withID: id), (store.takeSizes[item.take] ?? 0) >= 2 else { return }
+                    reviewAfterPick = true
+                    reviewMode = false
+                    pickRequest = .only(item.take, focus: id)
+                }
             } else if let request = pickRequest {
                 PickView(store: store, request: request, sortByScore: takeSortByScore) { focusID in
+                    pickRequest = nil
+                    // 从审片过来的：回审片（顺序还是进审片时冻结的那份），停在按 C 的那张 —— focusedID
+                    // 一直没动；那张被废了而跳过废片开着，ReviewView.onAppear 会落到它后面第一张留下的。
+                    // 以前这里把焦点换成挑选里高亮的那张（可能在别的场），中间的照片就悄悄跳过了。
+                    if reviewAfterPick {
+                        reviewAfterPick = false
+                        reviewMode = true
+                        return
+                    }
                     if let focusID {
                         focusedID = focusID
                         lastVisitedTake = store.item(withID: focusID)?.take
                     }
-                    pickRequest = nil
                 }
                 .id(request)
             } else {
@@ -123,8 +149,33 @@ struct BatchView: View {
                                 .transition(.move(edge: .trailing))
                         }
                     }
+                    importBanner
                     Divider()
                     statusBar
+                }
+                // 从访达把文件夹拖进来就打开（Aftershoot / Narrative 都这样）；拖的是照片就打开它所在的文件夹。
+                .overlay {
+                    if folderDropTargeted {
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.accentColor, lineWidth: 3)
+                            .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                            .overlay(
+                                Label("松开打开这个文件夹", systemImage: "folder.badge.plus")
+                                    .font(.title3.bold())
+                                    .padding(.horizontal, 18).padding(.vertical, 10)
+                                    .background(.black.opacity(0.7), in: Capsule())
+                            )
+                            .padding(6)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .onDrop(of: [.fileURL], isTargeted: $folderDropTargeted) { providers in
+                    guard let provider = providers.first else { return false }
+                    _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                        guard let url else { return }
+                        DispatchQueue.main.async { openDroppedFolder(url) }
+                    }
+                    return true
                 }
             }
         }
@@ -144,7 +195,13 @@ struct BatchView: View {
         }
         // 换了一场拍摄就把选择/焦点全部丢掉。留着的话批量改判栏还显示"已选 3 张"，
         // 点下去会把判决写进新场次里根本不存在的 id（同名文件则改判错照片）。
+        // 存储卡导完：闲着（网格就在眼前）就直接打开、开始分析；正在挑片 / 审片 / 看大图 / 开着导出框，
+        // 就只留一条横幅 —— 自动切场次会把没确认的挑选草稿、审片位置一起扔掉（审查发现）。
+        .onChange(of: store.importCompletions) { openFinishedImportIfIdle() }
+        .onAppear { openFinishedImportIfIdle() }
         .onChange(of: store.photoDir) {
+            reviewMode = false
+            reviewAfterPick = false
             selectedIDs = []
             focusedID = nil
             inspectedID = nil
@@ -171,17 +228,15 @@ struct BatchView: View {
         .sheet(isPresented: $showJPEGSheet) { jpegExportSheet }
         .sheet(isPresented: $showISOSheet) { isoExportSheet }
         .sheet(isPresented: $showHighlightsSheet) { highlightsSheet }
-        .confirmationDialog(
-            "把 \(store.recommendationSummary.takes) 场按推荐定案？",
-            isPresented: $showAcceptAllConfirm
-        ) {
-            Button("定案 · \(store.recommendationSummary.rejects) 张设为废片") {
-                withAnimation { store.acceptAllRecommendations() }
+        .confirmationDialog(acceptTitle, isPresented: $showAcceptAllConfirm) {
+            Button("定案 · \(acceptPreview.rejects) 张设为废片") {
+                let scope = acceptScope
+                withAnimation { store.acceptAllRecommendations(inChapter: scope) }
                 selectedIDs.removeAll()
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("每个有精选的待处理场：精选留下，其余可用设为废片。你手动改判过的照片不动。整个操作 ⌘Z 一次撤销。")
+            Text(acceptMessage)
         }
         .confirmationDialog(
             "把 \(store.verdictCounts.reject) 张废片移到废纸篓？",
@@ -204,12 +259,67 @@ struct BatchView: View {
         }
     }
 
+    // MARK: - 存储卡导入：导完待打开的横幅、导入出的问题
+
+    /// 用户正在干别的（挑片、审片、看大图、开着导出框 / 确认框 / 选文件夹）：导完别自动切场次 ——
+    /// 确认框底下换了场次，「移到废纸篓」「接受推荐」就落到新文件夹上了（审查发现）。
+    private var busyWithPhotos: Bool {
+        reviewMode || pickRequest != nil || inspectedID != nil || modalPanelOpen
+            || showJPEGSheet || showISOSheet || showHighlightsSheet
+            || showTrashConfirm || showAcceptAllConfirm || showClearRecentsConfirm
+    }
+
+    private func openFinishedImportIfIdle() {
+        store.openFinishedImportIfReady(userBusy: busyWithPhotos)
+    }
+
+    @ViewBuilder
+    private var importBanner: some View {
+        if let done = store.finishedImport {
+            HStack(spacing: 10) {
+                Image(systemName: "sdcard.fill").foregroundStyle(.green)
+                Text(finishedImportText(done)).font(.callout)
+                Spacer()
+                Button(done.analyze ? "打开并分析" : "打开") { store.openFinishedImport() }
+                    .controlSize(.small)
+                    .disabled(store.isRunning)
+                Button { store.finishedImport = nil } label: { Image(systemName: "xmark.circle.fill") }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .help("不打开（以后从「选择文件夹…」打开这个文件夹也行）")
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(Color.green.opacity(0.12))
+        }
+        if let notice = store.importNotice {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                Text(notice).font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                Spacer()
+                Button { store.importNotice = nil } label: { Image(systemName: "xmark.circle.fill") }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .help("知道了（关掉这条提醒）")
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(Color.orange.opacity(0.14))
+        }
+    }
+
+    private func finishedImportText(_ done: CardImporter.FinishedImport) -> String {
+        "存储卡导入完成：\(done.shots) 张在 " + CardImporter.displayPath(done.folder)
+    }
+
     // MARK: - Top bar (workflow-ordered: source → analyze → view → review → export)
 
     private var topBar: some View {
         HStack(spacing: 10) {
             Menu {
                 Button("选择文件夹...") { pickFolder() }
+                // 插卡时会自己问；这条给「卡早就插着、当时点了不导入」的时候用。
+                Button("从存储卡导入...") {
+                    NotificationCenter.default.post(name: .cardImportRequested, object: nil)
+                }
                 if !store.recentSessions.isEmpty {
                     Divider()
                     ForEach(store.recentSessions) { session in
@@ -447,7 +557,12 @@ struct BatchView: View {
             }
             Slider(value: $thumbSize, in: 90...260)
                 .frame(width: 100)
-                .help("缩略图大小")
+                .help("缩略图大小 (- / =)")
+            Button { showShortcuts.toggle() } label: { Image(systemName: "keyboard") }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("快捷键一览 (?)")
+                .popover(isPresented: $showShortcuts, arrowEdge: .top) { ShortcutsPanel() }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -721,6 +836,11 @@ struct BatchView: View {
                 return pickFromKeyboard() ? .handled : .ignored
             }
             .onKeyPress(.return) { openFocused(); return .handled }
+            // ?：快捷键一览。
+            .onKeyPress(characters: .init(charactersIn: "?")) { _ in
+                showShortcuts.toggle()
+                return .handled
+            }
             // [ ]：上一章 / 下一章（时间轴上那一段的第一张）。
             .onKeyPress(characters: .init(charactersIn: "[]")) { press in
                 guard press.modifiers.isDisjoint(with: [.command, .option, .control]) else { return .ignored }
@@ -920,8 +1040,9 @@ struct BatchView: View {
                     .foregroundStyle(.secondary)
                 Button("选择照片文件夹...") { pickFolder() }
             }
-            Text("点击=选中 · 空格=大图 · F=审片 · C=挑选连拍 · ←/→=移动 · [ ]=上/下一章 · -/= 缩略图大小 · 1精选 2可用 3废片 0恢复 · ⌘点击=多选 · ⇧点击=连选 · 按分组=每场一行，鼠标停在照片上点「只留这张」")
-                .font(.caption2).foregroundStyle(.tertiary)
+            // 以前这里是一整行密密麻麻的快捷键；现在有快捷键表了，只留两条最有用的入口。
+            Text("也可以把照片文件夹从访达直接拖进窗口 · 插上相机存储卡会问要不要导入 · 按 ? 看全部快捷键")
+                .font(.caption).foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 120)
@@ -998,9 +1119,25 @@ struct BatchView: View {
         .frame(minWidth: 320)
     }
 
+    /// 「接受推荐」确认框的标题 / 说明，数是按下按钮那一刻算好的（`acceptPreview`）—— 以前每次重绘都
+    /// 重新扫一遍全场。单独成属性：三元 + 插值拼在视图构建器里，Xcode 16 类型检查会超时（同 takeStatusText）。
+    private var acceptTitle: String {
+        let scope = acceptScope != nil ? "把本章 " : "把 "
+        return scope + "\(acceptPreview.takes) 场按推荐定案？"
+    }
+
+    private var acceptMessage: String {
+        let scope = acceptScope != nil ? "只动这一章。" : ""
+        return scope + "每个有精选的待处理场：精选留下，其余可用设为废片。你手动改判过的照片不动。整个操作 ⌘Z 一次撤销。"
+    }
+
     private var groupToolbar: some View {
         let stats = store.takeStats
-        let rec = store.recommendationSummary
+        let chapter = store.activeChapterFilter
+        // 「只看这一章」开着就只算、只动这一章（长场次一章一章过）；否则全场。
+        let rec = chapter.map { store.recommendationSummary(inChapter: $0) } ?? store.recommendationSummary
+        let bursts = burstTakesInScope
+        let decided = max(0, bursts - pendingInScope)
         return HStack(spacing: 10) {
             if pendingInScope > 0 {
                 Button { startPicking() } label: {
@@ -1021,15 +1158,25 @@ struct BatchView: View {
             Toggle("场内按评分", isOn: $takeSortByScore)
                 .toggleStyle(.button).controlSize(.small)
                 .help("每场里评分高的排前面 (表情 > 人脸质量 > 锐度)；关掉则按拍摄顺序。缩略图上的 #1 #2 #3 是同一把尺子")
+            if bursts > 0 {
+                Divider().frame(height: 14)
+                // 进度：这一轮（全场 / 本章）多张连拍定了几场。
+                ProgressView(value: Double(decided), total: Double(bursts))
+                    .frame(width: 70)
+                Text("已定 \(decided)/\(bursts) 场").font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                    .help((chapter != nil ? "这一章" : "这场拍摄") + "里 \(bursts) 个多张连拍，定完 \(decided) 个")
+            }
             Spacer()
-            // 「只看这一章」开着时这个按钮仍然作用于全部章节 —— 名字上写明，别让人以为只动了这一章。
-            Button((store.activeChapterFilter != nil ? "全部章节接受推荐" : "全部接受推荐")
+            Button((chapter != nil ? "本章接受推荐" : "全部接受推荐")
                    + (rec.takes > 0 ? " (\(rec.takes) 场 · \(rec.rejects) 张废片)" : "")) {
+                acceptScope = chapter
+                acceptPreview = rec
                 showAcceptAllConfirm = true
             }
             .controlSize(.small)
             .disabled(rec.takes == 0)
-            .help("一键接受算法的推荐：每个有精选的待处理场，精选留下、其余可用设为废片。你手动标过可用的不动。⌘Z 一次全部撤销")
+            .help((chapter != nil ? "只动这一章：" : "") +
+                  "一键接受算法的推荐：每个有精选的待处理场，精选留下、其余可用设为废片。你手动标过可用的不动。⌘Z 一次全部撤销")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -1344,11 +1491,12 @@ struct BatchView: View {
                 .buttonStyle(.plain)
                 .help(allSelected ? "取消选中这一场" : "选中这一场的全部 \(members.count) 张")
 
+                let pillColor: Color = pending ? .orange : .green
                 Text(Self.takeStatusText(pending: pending, alive: alive.count, picks: picks.count))
                     .font(.caption2).bold()
                     .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(pending ? Color.orange.opacity(0.25) : Color.green.opacity(0.2), in: Capsule())
-                    .foregroundStyle(pending ? .orange : .green)
+                    .background(pillColor.opacity(pending ? 0.25 : 0.2), in: Capsule())
+                    .foregroundStyle(pillColor)
                 if folded > 0 {
                     Button {
                         withAnimation(.easeOut(duration: 0.15)) { _ = expandedTakes.insert(take) }
@@ -1384,10 +1532,14 @@ struct BatchView: View {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: thumbSize), spacing: 8)], alignment: .leading, spacing: 8) {
                 ForEach(members) { member in
                     // groupSize 1：行头已经写了张数，缩略图上再贴 ×N 就重复了。
-                    KeepOnHover(isKept: member.verdict != .reject && alive.count == 1) {
-                        withAnimation { keepOnly(member.id, inTake: all) }
-                        focusedID = member.id
-                    } content: {
+                    let soleKeeper = member.verdict != .reject && alive.count == 1
+                    CellHoverBar(id: member.id, verdict: member.verdict,
+                                 keepOnly: soleKeeper ? nil : {
+                                     withAnimation { keepOnly(member.id, inTake: all) }
+                                     focusedID = member.id
+                                 },
+                                 compact: thumbSize < 150,
+                                 onSet: { v in setFromHover(member.id, v) }) {
                         thumbnailCell(member, color: member.verdict.color, groupSize: 1)
                     }
                     .id(member.id)
@@ -1420,6 +1572,19 @@ struct BatchView: View {
         return keep + rest + "整场一次改判，⌘Z 一次撤销"
     }
 
+    /// 缩略图悬停条上的 ★ / ● / ✕：只改这一张。已经是这个**人工**判决就不重复写一条撤销记录；
+    /// 自动判的点亮着的那个，等于把它钉成人工判决（以后拧滑杆不再跟着动），记一步撤销。
+    /// 改的是焦点那张：和数字键一样焦点留在原位（`placeAfterChange`），不然按判决分区时它跳去废片区，
+    /// ←/→ 从那儿接着走。不滚动 —— 鼠标就停在这儿。
+    private func setFromHover(_ id: String, _ verdict: Verdict) {
+        guard store.item(withID: id)?.verdict != verdict || store.overrides[id] != verdict else { return }
+        let before = id == focusedID ? visibleItems.map(\.id) : nil
+        withAnimation(.easeInOut(duration: 0.2)) { store.setOverrideBatch([id], verdict) }
+        if let before, let next = Self.placeAfterChange(of: id, before: before, after: visibleItems.map(\.id)) {
+            focusedID = next
+        }
+    }
+
     /// 「只留这张」：它精选，本场其余全部废片（整场一条撤销记录）。
     private func keepOnly(_ id: String, inTake members: [BatchItem]) {
         store.applyOverrides(Dictionary(members.map { ($0.id, $0.id == id ? Verdict.pick : .reject) },
@@ -1445,8 +1610,10 @@ struct BatchView: View {
             if showSingles {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: thumbSize), spacing: 8)], alignment: .leading, spacing: 8) {
                     ForEach(singles) { item in
-                        thumbnailCell(item, color: item.verdict.color, groupSize: 1)
-                            .id(item.id)
+                        CellHoverBar(id: item.id, verdict: item.verdict, keepOnly: nil, onSet: { v in setFromHover(item.id, v) }) {
+                            thumbnailCell(item, color: item.verdict.color, groupSize: 1)
+                        }
+                        .id(item.id)
                     }
                 }
             }
@@ -1522,8 +1689,10 @@ struct BatchView: View {
             Section {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: thumbSize), spacing: 8)], spacing: 8) {
                     ForEach(matching) { item in
-                        thumbnailCell(item, color: color, groupSize: takeSizes[item.take] ?? 1)
-                            .id(item.id)
+                        CellHoverBar(id: item.id, verdict: item.verdict, keepOnly: nil, onSet: { v in setFromHover(item.id, v) }) {
+                            thumbnailCell(item, color: color, groupSize: takeSizes[item.take] ?? 1)
+                        }
+                        .id(item.id)
                     }
                 }
             } header: {
@@ -1676,8 +1845,11 @@ struct BatchView: View {
         // that was the visible lag on selection. Simultaneous recognition fires
         // the single click instantly; during a double-click the first click just
         // sets focus (harmless) and the second opens the inspector.
+        // 双击的第二下不再算一次单击：⌘ 双击不会选上又取消；点完悬停按钮照片挪了位，手快补的
+        // 第二下落在新补上来的照片上，也不会把焦点和多选带走。
         .gesture(TapGesture(count: 2).onEnded { openInspector(item.id) })
         .simultaneousGesture(TapGesture().onEnded {
+            guard !ClickGuard.isRepeatClick else { return }
             handleClick(ids: [item.id], anchorID: item.id)
         })
     }
@@ -1864,7 +2036,23 @@ struct BatchView: View {
         .help(help)
     }
 
+    /// 拖进来的东西：文件夹就打开它，照片文件就打开它所在的文件夹。新文件夹直接开始分析；
+    /// 分析过的就打开缓存的结果（要重新分析点顶栏「重新分析」）。
+    private func openDroppedFolder(_ url: URL) {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return }
+        let folder = isDir.boolValue ? url : url.deletingLastPathComponent()
+        guard !store.isRunning else {
+            store.lastError = "正在处理中，先点“取消”再换文件夹"
+            return
+        }
+        store.switchSession(to: folder)
+        if store.items.isEmpty { store.runAnalysis() }
+    }
+
     private func pickFolder() {
+        modalPanelOpen = true
+        defer { modalPanelOpen = false }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -1894,6 +2082,8 @@ struct BatchView: View {
     }
 
     private func exportContactSheet(includeUsable: Bool) {
+        modalPanelOpen = true      // 存储卡导完别在保存面板开着时切场次（导出的会变成新场次的）
+        defer { modalPanelOpen = false }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "选片确认_\(store.photoDir?.lastPathComponent ?? "").html"
         if let htmlType = UTType(filenameExtension: "html") {
@@ -1911,6 +2101,8 @@ struct BatchView: View {
 
     /// nil = ask for a folder; otherwise export straight into it.
     private func exportJPEGs(to target: URL?) {
+        modalPanelOpen = true      // 存储卡导完别在保存面板开着时切场次（导出的会变成新场次的）
+        defer { modalPanelOpen = false }
         var folder = target
         if folder == nil {
             let panel = NSOpenPanel()
@@ -1931,34 +2123,168 @@ struct BatchView: View {
     }
 }
 
-// MARK: - 分组行：鼠标停上去「只留这张」
+// MARK: - 快捷键一览
 
-/// 分组行里的缩略图：鼠标停上去露出「只留这张」—— 一下点完，不用 ⌘ 选了再去顶上的批量栏。
-/// 悬停挂在叠加层**之后**（把按钮也包进去）：挂在前面的话指针移到按钮上算「离开」，按钮一闪一闪。
-private struct KeepOnHover<Content: View>: View {
-    /// 已经是「只留它」了（本场只剩它没废），不再出按钮。
-    let isKept: Bool
-    let action: () -> Void
+/// 快捷键按场景分组列出来（Aftershoot、Narrative 都有这么一张表）。以前只散在各处的提示行里。
+struct ShortcutsPanel: View {
+    private static let sections: [(String, [(String, String)])] = [
+        ("网格", [
+            ("点击", "选中这张（数字键改的就是它）"),
+            ("双击 / 空格 / ⏎", "打开大图"),
+            ("← → ↑ ↓", "移动"),
+            ("[  ]", "上一章 / 下一章"),
+            ("1  2  3  0", "精选 · 可用 · 废片 · 恢复自动（选了多张就作用于全部）"),
+            ("⌘点  ⇧点  ⌘A", "多选 · 连选 · 全选"),
+            ("⌘⏎", "保留选中，同场其余废片（选了连拍里的照片时）"),
+            ("C  D  F", "连拍挑选 · 跳到下一个待处理的场（切到按分组）· 审片"),
+            ("-  =", "缩略图小一号 / 大一号"),
+            ("⌥⌘S", "收起 / 显示右侧筛选面板"),
+            ("⌘Z  Esc", "撤销 · 取消选择"),
+        ]),
+        ("连拍挑选", [
+            ("点照片", "只留这张（同一场其余废）"),
+            ("右上角 精选/可用/废", "只改这一张"),
+            ("⌘点  ⇧空格", "多留 / 取消"),
+            ("1–9  空格", "只留第几张（开了「选完直接下一组」就顺便确认）· 只留高亮那张"),
+            ("0", "恢复推荐"),
+            ("← →  ↑ ↓", "移动高亮 · 上一组 / 下一组"),
+            ("⏎", "确认并下一组"),
+            ("Z  [ ]  P", "放大到脸 · 放大时换人 · 对焦高亮"),
+            ("⌘Z  Esc", "撤销 · 先退出放大，再返回（网格；从审片来的回审片）"),
+        ]),
+        ("审片", [
+            ("1  2  3", "精选 · 可用 · 废片（判完自动下一张）"),
+            ("0", "恢复自动"),
+            ("← →", "上一张 / 下一张"),
+            ("Z  P", "放大 · 对焦高亮"),
+            ("C", "这张是连拍：去挑这一场（⏎ 定完自动回到审片）"),
+            ("⌘Z  Esc", "撤销 · 先退出放大，再退出审片"),
+        ]),
+        ("大图（双击打开）", [
+            ("← →", "上一张 / 下一张"),
+            ("1  2  3  0", "精选 · 可用 · 废片 · 恢复自动"),
+            ("C  P", "挑选本场 · 对焦高亮（放大时）"),
+            ("⌘Z  Esc", "撤销 · 关闭"),
+        ]),
+        ("时间轴", [
+            ("点一段", "跳到这一章"),
+            ("右键", "只看这一章（已经在看这一章：显示全部章节）"),
+            ("⇧Esc", "显示全部章节"),
+        ]),
+        ("其他", [
+            ("拖文件夹进窗口", "打开这场拍摄（拖照片 = 打开它所在的文件夹）"),
+            ("插相机存储卡", "问要不要导入到「图片 › 今天日期」，导完直接分析"),
+            ("?", "这张表"),
+        ]),
+    ]
+
+    var body: some View {
+        // 两列（网格 + 时间轴 + 其他 / 连拍挑选 + 审片 + 大图）：并排四列比 1280 的窗口还宽，
+        // 从状态栏弹出来会出界。
+        HStack(alignment: .top, spacing: 24) {
+            column([Self.sections[0], Self.sections[4], Self.sections[5]])
+            column([Self.sections[1], Self.sections[2], Self.sections[3]])
+        }
+        .padding(16)
+    }
+
+    private func column(_ sections: [(String, [(String, String)])]) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(sections, id: \.0) { title, rows in
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(title).font(.headline)
+                    ForEach(rows, id: \.0) { key, action in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(key).font(.caption.monospaced().bold())
+                                .frame(width: 128, alignment: .leading)
+                            Text(action).font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: 330, alignment: .leading)
+    }
+}
+
+// MARK: - 缩略图悬停：快捷判决（Lightroom 网格格子上可点的旗标那种）
+
+/// 鼠标停在缩略图上，图下沿露出一小条：★ 精选 / ● 可用 / ✕ 废片（现在是哪个亮哪个），多张连拍的行里
+/// 再加「只留这张」。只用鼠标的人不用先 ⌘ 选再去顶上的批量栏，也不用记 1/2/3。
+/// 包在格子**外面**：按钮是格子点击手势的兄弟而不是子孙，点按钮不会顺带触发「选中这张」；
+/// 悬停挂在叠加层之后（把按钮也包进去），不然指针移到按钮上算「离开」，按钮一闪一闪。
+private struct CellHoverBar<Content: View>: View {
+    let id: String
+    let verdict: Verdict
+    /// 多张连拍、而且它还不是唯一留下的那张时才有。
+    let keepOnly: (() -> Void)?
+    /// 缩略图窄（< 150pt）：「只留这张」单独一行放在上面。一行放不下时整条比格子宽，✕ 伸到隔壁格子
+    /// 底下，鼠标一过去悬停就没了，根本点不到（审查发现）。
+    var compact = false
+    let onSet: (Verdict) -> Void
     @ViewBuilder let content: () -> Content
     @State private var hovering = false
+
+    /// 只认单击：点完 ✕ 这张会跳去废片区、「只留这张」会让整场叠起来，后面的照片立刻补到指针底下 ——
+    /// 手快连点两下，第二下就落在别的照片上了（`ClickGuard`）。
+    static var isSingleClick: Bool { !ClickGuard.isRepeatClick }
 
     var body: some View {
         content()
             .overlay(alignment: .bottom) {
-                if hovering && !isKept {
-                    Button(action: action) {
-                        Label("只留这张", systemImage: "checkmark.circle.fill")
-                            .font(.caption2.bold())
-                            .padding(.horizontal, 8).padding(.vertical, 3)
-                            .background(Verdict.pick.color.opacity(0.92), in: Capsule())
-                            .foregroundStyle(.white)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.bottom, 22)
-                    .help("这张留下（精选），本场其余设为废片。整场一次改判，⌘Z 撤销")
+                if hovering || id == SnapshotPreview.hoverID {
+                    bar
+                        .padding(3)
+                        .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .fixedSize()
+                        .padding(.bottom, 22)
                 }
             }
             .onHover { hovering = $0 }
+    }
+
+    @ViewBuilder private var bar: some View {
+        if compact, let keepOnly {
+            VStack(spacing: 3) {
+                keepButton(keepOnly)
+                verdictButtons
+            }
+        } else {
+            HStack(spacing: 3) {
+                if let keepOnly { keepButton(keepOnly) }
+                verdictButtons
+            }
+        }
+    }
+
+    private func keepButton(_ action: @escaping () -> Void) -> some View {
+        Button { if Self.isSingleClick { action() } } label: {
+            Text("只留这张").font(.caption2.bold())
+                .padding(.horizontal, 7).padding(.vertical, 3)
+                .background(Verdict.pick.color.opacity(0.92), in: Capsule())
+                .foregroundStyle(.white)
+        }
+        .buttonStyle(.plain)
+        .help("这张留下（精选），本场其余设为废片。整场一次改判，⌘Z 撤销")
+    }
+
+    private var verdictButtons: some View {
+        HStack(spacing: 3) {
+            ForEach([Verdict.pick, .usable, .reject], id: \.self) { v in
+                let on = v == verdict
+                Button { if Self.isSingleClick { onSet(v) } } label: {
+                    Image(systemName: v.symbol)
+                        .font(.system(size: 10, weight: .bold))
+                        .frame(width: 22, height: 18)
+                        .background(on ? v.color.opacity(0.9) : Color.clear, in: Capsule())
+                        .foregroundStyle(on ? Color.white : v.color)
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help(v.rawValue + "（只改这一张）")
+            }
+        }
     }
 }
 
@@ -2361,9 +2687,9 @@ struct ZoomPane: NSViewRepresentable {
         var onClick: (() -> Void)?
         var onDoubleClick: (() -> Void)?
 
-        @objc func clicked(_ gesture: NSClickGestureRecognizer) {
+        @MainActor @objc func clicked(_ gesture: NSClickGestureRecognizer) {
             // 双击的第二下也会再来一次单击：只认真正的单击。
-            guard (NSApp.currentEvent?.clickCount ?? 1) < 2 else { return }
+            guard !ClickGuard.isRepeatClick else { return }
             onClick?()
         }
 
@@ -3315,6 +3641,9 @@ struct ReviewView: View {
     let rejectsSkippable: Bool
     @Binding var focusedID: String?
     @Binding var reviewMode: Bool
+    /// C / 「挑选这一场」：审到连拍时直接去挑这一场（参数是当前这张的 id）。
+    var onPickTake: (String) -> Void = { _ in }
+    @State private var showShortcuts = false
     /// In-flow focus check: Z / double-click / pinch opens the full-res ZoomPane
     /// right here — no detour through the inspector and back.
     @State private var zoomed = false
@@ -3369,9 +3698,15 @@ struct ReviewView: View {
                     if let exif = item.exif {
                         Text(exif.summary).font(.caption).monospacedDigit().foregroundStyle(.secondary)
                     }
-                    // 连拍里的第几张：审到连拍时知道前后还有几张同一瞬间的。
+                    // 连拍里的第几张：审到连拍时知道前后还有几张同一瞬间的；点一下（或按 C）去挑这一场。
                     if let position = burstPosition(item) {
-                        Text(position).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                        Button { onPickTake(item.id) } label: {
+                            Label(position + " · 挑选 (C)", systemImage: "rectangle.stack")
+                                .font(.caption).monospacedDigit()
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("这张是连拍里的一张：去连拍挑选把这一场并排比一遍 (C)")
                     }
                     Spacer()
                     if skipping, position == order.count - 1 {
@@ -3423,6 +3758,8 @@ struct ReviewView: View {
                             }
                         )
                 }
+
+                verdictBar(item)
 
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -3505,6 +3842,17 @@ struct ReviewView: View {
             focusPeak.toggle()
             return .handled
         }
+        .onKeyPress(characters: .init(charactersIn: "?")) { _ in
+            showShortcuts.toggle()
+            return .handled
+        }
+        // C：这张在连拍里就去挑这一场。⌘C 放过去。
+        .onKeyPress(characters: .init(charactersIn: "cC")) { press in
+            guard press.modifiers.isSubset(of: [.shift, .capsLock]), let item = current,
+                  burstPosition(item) != nil else { return .ignored }
+            onPickTake(item.id)
+            return .handled
+        }
         .onKeyPress(characters: .init(charactersIn: "zZ")) { press in
             // Bare Z only: ⌘Z is the undo shortcut on the button above and
             // must not also toggle the zoom.
@@ -3516,19 +3864,57 @@ struct ReviewView: View {
         .onKeyPress(characters: .init(charactersIn: "1230"), phases: .down) { press in
             guard let item = current else { return .ignored }
             switch press.characters {
-            case "1": store.setOverride(item.id, .pick)
-            case "2": store.setOverride(item.id, .usable)
-            case "3": store.setOverride(item.id, .reject)
-            default: store.setOverride(item.id, nil)
+            case "1": apply(.pick, to: item)
+            case "2": apply(.usable, to: item)
+            case "3": apply(.reject, to: item)
+            default: apply(nil, to: item)
             }
-            if let now = store.item(withID: item.id) {
-                let manual = press.characters != "0"
-                showToast(manual ? "\(now.verdict.rawValue) · \(item.id)" : "恢复自动 → \(now.verdict.rawValue) · \(item.id)",
-                          symbol: now.verdict.symbol, color: now.verdict.color)
-            }
-            if press.characters != "0" { step(1, from: item.id) }  // tag-and-advance
             return .handled
         }
+    }
+
+    /// 判一张：按键和下面那排按钮走同一条路 —— 写判决、闪提示、判了（不是恢复）就自动下一张。
+    private func apply(_ verdict: Verdict?, to item: BatchItem) {
+        store.setOverride(item.id, verdict)
+        if let now = store.item(withID: item.id) {
+            showToast(verdict != nil ? "\(now.verdict.rawValue) · \(item.id)" : "恢复自动 → \(now.verdict.rawValue) · \(item.id)",
+                      symbol: now.verdict.symbol, color: now.verdict.color)
+        }
+        if verdict != nil { step(1, from: item.id) }  // tag-and-advance
+    }
+
+    /// 大图下面那排判决按钮：只用鼠标也能审（以前审片模式只认按键）。
+    private func verdictBar(_ item: BatchItem) -> some View {
+        HStack(spacing: 8) {
+            ForEach([(Verdict.pick, "1"), (.usable, "2"), (.reject, "3")], id: \.0) { verdict, key in
+                let on = item.verdict == verdict
+                // 只认单击：判完会自动翻到下一张，双击的第二下会判到下一张上。
+                Button { if !ClickGuard.isRepeatClick { apply(verdict, to: item) } } label: {
+                    Label("\(verdict.rawValue)  \(key)", systemImage: verdict.symbol)
+                        .font(.callout.bold())
+                        .padding(.horizontal, 12).padding(.vertical, 4)
+                        .background(on ? verdict.color.opacity(0.85) : verdict.color.opacity(0.15), in: Capsule())
+                        .foregroundStyle(on ? Color.white : verdict.color)
+                }
+                .buttonStyle(.plain)
+                .help("\(verdict.rawValue) (\(key))，判完自动下一张")
+            }
+            Button { apply(nil, to: item) } label: {
+                Text("恢复自动  0").font(.callout)
+                    .padding(.horizontal, 12).padding(.vertical, 4)
+                    .background(Color.white.opacity(0.08), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .disabled(store.overrides[item.id] == nil)
+            .help("去掉人工改判，回到按滑杆算的判决 (0)")
+            Button { showShortcuts.toggle() } label: { Image(systemName: "keyboard") }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("快捷键一览 (?)")
+                .popover(isPresented: $showShortcuts, arrowEdge: .bottom) { ShortcutsPanel() }
+        }
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
     }
 
     private func refreshFocusMask() {

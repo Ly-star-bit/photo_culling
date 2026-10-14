@@ -35,11 +35,13 @@ struct PickView: View {
     @State private var lastClick: (key: Int, at: Date)?
     /// Esc 离开时还有改过没确认的组：先问一声（草稿模式下点了不按 ⏎ 是不会写的）。
     @State private var confirmExit = false
+    @State private var showShortcuts = false
     @FocusState private var keyFocus: Bool
 
     init(store: BatchStore, request: PickRequest, sortByScore: Bool, onExit: @escaping (String?) -> Void) {
         self.store = store
         self.onExit = onExit
+        returnsToReview = request.returnsToReview
         _session = StateObject(wrappedValue: PickSession(store: store, request: request, sortByScore: sortByScore))
     }
 
@@ -55,6 +57,9 @@ struct PickView: View {
     }
 
     private var zoomOnAppear = false
+    /// 审片里按 C 进来的：按钮写「返回审片」，⏎ 定完这一场直接回去。
+    private var returnsToReview = false
+    private var backLabel: String { returnsToReview ? "返回审片" : "返回网格" }
 
     var body: some View {
         let frames = session.frames
@@ -98,6 +103,10 @@ struct PickView: View {
             resetZoom()
             prefetchUpcoming()
         }
+        // 审片里绕过来挑一场：⏎ 定完就回审片接着往下，不用再按 Esc。
+        .onChange(of: session.allDone) { _, done in
+            if done && returnsToReview { onExit(session.highlightedID) }
+        }
         .onChange(of: focusPeak) {
             if focusPeak { refreshMasks() } else { masks = [:] }
         }
@@ -133,6 +142,10 @@ struct PickView: View {
             focusPeak.toggle()
             return .handled
         }
+        .onKeyPress(characters: .init(charactersIn: "?")) { _ in
+            showShortcuts.toggle()
+            return .handled
+        }
         // [ ]：放大时换一个人居中（只有一个人就不响应）。
         .onKeyPress(characters: .init(charactersIn: "[]")) { press in
             guard press.modifiers.isDisjoint(with: [.command, .option, .control]), zoomed, faces.people > 1 else {
@@ -148,11 +161,11 @@ struct PickView: View {
     private func header(_ frames: [BatchItem], people: Int) -> some View {
         HStack(spacing: 10) {
             Button { exitOrUnzoom() } label: {
-                Label(zoomed ? "适应" : "返回网格",
+                Label(zoomed ? "适应" : backLabel,
                       systemImage: zoomed ? "arrow.down.right.and.arrow.up.left" : "chevron.left")
             }
             .keyboardShortcut(.escape, modifiers: [])
-            .help(zoomed ? "退出放大 (Esc)" : "回到网格 (Esc)，焦点落在高亮的那张")
+            .help(zoomed ? "退出放大 (Esc)" : (returnsToReview ? "回到审片 (Esc)，接着刚才那张往下" : "回到网格 (Esc)，焦点落在高亮的那张"))
             Text("连拍挑选").font(.headline)
             if !session.isSelection && !session.groups.isEmpty {
                 Text("第 \(session.position + 1)/\(session.groups.count) 组").font(.headline).monospacedDigit()
@@ -305,6 +318,10 @@ struct PickView: View {
                  onHighlight: {
                      session.highlight(item.id)
                      keyFocus = true
+                 },
+                 onSet: { verdict in
+                     withAnimation(.easeOut(duration: 0.12)) { session.set(item.id, verdict) }
+                     keyFocus = true
                  })
             .onAppear {
                 appeared.insert(item.id)
@@ -357,6 +374,9 @@ struct PickView: View {
                         .controlSize(.small)
                         .help("扔掉这一组你点过的，回到算法推荐（精选留、其余废）")
                 }
+                Button("这组全留") { withAnimation(.easeOut(duration: 0.12)) { session.keepAll() } }
+                    .controlSize(.small)
+                    .help("整组都想留时用：现在的精选（你点过的；没点过就是推荐的那张）还是精选，其余都设可用。⏎ 才写进去")
                 Spacer(minLength: 8)
                 Toggle("数字键选完直接下一组", isOn: $autoAdvance)
                     .toggleStyle(.checkbox)
@@ -373,11 +393,18 @@ struct PickView: View {
                 .disabled(session.frames.isEmpty)
                 .help("按左边那句话写判决（留的设为精选/可用，其余设为废片，整组一次撤销），然后跳到下一个待处理的组")
             }
-            Text(session.isSelection
-                 ? "点 = 留这张（同一场的其余废，别的场不动）· ⌘点 = 留/废切换 · 1–9 第几张 · ←/→ 移动 · Z 放大到脸 · ⌘Z 撤销 · Esc 返回"
-                 : "点 = 只留这张 · ⌘点 = 多留/取消 · 1–9 只留第几张 · ←/→ 移动 · 空格 只留高亮 · ⇧空格 多留 · ↑/↓ 换组 · Z 放大到脸 · ⌘Z 撤销 · Esc 返回")
-                .font(.caption2).foregroundStyle(.tertiary)
-                .lineLimit(1).truncationMode(.tail)
+            HStack(spacing: 6) {
+                Text(session.isSelection
+                     ? "点 = 留这张（同一场的其余废，别的场不动）· 右上角 = 只改这一张 · 1–9 第几张 · ←/→ 移动 · Z 放大到脸 · ⌘Z 撤销 · Esc 返回"
+                     : "点 = 只留这张 · 鼠标停上去右上角 精选/可用/废 = 只改这一张 · 1–9 只留第几张 · ⇧空格 多留 · ↑/↓ 换组 · Z 放大到脸 · ⌘Z 撤销 · Esc 返回")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .lineLimit(1).truncationMode(.tail)
+                Button { showShortcuts.toggle() } label: { Image(systemName: "keyboard").font(.caption) }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("快捷键一览 (?)")
+                    .popover(isPresented: $showShortcuts, arrowEdge: .top) { ShortcutsPanel() }
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
@@ -392,7 +419,7 @@ struct PickView: View {
                 .foregroundStyle(.green)
             // 鼠标用户也得有条路回去（以前只写了「Esc 返回网格」）；回网格后按 F 逐张审片。
             // 直接回网格：放大着确认完最后一组时，这里点一下不该只是退出放大。
-            Button("返回网格") {
+            Button(backLabel) {
                 if zoomed { resetZoom() }
                 exitOrUnzoom()
             }
@@ -533,6 +560,8 @@ private struct PickTile: View {
     /// 放大时在照片上单击 / 双击：只把这一格设为高亮，不改去留 —— 放大时点一下多半是为了拖、捏、
     /// 按 [ ] 或 P，不是在选（审查发现：以前会顺手把它改成唯一留下的）。
     let onHighlight: () -> Void
+    /// 右上角「精选 / 可用 / 废」：只改这一张。
+    let onSet: (Verdict) -> Void
 
     @State private var hovering = false
 
@@ -545,15 +574,19 @@ private struct PickTile: View {
 
     var body: some View {
         let kept = state != .reject
+        let showHover = hovering || item.id == SnapshotPreview.hoverID
         // 废掉的照片变灰，但鼠标停上去 / 键盘高亮时恢复原色 —— 它们还是候选，要能比。
-        let vivid = kept || highlighted || hovering
+        let vivid = kept || highlighted || showHover
         VStack(alignment: .leading, spacing: PickLayout.innerSpacing) {
             photo(vivid: vivid)
                 .frame(width: layout.image.width, height: layout.image.height)
                 .clipShape(RoundedRectangle(cornerRadius: 5))
                 .overlay(RoundedRectangle(cornerRadius: 5).stroke(kept ? state.color : Color.clear, lineWidth: 3))
                 .overlay(alignment: .topLeading) { numberBadge }
-                .overlay(alignment: .topTrailing) { stateBadge }
+                .overlay(alignment: .topTrailing) {
+                    // 悬停时这里换成可点的三个按钮（挂在下面手势的外层）。
+                    if !showHover { stateBadge }
+                }
                 .overlay(alignment: .bottomLeading) { reasonsBadge }
             if layout.faceSize > 0 { faces }
             metrics
@@ -565,15 +598,65 @@ private struct PickTile: View {
                 .stroke(highlighted ? Color.white.opacity(0.85) : Color.white.opacity(0.06), lineWidth: highlighted ? 2 : 1)
         )
         .contentShape(Rectangle())
-        .onHover { hovering = $0 }
         // 同网格：双击手势 + 同时识别的单击，单击不必等 300ms 排除双击；双击的第二下也会来一次
         // 单击，按 clickCount 跳过（拼图画布同一个写法，用户在界面里验过）。
         .gesture(TapGesture(count: 2).onEnded { onDoubleClick() })
         .simultaneousGesture(TapGesture().onEnded {
-            guard (NSApp.currentEvent?.clickCount ?? 1) < 2 else { return }
+            guard !ClickGuard.isRepeatClick else { return }
             onClick(NSEvent.modifierFlags.contains(.command))
         })
-        .help("\(item.id) · 点 = 只留这张，⌘点 = 多留/取消，双击 = 放大到脸")
+        // 悬停时右上角三个按钮（Lightroom 网格格子上可点的旗标那种）。必须挂在点击手势**之后**：
+        // 挂在里面的话它们是手势的子孙，点按钮会同时触发上面的「只留这张」。
+        .overlay(alignment: .topTrailing) {
+            if showHover {
+                stateControls
+                    .padding(.top, PickLayout.tilePadding + 5)
+                    .padding(.trailing, PickLayout.tilePadding + 5)
+            }
+        }
+        // 悬停也挂在按钮外层：挂在里面的话鼠标移到按钮上就算「离开」，按钮一闪一闪。
+        .onHover { hovering = $0 }
+        .help("\(item.id) · 点照片 = 只留这张 · 右上角 = 只改这一张 · ⌘点 = 多留/取消 · 双击 = 放大到脸")
+    }
+
+    /// 精选 / 可用 / 废：现在是哪个就亮哪个。
+    private var stateControls: some View {
+        HStack(spacing: 2) {
+            ForEach([Verdict.pick, .usable, .reject], id: \.self) { verdict in
+                let on = state == verdict
+                // 只认单击：双击的第二下不算（和网格悬停条一样）。
+                Button { if !ClickGuard.isRepeatClick { onSet(verdict) } } label: {
+                    Label(Self.controlTitle(verdict), systemImage: verdict.symbol)
+                        .font(.caption.bold())
+                        .labelStyle(.titleAndIcon)
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(on ? verdict.color.opacity(0.9) : Color.clear, in: Capsule())
+                        .foregroundStyle(on ? Color.white : verdict.color)
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help(Self.controlHelp(verdict))
+            }
+        }
+        .padding(3)
+        .background(.black.opacity(0.75), in: Capsule())
+        .fixedSize()
+    }
+
+    private static func controlTitle(_ verdict: Verdict) -> String {
+        switch verdict {
+        case .pick: return "精选"
+        case .usable: return "可用"
+        case .reject: return "废"
+        }
+    }
+
+    private static func controlHelp(_ verdict: Verdict) -> String {
+        switch verdict {
+        case .pick: return "这张留作精选（同一场别的照片不动）"
+        case .usable: return "这张留作可用（同一场别的照片不动）"
+        case .reject: return "这张废掉（同一场别的照片不动）"
+        }
     }
 
     @ViewBuilder

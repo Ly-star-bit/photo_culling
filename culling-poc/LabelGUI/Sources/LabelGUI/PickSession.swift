@@ -21,6 +21,14 @@ enum PickRequest: Hashable {
     case take(Int, preset: [String] = [], focus: String? = nil, chapter: Int? = nil)
     /// 跨场 ⌘ 多选的几张：当成临时的一组来挑，没有上一组 / 下一组。
     case selection([String])
+    /// 只挑这一场（审片里按 C 进来的）：没有上一组 / 下一组，⏎ 定完就回审片。
+    case only(Int, focus: String?)
+
+    /// 审片里按 C 进来的 —— 返回去的是审片，不是网格。
+    var returnsToReview: Bool {
+        if case .only = self { return true }
+        return false
+    }
 
     /// ⌘ 多选进来的：全在同一场就按整场挑（选中的预先勾成留），跨场就只挑这几张。
     @MainActor
@@ -106,6 +114,11 @@ final class PickSession: ObservableObject {
             selectionIDs = ids
             position = 0
             highlight = initialHighlight(focus: nil)
+        case .only(let take, let focus):
+            groups = (store.takeSizes[take] ?? 0) >= 2 ? [take] : []
+            selectionIDs = nil
+            position = 0
+            highlight = initialHighlight(focus: focus)
         }
     }
 
@@ -261,6 +274,41 @@ final class PickSession: ObservableObject {
         recordDraft()
         drafts[currentKey] = d
         highlight = idx
+    }
+
+    /// 格子右上角的「精选 / 可用 / 废」：只改这一张，同一场别的照片不动（点照片本身才是「只留这张」）。
+    /// 一组留几张、或者「一张精选 + 几张可用」，鼠标不用记 ⌘ 也能点出来。不触发「选完直接下一组」。
+    func set(_ id: String, _ verdict: Verdict) {
+        let frames = self.frames
+        guard let idx = frames.firstIndex(where: { $0.id == id }) else { return }
+        highlight = idx
+        var d = draft(for: currentKey)
+        guard d[id] != verdict else { return }
+        d[id] = verdict
+        recordDraft()
+        drafts[currentKey] = d
+    }
+
+    /// 「这组全留」：屏幕上现在的精选（你点过的；没点过就是推荐的那张；一张都没有就评分最高的）
+    /// 还是精选，其余可用 —— 整组都想留时不用一张张点。一步撤销。
+    /// 以前从推荐出发：点了 #3 留它再按「全留」，精选又跳回算法挑的那张、#3 变成可用（审查发现）。
+    func keepAll() {
+        let frames = self.frames
+        guard !frames.isEmpty else { return }
+        let current = draft(for: currentKey)
+        var picks = Set(frames.filter { current[$0.id] == .pick }.map(\.id))
+        if picks.isEmpty {
+            let recommendation = recommended(currentKey)
+            picks = Set(frames.filter { recommendation[$0.id] == .pick }.map(\.id))
+        }
+        if picks.isEmpty, let best = frames.max(by: { BatchStore.scoreKey($0) < BatchStore.scoreKey($1) }) {
+            picks = [best.id]
+        }
+        let d = Dictionary(frames.map { ($0.id, picks.contains($0.id) ? Verdict.pick : .usable) },
+                           uniquingKeysWith: { first, _ in first })
+        guard d != draft(for: currentKey) else { return }
+        recordDraft()
+        drafts[currentKey] = d
     }
 
     func chooseHighlighted() {
@@ -453,6 +501,7 @@ final class PickSession: ObservableObject {
         case "enter", "⏎": confirm()
         case "undo": undo()
         case "0", "reset": resetDraft()
+        case "keepall": keepAll()
         default:
             if let n = Int(key), (1...9).contains(n) {
                 press(number: n)
@@ -460,6 +509,10 @@ final class PickSession: ObservableObject {
                 choose(String(key.dropFirst(6)))
             } else if key.hasPrefix("cmd:") {
                 toggle(String(key.dropFirst(4)))
+            } else if key.hasPrefix("set:"), let eq = key.firstIndex(of: "="),
+                      let verdict = Verdict(rawValue: String(key[key.index(after: eq)...])) {
+                // set:<id>=精选|可用|废片 —— 格子右上角那三个按钮。
+                set(String(key[key.index(key.startIndex, offsetBy: 4)..<eq]), verdict)
             } else {
                 return false
             }

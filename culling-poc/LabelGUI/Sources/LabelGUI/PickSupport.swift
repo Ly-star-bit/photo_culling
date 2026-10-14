@@ -258,3 +258,19 @@ struct CompareBest {
     static func sharpnessText(_ value: Double) -> Int { Int(value) }
     static func qualityText(_ value: Double) -> String { String(format: "%.2f", value) }
 }
+
+/// 这一下是不是双击的第二下（或更多）。按钮被点完照片会挪位（跳去废片区、整场叠起来），手快连点时
+/// 第二下就落在别的照片上了 —— 第二下一律不算。
+/// 只有鼠标按键事件才有 clickCount：全键盘操控按空格、VoiceOver / 语音控制按下按钮时 currentEvent 是
+/// 键盘或别的事件，读 clickCount 会抛 NSInternalInconsistencyException（拼图画布同一个写法）。
+enum ClickGuard {
+    @MainActor static var isRepeatClick: Bool {
+        guard let e = NSApp.currentEvent else { return false }
+        switch e.type {
+        case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp:
+            return e.clickCount >= 2
+        default:
+            return false
+        }
+    }
+}

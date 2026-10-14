@@ -67,6 +67,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>插上相机存储卡时读取卡上的照片，问你要不要导入到「图片」文件夹。只读，不会改动卡上的文件。</string>
 </dict>
 </plist>
 PLIST

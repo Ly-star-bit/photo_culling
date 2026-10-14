@@ -8,13 +8,17 @@ import UniformTypeIdentifiers
 /// thumbnail generation (kCGImageSourceCreateThumbnailWithTransform), and gives
 /// us EXIF capture time without shelling out to exiftool.
 enum ImageLoader {
+    /// 后一行是 2026-10 存储卡导入时补的老机型 / 中画幅 RAW（尼康卡片机 NRW、索尼 SR2/SRF、哈苏 3FR/FFF、
+    /// 飞思 IIQ、佳能老 CRW、爱普生 ERF、Leaf MOS、美能达 MRW、柯达 DCR、徕卡 RWL、松下/徕卡 RAW）——
+    /// 只收本机 ImageIO 解得开的（CGImageSourceCopyTypeIdentifiers 里有的），解不开的不进分析。
     static let rawExtensions: Set<String> = [
         "cr2", "cr3", "nef", "arw", "raf", "orf", "dng", "rw2", "pef", "srw",
+        "nrw", "sr2", "srf", "3fr", "fff", "iiq", "crw", "erf", "mos", "mrw", "dcr", "rwl", "raw",
     ]
     /// 手机图 (heic) / 截图 (png) / 扫描件 (tiff) 都交给 ImageIO 解码 — 网格空着
-    /// 却说"文件夹里明明有图"的工单基本都是格式不在名单里。
+    /// 却说"文件夹里明明有图"的工单基本都是格式不在名单里。佳能 / 富士 / 索尼机内 HEIF 的扩展名是 .HIF。
     static let imageExtensions: Set<String> = rawExtensions.union([
-        "jpg", "jpeg", "png", "heic", "heif", "tif", "tiff", "webp", "bmp",
+        "jpg", "jpeg", "png", "heic", "heif", "hif", "tif", "tiff", "webp", "bmp", "jxl", "avif",
     ])
 
     /// Subfolder (inside the shoot folder) where the 高ISO RAW copies for the
