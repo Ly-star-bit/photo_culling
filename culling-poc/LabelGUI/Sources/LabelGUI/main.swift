@@ -60,6 +60,8 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--analyze"),
         // Same per-shoot session dir the GUI uses, so headless runs show up there.
         let sessionDir = appDataDir.appendingPathComponent("sessions/\(BatchStore.sessionKey(for: dir))")
         try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+        // 界面上是先打开文件夹（这时定下这一场的阈值）再分析；这里不先定的话，分析完再打开会被当成老场次。
+        BatchStore.sessionThresholds(sessionDir: sessionDir, dataDir: appDataDir)
         let summary = try AnalysisEngine.analyzeFolder(dir, dataDir: sessionDir) { message in
             print(message)
         }
@@ -160,8 +162,9 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--session-key"),
 }
 
 // Headless verdict smoke test (连拍去重用):
-// LabelGUI --verdicts <photo_dir> [--dedupe]
+// LabelGUI --verdicts <photo_dir> [--dedupe] [--per-photo]
 // 加载该场次的缓存结果，套用当前阈值，打印判决/理由统计和多张连拍组的组内判决。
+// --per-photo：最后再逐张打印「id 判决 理由」（单张的场上面不打印），对比两次分析用。
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
    CommandLine.arguments.count > flagIndex + 1 {
     let dir = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])
@@ -211,6 +214,14 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
                 .map { "\($0.id)=\($0.verdict.rawValue)" + (store.takeRank[$0.id].map { "#\($0)" } ?? "") }
                 .joined(separator: " ")
             print("  场 \(take) (\(byTake[take]!.count) 张): \(line)")
+        }
+        if CommandLine.arguments.contains("--per-photo") {
+            let preset = store.currentPreset?.rawValue ?? "自定义"
+            print("阈值: 锐度 \(store.sharpnessThreshold) · 曝光裁切 \(store.exposureThreshold) · 人脸质量 \(store.faceQualityThreshold) · 预设 \(preset)")
+            for item in store.items.sorted(by: { $0.id < $1.id }) {
+                let reasons = item.rejectReasons.isEmpty ? "-" : item.rejectReasons.joined(separator: ",")
+                print("  \(item.id) \(item.verdict.rawValue) \(reasons)")
+            }
         }
         // --clear-recents：打印完再点一次「全部清除」，数还剩哪些场次目录 —— 验证掉出菜单的旧场次
         // 判决不被顺手删掉。会删数据目录里的场次：只在临时 LABELGUI_DATA_DIR 下跑。

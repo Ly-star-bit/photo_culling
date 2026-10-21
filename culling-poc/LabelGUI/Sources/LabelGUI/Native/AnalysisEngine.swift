@@ -42,6 +42,16 @@ enum AnalysisEngine {
         let sharpnessScope: String
         let highlightClipPct: Double
         let shadowClipPct: Double
+        /// 同一个裁切口径，只数主体区域（主体脸扩到头 + 上半身的并集）；没有脸、或者人在画面里太小
+        /// （FaceAnalyzer.minSubjectRegionShare）= 整张。判决用这两个 ——
+        /// 屋檐下的死黑背景不该把曝光正常的人像判废（DSCF7221：整张暗部 15.3%，主体区域 2.5%）。
+        let subjectHighlightClipPct: Double
+        let subjectShadowClipPct: Double
+        /// 主体脸的亮度中位数（0–255，几张脸合起来；没有脸 = nil）。
+        let faceLuma: Double?
+        /// 整张的亮度中位数和 p99 —— p99 低 = 画面里没有一处是亮的。
+        let frameLuma: Double
+        let frameLumaP99: Double
         let elapsedSec: Double
         /// Source file's modification time — the incremental-reuse key: same
         /// id + same mtime on the next run means the analysis is still valid.
@@ -57,8 +67,9 @@ enum AnalysisEngine {
     /// Bump whenever a metric's scale changes (decode size, sharpness formula,
     /// pHash construction). Old sessions carrying another version are re-analyzed
     /// instead of silently mixing two scales under one slider. Files written
-    /// before this key existed are treated as version 1 (the current scale).
-    static let analysisVersion = 1
+    /// before this key existed are treated as version 1.
+    /// 2：曝光裁切改按主体区域算，加了欠曝 / 过曝要的亮度、合影小脸的原图 EAR。
+    static let analysisVersion = 2
 
     struct Summary {
         let analyzed: Int
@@ -282,10 +293,19 @@ enum AnalysisEngine {
         // count it as failed instead of pretending.
         guard ImageLoader.savePreview(loaded.image, to: previewURL) else { return nil }
 
+        // Vision 先跑：曝光要按主体区域（人脸 → 头 + 上半身）算，得先知道脸在哪。RGBA / 灰度图都在它之后
+        // 才分配，Vision 跑的时候手里只有分析图，峰值内存不比以前高。
+        let vision = FaceAnalyzer.analyze(in: loaded.image)
+        let face = vision.face
+        // 合影小脸在原图分辨率上重量 EAR（没有这种脸的照片不解原图，零开销）。
+        let subjectFaces = face.map { FaceAnalyzer.refineSmallFaces($0.subjectFaces, decodeURL: file.decodeURL) } ?? []
+        let regions = FaceAnalyzer.exposureRegions(subjectFaces)
+
         // The RGBA buffer (~38MB) is only needed for the pixel metrics; scope
-        // it so it's released before Vision runs alongside 7 other workers.
+        // it so it's released before the sharpness ROI work below.
         let hash: UInt64
         let highlightPct: Double, shadowPct: Double
+        let subjectClip: (highlightPct: Double, shadowPct: Double)?
         let gray: [Float]
         let width: Int, height: Int
         do {
@@ -293,15 +313,23 @@ enum AnalysisEngine {
             width = w; height = h
             hash = Metrics.phash(rgba: rgba, width: w, height: h)
             (highlightPct, shadowPct) = Metrics.exposureClipping(rgba: rgba, width: w, height: h)
+            let bodySpans = Metrics.spans(of: regions.bodies, width: w, height: h)
+            let bodyPixels = bodySpans.reduce(0) { $0 + $1.x1 - $1.x0 }
+            // 人在画面里太小（远景、旅拍里的小人）：画面本身才是主体，照旧按整张算 —— 不然一张碰巧认出来的
+            // 小脸就把一大片死白天空排除在外，认没认出来脸，判决就翻。
+            let bigEnough = Double(bodyPixels) >= FaceAnalyzer.minSubjectRegionShare * Double(w * h)
+            subjectClip = bigEnough ? Metrics.exposureClipping(rgba: rgba, width: w, spans: bodySpans) : nil
             gray = Metrics.grayscale(rgba: rgba, width: w, height: h)
         }
+        // 欠曝 / 过曝的依据：脸的亮度中位数（没有脸 = nil），整张的中位数和 p99（「画面里有没有亮的东西」）。
+        let frameHist = Metrics.lumaHistogram(gray: gray, width: width, height: height)
+        let faceHist = Metrics.lumaHistogram(gray: gray, width: width, height: height,
+                                             spans: Metrics.spans(of: regions.faces, width: width, height: height))
         // 截断的 JPEG 解码不报错（缺的补灰，人脸在上半截照样认得出），不查就会被当好片、甚至提名精选。
         // 只看文件结束标记，不看解出来的图有没有整条纯灰：灰底棚拍、加了灰边的导出图也是整条 128 灰，
         // 会被冤成「文件损坏」，还叫人别格式化卡（审查发现）。截断的那些 EOI 检查已经全认得出。
         let fileCorrupt = ImageLoader.jpegTruncated(file.decodeURL)
 
-        let vision = FaceAnalyzer.analyze(in: loaded.image)
-        let face = vision.face
         // Sharpness ladder: facial-feature rects (eyes/brows/mouth — where focus
         // is judged, hair and background excluded) → face bbox → foreground
         // subject (ring/bouquet/detail shots with no face) → whole frame.
@@ -363,11 +391,16 @@ enum AnalysisEngine {
             subjectFaceCount: face?.subjectFaceCount ?? 0,
             faceBbox: face.map { [$0.bbox.x0, $0.bbox.y0, $0.bbox.x1, $0.bbox.y1] },
             faceAreaPct: face?.faceAreaPct,
-            subjectFaces: face?.subjectFaces ?? [],
+            subjectFaces: subjectFaces,
             sharpness: sharpness,
             sharpnessScope: scope,
             highlightClipPct: highlightPct,
             shadowClipPct: shadowPct,
+            subjectHighlightClipPct: subjectClip?.highlightPct ?? highlightPct,
+            subjectShadowClipPct: subjectClip?.shadowPct ?? shadowPct,
+            faceLuma: Metrics.percentile(faceHist, 0.5),
+            frameLuma: Metrics.percentile(frameHist, 0.5) ?? 0,
+            frameLumaP99: Metrics.percentile(frameHist, 0.99) ?? 0,
             elapsedSec: Date().timeIntervalSince(start),
             srcMtime: stampAfter.mtime,
             srcSize: stampAfter.size,
@@ -475,13 +508,19 @@ enum AnalysisEngine {
             "face_area_pct": p.faceAreaPct as Any,
             "faces": p.subjectFaces.map { face -> [String: Any] in
                 ["bbox": face.bbox, "eye_closed": face.eyeClosed as Any,
-                 "ear": face.ear as Any, "area_pct": face.areaPct]
+                 "ear": face.ear as Any, "area_pct": face.areaPct, "ear_full_res": face.earFullRes]
             },
             "horizon_deg": p.horizonDeg as Any,
             "sharpness": p.sharpness,
             "sharpness_scope": p.sharpnessScope,
+            // 整张的两个照旧写（evaluate.py / 老工具读它们）；判决用 subject_*。
             "highlight_clip_pct": p.highlightClipPct,
             "shadow_clip_pct": p.shadowClipPct,
+            "subject_highlight_clip_pct": p.subjectHighlightClipPct,
+            "subject_shadow_clip_pct": p.subjectShadowClipPct,
+            "face_luma": p.faceLuma as Any,
+            "frame_luma": p.frameLuma,
+            "frame_luma_p99": p.frameLumaP99,
             "elapsed_sec": p.elapsedSec,
             "burst_group": p.burstGroup,
             "file_corrupt": p.fileCorrupt,

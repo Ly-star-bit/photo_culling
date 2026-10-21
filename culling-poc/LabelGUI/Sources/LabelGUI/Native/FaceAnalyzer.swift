@@ -1,6 +1,7 @@
 import Foundation
 import Vision
 import CoreGraphics
+import ImageIO
 
 /// Native replacement for YuNet + MediaPipe: Apple's Vision framework handles both
 /// jobs (find the face, read the eye state) in one landmarks request, and unlike
@@ -41,6 +42,9 @@ enum FaceAnalyzer {
         /// frame get EAR immunity downstream (too few pixels for reliable
         /// landmarks — hair wisps and squints read as blinks).
         let areaPct: Double
+        /// `ear` 是在原图分辨率的脸部裁块上重新量的（合影小脸，见 refineSmallFaces）——
+        /// 判决层对这种脸的免检线放低到 0.05%。
+        var earFullRes = false
     }
 
     struct FaceResult {
@@ -121,17 +125,7 @@ enum FaceAnalyzer {
         var worstEar: Double?
         var subjectFaces: [SubjectFace] = []
         for face in subjects.sorted(by: { area($0) > area($1) }) {
-            var ear: Double?
-            if let landmarks = face.landmarks,
-               let left = landmarks.leftEye, let right = landmarks.rightEye {
-                let leftRatio = aspectRatio(of: left)
-                let rightRatio = aspectRatio(of: right)
-                if let l = leftRatio, let r = rightRatio {
-                    ear = (l + r) / 2
-                } else {
-                    ear = leftRatio ?? rightRatio
-                }
-            }
+            let ear = eyeAspectRatio(of: face)
             if let ear {
                 worstEar = min(worstEar ?? .infinity, ear)
             }
@@ -165,6 +159,103 @@ enum FaceAnalyzer {
             faceAreaPct: Double(bb.width * bb.height),
             featureRects: featureRects(for: primary)
         )
+    }
+
+    // MARK: - 曝光的主体区域
+
+    /// 主体区域（下面 exposureRegions 的头 + 上半身并集，裁到画面内）至少占画面这么多，曝光裁切才只看主体：
+    /// 约等于一张 0.23% 的脸扩成头 + 上半身（人占画面高度一半左右的全身照）。再小就是远景里的人，照旧算整张。
+    /// photot 的环境人像最小 3.6%，合影（3×3 到 5×5）6–11%，大片死白天空下一张 0.08% 的小脸只有 0.7%。
+    static let minSubjectRegionShare = 0.02
+
+    /// 曝光看的「主体区域」：每张主体脸扩到头 + 上半身（宽 2 倍脸宽，往上 0.3 个脸高带上头发，往下 3 个脸高
+    /// 到腰），几张脸取并集；另给只有脸的框 —— 亮度只看脸，上半身里一身黑西装会把中位数拉下去。
+    /// 归一化左上原点；SubjectFace.bbox 带 15% padding，这里先还原成原始脸框。
+    static func exposureRegions(_ faces: [SubjectFace]) -> (bodies: [[Double]], faces: [[Double]]) {
+        var bodies: [[Double]] = [], boxes: [[Double]] = []
+        for f in faces {
+            let w = (f.bbox[2] - f.bbox[0]) / (1 + 2 * bboxPadding)
+            let h = (f.bbox[3] - f.bbox[1]) / (1 + 2 * bboxPadding)
+            let cx = (f.bbox[0] + f.bbox[2]) / 2, top = (f.bbox[1] + f.bbox[3]) / 2 - h / 2
+            boxes.append([cx - w / 2, top, cx + w / 2, top + h])
+            bodies.append([cx - w, top - 0.3 * h, cx + w, top + 4 * h])
+        }
+        return (bodies, boxes)
+    }
+
+    // MARK: - 合影小脸：原图分辨率重量 EAR
+
+    /// 3072 分析图上小于这个面积的脸 landmark 不可靠 —— 判决层的小脸免检线（BatchStore.minEarFaceAreaPct）。
+    static let smallFaceAreaPct = 0.003
+    /// 原图上的脸至少要这么多像素才重量：≈ 3072×2048 分析图上 0.3% 的脸（约 137px 见方），也就是小脸免检
+    /// 原来那条「landmark 读得准」的线，换成像素数。4000 万像素的机身约 0.05%，2400 万像素约 0.08%。
+    static let minLandmarkFacePixels = 0.003 * 3072 * 2048
+    /// 同时解原图的上限：4000 万像素一张 RGBA 就 160MB，8 个 worker 一起解会吃掉好几 GB。
+    private static let fullResGate = DispatchSemaphore(value: 2)
+
+    /// 合影里的小脸（3072 分析图上 < 0.3%：以前一律免检，9 人以上的合影整张免检）：从原图（decodeURL，按
+    /// EXIF 方向转正）按脸框裁出原分辨率的块，在块上重跑 landmark，EAR 按原分辨率算，标 earFullRes。
+    /// 只做「像主体」的小脸：面积 ≥ 最大脸的一半；或者是合影（没有哪张脸独大）、并且有 ≥3 张差不多大的脸。
+    /// 一个人的街拍，主角的脸独大，背后路人再多也不重量，照旧免检。裁块里找不到这张脸 / 读不出眼睛的
+    /// 保持原样（照旧免检），绝不拿 3072 上那个不可靠的 EAR 顶上。
+    static func refineSmallFaces(_ faces: [SubjectFace], decodeURL: URL) -> [SubjectFace] {
+        let areas = faces.map(\.areaPct).sorted(by: >)
+        guard let largest = areas.first else { return faces }
+        let group = areas.count > 1 && areas[1] >= largest * 0.5
+        func plausible(_ a: Double) -> Bool {
+            a >= largest * 0.5 || (group && areas.filter { $0 >= a / 2 && $0 <= a * 2 }.count >= 3)
+        }
+        var todo = faces.indices.filter { faces[$0].areaPct < smallFaceAreaPct && plausible(faces[$0].areaPct) }
+        guard !todo.isEmpty,
+              let source = CGImageSourceCreateWithURL(decodeURL as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let pw = props[kCGImagePropertyPixelWidth] as? Int,
+              let ph = props[kCGImagePropertyPixelHeight] as? Int else { return faces }
+        todo = todo.filter { faces[$0].areaPct * Double(pw * ph) >= minLandmarkFacePixels }
+        // 原图没比分析图大多少（手机小图、导出的 JPG）：重解一遍什么也得不到。
+        guard !todo.isEmpty, max(pw, ph) > ImageLoader.analysisMaxPixel * 3 / 2 else { return faces }
+
+        fullResGate.wait()
+        defer { fullResGate.signal() }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(pw, ph),
+            kCGImageSourceCreateThumbnailWithTransform: true,
+        ]
+        guard let full = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return faces }
+        var out = faces
+        for i in todo {
+            guard let ear = fullResEar(of: faces[i].bbox, in: full) else { continue }
+            out[i] = SubjectFace(bbox: faces[i].bbox, eyeClosed: ear < earClosedThreshold, ear: ear,
+                                 areaPct: faces[i].areaPct, earFullRes: true)
+        }
+        return out
+    }
+
+    /// 一张脸（归一化左上原点、带 padding 的框）在原图上的 EAR：四周再放出半张脸的余量裁块，取块里中心落在
+    /// 这张脸框内、离它中心最近的那张脸 —— 挤在一起的合影里，裁块边上的邻居不能顶替。
+    private static func fullResEar(of bbox: [Double], in image: CGImage) -> Double? {
+        let w = Double(image.width), h = Double(image.height)
+        let bw = bbox[2] - bbox[0], bh = bbox[3] - bbox[1]
+        let x0 = max(0, (bbox[0] - bw * 0.5) * w), x1 = min(w, (bbox[2] + bw * 0.5) * w)
+        let y0 = max(0, (bbox[1] - bh * 0.5) * h), y1 = min(h, (bbox[3] + bh * 0.5) * h)
+        // CGImage 的裁切坐标左上原点，和 bbox 一样。
+        let rect = CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0).integral
+        guard rect.width >= 32, rect.height >= 32, let crop = image.cropping(to: rect) else { return nil }
+        let request = VNDetectFaceLandmarksRequest()
+        guard (try? VNImageRequestHandler(cgImage: crop, options: [:]).perform([request])) != nil,
+              let found = request.results else { return nil }
+        // 目标脸中心换到裁块坐标（Vision 左下原点），允许偏半个脸框。
+        let cx = ((bbox[0] + bbox[2]) / 2 * w - rect.minX) / rect.width
+        let cy = 1 - ((bbox[1] + bbox[3]) / 2 * h - rect.minY) / rect.height
+        let tolX = bw * w / rect.width / 2, tolY = bh * h / rect.height / 2
+        let near = found.filter {
+            abs(Double($0.boundingBox.midX) - cx) < tolX && abs(Double($0.boundingBox.midY) - cy) < tolY
+        }
+        func distance(_ f: VNFaceObservation) -> Double {
+            hypot(Double(f.boundingBox.midX) - cx, Double(f.boundingBox.midY) - cy)
+        }
+        return near.min { distance($0) < distance($1) }.flatMap(eyeAspectRatio(of:))
     }
 
     /// Eye+brow band and mouth rects of one face, image-normalized top-left
@@ -249,6 +340,17 @@ enum FaceAnalyzer {
         guard areaFraction > 0.02, areaFraction < 0.95 else { return nil }
         return (Double(minX) / Double(w), Double(minY) / Double(h),
                 Double(maxX + 1) / Double(w), Double(maxY + 1) / Double(h))
+    }
+
+    /// Both eyes' aspect ratios averaged (one when only one is readable); nil
+    /// when the landmarks have no eyes.
+    private static func eyeAspectRatio(of face: VNFaceObservation) -> Double? {
+        guard let landmarks = face.landmarks,
+              let left = landmarks.leftEye, let right = landmarks.rightEye else { return nil }
+        let leftRatio = aspectRatio(of: left)
+        let rightRatio = aspectRatio(of: right)
+        if let l = leftRatio, let r = rightRatio { return (l + r) / 2 }
+        return leftRatio ?? rightRatio
     }
 
     /// Height/width of the eye outline's bounding extent. Point order in Vision's

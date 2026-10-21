@@ -1661,6 +1661,8 @@ struct BatchView: View {
         if reason.contains("连拍重复") { return "square.stack.3d.down.right" }
         if reason.contains("闭眼") { return "eye.slash" }
         if reason.contains("虚焦") { return "minus.magnifyingglass" }
+        if reason.contains("欠曝") { return "sun.min.fill" }
+        if reason.contains("过曝") { return "sun.max.circle.fill" }
         if reason.contains("曝光") { return "sun.max.fill" }
         if reason.contains("人脸质量") { return "person.crop.circle.badge.exclamationmark" }
         if reason.contains("VLM") { return "sparkles" }

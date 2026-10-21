@@ -69,11 +69,15 @@ struct FaceInfo: Codable, Hashable {
     let eyeClosed: Bool?
     let ear: Double?
     let areaPct: Double?
+    /// `ear` 是在原图分辨率上量的（合影小脸）—— 免检线按 BatchStore.minFullResEarFaceAreaPct。
+    /// 老版本分析的没有这个字段 = 没重量过。
+    var earFullRes: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case bbox, ear
         case eyeClosed = "eye_closed"
         case areaPct = "area_pct"
+        case earFullRes = "ear_full_res"
     }
 }
 
@@ -91,6 +95,13 @@ struct Layer1Result: Codable {
     let sharpness: Double?
     let highlightClipPct: Double?
     let shadowClipPct: Double?
+    /// 主体区域（脸 → 头 + 上半身）的裁切占比、脸 / 整张的亮度。analysis_version 2 起才有；
+    /// 老结果没有 = 判决退回整张的裁切、不判欠曝 / 过曝（判决不因升级变）。
+    let subjectHighlightClipPct: Double?
+    let subjectShadowClipPct: Double?
+    let faceLuma: Double?
+    let frameLuma: Double?
+    let frameLumaP99: Double?
     let burstGroup: Int?
     /// 引擎查出文件是坏的（JPEG 截断）。旧版本分析的没有这个字段 = 没查过、当好的。
     let fileCorrupt: Bool?
@@ -111,6 +122,11 @@ struct Layer1Result: Codable {
         case sharpness
         case highlightClipPct = "highlight_clip_pct"
         case shadowClipPct = "shadow_clip_pct"
+        case subjectHighlightClipPct = "subject_highlight_clip_pct"
+        case subjectShadowClipPct = "subject_shadow_clip_pct"
+        case faceLuma = "face_luma"
+        case frameLuma = "frame_luma"
+        case frameLumaP99 = "frame_luma_p99"
         case burstGroup = "burst_group"
     }
 }

@@ -3,7 +3,9 @@ import Foundation
 /// Native ports of layer1.py's numeric metrics. Same algorithms, same semantics:
 /// - Laplacian variance for sharpness (higher = sharper)
 /// - Exposure clipping: fraction of pixels where EVERY channel is blown/crushed
-///   (a saturated red flower is not "blown"; washed-out white is)
+///   (a saturated red flower is not "blown"; washed-out white is). Also over the
+///   subject region only (faces → head + upper body), plus luminance percentiles
+///   for the 欠曝 / 过曝 call
 /// - DCT perceptual hash for burst/duplicate grouping (same construction as
 ///   Python's imagehash.phash: 32x32 grayscale → 2D DCT-II → top-left 8x8 vs median)
 enum Metrics {
@@ -216,6 +218,85 @@ enum Metrics {
             }
         }
         return (Double(blown) / Double(n), Double(crushed) / Double(n))
+    }
+
+    // MARK: - Subject region (主体区域的裁切和亮度)
+
+    /// 一行里的一段像素 [x0, x1)。几个矩形（多张脸）先拆成按行不重叠的段，重叠处不重复计数。
+    struct Span { let y: Int; let x0: Int; let x1: Int }
+
+    /// 归一化（左上原点）矩形的并集 → 按行的像素段。空列表 = 没有像素。
+    static func spans(of rects: [[Double]], width: Int, height: Int) -> [Span] {
+        let boxes = rects.compactMap { r -> (x0: Int, y0: Int, x1: Int, y1: Int)? in
+            let x0 = max(0, Int(r[0] * Double(width))), x1 = min(width, Int(r[2] * Double(width)))
+            let y0 = max(0, Int(r[1] * Double(height))), y1 = min(height, Int(r[3] * Double(height)))
+            return x1 > x0 && y1 > y0 ? (x0, y0, x1, y1) : nil
+        }
+        guard let top = boxes.map(\.y0).min(), let bottom = boxes.map(\.y1).max() else { return [] }
+        var out: [Span] = []
+        for y in top..<bottom {
+            let row = boxes.filter { $0.y0 <= y && y < $0.y1 }.map { ($0.x0, $0.x1) }.sorted { $0.0 < $1.0 }
+            var current: (Int, Int)?
+            for seg in row {
+                if let c = current, seg.0 <= c.1 {
+                    current = (c.0, max(c.1, seg.1))
+                } else {
+                    if let c = current { out.append(Span(y: y, x0: c.0, x1: c.1)) }
+                    current = seg
+                }
+            }
+            if let c = current { out.append(Span(y: y, x0: c.0, x1: c.1)) }
+        }
+        return out
+    }
+
+    /// 和 exposureClipping 同一个口径（三通道同时裁切），只数这些像素段 —— 背景里的死黑屋檐不算。
+    static func exposureClipping(rgba: [UInt8], width: Int, spans: [Span]) -> (highlightPct: Double, shadowPct: Double)? {
+        var blown = 0, crushed = 0, n = 0
+        rgba.withUnsafeBufferPointer { src in
+            for s in spans {
+                for x in s.x0..<s.x1 {
+                    let i = (s.y * width + x) * 4
+                    let r = src[i], g = src[i + 1], b = src[i + 2]
+                    if min(r, min(g, b)) >= highlightClipValue { blown += 1 }
+                    if max(r, max(g, b)) <= shadowClipValue { crushed += 1 }
+                }
+                n += s.x1 - s.x0
+            }
+        }
+        guard n > 0 else { return nil }
+        return (Double(blown) / Double(n), Double(crushed) / Double(n))
+    }
+
+    /// 亮度（grayscale 的 0–255 口径）直方图，256 格。spans 为 nil = 整张。
+    static func lumaHistogram(gray: [Float], width: Int, height: Int, spans: [Span]? = nil) -> [Int] {
+        var hist = [Int](repeating: 0, count: 256)
+        let rows = spans ?? (0..<height).map { Span(y: $0, x0: 0, x1: width) }
+        gray.withUnsafeBufferPointer { g in
+            hist.withUnsafeMutableBufferPointer { h in
+                for s in rows {
+                    let row = s.y * width
+                    for x in s.x0..<s.x1 {
+                        let v = Int(g[row + x])
+                        h[v < 0 ? 0 : (v > 255 ? 255 : v)] += 1
+                    }
+                }
+            }
+        }
+        return hist
+    }
+
+    /// 直方图的分位点（0…1），落在哪一格就返回那一格的亮度。空直方图返回 nil。
+    static func percentile(_ hist: [Int], _ q: Double) -> Double? {
+        let total = hist.reduce(0, +)
+        guard total > 0 else { return nil }
+        let target = Int((Double(total) * q).rounded(.up))
+        var seen = 0
+        for (level, count) in hist.enumerated() {
+            seen += count
+            if seen >= max(1, target) { return Double(level) }
+        }
+        return 255
     }
 
     // MARK: - Perceptual hash

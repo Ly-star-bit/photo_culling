@@ -308,13 +308,15 @@ EXPOSURE_PROMPT = (
 )
 
 
-# Reject reason (substring, as the GUI writes them: 闭眼 / 虚焦 / 曝光裁切) →
-# the result key that answers that charge. The GUI clears a charge only when
-# its key is present, so "which charges still need asking" is decided here.
+# Reject reason (substring, as the GUI writes them: 闭眼 / 虚焦 / 曝光裁切 / 欠曝 /
+# 过曝) → the result key that answers that charge. The GUI clears a charge only
+# when its key is present, so "which charges still need asking" is decided here.
+# "曝" matches all three exposure charges: one EXPOSURE_PROMPT answer (deliberate
+# low-key / high-key / silhouette?) clears 曝光裁切, 欠曝 and 过曝 alike.
 APPEAL_CHARGES = [
     ("闭眼", "closed_eyes"),
     ("虚焦", "subject_sharp"),
-    ("曝光", "intentional_exposure"),
+    ("曝", "intentional_exposure"),
 ]
 
 

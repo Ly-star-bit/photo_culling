@@ -698,8 +698,7 @@ struct FaceAlignment {
 
         // 每个人本组睁得最开的 EAR（太小的脸 EAR 不可信，和判决层同一条线）。
         func usableEar(_ f: FaceInfo) -> Double? {
-            guard let ear = f.ear else { return nil }
-            if let area = f.areaPct, area < BatchStore.minEarFaceAreaPct { return nil }
+            guard let ear = f.ear, !BatchStore.earImmune(f) else { return nil }
             return ear
         }
         var bestEar = [Double?](repeating: nil, count: people)

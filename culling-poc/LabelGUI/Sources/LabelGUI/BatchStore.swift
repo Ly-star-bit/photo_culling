@@ -46,6 +46,8 @@ struct BatchItem: Identifiable {
     /// Fast full-res decode source (JPEG of a RAW+JPEG pair, else the file itself).
     let decodePath: String
     let sharpness: Double
+    /// 高光 / 暗部裁切里更糟的那个。新结果按主体区域（脸 → 头 + 上半身）算，老结果（analysis_version 1）
+    /// 只有整张的，就用整张的。
     let worstClipPct: Double
     /// Engine's absolute-threshold eye call — only a fallback for sessions
     /// analyzed by older builds. Current verdicts come from `dynamicEyeClosed`.
@@ -96,7 +98,7 @@ struct BatchItem: Identifiable {
     var take: Int = 0
     var verdict: Verdict = .usable
     var rejectReasons: [String] = []
-    /// Charges the VLM appeal cleared this photo of ("虚焦"/"闭眼"/"曝光裁切") —
+    /// Charges the VLM appeal cleared this photo of ("虚焦"/"闭眼"/"曝光裁切"/"欠曝"/"过曝") —
     /// shown as the 平反 badge so the photographer sees WHY it walked.
     var vlmRescued: [String] = []
     /// Burst-relative eye decision computed by applyThresholds (nil = no
@@ -106,6 +108,11 @@ struct BatchItem: Identifiable {
     var order: Int = 0
     /// JPEG 截断（读卡出错、拷贝中断，解出来缺的那截是灰的）：带「文件损坏」判废片，复审也不送。
     var fileCorrupt = false
+    /// 欠曝 / 过曝的依据（0–255 亮度）：主体脸的中位数（没有脸 = nil），整张的中位数和 p99。
+    /// 老版本分析的全是 nil = 不判。
+    var faceLuma: Double?
+    var frameLuma: Double?
+    var frameLumaP99: Double?
 
     /// Below the safety-shutter rule — motion blur likely; info badge, not a reject.
     var slowShutter: Bool { exif?.slowShutter ?? false }
@@ -254,7 +261,7 @@ final class BatchStore: ObservableObject {
     /// sharpness line than a studio day), so they live in the session dir and
     /// come back with it. They used to reset to the defaults on every launch:
     /// yesterday's 废片 count was different this morning and nobody knew why.
-    private struct ThresholdState: Codable {
+    struct ThresholdState: Codable {
         var sharpness: Double
         var exposure: Double
         var faceQuality: Double
@@ -269,12 +276,39 @@ final class BatchStore: ObservableObject {
 
     private func thresholdsPath(in dir: URL) -> URL { dir.appendingPathComponent("thresholds.json") }
 
+    nonisolated private static func readThresholds(_ dir: URL) -> ThresholdState? {
+        (try? Data(contentsOf: dir.appendingPathComponent("thresholds.json")))
+            .flatMap { try? JSONDecoder().decode(ThresholdState.self, from: $0) }
+    }
+
+    /// 什么都没设过时的默认 = 「标准」预设（以前是 45/0.15/0，不属于任何预设：第一次打开就显示「自定义」，
+    /// 连拍组内的人脸质量比较也不跑）。
+    nonisolated static let freshThresholds = ThresholdState(sharpness: 45, exposure: 0.15, faceQuality: 0.30, takeGap: nil)
+    /// 升级前的默认值。已经分析过、但从没存过阈值的老场次按它来，判决不因为升级悄悄变。
+    nonisolated static let legacyThresholds = ThresholdState(sharpness: 45, exposure: 0.15, faceQuality: 0, takeGap: nil)
+
+    /// 这一场的阈值。场次目录里还没有 thresholds.json 时当场定一份写进去，以后就按它（不再每次猜）：
+    /// 上次用的那份（数据目录里的）优先，和以前一样给新场次打底；没有的话，已经有分析结果的老场次用升级前
+    /// 的默认值，全新的场次用「标准」。命令行 --analyze 不经过 BatchStore，分析前也先调它，和界面一致。
+    @discardableResult
+    nonisolated static func sessionThresholds(sessionDir: URL, dataDir: URL) -> ThresholdState {
+        if let own = readThresholds(sessionDir) { return own }
+        let fm = FileManager.default
+        let analyzed = ["layer1_results.json", "manifest.json"].contains {
+            fm.fileExists(atPath: sessionDir.appendingPathComponent($0).path)
+        }
+        let state = readThresholds(dataDir) ?? (analyzed ? legacyThresholds : freshThresholds)
+        if let data = try? JSONEncoder().encode(state) {
+            try? data.write(to: sessionDir.appendingPathComponent("thresholds.json"), options: .atomic)
+        }
+        return state
+    }
+
     private func loadThresholds() {
-        let candidates = [thresholdsPath(in: sessionDir), thresholdsPath(in: dataDir)]
-        let state = candidates.lazy
-            .compactMap { try? Data(contentsOf: $0) }
-            .compactMap { try? JSONDecoder().decode(ThresholdState.self, from: $0) }
-            .first ?? ThresholdState(sharpness: 45, exposure: 0.15, faceQuality: 0, takeGap: nil)
+        // 没开文件夹（sessions/default）不落盘，和 scheduleThresholdSave 一样。
+        let state = photoDir != nil
+            ? Self.sessionThresholds(sessionDir: sessionDir, dataDir: dataDir)
+            : Self.readThresholds(dataDir) ?? Self.freshThresholds
         batchingThresholds = true
         sharpnessThreshold = state.sharpness
         exposureThreshold = state.exposure
@@ -846,7 +880,7 @@ final class BatchStore: ObservableObject {
                         "下面是上次分析的缓存结果，重新分析/导出/写 XMP 都会失败。"
         } else if previewsPruned {
             lastError = "这一场掉出了最近 15 场，预览图已清理省空间 (判决和人工改判都还在)。" +
-                        "点「重新分析」补回预览：没变的照片只重做预览，不改判决"
+                        "点「重新分析」补回预览：没变的照片只重做预览，人工改判不会动"
         }
         // Register a session that HAS cached results as soon as it's opened, not
         // just after an analysis: pruneOrphanedSessions clears the previews of
@@ -942,8 +976,9 @@ final class BatchStore: ObservableObject {
             && dir.lastPathComponent != "default"
             && !keep.contains(dir.lastPathComponent) {
             try? fm.removeItem(at: dir.appendingPathComponent("previews"))
-            // 什么都没剩（只打开过、从没分析过的空场次）才连目录一起删。
-            if (try? fm.contentsOfDirectory(atPath: dir.path))?.isEmpty == true {
+            // 什么都没剩（只打开过、从没分析过的空场次）才连目录一起删。打开时就写下的 thresholds.json 不算。
+            let left = (try? fm.contentsOfDirectory(atPath: dir.path))?.filter { $0 != "thresholds.json" }
+            if left?.isEmpty == true {
                 try? fm.removeItem(at: dir)
             }
         }
@@ -1361,7 +1396,7 @@ final class BatchStore: ObservableObject {
     }
 
     /// Canonical display order for reject-reason chips and slider kill-counts.
-    static let reasonOrder = ["文件损坏", "连拍重复", "闭眼", "虚焦", "曝光裁切", "人脸质量低", "VLM建议淘汰"]
+    static let reasonOrder = ["文件损坏", "连拍重复", "闭眼", "虚焦", "曝光裁切", "欠曝", "过曝", "人脸质量低", "VLM建议淘汰"]
 
     /// Within ±15% of any ACTIVE threshold — the photos a small slider nudge
     /// would flip either way.
@@ -1432,7 +1467,7 @@ final class BatchStore: ObservableObject {
             rawPath: a.rawPath,
             decodePath: a.decodePath,
             sharpness: a.sharpness,
-            worstClipPct: max(a.highlightClipPct, a.shadowClipPct),
+            worstClipPct: max(a.subjectHighlightClipPct, a.subjectShadowClipPct),
             eyeClosed: a.eyeClosed,
             faceQuality: a.faceQuality,
             faceCount: a.subjectFaceCount,
@@ -1455,7 +1490,10 @@ final class BatchStore: ObservableObject {
                            focal35: a.focal35, lens: a.lensModel),
             horizonDeg: a.horizonDeg,
             camera: a.cameraModel,
-            fileCorrupt: a.fileCorrupt
+            fileCorrupt: a.fileCorrupt,
+            faceLuma: a.faceLuma,
+            frameLuma: a.frameLuma,
+            frameLumaP99: a.frameLumaP99
         )
     }
 
@@ -1666,7 +1704,7 @@ final class BatchStore: ObservableObject {
     /// applyThresholds, which drops cleared charges and lets the photo walk.
     func runAppealOnRejects() {
         guard !isRunning, !items.isEmpty else { return }
-        // 文件损坏的不送：VLM 只能平反闭眼 / 虚焦 / 曝光，坏文件送去也平反不了，白跑。
+        // 文件损坏的不送：VLM 只能平反闭眼 / 虚焦 / 曝光（裁切、欠曝、过曝），坏文件送去也平反不了，白跑。
         let accused = items.filter { $0.verdict == .reject && overrides[$0.id] == nil
             && !$0.rejectReasons.isEmpty && !$0.fileCorrupt }
         guard !accused.isEmpty else {
@@ -1697,7 +1735,7 @@ final class BatchStore: ObservableObject {
             do {
                 try accused.map(\.id).joined(separator: "\n")
                     .write(to: idsFile, atomically: true, encoding: .utf8)
-                let reasons = Dictionary(uniqueKeysWithValues: accused.map { ($0.id, $0.rejectReasons) })
+                let reasons = Dictionary(uniqueKeysWithValues: accused.map { ($0.id, Self.appealCharges($0)) })
                 let json = try JSONSerialization.data(withJSONObject: reasons, options: [.sortedKeys])
                 try json.write(to: reasonsFile)
             } catch {
@@ -1877,7 +1915,8 @@ final class BatchStore: ObservableObject {
                 rawPath: photo.rawPath,
                 decodePath: photo.decodePath ?? photo.rawPath,
                 sharpness: sharpness,
-                worstClipPct: max(l1.highlightClipPct ?? 0, l1.shadowClipPct ?? 0),
+                worstClipPct: max(l1.subjectHighlightClipPct ?? l1.highlightClipPct ?? 0,
+                                  l1.subjectShadowClipPct ?? l1.shadowClipPct ?? 0),
                 eyeClosed: l1.eyeClosed,
                 faceQuality: l1.faceQuality,
                 faceCount: l1.faceCount ?? (l1.faceFound == true ? 1 : 0),
@@ -1900,6 +1939,9 @@ final class BatchStore: ObservableObject {
             item.order = index
             item.camera = photo.camera
             item.fileCorrupt = l1.fileCorrupt ?? false
+            item.faceLuma = l1.faceLuma
+            item.frameLuma = l1.frameLuma
+            item.frameLumaP99 = l1.frameLumaP99
             return item
         }
         Self.assignChapters(&loaded)
@@ -2263,7 +2305,16 @@ final class BatchStore: ObservableObject {
     /// floor of readable landmarks. NOT the plan's original 2%: on the real test
     /// set every normal environmental portrait sits at 0.4-1.5% area, so a 2%
     /// floor would have immunized ALL of them and killed eye detection outright.
-    static let minEarFaceAreaPct = 0.003
+    static let minEarFaceAreaPct = FaceAnalyzer.smallFaceAreaPct
+    /// 合影小脸在原图分辨率上重量过 EAR 的（earFullRes），免检线放到 0.05%：4000 万像素的原图上
+    /// 这么大的脸约 140px 见方，和 3072 分析图上 0.3% 的脸一样多像素（引擎那边按像素数把关）。
+    static let minFullResEarFaceAreaPct = 0.0005
+
+    /// 这张脸太小、眼睛读不准，闭眼判定跳过它。PickSession 的眯眼 / 最佳眼睛也用这一条。
+    static func earImmune(_ face: FaceInfo) -> Bool {
+        guard let area = face.areaPct else { return false }
+        return area < (face.earFullRes == true ? minFullResEarFaceAreaPct : minEarFaceAreaPct)
+    }
     /// Quality is judged group-relative too: suspect only when this far below
     /// the group's best FaceCaptureQuality (its designed use — ranking captures
     /// of the same subject). No global kill-line for grouped photos.
@@ -2274,10 +2325,47 @@ final class BatchStore: ObservableObject {
     /// EARs, or every face under the size floor).
     static func effectiveEar(_ item: BatchItem) -> Double? {
         item.faces.compactMap { face -> Double? in
-            guard let ear = face.ear else { return nil }
-            if let area = face.areaPct, area < minEarFaceAreaPct { return nil }
+            guard let ear = face.ear, !earImmune(face) else { return nil }
             return ear
         }.min()
+    }
+
+    /// 闭眼是合影小脸在原图上判出来的（earFullRes 的脸判了闭眼）：VLM 复审从 1024 的预览图裁脸，这种脸
+    /// 在预览上只有二三十像素宽，而且 layer2 不裁小于 0.3% 的脸，会退回去裁主脸 —— 主脸睁着眼就把整张
+    /// 放了。所以这条闭眼复审撤销不了，也不拿去问。要在 applyThresholds 之后看（faces 的 eyeClosed 是那里重算的）。
+    nonisolated static func eyesBeyondAppeal(_ item: BatchItem) -> Bool {
+        item.faces.contains { $0.earFullRes == true && $0.eyeClosed == true }
+    }
+
+    /// 写给 layer2 复审的罪名：合影小脸在原图上判的闭眼不问（问了也是看错脸），别的罪名照问。
+    nonisolated static func appealCharges(_ item: BatchItem) -> [String] {
+        guard eyesBeyondAppeal(item) else { return item.rejectReasons }
+        return item.rejectReasons.filter { $0 != "闭眼" }
+    }
+
+    // 整体欠曝 / 过曝：固定常数，不做滑杆。判断看脸，不看整张 —— 低调人像整张很暗、脸是正常的
+    // （DSCF7221：整张亮度中位数 47，脸 167）。但只看脸又会冤枉深肤色 / 背光里的正常片，所以欠曝还要
+    // 整张「没有一处是亮的」（p99 低）：闪光灯没闪那种是脸和整张一起黑。实测（photot 21 张；DSCF7207 / 7225
+    // 按线性光压暗）：脸 正常 134–180、-2EV 86–88、-3EV 61–62；整张 p99 正常 211–229、-2EV 116–120、
+    // -3EV 83–86。-2EV 及以内不判，-3EV 起判。
+    static let underexposedFaceLuma = 80.0
+    static let underexposedFrameP99 = 100.0
+    /// 没有脸时看整张中位数，线低得多 —— 没有脸，亮暗多半是画面内容不是曝光：正常亮度的桥景原片 152、
+    /// -2EV 79、-4EV 38；本来就暗的屋檐原片 44、-1EV 29（p99 115，靠 p99 那条放过）。
+    static let underexposedFrameLuma = 40.0
+    /// 脸的亮度中位数到这里皮肤就没层次了（+1EV 216–221、+1.5EV 239–243、+2EV 251–252）。只看有脸的：
+    /// 白色无缝背景的静物整张本来就在 245 上下，按整张判会误杀。
+    static let overexposedFaceLuma = 240.0
+
+    /// 「欠曝」/「过曝」/ nil。老版本分析的没有亮度数据，不判。
+    static func toneReason(_ item: BatchItem) -> String? {
+        guard let p99 = item.frameLumaP99 else { return nil }
+        if let face = item.faceLuma {
+            if face >= overexposedFaceLuma { return "过曝" }
+            return face < underexposedFaceLuma && p99 < underexposedFrameP99 ? "欠曝" : nil
+        }
+        guard let frame = item.frameLuma else { return nil }
+        return frame < underexposedFrameLuma && p99 < underexposedFrameP99 ? "欠曝" : nil
     }
 
     /// 景别 compensation for photos with no burst siblings: the slider value is
@@ -2359,15 +2447,15 @@ final class BatchStore: ObservableObject {
                 let face = updated[i].faces[f]
                 guard let ear = face.ear else { continue }
                 let closed: Bool?
-                if let area = face.areaPct, area < Self.minEarFaceAreaPct {
+                if Self.earImmune(face) {
                     closed = nil
                 } else {
                     closed = Self.eyeVerdict(ear: ear, groupBest: groupBestEar[group],
                                              groupEarCount: earCount)
                 }
                 if closed != face.eyeClosed {
-                    updated[i].faces[f] = FaceInfo(bbox: face.bbox, eyeClosed: closed,
-                                                   ear: face.ear, areaPct: face.areaPct)
+                    updated[i].faces[f] = FaceInfo(bbox: face.bbox, eyeClosed: closed, ear: face.ear,
+                                                   areaPct: face.areaPct, earFullRes: face.earFullRes)
                 }
             }
 
@@ -2376,6 +2464,7 @@ final class BatchStore: ObservableObject {
             if eyeClosed == true { reasons.append("闭眼") }
             if updated[i].sharpness < sharpnessThreshold { reasons.append("虚焦") }
             if updated[i].worstClipPct >= exposureThreshold { reasons.append("曝光裁切") }
+            if let tone = Self.toneReason(updated[i]) { reasons.append(tone) }
             if faceQualityThreshold > 0, let q = updated[i].faceQuality {
                 if (groupQCount[group] ?? 0) >= 2, let best = groupBestQ[group] {
                     // Burst siblings exist: only a clear intra-group loser is suspect.
@@ -2397,9 +2486,14 @@ final class BatchStore: ObservableObject {
                 reasons.removeAll { $0 == charge }
                 rescued.append(charge)
             }
-            clear("闭眼", when: updated[i].appealClosedEyes.map { !$0 })
+            if !Self.eyesBeyondAppeal(updated[i]) {
+                clear("闭眼", when: updated[i].appealClosedEyes.map { !$0 })
+            }
             clear("虚焦", when: updated[i].appealSubjectSharp)
             clear("曝光裁切", when: updated[i].appealIntentionalExposure)
+            // 欠曝 / 过曝问的是同一个问题（是不是刻意的低调 / 高调、剪影），答案一并清。
+            clear("欠曝", when: updated[i].appealIntentionalExposure)
+            clear("过曝", when: updated[i].appealIntentionalExposure)
             updated[i].vlmRescued = rescued
             updated[i].rejectReasons = reasons
 
