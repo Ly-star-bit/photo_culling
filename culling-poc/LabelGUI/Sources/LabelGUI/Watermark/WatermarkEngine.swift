@@ -203,10 +203,13 @@ enum WatermarkEngine {
 
     struct ExifTags {
         var values: [String: String] = [:]
+        /// 文件属性真的读到了（文件不在、打不开 = false）。values 空不等于没读到：截图、PNG 本来就没有 EXIF。
+        private(set) var readOK = false
 
         init(source: CGImageSource?) {
             guard let source,
                   let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return }
+            readOK = true
             let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
             let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
 
@@ -425,37 +428,9 @@ enum WatermarkEngine {
         ctx.scaleBy(x: 1, y: -1)
         drawImageTopLeft(ctx, base, CGRect(x: 0, y: 0, width: w, height: h))
 
-        var signatureSkipped = false
-        // 签名图
-        if config.signatureEnabled, let signature {
-            let targetW = targetWatermarkWidth(imgW: w, imgH: h, sizeRatio: config.sizeRatio)
-            let targetH = max(1, Int((Double(signature.height) * Double(targetW) / Double(signature.width)).rounded()))
-            let wm = preparedSignature(signature, width: targetW, height: targetH,
-                                       tint: config.tintEnabled ? config.tint : nil)
-
-            if config.tile.enabled {
-                drawTiled(ctx, wm, canvasW: w, canvasH: h, tile: config.tile, opacity: config.opacity)
-            } else if targetW <= w && targetH <= h {
-                let landscape = w >= h
-                let anchor = (landscape && config.landscapeOverrideEnabled)
-                    ? config.landscapeOverride : config.position
-                let origin = computePosition(imgW: w, imgH: h, wmW: targetW, wmH: targetH,
-                                             anchor: anchor,
-                                             marginX: config.marginX * scale,
-                                             marginY: config.marginY * scale)
-                ctx.saveGState()
-                ctx.setAlpha(config.opacity)
-                drawImageTopLeft(ctx, wm, CGRect(origin: origin, size: CGSize(width: targetW, height: targetH)))
-                ctx.restoreGState()
-            } else {
-                signatureSkipped = true
-            }
-        }
-
-        // EXIF 文字水印
-        if config.exifText.enabled {
-            drawExifText(ctx, config: config.exifText, tags: tags, imgW: w, imgH: h, scale: scale)
-        }
+        // 签名 + EXIF 文字（拼图里每格 / 整页画的也是这一段）
+        let signatureSkipped = drawMarks(in: ctx, width: w, height: h, signature: signature,
+                                         config: config, tags: tags, scale: scale)
 
         guard var composed = ctx.makeImage() else { return nil }
 
@@ -487,6 +462,108 @@ enum WatermarkEngine {
         return (w, h)
     }
 
+    // MARK: - 签名 + 文字（水印页整张图、拼图每格 / 整页共用）
+
+    /// 签名和文字各落在哪（区域左上原点）。平铺时 signature = nil、tiled = true；
+    /// 签名关了 / 没签名 / 比区域还大被跳过时 signature = nil、tiled = false。
+    /// text = 文字块（开了背景就是背景框），已裁到区域内；没开文字或字是空的 = nil。
+    struct MarkLayout {
+        var signature: CGRect?
+        var text: CGRect?
+        var tiled: Bool
+        /// 文字块本来要多大（最宽一行 + 内边距 × 2、总高；满宽时也只算字）。比区域大 = 字伸出去被裁了，
+        /// 拼图按它把字号缩到放得下。
+        var textSize: CGSize? = nil
+    }
+
+    /// 签名的目标尺寸和左上角；origin = nil：平铺（tiled）或放不下（跳过）。
+    private struct SignaturePlacement {
+        let width: Int
+        let height: Int
+        let origin: CGPoint?
+        let tiled: Bool
+    }
+
+    private static func placeSignature(width w: Int, height h: Int, signatureSize: CGSize,
+                                       config: Config, scale: CGFloat) -> SignaturePlacement {
+        let targetW = targetWatermarkWidth(imgW: w, imgH: h, sizeRatio: config.sizeRatio)
+        let targetH = max(1, Int((Double(signatureSize.height) * Double(targetW) / Double(signatureSize.width)).rounded()))
+        if config.tile.enabled {
+            return SignaturePlacement(width: targetW, height: targetH, origin: nil, tiled: true)
+        }
+        guard targetW <= w && targetH <= h else {
+            return SignaturePlacement(width: targetW, height: targetH, origin: nil, tiled: false)
+        }
+        let landscape = w >= h
+        let anchor = (landscape && config.landscapeOverrideEnabled)
+            ? config.landscapeOverride : config.position
+        let origin = computePosition(imgW: w, imgH: h, wmW: targetW, wmH: targetH,
+                                     anchor: anchor,
+                                     marginX: config.marginX * scale,
+                                     marginY: config.marginY * scale)
+        return SignaturePlacement(width: targetW, height: targetH, origin: origin, tiled: false)
+    }
+
+    /// 在 ctx 当前坐标系（左上原点、已翻转、原点 = 区域左上角）里画签名和文字；调用方负责平移和裁剪。
+    /// 返回 signatureSkipped。`scale` 同 compose：像素单位的边距乘它（拼图里边距已是区域像素，传 1）。
+    @discardableResult
+    static func drawMarks(in ctx: CGContext, width: Int, height: Int, signature: CGImage?, config: Config,
+                          tags: ExifTags, scale: CGFloat) -> Bool {
+        // drawExifText 会改 fill color：整段包起来，不漏给调用方后面的绘制。
+        ctx.saveGState()
+        defer { ctx.restoreGState() }
+
+        var signatureSkipped = false
+        // 签名图
+        if config.signatureEnabled, let signature {
+            let place = placeSignature(width: width, height: height,
+                                       signatureSize: CGSize(width: signature.width, height: signature.height),
+                                       config: config, scale: scale)
+            let wm = preparedSignature(signature, width: place.width, height: place.height,
+                                       tint: config.tintEnabled ? config.tint : nil)
+            if place.tiled {
+                drawTiled(ctx, wm, canvasW: width, canvasH: height, tile: config.tile, opacity: config.opacity)
+            } else if let origin = place.origin {
+                ctx.saveGState()
+                ctx.setAlpha(config.opacity)
+                drawImageTopLeft(ctx, wm, CGRect(origin: origin, size: CGSize(width: place.width, height: place.height)))
+                ctx.restoreGState()
+            } else {
+                signatureSkipped = true
+            }
+        }
+
+        // EXIF 文字水印
+        if config.exifText.enabled,
+           let text = layoutExifText(config: config.exifText, tags: tags, imgW: width, imgH: height, scale: scale) {
+            drawExifText(ctx, text, config: config.exifText, imgH: height)
+        }
+        return signatureSkipped
+    }
+
+    /// 只算位置不画（拼图的压字躲让、无头断言用），和 drawMarks 同一套计算。
+    /// `signatureSize` = 签名原图尺寸，nil = 没有签名。
+    static func layoutMarks(width: Int, height: Int, signatureSize: CGSize?, config: Config,
+                            tags: ExifTags, scale: CGFloat) -> MarkLayout {
+        var layout = MarkLayout(signature: nil, text: nil, tiled: false)
+        if config.signatureEnabled, let signatureSize, signatureSize.width > 0, signatureSize.height > 0 {
+            let place = placeSignature(width: width, height: height, signatureSize: signatureSize,
+                                       config: config, scale: scale)
+            layout.tiled = place.tiled
+            if let origin = place.origin {
+                layout.signature = CGRect(origin: origin, size: CGSize(width: place.width, height: place.height))
+            }
+        }
+        if config.exifText.enabled,
+           let text = layoutExifText(config: config.exifText, tags: tags, imgW: width, imgH: height, scale: scale) {
+            // 字比区域还宽时块会伸出去：画出来的只有区域里那部分。
+            let visible = text.block.intersection(CGRect(x: 0, y: 0, width: width, height: height))
+            layout.text = visible.isNull || visible.isEmpty ? nil : visible
+            layout.textSize = text.natural
+        }
+        return layout
+    }
+
     // MARK: - 签名处理
 
     /// 签名按目标尺寸缩放并着色后的小图，按 (原图, 尺寸, 颜色) 缓存。
@@ -501,7 +578,8 @@ enum WatermarkEngine {
     }
     private static var signatureCache: [PreparedSignature] = []
     private static let signatureCacheLock = NSLock()
-    private static let signatureCacheLimit = 8
+    /// 拼图里每格尺寸都不一样（一页十几格 × 每张照片层 + 整页层），8 个会来回抖。
+    private static let signatureCacheLimit = 48
 
     /// 非透明像素 RGB 替换为目标色，alpha 边缘保留（apply_tint 语义）：
     /// sourceIn 混合 = 用 alpha 蒙版填色。缩放与着色一次完成。
@@ -574,10 +652,26 @@ enum WatermarkEngine {
 
     // MARK: - EXIF 文字水印 (exif_text.rs)
 
-    private static func drawExifText(_ ctx: CGContext, config: ExifTextConfig, tags: ExifTags,
-                                     imgW: Int, imgH: Int, scale: CGFloat) {
+    /// 文字一次排版的结果：画的时候直接用，不再重新量字（layoutMarks 只取 block）。
+    private struct ExifTextLayout {
+        let lines: [CTLine]
+        let ascender: Double
+        let lineHeight: Double
+        let padding: Double
+        /// computePosition 给的块左上角（满宽时 x 不用它）。
+        let origin: CGPoint
+        /// 背景框（没开背景时 = 文字块），左上原点坐标。
+        let block: CGRect
+        let textX: Double
+        /// 最宽一行 + 内边距 × 2、总高（不管满宽）。
+        let natural: CGSize
+    }
+
+    /// 量字 + 定位；字是空的 = nil。
+    private static func layoutExifText(config: ExifTextConfig, tags: ExifTags,
+                                       imgW: Int, imgH: Int, scale: CGFloat) -> ExifTextLayout? {
         let text = config.customText.isEmpty ? tags.fillStripMissing(template: config.template) : config.customText
-        guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
 
         let longSide = Double(max(imgW, imgH))
         let fontSize = max(longSide * config.fontSizeRatio, 8.0)
@@ -603,17 +697,25 @@ enum WatermarkEngine {
                                      marginX: config.fullWidth ? 0 : config.marginX * scale,
                                      marginY: config.marginY * scale)
         let blockX = config.fullWidth ? 0 : origin.x
+        // full_width 时文字仍按 margin_x 缩进
+        let textX = config.fullWidth ? Double(config.marginX) * scale + padding : Double(origin.x) + padding
+        return ExifTextLayout(lines: ctLines.map(\.line), ascender: Double(font.ascender),
+                              lineHeight: Double(lineHeight), padding: padding, origin: origin,
+                              block: CGRect(x: blockX, y: origin.y, width: blockW, height: blockH),
+                              textX: textX, natural: CGSize(width: textW + padding * 2, height: blockH))
+    }
 
+    /// 按 layoutExifText 的结果画背景框和每一行。canvasH 传区域高度：drawCTLine 只在局部翻转，
+    /// ctx 外面平移过也没关系。
+    private static func drawExifText(_ ctx: CGContext, _ layout: ExifTextLayout, config: ExifTextConfig, imgH: Int) {
         if config.backgroundEnabled {
             ctx.setFillColor(config.backgroundColor.nsColor
                 .withAlphaComponent(config.backgroundAlpha).cgColor)
-            ctx.fill(CGRect(x: blockX, y: origin.y, width: blockW, height: blockH))
+            ctx.fill(layout.block)
         }
-        // full_width 时文字仍按 margin_x 缩进
-        let textX = config.fullWidth ? Double(config.marginX) * scale + padding : Double(origin.x) + padding
-        for (index, entry) in ctLines.enumerated() {
-            let baselineY = Double(origin.y) + padding + lineHeight * Double(index) + Double(font.ascender)
-            drawCTLine(ctx, entry.line, x: textX, baselineTopY: baselineY, canvasH: imgH)
+        for (index, line) in layout.lines.enumerated() {
+            let baselineY = Double(layout.origin.y) + layout.padding + layout.lineHeight * Double(index) + layout.ascender
+            drawCTLine(ctx, line, x: layout.textX, baselineTopY: baselineY, canvasH: imgH)
         }
     }
 

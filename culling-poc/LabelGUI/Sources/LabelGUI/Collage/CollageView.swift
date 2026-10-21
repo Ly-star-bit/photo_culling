@@ -6,13 +6,17 @@ import UniformTypeIdentifiers
 struct CollageView: View {
     @ObservedObject var store: CollageStore
     @ObservedObject var batchStore: BatchStore
+    /// 检视器「水印」页读水印页的签名、设置和预设；只在那一页里观察它（水印页预览一动，拼图页不跟着重算）。
+    let watermarkStore: WatermarkStore
     @State private var inspectorTab: CollageInspector.Tab
     @State private var autoCount = 6
     @State private var dedupeAlbum = true
 
-    init(store: CollageStore, batchStore: BatchStore, initialTab: CollageInspector.Tab = .layout) {
+    init(store: CollageStore, batchStore: BatchStore, watermarkStore: WatermarkStore,
+         initialTab: CollageInspector.Tab = .layout) {
         self.store = store
         self.batchStore = batchStore
+        self.watermarkStore = watermarkStore
         _inspectorTab = State(initialValue: initialTab)
     }
 
@@ -25,7 +29,7 @@ struct CollageView: View {
                     .frame(minWidth: 190, idealWidth: 230, maxWidth: 320)
                 CollageCanvasView(store: store) { inspectorTab = .text }
                     .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
-                CollageInspector(store: store, tab: $inspectorTab)
+                CollageInspector(store: store, watermarkStore: watermarkStore, tab: $inspectorTab)
                     .frame(minWidth: 300, idealWidth: 330, maxWidth: 380)
             }
             Divider()
@@ -172,7 +176,9 @@ struct CollageView: View {
             }
             Spacer()
             if let notice = store.notice {
+                // 一行放不下就截掉尾巴（悬停看全文），不把状态栏撑高。
                 Text(notice).font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.tail).help(notice)
             }
             if !store.progressText.isEmpty {
                 Text(store.progressText).font(.caption).foregroundStyle(.secondary)

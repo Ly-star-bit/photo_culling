@@ -113,6 +113,8 @@ swift build -c release
 # 下面两个会改写拼图工程和设置，必须指定临时数据目录（不设直接拒绝运行）:
 # 拼图编辑脚本(测试用): LABELGUI_DATA_DIR=/tmp/lg LabelGUI --collage-ops <照片文件夹> --ops "swap:00>11,move:010>11:left,lock:00,regen,undo" --out 目录
 # 拼图界面离屏快照(测试用): LABELGUI_DATA_DIR=/tmp/lg LabelGUI --collage-ui <照片文件夹> out.png [--album] [--tab 文字] [--light]
+#   只截检视器: --inspector-width 300；--ax-dump 打印滑杆 / 分段控件的值；--notice "提示文字" 截图前放一条状态栏提示
+# 水印页离屏快照(测试用): LABELGUI_DATA_DIR=/tmp/lg LabelGUI --watermark-ui <照片文件夹> out.png [--width 960] [--light] [--signature sig.png]
 ```
 
 ## 使用流程

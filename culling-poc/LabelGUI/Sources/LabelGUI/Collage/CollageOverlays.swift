@@ -94,20 +94,9 @@ enum CollageOverlays {
         text.alignV = .leading
 
         let sampled = meanLuminance(rect, grid: grid, mapper: mapper)
-        var lum = sampled ?? background.luminance
-        // 网格是调色前的亮度：套了色调（日系提亮、复古抬黑位）要按调完的亮度判深字浅字。
         // 字落在留白底色上（取不到照片）时不调：底色本身不过色调。
-        if sampled != nil, look != .none, lookStrength > 0 {
-            let m = CollageLooks.map(look, lum, lum, lum)
-            let after: Double = 0.2126 * m.0 + 0.7152 * m.1 + 0.0722 * m.2
-            lum += (after - lum) * min(1, lookStrength)
-        }
-        let light: Bool
-        switch overlay.tone {
-        case .auto: light = lum < 0.56
-        case .light: light = true
-        case .dark: light = false
-        }
+        let lum = sampled.map { graded($0, look: look, strength: lookStrength) } ?? background.luminance
+        let light = tone(lum, overlay.tone)
         text.lines = text.lines.map { line in
             var l = line
             l.color = toned(line.color, light: light)
@@ -133,13 +122,21 @@ enum CollageOverlays {
     private static let autoScales: [Double] = [1, 0.85, 0.72]
     private static let shrinkCost = 6.0
 
-    /// 自动字色：底下平均亮度 0.56 以下用浅字（和最后真正上色用同一条线）。
-    private static func tone(_ mean: Double, _ tone: CollageTone) -> Bool {
+    /// 自动字色：底下平均亮度 0.56 以下用浅字（和最后真正上色用同一条线；拼图水印的「自动深浅」也用它）。
+    static func tone(_ mean: Double, _ tone: CollageTone) -> Bool {
         switch tone {
         case .auto: return mean < 0.56
         case .light: return true
         case .dark: return false
         }
+    }
+
+    /// 网格是调色前的亮度：套了色调（日系提亮、复古抬黑位）要按调完的亮度判深浅。
+    static func graded(_ lum: Double, look: CollageLook, strength: Double) -> Double {
+        guard look != .none, strength > 0 else { return lum }
+        let m = CollageLooks.map(look, lum, lum, lum)
+        let after: Double = 0.2126 * m.0 + 0.7152 * m.1 + 0.0722 * m.2
+        return lum + (after - lum) * min(1, strength)
     }
 
     /// 字和底的对比度（WCAG 那种，1…21），按底下最不利的那一片算：浅字看底下偏亮的、深字看偏暗的。
@@ -375,7 +372,18 @@ enum CollageOverlays {
         let iw = Double(image.width)
         let ih = Double(image.height)
         let crop = CGRect(x: window.x * iw, y: window.y * ih, width: max(1, window.w * iw), height: max(1, window.h * ih)).integral
-        guard let piece = image.cropping(to: crop) else { return nil }
+        guard let piece = image.cropping(to: crop),
+              let g = grid(of: piece, window: CGRect(x: window.x, y: window.y, width: window.w, height: window.h))
+        else { return nil }
+        gridLock.lock()
+        if gridCache.count > 256 { gridCache.removeAll() }
+        gridCache[key] = g
+        gridLock.unlock()
+        return g
+    }
+
+    /// 一张图缩成 48×48 的亮度网格（不缓存，调用方自己缓存）。window = 这张图在照片坐标里是哪块。
+    static func grid(of piece: CGImage, window: CGRect) -> Grid? {
         let n = Grid.side
         var pixels = [UInt8](repeating: 0, count: n * n)
         let ok: Bool = pixels.withUnsafeMutableBytes { buf in
@@ -398,12 +406,7 @@ enum CollageOverlays {
                 grad[j * n + i] = abs(right - v) + abs(down - v)
             }
         }
-        let g = Grid(window: CGRect(x: window.x, y: window.y, width: window.w, height: window.h), lum: lum, grad: grad)
-        gridLock.lock()
-        if gridCache.count > 256 { gridCache.removeAll() }
-        gridCache[key] = g
-        gridLock.unlock()
-        return g
+        return Grid(window: window, lum: lum, grad: grad)
     }
 
     // MARK: - 预设：杂志小字层

@@ -2,16 +2,18 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
-/// 右侧检视器：版式 / 样式 / 文字 / 导出。所有改动都走 store 的方法（进撤销栈）。
+/// 右侧检视器：版式 / 样式 / 文字 / 水印 / 导出。所有改动都走 store 的方法（进撤销栈）。
 struct CollageInspector: View {
     enum Tab: String, CaseIterable {
         case layout = "版式"
         case style = "样式"
         case text = "文字"
+        case watermark = "水印"
         case export = "导出"
     }
 
     @ObservedObject var store: CollageStore
+    let watermarkStore: WatermarkStore
     @Binding var tab: Tab
 
     var body: some View {
@@ -29,6 +31,7 @@ struct CollageInspector: View {
                     case .layout: CollageLayoutPanel(store: store)
                     case .style: CollageStylePanel(store: store)
                     case .text: CollageTextPanel(store: store)
+                    case .watermark: CollageWatermarkPanel(store: store, watermarkStore: watermarkStore)
                     case .export: CollageExportPanel(store: store)
                     }
                 }
@@ -976,6 +979,7 @@ struct CollageExportPanel: View {
                     CollageSlider(label: "质量", value: $store.exportOptions.quality, range: 0.7...1,
                                   display: "\(Int(store.exportOptions.quality * 100))")
                 }
+                watermarkToggle
                 Text(summary).font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1012,6 +1016,29 @@ struct CollageExportPanel: View {
         .buttonStyle(.borderedProminent)
         .disabled(store.exportBlockedReason != nil)
         .help(store.exportBlockedReason ?? "⌘E")
+    }
+
+    /// 工程里开着水印层就显示（开关跟着这个拼图存，别的拼图不受影响）：关掉 = 导出一版干净的（预览照样显示
+    /// 水印，水印设置也不动）。关着的时候写一行，免得忘了。两层都关了就不显示（本来就没水印可带）。
+    @ViewBuilder
+    private var watermarkToggle: some View {
+        if Self.showsWatermarkToggle(store.project.watermark) {
+            Toggle("导出带水印", isOn: exportWatermarkBinding)
+                .help("只管这个拼图：关掉 = 导出不带水印的一版（预览里照样显示，右边「水印」里的设置不动）")
+            if store.project.watermark?.exportEnabled == false {
+                Text("这个拼图导出时不带水印（预览照常显示）")
+                    .font(.caption2).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// 导出页显示「导出带水印」开关：至少开着一层水印（--collage-ui --tab 导出 按同一个判断打印「导出面板」行）。
+    static func showsWatermarkToggle(_ wm: CollageWatermark?) -> Bool { wm?.anyLayerOn == true }
+
+    private var exportWatermarkBinding: Binding<Bool> {
+        Binding(get: { store.project.watermark?.exportEnabled ?? true },
+                set: { on in store.updateWatermark { $0.exportEnabled = on } })
     }
 
     private var summary: String {

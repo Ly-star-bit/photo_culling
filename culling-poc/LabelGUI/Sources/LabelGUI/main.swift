@@ -82,26 +82,44 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--analyze"),
 }
 
 // Headless watermark smoke test:
-// LabelGUI --watermark <photo> <out.jpg> [signature.png]
+// LabelGUI --watermark <photo> <out.jpg> [signature.png] [--config <config.json>]
 // Renders with EXIF text + frame enabled so the whole pipeline gets exercised.
+// --config：一份 WatermarkEngine.Config 的 JSON（文件路径，或以 { 开头的 JSON 原文），
+// 从 Config() 默认值起逐字段宽松解码，不再叠加上面那套硬编码；同一份 JSON 里的
+// maxLongSide/quality 等导出选项也认（ExportOptions 同样宽松解码）。回归逐字节对比用。
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--watermark"),
    CommandLine.arguments.count > flagIndex + 2 {
-    let photo = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])
-    let out = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 2])
+    let args = CommandLine.arguments
+    let photo = URL(fileURLWithPath: args[flagIndex + 1])
+    let out = URL(fileURLWithPath: args[flagIndex + 2])
     var signature: CGImage?
-    if CommandLine.arguments.count > flagIndex + 3 {
-        let sigURL = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 3])
+    // 第三个位置参数是 --config 之类的开关时，没有签名。
+    if args.count > flagIndex + 3, !args[flagIndex + 3].hasPrefix("--") {
+        let sigURL = URL(fileURLWithPath: args[flagIndex + 3])
         if let src = CGImageSourceCreateWithURL(sigURL as CFURL, nil) {
             signature = CGImageSourceCreateImageAtIndex(src, 0, nil)
         }
     }
     var config = WatermarkEngine.Config()
-    config.tintEnabled = true
-    config.tint = .white
-    config.exifText.enabled = true
-    config.frame.enabled = true
+    var options = WatermarkEngine.ExportOptions()
+    if let configIndex = args.firstIndex(of: "--config"), args.count > configIndex + 1 {
+        let arg = args[configIndex + 1]
+        let data = arg.hasPrefix("{") ? Data(arg.utf8) : try? Data(contentsOf: URL(fileURLWithPath: arg))
+        // 读不了 / 不是 JSON 对象就直接失败：悄悄退回默认配置会让对比测试空跑通过。
+        guard let data, let decoded = try? JSONDecoder().decode(WatermarkEngine.Config.self, from: data) else {
+            FileHandle.standardError.write("watermark: --config 读不了：\(arg)\n".data(using: .utf8)!)
+            exit(1)
+        }
+        config = decoded
+        options = (try? JSONDecoder().decode(WatermarkEngine.ExportOptions.self, from: data)) ?? options
+    } else {
+        config.tintEnabled = true
+        config.tint = .white
+        config.exifText.enabled = true
+        config.frame.enabled = true
+    }
     let ok = WatermarkEngine.exportPhoto(source: photo, to: out, signature: signature,
-                                         config: config, options: .init())
+                                         config: config, options: options)
     print(ok ? "watermark OK: \(out.path)" : "watermark FAILED")
     exit(ok ? 0 : 1)
 }
@@ -326,6 +344,15 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--collage-ui"),
    CommandLine.arguments.count > flagIndex + 2 {
     MainActor.assumeIsolated {
         CollageUISnapshot.run(flagIndex: flagIndex)
+    }
+}
+
+// 水印页离屏快照：LabelGUI --watermark-ui <photo_dir> <out.png> [--width 1100] [--light]（见 WatermarkSnapshot.swift）。
+// 和 --collage-ui 一样禁止激活、窗口从不显示。
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--watermark-ui"),
+   CommandLine.arguments.count > flagIndex + 2 {
+    MainActor.assumeIsolated {
+        WatermarkUISnapshot.run(flagIndex: flagIndex)
     }
 }
 

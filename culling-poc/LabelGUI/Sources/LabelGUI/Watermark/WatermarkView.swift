@@ -32,7 +32,8 @@ struct WatermarkView: View {
 
     // MARK: - 顶栏
 
-    private var topBar: some View {
+    /// 不是 private：离屏快照（--watermark-ui）单独量它的理想宽度。
+    var topBar: some View {
         HStack(spacing: 10) {
             Button("导入照片...") { pickPhotos() }
                 .keyboardShortcut("o", modifiers: .command)
@@ -58,6 +59,7 @@ struct WatermarkView: View {
                 .frame(maxWidth: 220)
             }
             .help(store.outputDir?.path ?? "选择导出目录")
+            collageButtons
             if store.isExporting {
                 Button("取消") { store.cancelExport() }
                     .buttonStyle(.bordered)
@@ -73,6 +75,27 @@ struct WatermarkView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.bar)
+    }
+
+    /// 带进拼图：带过去的是原图 + 水印设置，水印在拼图里实时画（换版式、换裁切都不会被裁掉）。
+    /// 相框、画布比例进不了拼图（会改画布尺寸），只开了它们时两个都灰掉。
+    @ViewBuilder
+    private var collageButtons: some View {
+        Menu("套到当前拼图") {
+            Button("每张照片都加") { store.requestCollage(.applyToCurrent(.photos)) }
+            Button("整张拼图加一个") { store.requestCollage(.applyToCurrent(.page)) }
+        }
+        .fixedSize()
+        .disabled(!store.canSendToCollage)
+        .help(store.collageBlockedReason ?? "只把现在的水印设置套到拼图页的当前拼图（照片不换）：每张照片各一个，或者整张拼图一个")
+        Button("拼图 (\(store.photos.count)) →") { store.requestCollage(.newCollage(store.photos)) }
+            .disabled(store.photos.isEmpty || !store.canSendToCollage)
+            .help(store.collageBlockedReason ?? collageHelp)
+    }
+
+    private var collageHelp: String {
+        "把列表里的原图带去拼图页排一版，每张都加水印：带过去的是原图 + 水印设置，水印在拼图里实时画在看得见的那块上，"
+            + "换版式、换裁切也不会被裁掉。一次最多排 \(CollageStore.handoffSingleLimit) 张（多的都进托盘，挑最好的先排）"
     }
 
     private var keeperCount: Int {
@@ -273,7 +296,7 @@ struct WatermarkView: View {
                         Text("平铺开启中：位置、边距、横构图位置不生效")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
-                    labeledSlider("大小", value: $store.config.sizeRatio, in: 0.03...0.6,
+                    labeledSlider("大小", value: $store.config.sizeRatio, in: CollageMarkLayer.sizeRange,
                                   display: "\(Int(store.config.sizeRatio * 100))%")
                     labeledSlider("不透明度", value: $store.config.opacity, in: 0.05...1,
                                   display: "\(Int(store.config.opacity * 100))%")
@@ -320,7 +343,7 @@ struct WatermarkView: View {
                     TextField("自定义文字 (留空则用模板)", text: $store.config.exifText.customText)
                         .font(.caption)
                     gridPicker(selection: $store.config.exifText.position)
-                    labeledSlider("字号", value: $store.config.exifText.fontSizeRatio, in: 0.01...0.08,
+                    labeledSlider("字号", value: $store.config.exifText.fontSizeRatio, in: CollageMarkText.fontSizeRange,
                                   display: String(format: "%.1f%%", store.config.exifText.fontSizeRatio * 100))
                     labeledSlider("不透明度", value: $store.config.exifText.opacity, in: 0.1...1,
                                   display: "\(Int(store.config.exifText.opacity * 100))%")

@@ -16,6 +16,40 @@ enum SnapshotPreview {
     @MainActor static var hoverID: String?
 }
 
+/// 离屏快照的辅助功能树（--ax-dump）：AppKit 那几样控件（滑杆、分段、输入框、菜单按钮）带着值和能不能点，
+/// 能按文字断言（滑杆的值是在滑杆范围里的比例：0 = 最左、1 = 最右）。SwiftUI 自己画的开关、文字不在树里。
+/// 走老的按属性名取值（AXRole、AXChildren…）：新的协议方法在没接辅助功能客户端时，SwiftUI 的宿主视图
+/// 不给子节点；按名字动态调，不引用已废弃的声明。
+enum SnapshotAX {
+    @MainActor
+    static func dump(_ root: NSView) {
+        let selector = NSSelectorFromString("accessibilityAttributeValue:")
+        func get(_ node: NSObject, _ attribute: String) -> Any? {
+            guard node.responds(to: selector) else { return nil }
+            return node.perform(selector, with: attribute)?.takeUnretainedValue()
+        }
+        func walk(_ node: NSObject, depth: Int) {
+            guard depth < 60 else { return }
+            let role = get(node, "AXRole").map { "\($0)" } ?? "?"
+            let name = [get(node, "AXDescription"), get(node, "AXTitle")]
+                .compactMap { $0 as? String }.filter { !$0.isEmpty }.joined(separator: "|")
+            var line = String(repeating: " ", count: depth) + role
+            if !name.isEmpty { line += " 「\(name)」" }
+            if let v = get(node, "AXValue") as? NSNumber {
+                line += String(format: " 值=%.4f", v.doubleValue)
+            } else if let v = get(node, "AXValue") as? String {
+                line += " 值=「\(v)」"
+            }
+            if (get(node, "AXEnabled") as? NSNumber)?.boolValue == false { line += " 灰" }
+            print("AX " + line)
+            for child in (get(node, "AXChildren") as? [Any]) ?? [] {
+                if let child = child as? NSObject { walk(child, depth: depth + 1) }
+            }
+        }
+        walk(root, depth: 0)
+    }
+}
+
 enum BatchUISnapshot {
     @MainActor
     static func run(flagIndex: Int, compare: Bool) -> Never {

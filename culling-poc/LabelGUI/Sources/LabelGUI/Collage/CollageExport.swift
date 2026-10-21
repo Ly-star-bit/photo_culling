@@ -79,21 +79,22 @@ enum CollageExport {
 
     /// 按整数边界切 rows×cols 块，阅读顺序（先行后列）。
     static func split(_ image: CGImage, rows: Int, cols: Int) -> [CGImage] {
-        let w = image.width
-        let h = image.height
-        var tiles: [CGImage] = []
+        tileRects(width: image.width, height: image.height, rows: rows, cols: cols).compactMap { image.cropping(to: $0) }
+    }
+
+    /// 切片的整数边界（阅读顺序）：导出切图和拼图整页水印「每片一个」共用，水印落在哪片和切出来的一致。
+    static func tileRects(width w: Int, height h: Int, rows: Int, cols: Int) -> [CGRect] {
+        var rects: [CGRect] = []
         for r in 0..<max(1, rows) {
             let y0 = Int((Double(h) * Double(r) / Double(rows)).rounded())
             let y1 = Int((Double(h) * Double(r + 1) / Double(rows)).rounded())
             for c in 0..<max(1, cols) {
                 let x0 = Int((Double(w) * Double(c) / Double(cols)).rounded())
                 let x1 = Int((Double(w) * Double(c + 1) / Double(cols)).rounded())
-                if let tile = image.cropping(to: CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)) {
-                    tiles.append(tile)
-                }
+                rects.append(CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0))
             }
         }
-        return tiles
+        return rects
     }
 
     // MARK: - PDF（相册印刷）

@@ -3,6 +3,33 @@ import SwiftUI
 import AppKit
 import ImageIO
 
+/// 水印页 → 拼图页：带过去的是原图 + 水印设置（拼图里实时画，换版式也不会被裁掉）。
+/// ContentView 收到后交给 CollageHandoff.fromWatermark。
+struct WatermarkCollageRequest: Equatable {
+    enum Action: Equatable {
+        /// 这些原图带进拼图排一版，每张加水印。
+        case newCollage([URL])
+        /// 只把设置套到当前拼图的某一层。
+        case applyToCurrent(CollageMarkLayerKind)
+    }
+
+    var action: Action
+    var config: WatermarkEngine.Config
+    var signatureURL: URL?
+    /// 水印页那张照片（转正后）的短边：像素边距按它折成比例。
+    var refShort: Double
+    var presetName: String?
+    /// 连点两次同样的请求也要各算一次（onChange 只认变化）。
+    var id = UUID()
+
+    /// 照片转正后的短边；读不了用 4000（常见相机短边的量级）。
+    static func refShort(of url: URL?) -> Double {
+        guard let url, let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let size = WatermarkEngine.uprightSize(of: source) else { return 4000 }
+        return Double(max(1, min(size.width, size.height)))
+    }
+}
+
 /// State for the 水印 tab: photo list, signature, live config, presets, and
 /// the batch export pipeline. Rendering itself lives in WatermarkEngine.
 @MainActor
@@ -33,6 +60,8 @@ final class WatermarkStore: ObservableObject {
     /// 下一次操作或几秒后自动清掉。
     @Published private(set) var notice: String?
     @Published var lastError: String?
+    /// 「拼图 (N) →」/「套到当前拼图」发出的请求；ContentView 接住后置 nil。
+    @Published var collageRequest: WatermarkCollageRequest?
 
     // MARK: - Private state
 
@@ -121,7 +150,26 @@ final class WatermarkStore: ObservableObject {
 
     /// 当前参数与哪个预设完全一致（有就打勾）。
     var activePresetName: String? {
+        Self.presetName(matching: config, in: presets)
+    }
+
+    static func presetName(matching config: WatermarkEngine.Config,
+                           in presets: [String: WatermarkEngine.Config]) -> String? {
         presets.keys.sorted().first { presets[$0] == config }
+    }
+
+    /// 能不能带进拼图：拼图只收签名和文字（相框、画布比例会改画布尺寸，进不了）。
+    var canSendToCollage: Bool {
+        (config.signatureEnabled && signatureImage != nil) || config.exifText.enabled
+    }
+
+    /// 带不进拼图的原因（按钮 tooltip）；nil = 能带。
+    var collageBlockedReason: String? {
+        guard !canSendToCollage else { return nil }
+        if config.frame.enabled || config.canvasRatio.enabled {
+            return "相框 / 画布比例进不了拼图（只在水印页单张导出时生效）—— 开签名或文字再带过去"
+        }
+        return "没有签名也没有文字 — 选签名图或启用文字"
     }
 
     // MARK: - 照片导入
@@ -426,6 +474,34 @@ final class WatermarkStore: ObservableObject {
         exportCancelled = true
         progressText = "正在取消导出..."
     }
+
+    // MARK: - 带进拼图
+
+    /// 组装请求交给拼图页：设置照当前的拍快照（之后改水印页不影响已带过去的）；refShort 按当前选中
+    /// （没有就第一张）照片的短边，像素边距折成比例后在拼图里每格成比例。
+    func requestCollage(_ action: WatermarkCollageRequest.Action) {
+        guard canSendToCollage else {
+            lastError = collageBlockedReason
+            return
+        }
+        collageRequest = makeCollageRequest(action)
+    }
+
+    /// 只拍快照、不发出去：拼图检视器「用水印页的设置」「预设 ▸」直接拿它套到当前拼图。`preset` = 用这个
+    /// 预设的设置（签名图还是水印页现在这张）；nil = 当前设置。签名读得出、签名开着才带签名。
+    func makeCollageRequest(_ action: WatermarkCollageRequest.Action,
+                            preset: String? = nil) -> WatermarkCollageRequest {
+        let presetConfig = preset.flatMap { presets[$0] }
+        let cfg = presetConfig ?? config
+        return WatermarkCollageRequest(
+            action: action, config: cfg,
+            signatureURL: cfg.signatureEnabled && signatureImage != nil ? signatureURL : nil,
+            refShort: WatermarkCollageRequest.refShort(of: selectedPhoto ?? photos.first),
+            presetName: presetConfig != nil ? preset : activePresetName)
+    }
+
+    /// 水印页现在有没有读得出的签名图（拼图检视器「用水印页的签名」用）。
+    var hasSignature: Bool { signatureImage != nil }
 
     // MARK: - 预设
 

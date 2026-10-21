@@ -3,6 +3,7 @@ import AppKit
 import PDFKit
 import CoreText
 import SwiftUI
+import CryptoKit
 
 /// 无头拼图：LabelGUI --collage <photo_dir> [选项]
 ///
@@ -575,8 +576,11 @@ enum CollageCLI {
 
 // MARK: - 界面离屏快照（不开 GUI：禁止激活、窗口从不显示）
 
-/// LabelGUI --collage-ui <photo_dir> <out.png> [--album] [--tab 版式|样式|文字|导出] [--select 路径如 10]
-/// [--crop] [--size 1440x900]
+/// LabelGUI --collage-ui <photo_dir> <out.png> [--album] [--tab 版式|样式|文字|水印|导出] [--select 路径如 10]
+/// [--crop] [--size 1440x900] [--adopt photos|page[:水印页预设名]] [--inspector-width 300] [--notice 提示文字]
+/// --inspector-width N：只截检视器、宽 N pt（高取 --size 的高）—— 窗口里检视器能拖到 300…380，
+/// 分栏视图给多宽外面定不准，单独截才能逐个宽度看有没有挤出去。
+/// --tab 水印 时另外打印面板上每层显示什么（「水印面板」行）；--ax-dump 打印辅助功能树（滑杆、分段、输入框）。
 /// 用和 app 一模一样的 CollageView 在离屏窗口里布局、渲染成 PNG —— 我不能打开界面，
 /// 用它看排布、控件有没有挤、画布叠加层对不对。
 enum CollageUISnapshot {
@@ -659,23 +663,40 @@ enum CollageUISnapshot {
         if let i = option("--select-item").flatMap(Int.init), store.items.indices.contains(i) {
             store.selectItem(store.items[i].id)
         }
+        // 检视器「水印」页读水印页的签名和预设：和 app 一样从同一个数据目录读。
+        let watermarkStore = WatermarkStore(dataDir: appDataDir)
+        // --adopt photos|page[:预设名]：走检视器「用水印页的设置 / 预设 ▸」同一条路把水印页设置套进来。
+        if let spec = option("--adopt") {
+            let parts = spec.split(separator: ":", maxSplits: 1).map(String.init)
+            if let kind = parts.first.flatMap(CollageMarkLayerKind.init(rawValue:)) {
+                let preset = parts.count > 1 ? parts[1] : nil
+                CollageHandoff.adopt(watermarkStore.makeCollageRequest(.applyToCurrent(kind), preset: preset),
+                                     layer: kind, into: store)
+                print("套用水印页设置 → \(kind.label)：" + (store.project.watermark?.summary ?? "无")
+                      + " · 提示：" + (store.notice ?? "无"))
+            }
+        }
         let tab: CollageInspector.Tab = CollageInspector.Tab.allCases.first { $0.rawValue == option("--tab") } ?? .layout
         let sizeParts = (option("--size") ?? "1440x900").split(separator: "x").compactMap { Double($0) }
         let size = NSSize(width: sizeParts.first ?? 1440, height: sizeParts.count > 1 ? sizeParts[1] : 900)
 
         // 离屏截图里 AppKit 面板底色会画成白的，深色模式的白字就看不见了：--light 用浅色看控件。
         let light = args.contains("--light")
-        let view = CollageSnapshotHost(store: store, batchStore: batch, tab: tab)
-            .frame(width: size.width, height: size.height)
+        let inspectorWidth = option("--inspector-width").flatMap(Double.init).map { CGFloat($0) }
+        let view = CollageSnapshotHost(store: store, batchStore: batch, watermarkStore: watermarkStore, tab: tab,
+                                       inspectorWidth: inspectorWidth)
+            .frame(width: inspectorWidth ?? size.width, height: size.height)
             .environment(\.colorScheme, light ? .light : .dark)
         let host = NSHostingView(rootView: view)
-        host.frame = NSRect(origin: .zero, size: size)
+        host.frame = NSRect(origin: .zero, size: NSSize(width: inspectorWidth ?? size.width, height: size.height))
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
         window.contentView = host
         host.layoutSubtreeIfNeeded()
         // 等备选缩略图、预览渲染、跨页缩略图都出来。
         spin(4)
+        // --notice <字>：状态栏提示（平常 5 秒就清掉，等不到截图）—— 截图前放上，核对长提示不把状态栏撑高。
+        if let text = option("--notice") { store.setNotice(text) }
         host.layoutSubtreeIfNeeded()
         spin(1.5)
         guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
@@ -690,7 +711,17 @@ enum CollageUISnapshot {
             print("写不出 \(out.path)")
             exit(1)
         }
-        print("界面快照 \(Int(size.width))x\(Int(size.height)) · 托盘 \(store.project.photos.count) 张 · \(store.project.pages.count) 页 · 备选 \(store.alternatives.count) · \(out.path)")
+        if tab == .watermark {
+            for line in CollageWatermarkPanel.describe(store) { print(line) }
+        }
+        if tab == .export {
+            let wm = store.project.watermark
+            let shown = CollageExportPanel.showsWatermarkToggle(wm)
+            print("导出面板 「导出带水印」" + (shown ? "显示" : "不显示")
+                  + (shown && wm?.exportEnabled == false ? " · 「这个拼图导出时不带水印」说明行" : ""))
+        }
+        if args.contains("--ax-dump") { SnapshotAX.dump(host) }
+        print("界面快照 \(Int(host.frame.width))x\(Int(size.height)) · 托盘 \(store.project.photos.count) 张 · \(store.project.pages.count) 页 · 备选 \(store.alternatives.count) · \(out.path)")
         exit(0)
     }
 }
@@ -699,12 +730,21 @@ enum CollageUISnapshot {
 private struct CollageSnapshotHost: View {
     let store: CollageStore
     let batchStore: BatchStore
+    let watermarkStore: WatermarkStore
     let tab: CollageInspector.Tab
+    /// 只截检视器（--inspector-width）。
+    let inspectorWidth: CGFloat?
 
     var body: some View {
         // 离屏没有窗口底色：不垫一层，透明处存成 PNG 是黑的，黑字就看不见了。
-        CollageView(store: store, batchStore: batchStore, initialTab: tab)
-            .background(Color(nsColor: .windowBackgroundColor))
+        Group {
+            if inspectorWidth != nil {
+                CollageInspector(store: store, watermarkStore: watermarkStore, tab: .constant(tab))
+            } else {
+                CollageView(store: store, batchStore: batchStore, watermarkStore: watermarkStore, initialTab: tab)
+            }
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }
 
@@ -717,6 +757,10 @@ private struct CollageSnapshotHost: View {
 /// 路径写成数字串（"10" = 根的第二个孩子的第一个孩子），根节点写 r；一步里的几个数用分号分（逗号分步）。
 /// 每步打印版式树、图层（~ 自动撒的，@7232 贴在那张相纸上）和撤销栈。出图不走导出：renderclean = 界面
 /// 预览同款，renderexport = 导出同款（成品尺寸带出血）。必须设 LABELGUI_DATA_DIR（起手会清托盘）。
+/// renderclean:<文件名>@0.3 按这个缩放出预览；bench:<次数>:<缩放> / benchdrag:<次数>:<缩放>[:<缝>] 量预览渲染耗时；
+/// exifprobe:<路径> 核对水印用的 EXIF 缓存。
+/// 水印：wm:photos:/sig.png、wmpos:photos:top_left、wmadopt:page:/水印页state.json、
+///     wmhandoff:/水印页state.json;/原图1;/原图2 …（全部见 CollageWatermarkCLI）。
 enum CollageOpsScript {
     @MainActor
     static func run(flagIndex: Int) -> Never {
@@ -744,7 +788,9 @@ enum CollageOpsScript {
         func idle() { spin(60) { !store.isSolving && store.busyText == nil } }
         func path(_ s: String) -> [Int] { s == "r" ? [] : s.compactMap { $0.wholeNumberValue } }
         func describe() -> String {
-            guard let root = store.root else { return "（空）" }
+            // 水印标签（没有就不加）：每步都看得出「接着拼，水印还在」。
+            let mark = store.project.watermark.map { "  ‖ 水印[\($0.summary)]" } ?? ""
+            guard let root = store.root else { return "（空）" + mark }
             let leaves = root.leafPaths().map { p -> String in
                 let cell = root.node(at: p)?.cell
                 var tag = cell?.kind == .text ? "文字" : (cell?.photoID.map { String($0.suffix(4)) } ?? "空")
@@ -777,16 +823,20 @@ enum CollageOpsScript {
             if store.isFreeform, let spec = store.page?.scatter { head += "[\(spec.frame.label)]" }
             if store.page?.gridRoot != nil { head += "(记着网格)" }
             if store.layoutStyle != store.effectiveLayoutStyle { head += "(偏好\(store.layoutStyle.label))" }
-            return head + (items.isEmpty ? "" : "  || 图层 " + items.joined(separator: " "))
+            return head + (items.isEmpty ? "" : "  || 图层 " + items.joined(separator: " ")) + mark
         }
         func itemID(_ s: String) -> UUID? {
             guard let i = Int(s), store.items.indices.contains(i) else { return nil }
             return store.items[i].id
         }
 
-        // 读回来的工程是什么画布（核对旧工程的容错解码 / 升级，下面马上会重置）。
+        // 读回来的工程是什么画布、带没带水印（核对旧工程的容错解码 / 升级、水印存盘，下面马上会重置）。
         let loaded = store.project.canvas
-        print("载入  \(loaded.name) \(loaded.width)x\(loaded.height) seams=\(loaded.seams.rawValue) · \(store.project.pages.count) 页")
+        let loadedMark = store.project.watermark.map { "水印[\($0.summary)]" } ?? "无水印"
+        // 「导出带水印」跟着拼图存：没有水印就无所谓开关（—）。
+        let loadedExport = store.project.watermark.map { $0.exportEnabled ? "开" : "关" } ?? "—"
+        print("载入  \(loaded.name) \(loaded.width)x\(loaded.height) seams=\(loaded.seams.rawValue) · \(store.project.pages.count) 页 · \(loadedMark) · 导出带水印 \(loadedExport)")
+        if let wm = store.project.watermark { print("  读回水印 " + CollageWatermarkCLI.json(wm)) }
 
         // 起手：单张 3:4、托盘 = 精选+可用，排一版（每次都从头来，脚本结果可复现）。
         store.clearTray()
@@ -796,6 +846,7 @@ enum CollageOpsScript {
         store.setStyle(CollageStyle())
         store.setTitle(option("--title") ?? "")
         store.setSubtitle(option("--subtitle") ?? "")
+        store.setWatermark(nil)
         store.importVerdicts(batch: batch, includeUsable: true)
         spin(20) { !store.project.photos.isEmpty && store.busyText == nil }
         store.solve(photoIDs: ["DSCF7232", "DSCF7208", "DSCF7222", "DSCF7215", "DSCF7212", "DSCF7214"]
@@ -970,6 +1021,18 @@ enum CollageOpsScript {
                 idle()
             case "untray":
                 store.removeFromTray(arg)
+            case "cleartray":
+                store.clearTray()
+            case "waittray":
+                // waittray:<张数>：等托盘里有这么多张（后台还在读的交接落下来了）再往下走，最多 60 秒。
+                guard let n = Int(arg) else { ok = false; break }
+                spin(60) { store.project.photos.count >= n }
+                idle()
+            case "spintray":
+                // spintray:<张数>：等托盘里有这么多张就往下走，不等排版 —— 交接排版还在算的时候改东西（撤销核对用）。
+                guard let n = Int(arg) else { ok = false; break }
+                spin(60) { store.project.photos.count >= n }
+                print("  托盘 \(store.project.photos.count) 张 · 排版" + (store.isSolving ? "还在算" : "已落下"))
             case "frombatch":
                 // 批量页多选「拼图 (N)」：frombatch:DSCF7209;DSCF7211（相册里应该新开一个跨页）。
                 store.importFromBatch(ids: arg.split(separator: ";").map(String.init), batch: batch, layout: true)
@@ -1020,6 +1083,16 @@ enum CollageOpsScript {
                         print("  「\(name)」缩略图 \(Int(img.size.width))x\(Int(img.size.height))")
                     }
                 }
+                // tplthumbs:前缀 = 每个模板缩略图存成 前缀_序号.png（序号按模板名排序；核对缩略图不画水印）。
+                if !arg.isEmpty {
+                    let names = store.templateThumbs.keys.sorted()
+                    for (i, name) in names.enumerated() {
+                        guard let cg = store.templateThumbs[name]?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { continue }
+                        try? CollageExport.write(cg, to: outDir.appendingPathComponent("\(arg)_\(i).png"), format: .png,
+                                                 quality: 1, dpi: 72)
+                    }
+                    print("  模板缩略图存了 \(names.count) 张 → \(arg)_*.png")
+                }
             case "altthumb":
                 // altthumb:序号=文件名：把第几个备选的缩略图存下来（核对和点下去的一致）。
                 let kv = arg.split(separator: "=", maxSplits: 1).map(String.init)
@@ -1029,6 +1102,92 @@ enum CollageOpsScript {
                     try? CollageExport.write(cg, to: outDir.appendingPathComponent(file + ".png"), format: .png,
                                              quality: 1, dpi: 72)
                     print("  备选缩略图 \(i) → \(file).png（共 \(store.alternativeThumbs.count) 个）")
+                } else { ok = false }
+            case "wm", "wmlayer", "wmpos", "wmsize", "wmopacity", "wmmargin", "wmtext", "wmtexton", "wmexif", "wmtile",
+                 "wmtiles", "wmsides", "wmskip", "exportwm", "wmcontrast", "wmmarginpref", "wmsigfile", "wmtextpos",
+                 "wmtextsize", "wmsig":
+                ok = CollageWatermarkCLI.apply(name, arg, store: store)
+            case "notice":
+                print("  提示: " + (store.notice ?? "无"))
+            case "wmdump":
+                // wmdump：整个水印的 JSON（核对关掉再打开恢复的是不是原来那份）。
+                print("  水印 " + (store.project.watermark.map(CollageWatermarkCLI.json) ?? "无"))
+            case "bench", "benchdrag":
+                // bench:<次数>:<缩放>：界面预览同款渲染（占位、不带出血、画水印）的耗时，先热两次缓存；
+                // benchdrag:<次数>:<缩放>[:<缝的路径>]：每帧把那条缝从 0.35 拖到 0.65 再渲染（= 拖缝）。
+                // 打印中位数 / p90（毫秒）：性能门禁拿水印开 / 关各跑一次比。
+                let bp = arg.split(separator: ":").map(String.init)
+                let frames = max(1, at(bp, 0).flatMap(Int.init) ?? 30)
+                let scale = at(bp, 1).flatMap(Double.init) ?? 0.3
+                let divider = path(at(bp, 2) ?? "r")
+                func timed() -> Double {
+                    guard let page = store.page else { return 0 }
+                    var opts = CollageRender.Options(scale: scale)
+                    opts.includeBleed = false
+                    opts.placeholders = true
+                    opts.watermark = true
+                    let t = Date()
+                    _ = CollageRender.render(page: page, project: store.project, hints: store.hints, options: opts)
+                    return Date().timeIntervalSince(t) * 1000
+                }
+                _ = timed()
+                _ = timed()
+                var times: [Double] = []
+                if name == "benchdrag" { store.beginContinuousEdit() }
+                for i in 0..<frames {
+                    if name == "benchdrag" { store.setRatio(0.35 + 0.3 * Double(i) / Double(frames), at: divider) }
+                    times.append(timed())
+                }
+                if name == "benchdrag" { store.endContinuousEdit() }
+                times.sort()
+                print(String(format: "  %@ 缩放 %.2f · %d 帧 · 中位 %.2f ms · p90 %.2f · 最慢 %.2f", name, scale, frames,
+                             times[frames / 2], times[min(frames - 1, Int(Double(frames) * 0.9))], times[frames - 1]))
+            case "exifprobe":
+                // exifprobe:<路径>（相对 --out 目录也行）：读一次水印用的 EXIF，打印读到几项、记没记进缓存
+                // （读不了的不能缓存：插上移动硬盘之后还得读得到）。
+                let file = arg.hasPrefix("/") ? arg : outDir.appendingPathComponent(arg).path
+                let values = CollageTypeset.exifValues(file)
+                print("  EXIF \(values.count) 项 · " + (CollageTypeset.exifCached(file) ? "缓存了" : "没缓存")
+                      + (values["model"].map { " · \($0)" } ?? ""))
+            case "digest":
+                // digest：整个工程（托盘、每页版式、水印）的指纹 —— 撤销之后核对「全都回去了」。
+                print("  工程指纹 " + CollageWatermarkCLI.digest(store.project)
+                      + " · 托盘 \(store.project.photos.count) 张 · \(store.project.pages.count) 页 · 第 \(store.pageIndex + 1) 页")
+            case "wmadopt":
+                // wmadopt:<photos|page>:<水印页 state.json>：「套到当前拼图」（和界面同一个交接函数）。
+                if let (k, file) = pair(arg, ":"), let kind = CollageMarkLayerKind(rawValue: k) {
+                    let refShort = store.project.photos.first.map { Double(min($0.width, $0.height)) } ?? 4000
+                    if let req = CollageWatermarkCLI.request(.applyToCurrent(kind), state: file, refShort: refShort) {
+                        let before = store.notice
+                        CollageHandoff.fromWatermark(req, batch: batch, collage: store)
+                        let notice = store.notice.flatMap { $0 == before ? nil : $0 }
+                        CollageWatermarkCLI.report(store, refShort: refShort, notices: notice.map { [$0] } ?? [])
+                    } else { ok = false }
+                } else { ok = false }
+            case "wmhandoff", "wmhandoffnowait":
+                // wmhandoff:<水印页 state.json>;<原图1>;<原图2>…：水印页「拼图 (N) →」（和界面同一个交接函数）。
+                // wmhandoffnowait：发起就走、不等照片读完（核对读照片期间又交接 / 手动改水印）；之后用 wait 等。
+                let parts = arg.split(separator: ";").map(String.init)
+                let urls = parts.dropFirst().map { URL(fileURLWithPath: $0) }
+                let refShort = WatermarkCollageRequest.refShort(of: urls.first)
+                if name == "wmhandoffnowait", let file = at(parts, 0),
+                   let req = CollageWatermarkCLI.request(.newCollage(urls), state: file, refShort: refShort) {
+                    CollageHandoff.fromWatermark(req, batch: batch, collage: store)
+                    print("  交接已发起（不等）：\(urls.count) 张")
+                } else if name == "wmhandoff", let file = at(parts, 0),
+                   let req = CollageWatermarkCLI.request(.newCollage(urls), state: file, refShort: refShort) {
+                    // 提示一个槽、5 秒就清：边等边记下新出现的每一条（上一步留下的不算）。
+                    var last = store.notice
+                    var notices: [String] = []
+                    func watch() {
+                        guard let n = store.notice, n != last else { return }
+                        notices.append(n)
+                        last = n
+                    }
+                    CollageHandoff.fromWatermark(req, batch: batch, collage: store)
+                    spin(30) { watch(); return store.busyText == nil }
+                    spin(60) { watch(); return !store.isSolving && store.busyText == nil }
+                    CollageWatermarkCLI.report(store, refShort: refShort, notices: notices)
                 } else { ok = false }
             case "undo":
                 store.undo()
@@ -1092,18 +1251,40 @@ enum CollageOpsScript {
             case "render", "renderclean", "renderexport":
                 // render = 半尺寸 + 调试框；renderclean = 和界面预览一样（占位、不带出血）；
                 // renderexport = 和导出一样（成品尺寸、带出血、不画占位）。
-                var opts = CollageRender.Options(scale: name == "renderexport" ? 1 : 0.5)
+                // renderclean:<文件名>@0.3：按这个缩放出预览（界面预览的缩放跟着窗口大小变，常见 0.3 左右）。
+                let sep = name == "renderclean" ? arg.lastIndex(of: "@") : nil
+                let previewScale = sep.flatMap { Double(arg[arg.index(after: $0)...]) }
+                let file = previewScale == nil ? arg : String(arg[..<(sep ?? arg.endIndex)])
+                var opts = CollageRender.Options(scale: name == "renderexport" ? 1 : previewScale ?? 0.5)
                 opts.includeBleed = name == "renderexport"
                 opts.debug = name == "render"
                 opts.placeholders = name == "renderclean"
                 opts.export = name == "renderexport"
+                // 水印：renderclean 同预览（一直画），renderexport 同导出（看这个拼图的「导出带水印」）；调试图不画。
+                let exportMarks = store.project.watermark?.exportEnabled ?? true
+                opts.watermark = name == "renderclean" || (name == "renderexport" && exportMarks)
+                let report = CollageRender.RenderReport()
+                opts.report = report
                 if let page = store.page,
                    let image = CollageRender.render(page: page, project: store.project, hints: store.hints, options: opts) {
-                    let url = outDir.appendingPathComponent(arg + ".jpg")
-                    try? CollageExport.write(image, to: url, format: .jpeg, quality: 0.85, dpi: 72)
+                    // 名字以 .png 结尾就存 PNG（逐像素核对水印用：JPEG 会把差异抹到整个 8×8 块）。
+                    let png = file.hasSuffix(".png")
+                    let url = outDir.appendingPathComponent(png ? file : file + ".jpg")
+                    try? CollageExport.write(image, to: url, format: png ? .png : .jpeg, quality: 0.85, dpi: 72)
                     let vars = CollageTypeset.variables(project: store.project, root: page.root, photos: store.photoMap,
                                                         pagePhotoIDs: page.photoIDs, pageID: page.id)
                     print("  出图 \(url.lastPathComponent) · 第 \(store.pageIndex + 1)/\(store.project.pages.count) 页 · {no}=\(vars["no"] ?? "")")
+                    // 导出完会弹的提示（同一个函数）：格子空着、签名图找不到……
+                    if name == "renderexport", let warning = CollageStore.exportWarning(
+                        missing: report.missing, lowRes: report.lowRes, signatureLost: CollageStore.signatureLost(report)) {
+                        print("  导出提示: " + warning)
+                    }
+                    if name != "render", store.project.watermark != nil {
+                        print("  " + CollageWatermarkCLI.marksSummary(report.marks))
+                        let stem = png ? String(file.dropLast(4)) : file
+                        CollageWatermarkCLI.writeMarks(report.marks, image: image, opts: opts, project: store.project,
+                                                       page: page, to: outDir.appendingPathComponent(stem + ".marks.json"))
+                    }
                 }
             default:
                 print("未知操作 \(op)")
@@ -1121,5 +1302,267 @@ enum CollageOpsScript {
         }
         store.flushSaves()
         exit(0)
+    }
+}
+
+// MARK: - 水印 op（--collage-ops）
+
+/// --collage-ops 里改拼图水印的 op（<层> = photos | page）：
+///   wm:<层>[:签名.png]（打开这一层，默认值；给了路径就导入签名）· wm:off（整个关掉）
+///   wmlayer:<层>:off|on（同检视器的开关：关掉记下设置，再开恢复）
+///   wmpos:<层>:bottom_right 等 · wmsize:<层>:0.15 · wmopacity:<层>:0.8 · wmmargin:<层>:0.02
+///   wmtext:<层>:<文字>（空 = 关文字，同检视器的开关会记下原来的字；逗号是分步符，文字里不能带）
+///   wmtexton:<层>（同检视器打开「文字」：恢复关掉前的字）· wmexif:<层>（用 EXIF 模板）· wmtile:<层>:on|off
+///   wmtextpos:<层>:<bottom_left 等 raw>（字的位置）· wmtextsize:<层>:<0.03>（字号 × 区域长边）
+///   wmsig:<层>:on|off（同检视器的「签名」勾选框：关掉只画字，签名的设置还记着）
+///   wmtiles:each|once · wmsides:right|both · wmskip:<照片 id>（切换）· exportwm:on|off（这个拼图导出带不带）
+///   wmcontrast:<层>:original|auto|light|dark · wmmarginpref:<层>:on|off（整页层优先放留白）
+///   wmsigfile:<路径>[;<sha1>]（直接改签名记录：核对签名文件找不到时的退路和提示）
+/// 每个 op 一步撤销（不合并连续调整），脚本按撤销栈深度核对。
+@MainActor
+enum CollageWatermarkCLI {
+
+    static func apply(_ name: String, _ arg: String, store: CollageStore) -> Bool {
+        let kv = arg.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+        let kind = kv.first.flatMap(CollageMarkLayerKind.init(rawValue:))
+        let value = kv.count > 1 ? kv[1] : ""
+        switch name {
+        case "wm":
+            if arg == "off" {
+                store.setWatermark(nil)
+                return true
+            }
+            guard let kind else { return false }
+            var signature: CollageSignature?
+            if !value.isEmpty {
+                guard let sig = store.importSignature(from: URL(fileURLWithPath: value)) else { return false }
+                signature = sig
+            }
+            store.updateWatermark { wm in
+                if wm.layer(kind) == nil { wm.setLayer(kind, CollageMarkLayer()) }
+                if let signature { wm.signature = signature }
+            }
+        case "wmlayer":
+            guard let kind, value == "off" || value == "on", store.project.watermark != nil else { return false }
+            store.setMarkLayer(kind, on: value == "on")
+        case "wmpos":
+            guard let pos = WatermarkEngine.GridPosition(rawValue: value) else { return false }
+            return edit(kind, store) { $0.position = pos }
+        case "wmsize":
+            guard let v = Double(value) else { return false }
+            return edit(kind, store) { $0.sizeRatio = min(1, max(0.01, v)) }
+        case "wmopacity":
+            guard let v = Double(value) else { return false }
+            return edit(kind, store) { $0.opacity = min(1, max(0, v)) }
+        case "wmmargin":
+            guard let v = Double(value) else { return false }
+            return edit(kind, store) { $0.marginRatio = min(0.2, max(0, v)) }
+        case "wmtext":
+            guard !value.isEmpty else {
+                guard let kind, store.project.watermark?.layer(kind) != nil else { return false }
+                store.setMarkText(kind, on: false)
+                return true
+            }
+            return edit(kind, store) { layer in
+                var t = layer.text ?? CollageMarkText()
+                t.customText = value
+                layer.text = t
+            }
+        case "wmtexton":
+            guard let kind, store.project.watermark?.layer(kind) != nil else { return false }
+            store.setMarkText(kind, on: true)
+        case "wmexif":
+            return edit(kind, store) { layer in
+                var t = layer.text ?? CollageMarkText()
+                t.customText = ""
+                layer.text = t
+            }
+        case "wmtextpos":
+            guard let pos = WatermarkEngine.GridPosition(rawValue: value),
+                  let kind, store.project.watermark?.layer(kind)?.text != nil else { return false }
+            return edit(kind, store) { $0.text?.position = pos }
+        case "wmtextsize":
+            guard let v = Double(value), let kind, store.project.watermark?.layer(kind)?.text != nil else { return false }
+            return edit(kind, store) { $0.text?.fontSizeRatio = min(0.2, max(0.001, v)) }
+        case "wmsig":
+            guard value == "on" || value == "off" else { return false }
+            return edit(kind, store) { $0.signatureOn = value == "on" }
+        case "wmtile":
+            guard value == "on" || value == "off" else { return false }
+            return edit(kind, store) { $0.tile = value == "on" ? ($0.tile ?? CollageMarkTile()) : nil }
+        case "wmtiles":
+            guard let tiles = ["each": CollageMarkTiles.eachTile, "once": .once][arg] else { return false }
+            store.updateWatermark { $0.tiles = tiles }
+        case "wmsides":
+            guard let sides = CollageMarkSides(rawValue: arg) else { return false }
+            store.updateWatermark { $0.albumSides = sides }
+        case "wmskip":
+            guard !arg.isEmpty else { return false }
+            store.updateWatermark { wm in
+                if wm.skipPhotoIDs.remove(arg) == nil { wm.skipPhotoIDs.insert(arg) }
+            }
+        case "exportwm":
+            // 跟着拼图存（一步撤销）；没有水印就无所谓带不带。
+            guard arg == "on" || arg == "off", store.project.watermark != nil else { return false }
+            store.updateWatermark { $0.exportEnabled = arg == "on" }
+        case "wmcontrast":
+            guard let contrast = CollageMarkContrast(rawValue: value) else { return false }
+            return edit(kind, store) { $0.contrast = contrast }
+        case "wmmarginpref":
+            guard value == "on" || value == "off" else { return false }
+            return edit(kind, store) { $0.preferMargin = value == "on" }
+        case "wmsigfile":
+            // wmsigfile:<路径>[;<sha1>]：直接改签名记录（核对存的路径没了时按 sha1 找副本、都找不到时的提示）。
+            let fk = arg.split(separator: ";", maxSplits: 1).map(String.init)
+            guard let file = fk.first, store.project.watermark?.signature != nil else { return false }
+            store.updateWatermark { wm in
+                wm.signature?.file = file
+                if fk.count > 1 { wm.signature?.key = fk[1] }
+            }
+        default:
+            return false
+        }
+        return true
+    }
+
+    /// 改已经开着的一层；没开（或层名写错）= 参数不对。
+    private static func edit(_ kind: CollageMarkLayerKind?, _ store: CollageStore,
+                             _ body: (inout CollageMarkLayer) -> Void) -> Bool {
+        guard let kind, store.project.watermark?.layer(kind) != nil else { return false }
+        store.updateWatermark { wm in
+            guard var layer = wm.layer(kind) else { return }
+            body(&layer)
+            wm.setLayer(kind, layer)
+        }
+        return true
+    }
+
+    /// 水印页的 state.json → 交接请求（和水印页 requestCollage 一样：签名文件在、开着签名才带）。
+    static func request(_ action: WatermarkCollageRequest.Action, state path: String,
+                        refShort: Double) -> WatermarkCollageRequest? {
+        guard let data = FileManager.default.contents(atPath: path),
+              let state = try? JSONDecoder().decode(WatermarkStore.PersistState.self, from: data) else {
+            print("  读不了水印页设置 \(path)")
+            return nil
+        }
+        let signature = state.signaturePath.flatMap {
+            FileManager.default.fileExists(atPath: $0) ? URL(fileURLWithPath: $0) : nil
+        }
+        return WatermarkCollageRequest(action: action, config: state.config,
+                                       signatureURL: state.config.signatureEnabled ? signature : nil,
+                                       refShort: refShort,
+                                       presetName: WatermarkStore.presetName(matching: state.config, in: state.presets))
+    }
+
+    /// 交接之后：托盘里的完整 id、每层换算出的比例、换回引擎的设置、签名副本、出现过的提示。
+    static func report(_ store: CollageStore, refShort: Double, notices: [String]) {
+        print(String(format: "  refShort %.0f · 托盘 ", refShort) + store.project.photos.map(\.id).joined(separator: " "))
+        if let wm = store.project.watermark {
+            for kind in CollageMarkLayerKind.allCases {
+                guard let layer = wm.layer(kind) else { continue }
+                print("  \(kind.label): " + detail(layer))
+                let ec = layer.engineConfig(areaShort: 1000)
+                print(String(format: "    → 引擎（区域短边 1000）: 签名边距 %.1fpx 文字边距 %.1fpx 相框%@ 画布比例%@",
+                             ec.marginX, ec.exifText.marginX, ec.frame.enabled ? "开" : "关",
+                             ec.canvasRatio.enabled ? "开" : "关"))
+            }
+            if let s = wm.signature {
+                let exists = FileManager.default.fileExists(atPath: s.file)
+                print("  签名 \(s.sourceName) sha1 \(s.key) 副本\(exists ? "在" : "不在") \(s.file)")
+            }
+        } else {
+            print("  水印: 无")
+        }
+        print("  提示: " + (notices.isEmpty ? "无" : notices.joined(separator: " → ")))
+    }
+
+    private static func detail(_ l: CollageMarkLayer) -> String {
+        var s = String(format: "签名%@ %@ 大小 %.3f 不透明 %.2f 边距 %.4f", l.signatureOn ? "开" : "关",
+                       l.position.rawValue, l.sizeRatio, l.opacity, l.marginRatio)
+        if let p = l.landscapePosition { s += " 横向区域 \(p.rawValue)" }
+        if let t = l.tint { s += String(format: " 着色 %.2f,%.2f,%.2f", t.r, t.g, t.b) }
+        if let t = l.tile { s += String(format: " 平铺 %.0f° 间距 %.2f", t.angleDeg, t.gapRatio) }
+        if let t = l.text {
+            s += String(format: " 字[%@ %@ 字号 %.3f 边距 %.4f]", t.customText.isEmpty ? "EXIF" : t.customText,
+                        t.position.rawValue, t.fontSizeRatio, t.marginRatio)
+        }
+        if let p = l.presetName { s += " 预设「\(p)」" }
+        if l.contrast != .original { s += " 深浅 \(l.contrast.rawValue)" }
+        if !l.preferMargin { s += " 不进留白" }
+        return s
+    }
+
+    /// 出图后的一行：「水印 N 个：photo@01 (x,y,w,h) … · 跳过 k（原因）」（成品坐标，未缩放、不含出血）。
+    static func marksSummary(_ marks: [CollageRender.MarkRecord]) -> String {
+        let drawn = marks.filter { $0.rect != nil }
+        let items = drawn.map { m -> String in
+            let r = m.rect ?? .zero
+            let kind = m.kind == "text" ? "字" : (m.kind == "tile" ? "平铺" : "")
+            // 只标和默认不一样的：放进了留白、深浅选成了白 / 黑。
+            let tone = m.contrast == "light" ? "白" : (m.contrast == "dark" ? "黑" : "")
+            let flag = (m.skipped.map { "[\($0)]" } ?? "") + (m.inMargin ? "[留白]" : "") + (tone.isEmpty ? "" : "[\(tone)]")
+            return String(format: "%@@%@%@ (%.0f,%.0f,%.0f,%.0f)%@", m.layer, m.owner, kind, r.minX, r.minY,
+                          r.width, r.height, flag)
+        }
+        let skipped = marks.filter { $0.rect == nil }
+        var s = "水印 \(drawn.count) 个：" + (items.isEmpty ? "无" : items.joined(separator: " "))
+        if !skipped.isEmpty {
+            let reasons = Dictionary(grouping: skipped, by: { $0.skipped ?? "?" })
+                .map { "\($0.key)×\($0.value.count)" }.sorted().joined(separator: " ")
+            s += " · 跳过 \(skipped.count)（\(reasons)）"
+        }
+        return s
+    }
+
+    /// report.marks → JSON（断言脚本读）：rect / region = [x, y, w, h]（成品坐标），外加这次出图的缩放、出血，
+    /// 和画布的尺寸、安全区、切带、外边距，整页水印进留白时要躲的东西（obstacles），脚本不用再猜。
+    static func writeMarks(_ marks: [CollageRender.MarkRecord], image: CGImage, opts: CollageRender.Options,
+                           project: CollageProject, page: CollagePage, to url: URL) {
+        func arr(_ r: CGRect?) -> Any { r.map { [Double($0.minX), Double($0.minY), Double($0.width), Double($0.height)] } ?? NSNull() }
+        let list: [[String: Any]] = marks.map { m in
+            ["layer": m.layer, "owner": m.owner, "kind": m.kind ?? NSNull(), "rect": arr(m.rect),
+             "region": arr(m.region), "skipped": m.skipped ?? NSNull(), "cell": arr(m.cell),
+             "visible": arr(m.visible), "shape": m.shape ?? NSNull(), "avoid": arr(m.avoid),
+             "font": m.font ?? NSNull(), "contrast": m.contrast ?? NSNull(), "inMargin": m.inMargin,
+             "local": m.local.map { [Double($0.width), Double($0.height)] } ?? NSNull(),
+             "corners": m.corners.map { $0.map { [Double($0.x), Double($0.y)] } } ?? NSNull()]
+        }
+        // 页上图层按画的顺序（后面的压在前面的上面）：转过之后的四个角、导出里印不印。
+        var photos: [String: CollagePhotoRef] = [:]
+        for p in project.photos where photos[p.id] == nil { photos[p.id] = p }
+        let skip = CollageItems.unprinted(page.items, photos: photos)
+        let items: [[String: Any]] = page.items.map { it in
+            ["kind": it.kind.rawValue, "printed": !skip.contains(it.id),
+             "corners": CollageItems.corners(it, canvas: project.canvas).map { [Double($0.x), Double($0.y)] }]
+        }
+        let c = project.canvas
+        let canvas: [String: Any] = ["width": c.width, "height": c.height, "bleed": c.bleed, "safe": c.safe,
+                                     "dpi": c.dpi, "corner": project.style.corner, "margin": project.style.margin,
+                                     "seams": c.seams.rawValue, "slides": c.slides, "binding": c.binding.rawValue,
+                                     "seamBands": CollageLayout.seamLines(c).map { arr($0) }]
+        let frames = CollageLayout.geometry(page.root, in: CollageLayout.contentRect(canvas: c, style: project.style),
+                                            gutter: CollageLayout.gutterPixels(canvas: c, style: project.style)).frames
+        let obstacles = CollageWatermarks.obstacles(page: page, frames: frames, canvas: c).map { arr($0) }
+        let obj: [String: Any] = ["scale": opts.scale, "includeBleed": opts.includeBleed, "watermark": opts.watermark,
+                                  "image": [image.width, image.height], "canvas": canvas, "marks": list,
+                                  "obstacles": obstacles, "items": items]
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? data.write(to: url)
+    }
+
+    /// 整个工程的指纹（键排序的 JSON 取 sha1 前 12 位）：同一次运行里撤销前后比对。
+    static func digest(_ project: CollageProject) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(project) else { return "?" }
+        return Insecure.SHA1.hash(data: data).map { String(format: "%02x", $0) }.joined().prefix(12).description
+    }
+
+    /// 整个水印的 JSON（键排序）：载入行打印，两次运行逐字比对。
+    static func json(_ wm: CollageWatermark) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(wm) else { return "?" }
+        return String(decoding: data, as: UTF8.self)
     }
 }

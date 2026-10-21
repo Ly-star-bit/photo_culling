@@ -37,11 +37,14 @@ enum CollageBridge {
         return ref
     }
 
+    /// 外部文件在托盘里的 id（导入完按 id 排版的地方要用同一个写法）。
+    static func fileID(_ url: URL) -> String { "file:" + url.path }
+
     /// 外部拖进来的文件：现场解一张 1536 跑人脸（和分析引擎同一个 FaceAnalyzer）。
     static func ref(fromFile url: URL) -> CollagePhotoRef? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let size = WatermarkEngine.uprightSize(of: source) else { return nil }
-        let id = "file:" + url.path
+        let id = fileID(url)
         var ref = CollagePhotoRef(id: id, path: url.path, previewPath: nil, width: size.width, height: size.height)
         if let image = CollageImages.decode(path: url.path, maxPixel: 1536),
            let face = FaceAnalyzer.analyze(in: image).face {

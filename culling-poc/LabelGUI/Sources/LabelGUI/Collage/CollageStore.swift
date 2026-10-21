@@ -1,6 +1,8 @@
 import Foundation
 import SwiftUI
 import AppKit
+import CryptoKit
+import ImageIO
 
 /// 拼图 tab 的状态：项目文档、选中、备选版式、撤销、预览、模板、导出、按场次存盘。
 /// 渲染本身在 CollageRender，版式在 CollageLayout —— 这里只做编排和撤销。
@@ -96,6 +98,10 @@ final class CollageStore: ObservableObject {
     private var redoStack: [CollageProject] = []
     private var lastUndoPush = Date.distantPast
     private var lastPushCoalesced = false
+    /// 几样改动合成一步撤销的期间（见 asOneUndoStep）：开头已经记过一步，这期间的 pushUndo 都不再记。
+    private var undoGroupOpen = false
+    /// 真记进撤销栈的次数（合并掉的、组里压住的不算）：不另记撤销的求解落下来时，看发起之后又记过几步。
+    private var undoPushes = 0
     @Published private(set) var canUndo = false
     @Published private(set) var canRedo = false
     /// 撤销栈深度（命令行脚本核对「一次操作记一步」用）。
@@ -109,6 +115,21 @@ final class CollageStore: ObservableObject {
         var pdf = true
         var cropMarks = true
         var outputPath: String?
+        // 「导出带水印」不在这里：它跟着拼图存（CollageWatermark.exportEnabled）。全局的一关，之后每个拼图
+        // 都是预览有水印、导出没有。以前存过的 state.json 里那个 watermark 键读的时候直接忽略。
+
+        init() {}
+
+        /// 逐字段容错：哪个键缺了、坏了只丢它自己，输出目录、格式、质量不会因此全丢。
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            let d = ExportOptions()
+            format = (try? c.decodeIfPresent(CollageExport.Format.self, forKey: .format)) ?? nil ?? d.format
+            quality = (try? c.decodeIfPresent(Double.self, forKey: .quality)) ?? nil ?? d.quality
+            pdf = (try? c.decodeIfPresent(Bool.self, forKey: .pdf)) ?? nil ?? d.pdf
+            cropMarks = (try? c.decodeIfPresent(Bool.self, forKey: .cropMarks)) ?? nil ?? d.cropMarks
+            outputPath = (try? c.decodeIfPresent(String.self, forKey: .outputPath)) ?? nil
+        }
     }
 
     @Published var exportOptions = ExportOptions() { didSet { scheduleStateSave() } }
@@ -137,6 +158,8 @@ final class CollageStore: ObservableObject {
     init(dataDir: URL) {
         stateDir = dataDir.appendingPathComponent("collage")
         try? FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
+        // 签名存的绝对路径找不到时，渲染按 sha1 到这里找副本（渲染在后台线程，先于任何渲染设好）。
+        CollageWatermarks.setAssetsDir(stateDir.appendingPathComponent("assets"))
         loadState()
         terminateObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
@@ -265,6 +288,10 @@ final class CollageStore: ObservableObject {
         templateThumbTask?.cancel()
         templateThumbsBusy = false
         templateThumbs = [:]
+        // 换了工程：关掉时记下的水印层 / 文字是上一个拼图的，不能恢复到这里；还在等照片的交接也不再套水印。
+        stashedMarkLayers = [:]
+        stashedMarkTexts = [:]
+        watermarkRevision += 1
         var loaded = CollageProject()
         loaded.canvas = defaultCanvas
         loaded.style = defaultStyle
@@ -301,42 +328,129 @@ final class CollageStore: ObservableObject {
         addRefs(from: ids.compactMap { batch.item(withID: $0) }, layout: .none)
     }
 
+    /// 水印页「拼图 (N) →」带过来的原图：认得出是批量页的照片按批量 id 进（带人脸、分数），认不出的按
+    /// 文件进 —— 两种合起来只排一次版（分开导入会起两次求解，后回来的把先排的盖掉）。`order`：带过来的
+    /// 顺序（批量 id 和 CollageBridge.fileID 穿插着）。张数有上限（handoffSingleLimit / handoffSpreadLimit）。
+    /// `then(true)`：读完、排版发起之后再做（交接时套水印放这里，它的提示不会被「托盘加入 N 张」盖掉）；
+    /// 一张都没带进来（都读不了、本来就没有）= `then(false)`（交接把占的号还回去）。进托盘、排版、then 里的
+    /// 改动合成**一步撤销**：撤销一次回到交接之前。
+    func importMixed(items: [BatchItem], files: [URL], order: [String], then: @escaping (Bool) -> Void) {
+        addRefs(from: items, files: files, layout: .handoff(order, then: then))
+    }
+
     private enum AfterImport {
         case none
         case solve([String])
+        /// 水印页交接：排版有张数上限；进托盘 + 排版 + then 算一步撤销。
+        case handoff([String], then: (Bool) -> Void)
     }
 
-    private func addRefs(from items: [BatchItem], layout: AfterImport) {
-        guard !items.isEmpty else {
+    /// `files`：外部文件（id 见 CollageBridge.fileID）。
+    private func addRefs(from items: [BatchItem], files: [URL] = [], layout: AfterImport) {
+        guard !items.isEmpty || !files.isEmpty else {
             setNotice("没有可带进来的照片")
+            if case .handoff(_, let then) = layout { then(false) }
             return
         }
-        busyText = "读取 \(items.count) 张照片…"
+        if items.isEmpty {
+            busyText = "分析 \(files.count) 张照片的人脸…"
+        } else {
+            busyText = "读取 \(items.count + files.count) 张照片…"
+        }
         let token = sessionToken
         // 带进来之后要排版的：读照片期间套了模板、撤销，读完就只进托盘、不再排（不能盖掉刚做的）。
         var ticket: SolveTicket?
-        if case .solve = layout { ticket = beginSolve() }
+        switch layout {
+        case .none: break
+        case .solve, .handoff: ticket = beginSolve()
+        }
+        // 交接张数超过单张拼图的上限：挑最好的几张排。挑片第一次要算特征（可能好几秒），和读照片一起放后台。
+        var pickLimit: Int?
+        if case .handoff(let ids, _) = layout, !isAlbum, Self.unique(ids).count > Self.handoffSingleLimit {
+            pickLimit = Self.handoffSingleLimit
+        }
+        let limit = pickLimit
         Task { [weak self] in
-            let refs = await Task.detached(priority: .userInitiated) {
-                items.compactMap(CollageBridge.ref(from:))
+            let (refs, picked) = await Task.detached(priority: .userInitiated) { () -> ([CollagePhotoRef], [String]?) in
+                let refs = items.compactMap(CollageBridge.ref(from:)) + files.compactMap(CollageBridge.ref(fromFile:))
+                return (refs, limit.map { CollageSelect.pick($0, from: refs).map(\.id) })
             }.value
             guard let self, self.sessionToken == token else { return }
             self.busyText = nil
-            self.mergeIntoTray(refs)
-            if case .solve(let ids) = layout, let ticket, ticket.generation == self.solveGeneration {
-                self.isSolving = false
-                self.layoutRequested(ids.filter { id in refs.contains { $0.id == id } })
+            switch layout {
+            case .none:
+                self.mergeIntoTray(refs)
+            case .solve(let ids):
+                self.mergeIntoTray(refs)
+                if let ticket, ticket.generation == self.solveGeneration {
+                    self.isSolving = false
+                    self.layoutRequested(ids.filter { id in refs.contains { $0.id == id } })
+                }
+            case .handoff(let ids, let then):
+                self.landHandoff(refs, order: ids, picked: picked, ticket: ticket, then: then)
             }
         }
+    }
+
+    // MARK: - 水印页交接
+
+    /// 水印页「拼图 (N) →」一次最多排几张：单张拼图 9 张（再多格子太小，每张上的水印都看不清），相册一个
+    /// 跨页 6 张。多的只进托盘。
+    static let handoffSingleLimit = 9
+    static let handoffSpreadLimit = 6
+
+    /// 交接的照片读完了：进托盘、排版、then（套水印）合成一步撤销。排版是后台算完才落下来的，发起时就说好
+    /// 不另记撤销（recordUndo: false），落下来也并进这一步。
+    private func landHandoff(_ refs: [CollagePhotoRef], order: [String], picked: [String]?, ticket: SolveTicket?,
+                             then: (Bool) -> Void) {
+        let current = ticket.map { $0.generation == solveGeneration } ?? false
+        if current { isSolving = false }
+        guard !refs.isEmpty else {
+            setNotice("带过来的照片都读不了")
+            then(false)
+            return
+        }
+        let loaded = Self.unique(order).filter { id in refs.contains { $0.id == id } }
+        asOneUndoStep {
+            mergeIntoTray(refs)
+            // 读照片期间套了模板、撤销、又排了一版：只进托盘，不再排（同批量页）。
+            if current { layoutHandoff(loaded, picked: picked) }
+            then(true)
+        }
+    }
+
+    /// 交接的排版。单张拼图超过上限：只排挑出来的那几张，其余留在托盘里。相册：新开一个跨页放；一个跨页
+    /// 放不下就只进托盘 —— 不替用户点「自动编排」：它按托盘里全部照片把整本重排，已经排好的跨页都会换掉。
+    private func layoutHandoff(_ ids: [String], picked: [String]?) {
+        if isAlbum {
+            let used = usedPhotoIDs
+            let fresh = ids.filter { !used.contains($0) }
+            guard fresh.count > Self.handoffSpreadLimit else {
+                layoutRequested(ids, recordUndo: false)
+                return
+            }
+            let hint = used.isEmpty ? "点「自动编排」排成相册" : "拖进跨页，或点「自动编排」用托盘里全部照片重排整本"
+            setNotice("\(fresh.count) 张已放进托盘（一个跨页最多放 \(Self.handoffSpreadLimit) 张）：" + hint)
+            return
+        }
+        guard ids.count > Self.handoffSingleLimit else {
+            layoutRequested(ids, recordUndo: false)
+            return
+        }
+        // 读照片时还是相册、读完切回了单张：没挑过，按带过来的顺序取前几张。
+        let chosen = picked ?? Array(ids.prefix(Self.handoffSingleLimit))
+        layoutRequested(chosen, recordUndo: false)
+        setNotice("托盘放了 \(ids.count) 张，先排了挑出来的 \(chosen.count) 张，其余在托盘里")
     }
 
     /// 批量页「拼图 (N)」带进来的这几张：单张拼图按开关上的网格 / 散落排（以前一律排成网格）；相册在
     /// 当前跨页后面新开一个跨页放它们（以前直接把当前跨页换掉 —— 那一页原来的照片从书里没了，已经在
     /// 别的跨页上的照片还会出现两次），已经在相册里的不重复放。
-    private func layoutRequested(_ ids: [String]) {
+    /// `recordUndo = false`：跟着别的操作一起（交接），排版落下来不另记撤销。
+    private func layoutRequested(_ ids: [String], recordUndo: Bool = true) {
         guard !ids.isEmpty else { return }
         guard isAlbum else {
-            layoutFresh(photoIDs: ids)
+            layoutFresh(photoIDs: ids, recordUndo: recordUndo)
             return
         }
         let used = usedPhotoIDs
@@ -345,7 +459,7 @@ final class CollageStore: ObservableObject {
             setNotice("这几张已经都在相册的跨页里了")
             return
         }
-        pushUndo()
+        if recordUndo { pushUndo() }
         let at = min(project.pages.count, pageIndex + 1)
         project.pages.insert(CollagePage(root: CollageLayout.blankRoot(for: project.canvas)), at: at)
         pageIndex = at
@@ -355,7 +469,8 @@ final class CollageStore: ObservableObject {
         setNotice("在第 \(at + 1) 个跨页放了 \(fresh.count) 张" + (fresh.count < ids.count ? "（其余已经在相册里）" : ""))
     }
 
-    func addFiles(_ urls: [URL]) {
+    /// `layout`：读完直接排一版（同批量页「拼图 (N)」）。
+    func addFiles(_ urls: [URL], layout: Bool = false) {
         var files: [URL] = []
         for url in urls {
             var isDir: ObjCBool = false
@@ -373,16 +488,7 @@ final class CollageStore: ObservableObject {
             setNotice("没有可导入的照片（格式不支持）")
             return
         }
-        busyText = "分析 \(files.count) 张照片的人脸…"
-        let token = sessionToken
-        Task { [weak self] in
-            let refs = await Task.detached(priority: .userInitiated) {
-                files.compactMap(CollageBridge.ref(fromFile:))
-            }.value
-            guard let self, self.sessionToken == token else { return }
-            self.busyText = nil
-            self.mergeIntoTray(refs)
-        }
+        addRefs(from: [], files: files, layout: layout ? .solve(files.map(CollageBridge.fileID)) : .none)
     }
 
     private func mergeIntoTray(_ refs: [CollagePhotoRef]) {
@@ -404,6 +510,7 @@ final class CollageStore: ObservableObject {
         cancelSolveIfRunning()
         pushUndo()
         project.photos.removeAll { $0.id == id }
+        pruneMarkSkips()
         for i in project.pages.indices {
             var root = project.pages[i].root
             for path in root.leafPaths() where root.node(at: path)?.cell?.photoID == id {
@@ -422,10 +529,20 @@ final class CollageStore: ObservableObject {
         pushUndo()
         project.photos.removeAll()
         project.pages.removeAll()
+        pruneMarkSkips()
         pageIndex = 0
         clearAlternatives()
         albumDropped = []
         commitEdit()
+    }
+
+    /// 「这张不加」只记托盘里的照片：拿出托盘就忘掉（以后再带进来照常加水印，摘要也不再数它）。
+    /// 直接改工程，和拿掉照片是同一步撤销。
+    private func pruneMarkSkips() {
+        guard let skips = project.watermark?.skipPhotoIDs, !skips.isEmpty else { return }
+        let inTray = Set(project.photos.map(\.id))
+        let kept = skips.filter { inTray.contains($0) }
+        if kept.count != skips.count { project.watermark?.skipPhotoIDs = kept }
     }
 
     private func computeHints(for photos: [CollagePhotoRef]) {
@@ -483,11 +600,11 @@ final class CollageStore: ObservableObject {
     }
 
     /// 空画布上第一次排版（拖进第一张照片）：按开关上的网格 / 散落。
-    func layoutFresh(photoIDs: [String]) {
+    func layoutFresh(photoIDs: [String], recordUndo: Bool = true) {
         if effectiveLayoutStyle == .scatter, !isAlbum {
-            scatter(photoIDs: photoIDs, spec: page?.scatter ?? CollageScatterSpec())
+            scatter(photoIDs: photoIDs, spec: page?.scatter ?? CollageScatterSpec(), recordUndo: recordUndo)
         } else {
-            solve(photoIDs: photoIDs)
+            solve(photoIDs: photoIDs, recordUndo: recordUndo)
         }
     }
 
@@ -756,6 +873,8 @@ final class CollageStore: ObservableObject {
         let pageID: UUID?
         /// false = 结果落下来不另记撤销（和发起它的操作算同一步）。
         var recordUndo = true
+        /// 发起时撤销栈记过几步（undoPushes）。
+        var pushes = 0
     }
 
     /// 用户做了会整页换掉的操作（套模板、撤销、切网格/散落、换模式）：还在算的那次求解作废，
@@ -776,7 +895,8 @@ final class CollageStore: ObservableObject {
     private func beginSolve(recordUndo: Bool = true) -> SolveTicket {
         solveGeneration += 1
         isSolving = true
-        return SolveTicket(generation: solveGeneration, session: sessionToken, pageID: page?.id, recordUndo: recordUndo)
+        return SolveTicket(generation: solveGeneration, session: sessionToken, pageID: page?.id, recordUndo: recordUndo,
+                           pushes: undoPushes)
     }
 
     private func finishSolve(_ ticket: SolveTicket, _ results: [CollageLayout.Scored],
@@ -786,6 +906,19 @@ final class CollageStore: ObservableObject {
         guard ticket.session == sessionToken, ticket.pageID == page?.id else { return }
         let ordered = avoiding.isEmpty ? results : CollageLayout.preferringNewShape(results, avoiding: avoiding)
         adopt(ordered, scatter: scatter, recordUndo: ticket.recordUndo)
+        if !ticket.recordUndo, !ordered.isEmpty { carryIntoLaterSteps(since: ticket.pushes) }
+    }
+
+    /// 不另记撤销的求解（交接、切相册重撒）算在发起它的那一步里；算的时候用户又做了不作废求解的改动（改水印、
+    /// 样式、标题）、记了新的几步：这几步的快照里也换上排好的这一页 —— 撤销那个小改动只退那个改动，不连排版
+    /// 一起退掉（不然交接排出来的版就再也回不来了）。
+    private func carryIntoLaterSteps(since pushes: Int) {
+        let later = min(undoPushes - pushes, undoStack.count)
+        guard later > 0, let current = page else { return }
+        for i in undoStack.indices.suffix(later) {
+            guard let j = undoStack[i].pages.firstIndex(where: { $0.id == current.id }) else { continue }
+            undoStack[i].pages[j] = current
+        }
     }
 
     private func adopt(_ results: [CollageLayout.Scored], scatter: CollageScatterSpec? = nil, recordUndo: Bool = true) {
@@ -1640,6 +1773,150 @@ final class CollageStore: ObservableObject {
         setNotice(text)
     }
 
+    // MARK: - 水印（工程自带的快照，全部可撤销）
+
+    /// 水印每改一次 +1（编辑、撤销 / 重做、换工程都算）；交接开始时也占一个号。交接的照片读完时号变了
+    /// （又来了一次交接、或者等的时候在检视器里改过水印），旧请求就不再盖上去。
+    private(set) var watermarkRevision = 0
+    /// 最近一次交接占的号（号对不上时分得清是被新的交接取代了，还是手动改过）。
+    private(set) var latestHandoffRevision = 0
+
+    /// 交接占的号，连同占之前的两个号：这次交接一张都没带进来，就把号还回去（releaseWatermarkRevision）。
+    struct WatermarkTicket {
+        let revision: Int
+        fileprivate let before: Int
+        fileprivate let latestBefore: Int
+    }
+
+    func reserveWatermarkRevision() -> WatermarkTicket {
+        let ticket = WatermarkTicket(revision: watermarkRevision + 1, before: watermarkRevision,
+                                     latestBefore: latestHandoffRevision)
+        watermarkRevision = ticket.revision
+        latestHandoffRevision = ticket.revision
+        return ticket
+    }
+
+    /// 交接一张照片都没带进来（都读不了）：它什么都没套，不能算「后面又来了一次交接」—— 号还回去，还在等照片
+    /// 的上一次交接照常套水印。占号之后水印又改过、又来了交接（号已经不是它的了）就不动。
+    func releaseWatermarkRevision(_ ticket: WatermarkTicket) {
+        guard watermarkRevision == ticket.revision else { return }
+        watermarkRevision = ticket.before
+        latestHandoffRevision = ticket.latestBefore
+    }
+
+    /// 关掉一层 / 一层的文字时记下原来的设置（只在这次打开期间、只对当前工程，不存盘）：再打开时恢复，
+    /// 不是变回默认值。
+    private var stashedMarkLayers: [CollageMarkLayerKind: CollageMarkLayer] = [:]
+    private var stashedMarkTexts: [CollageMarkLayerKind: CollageMarkText] = [:]
+
+    /// `coalesce`：滑杆连续拖动合成一步；开关、换位置每次一步。水印跟着工程走，不记成下次新建的默认。
+    func setWatermark(_ wm: CollageWatermark?, coalesce: Bool = false) {
+        guard wm != project.watermark else { return }
+        pushUndo(coalesce: coalesce)
+        project.watermark = wm
+        watermarkRevision += 1
+        commitEdit()
+    }
+
+    /// 开 / 关一层（检视器的开关、命令行 wmlayer 都走这里）。关：整层拿掉，设置记下来；开：有记着的就原样
+    /// 恢复，没有就用默认值 —— 工程里还没签名时先开着文字（开了马上看得见）。
+    func setMarkLayer(_ kind: CollageMarkLayerKind, on: Bool) {
+        guard on else {
+            guard let layer = project.watermark?.layer(kind) else { return }
+            stashedMarkLayers[kind] = layer
+            updateWatermark { $0.setLayer(kind, nil) }
+            return
+        }
+        guard project.watermark?.layer(kind) == nil else { return }
+        var layer = CollageMarkLayer()
+        // 记着的不删：开了又撤销（= 又关上）再开，还是这一份；下次真关掉时换成那时的设置。
+        if let kept = stashedMarkLayers[kind] {
+            layer = kept
+        } else if project.watermark?.signature == nil {
+            layer.text = CollageMarkText()
+        }
+        updateWatermark { $0.setLayer(kind, layer) }
+    }
+
+    /// 开 / 关一层的文字：关的时候记下这段字（自定义的字、字号、位置），再开时恢复。层没开 = 不动。
+    func setMarkText(_ kind: CollageMarkLayerKind, on: Bool) {
+        guard let layer = project.watermark?.layer(kind), (layer.text != nil) != on else { return }
+        if let text = layer.text { stashedMarkTexts[kind] = text }
+        let text = on ? (stashedMarkTexts[kind] ?? CollageMarkText()) : nil
+        updateWatermark { wm in
+            guard var l = wm.layer(kind) else { return }
+            l.text = text
+            wm.setLayer(kind, l)
+        }
+    }
+
+    /// 改水印的某几样；还没加过水印就从默认值起。
+    func updateWatermark(coalesce: Bool = false, _ body: (inout CollageWatermark) -> Void) {
+        var wm = project.watermark ?? CollageWatermark()
+        body(&wm)
+        setWatermark(wm, coalesce: coalesce)
+    }
+
+    /// 签名图拷一份进 <dataDir>/collage/assets/<sha1>.png（原文件挪走、改名也不影响已存的拼图）。
+    /// 解不成图的不收；同一张图只存一份。
+    func importSignature(from url: URL) -> CollageSignature? {
+        guard let data = try? Data(contentsOf: url),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else {
+            setNotice("签名图读不了：\(url.lastPathComponent)")
+            return nil
+        }
+        let key = Insecure.SHA1.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let dir = stateDir.appendingPathComponent("assets")
+        let dest = dir.appendingPathComponent("\(key).png")
+        if !FileManager.default.fileExists(atPath: dest.path) {
+            do {
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                try data.write(to: dest, options: .atomic)
+            } catch {
+                lastError = "签名图存不进拼图资料: \(error.localizedDescription)"
+                return nil
+            }
+        }
+        return CollageSignature(file: dest.path, key: key, sourceName: url.lastPathComponent)
+    }
+
+    /// 水印页的设置套进拼图的一层（一步撤销）：换算成比例、签名拷一份进来。签名开关跟水印页看到的
+    /// 一致：水印页没签名（或读不了）这一层就不画签名，不会冒出工程里以前那张。相框、画布比例会改画布
+    /// 尺寸，不带进来，开着就提示一句。既没签名也没字：提示，什么都不改。
+    /// 返回套没套上。专门套了水印就是要它出现在导出里：这个拼图以前关掉的「导出带水印」重新打开（说一声）。
+    @discardableResult
+    func adoptWatermark(config: WatermarkEngine.Config, signatureURL: URL?, layer kind: CollageMarkLayerKind,
+                        refShort: Double, presetName: String?) -> Bool {
+        var layer = CollageMarkLayer(config: config, refShort: refShort)
+        layer.presetName = presetName
+        let signature = config.signatureEnabled ? signatureURL.flatMap { importSignature(from: $0) } : nil
+        layer.signatureOn = signature != nil
+        guard layer.hasContent(signature: signature != nil) else {
+            setNotice(signatureURL != nil && config.signatureEnabled
+                      ? "签名图读不了，水印页也没开文字：拼图的水印没改"
+                      : "水印页没有签名也没有文字：没什么可带进拼图")
+            return false
+        }
+        let exportWasOff = project.watermark?.exportEnabled == false
+        updateWatermark { wm in
+            wm.setLayer(kind, layer)
+            if let signature { wm.signature = signature }
+            wm.exportEnabled = true
+        }
+        // 套进来的设置取代了这一层关掉时记着的那份。
+        stashedMarkLayers[kind] = nil
+        stashedMarkTexts[kind] = nil
+        var notes: [String] = []
+        if config.signatureEnabled, signatureURL != nil, signature == nil { notes.append("签名图读不了，只带了文字") }
+        if config.frame.enabled || config.canvasRatio.enabled {
+            notes.append("相框 / 画布比例没有带进拼图（只在水印页单张导出时生效）")
+        }
+        if exportWasOff { notes.append("这个拼图的「导出带水印」重新打开了") }
+        if !notes.isEmpty { setNotice(notes.joined(separator: "；")) }
+        return true
+    }
+
     // MARK: - 印刷放大
 
     /// 一张照片在成品上要放大多少。
@@ -2084,6 +2361,7 @@ final class CollageStore: ObservableObject {
     /// coalesce：滑杆连续拖动 0.6 秒内只记一次。只和紧挨着的上一次「也是连续调整」的合并 ——
     /// 刚点完「换一批」马上拖滑杆，不能把滑杆的改动并进换一批那一步（撤销会一次退两步）。
     private func pushUndo(coalesce: Bool = false) {
+        guard !undoGroupOpen else { return }
         let now = Date()
         if coalesce, lastPushCoalesced, now.timeIntervalSince(lastUndoPush) < 0.6 {
             lastUndoPush = now
@@ -2092,9 +2370,29 @@ final class CollageStore: ObservableObject {
         lastPushCoalesced = coalesce
         lastUndoPush = now
         undoStack.append(project)
+        undoPushes += 1
         if undoStack.count > 120 { undoStack.removeFirst(undoStack.count - 120) }
         redoStack.removeAll()
         updateUndoFlags()
+    }
+
+    /// 几样改动合成一步撤销（交接：进托盘 + 排版 + 套水印）：开头记一步，body 里同步发生的 pushUndo 都
+    /// 不再记。body 里发起的求解要自己传 recordUndo: false —— 结果落下来时这里早结束了。什么都没变、
+    /// 也没有排版在算：不留空步（重做栈照旧）。
+    private func asOneUndoStep(_ body: () -> Void) {
+        let before = project
+        let redo = redoStack
+        pushUndo()
+        let generation = solveGeneration
+        undoGroupOpen = true
+        body()
+        undoGroupOpen = false
+        let pending = isSolving && solveGeneration != generation
+        if !pending, project == before, undoStack.last == before {
+            undoStack.removeLast()
+            redoStack = redo
+            updateUndoFlags()
+        }
     }
 
     func undo() {
@@ -2112,6 +2410,7 @@ final class CollageStore: ObservableObject {
     private func restore(_ p: CollageProject) {
         cancelPendingSolve()
         let keepItem = selectedItem
+        if p.watermark != project.watermark { watermarkRevision += 1 }
         project = p
         pageIndex = min(pageIndex, max(0, project.pages.count - 1))
         selection = nil
@@ -2214,6 +2513,8 @@ final class CollageStore: ObservableObject {
                 opts.includeBleed = false
                 opts.guides = self.showGuides
                 opts.placeholders = true
+                // 预览 = 导出：水印一直画（导出关了「导出带水印」才不画）。
+                opts.watermark = true
                 let image = await Task.detached(priority: .userInitiated) {
                     CollageRender.render(page: page, project: snapshot, hints: hints, options: opts)
                 }.value
@@ -2269,12 +2570,15 @@ final class CollageStore: ObservableObject {
             var failure: String?
             var lowRes: [String] = []
             var missing: [String] = []
+            var signatureLost = false
             for (i, page) in snapshot.pages.enumerated() {
                 if self?.exportCancelled ?? true { break }
                 let result = await Task.detached(priority: .userInitiated) { () -> PageResult in
                     var opts = CollageRender.Options(scale: 1)
                     opts.export = true
                     opts.includeBleed = true
+                    // 「导出带水印」跟着这个拼图存。
+                    opts.watermark = snapshot.watermark?.exportEnabled ?? true
                     let report = CollageRender.RenderReport()
                     opts.report = report
                     guard let image = CollageRender.render(page: page, project: snapshot, hints: hints, options: opts) else {
@@ -2283,7 +2587,8 @@ final class CollageStore: ObservableObject {
                     do {
                         let data = try Self.writePage(image, files: plan.pages[i], project: snapshot,
                                                       options: options, dir: folder, wantPDF: wantPDF)
-                        return PageResult(pdfData: data, error: nil, lowRes: report.lowRes, missing: report.missing)
+                        return PageResult(pdfData: data, error: nil, lowRes: report.lowRes, missing: report.missing,
+                                          signatureLost: Self.signatureLost(report))
                     } catch {
                         return PageResult(pdfData: nil, error: error.localizedDescription, lowRes: [], missing: [])
                     }
@@ -2292,6 +2597,7 @@ final class CollageStore: ObservableObject {
                 if let f = result.error, failure == nil { failure = f }
                 lowRes += result.lowRes
                 missing += result.missing
+                signatureLost = signatureLost || result.signatureLost
                 guard let self else { return }
                 self.progressFraction = Double(i + 1) / Double(snapshot.pages.count)
                 self.progressText = "导出 \(i + 1)/\(snapshot.pages.count)…"
@@ -2322,16 +2628,31 @@ final class CollageStore: ObservableObject {
             } else {
                 let files = plan.pages.flatMap { $0 } + (plan.pdf.map { [$0] } ?? [])
                 let main = plan.pdf ?? files.first ?? base
-                self.progressText = "导出完成 → \(main)" + (files.count > 1 ? "（共 \(files.count) 个文件）" : "")
+                let clean = snapshot.watermark.map { !$0.exportEnabled && $0.anyLayerOn } == true ? "（不带水印）" : ""
+                self.progressText = "导出完成\(clean) → \(main)" + (files.count > 1 ? "（共 \(files.count) 个文件）" : "")
                 AppRuntime.revealInFinder(files.map { folder.appendingPathComponent($0) })
             }
-            // 成品里有退化的格子：说清楚是哪几张（导出本身不算失败）。
-            if !missing.isEmpty {
-                self.lastError = "\(Set(missing).count) 张照片读不了，格子空着：" + Set(missing).sorted().prefix(4).joined(separator: " ")
-            } else if !lowRes.isEmpty {
-                self.lastError = "\(Set(lowRes).count) 张原图读不了，用了 1024 预览（印刷会糊）：" + Set(lowRes).sorted().prefix(4).joined(separator: " ")
+            if let warning = Self.exportWarning(missing: missing, lowRes: lowRes, signatureLost: signatureLost) {
+                self.lastError = warning
             }
         }
+    }
+
+    /// 成品里有退化的地方：说清楚是哪几张、缺了什么（导出本身不算失败）。命令行 renderexport 也打印这一句。
+    static func exportWarning(missing: [String], lowRes: [String], signatureLost: Bool) -> String? {
+        var parts: [String] = []
+        if !missing.isEmpty {
+            parts.append("\(Set(missing).count) 张照片读不了，格子空着：" + Set(missing).sorted().prefix(4).joined(separator: " "))
+        } else if !lowRes.isEmpty {
+            parts.append("\(Set(lowRes).count) 张原图读不了，用了 1024 预览（印刷会糊）：" + Set(lowRes).sorted().prefix(4).joined(separator: " "))
+        }
+        if signatureLost { parts.append(CollageWatermarks.signatureLostWarning) }
+        return parts.isEmpty ? nil : parts.joined(separator: "；")
+    }
+
+    /// 这一页该有签名、签名图却读不了（渲染记账里的「签名读不了」）。
+    nonisolated static func signatureLost(_ report: CollageRender.RenderReport) -> Bool {
+        report.marks.contains { $0.skipped == "签名读不了" }
     }
 
     func cancelExport() {
@@ -2354,6 +2675,7 @@ final class CollageStore: ObservableObject {
         var error: String?
         var lowRes: [String]
         var missing: [String]
+        var signatureLost = false
     }
 
     /// 一页落盘：单张按画布切缝写九宫格/轮播；相册每个跨页一张（带出血）。
@@ -2466,8 +2788,10 @@ final class CollageStore: ObservableObject {
     func setNotice(_ text: String) {
         notice = text
         noticeTask?.cancel()
+        // 几条合成一条的（交接）长：每 10 个字多留一秒，5～10 秒。
+        let seconds = min(10, max(5, Double(text.count) / 10))
         noticeTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(5))
+            try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled else { return }
             self?.notice = nil
         }

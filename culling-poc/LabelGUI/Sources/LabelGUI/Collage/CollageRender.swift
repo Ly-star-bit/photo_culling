@@ -61,6 +61,9 @@ enum CollageRender {
         var placeholders = false
         /// true = 导出（原图解码不走缓存）。
         var export = false
+        /// 画工程里的水印（project.watermark）。默认不画：只有界面预览、导出、命令行 renderclean /
+        /// renderexport 打开 —— 缩略图、样张一律不画。
+        var watermark = false
         /// 导出时收集读不了原图的照片（用了预览图 / 整格空着），导出结束要报出来。
         var report: RenderReport?
 
@@ -73,6 +76,40 @@ enum CollageRender {
         var lowRes: [String] = []
         /// 连预览都读不了，格子空着。
         var missing: [String] = []
+        /// 这一页画了哪些水印、落在哪（命令行出图核对用；界面预览不收）。
+        var marks: [MarkRecord] = []
+    }
+
+    /// 一个水印块。rect / region 都是成品坐标（未缩放、不含出血）；相纸上的是转过之后的外接框。
+    struct MarkRecord {
+        /// "photo"（每张照片层）/ "page"（整页层）。
+        var layer: String
+        /// 格子路径（"01"，根 = "r"）、"item3"、"page"、"tile5"、"left" / "right"。
+        var owner: String
+        /// "signature" / "text" / "tile"（平铺 = 整块区域）；没画 = nil。
+        var kind: String?
+        var rect: CGRect?
+        /// 这一块水印能用的区域（切带、安全区、形状都处理过之后）。
+        var region: CGRect?
+        /// 没画的原因（"格子太小" / "签名读不了" / "签名放不下" / "字放不下" / 相纸上的 "压缝" / "出安全区" …）；
+        /// "压字冲突未解" = 照画了但躲不开压字。
+        var skipped: String?
+        /// 核对用的几何：格子 / 相纸外接框 / 整页、照片实际画出来的那块、形状。
+        var cell: CGRect?
+        var visible: CGRect?
+        var shape: String?
+        /// 这一格压字的字块（躲让的对象）。
+        var avoid: CGRect?
+        /// 字的实际字号（成品像素；只有 kind == "text" 有）。
+        var font: Double? = nil
+        /// 实际用的深浅："original" / "light" / "dark"（「自动」在这两个里选定之后的结果）；没画 = nil。
+        var contrast: String? = nil
+        /// 整页层放进了版心外的留白带。
+        var inMargin = false
+        /// 相纸上的（rect 是转过之后的外接框）：没转之前的大小 —— 签名宽的下限按它核对；
+        /// 转过之后的四个角（成品坐标，从左上顺时针）—— 被后画的图层盖住多少按它核对。
+        var local: CGSize? = nil
+        var corners: [CGPoint]? = nil
     }
 
     static let ciContext = CIContext(options: [.cacheIntermediates: false])
@@ -130,6 +167,12 @@ enum CollageRender {
         let vars = CollageTypeset.variables(project: project, root: root, photos: photos, pagePhotoIDs: pagePhotoIDs,
                                             pageID: page.id)
         let sharpenRadius = canvas.dpi >= 200 ? 1.3 * scale : 0.8
+        // 工程里的水印（只有预览、导出、命令行出图打开；缩略图、样张 = nil，什么都不画）。整页层先排好
+        // （每张照片的水印让着它），页上图层在哪先记下（水印不躲进它们底下）。
+        let marks = CollageWatermarks.Painter(project: project, options: options, bleed: bleed) {
+            markPaper(project: project, pagePhotoIDs: pagePhotoIDs, photos: photos, background: bg, colorOps: colorOps)
+        }
+        marks?.prepare(page: page, pagePhotoIDs: pagePhotoIDs, photos: photos, vars: vars, frames: framingFrames)
 
         if !page.freeform {
             for frame in geo.frames {
@@ -161,6 +204,10 @@ enum CollageRender {
                                     photo: photo, framing: framing, hints: hints[id], vars: vars, background: bg,
                                     scale: scale, bleed: bleed, canvasHeight: fullH)
                     }
+                    if let marks, let unscaled {
+                        marks.drawCell(frame.cell, path: frame.path, frameRect: unscaled.rect.cgRect, photo: photo,
+                                       framing: framing, hints: hints[id], vars: vars, background: bg, ctx: ctx)
+                    }
                 case .text:
                     if let text = frame.cell.text {
                         // 印刷：文字格贴着成品边时退进安全区（裁切有 ±1mm 误差，字贴边会被切掉）。
@@ -178,9 +225,11 @@ enum CollageRender {
         if !page.items.isEmpty {
             let dc = CollageItems.DrawContext(canvas: canvas, scale: scale, bleed: Double(bleed), photos: photos,
                                               hints: hints, colorOps: colorOps, vars: vars, options: options,
-                                              sharpenRadius: sharpenRadius, sharpen: style.sharpen, canvasHeight: fullH)
+                                              sharpenRadius: sharpenRadius, sharpen: style.sharpen, canvasHeight: fullH,
+                                              marks: marks)
             CollageItems.draw(page.items, ctx: ctx, dc: dc)
         }
+        marks?.drawPage(ctx: ctx)
 
         if options.guides {
             drawGuides(ctx, canvas: canvas, scale: scale, trim: trim.cgRect, bleed: bleed)
@@ -673,6 +722,52 @@ enum CollageRender {
         case .solid, .fromPhoto:
             break
         }
+    }
+
+    /// 水印「自动深浅」看的页底亮度（CollageWatermarks.Paper）。只有整页层开着自动、底是主图模糊 / 渐变时才
+    /// 按位置算（drawBackdrop 同一套：模糊图按铺法铺满带出血的整页、盖 washShare 那么多纸色；渐变从出血上沿到
+    /// 下沿）；别的时候整页就是代表色那一个亮度。
+    static func markPaper(project: CollageProject, pagePhotoIDs: [String], photos: [String: CollagePhotoRef],
+                          background: CollageColor, colorOps: [String: CollageLooks.Ops]) -> CollageWatermarks.Paper {
+        var paper = CollageWatermarks.Paper(flat: background.luminance)
+        let style = project.style
+        guard project.watermark?.page?.contrast == .auto, style.backgroundMode.usesPaperTint,
+              let hero = heroPhoto(pagePhotoIDs, photos: photos) else { return paper }
+        let canvas = project.canvas
+        let b = CGFloat(canvas.bleed)
+        let full = CGRect(x: -b, y: -b, width: CGFloat(canvas.width) + 2 * b, height: CGFloat(canvas.height) + 2 * b)
+        switch style.backgroundMode {
+        case .blurPhoto:
+            guard let blurred = blurredBackdrop(hero, ops: colorOps[hero.id]),
+                  let grid = backdropGrid(blurred, key: CollageVision.cacheKey(hero) + "#" + opsKey(colorOps[hero.id]))
+            else { return paper }
+            let rect = aspectFill(Double(blurred.width) / Double(max(1, blurred.height)), in: full)
+            let wash = gradedAverage(hero, style: style)
+                .map { washShare(paper: style.background, photo: $0, minimum: blurWashMinimum) } ?? 0
+            paper.blur = (grid, rect, wash, style.background.luminance)
+        case .gradient:
+            guard let colors = gradientColors(hero, style: style) else { return paper }
+            paper.gradient = (colors.top.luminance, colors.bottom.luminance, full.minY, full.maxY)
+        case .solid, .fromPhoto:
+            break
+        }
+        return paper
+    }
+
+    private static var backdropGrids: [String: CollageOverlays.Grid] = [:]
+
+    /// 模糊底那张图（已调色、已模糊）的亮度网格，按同一个键缓存：拖缝每帧都要问，不能每次都缩一遍。
+    private static func backdropGrid(_ image: CGImage, key: String) -> CollageOverlays.Grid? {
+        backdropLock.lock()
+        let hit = backdropGrids[key]
+        backdropLock.unlock()
+        if let hit { return hit }
+        guard let grid = CollageOverlays.grid(of: image, window: CGRect(x: 0, y: 0, width: 1, height: 1)) else { return nil }
+        backdropLock.lock()
+        if backdropGrids.count > 24 { backdropGrids.removeAll() }
+        backdropGrids[key] = grid
+        backdropLock.unlock()
+        return grid
     }
 
     /// 铺满 rect（多出来的裁掉），居中。

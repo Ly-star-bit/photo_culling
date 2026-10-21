@@ -202,7 +202,9 @@ enum CollageTypeset {
     private static let exifLock = NSLock()
     private static var exifCache: [String: [String: String]] = [:]
 
-    private static func exifValues(_ path: String) -> [String: String] {
+    /// 一张照片的 EXIF 占位符（按路径缓存：拼图水印每格每帧都要，不能每次开文件）。原图读不了（移动硬盘没插）
+    /// 不缓存，下次再试：插上盘之后的预览、导出就有字了（以前记下一个空的，整个会话都没字）。
+    static func exifValues(_ path: String) -> [String: String] {
         exifLock.lock()
         if let hit = exifCache[path] {
             exifLock.unlock()
@@ -210,11 +212,19 @@ enum CollageTypeset {
         }
         exifLock.unlock()
         let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil)
-        let values = WatermarkEngine.ExifTags(source: source).values
+        let tags = WatermarkEngine.ExifTags(source: source)
+        guard tags.readOK else { return tags.values }
         exifLock.lock()
-        exifCache[path] = values
+        exifCache[path] = tags.values
         exifLock.unlock()
-        return values
+        return tags.values
+    }
+
+    /// 这个路径的 EXIF 有没有缓存下来（命令行 exifprobe 核对「读不了的不缓存」用）。
+    static func exifCached(_ path: String) -> Bool {
+        exifLock.lock()
+        defer { exifLock.unlock() }
+        return exifCache[path] != nil
     }
 
     static func variables(project: CollageProject, root: CollageNode, photos: [String: CollagePhotoRef],

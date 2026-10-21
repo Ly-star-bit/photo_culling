@@ -22,7 +22,7 @@ struct ContentView: View {
                 .tabItem { Label("水印", systemImage: "signature") }
                 .tag(AppTab.watermark)
 
-            CollageView(store: collageStore, batchStore: batchStore)
+            CollageView(store: collageStore, batchStore: batchStore, watermarkStore: watermarkStore)
                 .tabItem { Label("拼图", systemImage: "rectangle.3.offgrid") }
                 .tag(AppTab.collage)
 
@@ -37,6 +37,13 @@ struct ContentView: View {
             collageStore.attach(sessionDir: batchStore.photoDir == nil ? nil : batchStore.sessionDir,
                                 photoDir: batchStore.photoDir)
             collageStore.importFromBatch(ids: ids, batch: batchStore, layout: true)
+            tab = .collage
+        }
+        // 水印页「拼图 (N) →」/「套到当前拼图」：原图 + 水印设置交给拼图页（水印在拼图里实时画）。
+        .onChange(of: watermarkStore.collageRequest) { _, request in
+            guard let request else { return }
+            watermarkStore.collageRequest = nil
+            CollageHandoff.fromWatermark(request, batch: batchStore, collage: collageStore)
             tab = .collage
         }
         // 插了相机存储卡：问要不要导入（导入的进度在批量页顶栏，点「导入」就切过去）。

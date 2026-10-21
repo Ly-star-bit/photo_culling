@@ -786,6 +786,107 @@ struct CollageScatterSpec: Codable, Hashable {
     init() {}
 }
 
+// MARK: - 水印（工程自带的快照）
+//
+// 水印页的设置带进拼图时换算成这里的结构（Collage/CollageWatermark.swift）：边距、字号都存成相对
+// 区域的比例，同一份设置套到大小不一的格子、整页上都成比例。相框和画布比例不进来（会改画布尺寸）。
+
+/// 拼图里的水印：工程自带的快照（不跟水印页联动；改水印页预设不会悄悄改掉已存的拼图）。
+struct CollageWatermark: Codable, Hashable {
+    /// 每张照片各一个，画在裁切后看得见的那块里。nil = 关。
+    var photos: CollageMarkLayer?
+    /// 整页一个（相册按半页、九宫格按片）。nil = 关。
+    var page: CollageMarkLayer?
+    /// 签名图副本（两层共用）。
+    var signature: CollageSignature?
+    /// 这些照片不加「每张照片」水印（按照片 id：互换、换一批都跟着照片走）。
+    var skipPhotoIDs: Set<String> = []
+    /// 九宫格 / 轮播的整页层：每片一个 / 整张一次。默认整张一次（「整张拼图加一个」就是一个）。
+    var tiles: CollageMarkTiles = .once
+    /// 相册的整页层：只放右页 / 左右两页。
+    var albumSides: CollageMarkSides = .right
+    /// 导出带水印。跟着这个拼图存（以前是全局设置：关过一次，之后别的拼图预览有水印、导出却没有）。
+    var exportEnabled = true
+
+    init() {}
+}
+
+enum CollageMarkTiles: String, Codable, CaseIterable, Hashable {
+    case eachTile, once
+}
+
+enum CollageMarkSides: String, Codable, CaseIterable, Hashable {
+    case right, both
+}
+
+/// 水印的深浅：原色 / 自动（按落点底下的亮度在白、黑里选）/ 白 / 黑。
+enum CollageMarkContrast: String, Codable, CaseIterable, Hashable {
+    case original, auto, light, dark
+}
+
+struct CollageSignature: Codable, Hashable {
+    /// <dataDir>/collage/assets/<sha1>.png 的绝对路径（导入时拷一份，原文件挪走也不影响）。
+    var file: String
+    /// 内容 sha1（hex），解码缓存的键。
+    var key: String
+    /// 原文件名，只用来显示。
+    var sourceName: String
+}
+
+/// 平铺：签名斜着铺满整块区域。
+struct CollageMarkTile: Codable, Hashable {
+    var angleDeg = 30.0
+    /// 间距，相对签名尺寸。
+    var gapRatio = 0.6
+
+    init() {}
+}
+
+struct CollageMarkLayer: Codable, Hashable {
+    var signatureOn = true
+    var position: WatermarkEngine.GridPosition = .bottomRight
+    /// 横向区域（宽 ≥ 高）用的位置；nil = 同 position。按「区域」的宽高判断，不按原图。
+    var landscapePosition: WatermarkEngine.GridPosition?
+    /// 签名宽 = 区域短边 × sizeRatio（与 targetWatermarkWidth 同一公式）。
+    var sizeRatio = 0.15
+    var opacity = 0.8
+    /// 边距 = 区域短边 × marginRatio。
+    var marginRatio = 0.02
+    /// nil = 签名原色。
+    var tint: CollageColor?
+    var tile: CollageMarkTile?
+    var text: CollageMarkText?
+    /// 从哪个预设来的（只显示）。
+    var presetName: String?
+    /// 深浅。original = 签名原色（tint 非 nil 就照 tint 染）、字用设定颜色；light / dark = 签名和字都是白 /
+    /// 近黑（不看 tint）；auto = 按落点底下的亮度在 light / dark 里选。新建的、从水印页拿来的都是 original：
+    /// 和水印页看到的一样，彩色 logo 也不会被默认染成纯白 / 纯黑。
+    var contrast: CollageMarkContrast = .original
+    /// 整页层：版心外的留白够宽就放进留白里，不压照片（每张照片层不看这个）。
+    var preferMargin = true
+
+    init() {}
+}
+
+struct CollageMarkText: Codable, Hashable {
+    var template = "{make} {model} · {lens} · f/{fnumber} · {shutter}s · ISO {iso}"
+    /// 非空 = 直接用这段字（可含 {title} {date} 等占位符），忽略 template。
+    var customText = ""
+    /// × 区域长边。
+    var fontSizeRatio = 0.03
+    var position: WatermarkEngine.GridPosition = .bottomLeft
+    /// 边距 = 区域短边 × marginRatio。
+    var marginRatio = 0.02
+    var opacity = 0.85
+    var color = CollageColor.white
+    var backgroundEnabled = true
+    var backgroundColor = CollageColor(r: 0, g: 0, b: 0)
+    var backgroundAlpha = 80.0 / 255
+    var fullWidth = false
+
+    init() {}
+}
+
 // MARK: - 项目 / 页 / 模板
 
 enum CollageMode: String, Codable, Hashable {
@@ -833,6 +934,8 @@ struct CollageProject: Codable, Hashable {
     var title = ""
     /// {subtitle} 占位符：地点、系列名。
     var subtitle = ""
+    /// 水印（每张照片 / 整页）；nil = 没加过。
+    var watermark: CollageWatermark?
 
     init() {}
 
@@ -1164,6 +1267,78 @@ extension CollageProject {
         style = c.soft(.style, CollageStyle())
         title = c.soft(.title, "")
         subtitle = c.soft(.subtitle, "")
+        // 旧工程没有这个键 = nil；坏了也只丢水印，页面照常读回。
+        watermark = c.softOptional(.watermark)
+    }
+}
+
+extension CollageWatermark {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        photos = c.softOptional(.photos)
+        page = c.softOptional(.page)
+        signature = c.softOptional(.signature)
+        skipPhotoIDs = Set(c.soft(.skipPhotoIDs, [Failable<String>]()).compactMap(\.value))
+        // 旧工程存了 eachTile 的照旧读 eachTile；没存 / 坏了 = 新默认（整张一次）。
+        tiles = c.soft(.tiles, .once)
+        albumSides = c.soft(.albumSides, .right)
+        exportEnabled = c.soft(.exportEnabled, true)
+    }
+}
+
+extension CollageSignature {
+    /// 文件和键缺一个就整个不要（没文件的签名画不出来，没键的缓存不住）。
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        file = try c.decode(String.self, forKey: .file)
+        key = try c.decode(String.self, forKey: .key)
+        sourceName = c.soft(.sourceName, "")
+    }
+}
+
+extension CollageMarkTile {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = CollageMarkTile()
+        angleDeg = min(90, max(-90, c.soft(.angleDeg, d.angleDeg)))
+        gapRatio = min(5, max(0, c.soft(.gapRatio, d.gapRatio)))
+    }
+}
+
+extension CollageMarkLayer {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = CollageMarkLayer()
+        signatureOn = c.soft(.signatureOn, d.signatureOn)
+        position = c.soft(.position, d.position)
+        landscapePosition = c.softOptional(.landscapePosition)
+        sizeRatio = min(1, max(0.01, c.soft(.sizeRatio, d.sizeRatio)))
+        opacity = min(1, max(0, c.soft(.opacity, d.opacity)))
+        marginRatio = min(0.2, max(0, c.soft(.marginRatio, d.marginRatio)))
+        tint = c.softOptional(.tint)
+        tile = c.softOptional(.tile)
+        text = c.softOptional(.text)
+        presetName = c.softOptional(.presetName)
+        contrast = c.soft(.contrast, d.contrast)
+        preferMargin = c.soft(.preferMargin, d.preferMargin)
+    }
+}
+
+extension CollageMarkText {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = CollageMarkText()
+        template = c.soft(.template, d.template)
+        customText = c.soft(.customText, d.customText)
+        fontSizeRatio = min(0.3, max(0.003, c.soft(.fontSizeRatio, d.fontSizeRatio)))
+        position = c.soft(.position, d.position)
+        marginRatio = min(0.2, max(0, c.soft(.marginRatio, d.marginRatio)))
+        opacity = min(1, max(0, c.soft(.opacity, d.opacity)))
+        color = c.soft(.color, d.color)
+        backgroundEnabled = c.soft(.backgroundEnabled, d.backgroundEnabled)
+        backgroundColor = c.soft(.backgroundColor, d.backgroundColor)
+        backgroundAlpha = min(1, max(0, c.soft(.backgroundAlpha, d.backgroundAlpha)))
+        fullWidth = c.soft(.fullWidth, d.fullWidth)
     }
 }
 

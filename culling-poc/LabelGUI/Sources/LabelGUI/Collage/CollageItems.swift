@@ -206,20 +206,32 @@ enum CollageItems {
         var sharpenRadius: Double
         var sharpen: Double
         var canvasHeight: Int
+        /// 水印（nil = 这次渲染不画水印）：「每张照片」层画在相纸上；整页层「自动深浅」要知道相纸在哪。
+        var marks: CollageWatermarks.Painter?
+    }
+
+    /// 导出里不印的图层：没分到照片的相纸（照片不够、从托盘拿掉了）和贴在它上面的东西。
+    static func unprinted(_ items: [CollageItem], photos: [String: CollagePhotoRef]) -> Set<UUID> {
+        var blank = Set<UUID>()
+        for it in items where it.kind == .photo && it.photoID.flatMap({ photos[$0] }) == nil {
+            blank.insert(it.id)
+        }
+        return Set(items.filter { blank.contains($0.id) || $0.attach.map { blank.contains($0.to) } == true }.map(\.id))
+    }
+
+    /// 每个图层转过之后的四个角（成品坐标），顺序同 items；导出里不印的 = nil（预览里的灰色占位也算不印：
+    /// 水印躲不躲它，预览和导出得一样）。
+    static func printedCorners(_ items: [CollageItem], photos: [String: CollagePhotoRef],
+                               canvas: CollageCanvas) -> [[CGPoint]?] {
+        let skip = unprinted(items, photos: photos)
+        return items.map { skip.contains($0.id) ? nil : corners($0, canvas: canvas) }
     }
 
     static func draw(_ items: [CollageItem], ctx: CGContext, dc: DrawContext) {
-        // 没分到照片的相纸（照片不够、从托盘拿掉了）：预览里画成灰色占位提醒，导出不印空白相纸，
-        // 贴在它上面的胶带也不印。
-        var skipped = Set<UUID>()
-        if !dc.options.placeholders {
-            for it in items where it.kind == .photo && it.photoID.flatMap({ dc.photos[$0] }) == nil {
-                skipped.insert(it.id)
-            }
-        }
-        for item in items {
+        // 没分到照片的相纸：预览里画成灰色占位提醒，导出不印空白相纸，贴在它上面的胶带也不印。
+        let skipped = dc.options.placeholders ? [] : unprinted(items, photos: dc.photos)
+        for (index, item) in items.enumerated() {
             if skipped.contains(item.id) { continue }
-            if let a = item.attach, skipped.contains(a.to) { continue }
             ctx.saveGState()
             // 成品坐标 → 缩放 + 出血偏移 → 旋转到局部。
             ctx.translateBy(x: CGFloat(dc.bleed), y: CGFloat(dc.bleed))
@@ -228,7 +240,7 @@ enum CollageItems {
             let outer = localRect(item, canvas: dc.canvas)
             switch item.kind {
             case .photo:
-                drawPhotoItem(item, outer: outer, ctx: ctx, dc: dc)
+                drawPhotoItem(item, index: index, outer: outer, ctx: ctx, dc: dc)
             case .text:
                 if let text = item.text {
                     CollageTypeset.draw(text, in: outer, ctx: ctx, short: dc.canvas.shortSide, vars: dc.vars,
@@ -244,7 +256,8 @@ enum CollageItems {
     private static let paperWhite = CollageColor(hex: 0xFBFAF6)
     private static let penInk = CollageColor(hex: 0x2E3440)
 
-    private static func drawPhotoItem(_ item: CollageItem, outer: CGRect, ctx: CGContext, dc: DrawContext) {
+    private static func drawPhotoItem(_ item: CollageItem, index: Int, outer: CGRect, ctx: CGContext,
+                                      dc: DrawContext) {
         let short = dc.canvas.shortSide
         let inner = photoArea(item.frame, outer: outer)
         // 投影：CG 的阴影偏移在设备空间（y 朝上，不跟旋转走）—— 光从上方来，影子永远往下落。
@@ -267,14 +280,16 @@ enum CollageItems {
                 drawFilmHoles(ctx, outer: outer, inner: inner, color: bg)
             }
         }
+        var window: CollageCrop.Window?
         if let id = item.photoID, let photo = dc.photos[id] {
             let framing: CollageFraming = item.framing == .auto ? .full : item.framing
-            let window = CollageCrop.window(for: photo, cellAspect: CollageCrop.aspect(of: inner), framing: framing,
-                                            override: nil, hints: dc.hints[id])
+            let w = CollageCrop.window(for: photo, cellAspect: CollageCrop.aspect(of: inner), framing: framing,
+                                       override: nil, hints: dc.hints[id])
+            window = w
             // 局部坐标按成品像素算，位图要按缩放后的像素要。
             let pw = max(1, Int((Double(inner.width) * dc.scale).rounded()))
             let ph = max(1, Int((Double(inner.height) * dc.scale).rounded()))
-            if let tile = CollageRender.cellImage(photo: photo, window: window, width: pw, height: ph,
+            if let tile = CollageRender.cellImage(photo: photo, window: w, width: pw, height: ph,
                                                   sharpen: dc.sharpen, radius: dc.sharpenRadius,
                                                   export: dc.options.export, report: dc.options.report,
                                                   color: dc.colorOps[id]) {
@@ -301,6 +316,10 @@ enum CollageItems {
             }
         }
         if item.frame == .mounts { drawMounts(ctx, rect: inner, px: CGFloat(dc.scale)) }
+        // 水印压在相角上面、跟着相纸转（区域躲开相角）。
+        if let marks = dc.marks, let id = item.photoID, let photo = dc.photos[id], let window {
+            marks.drawItem(item, index: index, inner: inner, photo: photo, window: window, vars: dc.vars, ctx: ctx)
+        }
     }
 
     private static func frameFill(_ frame: CollageItemFrame) -> CollageColor {
