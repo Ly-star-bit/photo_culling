@@ -367,18 +367,23 @@ final class WatermarkStore: ObservableObject {
         }
         // 目标文件名在批次内去重：a.jpg + a.png、或两个子文件夹里的同名照片会算出
         // 同一个 dest，先写的那张被后写的顶掉，而两张都报"成功"。APFS 默认大小写
-        // 不敏感，所以按小写路径去重。
+        // 不敏感，所以按小写路径去重。输出目录里已经有的也不覆盖（和拼图导出一样加 -2、-3……）：
+        // 交付后修了几张再导一次到客户文件夹、或者两套预设用了同一个后缀，旧文件以前被悄悄换掉。
         var used = Set<String>()
         var jobs: [(src: URL, dest: URL)] = []
+        var renamed = 0
         let suffix = Self.sanitizedSuffix(options.filenameSuffix)
+        let fm = FileManager.default
         for src in photos {
             let base = src.deletingPathExtension().lastPathComponent + suffix
-            var dest = outputDir.appendingPathComponent("\(base).jpg")
+            let first = outputDir.appendingPathComponent("\(base).jpg")
+            var dest = first
             var n = 2
-            while used.contains(dest.standardizedFileURL.path.lowercased()) {
+            while used.contains(dest.standardizedFileURL.path.lowercased()) || fm.fileExists(atPath: dest.path) {
                 dest = outputDir.appendingPathComponent("\(base)-\(n).jpg")
                 n += 1
             }
+            if dest != first, fm.fileExists(atPath: first.path) { renamed += 1 }
             used.insert(dest.standardizedFileURL.path.lowercased())
             jobs.append((src, dest))
         }
@@ -405,6 +410,7 @@ final class WatermarkStore: ObservableObject {
         let cfg = config
         let opts = options
         let total = jobs.count
+        let renamedCount = renamed
 
         Task.detached { [weak self] in
             let workers = min(4, max(2, ProcessInfo.processInfo.activeProcessorCount / 4))
@@ -458,7 +464,8 @@ final class WatermarkStore: ObservableObject {
                     self.exportCancelled = false
                     self.progressText = "导出已取消 (已写出 \(succeeded)/\(total) 张，保留在输出目录)"
                 } else if failed.isEmpty {
-                    self.progressText = "导出完成: \(total) 张 → \(outputDir.lastPathComponent)"
+                    let kept = renamedCount > 0 ? "（\(renamedCount) 张目标里已有同名，另存为 -2、-3…，旧文件没动）" : ""
+                    self.progressText = "导出完成: \(total) 张 → \(outputDir.lastPathComponent)" + kept
                     AppRuntime.revealInFinder([outputDir])
                 } else {
                     self.progressText = "导出结束: \(succeeded) 成功, \(failed.count) 失败"

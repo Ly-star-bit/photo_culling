@@ -6,7 +6,7 @@ enum AppRuntime {
     static let headlessFlags: Set<String> = [
         "--analyze", "--watermark", "--session-key", "--verdicts", "--sharp", "--focus", "--compare",
         "--collage", "--collage-ui", "--collage-ops", "--compare-crop", "--batch-ui", "--compare-ui", "--timeline-selftest", "--ux-selftest", "--export-xmp",
-        "--watermark-ui",
+        "--watermark-ui", "--watermark-batch",
         "--ingest", "--card-ui", "--card-queue-selftest",
     ]
 

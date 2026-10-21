@@ -255,7 +255,8 @@ struct BatchView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("将释放约 \(BatchStore.sizeText(store.totalSessionBytes)) 磁盘空间。" +
-                 "只删除这些拍摄的缓存分析结果 (预览图/判决/人工改判)，照片本身不动。重新打开这些文件夹需要再分析一次。")
+                 "只删除这些拍摄的缓存分析结果 (预览图/判决/人工改判)，照片本身不动。重新打开这些文件夹需要再分析一次。" +
+                 "更早掉出菜单的拍摄只清预览图，判决照旧留着。")
         }
     }
 
@@ -501,8 +502,8 @@ struct BatchView: View {
                     .buttonStyle(.plain)
                     .help("还留着 2 张以上没淘汰的场。点这里（或按 C）一组一组挑；按 D 在网格里跳到下一个")
                 }
-                if !store.overrides.isEmpty {
-                    Text("人工改判 \(store.overrides.count)")
+                if store.manualOverrideCount > 0 {
+                    Text("人工改判 \(store.manualOverrideCount)")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -514,7 +515,7 @@ struct BatchView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(store.isRunning)
-                .help("有 \(store.xmpStaleCount) 张的判决或星级和上次写进 XMP 的不一样（或者上次没写进去），Lightroom / Capture One 读到的还是旧的。点这里按现在的判决重写（别的软件写的 XMP 照旧不碰）")
+                .help("有 \(store.xmpStaleCount) 张的判决或星级和上次写进 XMP 的不一样（或者上次没写进去），Lightroom / Capture One 读到的还是旧的。点这里按现在的判决重写（别的软件写的 XMP 只改星级/色标，调色等原样保留）")
             }
             if store.unparsedCount > 0 {
                 // Photos the engine couldn't read are invisible in the grid;
@@ -522,6 +523,12 @@ struct BatchView: View {
                 Label("\(store.unparsedCount) 张未能解析", systemImage: "questionmark.square.dashed")
                     .font(.caption).foregroundStyle(.orange).lineLimit(1)
                     .help("文件夹里有 \(store.unparsedCount) 张照片无法解码 (文件损坏、格式不支持或分析时还在拷贝)，不在网格中。修复后重新分析即可")
+            }
+            // 解得出来但文件不完整的：在网格里、已判废片，这条一直挂着 —— 别以为卡上的原片没问题就格式化了。
+            if let corrupt = store.reasonCounts["文件损坏"] {
+                Label("\(corrupt) 张文件损坏", systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.orange).lineLimit(1)
+                    .help("这 \(corrupt) 张文件不完整 (JPEG 结尾缺失、解出来缺的那截是灰的，多半是读卡出错或拷贝中断)，已判废片。卡先别格式化，从卡上重新拷一次再分析")
             }
             // 章节警告收成一条：长场次里几十章，一条一个会把状态栏挤爆。全文在提示里，时间轴上有三角标。
             if let first = store.chapterWarnings.first {
@@ -1517,7 +1524,7 @@ struct BatchView: View {
                 // 一键接受算法的推荐：精选留、你标过可用的留，其余废。快速过场用的。
                 if pending {
                     Button(recRejects > 0 ? "接受推荐 · 废 \(recRejects) 张" : "接受推荐") {
-                        withAnimation { store.applyOverrides(recommended) }
+                        withAnimation { store.applyOverrides(recommended, accepted: true) }
                         // 定完这一场会叠起来：焦点落到留下的那张上，别停在被叠掉的照片上（←/→ 会从头开始）。
                         if let keep = all.first(where: { recommended[$0.id] == .pick }) { focusedID = keep.id }
                     }
@@ -1765,7 +1772,7 @@ struct BatchView: View {
                 // 一坨、精选绿圆和 #1 黄字打架，代码里自己写着"别弄成圣诞树"。
                 .overlay(alignment: .topTrailing) {
                     let rank = store.takeRank[item.id]
-                    let manual = store.overrides[item.id] != nil
+                    let manual = store.isManual(item.id)
                     if rank != nil || manual || item.verdict == .pick || groupSize > 1 {
                         HStack(spacing: 4) {
                             if let rank {

@@ -64,7 +64,7 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--analyze"),
             print(message)
         }
         // 登记到 sessions.json：否则下次 GUI 分析任何文件夹时，
-        // pruneOrphanedSessions 会把这次跑出来的预览和结果整个删掉。
+        // pruneOrphanedSessions 会把这次跑出来的预览清掉。
         BatchStore.registerSession(dataDir: appDataDir, folder: dir,
                                    photoCount: summary.analyzed + summary.reused)
         let elapsed = Date().timeIntervalSince(start)
@@ -72,6 +72,9 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--analyze"),
                      summary.analyzed, summary.reused, elapsed, elapsed / Double(max(1, summary.analyzed))))
         if !summary.failed.isEmpty {
             print("Failed (\(summary.failed.count)): \(summary.failed.joined(separator: ", "))")
+        }
+        if !summary.corrupt.isEmpty {
+            print("Corrupt (\(summary.corrupt.count)): \(summary.corrupt.joined(separator: ", "))")
         }
         print("Artifacts: \(sessionDir.path)")
         exit(0)
@@ -180,10 +183,10 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
         // 所以只在临时 LABELGUI_DATA_DIR 下用）。--undo 紧接着撤销一次，验证单条撤销记录。
         if CommandLine.arguments.contains("--accept-all") {
             let n = store.acceptAllRecommendations()
-            print("接受全部推荐: 动了 \(n) 场 · overrides \(store.overrides.count) 条")
+            print("接受全部推荐: 动了 \(n) 场 · overrides \(store.overrides.count) 条 · 人工改判 \(store.manualOverrideCount) 条")
             if CommandLine.arguments.contains("--undo") {
                 store.undoLastOverride()
-                print("撤销一次后: overrides \(store.overrides.count) 条")
+                print("撤销一次后: overrides \(store.overrides.count) 条 · 人工改判 \(store.manualOverrideCount) 条")
             }
         }
         let counts = store.verdictCounts
@@ -208,6 +211,19 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
                 .map { "\($0.id)=\($0.verdict.rawValue)" + (store.takeRank[$0.id].map { "#\($0)" } ?? "") }
                 .joined(separator: " ")
             print("  场 \(take) (\(byTake[take]!.count) 张): \(line)")
+        }
+        // --clear-recents：打印完再点一次「全部清除」，数还剩哪些场次目录 —— 验证掉出菜单的旧场次
+        // 判决不被顺手删掉。会删数据目录里的场次：只在临时 LABELGUI_DATA_DIR 下跑。
+        if CommandLine.arguments.contains("--clear-recents") {
+            guard !(ProcessInfo.processInfo.environment["LABELGUI_DATA_DIR"] ?? "").isEmpty else {
+                print("--clear-recents 会删场次缓存：先设 LABELGUI_DATA_DIR=<临时目录>")
+                exit(2)
+            }
+            store.clearRecentSessions()
+            let root = appDataDir.appendingPathComponent("sessions")
+            let left = ((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
+                .filter { $0 != "default" && !$0.hasPrefix(".") }.sorted()
+            print("全部清除后: 剩 \(left.count) 个场次目录 \(left.joined(separator: " "))")
         }
     }
     exit(0)
@@ -356,6 +372,14 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--watermark-ui"),
     }
 }
 
+// 水印页批量导出（同名不覆盖）：LABELGUI_DATA_DIR=<临时> LabelGUI --watermark-batch <photo_dir> <out_dir> [--signature sig.png] [--exif]
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--watermark-batch"),
+   CommandLine.arguments.count > flagIndex + 2 {
+    MainActor.assumeIsolated {
+        WatermarkBatchCLI.run(flagIndex: flagIndex)
+    }
+}
+
 // 网格「改判后保持位置」自检：LabelGUI --ux-selftest。
 if CommandLine.arguments.contains("--ux-selftest") {
     MainActor.assumeIsolated {
@@ -402,8 +426,10 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--export-xmp"),
         store.exportXMP()
         let deadline = Date().addingTimeInterval(30)
         while store.isRunning && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        // 有张没写进去（别人的 XMP 合并不了）时 lastError 是提醒、progressText 是完成摘要：两行都打。
         let exportError = store.lastError
-        print(exportError ?? store.progressText)
+        print(store.progressText)
+        if let exportError { print(exportError) }
         print("写完：XMP 过期 \(store.xmpStaleCount) 张")
         if let i = CommandLine.arguments.firstIndex(of: "--then"), CommandLine.arguments.count > i + 1 {
             let parts = CommandLine.arguments[i + 1].split(separator: "=").map(String.init)

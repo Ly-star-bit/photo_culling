@@ -538,7 +538,7 @@ final class PickSession: ObservableObject {
             let v = draft[f.id] ?? .reject
             let mark = v == .reject ? "废" : (v == .pick ? "留★" : "留·可用")
             let rank = store.takeRank[f.id].map { " #\($0)" } ?? ""
-            let override = store.overrides[f.id] != nil ? " ✋" : ""
+            let override = store.isManual(f.id) ? " ✋" : ""
             lines.append("\(i == highlight ? ">" : " ")\(i + 1) \(f.id) 现在\(f.verdict.rawValue)\(override) → \(mark)\(rank)"
                          + faces.describe(f.id))
         }

@@ -303,7 +303,7 @@ struct PickView: View {
     private func tile(_ item: BatchItem, index: Int, state: Verdict, best: CompareBest,
                       faces: FaceAlignment, layout: PickLayout.Result) -> some View {
         PickTile(item: item, number: index + 1, state: state,
-                 rank: store.takeRank[item.id], manual: store.overrides[item.id] != nil,
+                 rank: store.takeRank[item.id], manual: store.isManual(item.id),
                  highlighted: index == session.highlight, layout: layout, best: best,
                  faceSlots: faces.slots[item.id] ?? [], eyes: faces.summary(item.id),
                  zoomFace: zoomPerson.flatMap { p in

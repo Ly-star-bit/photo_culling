@@ -104,6 +104,8 @@ struct BatchItem: Identifiable {
     var dynamicEyeClosed: Bool?
     /// Position in the manifest (folder listing order) — the 文件名 sort key.
     var order: Int = 0
+    /// JPEG 截断（读卡出错、拷贝中断，解出来缺的那截是灰的）：带「文件损坏」判废片，复审也不送。
+    var fileCorrupt = false
 
     /// Below the safety-shutter rule — motion blur likely; info badge, not a reject.
     var slowShutter: Bool { exif?.slowShutter ?? false }
@@ -196,6 +198,14 @@ final class BatchStore: ObservableObject {
     /// Photographer's final say: id → forced verdict, wins over every threshold.
     /// Persisted so re-opening the app keeps manual decisions.
     @Published private(set) var overrides: [String: Verdict] = [:]
+    /// 「接受推荐」（全部 / 本章）写进 overrides 的那些：得钉住（不然砍完对手的精选会掉回可用、
+    /// 待处理的场永远定不下来），但那是算法的结果，不是你改的 —— ✋、「人工改判 N」、复盘统计
+    /// （阈值建议、滑杆漏掉）都不算它们。你之后亲手改过的那张就从这里拿掉。存 accepted.json。
+    /// 不单独发布：每次改它后面都跟着 applyThresholds（items / derived 会刷新界面）。
+    private(set) var acceptedIDs: Set<String> = []
+
+    /// 这张的判决是你亲手改的（不是「接受推荐」钉住的）。
+    func isManual(_ id: String) -> Bool { overrides[id] != nil && !acceptedIDs.contains(id) }
 
     // Slider thresholds. Sharpness below → reject; worst clip pct above → reject;
     // face quality below → reject (0 disables; only applies to photos with a face).
@@ -385,6 +395,8 @@ final class BatchStore: ObservableObject {
         var faceQualityBins: [Int] = []
         /// Rejects with no manual override — the appeal court's docket.
         var autoRejectCount = 0
+        /// 真正经你手改过的张数（overrides 去掉「接受推荐」钉的）：状态栏「人工改判 N」。
+        var manualOverrideCount = 0
         /// 上次写 XMP 之后判决变了的张数（从没写过 = 0，不提醒）。Lightroom / C1 看的是 XMP，
         /// 在这里改完忘了重写，那边还是旧结果。
         var xmpStaleCount = 0
@@ -404,6 +416,7 @@ final class BatchStore: ObservableObject {
     var chapterWarnings: [String] { derived.chapterWarnings }
     var borderlineCount: Int { derived.borderlineCount }
     var pendingTakeCount: Int { derived.pendingTakeCount }
+    var manualOverrideCount: Int { derived.manualOverrideCount }
     var pendingTakes: [Int] { derived.pendingTakes }
 
     /// 「待处理」的场：还留着 2 张以上没淘汰，而且其中还有没经你手的（自动判的）。
@@ -441,7 +454,7 @@ final class BatchStore: ObservableObject {
     var autoRejectCount: Int { derived.autoRejectCount }
     var xmpStaleCount: Int { derived.xmpStaleCount }
 
-    /// 写进 XMP 的那两样：判决（色标 / -1 废片）和星级（精选、可用的星级跟着 VLM 表情分走）。
+    /// 写进 XMP 的那两样：判决（色标 / -1 废片）和星级（判决定档，VLM 表情分只在档内排先后）。
     struct XMPMark: Codable, Equatable {
         let v: String
         let s: Int
@@ -452,6 +465,8 @@ final class BatchStore: ObservableObject {
     private struct XMPState: Codable {
         var marks: [String: XMPMark] = [:]
         var foreign: Set<String> = []
+        /// foreign 已按现在的归属规则复查过。旧版本存的没有这个字段（见 recheckForeignSidecars）。
+        var foreignRechecked: Bool?
     }
     private var xmpState: XMPState?
     private var xmpStatePath: URL { sessionDir.appendingPathComponent("xmp_state.json") }
@@ -464,7 +479,26 @@ final class BatchStore: ObservableObject {
         xmpState = try? JSONDecoder().decode(XMPState.self, from: data)
     }
 
+    /// 旧版本把本工具更早写的 sidecar（rate.py 的 culling-poc 标记）也记成了「别人的」，「XMP 过期」
+    /// 从来不算它们 —— 升级后不重新导一次，改判了也不提醒，LR/C1 一直是旧星级。打开场次时按现在的规则
+    /// 复查一次：是我们自己的就从 foreign 拿出来（没有 marks = 没写过，算过期，下次写 XMP 整份重写）。
+    /// 只查一次（记 foreignRechecked），大场次别每次打开都读几千个 sidecar；照片文件夹不在（硬盘没插）先不查。
+    private func recheckForeignSidecars() {
+        guard var state = xmpState, state.foreignRechecked != true,
+              let dir = photoDir, FileManager.default.fileExists(atPath: dir.path) else { return }
+        let paths = Dictionary(items.map { ($0.id, $0.rawPath) }, uniquingKeysWith: { first, _ in first })
+        for id in state.foreign {
+            guard let raw = paths[id] else { continue }
+            let url = URL(fileURLWithPath: raw).deletingPathExtension().appendingPathExtension("xmp")
+            if let data = try? Data(contentsOf: url), XMPSidecar.isOwn(data) { state.foreign.remove(id) }
+        }
+        saveXMPState(state)
+    }
+
     private func saveXMPState(_ state: XMPState) {
+        var state = state
+        // 这里写下的 foreign 都是按现在的规则判的（导出时逐张判过，或者刚复查过）。
+        state.foreignRechecked = true
         xmpState = state
         if let data = try? JSONEncoder().encode(state) {
             try? data.write(to: xmpStatePath, options: .atomic)
@@ -483,14 +517,27 @@ final class BatchStore: ObservableObject {
     }
 
     /// XMP 里的星级和色标。导出和「XMP 过期」比对共用这一份，两边不会算岔。
+    /// 判决定星级档：精选 4–5、可用 2–3、废片 -1 —— 精选永远比可用星多，LR 里按「≥4 星」筛精修
+    /// 不会漏掉你亲手定的精选。VLM 表情分只在档内排先后（表情好的精选 5 星、表情差的可用 2 星）；
+    /// 以前星级直接等于表情分，表情分 1 的精选只有 1 星，排在 4 星的可用后面。
+    /// 没跑过 VLM 的：精选 4、可用 3，和以前一样（老场次不会因此全变「XMP 过期」）。
     static func xmpRating(_ item: BatchItem) -> (stars: Int, label: String?) {
         switch item.verdict {
         case .reject:
-            return (-1, "Red")    // Bridge/LR read -1 as "rejected"; C1 filters by the red label instead
+            return (-1, xmpLabel(.reject))    // Bridge/LR read -1 as "rejected"; C1 filters by the red label instead
         case .pick:
-            return (item.expressionScore ?? 4, "Green")
+            return ((item.expressionScore ?? 0) >= 4 ? 5 : 4, xmpLabel(.pick))
         case .usable:
-            return (item.expressionScore.map { max(1, $0 - 1) } ?? 3, nil)
+            return ((item.expressionScore ?? 3) >= 3 ? 3 : 2, xmpLabel(.usable))
+        }
+    }
+
+    /// 判决对应的色标：精选绿、废片红（LR 和 C1 都能按色标筛），可用不带。
+    static func xmpLabel(_ verdict: Verdict) -> String? {
+        switch verdict {
+        case .reject: return "Red"
+        case .pick: return "Green"
+        case .usable: return nil
         }
     }
 
@@ -571,6 +618,7 @@ final class BatchStore: ObservableObject {
             for (i, item) in ranked.prefix(3).enumerated() { d.takeRank[item.id] = i + 1 }
         }
         d.verdictCounts = (r, u, p)
+        d.manualOverrideCount = overrides.keys.filter { !acceptedIDs.contains($0) }.count
         for (idx, item) in items.enumerated() { d.byVerdict[item.verdict, default: []].append(idx) }
         d.sharpnessBins = Self.histogramBins(items.map(\.sharpness), range: Self.sharpnessHistRange, sqrtScale: false)
         d.exposureBins = Self.histogramBins(items.map(\.worstClipPct), range: Self.exposureHistRange, sqrtScale: true)
@@ -775,6 +823,7 @@ final class BatchStore: ObservableObject {
         sessionDir = dataDir.appendingPathComponent("sessions/\(currentSessionKey)")
         try? FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
         overrides = [:]
+        acceptedIDs = []
         overrideUndoStack = []
         reasonFilter = nil
         borderlineFilter = false
@@ -788,20 +837,24 @@ final class BatchStore: ObservableObject {
         loadOverrides()
         loadXMPState()
         loadResults()
+        recheckForeignSidecars()
         applyThresholds()
         // Cached results load happily from a folder that no longer exists — say
         // so up front instead of letting 导出/分析 fail silently later.
         if !FileManager.default.fileExists(atPath: resolved.path) {
             lastError = "「\(folder.lastPathComponent)」的照片文件夹已不存在 (被删除、改名或所在硬盘未挂载)。" +
                         "下面是上次分析的缓存结果，重新分析/导出/写 XMP 都会失败。"
+        } else if previewsPruned {
+            lastError = "这一场掉出了最近 15 场，预览图已清理省空间 (判决和人工改判都还在)。" +
+                        "点「重新分析」补回预览：没变的照片只重做预览，不改判决"
         }
         // Register a session that HAS cached results as soon as it's opened, not
-        // just after an analysis: pruneOrphanedSessions deletes every
-        // sessions/<key> missing from this index, so a session that was only
-        // ever opened (and manually re-judged — overrides.json lives in there)
-        // used to be wiped the next time any other folder was analyzed.
+        // just after an analysis: pruneOrphanedSessions clears the previews of
+        // every sessions/<key> missing from this index (it used to delete the
+        // whole dir, overrides.json included), so a session that was only ever
+        // opened would lose its previews the next time any other folder was analyzed.
         // Empty ones stay out — a mistaken pick shouldn't land in the menu
-        // forever, or evict (and delete) the oldest real session at the 15 cap.
+        // forever, or push the oldest real session (and its previews) out at the 15 cap.
         if !items.isEmpty { touchSessionIndex() }
         refreshSessionAvailability()
         postResultsChanged(previewsChanged: false)
@@ -817,8 +870,8 @@ final class BatchStore: ObservableObject {
     }
 
     /// Register a session written outside the GUI (the `--analyze` CLI path) so
-    /// pruneOrphanedSessions treats it as live instead of deleting its previews
-    /// and results the next time the app analyzes anything.
+    /// pruneOrphanedSessions treats it as live instead of clearing its previews
+    /// the next time the app analyzes anything.
     nonisolated static func registerSession(dataDir: URL, folder: URL, photoCount: Int) {
         let indexPath = dataDir.appendingPathComponent("sessions.json")
         let key = sessionKey(for: folder)
@@ -874,19 +927,33 @@ final class BatchStore: ObservableObject {
         refreshSessionAvailability(force: true)
     }
 
-    /// Delete session dirs that fell out of the recents index — one big shoot's
-    /// previews run to hundreds of MB and nothing else ever removes them.
+    /// 掉出最近 15 场的场次只清预览图 —— 一场大拍摄的预览几百 MB，别的地方不会去删它。
+    /// 以前是整个 sessions/<key> 删掉：人工改判 (overrides.json)、阈值、XMP 记录、审到哪、
+    /// 拼图工程、VLM 结果全跟着没了，一点提示都没有（第 16 场一分析，最早那场的选片就丢了）。
+    /// 现在这些 KB 级的东西一律留着：菜单只是「最近」，不是「保留期限」；重新打开那个文件夹，
+    /// 判决原样回来，点「重新分析」补回预览（分析结果没变的照片只重做预览，几秒钟）。
     private func pruneOrphanedSessions() {
         let keep = Set(recentSessions.map(\.key))
         let root = dataDir.appendingPathComponent("sessions")
-        guard let dirs = try? FileManager.default.contentsOfDirectory(
-            at: root, includingPropertiesForKeys: nil) else { return }
+        let fm = FileManager.default
+        guard let dirs = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
         for dir in dirs
         where dir.hasDirectoryPath
             && dir.lastPathComponent != "default"
             && !keep.contains(dir.lastPathComponent) {
-            try? FileManager.default.removeItem(at: dir)
+            try? fm.removeItem(at: dir.appendingPathComponent("previews"))
+            // 什么都没剩（只打开过、从没分析过的空场次）才连目录一起删。
+            if (try? fm.contentsOfDirectory(atPath: dir.path))?.isEmpty == true {
+                try? fm.removeItem(at: dir)
+            }
         }
+    }
+
+    /// 这一场的预览图被上面清掉了（判决还在）：网格会是一片灰，得说清楚怎么补回来。
+    private var previewsPruned: Bool {
+        guard let first = items.first else { return false }
+        return !FileManager.default.fileExists(atPath: sessionDir.appendingPathComponent("previews").path)
+            && !FileManager.default.fileExists(atPath: first.previewPath)
     }
 
     // MARK: - Recents housekeeping
@@ -987,7 +1054,7 @@ final class BatchStore: ObservableObject {
         progressText = "已从列表移除「\(entry.name)」(照片本身未动)"
     }
 
-    /// Empty the menu and wipe every cached session. Originals untouched —
+    /// Empty the menu and wipe the cached sessions it listed. Originals untouched —
     /// reopening a folder just means analyzing it again.
     func clearRecentSessions() {
         guard !isRunning else {
@@ -995,10 +1062,17 @@ final class BatchStore: ObservableObject {
             return
         }
         let count = recentSessions.count
+        let listed = recentSessions.map(\.key)
         recentSessions = []
         saveSessionsIndex()
         resetToNoSession()
-        pruneOrphanedSessions()     // empty keep-set: removes every session dir
+        // 用户在确认框里点过的「全部清除」：菜单里列着的这几场整份删，判决、人工改判一起（确认框里写着）。
+        // 掉出菜单的更早的场次确认框里没列，不能顺手把它们的判决也删了：只清预览（pruneOrphanedSessions，
+        // 这时 keep 集是空的），判决这些 KB 级的小文件照旧留着。
+        for key in listed {
+            try? FileManager.default.removeItem(at: dataDir.appendingPathComponent("sessions/\(key)"))
+        }
+        pruneOrphanedSessions()
         refreshSessionAvailability(force: true)
         progressText = "已清除 \(count) 条历史记录 (照片本身未动)"
     }
@@ -1013,6 +1087,7 @@ final class BatchStore: ObservableObject {
         currentSessionPath = ""
         sessionDir = dataDir.appendingPathComponent("sessions/default")
         overrides = [:]
+        acceptedIDs = []
         overrideUndoStack = []
         reasonFilter = nil
         borderlineFilter = false
@@ -1116,20 +1191,27 @@ final class BatchStore: ObservableObject {
     /// touched id's PREVIOUS override (nil = was automatic). ⌘Z pops — a
     /// mis-keyed digit in tag-and-advance review mode costs one keystroke, not
     /// a hunt back through the filmstrip.
-    @Published private var overrideUndoStack: [[(id: String, previous: Verdict?)]] = []
+    @Published private var overrideUndoStack: [[(id: String, previous: Verdict?, accepted: Bool)]] = []
 
     var canUndoOverride: Bool { !overrideUndoStack.isEmpty }
+
+    /// 动手之前压一条撤销记录：每张原来的判决，和它原来是不是「接受推荐」钉的。
+    private func pushUndo(_ ids: some Collection<String>) {
+        overrideUndoStack.append(ids.map { ($0, overrides[$0], acceptedIDs.contains($0)) })
+        if overrideUndoStack.count > 100 { overrideUndoStack.removeFirst() }
+    }
 
     /// 返回这次撤销动到的照片 id —— 连拍挑选据此跳回出事的那一组。
     @discardableResult
     func undoLastOverride() -> [String] {
         guard let last = overrideUndoStack.popLast() else { return [] }
-        for (id, previous) in last {
+        for (id, previous, accepted) in last {
             if let previous {
                 overrides[id] = previous
             } else {
                 overrides.removeValue(forKey: id)
             }
+            if accepted { acceptedIDs.insert(id) } else { acceptedIDs.remove(id) }
         }
         saveOverrides()
         applyThresholds()
@@ -1138,9 +1220,9 @@ final class BatchStore: ObservableObject {
 
     /// Batch form (⌘-click multi-select): one save + one recompute for the lot.
     func setOverrideBatch(_ ids: some Collection<String>, _ verdict: Verdict?) {
-        overrideUndoStack.append(ids.map { ($0, overrides[$0]) })
-        if overrideUndoStack.count > 100 { overrideUndoStack.removeFirst() }
+        pushUndo(ids)
         for id in ids {
+            acceptedIDs.remove(id)
             if let verdict {
                 overrides[id] = verdict
             } else {
@@ -1165,10 +1247,10 @@ final class BatchStore: ObservableObject {
         let all = Array(candidates)
         guard !all.isEmpty else { return }
         let keep = Set(keepers)
-        overrideUndoStack.append(all.map { ($0, overrides[$0]) })
-        if overrideUndoStack.count > 100 { overrideUndoStack.removeFirst() }
+        pushUndo(all)
         for id in all {
             overrides[id] = keep.contains(id) ? keeperVerdict : .reject
+            acceptedIDs.remove(id)
         }
         saveOverrides()
         applyThresholds()
@@ -1176,12 +1258,20 @@ final class BatchStore: ObservableObject {
 
     /// 一组判决一次写进去：一条撤销记录、一次保存、一次重算。连拍挑选的 ⏎、分组行的
     /// 「接受推荐」/「只留这张」都走这里 —— 一组 8 张拆成 8 次 setOverride 的话，⌘Z 要按 8 下。
-    func applyOverrides(_ changes: [String: Verdict]) {
+    /// `accepted`：分组行的「接受推荐」—— 原来是自动判的那几张记成「接受推荐」钉住的，不算人工改判
+    /// （你亲手判过的照旧算你的）。
+    func applyOverrides(_ changes: [String: Verdict], accepted: Bool = false) {
         guard !changes.isEmpty else { return }
         let ids = changes.keys.sorted()
-        overrideUndoStack.append(ids.map { ($0, overrides[$0]) })
-        if overrideUndoStack.count > 100 { overrideUndoStack.removeFirst() }
-        for id in ids { overrides[id] = changes[id] }
+        pushUndo(ids)
+        for id in ids {
+            if accepted, overrides[id] == nil || acceptedIDs.contains(id) {
+                acceptedIDs.insert(id)
+            } else {
+                acceptedIDs.remove(id)
+            }
+            overrides[id] = changes[id]
+        }
         saveOverrides()
         applyThresholds()
     }
@@ -1244,10 +1334,16 @@ final class BatchStore: ObservableObject {
         return (g, p)
     }
 
+    /// overrides.json 的格式不动（老版本照样读得懂），「接受推荐」的来源另存一份。
+    private var acceptedPath: URL { sessionDir.appendingPathComponent("accepted.json") }
+
     private func loadOverrides() {
         guard let data = try? Data(contentsOf: overridesPath),
               let raw = try? JSONDecoder().decode([String: String].self, from: data) else { return }
         overrides = raw.compactMapValues(Verdict.init(rawValue:))
+        let accepted = (try? Data(contentsOf: acceptedPath))
+            .flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
+        acceptedIDs = Set(accepted).filter { overrides[$0] != nil }
     }
 
     private func saveOverrides() {
@@ -1257,10 +1353,15 @@ final class BatchStore: ObservableObject {
             // of the shoot.
             try? data.write(to: overridesPath, options: .atomic)
         }
+        if acceptedIDs.isEmpty {
+            try? FileManager.default.removeItem(at: acceptedPath)
+        } else if let data = try? JSONEncoder().encode(acceptedIDs.sorted()) {
+            try? data.write(to: acceptedPath, options: .atomic)
+        }
     }
 
     /// Canonical display order for reject-reason chips and slider kill-counts.
-    static let reasonOrder = ["连拍重复", "闭眼", "虚焦", "曝光裁切", "人脸质量低", "VLM建议淘汰"]
+    static let reasonOrder = ["文件损坏", "连拍重复", "闭眼", "虚焦", "曝光裁切", "人脸质量低", "VLM建议淘汰"]
 
     /// Within ±15% of any ACTIVE threshold — the photos a small slider nudge
     /// would flip either way.
@@ -1353,7 +1454,8 @@ final class BatchStore: ObservableObject {
             exif: ExifMeta(shutterSec: a.shutterSec, aperture: a.aperture, iso: a.iso,
                            focal35: a.focal35, lens: a.lensModel),
             horizonDeg: a.horizonDeg,
-            camera: a.cameraModel
+            camera: a.cameraModel,
+            fileCorrupt: a.fileCorrupt
         )
     }
 
@@ -1420,9 +1522,20 @@ final class BatchStore: ObservableObject {
                     self.progressText = summary.reused > 0
                         ? "完成: 分析 \(summary.analyzed) 张 · 复用 \(summary.reused) 张未变"
                         : "完成: \(summary.analyzed) 张"
-                    if !summary.failed.isEmpty {
-                        self.lastError = "\(summary.failed.count) 张无法解析被跳过 (文件损坏或仍在拷贝中): \(summary.failed.prefix(5).joined(separator: ", "))\(summary.failed.count > 5 ? "..." : "")"
+                    // 拆开拼：一长串插值 + 三元在 CI 的 Xcode 16 上类型检查会慢。
+                    func names(_ ids: [String]) -> String {
+                        ids.prefix(5).joined(separator: ", ") + (ids.count > 5 ? "..." : "")
                     }
+                    var problems: [String] = []
+                    if !summary.failed.isEmpty {
+                        problems.append("\(summary.failed.count) 张无法解析被跳过 (文件损坏或仍在拷贝中): " + names(summary.failed))
+                    }
+                    // 坏文件照样在网格里（看得到缺的那截），判废片；要紧的是别把卡格式化了。
+                    if !summary.corrupt.isEmpty {
+                        problems.append("\(summary.corrupt.count) 张文件损坏 (不完整，可能读卡出错或拷贝中断)，已判废片: "
+                                        + names(summary.corrupt) + " —— 卡先别格式化，从卡上重新拷一次")
+                    }
+                    if !problems.isEmpty { self.lastError = problems.joined(separator: "；") }
                 }
                 self.isRunning = false
                 self.analyzing = false
@@ -1553,8 +1666,9 @@ final class BatchStore: ObservableObject {
     /// applyThresholds, which drops cleared charges and lets the photo walk.
     func runAppealOnRejects() {
         guard !isRunning, !items.isEmpty else { return }
+        // 文件损坏的不送：VLM 只能平反闭眼 / 虚焦 / 曝光，坏文件送去也平反不了，白跑。
         let accused = items.filter { $0.verdict == .reject && overrides[$0.id] == nil
-            && !$0.rejectReasons.isEmpty }
+            && !$0.rejectReasons.isEmpty && !$0.fileCorrupt }
         guard !accused.isEmpty else {
             progressText = "没有可复审的自动废片"
             return
@@ -1785,6 +1899,7 @@ final class BatchStore: ObservableObject {
             )
             item.order = index
             item.camera = photo.camera
+            item.fileCorrupt = l1.fileCorrupt ?? false
             return item
         }
         Self.assignChapters(&loaded)
@@ -2257,6 +2372,7 @@ final class BatchStore: ObservableObject {
             }
 
             var reasons: [String] = []
+            if updated[i].fileCorrupt { reasons.append("文件损坏") }
             if eyeClosed == true { reasons.append("闭眼") }
             if updated[i].sharpness < sharpnessThreshold { reasons.append("虚焦") }
             if updated[i].worstClipPct >= exposureThreshold { reasons.append("曝光裁切") }
@@ -2354,9 +2470,10 @@ final class BatchStore: ObservableObject {
     /// 重新分组就是刚从 groupedItems 里清掉的那个坑。
     var recommendationSummary: (takes: Int, rejects: Int) { derived.recommendationSummary }
 
-    /// 每个有精选的待处理场：精选留下（写成人工精选，否则砍完对手它会掉回可用），
+    /// 每个有精选的待处理场：精选留下（钉成精选，否则砍完对手它会掉回可用），
     /// 其余**没被人工改判**的可用设为废片。人工标过可用的一律不碰 —— 那是用户
-    /// 亲手做的决定。整个操作一条撤销记录，⌘Z 一次全部回来。
+    /// 亲手做的决定。写进去的都记在 acceptedIDs：判决钉住了，但不算「人工改判」。
+    /// 整个操作一条撤销记录，⌘Z 一次全部回来。
     /// chapter 非 nil = 只动这一章（时间轴「只看这一章」开着时的「本章接受推荐」）。
     @discardableResult
     func acceptAllRecommendations(inChapter chapter: Int? = nil) -> Int {
@@ -2373,9 +2490,11 @@ final class BatchStore: ObservableObject {
             for l in losers { changes.append((l.id, .reject)) }
         }
         guard !changes.isEmpty else { return 0 }
-        overrideUndoStack.append(changes.map { ($0.id, overrides[$0.id]) })
-        if overrideUndoStack.count > 100 { overrideUndoStack.removeFirst() }
-        for c in changes { overrides[c.id] = c.verdict }
+        pushUndo(changes.map(\.id))
+        for c in changes {
+            overrides[c.id] = c.verdict
+            acceptedIDs.insert(c.id)
+        }
         saveOverrides()
         applyThresholds()
         return takes
@@ -2439,6 +2558,7 @@ final class BatchStore: ObservableObject {
         func released(_ reason: String) -> [BatchItem] {
             items.filter { item in
                 item.rejectReasons.contains(reason) && overrides[item.id].map { $0 != .reject } == true
+                    && !acceptedIDs.contains(item.id)
             }
         }
         /// 排好序的值里，覆盖 ≥75% 的那个分位点。`lineIsMinimum` = 这条线是下限
@@ -2494,9 +2614,9 @@ final class BatchStore: ObservableObject {
     }
 
     /// 你手动废掉、但当前滑杆一个理由都没给的张数 —— 滑杆漏掉的。只报数，不编建议：
-    /// 没有信号说明是哪条线该收紧。
+    /// 没有信号说明是哪条线该收紧。「接受推荐」废掉的落选张不算：那是算法自己的推荐，不是你在纠错。
     var manualRejectsWithoutReason: Int {
-        items.filter { overrides[$0.id] == .reject && $0.rejectReasons.isEmpty }.count
+        items.filter { overrides[$0.id] == .reject && $0.rejectReasons.isEmpty && !acceptedIDs.contains($0.id) }.count
     }
 
     // MARK: - Trash rejects
@@ -2575,7 +2695,10 @@ final class BatchStore: ObservableObject {
                 guard let self else { return }
                 self.progressFraction = nil
                 self.items.removeAll { trashed.contains($0.id) }
-                for id in trashed { self.overrides.removeValue(forKey: id) }
+                for id in trashed {
+                    self.overrides.removeValue(forKey: id)
+                    self.acceptedIDs.remove(id)
+                }
                 self.saveOverrides()
                 self.rebuildGroupSizes()
                 self.purgeFromArtifacts(ids: trashed)
@@ -2868,12 +2991,16 @@ final class BatchStore: ObservableObject {
         // Verdicts/overrides live on the main actor, so the sidecar contents are
         // derived here; the detached task is pure file IO (thousands of atomic
         // writes on a big shoot would otherwise freeze the UI for seconds).
-        let jobs: [(id: String, url: URL, content: String)] = items.map { item in
+        let jobs: [XMPJob] = items.map { item in
             // Red = the cross-app 淘汰 color — filterable in LR AND Capture One.
             let (stars, label) = Self.xmpRating(item)
             let xmpURL = URL(fileURLWithPath: item.rawPath).deletingPathExtension().appendingPathExtension("xmp")
             let reason = item.verdict == .reject ? item.rejectReasons.joined(separator: "; ") : ""
-            return (item.id, xmpURL, Self.xmpContent(rating: stars, label: label, reason: reason))
+            // 上次写进去的色标（精选绿 / 废片红）：这次没有色标时，别人的 sidecar 里还是这个色就拿掉；
+            // 已经是别的色（你后来在 LR 里改的）就不动。
+            let lastLabel = xmpState?.marks[item.id].flatMap { Verdict(rawValue: $0.v) }.flatMap(Self.xmpLabel)
+            return XMPJob(id: item.id, url: xmpURL, content: Self.xmpContent(rating: stars, label: label, reason: reason),
+                          stars: stars, label: label, lastLabel: lastLabel)
         }
         let total = jobs.count
         // 写完记下「每张这次写进去的是什么」，之后判决 / 星级再变就提醒重写（状态栏）。
@@ -2890,17 +3017,32 @@ final class BatchStore: ObservableObject {
         Task.detached { [weak self] in
             var written = 0
             var writtenIDs: [String] = []
+            var merged = 0
             var preserved: [String] = []
             var failed: [String] = []
             for (index, job) in jobs.enumerated() {
                 if flag.isSet { break }
-                // Lightroom 把调色参数、关键字、GPS 都存在同名 .xmp 里。别人的
-                // sidecar 一律不碰 —— 覆盖成我们这份只有星级的模板 = 整场调色报废。
-                if FileManager.default.fileExists(atPath: job.url.path),
-                   let existing = try? String(contentsOf: job.url, encoding: .utf8),
-                   !existing.contains(Self.xmpMarker) {
-                    preserved.append(job.id)
-                    continue
+                // Lightroom 把调色参数、关键字、GPS 都存在同名 .xmp 里。别人的 sidecar 不能整份
+                // 覆盖成我们这份只有星级的模板 = 整场调色报废；只合并星级 / 色标，合并不了的不碰。
+                // 读不出来（权限、坏文件）也当别人的：以前读失败会落到下面整份覆盖。
+                if FileManager.default.fileExists(atPath: job.url.path) {
+                    let existing = try? Data(contentsOf: job.url)
+                    if existing.map(XMPSidecar.isOwn) != true {
+                        guard let existing,
+                              let data = XMPSidecar.merged(existing, rating: job.stars, label: job.label,
+                                                           lastLabel: job.lastLabel) else {
+                            preserved.append(job.id)
+                            continue
+                        }
+                        do {
+                            try data.write(to: job.url, options: .atomic)
+                            merged += 1
+                            writtenIDs.append(job.id)
+                        } catch {
+                            failed.append(job.id)
+                        }
+                        continue
+                    }
                 }
                 do {
                     try job.content.write(to: job.url, atomically: true, encoding: .utf8)
@@ -2919,6 +3061,7 @@ final class BatchStore: ObservableObject {
             }
 
             let writtenCount = written
+            let mergedCount = merged
             let writtenIds = writtenIDs
             let preservedIds = preserved
             let failedIds = failed
@@ -2926,7 +3069,8 @@ final class BatchStore: ObservableObject {
                 guard let self else { return }
                 self.progressFraction = nil
                 self.isRunning = false
-                // 只记真正写进去的（取消、个别写失败也照记已写的那些）；别的软件的 XMP 记成「不归我们管」。
+                // 只记真正写进去的（合并了星级色标的也算；取消、个别写失败也照记已写的那些）；
+                // 合并不了、没碰的那些记成「不归我们管」，不算过期 —— 这次结果里点名说了。
                 if !writtenIds.isEmpty || !preservedIds.isEmpty {
                     var state = self.xmpState ?? XMPState()
                     for id in writtenIds {
@@ -2941,25 +3085,44 @@ final class BatchStore: ObservableObject {
                 }
                 // 写的这段时间里判决可能又变了：按现在的判决重数一遍。
                 self.derived.xmpStaleCount = self.xmpStale(in: self.items)
+                let done = writtenCount + mergedCount
+                let mergedNote = "其中 \(mergedCount) 个是其它软件的 XMP，只改了星级/色标，调色、关键字等原样保留"
+                // 没写进去的要说出来，不能混在「完成」里、也不能被写失败的提示盖掉：这几张在 LR/C1 里还是旧星级。
+                var keptNote: String?
+                if !preservedIds.isEmpty {
+                    let names = preservedIds.prefix(3).joined(separator: ", ") + (preservedIds.count > 3 ? "…" : "")
+                    keptNote = "\(preservedIds.count) 张没写星级 (\(names))：旁边已有其它软件的 XMP，" +
+                        "格式读不全、合并怕写丢调色，原样保留了 —— 这几张请在 LR/C1 里自己标"
+                }
                 if failedIds.isEmpty {
-                    var summary = flag.isSet ? "XMP 已取消: 已写入 \(writtenCount) 个" : "XMP 完成: \(writtenCount) 个已写入原图目录"
-                    if !preservedIds.isEmpty {
-                        summary += "；\(preservedIds.count) 个已有其它软件的 XMP (可能含 Lightroom 调色)，已保留未覆盖"
-                    }
+                    var summary = flag.isSet ? "XMP 已取消: 已写入 \(done) 个" : "XMP 完成: \(done) 个已写入原图目录"
+                    if mergedCount > 0 { summary += "；" + mergedNote }
                     if jpegOnly > 0 {
                         summary += "；注意 \(jpegOnly) 张是纯 JPG：Lightroom 不读 JPG 旁的 .xmp (Capture One 可读)"
                     }
                     self.progressText = summary
+                    self.lastError = keptNote
                 } else {
-                    self.lastError = "XMP: \(writtenCount) 个成功, \(failedIds.count) 个失败 (\(failedIds.prefix(3).joined(separator: ", ")))"
+                    let failedNames = failedIds.prefix(3).joined(separator: ", ")
+                    var message = "XMP: \(done) 个成功, \(failedIds.count) 个失败 (\(failedNames))"
+                    if mergedCount > 0 { message += "；" + mergedNote }
+                    if let keptNote { message += "；" + keptNote }
+                    self.lastError = message
                 }
             }
         }
     }
 
-    /// 我们自己写的 sidecar 的指纹 —— Lightroom 写的是 x:xmptk="Adobe XMP Core ..."。
-    /// 靠它区分“上次是我们写的，可以安全覆盖”和“别人的数据，碰不得”。
-    nonisolated static let xmpMarker = #"x:xmptk="选片工具""#
+    /// 一张照片的 sidecar 要写什么：我们自己的整份模板，或者合并进别人 sidecar 的星级 / 色标。
+    private struct XMPJob: Sendable {
+        let id: String
+        let url: URL
+        let content: String
+        let stars: Int
+        let label: String?
+        /// 上次写进这张的色标（没写过 / 可用 = nil）。
+        let lastLabel: String?
+    }
 
     /// Standard xmp:Rating (-1 rejected, 1-5 stars) + xmp:Label color, readable by
     /// Lightroom/Bridge/Capture One.

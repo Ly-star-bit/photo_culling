@@ -47,6 +47,8 @@ enum AnalysisEngine {
         /// id + same mtime on the next run means the analysis is still valid.
         let srcMtime: Double?
         let srcSize: Int?
+        /// JPEG 尾巴缺了（没有结束标记）：判决层带「文件损坏」直接废，不进 VLM。
+        let fileCorrupt: Bool
         var burstGroup: Int = 0
     }
 
@@ -67,6 +69,8 @@ enum AnalysisEngine {
         /// Photos that failed to decode/analyze — surfaced to the user instead of
         /// silently shrinking the set.
         let failed: [String]
+        /// 解得出来、但文件是坏的（JPEG 截断）：照常进网格，带「文件损坏」判废片。
+        let corrupt: [String]
         let cancelled: Bool
     }
 
@@ -124,6 +128,7 @@ enum AnalysisEngine {
 
         var reusedEntries: [(id: String, manifest: [String: Any], layer1: [String: Any])] = []
         var todo: [ImageLoader.PhotoFile] = []
+        var candidates: [(file: ImageLoader.PhotoFile, manifest: [String: Any], layer1: [String: Any])] = []
         for file in photos {
             let previewURL = previewDir.appendingPathComponent("\(file.stem).jpg")
             if let l1 = oldLayer1ByID[file.stem],
@@ -132,18 +137,43 @@ enum AnalysisEngine {
                let current = ImageLoader.FileStamp.of(file.decodeURL),
                abs(saved - current.mtime) < 1.0,
                // Entries written before src_size existed match on mtime alone.
-               (l1["src_size"] as? Int).map({ $0 == current.size }) ?? true,
-               fm.fileExists(atPath: previewURL.path) {
+               (l1["src_size"] as? Int).map({ $0 == current.size }) ?? true {
+                var l1 = l1
+                // 旧版本分析的没查过文件完整性：补查一次尾巴（只读最后 64KB），之后就记在结果里了。
+                if l1["file_corrupt"] == nil { l1["file_corrupt"] = ImageLoader.jpegTruncated(file.decodeURL) }
                 // The analysis numbers are still valid, but the file layout may
                 // not be: a RAF copied in next to an analyzed JPG makes the RAW
                 // the primary (XMP goes beside it) — refresh paths every run.
                 m["raw_path"] = file.primaryURL.path
                 m["decode_path"] = file.decodeURL.path
                 m["preview_path"] = previewURL.path
-                reusedEntries.append((file.stem, m, l1))
+                candidates.append((file, m, l1))
             } else {
                 todo.append(file)
             }
+        }
+        // 分析结果还有效、只是预览图没了（掉出最近 15 场被清掉的）：只重做预览，数值原样复用 ——
+        // 整张重分析的话人脸质量每次有点抖，人工改判以外的判决可能悄悄变掉。重做失败的才整张重分析。
+        let missing = candidates.indices.filter {
+            !fm.fileExists(atPath: previewDir.appendingPathComponent("\(candidates[$0].file.stem).jpg").path)
+        }
+        var regenerated = [Bool](repeating: true, count: candidates.count)
+        if !missing.isEmpty {
+            progress("补回 \(missing.count) 张预览图...")
+            for i in missing { regenerated[i] = false }
+            let lock = NSLock()
+            DispatchQueue.concurrentPerform(iterations: missing.count) { k in
+                guard !cancel.isSet else { return }
+                let c = candidates[missing[k]]
+                let url = previewDir.appendingPathComponent("\(c.file.stem).jpg")
+                let ok = ImageLoader.load(c.file.decodeURL).map { ImageLoader.savePreview($0.image, to: url) } ?? false
+                lock.lock(); regenerated[missing[k]] = ok; lock.unlock()
+            }
+        }
+        // 取消了：没来得及补的照样留着（分析结果不丢，只是还没预览，下次再补）。
+        let keepAll = cancel.isSet
+        for (i, c) in candidates.enumerated() {
+            if regenerated[i] || keepAll { reusedEntries.append((c.file.stem, c.manifest, c.layer1)) } else { todo.append(c.file) }
         }
         if !reusedEntries.isEmpty {
             progress("复用 \(reusedEntries.count) 张未变照片，分析 \(todo.count) 张...")
@@ -226,8 +256,9 @@ enum AnalysisEngine {
         // run redid all of them. Now they become reusable entries.
         try writeManifest(orderedIds.compactMap { manifestByID[$0] }, photoDir: photoDir, dataDir: dataDir)
         try writeLayer1(orderedIds.compactMap { layer1ByID[$0] }, dataDir: dataDir)
+        let corrupt = orderedIds.filter { layer1ByID[$0]?["file_corrupt"] as? Bool == true }
         return Summary(analyzed: completed.count, reused: reusedFinal.count,
-                       failed: failed, cancelled: cancelled)
+                       failed: failed, corrupt: corrupt, cancelled: cancelled)
     }
 
     // MARK: - Per-photo
@@ -264,6 +295,10 @@ enum AnalysisEngine {
             (highlightPct, shadowPct) = Metrics.exposureClipping(rgba: rgba, width: w, height: h)
             gray = Metrics.grayscale(rgba: rgba, width: w, height: h)
         }
+        // 截断的 JPEG 解码不报错（缺的补灰，人脸在上半截照样认得出），不查就会被当好片、甚至提名精选。
+        // 只看文件结束标记，不看解出来的图有没有整条纯灰：灰底棚拍、加了灰边的导出图也是整条 128 灰，
+        // 会被冤成「文件损坏」，还叫人别格式化卡（审查发现）。截断的那些 EOI 检查已经全认得出。
+        let fileCorrupt = ImageLoader.jpegTruncated(file.decodeURL)
 
         let vision = FaceAnalyzer.analyze(in: loaded.image)
         let face = vision.face
@@ -335,7 +370,8 @@ enum AnalysisEngine {
             shadowClipPct: shadowPct,
             elapsedSec: Date().timeIntervalSince(start),
             srcMtime: stampAfter.mtime,
-            srcSize: stampAfter.size
+            srcSize: stampAfter.size,
+            fileCorrupt: fileCorrupt
         )
     }
 
@@ -448,6 +484,7 @@ enum AnalysisEngine {
             "shadow_clip_pct": p.shadowClipPct,
             "elapsed_sec": p.elapsedSec,
             "burst_group": p.burstGroup,
+            "file_corrupt": p.fileCorrupt,
         ]
     }
 

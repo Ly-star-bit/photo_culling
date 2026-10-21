@@ -91,9 +91,16 @@ enum ImageLoader {
     static func listPhotos(in directory: URL) -> [PhotoFile] {
         let fm = FileManager.default
         var images: [URL] = []
+        // 不用 .skipsHiddenFiles：它也会跳过带「隐藏」标记的文件 —— FAT 卡上的隐藏属性（尼康等的「隐藏图像」）
+        // 就是这个标记，那些是真照片；直接打开卡、或者访达拷出来的文件夹（标记会跟着拷）里它们被悄悄跳过，
+        // 网格里没有、也不算「无法解析」。和存储卡导入一样，只跳过名字以点开头的（._ 文件、.Trashes）。
         if let enumerator = fm.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey],
-                                          options: [.skipsHiddenFiles, .skipsPackageDescendants]) {
+                                          options: [.skipsPackageDescendants]) {
             for case let url as URL in enumerator {
+                if url.lastPathComponent.hasPrefix(".") {
+                    if url.hasDirectoryPath { enumerator.skipDescendants() }
+                    continue
+                }
                 if url.hasDirectoryPath, excludedSubfolders.contains(url.lastPathComponent) {
                     enumerator.skipDescendants()
                     continue
@@ -244,6 +251,59 @@ enum ImageLoader {
                       cameraModel: cameraModel,
                       shutterSec: shutterSec, aperture: aperture, iso: iso,
                       focal35: focal35, lensModel: lensModel)
+    }
+
+    /// JPEG 尾巴被截掉了（读卡出错、拷贝中断、网盘只同步了一半）：ImageIO 把缺的部分补成灰照样解码，
+    /// CGImageSourceGetStatus 也说 complete，只能自己看文件结束标记 EOI (FF D9)。
+    /// 先看最后 64KB（正常 JPEG 的 EOI 后面最多跟些填充 / 厂商尾巴）；没有的话从头按段走一遍，
+    /// 找主图自己的 EOI —— 动态照片（Pixel / 三星）在 EOI 后面接了整段视频，尾巴里本来就没有 FF D9。
+    /// 不是 JPEG、或者结构看不懂的，都不算截断（解码已经成功了，别冤枉好片）。
+    static func jpegTruncated(_ url: URL) -> Bool {
+        guard ["jpg", "jpeg"].contains(url.pathExtension.lowercased()),
+              let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let size = try? handle.seekToEnd(), size > 4 else { return false }
+        try? handle.seek(toOffset: size > 65536 ? size - 65536 : 0)
+        guard let tail = try? handle.readToEnd() else { return false }
+        if tail.range(of: Data([0xFF, 0xD9])) != nil { return false }
+        guard let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return false }
+        return !jpegHasEOI(data)
+    }
+
+    /// 按 JPEG 段结构走到主图的 EOI：段头带长度的直接跳；SOS 之后是熵编码数据，
+    /// 里面的 FF 后面跟 00（填充）或 D0–D7（RST）都不是段标记。走到文件尾还没见到 EOI = 截断。
+    /// 看不懂的结构返回 true（当作完整）。
+    private static func jpegHasEOI(_ data: Data) -> Bool {
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
+            let b = raw.bindMemory(to: UInt8.self)
+            let n = b.count
+            guard n > 4, b[0] == 0xFF, b[1] == 0xD8 else { return true }
+            let rst: ClosedRange<UInt8> = 0xD0...0xD7
+            var i = 2
+            while i + 1 < n {
+                guard b[i] == 0xFF else { return true }
+                let marker = b[i + 1]
+                if marker == 0xD9 { return true }
+                if marker == 0xFF {
+                    i += 1
+                    continue
+                }
+                if marker == 0x01 || rst.contains(marker) {
+                    i += 2
+                    continue
+                }
+                guard i + 3 < n else { return false }
+                i += 2 + (Int(b[i + 2]) << 8 | Int(b[i + 3]))
+                guard marker == 0xDA else { continue }
+                // 熵编码数据：找下一个真正的段标记（FF 后面不是 00、也不是 RST）。
+                while i + 1 < n {
+                    let next = b[i + 1]
+                    if b[i] == 0xFF, next != 0x00, !rst.contains(next) { break }
+                    i += 1
+                }
+            }
+            return false
+        }
     }
 
     static let exifDateFormatter: DateFormatter = {

@@ -97,3 +97,39 @@ enum WatermarkUISnapshot {
         exit(0)
     }
 }
+
+// MARK: - 水印页批量导出（无头）
+
+/// LABELGUI_DATA_DIR=<临时目录> LabelGUI --watermark-batch <photo_dir> <out_dir> [--signature <sig.png>] [--exif]
+/// 走水印页「批量导出」同一个 exportAll（批内重名、目标里已有的都另存 -2，不覆盖），打印结果那一行。
+/// 无头参数：导完不弹访达。
+enum WatermarkBatchCLI {
+    @MainActor
+    static func run(flagIndex: Int) -> Never {
+        let args = CommandLine.arguments
+        func option(_ name: String) -> String? {
+            guard let i = args.firstIndex(of: name), args.count > i + 1 else { return nil }
+            return args[i + 1]
+        }
+        // 会把设置写回 watermark/state.json：只在临时数据目录里跑。
+        CollageCLI.requireIsolatedDataDir("--watermark-batch")
+        let dir = URL(fileURLWithPath: args[flagIndex + 1])
+        let store = WatermarkStore(dataDir: appDataDir)
+        if let sig = option("--signature") {
+            store.signatureURL = URL(fileURLWithPath: sig)
+            store.config.signatureEnabled = true
+        }
+        if args.contains("--exif") { store.config.exifText.enabled = true }
+        store.outputDir = URL(fileURLWithPath: args[flagIndex + 2])
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        store.addPhotos(files.filter { WatermarkStore.inputExtensions.contains($0.pathExtension.lowercased()) }
+            .sorted { $0.path < $1.path })
+        store.exportAll()
+        let deadline = Date().addingTimeInterval(300)
+        while store.isExporting && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let error = store.lastError
+        print(store.progressText)
+        if let error { print(error) }
+        exit(error == nil && !store.isExporting ? 0 : 1)
+    }
+}

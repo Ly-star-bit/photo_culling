@@ -413,6 +413,8 @@ enum WatermarkEngine {
         let image: CGImage
         /// 非平铺模式下签名比画布还大，跳过没画。
         let signatureSkipped: Bool
+        /// 文字放不下 / 压签名，自动缩了字号或挪了位置（fitText 的说明）；没动 = nil。
+        var textFit: String? = nil
     }
 
     /// 完整合成管线。`scale` 让像素单位的参数（边距）在降采样图上保持视觉一致：
@@ -428,9 +430,11 @@ enum WatermarkEngine {
         ctx.scaleBy(x: 1, y: -1)
         drawImageTopLeft(ctx, base, CGRect(x: 0, y: 0, width: w, height: h))
 
-        // 签名 + EXIF 文字（拼图里每格 / 整页画的也是这一段）
+        // 签名 + EXIF 文字（拼图里每格 / 整页画的也是这一段；字放不下的自动缩只在整张图这里做，
+        // 拼图有自己那套躲让）
+        let fit = fitText(config, width: w, height: h, signature: signature, tags: tags, scale: scale)
         let signatureSkipped = drawMarks(in: ctx, width: w, height: h, signature: signature,
-                                         config: config, tags: tags, scale: scale)
+                                         config: fit.config, tags: tags, scale: scale)
 
         guard var composed = ctx.makeImage() else { return nil }
 
@@ -443,7 +447,82 @@ enum WatermarkEngine {
            let expanded = expandToRatio(composed, config: config.canvasRatio) {
             composed = expanded
         }
-        return Composition(image: composed, signatureSkipped: signatureSkipped)
+        return Composition(image: composed, signatureSkipped: signatureSkipped, textFit: fit.note)
+    }
+
+    /// 整张图上的 EXIF 文字放不下就自动缩字。字号按长边 3% 算、不封顶：默认模板 + 长镜头名，横图截在
+    /// 「1/2000s · IS」、竖图（字号同样按长边）截在「RXD B」，光圈快门全丢；默认的左下文字还会伸到
+    /// 右下签名底下，签名被半透明底条盖住。
+    /// - 压着签名：先让到签名旁边（字靠哪边让哪边，居中的两边对称让）；旁边不到这一条的 35%，就叠到
+    ///   签名上方（字在下排）/ 下方（字在上排）/ 上下空得多的那边（字在中排，和签名同一列时旁边没地方）。
+    /// - 伸出画面：缩到左右各留边距放得下。
+    /// 放得下、不压签名的一个参数都不改（用户自己调的字号原样画）。最小 8px（layoutExifText 的下限）。
+    static func fitText(_ config: Config, width w: Int, height h: Int, signature: CGImage?,
+                        tags: ExifTags, scale: CGFloat) -> (config: Config, note: String?) {
+        guard config.exifText.enabled else { return (config, nil) }
+        var sig: CGRect?
+        if config.signatureEnabled, let signature {
+            let place = placeSignature(width: w, height: h, signatureSize: CGSize(width: signature.width, height: signature.height),
+                                       config: config, scale: scale)
+            sig = place.origin.map { CGRect(origin: $0, size: CGSize(width: place.width, height: place.height)) }
+        }
+        let gap = max(2, Double(config.marginX * scale))
+        var fitted = config
+        var notes: [String] = []
+        func note(_ text: String) { if !notes.contains(text) { notes.append(text) } }
+        for _ in 0..<4 {
+            guard let text = layoutExifText(config: fitted.exifText, tags: tags, imgW: w, imgH: h, scale: scale),
+                  text.natural.width > 0, text.natural.height > 0 else { break }
+            let t = fitted.exifText
+            let margin = Double(t.marginX * scale)
+            var target = Double(w) - margin * 2
+            if let sig, sig.intersects(text.block) {
+                let beside = t.fullWidth ? 0 : besideWidth(sig, column: t.position.column, width: Double(w),
+                                                           margin: margin, gap: gap)
+                if beside >= target * 0.35 {
+                    target = beside
+                    note("让开签名")
+                } else {
+                    // 叠到签名外侧：下排的字挪到签名上面，上排的挪到签名下面（marginY 存的是没缩放的像素）。
+                    // 中排的 marginY 不起作用（computePosition 中排只管居中），换成同一列的上 / 下排再定
+                    // marginY：签名下面空得多就叠到下面，否则叠到上面。
+                    let row = t.position.row
+                    let below = row < 0 || (row == 0 && Double(h) - Double(sig.maxY) >= Double(sig.minY))
+                    if row == 0 { fitted.exifText.position = .at(row: below ? -1 : 1, column: t.position.column) }
+                    let edge = below ? Double(sig.maxY) + gap : Double(h) - Double(sig.minY) + gap
+                    fitted.exifText.marginY = edge / Double(scale)
+                    note("叠到签名\(below ? "下方" : "上方")")
+                    continue
+                }
+            } else {
+                // 没压签名：真伸出画面才缩（满宽时看字本身的右端，不满宽看底框）—— 只是边距窄点的不动。
+                let glyphEnd = text.textX + text.natural.width - text.padding * 2
+                let clipped = t.fullWidth ? glyphEnd > Double(w) : text.natural.width > Double(w)
+                guard clipped || text.natural.height > Double(h) else { break }
+                note("放不下")
+            }
+            let k = min(target / text.natural.width, Double(h) / text.natural.height)
+            // k ≥ 1：已经放得下（取整误差）；字已经到 8px 下限：缩不动了。
+            guard k < 1, k > 0, Double(max(w, h)) * t.fontSizeRatio > 8 else { break }
+            fitted.exifText.fontSizeRatio = t.fontSizeRatio * k * 0.98
+        }
+        guard fitted != config else { return (config, nil) }
+        let percent = Int((fitted.exifText.fontSizeRatio / config.exifText.fontSizeRatio * 100).rounded())
+        let why = notes.isEmpty ? "自动缩字" : notes.joined(separator: "、")
+        return (fitted, why + "，字号 \(percent)%")
+    }
+
+    /// 文字和签名在同一条上时，字这一侧还剩多宽（字靠左让到签名左边，靠右让到右边，居中的两边对称让）。
+    private static func besideWidth(_ sig: CGRect, column: Int, width: Double, margin: Double, gap: Double) -> Double {
+        let minX = Double(sig.minX), maxX = Double(sig.maxX)
+        let sigOnRight = Double(sig.midX) > width / 2
+        switch column {
+        case -1: return sigOnRight ? minX - gap - margin : 0
+        case 1: return sigOnRight ? 0 : width - margin - maxX - gap
+        default:
+            let half: Double = sigOnRight ? minX - gap - width / 2 : width / 2 - maxX - gap
+            return max(0, half * 2)
+        }
     }
 
     /// 相框/画布扩展后的输出尺寸（不含四舍五入），用来倒推导出时该解多大的底图。
@@ -914,8 +993,10 @@ enum WatermarkEngine {
     /// 单张导出：按目标尺寸解码 → compose → JPEG 编码。
     /// 元数据走 CGImageMetadata：EXIF/TIFF/GPS IFD 和 XMP（版权、关键词）一起
     /// 保留；方向和像素尺寸已烘焙进像素所以剥掉；可选去除 GPS。
+    /// 返回文字自动缩 / 挪的说明（没动 = nil），无头冒烟测试打出来。
+    @discardableResult
     static func export(source: URL, to dest: URL, signature: CGImage?,
-                       config: Config, options: ExportOptions) throws {
+                       config: Config, options: ExportOptions) throws -> String? {
         // 绝不写回源文件：后缀被清空 + 输出目录选成照片原目录时 dest == source，
         // 原片会被带水印的版本静默替换掉（不可恢复）。
         guard !isSameFile(source, dest) else { throw ExportError.sameFile }
@@ -933,8 +1014,9 @@ enum WatermarkEngine {
         let scale = CGFloat(base.image.width) / CGFloat(base.fullWidth)
 
         let tags = ExifTags(source: src)
-        guard var composed = compose(base: base.image, signature: signature, config: config,
-                                     tags: tags, scale: scale)?.image else { throw ExportError.composeFailed }
+        guard let composition = compose(base: base.image, signature: signature, config: config,
+                                        tags: tags, scale: scale) else { throw ExportError.composeFailed }
+        var composed = composition.image
 
         // 四舍五入偶尔多出一两个像素：这时才补一次（此时图已经很小）缩放。
         if options.maxLongSide > 0 {
@@ -961,13 +1043,16 @@ enum WatermarkEngine {
             CGImageDestinationAddImage(out, composed, destOptions)
         }
         guard CGImageDestinationFinalize(out) else { throw ExportError.encodeFailed }
+        return composition.textFit
     }
 
     /// Bool 版入口（main.swift 的 --watermark 冒烟测试用）。
     static func exportPhoto(source: URL, to dest: URL, signature: CGImage?,
                             config: Config, options: ExportOptions) -> Bool {
         do {
-            try export(source: source, to: dest, signature: signature, config: config, options: options)
+            if let fit = try export(source: source, to: dest, signature: signature, config: config, options: options) {
+                print("文字自动调整: \(fit)")
+            }
             return true
         } catch {
             FileHandle.standardError.write("watermark: \(dest.lastPathComponent): \(error.localizedDescription)\n".data(using: .utf8)!)

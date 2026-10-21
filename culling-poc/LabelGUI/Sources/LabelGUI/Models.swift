@@ -92,10 +92,13 @@ struct Layer1Result: Codable {
     let highlightClipPct: Double?
     let shadowClipPct: Double?
     let burstGroup: Int?
+    /// 引擎查出文件是坏的（JPEG 截断）。旧版本分析的没有这个字段 = 没查过、当好的。
+    let fileCorrupt: Bool?
     let error: String?
 
     enum CodingKeys: String, CodingKey {
         case id, error
+        case fileCorrupt = "file_corrupt"
         case faceFound = "face_found"
         case eyeClosed = "eye_closed"
         case blinkScore = "blink_score"
