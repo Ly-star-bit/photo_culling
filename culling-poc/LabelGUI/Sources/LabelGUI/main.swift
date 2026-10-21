@@ -524,6 +524,17 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--compare-crop"),
     exit(0)
 }
 
+// 客户选片闭环的无头入口（确认表 / 导入客户选择 / 复制文件名清单 / 复制原片，见 ClientPicksView.swift）：
+// LABELGUI_DATA_DIR=<临时> LabelGUI --proof-sheet|--client-import|--copy-list|--copy-originals <photo_dir> [...]
+for flag in ClientPicksCLI.flags {
+    if let flagIndex = CommandLine.arguments.firstIndex(of: flag),
+       CommandLine.arguments.count > flagIndex + 1 {
+        MainActor.assumeIsolated {
+            ClientPicksCLI.run(flag: flag, flagIndex: flagIndex)
+        }
+    }
+}
+
 // 走到这里就要开界面了。命令行里带着不认识的 `--参数`（拼错了、或者拿新的测试脚本跑旧版程序）时
 // 不开：测试 / 自动化以为自己在无头跑，结果弹出一个窗口。系统自己传的参数是单横线（-NSDocument…、-psn_…）。
 if let unknown = CommandLine.arguments.dropFirst().first(where: { $0.hasPrefix("--") }) {

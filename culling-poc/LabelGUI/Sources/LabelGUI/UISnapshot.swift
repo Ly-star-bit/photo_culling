@@ -6,6 +6,7 @@ import AppKit
 /// LabelGUI --batch-ui <photo_dir> <out.png> [--size 1440x900] [--light]
 /// LabelGUI --compare-ui <photo_dir> <out.png> [--take N | --select a,b] [--keys "2,cmd:<id>,..."] [--zoom [--person N]] [--size 1440x900] [--light]
 /// LabelGUI --batch-ui <photo_dir> <out.png> --timeline-only [--hover N] [--pending]   （只画时间轴 + 悬停卡片）
+/// LabelGUI --batch-ui <photo_dir> <out.png> [--client-only] [--client-import-ui <回复.txt>]   （只看客户选中 / 导入客户选择对话框）
 ///
 /// 和 --collage-ui 同一套：用 app 里一模一样的视图在一个从不显示的无边框窗口里布局、
 /// 渲染成 PNG。界面不能开，排布有没有挤、时间轴会不会压到别的区域，只能这样看。
@@ -73,6 +74,8 @@ enum BatchUISnapshot {
         if let gap = option("--gap").flatMap(Double.init) { store.takeGapSec = gap }
         // --chapter N：先开「只看这一章」（章节号从 1 数，和界面上一样）。
         if let n = option("--chapter").flatMap(Int.init) { store.chapterFilter = n - 1 }
+        // --client-only：先开「只看客户选中」（客户选中先用 --client-import --apply 导进同一个数据目录）。
+        if args.contains("--client-only") { store.clientPickFilter = true }
         // 存储卡导入的两条横幅：--import-notice "文字" 假装有导入提醒；--finished-import 假装导完一批还没打开
         // （同时假装有任务在跑，不然 BatchView 一出来就把它打开了）。
         if let notice = option("--import-notice") { store.importNotice = notice }
@@ -101,6 +104,11 @@ enum BatchUISnapshot {
         let startID = option("--id") ?? order.first ?? ""
         if args.contains("--shortcuts-ui") {
             root = AnyView(ShortcutsPanel().background(Color(white: 0.16)))
+        } else if let path = option("--client-import-ui") {
+            // 导入客户选择对话框（sheet 在离屏窗口里画不出来，单独当根视图画），框里预先放好这段回复。
+            let text = (try? Data(contentsOf: URL(fileURLWithPath: path))).flatMap(ClientReply.decode) ?? ""
+            root = AnyView(ClientImportSheet(store: store, isPresented: .constant(true), text: text)
+                .background(Color(white: 0.16)))
         } else if args.contains("--review-ui") {
             let skippable = order.contains { store.item(withID: $0).map { $0.verdict != .reject } ?? false }
             root = AnyView(ReviewView(store: store, orderIDs: order, rejectsSkippable: skippable,

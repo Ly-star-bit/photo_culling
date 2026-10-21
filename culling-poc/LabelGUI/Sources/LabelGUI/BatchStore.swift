@@ -214,6 +214,13 @@ final class BatchStore: ObservableObject {
     /// 这张的判决是你亲手改的（不是「接受推荐」钉住的）。
     func isManual(_ id: String) -> Bool { overrides[id] != nil && !acceptedIDs.contains(id) }
 
+    /// 客户选中（「导入客户选择…」：客户在确认表里点的、微信里回的文件名 / 编号）。和判决是两回事：
+    /// 不改判决、不进 overrides，只多一个标记 —— 缩略图上的紫心、「只看客户选中」、XMP 紫色标。
+    /// 存 client_picks.json。改它的地方都压撤销记录（和改判同一条 ⌘Z）。
+    @Published private(set) var clientPicks: Set<String> = []
+    /// 「只看客户选中」：和判决筛选叠加；复制文件名 / 复制原片没选中照片时就按它定范围。换场次清掉。
+    @Published var clientPickFilter = false
+
     // Slider thresholds. Sharpness below → reject; worst clip pct above → reject;
     // face quality below → reject (0 disables; only applies to photos with a face).
     // Sharpness is the Tenengrad RMS-gradient metric (feature-ROI, Gaussian
@@ -434,6 +441,10 @@ final class BatchStore: ObservableObject {
         /// 上次写 XMP 之后判决变了的张数（从没写过 = 0，不提醒）。Lightroom / C1 看的是 XMP，
         /// 在这里改完忘了重写，那边还是旧结果。
         var xmpStaleCount = 0
+        /// 客户选中里还在这一场的张数（状态栏、顶栏「客户选中 N」）。
+        var clientPickCount = 0
+        /// 判成废片、可客户点名要了的张数：「废片移到废纸篓」不动它们。
+        var clientPickRejectCount = 0
         /// Photos with no burst sibling carrying a face-quality score: the only
         /// ones the ABSOLUTE face-quality line applies to (grouped photos are
         /// judged relative to their group's best), so the slider histogram
@@ -487,11 +498,20 @@ final class BatchStore: ObservableObject {
     }
     var autoRejectCount: Int { derived.autoRejectCount }
     var xmpStaleCount: Int { derived.xmpStaleCount }
+    var clientPickCount: Int { derived.clientPickCount }
+    var clientPickRejectCount: Int { derived.clientPickRejectCount }
+    /// 「废片移到废纸篓」真会移的张数：废片里去掉客户选中的（客户点名要精修的照片不扔）。
+    var trashableRejectCount: Int { verdictCounts.reject - clientPickRejectCount }
+    /// 「废片移到废纸篓」要移的那些照片（和上面的张数是同一个条件）。
+    var trashableRejects: [BatchItem] { items.filter { $0.verdict == .reject && !clientPicks.contains($0.id) } }
 
-    /// 写进 XMP 的那两样：判决（色标 / -1 废片）和星级（判决定档，VLM 表情分只在档内排先后）。
+    /// 写进 XMP 的那几样：判决（色标 / -1 废片）、星级（判决定档，VLM 表情分只在档内排先后），
+    /// 客户选中（紫色标）。`c` 只在客户选中时是 true，其余一律 nil（不是 false）：老的 xmp_state.json
+    /// 没有这个键，没选中的照片比对起来和以前一模一样，升级后不会整场变「XMP 过期」。
     struct XMPMark: Codable, Equatable {
         let v: String
         let s: Int
+        var c: Bool? = nil
     }
 
     /// 这一场写过的 XMP（xmp_state.json）：每张最后一次**真正写进去**的样子，加上别的软件写的、
@@ -545,7 +565,7 @@ final class BatchStore: ObservableObject {
         guard let state = xmpState else { return 0 }
         var n = 0
         for item in items where !state.foreign.contains(item.id) {
-            if state.marks[item.id] != Self.xmpMark(item) { n += 1 }
+            if state.marks[item.id] != Self.xmpMark(item, clientPick: clientPicks.contains(item.id)) { n += 1 }
         }
         return n
     }
@@ -555,15 +575,25 @@ final class BatchStore: ObservableObject {
     /// 不会漏掉你亲手定的精选。VLM 表情分只在档内排先后（表情好的精选 5 星、表情差的可用 2 星）；
     /// 以前星级直接等于表情分，表情分 1 的精选只有 1 星，排在 4 星的可用后面。
     /// 没跑过 VLM 的：精选 4、可用 3，和以前一样（老场次不会因此全变「XMP 过期」）。
-    static func xmpRating(_ item: BatchItem) -> (stars: Int, label: String?) {
+    /// 客户选中的色标是紫色（压过判决的绿 / 红），星级照判决不变。
+    static func xmpRating(_ item: BatchItem, clientPick: Bool = false) -> (stars: Int, label: String?) {
+        let stars: Int
         switch item.verdict {
-        case .reject:
-            return (-1, xmpLabel(.reject))    // Bridge/LR read -1 as "rejected"; C1 filters by the red label instead
-        case .pick:
-            return ((item.expressionScore ?? 0) >= 4 ? 5 : 4, xmpLabel(.pick))
-        case .usable:
-            return ((item.expressionScore ?? 3) >= 3 ? 3 : 2, xmpLabel(.usable))
+        case .reject: stars = -1    // Bridge/LR read -1 as "rejected"; C1 filters by the red label instead
+        case .pick: stars = (item.expressionScore ?? 0) >= 4 ? 5 : 4
+        case .usable: stars = (item.expressionScore ?? 3) >= 3 ? 3 : 2
         }
+        return (stars, clientPick ? clientPickLabel : xmpLabel(item.verdict))
+    }
+
+    /// 客户选中的色标：LR / C1 里按紫色一筛就是要精修的那些。
+    static let clientPickLabel = "Purple"
+
+    /// 上次写进这张 XMP 的色标（xmp_state.json 里记的那份）：客户选中 = 紫，否则按判决。
+    /// 别人的 sidecar 里色标还是它才算「我们写的」，这次不要了才拿掉（XMPSidecar.merged 的 lastLabel）。
+    static func writtenLabel(_ mark: XMPMark) -> String? {
+        if mark.c == true { return clientPickLabel }
+        return Verdict(rawValue: mark.v).flatMap(xmpLabel)
     }
 
     /// 判决对应的色标：精选绿、废片红（LR 和 C1 都能按色标筛），可用不带。
@@ -575,8 +605,8 @@ final class BatchStore: ObservableObject {
         }
     }
 
-    static func xmpMark(_ item: BatchItem) -> XMPMark {
-        XMPMark(v: item.verdict.rawValue, s: xmpRating(item).stars)
+    static func xmpMark(_ item: BatchItem, clientPick: Bool = false) -> XMPMark {
+        XMPMark(v: item.verdict.rawValue, s: xmpRating(item).stars, c: clientPick ? true : nil)
     }
 
     func item(withID id: String) -> BatchItem? {
@@ -639,6 +669,10 @@ final class BatchStore: ObservableObject {
             for reason in item.rejectReasons { d.reasonCounts[reason, default: 0] += 1 }
             if isBorderline(item) { d.borderlineCount += 1 }
             if item.verdict == .reject, overrides[item.id] == nil { d.autoRejectCount += 1 }
+            if clientPicks.contains(item.id) {
+                d.clientPickCount += 1
+                if item.verdict == .reject { d.clientPickRejectCount += 1 }
+            }
             if let q = item.faceQuality, (groupQCount[item.burstGroup] ?? 0) < 2 {
                 d.faceQualityAbsoluteValues.append(q)
             }
@@ -788,6 +822,7 @@ final class BatchStore: ObservableObject {
         } else {
             loadThresholds()
             loadOverrides()
+            loadClientPicks()
             loadXMPState()
             loadResults()
             applyThresholds()
@@ -862,6 +897,7 @@ final class BatchStore: ObservableObject {
         reasonFilter = nil
         borderlineFilter = false
         chapterFilter = nil
+        clientPickFilter = false
         // 判决筛选也要跟着清：留着"只看废片"切到新场次，网格里只有废片，
         // 看起来像是"照片少了一大半"。
         verdictFilter = nil
@@ -869,6 +905,7 @@ final class BatchStore: ObservableObject {
         loadReviewPosition()
         loadThresholds()
         loadOverrides()
+        loadClientPicks()
         loadXMPState()
         loadResults()
         recheckForeignSidecars()
@@ -1127,11 +1164,13 @@ final class BatchStore: ObservableObject {
         reasonFilter = nil
         borderlineFilter = false
         chapterFilter = nil
+        clientPickFilter = false
         verdictFilter = nil
         lastError = nil
         loadReviewPosition()
         loadThresholds()
         loadOverrides()
+        loadClientPicks()
         loadXMPState()
         loadResults()
         applyThresholds()
@@ -1222,24 +1261,39 @@ final class BatchStore: ObservableObject {
         setOverrideBatch([id], verdict)
     }
 
+    /// ⌘Z 的一步：一次改判（每张原来的判决、原来是不是「接受推荐」钉的），或者一次导入 / 清除
+    /// 客户选中（之前的整份）。两种放在同一条栈里：导入客户选择 → 改判 → ⌘Z ⌘Z 按时间倒着撤。
+    private enum UndoStep {
+        case verdicts([(id: String, previous: Verdict?, accepted: Bool)])
+        case clientPicks(Set<String>)
+    }
+
     /// Undo stack for verdict overrides: one entry per user action, holding each
     /// touched id's PREVIOUS override (nil = was automatic). ⌘Z pops — a
     /// mis-keyed digit in tag-and-advance review mode costs one keystroke, not
     /// a hunt back through the filmstrip.
-    @Published private var overrideUndoStack: [[(id: String, previous: Verdict?, accepted: Bool)]] = []
+    @Published private var overrideUndoStack: [UndoStep] = []
 
     var canUndoOverride: Bool { !overrideUndoStack.isEmpty }
 
     /// 动手之前压一条撤销记录：每张原来的判决，和它原来是不是「接受推荐」钉的。
     private func pushUndo(_ ids: some Collection<String>) {
-        overrideUndoStack.append(ids.map { ($0, overrides[$0], acceptedIDs.contains($0)) })
+        pushUndoStep(.verdicts(ids.map { ($0, overrides[$0], acceptedIDs.contains($0)) }))
+    }
+
+    private func pushUndoStep(_ step: UndoStep) {
+        overrideUndoStack.append(step)
         if overrideUndoStack.count > 100 { overrideUndoStack.removeFirst() }
     }
 
     /// 返回这次撤销动到的照片 id —— 连拍挑选据此跳回出事的那一组。
     @discardableResult
     func undoLastOverride() -> [String] {
-        guard let last = overrideUndoStack.popLast() else { return [] }
+        guard let step = overrideUndoStack.popLast() else { return [] }
+        guard case .verdicts(let last) = step else {
+            if case .clientPicks(let previous) = step { return restoreClientPicks(previous) }
+            return []
+        }
         for (id, previous, accepted) in last {
             if let previous {
                 overrides[id] = previous
@@ -1393,6 +1447,43 @@ final class BatchStore: ObservableObject {
         } else if let data = try? JSONEncoder().encode(acceptedIDs.sorted()) {
             try? data.write(to: acceptedPath, options: .atomic)
         }
+    }
+
+    // MARK: - 客户选中（client_picks.json）
+
+    private var clientPicksPath: URL { sessionDir.appendingPathComponent("client_picks.json") }
+
+    private func loadClientPicks() {
+        let ids = (try? Data(contentsOf: clientPicksPath))
+            .flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
+        clientPicks = Set(ids)
+    }
+
+    private func saveClientPicks() {
+        if clientPicks.isEmpty {
+            try? FileManager.default.removeItem(at: clientPicksPath)
+        } else if let data = try? JSONEncoder().encode(clientPicks.sorted()) {
+            try? data.write(to: clientPicksPath, options: .atomic)
+        }
+    }
+
+    /// 换成这一份客户选中（导入 = 加上去，清除 = 空集）：一条撤销记录、一次保存，再重算一遍
+    /// （客户选中数、「XMP 过期」都在 Derived 里；判决不受影响）。和原来一样就什么都不做。
+    func setClientPicks(_ picks: Set<String>) {
+        guard picks != clientPicks else { return }
+        pushUndoStep(.clientPicks(clientPicks))
+        clientPicks = picks
+        saveClientPicks()
+        applyThresholds()
+    }
+
+    /// ⌘Z 撤回一次导入 / 清除。返回这次变了的照片（按网格顺序）。
+    private func restoreClientPicks(_ previous: Set<String>) -> [String] {
+        let touched = clientPicks.symmetricDifference(previous)
+        clientPicks = previous
+        saveClientPicks()
+        applyThresholds()
+        return items.map(\.id).filter(touched.contains)
     }
 
     /// Canonical display order for reject-reason chips and slider kill-counts.
@@ -2195,12 +2286,17 @@ final class BatchStore: ObservableObject {
     // MARK: - Contact sheet (客户选片确认)
 
     /// Single-file HTML gallery of the picks — numbered, with ids, sendable over
-    /// WeChat as one file. Preview JPEGs are embedded base64 (they're already
-    /// ~1024px files on disk; no re-encode).
-    func exportContactSheet(to url: URL, includeUsable: Bool) {
+    /// WeChat as one file. Preview JPEGs are embedded base64 (re-encoded at 800px/q0.72).
+    /// 客户在页面上点选、「复制我的选择」发回文件名清单（见 ProofSheetPage）；这次导出的照片顺序
+    /// 记进 proof_sheets.json，客户只回编号时按对的那张表认。`ids` 给定时只导这几张（选中的照片，
+    /// 大场次分批发），否则按判决选。
+    func exportContactSheet(to url: URL, includeUsable: Bool, ids: [String]? = nil) {
         guard !isRunning else { return }
-        let chosen = items.filter { $0.verdict == .pick || (includeUsable && $0.verdict == .usable) }
-            .map { (id: $0.id, previewPath: $0.previewPath, pick: $0.verdict == .pick) }
+        let wanted = ids.map(Set.init)
+        let chosen = items.filter { item in
+            if let wanted { return wanted.contains(item.id) }
+            return item.verdict == .pick || (includeUsable && item.verdict == .usable)
+        }.map { (id: $0.id, previewPath: $0.previewPath, pick: $0.verdict == .pick) }
         guard !chosen.isEmpty else {
             lastError = "没有可导出的照片"
             return
@@ -2211,20 +2307,21 @@ final class BatchStore: ObservableObject {
         let flag = cancelFlag
         let title = photoDir?.lastPathComponent ?? ""
         let total = chosen.count
+        let scope = ids != nil ? "选中的照片" : (includeUsable ? "精选 + 可用" : "仅精选")
+        let sheetID = ProofSheet.newID()
 
         // Off the main thread: reading + base64-encoding hundreds of ~190KB
         // previews took seconds of beachball. The 1024px previews are
         // re-encoded at 800px/q0.72 so a 300-photo sheet stays WeChat-sized.
         Task.detached(priority: .userInitiated) { [weak self] in
             var cells = ""
+            // 真正放进表里的（预览读不出来的跳过）：编号 #n 就是这里的第 n 张，记进 proof_sheets.json。
+            var shown: [String] = []
             for (index, item) in chosen.enumerated() {
                 if flag.isSet { break }
                 guard let data = Self.contactSheetJPEG(path: item.previewPath) else { continue }
-                let b64 = data.base64EncodedString()
-                cells += """
-                <div class="cell"><img src="data:image/jpeg;base64,\(b64)">
-                <div class="cap">#\(index + 1) · \(item.id)\(item.pick ? " ★" : "")</div></div>\n
-                """
+                shown.append(item.id)
+                cells += ProofSheetPage.cell(number: shown.count, id: item.id, pick: item.pick, jpeg: data)
                 let done = index + 1
                 if done % 20 == 0 || done == total {
                     await MainActor.run { [weak self] in
@@ -2234,20 +2331,8 @@ final class BatchStore: ObservableObject {
                 }
             }
             let dateString = DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .none)
-            let html = """
-            <!doctype html><html lang="zh"><head><meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>选片确认 · \(title)</title>
-            <style>
-            body{font-family:-apple-system,sans-serif;background:#111;color:#eee;margin:1rem}
-            h1{font-size:1.1rem} .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
-            .cell img{width:100%;border-radius:6px;display:block}
-            .cap{font-size:.8rem;color:#bbb;padding:4px 2px}
-            </style></head><body>
-            <h1>选片确认 · \(title) · \(total) 张 · \(dateString)</h1>
-            <p style="color:#999;font-size:.85rem">★ = 摄影师精选。请回复需要精修的编号。</p>
-            <div class="grid">\(cells)</div></body></html>
-            """
+            let html = ProofSheetPage.html(title: title, sheetID: sheetID, count: shown.count,
+                                           date: dateString, cells: cells)
             let cancelled = flag.isSet
             var writeError: String?
             if !cancelled {
@@ -2255,6 +2340,8 @@ final class BatchStore: ObservableObject {
                 catch { writeError = error.localizedDescription }
             }
             let failure = writeError
+            let bytes = Int64(html.utf8.count)
+            let sheet = ProofSheet(id: sheetID, date: Date(), scope: scope, ids: shown)
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
@@ -2264,7 +2351,9 @@ final class BatchStore: ObservableObject {
                 } else if let failure {
                     self.lastError = "联系表导出失败: \(failure)"
                 } else {
-                    self.progressText = "选片确认表已导出: \(total) 张 → \(url.lastPathComponent)"
+                    self.recordProofSheet(sheet)
+                    self.progressText = "选片确认表已导出: \(sheet.ids.count) 张 · \(Self.sizeText(bytes)) → \(url.lastPathComponent)"
+                    if bytes > ProofSheetPage.largeBytes { self.lastError = ProofSheetPage.largeNote(bytes) }
                 }
             }
         }
@@ -2720,13 +2809,18 @@ final class BatchStore: ObservableObject {
     /// A RAW+JPEG pair goes together, along with its .xmp sidecar, and the photo
     /// disappears from the session + persisted artifacts so it doesn't resurface
     /// as a broken entry.
+    /// 客户选中的废片不动：客户点名要精修的，判成废片也留着（菜单、确认框上的张数也不算它们）。
     func trashRejects() {
         guard !isRunning else {
             lastError = "正在处理中，先点“取消”再移动废片"
             return
         }
-        let rejects = items.filter { $0.verdict == .reject }
-        guard !rejects.isEmpty else { return }
+        let rejects = trashableRejects
+        let keptForClient = clientPickRejectCount
+        guard !rejects.isEmpty else {
+            if keptForClient > 0 { lastError = "废片都是客户选中的 (\(keptForClient) 张)，没有要移的" }
+            return
+        }
         // 照片文件夹不在了就别开工：一张也移不动，却会把这些 id 从结果里抹掉。
         if let dir = photoDir, !FileManager.default.fileExists(atPath: dir.path) {
             lastError = "照片文件夹「\(dir.lastPathComponent)」不存在 (被删除、改名或硬盘未挂载)，无法移动废片"
@@ -2794,6 +2888,10 @@ final class BatchStore: ObservableObject {
                     self.acceptedIDs.remove(id)
                 }
                 self.saveOverrides()
+                if !self.clientPicks.isDisjoint(with: trashed) {
+                    self.clientPicks.subtract(trashed)
+                    self.saveClientPicks()
+                }
                 self.rebuildGroupSizes()
                 self.purgeFromArtifacts(ids: trashed)
                 self.applyThresholds()
@@ -2803,7 +2901,8 @@ final class BatchStore: ObservableObject {
                 if flag.isSet {
                     self.progressText = "已取消: \(trashed.count) 张已移到废纸篓 (可恢复)，其余未动"
                 } else if failedIds.isEmpty {
-                    self.progressText = "已把 \(trashed.count) 张废片移到废纸篓 (可恢复)"
+                    self.progressText = "已把 \(trashed.count) 张废片移到废纸篓 (可恢复)" +
+                        (keptForClient > 0 ? "；客户选中的 \(keptForClient) 张废片没动" : "")
                 } else {
                     self.lastError = "移到废纸篓: \(trashed.count) 成功, \(failedIds.count) 失败 (\(failedIds.prefix(3).joined(separator: ", ")))"
                 }
@@ -3087,18 +3186,20 @@ final class BatchStore: ObservableObject {
         // writes on a big shoot would otherwise freeze the UI for seconds).
         let jobs: [XMPJob] = items.map { item in
             // Red = the cross-app 淘汰 color — filterable in LR AND Capture One.
-            let (stars, label) = Self.xmpRating(item)
+            // 客户选中的是紫色（压过绿 / 红），星级不变。
+            let (stars, label) = Self.xmpRating(item, clientPick: clientPicks.contains(item.id))
             let xmpURL = URL(fileURLWithPath: item.rawPath).deletingPathExtension().appendingPathExtension("xmp")
             let reason = item.verdict == .reject ? item.rejectReasons.joined(separator: "; ") : ""
-            // 上次写进去的色标（精选绿 / 废片红）：这次没有色标时，别人的 sidecar 里还是这个色就拿掉；
+            // 上次写进去的色标（精选绿 / 废片红 / 客户选中紫）：这次没有色标时，别人的 sidecar 里还是这个色就拿掉；
             // 已经是别的色（你后来在 LR 里改的）就不动。
-            let lastLabel = xmpState?.marks[item.id].flatMap { Verdict(rawValue: $0.v) }.flatMap(Self.xmpLabel)
+            let lastLabel = xmpState?.marks[item.id].flatMap(Self.writtenLabel)
             return XMPJob(id: item.id, url: xmpURL, content: Self.xmpContent(rating: stars, label: label, reason: reason),
                           stars: stars, label: label, lastLabel: lastLabel)
         }
         let total = jobs.count
-        // 写完记下「每张这次写进去的是什么」，之后判决 / 星级再变就提醒重写（状态栏）。
-        let marks = Dictionary(items.map { ($0.id, Self.xmpMark($0)) }, uniquingKeysWith: { first, _ in first })
+        // 写完记下「每张这次写进去的是什么」，之后判决 / 星级 / 客户选中再变就提醒重写（状态栏）。
+        let marks = Dictionary(items.map { ($0.id, Self.xmpMark($0, clientPick: clientPicks.contains($0.id))) },
+                               uniquingKeysWith: { first, _ in first })
         // Lightroom Classic only reads .xmp sidecars for proprietary RAW; for
         // JPEG/TIFF/DNG it expects the metadata embedded. Capture One reads
         // sidecars for everything. Say so instead of reporting a clean success.
@@ -3214,7 +3315,7 @@ final class BatchStore: ObservableObject {
         let content: String
         let stars: Int
         let label: String?
-        /// 上次写进这张的色标（没写过 / 可用 = nil）。
+        /// 上次写进这张的色标（没写过 / 可用 = nil；客户选中的是 Purple）。
         let lastLabel: String?
     }
 

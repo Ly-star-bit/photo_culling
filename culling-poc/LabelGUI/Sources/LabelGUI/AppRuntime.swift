@@ -8,6 +8,7 @@ enum AppRuntime {
         "--collage", "--collage-ui", "--collage-ops", "--compare-crop", "--batch-ui", "--compare-ui", "--timeline-selftest", "--ux-selftest", "--export-xmp",
         "--watermark-ui", "--watermark-batch",
         "--ingest", "--card-ui", "--card-queue-selftest",
+        "--proof-sheet", "--client-import", "--copy-list", "--copy-originals",
     ]
 
     /// true = 无头跑（测试、自动化）。

@@ -26,6 +26,8 @@ struct BatchView: View {
     @State private var showISOSheet = false
     /// 精华 Top N（Aftershoot 的 Sneak Peek）：当天发朋友圈用的那二十张。
     @State private var showHighlightsSheet = false
+    /// 「导入客户选择…」对话框。
+    @State private var showClientImport = false
     @AppStorage("batch.highlightsCount") private var highlightsCount = 20
     @AppStorage("batch.highlightsMaxPixel") private var highlightsMaxPixel = 2048
     @AppStorage("batch.isoThreshold") private var isoThreshold = 3200
@@ -228,6 +230,7 @@ struct BatchView: View {
         .sheet(isPresented: $showJPEGSheet) { jpegExportSheet }
         .sheet(isPresented: $showISOSheet) { isoExportSheet }
         .sheet(isPresented: $showHighlightsSheet) { highlightsSheet }
+        .sheet(isPresented: $showClientImport) { ClientImportSheet(store: store, isPresented: $showClientImport) }
         .confirmationDialog(acceptTitle, isPresented: $showAcceptAllConfirm) {
             Button("定案 · \(acceptPreview.rejects) 张设为废片") {
                 let scope = acceptScope
@@ -239,13 +242,13 @@ struct BatchView: View {
             Text(acceptMessage)
         }
         .confirmationDialog(
-            "把 \(store.verdictCounts.reject) 张废片移到废纸篓？",
+            "把 \(store.trashableRejectCount) 张废片移到废纸篓？",
             isPresented: $showTrashConfirm
         ) {
             Button("移到废纸篓", role: .destructive) { store.trashRejects() }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("原图 (RAW+JPG 成对一起) 和 XMP 会移到系统废纸篓，可随时恢复，不是永久删除。")
+            Text(trashMessage)
         }
         .confirmationDialog(
             "清除全部 \(store.recentSessions.count) 条历史记录？",
@@ -266,7 +269,7 @@ struct BatchView: View {
     /// 确认框底下换了场次，「移到废纸篓」「接受推荐」就落到新文件夹上了（审查发现）。
     private var busyWithPhotos: Bool {
         reviewMode || pickRequest != nil || inspectedID != nil || modalPanelOpen
-            || showJPEGSheet || showISOSheet || showHighlightsSheet
+            || showJPEGSheet || showISOSheet || showHighlightsSheet || showClientImport
             || showTrashConfirm || showAcceptAllConfirm || showClearRecentsConfirm
     }
 
@@ -405,6 +408,19 @@ struct BatchView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .frame(width: 220)
+            // 「只看客户选中」：和判决筛选叠加。没导入过客户选择就不占顶栏的地方。
+            if store.clientPickCount > 0 || store.clientPickFilter {
+                Toggle(isOn: $store.clientPickFilter) {
+                    Label {
+                        Text("客户选中 \(store.clientPickCount)")
+                    } icon: {
+                        Image(systemName: "heart.fill").foregroundStyle(store.clientPickFilter ? Color.purple : Color.secondary)
+                    }
+                }
+                .toggleStyle(.button)
+                .fixedSize()
+                .help("只看客户选中的照片（和左边的判决筛选叠加）。没选中照片时，复制文件名、复制原片就按这个范围")
+            }
             Picker("排序", selection: $store.sortOrder) {
                 ForEach(BatchStore.SortOrder.allCases, id: \.self) { s in
                     Text(s.rawValue).tag(s)
@@ -421,7 +437,7 @@ struct BatchView: View {
             Button { store.undoLastOverride() } label: { Image(systemName: "arrow.uturn.backward") }
                 .keyboardShortcut("z", modifiers: .command)
                 .disabled(!store.canUndoOverride)
-                .help("撤销上一次改判 (⌘Z)")
+                .help("撤销上一步：改判、导入 / 清除客户选中 (⌘Z)")
             Button { selectedIDs = Set(visibleItems.map(\.id)) } label: { Image(systemName: "checkmark.square") }
                 .keyboardShortcut("a", modifiers: .command)
                 .disabled(store.items.isEmpty)
@@ -451,22 +467,13 @@ struct BatchView: View {
                     .disabled(store.items.isEmpty || store.isRunning)
                 Button("导出高 ISO RAW (降噪)...") { showISOSheet = true }
                     .disabled(store.items.isEmpty || store.isRunning)
-                Menu("导出选片确认表 (HTML)") {
-                    Button("仅精选 (\(store.verdictCounts.pick))...") {
-                        exportContactSheet(includeUsable: false)
-                    }
-                    .disabled(store.verdictCounts.pick == 0)
-                    Button("精选 + 可用 (\(store.verdictCounts.pick + store.verdictCounts.usable))...") {
-                        exportContactSheet(includeUsable: true)
-                    }
-                    .disabled(store.verdictCounts.pick + store.verdictCounts.usable == 0)
-                }
-                .disabled(store.isRunning)
                 Divider()
-                Button("废片移到废纸篓 (\(store.verdictCounts.reject))", role: .destructive) {
+                clientMenuItems
+                Divider()
+                Button("废片移到废纸篓 (\(store.trashableRejectCount))", role: .destructive) {
                     showTrashConfirm = true
                 }
-                .disabled(store.verdictCounts.reject == 0 || store.isRunning)
+                .disabled(store.trashableRejectCount == 0 || store.isRunning)
             } label: {
                 Label("导出", systemImage: "square.and.arrow.up")
             }
@@ -506,6 +513,11 @@ struct BatchView: View {
                     Text("人工改判 \(store.manualOverrideCount)")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                if store.clientPickCount > 0 {
+                    Label("客户选中 \(store.clientPickCount)", systemImage: "heart.fill")
+                        .font(.caption).foregroundStyle(.purple)
+                        .help("导入的客户选择（紫心）。顶栏「客户选中」只看这些；「导出」菜单里复制文件名、复制原片到精修文件夹")
+                }
             }
             // 上次写 XMP 之后又改了判决：Lightroom / C1 那边还是旧的，提醒一下、点一下就重写。
             if store.xmpStaleCount > 0 {
@@ -515,7 +527,7 @@ struct BatchView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(store.isRunning)
-                .help("有 \(store.xmpStaleCount) 张的判决或星级和上次写进 XMP 的不一样（或者上次没写进去），Lightroom / Capture One 读到的还是旧的。点这里按现在的判决重写（别的软件写的 XMP 只改星级/色标，调色等原样保留）")
+                .help("有 \(store.xmpStaleCount) 张的判决、星级或客户选中和上次写进 XMP 的不一样（或者上次没写进去），Lightroom / Capture One 读到的还是旧的。点这里按现在的判决重写（别的软件写的 XMP 只改星级/色标，调色等原样保留）")
             }
             if store.unparsedCount > 0 {
                 // Photos the engine couldn't read are invisible in the grid;
@@ -729,10 +741,12 @@ struct BatchView: View {
             if pendingTakesOnly, !pending { return nil }
             if let filter = store.verdictFilter {
                 members = members.filter { $0.verdict == filter }
-            } else if !pending, !alive.isEmpty, !expandedTakes.contains(row.take) {
+            } else if !pending, !alive.isEmpty, !expandedTakes.contains(row.take), !store.clientPickFilter {
                 // 定完的场叠起来：只剩留下的那几张（整场全废的不叠，不然这一行什么都看不见）。
+                // 「只看客户选中」时不叠：客户选中的废片也得看得见。
                 members = alive
             }
+            if store.clientPickFilter { members = members.filter { store.clientPicks.contains($0.id) } }
             guard !members.isEmpty else { return nil }
             if takeSortByScore {
                 members.sort {
@@ -753,6 +767,7 @@ struct BatchView: View {
                   items[idx].take == row.take else { return nil }
             let item = items[idx]
             if let filter = store.verdictFilter, item.verdict != filter { return nil }
+            if store.clientPickFilter, !store.clientPicks.contains(item.id) { return nil }
             if let chapter = store.activeChapterFilter, BatchStore.timelineChapter(of: item) != chapter { return nil }
             return item
         }
@@ -914,6 +929,7 @@ struct BatchView: View {
                 guard idx < items.count, items[idx].take == row.take else { return nil }
                 let item = items[idx]
                 if let filter = store.verdictFilter, item.verdict != filter { return nil }
+                if store.clientPickFilter, !store.clientPicks.contains(item.id) { return nil }
                 if let chapter, BatchStore.timelineChapter(of: item) != chapter { return nil }
                 return item.id
             }
@@ -1131,6 +1147,13 @@ struct BatchView: View {
     private var acceptTitle: String {
         let scope = acceptScope != nil ? "把本章 " : "把 "
         return scope + "\(acceptPreview.takes) 场按推荐定案？"
+    }
+
+    /// 「废片移到废纸篓」确认框的说明：客户选中的废片不动，要说出来。
+    private var trashMessage: String {
+        let kept = store.clientPickRejectCount
+        let client = kept > 0 ? "客户选中的 \(kept) 张废片不动 (客户点名要的)。" : ""
+        return client + "原图 (RAW+JPG 成对一起) 和 XMP 会移到系统废纸篓，可随时恢复，不是永久删除。"
     }
 
     private var acceptMessage: String {
@@ -1470,8 +1493,9 @@ struct BatchView: View {
         let alive = all.filter { $0.verdict != .reject }
         let picks = all.filter { $0.verdict == .pick }
         let pending = store.isPendingTake(alive: alive)
-        // 这一行被叠起来藏掉的废片张数（判决筛选藏掉的不算 —— 那是你自己要的）。
-        let folded = store.verdictFilter == nil ? all.count - members.count : 0
+        // 这一行被叠起来藏掉的废片张数（判决筛选、只看客户选中藏掉的不算 —— 那是你自己要的）。
+        let unfiltered = store.verdictFilter == nil && !store.clientPickFilter
+        let folded = unfiltered ? all.count - members.count : 0
         let allSelected = members.allSatisfy { selectedIDs.contains($0.id) }
         let recommended = pending ? store.recommendedDecision(for: all) : [:]
         let recRejects = alive.filter { recommended[$0.id] == .reject }.count
@@ -1512,7 +1536,7 @@ struct BatchView: View {
                     }
                     .buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)
                     .help("这一场定完了，被废的照片叠起来了。点开再看一遍")
-                } else if !pending, store.verdictFilter == nil, expandedTakes.contains(take), alive.count < all.count {
+                } else if !pending, unfiltered, expandedTakes.contains(take), alive.count < all.count {
                     Button {
                         withAnimation(.easeOut(duration: 0.15)) { _ = expandedTakes.remove(take) }
                     } label: {
@@ -1636,10 +1660,11 @@ struct BatchView: View {
     }
 
     /// 两条角标各一个 tooltip，代替以前每个小图标各挂一个（一格 8 个 .help）。
-    static func statusHelp(rank: Int?, manual: Bool, pick: Bool, groupSize: Int) -> String {
+    static func statusHelp(rank: Int?, manual: Bool, client: Bool, pick: Bool, groupSize: Int) -> String {
         var parts: [String] = []
         if let rank { parts.append("本场评分第 \(rank)") }
         if manual { parts.append("人工改判") }
+        if client { parts.append("客户选中") }
         if pick { parts.append("精选") }
         if groupSize > 1 { parts.append("同场 \(groupSize) 张") }
         return parts.joined(separator: " · ")
@@ -1680,6 +1705,9 @@ struct BatchView: View {
         }
         if store.borderlineFilter {
             matching = matching.filter { store.isBorderline($0) }
+        }
+        if store.clientPickFilter {
+            matching = matching.filter { store.clientPicks.contains($0.id) }
         }
         if let chapter = store.activeChapterFilter {
             matching = matching.filter { BatchStore.timelineChapter(of: $0) == chapter }
@@ -1775,13 +1803,17 @@ struct BatchView: View {
                 .overlay(alignment: .topTrailing) {
                     let rank = store.takeRank[item.id]
                     let manual = store.isManual(item.id)
-                    if rank != nil || manual || item.verdict == .pick || groupSize > 1 {
+                    let client = store.clientPicks.contains(item.id)
+                    let hasStatus: Bool = rank != nil || manual || client || item.verdict == .pick || groupSize > 1
+                    if hasStatus {
                         HStack(spacing: 4) {
                             if let rank {
                                 Text("#\(rank)").font(.caption2).bold().monospacedDigit()
                                     .foregroundStyle(rank == 1 ? Color.white : Color.white.opacity(0.6))
                             }
                             if manual { Image(systemName: "hand.raised.fill").font(.caption2) }
+                            // 客户选中：紫心（和确认表上客户点的那颗、XMP 的紫色标同一个颜色）。
+                            if client { Image(systemName: "heart.fill").font(.caption2).foregroundStyle(.purple) }
                             if item.verdict == .pick {
                                 Image(systemName: "star.fill").font(.caption2).foregroundStyle(Verdict.pick.color)
                             }
@@ -1790,7 +1822,8 @@ struct BatchView: View {
                         .padding(.horizontal, 5).padding(.vertical, 3)
                         .background(.black.opacity(0.55), in: Capsule())
                         .padding(4)
-                        .help(Self.statusHelp(rank: rank, manual: manual, pick: item.verdict == .pick, groupSize: groupSize))
+                        .help(Self.statusHelp(rank: rank, manual: manual, client: client,
+                                              pick: item.verdict == .pick, groupSize: groupSize))
                     }
                 }
                 // 左下一条：信息（淘汰理由 · VLM 平反 · 慢门 · 水平 · 合影睁眼）。
@@ -2090,7 +2123,8 @@ struct BatchView: View {
         }
     }
 
-    private func exportContactSheet(includeUsable: Bool) {
+    /// `ids` 给定 = 只导这几张（「选中的照片」，大场次分批发）。
+    private func exportContactSheet(includeUsable: Bool, ids: [String]? = nil) {
         modalPanelOpen = true      // 存储卡导完别在保存面板开着时切场次（导出的会变成新场次的）
         defer { modalPanelOpen = false }
         let panel = NSSavePanel()
@@ -2099,8 +2133,88 @@ struct BatchView: View {
             panel.allowedContentTypes = [htmlType]
         }
         if panel.runModal() == .OK, let url = panel.url {
-            store.exportContactSheet(to: url, includeUsable: includeUsable)
+            store.exportContactSheet(to: url, includeUsable: includeUsable, ids: ids)
         }
+    }
+
+    // MARK: - 客户选片闭环：确认表 → 导入客户选择 → 复制文件名清单 / 复制原片
+
+    /// 「导出」菜单里的这一段。确认表的大小按每张约 120 KB 先估给你看。
+    /// 菜单跟着整页重绘（方向键每按一下都算），这里只数张数；照片 id 等点了再取。
+    @ViewBuilder
+    private var clientMenuItems: some View {
+        let counts = store.verdictCounts
+        let keepers = counts.pick + counts.usable
+        let selectedCount = selectedIDs.count
+        Menu("导出选片确认表 (HTML)") {
+            Button("仅精选 (\(counts.pick) 张 · \(ProofSheetPage.estimate(counts.pick)))...") {
+                exportContactSheet(includeUsable: false)
+            }
+            .disabled(counts.pick == 0)
+            Button("精选 + 可用 (\(keepers) 张 · \(ProofSheetPage.estimate(keepers)))...") {
+                exportContactSheet(includeUsable: true)
+            }
+            .disabled(keepers == 0)
+            Button("选中的照片 (\(selectedCount) 张 · \(ProofSheetPage.estimate(selectedCount)))...") {
+                exportContactSheet(includeUsable: false, ids: selectedInGridOrder)
+            }
+            .disabled(selectedCount == 0)
+        }
+        .disabled(store.isRunning)
+        Button("导入客户选择...") { showClientImport = true }
+            .disabled(store.items.isEmpty || store.isRunning)
+        if store.clientPickCount > 0 {
+            Button("清除客户选中 (\(store.clientPickCount))") { store.clearClientPicks() }
+        }
+        let scopeCount = selectedCount > 0 ? selectedCount : store.filteredCount
+        let scope = Self.scopeLabel(store: store, selected: selectedCount, count: scopeCount)
+        Menu("复制文件名 (\(scope))") {
+            ForEach(FilenameList.Format.allCases) { format in
+                Button(format.title) { store.copyFilenameList(deliveryScopeIDs(), format: format) }
+            }
+        }
+        .disabled(scopeCount == 0)
+        Button("复制原片到... (\(scope))") { copyOriginals(deliveryScopeIDs()) }
+            .disabled(scopeCount == 0 || store.isRunning || store.photoDir == nil)
+    }
+
+    /// 选中的照片，按网格顺序（Set 没有顺序）。
+    private var selectedInGridOrder: [String] {
+        store.items.map(\.id).filter(selectedIDs.contains)
+    }
+
+    /// 复制文件名 / 复制原片的范围：选中了照片就是选中的那些，否则是当前筛选（判决、客户选中、本章、临界）。
+    /// 分组视图里收起来的单张、叠起来的废片照样算（筛选选得出来就算）。
+    private func deliveryScopeIDs() -> [String] {
+        selectedIDs.isEmpty ? store.filteredItems().map(\.id) : selectedInGridOrder
+    }
+
+    private static func scopeLabel(store: BatchStore, selected: Int, count: Int) -> String {
+        guard selected == 0 else { return "选中的 \(selected) 张" }
+        var parts: [String] = []
+        if store.activeChapterFilter != nil { parts.append("本章") }
+        if store.clientPickFilter { parts.append("客户选中") }
+        if let verdict = store.verdictFilter { parts.append(verdict.rawValue) }
+        if store.borderlineFilter { parts.append("临界") }
+        let name = parts.isEmpty ? "全部" : parts.joined(separator: "·")
+        return name + " \(count) 张"
+    }
+
+    /// 「复制原片到…」：选目标文件夹（记住上次的，没有就从拍摄文件夹旁边开始），然后后台复制。
+    private func copyOriginals(_ ids: [String]) {
+        modalPanelOpen = true      // 存储卡导完别在选文件夹时切场次
+        defer { modalPanelOpen = false }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "复制到这里"
+        panel.message = "把 \(ids.count) 张的原片（RAW+JPG 和旁边的 .xmp 一起）复制过去：只复制、不移动，同名不覆盖。" +
+            "不能选拍摄文件夹里面（下次分析会当成新照片），可以在旁边新建一个精修文件夹"
+        panel.directoryURL = store.lastCopyDestination ?? store.photoDir?.deletingLastPathComponent()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        store.copyOriginals(ids, to: url)
     }
 
     private var jpegExportCount: Int {

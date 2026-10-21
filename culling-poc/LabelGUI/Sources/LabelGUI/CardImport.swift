@@ -672,7 +672,8 @@ enum CardImporter {
     /// 复制一个文件：.part → 校验 → 不覆盖地改名。返回账本 key（复制成功但读不回指纹就是 nil：
     /// 文件好好的，只是不记账，下次导进同一个文件夹时整份比对会认出来）。
     /// 错误分清楚：读卡出错 / 写目标出错 / 盘满 / 同名 —— 用户看到的原因不能全是「存储卡坏了」。
-    private static func copyOne(_ copy: Copy, into destination: URL, cancel: AnalysisEngine.CancelFlag,
+    /// 「复制原片到…」（OriginalsCopier）也走这一个：同一套校验、同一道绝不覆盖的闸。
+    static func copyOne(_ copy: Copy, into destination: URL, cancel: AnalysisEngine.CancelFlag,
                                 onBytes: (Int64) -> Void) throws -> String? {
         let fm = FileManager.default
         let name = copy.originalName
@@ -797,7 +798,7 @@ enum CardImporter {
         return hasher.finalize().prefix(16).map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func sha256(of url: URL, cancel: AnalysisEngine.CancelFlag? = nil) throws -> SHA256.Digest {
+    static func sha256(of url: URL, cancel: AnalysisEngine.CancelFlag? = nil) throws -> SHA256.Digest {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
