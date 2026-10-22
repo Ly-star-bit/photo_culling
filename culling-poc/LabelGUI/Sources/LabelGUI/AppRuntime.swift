@@ -9,6 +9,7 @@ enum AppRuntime {
         "--watermark-ui", "--watermark-batch",
         "--ingest", "--card-ui", "--card-queue-selftest",
         "--proof-sheet", "--client-import", "--copy-list", "--copy-originals",
+        "--export-jpeg",
     ]
 
     /// true = 无头跑（测试、自动化）。

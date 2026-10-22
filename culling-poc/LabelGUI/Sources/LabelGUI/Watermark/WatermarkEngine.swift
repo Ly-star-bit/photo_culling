@@ -182,22 +182,9 @@ enum WatermarkEngine {
         }
     }
 
-    struct ExportOptions: Codable, Equatable {
-        var maxLongSide: Int = 0            // 0 = 原尺寸
-        var quality: Double = 0.95
-        var filenameSuffix = "_wm"
-        var stripGPS = false                // 去除位置信息 (GPS)
-
-        init() {}
-        init(from decoder: Decoder) throws {
-            let c = try decoder.container(keyedBy: CodingKeys.self)
-            let d = Self()
-            maxLongSide = c.lenient(.maxLongSide, d.maxLongSide)
-            quality = c.lenient(.quality, d.quality)
-            filenameSuffix = c.lenient(.filenameSuffix, d.filenameSuffix)
-            stripGPS = c.lenient(.stripGPS, d.stripGPS)
-        }
-    }
+    /// 导出设置和「导出 JPG」「精华 Top N」共用一份（尺寸、锐化、去 GPS、文件名模板、体积上限、质量）。
+    /// 旧 state.json / --config 里的 maxLongSide、filenameSuffix 照样认（换算成 size、nameTemplate）。
+    typealias ExportOptions = DeliveryOptions
 
     // MARK: - EXIF tag extraction (ImageIO 代替 Rust 的裸 EXIF 解析)
 
@@ -978,6 +965,8 @@ enum WatermarkEngine {
         case decodeFailed
         case composeFailed
         case encodeFailed
+        /// 压到最低质量还是超过体积上限（文件照最低质量写出去了）。
+        case overLimit(Double)
 
         var errorDescription: String? {
             switch self {
@@ -986,6 +975,8 @@ enum WatermarkEngine {
             case .decodeFailed: return "解码失败 (文件损坏或格式不支持)"
             case .composeFailed: return "合成失败"
             case .encodeFailed: return "写入 JPEG 失败 (检查输出目录权限/磁盘空间)"
+            case .overLimit(let mb):
+                return "压到最低质量 \(Int(DeliveryEncoder.floorQuality * 100)) 还是超过 \(String(format: "%g", mb)) MB（已按最低质量写出）"
             }
         }
     }
@@ -1004,13 +995,23 @@ enum WatermarkEngine {
 
         // "长边 2048" 直接解到目标大小再合成，而不是全尺寸合成后缩小
         // （61MP × 4 worker 就是 4GB）。相框/画布会把成品撑大，先倒推底图该多大。
+        // 尺寸规格（长边 / 短边 / 放进框）都是对成品说的：按预测的成品尺寸折成长边再倒推。
+        let size = options.sizeValue
         var maxPixel = 20000
-        if options.maxLongSide > 0, let full = uprightSize(of: src) {
+        var downscaled = false
+        if let full = uprightSize(of: src) {
             let predicted = predictedOutputSize(baseW: Double(full.width), baseH: Double(full.height), config: config)
-            let growth = max(predicted.width, predicted.height) / Double(max(full.width, full.height))
-            maxPixel = max(1, Int((Double(options.maxLongSide) / growth).rounded()))
+            if let cap = size.longEdgeCap(width: predicted.width, height: predicted.height) {
+                let growth = max(predicted.width, predicted.height) / Double(max(full.width, full.height))
+                maxPixel = max(1, Int((Double(cap) / growth).rounded()))
+                downscaled = maxPixel < max(full.width, full.height)
+            }
         }
-        guard let base = decodeUpright(src, maxPixel: maxPixel) else { throw ExportError.decodeFailed }
+        // 缩小了就先给照片本身补一刀输出锐化，再往上合成签名 / 文字 —— 水印不能跟着被锐化出白边。
+        // 不锐化 = 以前那条 ImageIO 缩略图，一个字节不变。
+        let sharpened = downscaled && options.sharpen != .off
+            ? SharpRenderer.deliveryDownscale(src, longEdge: maxPixel, sharpen: options.sharpen, keepColor: false) : nil
+        guard let base = sharpened ?? decodeUpright(src, maxPixel: maxPixel) else { throw ExportError.decodeFailed }
         let scale = CGFloat(base.image.width) / CGFloat(base.fullWidth)
 
         let tags = ExifTags(source: src)
@@ -1019,31 +1020,30 @@ enum WatermarkEngine {
         var composed = composition.image
 
         // 四舍五入偶尔多出一两个像素：这时才补一次（此时图已经很小）缩放。
-        if options.maxLongSide > 0 {
-            let long = max(composed.width, composed.height)
-            if long > options.maxLongSide {
-                let ratio = Double(options.maxLongSide) / Double(long)
-                let nw = max(1, Int((Double(composed.width) * ratio).rounded()))
-                let nh = max(1, Int((Double(composed.height) * ratio).rounded()))
-                if let ctx = makeContext(width: nw, height: nh, opaque: true) {
-                    ctx.interpolationQuality = .high
-                    ctx.draw(composed, in: CGRect(x: 0, y: 0, width: nw, height: nh))
-                    if let resized = ctx.makeImage() { composed = resized }
-                }
+        if let ratio = size.shrinkRatio(width: composed.width, height: composed.height) {
+            let nw = max(1, Int((Double(composed.width) * ratio).rounded()))
+            let nh = max(1, Int((Double(composed.height) * ratio).rounded()))
+            if let ctx = makeContext(width: nw, height: nh, opaque: true) {
+                ctx.interpolationQuality = .high
+                ctx.draw(composed, in: CGRect(x: 0, y: 0, width: nw, height: nh))
+                if let resized = ctx.makeImage() { composed = resized }
             }
         }
 
-        guard let out = CGImageDestinationCreateWithURL(dest as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
-            throw ExportError.encodeFailed
+        let metadata = sanitizedMetadata(src, url: source, stripGPS: options.stripGPS)
+        let outcome = DeliveryEncoder.write(to: dest, quality: options.quality, maxBytes: options.maxBytes) { out, quality in
+            let destOptions = [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary
+            if let metadata {
+                CGImageDestinationAddImageAndMetadata(out, composed, metadata, destOptions)
+            } else {
+                CGImageDestinationAddImage(out, composed, destOptions)
+            }
         }
-        let destOptions = [kCGImageDestinationLossyCompressionQuality: options.quality] as CFDictionary
-        if let metadata = sanitizedMetadata(src, url: source, stripGPS: options.stripGPS) {
-            CGImageDestinationAddImageAndMetadata(out, composed, metadata, destOptions)
-        } else {
-            CGImageDestinationAddImage(out, composed, destOptions)
+        switch outcome {
+        case .failed: throw ExportError.encodeFailed
+        case .overLimit: throw ExportError.overLimit(options.maxMB)
+        case .ok: return composition.textFit
         }
-        guard CGImageDestinationFinalize(out) else { throw ExportError.encodeFailed }
-        return composition.textFit
     }
 
     /// Bool 版入口（main.swift 的 --watermark 冒烟测试用）。
@@ -1053,6 +1053,9 @@ enum WatermarkEngine {
             if let fit = try export(source: source, to: dest, signature: signature, config: config, options: options) {
                 print("文字自动调整: \(fit)")
             }
+            return true
+        } catch ExportError.overLimit {
+            print("体积: \(ExportError.overLimit(options.maxMB).localizedDescription)")
             return true
         } catch {
             FileHandle.standardError.write("watermark: \(dest.lastPathComponent): \(error.localizedDescription)\n".data(using: .utf8)!)
@@ -1101,7 +1104,7 @@ enum WatermarkEngine {
 
     /// ImageIO 的 XMP 解析器不认单引号属性（exiftool 写出的包就是单引号，Adobe
     /// 的是双引号）；直接解析失败时用 XMLDocument 重新序列化一遍再喂。
-    private static func metadataTree(fromXMP packet: Data) -> CGImageMetadata? {
+    static func metadataTree(fromXMP packet: Data) -> CGImageMetadata? {
         if let tree = CGImageMetadataCreateFromXMPData(packet as CFData) { return tree }
         guard let doc = try? XMLDocument(data: packet, options: []),
               let root = doc.rootElement(),
@@ -1111,9 +1114,14 @@ enum WatermarkEngine {
 
     /// JPEG APP1 段里的原始 XMP 包（不含扩展包）；非 JPEG 或没有 XMP 返回 nil。
     private static func rawXMPPacket(of url: URL) -> Data? {
+        jpegSegment(of: url, marker: 0xE1, header: Data("http://ns.adobe.com/xap/1.0/\0".utf8))
+    }
+
+    /// JPEG 里 `marker`（0xE1 = APP1、0xE2 = APP2…）段、payload 以 `header` 开头的第一段，去掉 header 返回；
+    /// 非 JPEG 或没有这段返回 nil。只走到 SOS（元数据段都在图像数据前面）。
+    static func jpegSegment(of url: URL, marker wanted: UInt8, header: Data) -> Data? {
         guard let data = try? Data(contentsOf: url, options: .alwaysMapped),
               data.count > 4, data[0] == 0xFF, data[1] == 0xD8 else { return nil }
-        let header = Data("http://ns.adobe.com/xap/1.0/\0".utf8)
         var i = 2
         while i + 4 <= data.count {
             guard data[i] == 0xFF else { return nil }
@@ -1123,7 +1131,7 @@ enum WatermarkEngine {
             if (0xD0...0xD7).contains(marker) || marker == 0x01 { i += 2; continue }  // 无长度的独立 marker
             let length = Int(data[i + 2]) << 8 | Int(data[i + 3])
             guard length >= 2, i + 2 + length <= data.count else { return nil }
-            if marker == 0xE1 {
+            if marker == wanted {
                 let payload = data[(i + 4)..<(i + 2 + length)]
                 if payload.starts(with: header) { return Data(payload.dropFirst(header.count)) }
             }

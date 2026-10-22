@@ -535,6 +535,15 @@ for flag in ClientPicksCLI.flags {
     }
 }
 
+// 导出 JPG / 精华 Top N 的无头入口（只往 --dest 里写）：
+// LABELGUI_DATA_DIR=<临时> LabelGUI --export-jpeg <photo_dir> --dest <dir> [--scope picks|picks+usable|top:N] [...]（见 DeliveryExportView.swift）
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--export-jpeg"),
+   CommandLine.arguments.count > flagIndex + 1 {
+    MainActor.assumeIsolated {
+        JPEGExportCLI.run(flagIndex: flagIndex)
+    }
+}
+
 // 走到这里就要开界面了。命令行里带着不认识的 `--参数`（拼错了、或者拿新的测试脚本跑旧版程序）时
 // 不开：测试 / 自动化以为自己在无头跑，结果弹出一个窗口。系统自己传的参数是单横线（-NSDocument…、-psn_…）。
 if let unknown = CommandLine.arguments.dropFirst().first(where: { $0.hasPrefix("--") }) {

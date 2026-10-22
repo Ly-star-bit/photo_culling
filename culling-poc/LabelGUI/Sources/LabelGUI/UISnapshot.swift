@@ -7,6 +7,8 @@ import AppKit
 /// LabelGUI --compare-ui <photo_dir> <out.png> [--take N | --select a,b] [--keys "2,cmd:<id>,..."] [--zoom [--person N]] [--size 1440x900] [--light]
 /// LabelGUI --batch-ui <photo_dir> <out.png> --timeline-only [--hover N] [--pending]   （只画时间轴 + 悬停卡片）
 /// LabelGUI --batch-ui <photo_dir> <out.png> [--client-only] [--client-import-ui <回复.txt>]   （只看客户选中 / 导入客户选择对话框）
+/// LabelGUI --batch-ui <photo_dir> <out.png> --delivery-ui jpeg|highlights|watermark [--delivery-json '{"size":"long:3000"}']
+///     （导出 JPG / 精华 Top N / 水印页的导出设置那一段）
 ///
 /// 和 --collage-ui 同一套：用 app 里一模一样的视图在一个从不显示的无边框窗口里布局、
 /// 渲染成 PNG。界面不能开，排布有没有挤、时间轴会不会压到别的区域，只能这样看。
@@ -104,6 +106,10 @@ enum BatchUISnapshot {
         let startID = option("--id") ?? order.first ?? ""
         if args.contains("--shortcuts-ui") {
             root = AnyView(ShortcutsPanel().background(Color(white: 0.16)))
+        } else if let kind = option("--delivery-ui") {
+            root = AnyView(deliveryPreview(kind, store: store, json: option("--delivery-json") ?? "")
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(Color(white: 0.16)))
         } else if let path = option("--client-import-ui") {
             // 导入客户选择对话框（sheet 在离屏窗口里画不出来，单独当根视图画），框里预先放好这段回复。
             let text = (try? Data(contentsOf: URL(fileURLWithPath: path))).flatMap(ClientReply.decode) ?? ""
@@ -209,5 +215,25 @@ enum BatchUISnapshot {
         }
         print("界面快照 \(Int(size.width))x\(Int(size.height)) · \(store.items.count) 张 · 章节 \(store.chapterSegments.count) · \(out.path)")
         exit(0)
+    }
+
+    /// 导出 JPG / 精华 Top N / 水印页导出设置那一段（--delivery-ui），按各自的默认、盖上 --delivery-json。
+    @MainActor
+    private static func deliveryPreview(_ kind: String, store: BatchStore, json: String) -> DeliveryOptionsPreview {
+        switch kind {
+        case "highlights":
+            let options = DeliveryOptions.load(json, defaults: .highlights(legacyMaxPixel: 2048))
+            let ids = store.topPicks(20).ids
+            return DeliveryOptionsPreview(options: options,
+                                          preview: store.jpegNamePreview(options, includeUsable: true, ids: ids, ranked: true),
+                                          tokensHint: DeliveryNaming.rankTokenHint)
+        case "watermark":
+            let options = DeliveryOptions.load(json, defaults: DeliveryOptions())
+            return DeliveryOptionsPreview(options: options, preview: "DSCF7207_wm.jpg", showsColor: false, width: 310)
+        default:
+            let options = DeliveryOptions.load(json, defaults: .jpegExport(legacyMaxPixel: 0, legacyQuality: 90))
+            return DeliveryOptionsPreview(options: options,
+                                          preview: store.jpegNamePreview(options, includeUsable: true))
+        }
     }
 }

@@ -475,31 +475,20 @@ struct WatermarkView: View {
     private var exportBox: some View {
         GroupBox("导出设置") {
             VStack(alignment: .leading, spacing: 8) {
-                Picker("尺寸", selection: $store.options.maxLongSide) {
-                    Text("原尺寸").tag(0)
-                    Text("长边 2048").tag(2048)
-                    Text("长边 4096").tag(4096)
-                }
-                .pickerStyle(.segmented)
-                .help("含相框/画布扩展后的成品长边")
-                labeledSlider("质量", value: $store.options.quality, in: 0.6...1,
-                              display: "\(Int(store.options.quality * 100))")
-                HStack(spacing: 6) {
-                    Text("后缀").font(.caption).foregroundStyle(.secondary)
-                        .frame(width: 30, alignment: .leading)
-                    TextField("文件名后缀", text: $store.options.filenameSuffix).font(.caption)
-                        .help("追加在原文件名后；\"/\" 和 \":\" 会被去掉")
-                }
-                Toggle("去除位置信息 (GPS)", isOn: $store.options.stripGPS).font(.caption)
-                    .help("交付给客户或发到公开平台时去掉拍摄地点")
+                DeliveryOptionsSection(options: $store.options, namePreview: store.namePreview, showsColor: false,
+                                       sizeHint: Self.exportSizeHint)
+                    .font(.caption)
+                    .controlSize(.small)
                 Text(store.options.stripGPS
-                     ? "输出 JPEG · 保留 EXIF 拍摄参数与 XMP 版权/关键词 · 去除 GPS · 方向已烘焙进像素"
-                     : "输出 JPEG · 保留 EXIF 拍摄参数、GPS 与 XMP 版权/关键词 · 方向已烘焙进像素")
+                     ? "输出 JPEG (sRGB) · 保留 EXIF 拍摄参数与 XMP 版权/关键词 · 去除 GPS · 方向已烘焙进像素"
+                     : "输出 JPEG (sRGB) · 保留 EXIF 拍摄参数、GPS 与 XMP 版权/关键词 · 方向已烘焙进像素")
                     .font(.caption2).foregroundStyle(.tertiary)
             }
             .padding(6)
         }
     }
+
+    private static let exportSizeHint = "含相框 / 画布扩展后的成品放进这个尺寸，不裁不放大；配上「画布比例扩展」补白能出精确尺寸（3:4 + 小红书 = 1080×1440）"
 
     private var presetBox: some View {
         GroupBox("预设") {

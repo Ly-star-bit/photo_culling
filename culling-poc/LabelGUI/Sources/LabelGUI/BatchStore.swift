@@ -2932,43 +2932,110 @@ final class BatchStore: ObservableObject {
         filterFile("appeal_results.json", arrayKey: "results")
     }
 
-    // MARK: - JPG export (交付用: 精选/可用全尺寸重编码, Capture One 式质量设置)
+    // MARK: - JPG export (交付用: 精选/可用重编码, 尺寸/锐化/色彩/去 GPS/文件名模板)
 
-    /// Full-resolution JPEG export of the keepers. Decodes from `decodePath`
-    /// (the JPEG half of a RAW+JPEG pair, else the RAW itself via ImageIO's
-    /// vendor decoders) and re-encodes at the chosen quality, carrying the
-    /// source metadata (EXIF/GPS/orientation) into the output.
-    /// maxPixel nil = full resolution; otherwise long-edge cap (2048 for
-    /// WeChat-able 选片小图, 4096 for screen delivery).
     /// Default JPG output folder: a subfolder of the shoot that listPhotos
     /// skips, so exporting never feeds the outputs back into the next analysis.
     var defaultJPEGExportFolder: URL? {
         photoDir?.appendingPathComponent(ImageLoader.jpegExportSubfolder)
     }
 
-    /// `overwrite` false = files already in the target are left alone and
-    /// counted (a re-export at another quality wants true; an accidental second
-    /// click, or a folder that already holds the client's retouched files, does
-    /// not).
-    /// `ids` 给定时只导这些（精华 Top N 走这里），否则按判决选。同一条通道：
-    /// isRunning 守卫、并发上限、跳过/覆盖、进度文字全部复用。
-    func exportJPEGs(to folder: URL, includeUsable: Bool, quality: Double, maxPixel: Int? = nil,
-                     overwrite: Bool = false, ids: Set<String>? = nil) {
-        guard !isRunning else { return }
-        let chosen = ids.map { wanted in items.filter { wanted.contains($0.id) } }
+    /// 上一次 JPG / 精华导出写了什么（无头 --export-jpeg 打印用）。
+    struct JPEGExportReport {
+        let folder: URL
+        let written: [URL]
+        let overLimit: [String]
+        let failed: [String]
+    }
+    private(set) var lastJPEGExport: JPEGExportReport?
+
+    /// 文件名模板要的字段：原名就是 id（以前固定的 {id}.jpg），日期 = 拍摄时间，星级 = 写进 XMP 的那个。
+    func nameFields(_ item: BatchItem, index: Int, rank: Int?) -> DeliveryNaming.Fields {
+        DeliveryNaming.Fields(original: item.id, index: index, date: item.captureTime, rank: rank,
+                              camera: item.camera,
+                              stars: Self.xmpRating(item, clientPick: clientPicks.contains(item.id)).stars)
+    }
+
+    /// 按判决（或给定 ids）选出要导的照片，保持顺序（精华按名次）。
+    private func jpegExportItems(includeUsable: Bool, ids: [String]?) -> [BatchItem] {
+        ids.map { $0.compactMap { item(withID: $0) } }
             ?? items.filter { $0.verdict == .pick || (includeUsable && $0.verdict == .usable) }
+    }
+
+    /// 文件名框旁边的预览：第一张导出来叫什么。
+    func jpegNamePreview(_ options: DeliveryOptions, includeUsable: Bool, ids: [String]? = nil, ranked: Bool = false) -> String {
+        guard let first = jpegExportItems(includeUsable: includeUsable, ids: ids).first else { return "（没有可导出的照片）" }
+        return DeliveryNaming.render(options.nameTemplate, nameFields(first, index: 1, rank: ranked ? 1 : nil)) + ".jpg"
+    }
+
+    /// 精华 Top N：每次导到「精华/」下面一个新文件夹（Top20_2026-10-21_1530，重名加 -2）。以前固定写进
+    /// 「精华/」、同名跳过、不清旧的：改了判决再导一次，掉出前 N 的还混在里面，而这个文件夹是要整个发出去的。
+    /// 不删任何东西。
+    func exportHighlights(count: Int, into base: URL, options: DeliveryOptions) {
+        guard !isRunning else { return }
+        let top = topPicks(count).ids
+        guard !top.isEmpty else {
+            lastError = "没有可导出的照片"
+            return
+        }
+        let stamp = DateFormatter()
+        stamp.locale = Locale(identifier: "en_US_POSIX")
+        stamp.dateFormat = "yyyy-MM-dd_HHmm"
+        let name = "Top\(top.count)_\(stamp.string(from: Date()))"
+        var folder = base.appendingPathComponent(name)
+        var n = 2
+        while FileManager.default.fileExists(atPath: folder.path) {
+            folder = base.appendingPathComponent("\(name)-\(n)")
+            n += 1
+        }
+        exportJPEGs(to: folder, includeUsable: true, options: options, ids: top, ranked: true,
+                    label: base.lastPathComponent + "/" + folder.lastPathComponent)
+    }
+
+    /// Decodes from `decodePath` (the JPEG half of a RAW+JPEG pair, else the RAW itself via ImageIO's
+    /// vendor decoders) and re-encodes with the delivery options (size / sharpen / color / GPS / quality).
+    /// 文件名按模板（默认 {原名} = 以前的 {id}.jpg）；批内重名、目标里已有的另存 -2、-3（旧文件不动），
+    /// 只有 `overwrite` 开着才覆盖目标里的同名文件（重新导一遍换个质量）。
+    /// `ids` 给定时只导这些、按给的顺序（精华 Top N 走这里，`ranked` = {名次} 按这个顺序），否则按判决选。
+    /// 同一条通道：isRunning 守卫、并发上限、进度文字全部复用。
+    func exportJPEGs(to folder: URL, includeUsable: Bool, options: DeliveryOptions, overwrite: Bool = false,
+                     ids: [String]? = nil, ranked: Bool = false, label: String? = nil) {
+        guard !isRunning else { return }
+        let chosen = jpegExportItems(includeUsable: includeUsable, ids: ids)
         guard !chosen.isEmpty else {
             lastError = "没有可导出的照片"
             return
         }
+        // 拍摄文件夹本身（选文件夹的面板一打开就在这儿）或里面会被分析扫到的子文件夹：勾了覆盖，{原名}.jpg
+        // 在不分大小写的 APFS 上就是原片 DSCF7207.JPG，原片被缩小版盖掉；不勾也会写进一堆 -2，下次分析当成新照片。
+        // 「导出JPG/」和它下面（精华）不参与分析，照常。
+        if let photoDir, OriginalsCopier.insideAnalysis(folder, shoot: photoDir) {
+            lastError = "不能导出到拍摄文件夹里面：勾了覆盖会把原片换成导出的 JPG，不勾下次分析也会把它们当成新照片。" +
+                "请用「导出到 \(ImageLoader.jpegExportSubfolder)/」，或选拍摄文件夹外面的文件夹"
+            return
+        }
+        // 目标路径在开工前一次排好（并发的 worker 各自算会撞名）。
+        let names = chosen.enumerated().map { index, item in
+            DeliveryNaming.render(options.nameTemplate, nameFields(item, index: index + 1, rank: ranked ? index + 1 : nil))
+        }
+        let plan = DeliveryNaming.plan(names, in: folder, overwrite: overwrite)
+        let jobs = zip(chosen, plan.dests).map { (id: $0.0.id, source: URL(fileURLWithPath: $0.0.decodePath), dest: $0.1) }
+        // 再兜一道：要覆盖的目标里有哪个就是原片（软链接过去的文件夹之类），整个不导。不覆盖时目标都是新名字。
+        if overwrite, let hit = Self.firstOriginal(among: jobs.map(\.dest), originals: chosen) {
+            lastError = "导出目标 \(hit.lastPathComponent) 就是原片，没有导出：请换一个文件夹"
+            return
+        }
+        let renamed = plan.renamed
+        let folderLabel = label ?? folder.lastPathComponent
+        let isHighlights = ranked
         isRunning = true
         lastError = nil
+        lastJPEGExport = nil
         cancelFlag = AnalysisEngine.CancelFlag()
         let flag = cancelFlag
-        let total = chosen.count
+        let total = jobs.count
 
         Task.detached { [weak self] in
-            enum Outcome { case ok, skipped, failed }
             do {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             } catch {
@@ -2984,27 +3051,22 @@ final class BatchStore: ObservableObject {
             // seed `workers` tasks, add one more as each finishes.
             let workers = min(4, max(2, ProcessInfo.processInfo.activeProcessorCount / 4))
             var failed: [String] = []
-            var skipped = 0
+            var overLimit: [String] = []
+            var written: [URL] = []
             var done = 0
-            var iterator = chosen.makeIterator()
-            await withTaskGroup(of: (String, Outcome).self) { group in
+            var iterator = jobs.makeIterator()
+            await withTaskGroup(of: (String, URL, DeliveryEncoder.Outcome).self) { group in
                 func addNext() {
-                    guard !flag.isSet, let item = iterator.next() else { return }
+                    guard !flag.isSet, let job = iterator.next() else { return }
                     group.addTask {
-                        let dest = folder.appendingPathComponent("\(item.id).jpg")
-                        if !overwrite, FileManager.default.fileExists(atPath: dest.path) {
-                            return (item.id, .skipped)
-                        }
-                        let ok = Self.writeJPEG(from: URL(fileURLWithPath: item.decodePath), to: dest,
-                                                quality: quality, maxPixel: maxPixel)
-                        return (item.id, ok ? .ok : .failed)
+                        (job.id, job.dest, Self.writeJPEG(from: job.source, to: job.dest, options: options))
                     }
                 }
                 for _ in 0..<workers { addNext() }
-                for await (id, outcome) in group {
+                for await (id, dest, outcome) in group {
                     switch outcome {
-                    case .ok: break
-                    case .skipped: skipped += 1
+                    case .ok: written.append(dest)
+                    case .overLimit: written.append(dest); overLimit.append(id)
                     case .failed: failed.append(id)
                     }
                     done += 1
@@ -3018,45 +3080,76 @@ final class BatchStore: ObservableObject {
             }
 
             let failedIds = failed
-            let skippedCount = skipped
-            let doneCount = done
+            let overIds = overLimit
+            let writtenFiles = written.sorted { $0.lastPathComponent < $1.lastPathComponent }
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
                 self.isRunning = false
-                let written = doneCount - skippedCount - failedIds.count
-                let skipNote = skippedCount > 0 ? " · \(skippedCount) 张已存在跳过" : ""
+                self.lastJPEGExport = JPEGExportReport(folder: folder, written: writtenFiles, overLimit: overIds,
+                                                       failed: failedIds)
+                let count = writtenFiles.count
+                let kept = renamed > 0 ? "（\(renamed) 张目标里已有同名，另存为 -2、-3…，旧文件没动）" : ""
                 if flag.isSet {
-                    self.progressText = "导出已取消: 已写出 \(written) 张\(skipNote)"
+                    self.progressText = "导出已取消: 已写出 \(count) 张 → \(folderLabel)"
                 } else if failedIds.isEmpty {
-                    self.progressText = "JPG 导出完成: \(written) 张 → \(folder.lastPathComponent)\(skipNote)"
+                    let title = isHighlights ? "精华导出完成" : "JPG 导出完成"
+                    self.progressText = "\(title): \(count) 张 → \(folderLabel)" + kept
+                    if !overIds.isEmpty { self.lastError = DeliveryEncoder.overLimitNote(overIds, maxMB: options.maxMB) }
                 } else {
-                    self.lastError = "JPG 导出: \(written) 成功, \(failedIds.count) 失败 (\(failedIds.prefix(3).joined(separator: ", ")))\(skipNote)"
+                    self.lastError = "JPG 导出: \(count) 成功, \(failedIds.count) 失败 (\(failedIds.prefix(3).joined(separator: ", ")))"
                 }
             }
         }
     }
 
+    /// `dests` 里第一个和某张原片（RAW 或 JPG）是同一个文件的；按设备号 + inode 比，大小写、软链接都骗不过。
+    /// 原片先 stat 一遍放进集合，几千张也只是几千次 stat。
+    private static func firstOriginal(among dests: [URL], originals: [BatchItem]) -> URL? {
+        func fileID(_ path: String) -> String? {
+            var st = stat()
+            return stat(path, &st) == 0 ? "\(st.st_dev):\(st.st_ino)" : nil
+        }
+        let ids = Set(originals.flatMap { [$0.rawPath, $0.decodePath] }.compactMap(fileID))
+        return dests.first { fileID($0.path).map(ids.contains) ?? false }
+    }
+
     /// Explicit decode → re-encode (NOT CGImageDestinationAddImageFromSource,
     /// which may copy the compressed stream and silently ignore the quality
-    /// setting for JPEG→JPEG). Source properties ride along so EXIF, GPS and
-    /// the orientation tag survive; pixels are written un-rotated with the tag,
-    /// exactly like the camera did.
-    nonisolated static func writeJPEG(from source: URL, to dest: URL, quality: Double,
-                                      maxPixel: Int? = nil) -> Bool {
+    /// setting for JPEG→JPEG). Source properties ride along so EXIF and
+    /// the orientation tag survive (GPS too unless stripGPS); pixels are written
+    /// un-rotated with the tag, exactly like the camera did.
+    ///
+    /// 不锐化 + 保留色彩 + 不去 GPS + 不限体积 = 以前那条路，一个字节不变。缩小且要锐化时走 SharpRenderer
+    /// （Lanczos + USM，渲染时直接出 sRGB 或源色彩空间）；不锐化但要 sRGB 的，解出来再真转换一次。
+    nonisolated static func writeJPEG(from source: URL, to dest: URL, options: DeliveryOptions) -> DeliveryEncoder.Outcome {
         guard let src = CGImageSourceCreateWithURL(source as CFURL, nil),
-              CGImageSourceGetCount(src) > 0,
-              let out = CGImageDestinationCreateWithURL(dest as CFURL, UTType.jpeg.identifier as CFString, 1, nil)
-        else { return false }
+              CGImageSourceGetCount(src) > 0
+        else { return .failed }
         var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
-        props[kCGImageDestinationLossyCompressionQuality] = quality
+        // 属性字典这条路，ImageIO 按 EXIF/TIFF 现编 XMP，原图的 XMP 包不跟过来 —— 拿掉 {GPS} 就是全拿掉了。
+        // 拍摄时间、机身、镜头、版权、方向都留着。
+        if options.stripGPS { props.removeValue(forKey: kCGImagePropertyGPSDictionary) }
+        let keepColor = options.effectiveColor == .keep
+        // 相机直出的 Adobe RGB（没嵌 ICC）转 sRGB 前先认回 Adobe RGB；保留原色彩空间时原样不动（和以前一样）。
+        let assumed = keepColor ? nil : SharpRenderer.cameraAdobeRGB(src, url: source, props: props)
 
         let image: CGImage?
-        if let maxPixel {
+        var rendered = false
+        let full = WatermarkEngine.uprightSize(of: src)
+        let size = options.sizeValue
+        if let maxPixel = size.longEdgeCap(width: Double(full?.width ?? 0), height: Double(full?.height ?? 0)) {
+            let downscaled = full.map { maxPixel < max($0.width, $0.height) } ?? false
+            // 缩小了才锐化（原图本来就比框小的不放大、不锐化）。
+            let sharpened = downscaled && options.sharpen != .off
+                ? SharpRenderer.deliveryDownscale(src, longEdge: maxPixel, sharpen: options.sharpen, keepColor: keepColor,
+                                                  assumeSpace: assumed)?.image
+                : nil
+            rendered = sharpened != nil
             // Resized path: thumbnail WITH transform bakes the rotation into the
             // pixels, so the orientation tag must be stripped — keeping it would
             // double-rotate in every viewer.
-            image = CGImageSourceCreateThumbnailAtIndex(src, 0, [
+            image = sharpened ?? CGImageSourceCreateThumbnailAtIndex(src, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
                 kCGImageSourceThumbnailMaxPixelSize: maxPixel,
                 kCGImageSourceCreateThumbnailWithTransform: true,
@@ -3069,9 +3162,26 @@ final class BatchStore: ObservableObject {
         } else {
             image = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCache: false] as CFDictionary)
         }
-        guard let image else { return false }
-        CGImageDestinationAddImage(out, image, props as CFDictionary)
-        return CGImageDestinationFinalize(out)
+        guard var image else { return .failed }
+        // 锐化那条已经在渲染时认过、转过了。
+        if !rendered { image = SharpRenderer.retagged(image, as: assumed) }
+        // 网络 / 微信：Adobe RGB、P3 真转换成 sRGB（平台丢了 ICC 按 sRGB 显示也不发灰），EXIF 色彩空间跟着改。
+        if !keepColor, SharpRenderer.needsSRGBConversion(image.colorSpace) {
+            guard let converted = SharpRenderer.convertedToSRGB(image) else { return .failed }
+            image = converted
+        }
+        if !keepColor, image.colorSpace?.name == CGColorSpace.sRGB,
+           var exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any],
+           (exif[kCGImagePropertyExifColorSpace] as? Int) != 1 {
+            exif[kCGImagePropertyExifColorSpace] = 1
+            props[kCGImagePropertyExifDictionary] = exif
+            props.removeValue(forKey: kCGImagePropertyProfileName)
+        }
+        let finalImage = image
+        return DeliveryEncoder.write(to: dest, quality: options.quality, maxBytes: options.maxBytes) { out, quality in
+            props[kCGImageDestinationLossyCompressionQuality] = quality
+            CGImageDestinationAddImage(out, finalImage, props as CFDictionary)
+        }
     }
 
     // MARK: - 高ISO RAW export (降噪流程: PureRAW / LR AI 降噪只吃 RAW)

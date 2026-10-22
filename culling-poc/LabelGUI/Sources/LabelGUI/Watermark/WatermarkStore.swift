@@ -349,10 +349,30 @@ final class WatermarkStore: ObservableObject {
 
     // MARK: - 批量导出
 
-    /// 文件名后缀里的路径字符（"/" ":"）会让 dest 跑到别的目录或在 Finder 里变成
-    /// 另一个字符；在这里剥掉。
-    static func sanitizedSuffix(_ suffix: String) -> String {
-        suffix.filter { $0 != "/" && $0 != ":" && $0 != "\0" }
+    /// 第 `index` 张（从 1 数）按文件名模板出来的名字（不带扩展名）。{日期}{相机}{星级} 要开文件读，
+    /// 模板里用到了才读。旧设置的「原名 + 后缀」就是模板 `{原名}_wm`，名字和以前逐字一样。
+    nonisolated static func outputName(for src: URL, index: Int, template: String) -> String {
+        var fields = DeliveryNaming.Fields(original: src.deletingPathExtension().lastPathComponent, index: index)
+        if DeliveryNaming.uses(template, "日期") || DeliveryNaming.uses(template, "相机") {
+            let tags = WatermarkEngine.ExifTags(source: CGImageSourceCreateWithURL(src as CFURL, nil))
+            fields.camera = tags.values["model"]
+            fields.date = tags.values["datetime"].flatMap(Self.exifDate)
+        }
+        if DeliveryNaming.uses(template, "星级") { fields.stars = DeliveryNaming.fileRating(src) }
+        return DeliveryNaming.render(template, fields)
+    }
+
+    private nonisolated static func exifDate(_ text: String) -> Date? {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        return f.date(from: text)
+    }
+
+    /// 文件名框旁边的预览：第一张导出来叫什么。
+    var namePreview: String {
+        guard let first = photos.first else { return "（先导入照片）" }
+        return Self.outputName(for: first, index: 1, template: options.nameTemplate) + ".jpg"
     }
 
     func exportAll() {
@@ -369,28 +389,15 @@ final class WatermarkStore: ObservableObject {
         // 同一个 dest，先写的那张被后写的顶掉，而两张都报"成功"。APFS 默认大小写
         // 不敏感，所以按小写路径去重。输出目录里已经有的也不覆盖（和拼图导出一样加 -2、-3……）：
         // 交付后修了几张再导一次到客户文件夹、或者两套预设用了同一个后缀，旧文件以前被悄悄换掉。
-        var used = Set<String>()
-        var jobs: [(src: URL, dest: URL)] = []
-        var renamed = 0
-        let suffix = Self.sanitizedSuffix(options.filenameSuffix)
-        let fm = FileManager.default
-        for src in photos {
-            let base = src.deletingPathExtension().lastPathComponent + suffix
-            let first = outputDir.appendingPathComponent("\(base).jpg")
-            var dest = first
-            var n = 2
-            while used.contains(dest.standardizedFileURL.path.lowercased()) || fm.fileExists(atPath: dest.path) {
-                dest = outputDir.appendingPathComponent("\(base)-\(n).jpg")
-                n += 1
-            }
-            if dest != first, fm.fileExists(atPath: first.path) { renamed += 1 }
-            used.insert(dest.standardizedFileURL.path.lowercased())
-            jobs.append((src, dest))
-        }
-        // 后缀为空 + 输出目录就是照片原目录 = 原片会被覆盖。引擎里也有兜底守卫，
+        let template = options.nameTemplate
+        let names = photos.enumerated().map { Self.outputName(for: $0.element, index: $0.offset + 1, template: template) }
+        let plan = DeliveryNaming.plan(names, in: outputDir, overwrite: false)
+        let jobs = Array(zip(photos, plan.dests)).map { (src: $0.0, dest: $0.1) }
+        let renamed = plan.renamed
+        // 文件名就是 {原名} + 输出目录就是照片原目录 = 原片会被覆盖。引擎里也有兜底守卫，
         // 但那只会报"失败"；在这里拦下才能说清为什么。
         if let clash = jobs.first(where: { WatermarkEngine.isSameFile($0.src, $0.dest) }) {
-            lastError = "输出会覆盖原片「\(clash.src.lastPathComponent)」—— 请填写文件名后缀，或换一个输出目录"
+            lastError = "输出会覆盖原片「\(clash.src.lastPathComponent)」—— 文件名模板里加个后缀（如 {原名}_wm），或换一个输出目录"
             return
         }
         do {
@@ -415,26 +422,31 @@ final class WatermarkStore: ObservableObject {
         Task.detached { [weak self] in
             let workers = min(4, max(2, ProcessInfo.processInfo.activeProcessorCount / 4))
             var failures: [(name: String, reason: String)] = []
+            var overLimit: [String] = []
             var done = 0
             var iterator = jobs.makeIterator()
-            await withTaskGroup(of: (String, String?).self) { group in
+            await withTaskGroup(of: (String, String?, Bool).self) { group in
                 func addNext() {
                     guard let job = iterator.next() else { return }
                     group.addTask {
                         do {
                             try WatermarkEngine.export(source: job.src, to: job.dest, signature: sig,
                                                        config: cfg, options: opts)
-                            return (job.src.lastPathComponent, nil)
+                            return (job.src.lastPathComponent, nil, false)
+                        } catch WatermarkEngine.ExportError.overLimit {
+                            // 写出去了，只是压不到上限：不算失败，收尾时点名。
+                            return (job.src.lastPathComponent, nil, true)
                         } catch {
-                            return (job.src.lastPathComponent, error.localizedDescription)
+                            return (job.src.lastPathComponent, error.localizedDescription, false)
                         }
                     }
                 }
                 for _ in 0..<workers { addNext() }
                 // 取消后不再排新的，但把已经在跑的等完再收尾：这样 done 就是
                 // 真实写出的张数，而不是 break 时丢掉在途结果的近似值。
-                for await (name, failure) in group {
+                for await (name, failure, over) in group {
                     if let failure { failures.append((name, failure)) }
+                    if over { overLimit.append(name) }
                     done += 1
                     let doneNow = done
                     let firstFailure = failures.first
@@ -454,6 +466,7 @@ final class WatermarkStore: ObservableObject {
             }
             let failed = failures
             let completed = done
+            let overNames = overLimit
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
@@ -466,6 +479,9 @@ final class WatermarkStore: ObservableObject {
                 } else if failed.isEmpty {
                     let kept = renamedCount > 0 ? "（\(renamedCount) 张目标里已有同名，另存为 -2、-3…，旧文件没动）" : ""
                     self.progressText = "导出完成: \(total) 张 → \(outputDir.lastPathComponent)" + kept
+                    if !overNames.isEmpty {
+                        self.lastError = DeliveryEncoder.overLimitNote(overNames, maxMB: opts.maxMB)
+                    }
                     AppRuntime.revealInFinder([outputDir])
                 } else {
                     self.progressText = "导出结束: \(succeeded) 成功, \(failed.count) 失败"

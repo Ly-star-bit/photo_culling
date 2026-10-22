@@ -17,7 +17,7 @@ struct BatchView: View {
     @AppStorage("batch.thumbSize") private var thumbSize: Double = 140
     @State private var showTrashConfirm = false
     @State private var showClearRecentsConfirm = false
-    /// JPG 交付导出设置 (Capture One 式质量档)。
+    /// JPG 交付导出设置。质量（60–100）是旧版存的：新的导出设置还没存过时拿它起默认。
     @AppStorage("batch.jpegQuality") private var jpegQuality: Double = 90
     @AppStorage("batch.jpegIncludeUsable") private var jpegIncludeUsable = true
     @AppStorage("batch.jpegOverwrite") private var jpegOverwrite = false
@@ -29,11 +29,14 @@ struct BatchView: View {
     /// 「导入客户选择…」对话框。
     @State private var showClientImport = false
     @AppStorage("batch.highlightsCount") private var highlightsCount = 20
+    /// 旧版存的精华长边 / JPG 导出长边 (0 = 原尺寸)：新的导出设置还没存过时拿它们起默认，老用户的选择不丢。
     @AppStorage("batch.highlightsMaxPixel") private var highlightsMaxPixel = 2048
     @AppStorage("batch.isoThreshold") private var isoThreshold = 3200
     @AppStorage("batch.isoKeepersOnly") private var isoKeepersOnly = true
-    /// JPG 导出长边 (0 = 原尺寸)。
     @AppStorage("batch.jpegMaxPixel") private var jpegMaxPixel = 0
+    /// 导出 JPG / 精华 Top N 各自的交付设置（DeliveryOptions 的 JSON；空 = 还没改过，用默认）。
+    @AppStorage("batch.jpegDelivery") private var jpegDeliveryRaw = ""
+    @AppStorage("batch.highlightsDelivery") private var highlightsDeliveryRaw = ""
     /// 连拍挑选（全窗口，占审片模式的位置）。nil = 在网格。
     @State private var pickRequest: PickRequest?
     /// 网格实际宽度 — ↑/↓ 换行导航需要估算列数。
@@ -590,23 +593,28 @@ struct BatchView: View {
 
     // MARK: - JPG export sheet
 
+    private var jpegOptions: Binding<DeliveryOptions> {
+        Binding(get: {
+            DeliveryOptions.load(jpegDeliveryRaw,
+                                 defaults: .jpegExport(legacyMaxPixel: jpegMaxPixel, legacyQuality: jpegQuality))
+        }, set: { jpegDeliveryRaw = $0.stored })
+    }
+
+    private var highlightsOptions: Binding<DeliveryOptions> {
+        Binding(get: {
+            DeliveryOptions.load(highlightsDeliveryRaw, defaults: .highlights(legacyMaxPixel: highlightsMaxPixel))
+        }, set: { highlightsDeliveryRaw = $0.stored })
+    }
+
     private var jpegExportSheet: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        let options = jpegOptions
+        let preview = store.jpegNamePreview(options.wrappedValue, includeUsable: jpegIncludeUsable)
+        return VStack(alignment: .leading, spacing: 14) {
             Text("导出 JPG").font(.headline)
             Toggle("包含可用 (关闭则仅导出精选)", isOn: $jpegIncludeUsable)
-            Picker("尺寸", selection: $jpegMaxPixel) {
-                Text("长边 2048 (选片/微信)").tag(2048)
-                Text("长边 4096 (屏幕交付)").tag(4096)
-                Text("原尺寸").tag(0)
-            }
-            .pickerStyle(.radioGroup)
-            HStack {
-                Text("质量")
-                Slider(value: $jpegQuality, in: 60...100, step: 5)
-                Text("\(Int(jpegQuality))").monospacedDigit().frame(width: 30)
-            }
+            DeliveryOptionsSection(options: options, namePreview: preview)
             Toggle("覆盖已存在的同名文件", isOn: $jpegOverwrite)
-                .help("关闭时已有的文件跳过不动 (防止误点第二次或覆盖客户已精修的文件)")
+                .help("关闭时目标里已有同名文件就另存为 -2、-3，旧文件不动 (防止覆盖客户已精修的文件)")
             Text("共 \(jpegExportCount) 张 · 重编码，保留 EXIF · 默认导出到 拍摄文件夹/\(ImageLoader.jpegExportSubfolder)/ (不参与分析)")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
@@ -626,29 +634,26 @@ struct BatchView: View {
             }
         }
         .padding(20)
-        .frame(width: 420)
+        .frame(width: 460)
     }
 
     // MARK: - 精华 Top N sheet
 
     private var highlightsSheet: some View {
         let top = store.topPicks(highlightsCount)
+        let options = highlightsOptions
+        let preview = store.jpegNamePreview(options.wrappedValue, includeUsable: true, ids: top.ids, ranked: true)
         return VStack(alignment: .leading, spacing: 14) {
             Text("精华 Top N").font(.headline)
             Text("全场评分最高的 N 张（表情 > 人脸质量 > 锐度），精选优先、不够从可用里补。当天发客户/朋友圈的那一把。")
                 .font(.caption).foregroundStyle(.secondary)
             Stepper("张数：\(highlightsCount)", value: $highlightsCount, in: 5...100, step: 5)
-            Picker("尺寸", selection: $highlightsMaxPixel) {
-                Text("长边 2048 (微信)").tag(2048)
-                Text("长边 4096").tag(4096)
-                Text("原尺寸").tag(0)
-            }
-            .pickerStyle(.radioGroup)
+            DeliveryOptionsSection(options: options, namePreview: preview, tokensHint: DeliveryNaming.rankTokenHint)
             Text(top.fromUsable > 0
                  ? "精选只有 \(top.ids.count - top.fromUsable) 张，从可用里按评分补了 \(top.fromUsable) 张"
                  : "共 \(top.ids.count) 张，全部来自精选")
                 .font(.caption).foregroundStyle(top.fromUsable > 0 ? .orange : .secondary)
-            Text("导出到 拍摄文件夹/\(ImageLoader.jpegExportSubfolder)/精华/ · 已存在的同名文件跳过")
+            Text("每次导到 拍摄文件夹/\(ImageLoader.jpegExportSubfolder)/精华/ 下面一个新文件夹（Top\(top.ids.count)_日期_时间），不和上次导的混")
                 .font(.caption2).foregroundStyle(.tertiary)
             HStack {
                 Spacer()
@@ -656,16 +661,15 @@ struct BatchView: View {
                 Button("导出 \(top.ids.count) 张") {
                     showHighlightsSheet = false
                     guard let base = store.defaultJPEGExportFolder else { return }
-                    store.exportJPEGs(to: base.appendingPathComponent("精华"), includeUsable: true,
-                                      quality: jpegQuality, maxPixel: highlightsMaxPixel == 0 ? nil : highlightsMaxPixel,
-                                      overwrite: false, ids: Set(top.ids))
+                    store.exportHighlights(count: highlightsCount, into: base.appendingPathComponent("精华"),
+                                           options: options.wrappedValue)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(top.ids.isEmpty || store.defaultJPEGExportFolder == nil)
             }
         }
         .padding(20)
-        .frame(width: 440)
+        .frame(width: 460)
     }
 
     // MARK: - 高ISO RAW export sheet
@@ -2234,14 +2238,14 @@ struct BatchView: View {
             panel.canCreateDirectories = true
             panel.allowsMultipleSelection = false
             panel.prompt = "导出到此文件夹"
+            panel.message = "不能选拍摄文件夹里面（勾了覆盖会换掉原片，下次分析也会当成新照片）；" +
+                "拍摄文件夹下的「\(ImageLoader.jpegExportSubfolder)」可以"
             panel.directoryURL = store.photoDir
             guard panel.runModal() == .OK, let url = panel.url else { return }
             folder = url
         }
         guard let folder else { return }
-        store.exportJPEGs(to: folder, includeUsable: jpegIncludeUsable,
-                          quality: jpegQuality / 100.0,
-                          maxPixel: jpegMaxPixel > 0 ? jpegMaxPixel : nil,
+        store.exportJPEGs(to: folder, includeUsable: jpegIncludeUsable, options: jpegOptions.wrappedValue,
                           overwrite: jpegOverwrite)
     }
 }
@@ -2551,49 +2555,7 @@ enum FitCache {
 
 // MARK: - Progressive fit view (检视器 / 审片 / 对比的大图)
 
-/// Capture One / Lightroom 那套"屏幕输出锐化"管线：Lanczos 精确缩到取景区的
-/// **设备像素**尺寸，再过一次轻量 unsharp mask。
-///
-/// 缩小本身必然让图变软，这是数学上的事；C1 的 Output Sharpening、LR 的
-/// "屏幕输出锐化"、PS 的 Bicubic Sharper 全是"缩完补一刀"。以前我们把 4096 的
-/// 解码交给合成器随手缩，既没有 Lanczos 也没有这一刀，看着就是不如 C1 精神。
-enum SharpRenderer {
-    private static let context = CIContext(options: [.cacheIntermediates: false])
-    /// 半径按设备像素算：0.8px / 0.4 是 LR "屏幕·标准" 那档的量，只提边缘不出光晕。
-    static let unsharpRadius = 0.8
-    static let unsharpIntensity = 0.4
-
-    /// 目标长边按 256 取整：窗口拖一像素不该重渲染，检视器和审片的取景区大小
-    /// 接近时也能共用同一张。
-    static func bucket(_ devicePixels: CGFloat) -> Int {
-        max(256, Int((devicePixels / 256).rounded(.up)) * 256)
-    }
-
-    /// 只缩不放：源图比目标小时按原尺寸只做锐化，绝不把图放大来凑。
-    static func render(_ source: NSImage, longEdge: Int) -> NSImage? {
-        guard let cg = source.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
-        let w = CGFloat(cg.width), h = CGFloat(cg.height)
-        let scale = min(1, CGFloat(longEdge) / max(w, h))
-        let extent = CGRect(x: 0, y: 0, width: (w * scale).rounded(), height: (h * scale).rounded())
-        var image = CIImage(cgImage: cg)
-        if scale < 1 {
-            guard let lanczos = CIFilter(name: "CILanczosScaleTransform") else { return nil }
-            // clampedToExtent：Lanczos 采样会越过边界，不钳住的话四周一圈发暗。
-            lanczos.setValue(image.clampedToExtent(), forKey: kCIInputImageKey)
-            lanczos.setValue(scale, forKey: kCIInputScaleKey)
-            lanczos.setValue(1.0, forKey: kCIInputAspectRatioKey)
-            guard let scaled = lanczos.outputImage else { return nil }
-            image = scaled.cropped(to: extent)
-        }
-        guard let usm = CIFilter(name: "CIUnsharpMask") else { return nil }
-        usm.setValue(image.clampedToExtent(), forKey: kCIInputImageKey)
-        usm.setValue(unsharpRadius, forKey: kCIInputRadiusKey)
-        usm.setValue(unsharpIntensity, forKey: kCIInputIntensityKey)
-        guard let sharpened = usm.outputImage?.cropped(to: extent),
-              let out = context.createCGImage(sharpened, from: extent) else { return nil }
-        return NSImage(cgImage: out, size: NSSize(width: out.width, height: out.height))
-    }
-}
+// SharpRenderer（Lanczos + 屏幕输出锐化）挪到了 DeliveryExport.swift：交付导出缩小时也走它。
 
 /// 适应窗口的大图，三段渐进：1024 预览秒出 → 4096 解码 → 按取景区设备像素
 /// Lanczos+锐化的成品换上。翻页时预取的是中间那张 4096，成品在 GPU 上几毫秒。
