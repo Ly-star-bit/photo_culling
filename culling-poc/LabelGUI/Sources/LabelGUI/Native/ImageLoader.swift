@@ -61,6 +61,8 @@ enum ImageLoader {
         /// burst frames share the same whole second, this breaks the tie.
         let captureSubsec: Double
         let cameraModel: String?
+        /// 机身序列号（读不到 = nil）：两台同型号机身靠它分开。
+        let bodySerial: String?
         /// Shooting parameters — the photographer's own language for judging a
         /// frame ("1/60 for action, of course it's soft").
         let shutterSec: Double?
@@ -209,6 +211,7 @@ enum ImageLoader {
         var captureTime: Date?
         var captureSubsec = 0.0
         var cameraModel: String?
+        var bodySerial: String?
         var shutterSec: Double?
         var aperture: Double?
         var iso: Int?
@@ -245,12 +248,39 @@ enum ImageLoader {
                 lensModel = exif[kCGImagePropertyExifLensModel] as? String
             }
             cameraModel = tiff?[kCGImagePropertyTIFFModel] as? String
+            bodySerial = Self.bodySerial(in: props)
         }
 
         return Loaded(image: image, captureTime: captureTime, captureSubsec: captureSubsec,
-                      cameraModel: cameraModel,
+                      cameraModel: cameraModel, bodySerial: bodySerial,
                       shutterSec: shutterSec, aperture: aperture, iso: iso,
                       focal35: focal35, lensModel: lensModel)
+    }
+
+    /// 机身序列号：先看 EXIF 的 BodySerialNumber（富士、索尼、新的佳能尼康都写这里），老机型写在
+    /// ExifAux 或厂商自己的段里。都没有 = nil（手机、扫描件），这时只能按型号认机身。
+    static func bodySerial(in props: [CFString: Any]) -> String? {
+        func dict(_ key: CFString) -> [CFString: Any]? { props[key] as? [CFString: Any] }
+        let candidates: [Any?] = [
+            dict(kCGImagePropertyExifDictionary)?[kCGImagePropertyExifBodySerialNumber],
+            dict(kCGImagePropertyExifAuxDictionary)?[kCGImagePropertyExifAuxSerialNumber],
+            dict(kCGImagePropertyMakerCanonDictionary)?[kCGImagePropertyMakerCanonCameraSerialNumber],
+            dict(kCGImagePropertyMakerNikonDictionary)?[kCGImagePropertyMakerNikonCameraSerialNumber],
+        ]
+        for case let value? in candidates {
+            let text = (value as? String) ?? (value as? NSNumber)?.stringValue ?? ""
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return nil
+    }
+
+    /// 只读文件头拿序列号（不解码，一张一两毫秒）：给这一版之前分析的场次补机身身份。
+    /// 文件读不了 = nil（下次再补）；读得了、没写序列号 = ""（记下来，别每次都读）。
+    static func bodySerial(of url: URL) -> String? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return nil }
+        return bodySerial(in: props) ?? ""
     }
 
     /// JPEG 尾巴被截掉了（读卡出错、拷贝中断、网盘只同步了一半）：ImageIO 把缺的部分补成灰照样解码，

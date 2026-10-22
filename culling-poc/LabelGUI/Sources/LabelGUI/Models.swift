@@ -40,10 +40,13 @@ struct Photo: Codable, Identifiable {
     var previewPath: String
     let captureTime: String?
     let camera: String?
+    /// 机身序列号。nil = 这一版之前分析的（没读过，打开时补）；"" = 读过、没有。
+    var bodySerial: String?
     let exif: ExifMeta?
 
     enum CodingKeys: String, CodingKey {
         case id, camera, exif
+        case bodySerial = "body_serial"
         case rawPath = "raw_path"
         case decodePath = "decode_path"
         case previewPath = "preview_path"

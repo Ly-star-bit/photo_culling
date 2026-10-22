@@ -9,6 +9,8 @@ import AppKit
 /// LabelGUI --batch-ui <photo_dir> <out.png> [--client-only] [--client-import-ui <回复.txt>]   （只看客户选中 / 导入客户选择对话框）
 /// LabelGUI --batch-ui <photo_dir> <out.png> --delivery-ui jpeg|highlights|watermark [--delivery-json '{"size":"long:3000"}']
 ///     （导出 JPG / 精华 Top N / 水印页的导出设置那一段）
+/// LabelGUI --batch-ui <photo_dir> <out.png> --body-clock-ui   （状态栏「N 台机身」点开的按机身对时面板）
+/// 都可以加 --ax-dump：截图前打印辅助功能树（输入框、滑杆这类 AppKit 控件带着值），按文字断言。
 ///
 /// 和 --collage-ui 同一套：用 app 里一模一样的视图在一个从不显示的无边框窗口里布局、
 /// 渲染成 PNG。界面不能开，排布有没有挤、时间轴会不会压到别的区域，只能这样看。
@@ -115,6 +117,10 @@ enum BatchUISnapshot {
             let text = (try? Data(contentsOf: URL(fileURLWithPath: path))).flatMap(ClientReply.decode) ?? ""
             root = AnyView(ClientImportSheet(store: store, isPresented: .constant(true), text: text)
                 .background(Color(white: 0.16)))
+        } else if args.contains("--body-clock-ui") {
+            // 按机身对时面板（sheet 在离屏窗口里画不出来，单独当根视图画）。
+            root = AnyView(BodyClockSheet(store: store, isPresented: .constant(true))
+                .background(Color(white: 0.16)))
         } else if args.contains("--review-ui") {
             let skippable = order.contains { store.item(withID: $0).map { $0.verdict != .reject } ?? false }
             root = AnyView(ReviewView(store: store, orderIDs: order, rejectsSkippable: skippable,
@@ -201,6 +207,7 @@ enum BatchUISnapshot {
                 print(String(format: "滚到 %3.0f%%：看得见的章节 ", fraction * 100) + chapters.joined(separator: ","))
             }
         }
+        if args.contains("--ax-dump") { SnapshotAX.dump(host) }
         guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
             print("快照失败")
             exit(1)

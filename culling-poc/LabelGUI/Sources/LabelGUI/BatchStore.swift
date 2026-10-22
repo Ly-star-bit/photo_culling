@@ -75,14 +75,22 @@ struct BatchItem: Identifiable {
     let appealSubjectSharp: Bool?
     let appealIntentionalExposure: Bool?
     let appealReason: String?
-    let captureTime: Date?
+    /// 拍摄时间，已经加上这台机身的对时偏移（`clockOffset`，没对过 = EXIF 原值）。章节、场、
+    /// 按拍摄时间排序、时间轴都用它 —— 两台机器的钟差几分钟，混在一起的顺序才对得上。
+    var captureTime: Date?
+    /// 这台机身对时加的秒数（captureTime 里已经含着它）。换偏移时先减掉旧的再加新的。
+    var clockOffset = 0
     let exif: ExifMeta?
     let horizonDeg: Double?
     /// Time-gap chapter (仪式/晚宴/外景...) — a >15min shooting pause starts a new one.
     var chapter: Int = 0
-    /// 机身型号。双机位婚礼两台机器同一秒各拍一张，是两个角度不是重复 —— 「场」
-    /// 必须按机身分开切，否则纯时间会把它们并进同一堆。
+    /// 机身型号（EXIF Model）。导出文件名的 {相机} 用它；分「场」按下面的 `body`。
     var camera: String?
+    /// 机身序列号（nil / "" = 没有）。两台同型号机身（主摄副摄都用 X-T50）只能靠它分开。
+    var bodySerial: String?
+    /// 机身 key（CameraBody.keys：型号，同型号有两台时带序列号）。双机位婚礼两台机器同一秒
+    /// 各拍一张，是两个角度不是重复 —— 「场」必须按机身分开切，对时偏移也按它存。
+    var body = ""
     /// 「场」(take)：连续按快门的一串，间隔超过 takeGapSec 就换一场。
     ///
     /// 和 `burstGroup` 是两个不同的东西，不要混用：
@@ -643,8 +651,7 @@ final class BatchStore: ObservableObject {
         takeSizes = takes
 
         var gaps: [Double] = []
-        let byCamera = Dictionary(grouping: items.filter { $0.captureTime != nil },
-                                  by: { $0.camera ?? "" })
+        let byCamera = Dictionary(grouping: items.filter { $0.captureTime != nil }, by: \.body)
         for (_, shots) in byCamera {
             let times = shots.compactMap(\.captureTime).sorted()
             for i in 1..<max(1, times.count) {
@@ -653,6 +660,7 @@ final class BatchStore: ObservableObject {
         }
         captureGaps = gaps
         captureGapBins = Self.histogramBins(gaps, range: Self.captureGapHistRange, sqrtScale: true)
+        bodies = Self.bodySummary(items, offsets: bodyOffsets)
     }
 
     private func rebuildDerived(groupQCount: [Int: Int]) {
@@ -749,7 +757,7 @@ final class BatchStore: ObservableObject {
 
     /// Stable: ties (and undated photos, which sort last) fall back to the
     /// manifest order so two runs never disagree.
-    private static func sort(_ array: inout [BatchItem], by order: SortOrder) {
+    static func sort(_ array: inout [BatchItem], by order: SortOrder) {
         switch order {
         case .filename:
             array.sort { $0.order < $1.order }
@@ -824,6 +832,7 @@ final class BatchStore: ObservableObject {
             loadOverrides()
             loadClientPicks()
             loadXMPState()
+            loadBodyOffsets()
             loadResults()
             applyThresholds()
         }
@@ -907,6 +916,7 @@ final class BatchStore: ObservableObject {
         loadOverrides()
         loadClientPicks()
         loadXMPState()
+        loadBodyOffsets()
         loadResults()
         recheckForeignSidecars()
         applyThresholds()
@@ -1172,6 +1182,7 @@ final class BatchStore: ObservableObject {
         loadOverrides()
         loadClientPicks()
         loadXMPState()
+        loadBodyOffsets()
         loadResults()
         applyThresholds()
     }
@@ -1266,6 +1277,8 @@ final class BatchStore: ObservableObject {
     private enum UndoStep {
         case verdicts([(id: String, previous: Verdict?, accepted: Bool)])
         case clientPicks(Set<String>)
+        /// 按机身对时之前的整份偏移。
+        case bodyOffsets([String: Int])
     }
 
     /// Undo stack for verdict overrides: one entry per user action, holding each
@@ -1275,6 +1288,11 @@ final class BatchStore: ObservableObject {
     @Published private var overrideUndoStack: [UndoStep] = []
 
     var canUndoOverride: Bool { !overrideUndoStack.isEmpty }
+    /// 上一步是对时（对时面板里的「撤销」只撤它，不去撤网格里的改判）。
+    var canUndoBodyOffsets: Bool {
+        if case .bodyOffsets = overrideUndoStack.last { return true }
+        return false
+    }
 
     /// 动手之前压一条撤销记录：每张原来的判决，和它原来是不是「接受推荐」钉的。
     private func pushUndo(_ ids: some Collection<String>) {
@@ -1292,6 +1310,7 @@ final class BatchStore: ObservableObject {
         guard let step = overrideUndoStack.popLast() else { return [] }
         guard case .verdicts(let last) = step else {
             if case .clientPicks(let previous) = step { return restoreClientPicks(previous) }
+            if case .bodyOffsets(let previous) = step { restoreBodyOffsets(previous) }
             return []
         }
         for (id, previous, accepted) in last {
@@ -1540,6 +1559,7 @@ final class BatchStore: ObservableObject {
             }
             updated.append(fresh)
         }
+        Self.applyBodyClock(&updated, offsets: bodyOffsets)
         Self.assignTakes(&updated, gapSec: takeGapSec)
         Self.sort(&updated, by: sortOrder)
         items = updated
@@ -1581,6 +1601,7 @@ final class BatchStore: ObservableObject {
                            focal35: a.focal35, lens: a.lensModel),
             horizonDeg: a.horizonDeg,
             camera: a.cameraModel,
+            bodySerial: a.bodySerial,
             fileCorrupt: a.fileCorrupt,
             faceLuma: a.faceLuma,
             frameLuma: a.frameLuma,
@@ -2029,18 +2050,21 @@ final class BatchStore: ObservableObject {
             )
             item.order = index
             item.camera = photo.camera
+            item.bodySerial = photo.bodySerial
             item.fileCorrupt = l1.fileCorrupt ?? false
             item.faceLuma = l1.faceLuma
             item.frameLuma = l1.frameLuma
             item.frameLumaP99 = l1.frameLumaP99
             return item
         }
+        Self.applyBodyClock(&loaded, offsets: bodyOffsets)
         Self.assignChapters(&loaded)
         Self.assignTakes(&loaded, gapSec: takeGapSec)
         Self.sort(&loaded, by: sortOrder)
         items = loaded
         unparsedCount = manifest.photos.count - loaded.count
         rebuildGroupSizes()
+        backfillBodySerials(manifest.photos)
     }
 
     // MARK: - Chapters (coverage protection)
@@ -2085,9 +2109,9 @@ final class BatchStore: ObservableObject {
     /// 各排一段，时间线整个乱掉 —— 而按机身分桶本来就是为双机位加的。
     static func assignTakes(_ array: inout [BatchItem], gapSec: Double) {
         var segments: [(start: Date, members: [Int])] = []
-        // 按机身分桶：双机位同一秒的两张是两个角度，不是重复。
+        // 按机身分桶：双机位同一秒的两张是两个角度，不是重复。同型号的两台靠序列号分开（BatchItem.body）。
         let byCamera = Dictionary(grouping: array.indices.filter { array[$0].captureTime != nil },
-                                  by: { array[$0].camera ?? "" })
+                                  by: { array[$0].body })
         for key in byCamera.keys.sorted() {
             let indices = byCamera[key]!.sorted { array[$0].captureTime! < array[$1].captureTime! }
             var current: [Int] = []
@@ -2115,6 +2139,226 @@ final class BatchStore: ObservableObject {
             take += 1
             array[idx].take = take
         }
+    }
+
+    // MARK: - 机身（双机位）与按机身对时
+
+    /// 每张的机身 key（CameraBody.keys，按这一场全部照片一起算）+ 这台机身的对时偏移。
+    /// captureTime 里原来带着的偏移先减掉再加新的：重复调用、换偏移都不会越加越多。
+    static func applyBodyClock(_ array: inout [BatchItem], offsets: [String: Int]) {
+        let keys = CameraBody.keys(models: array.map(\.camera), serials: array.map(\.bodySerial))
+        let slots = offsets.isEmpty ? [:] : bodyOffsetSlots(array, keys: keys, stored: offsets)
+        for i in array.indices {
+            array[i].body = keys[i]
+            let offset = slots[keys[i]]?.seconds ?? 0
+            guard offset != array[i].clockOffset else { continue }
+            array[i].captureTime = array[i].captureTime?.addingTimeInterval(Double(offset - array[i].clockOffset))
+            array[i].clockOffset = offset
+        }
+    }
+
+    /// 一台机身的偏移在 body_offsets.json 里存在哪、现在用的是多少。
+    struct BodyOffsetSlot {
+        /// 改偏移时写到这个 key 下：读得到序列号就是「型号 #序列号」（和这一场有几台同型号无关），读不到就是型号。
+        let home: String
+        let seconds: Int
+        /// 这次是从哪个 key 读到的（nil = 没对过）。和 home 不同 = 借的纯型号那条。
+        let source: String?
+    }
+
+    /// 机身 key → 偏移存在哪、用多少。机身 key 会跟着这一场的照片变：老场次补上序列号、或者后来又拷进
+    /// 一台同型号的，两台才分开（「X-T50」→「X-T50 #5B008966」「X-T50 #SECOND-BODY-0002」）；同型号一台的
+    /// 照片全进了废纸篓，剩下那台又退回「X-T50」。所以存的时候只要有序列号就带上，查的时候自己名下没有，
+    /// 再认没读到序列号时存的纯型号（那时两台算一台，对的就是两台一起）—— 对过的时不会因为 key 变了悄悄丢掉。
+    static func bodyOffsetSlots(_ array: [BatchItem], keys: [String], stored: [String: Int]) -> [String: BodyOffsetSlot] {
+        var model: [String: String] = [:]
+        var serial: [String: String] = [:]
+        for (item, key) in zip(array, keys) {
+            model[key] = item.camera ?? ""
+            if let s = item.bodySerial, !s.isEmpty { serial[key] = s }
+        }
+        var slots: [String: BodyOffsetSlot] = [:]
+        for (key, m) in model {
+            let home = serial[key].map { "\(m) #\($0)" } ?? key
+            var sources = [home]
+            // 纯型号那条归这台：它自己就叫纯型号，或者这一场没有叫纯型号的机身（没序列号的那几张）。
+            if home != m && (key == m || model[m] == nil) { sources.append(m) }
+            let source = sources.first { stored[$0] != nil }
+            slots[key] = BodyOffsetSlot(home: home, seconds: source.flatMap { stored[$0] } ?? 0, source: source)
+        }
+        return slots
+    }
+
+    /// 状态栏「N 台机身」和对时面板里的一行。
+    struct BodyInfo: Identifiable {
+        let key: String
+        let name: String
+        let count: Int
+        /// 对时之后的第一张 / 最后一张（没有拍摄时间的不算）。
+        let first: Date?
+        let last: Date?
+        let offset: Int
+        let slot: BodyOffsetSlot
+        var id: String { key }
+    }
+
+    /// 这一场的机身，照片多的在前（第一台当主机位：「对成同一时刻」以它为准）。没有型号的不算一台。
+    private(set) var bodies: [BodyInfo] = []
+
+    private static func bodySummary(_ items: [BatchItem], offsets: [String: Int]) -> [BodyInfo] {
+        let byBody = Dictionary(grouping: items.filter { !$0.body.isEmpty }, by: \.body)
+        let names = CameraBody.displayNames(byBody.map { key, members in
+            let model = members[0].camera ?? ""
+            return (key, model, key == model ? "" : members[0].bodySerial ?? "")
+        })
+        let slots = bodyOffsetSlots(items, keys: items.map(\.body), stored: offsets)
+        let infos = byBody.map { key, members -> BodyInfo in
+            let times = members.compactMap(\.captureTime)
+            let slot = slots[key] ?? BodyOffsetSlot(home: key, seconds: 0, source: nil)
+            return BodyInfo(key: key, name: names[key] ?? key, count: members.count,
+                            first: times.min(), last: times.max(), offset: slot.seconds, slot: slot)
+        }
+        return infos.sorted { $0.count != $1.count ? $0.count > $1.count : $0.key < $1.key }
+    }
+
+    /// 按机身对时（body_offsets.json：机身 → 秒，key 见 BodyOffsetSlot.home）。没对过 = 空，文件也不写。
+    private(set) var bodyOffsets: [String: Int] = [:]
+    private var bodyOffsetsPath: URL { sessionDir.appendingPathComponent("body_offsets.json") }
+
+    private func loadBodyOffsets() {
+        let stored = (try? Data(contentsOf: bodyOffsetsPath))
+            .flatMap { try? JSONDecoder().decode([String: Int].self, from: $0) } ?? [:]
+        // 手改坏的、超过 ±48 小时的不认（不用 abs：Int.min 取绝对值会崩）。
+        let allowed = -BodyClock.maxOffset...BodyClock.maxOffset
+        bodyOffsets = stored.filter { allowed.contains($0.value) }
+    }
+
+    private func saveBodyOffsets() {
+        if bodyOffsets.isEmpty {
+            try? FileManager.default.removeItem(at: bodyOffsetsPath)
+            return
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? encoder.encode(bodyOffsets) { try? data.write(to: bodyOffsetsPath, options: .atomic) }
+    }
+
+    /// 改对时偏移（机身 key → 秒，一台或几台一起）：一条撤销记录、一次保存，然后整场重排时间。
+    /// 0 = 去掉这台的偏移。和现在一样的不算改（面板里什么都没改按「完成」不留撤销记录）。
+    func setBodyOffsets(_ changes: [String: Int]) {
+        let byKey = Dictionary(uniqueKeysWithValues: bodies.map { ($0.key, $0) })
+        let effective = changes.filter { key, seconds in (byKey[key]?.offset ?? 0) != seconds }
+        guard !effective.isEmpty else { return }
+        var next = bodyOffsets
+        // 借纯型号那条的先改存到自己名下：不然把这台改成 0（删掉这一条）又会借回纯型号的偏移。
+        for body in bodies {
+            guard let source = body.slot.source, source != body.slot.home else { continue }
+            next[source] = nil
+            next[body.slot.home] = body.offset
+        }
+        for (key, seconds) in effective { next[byKey[key]?.slot.home ?? key] = seconds == 0 ? nil : seconds }
+        guard next != bodyOffsets else { return }
+        pushUndoStep(.bodyOffsets(bodyOffsets))
+        restoreBodyOffsets(next)
+    }
+
+    private func restoreBodyOffsets(_ offsets: [String: Int]) {
+        bodyOffsets = offsets
+        saveBodyOffsets()
+        // 章节号可能整体挪了：留着「只看第 3 章」会悄悄换成另一章。
+        chapterFilter = nil
+        reflowCaptureTimes(items)
+    }
+
+    /// 机身 key 或对时偏移变了：重算拍摄时间，章节、场、排序、时间轴跟着重来。判决规则不看时间，
+    /// 但精选提名按场 —— 场变了提名跟着变，所以要重判一遍。
+    private func reflowCaptureTimes(_ array: [BatchItem]) {
+        var updated = array
+        Self.applyBodyClock(&updated, offsets: bodyOffsets)
+        Self.assignChapters(&updated)
+        Self.assignTakes(&updated, gapSec: takeGapSec)
+        Self.sort(&updated, by: sortOrder)
+        items = updated
+        rebuildGroupSizes()
+        applyThresholds()
+    }
+
+    /// 「把这两张对成同一时刻」：两台机身同一瞬间各拍的一张（同一次闪光、同一个动作）。以 bodies 里
+    /// 排在前面的（照片多的）为准，算出另一台的新偏移。同一台、没有型号、没有拍摄时间的、
+    /// 算出来超过 ±48 小时的（BodyClock.maxOffset，多半选错了照片）= nil。
+    func alignment(_ a: String, _ b: String) -> (reference: BodyInfo, moved: BodyInfo, offset: Int)? {
+        guard let x = item(withID: a), let y = item(withID: b), x.body != y.body,
+              let rx = bodies.firstIndex(where: { $0.key == x.body }),
+              let ry = bodies.firstIndex(where: { $0.key == y.body }) else { return nil }
+        let (ref, moved) = rx < ry ? (x, y) : (y, x)
+        guard let tRef = ref.captureTime, let tMoved = moved.captureTime else { return nil }
+        // 先用 Double 算、卡住范围再转 Int：转换本身不会溢出。
+        let offset = Double(moved.clockOffset) + tRef.timeIntervalSince(tMoved).rounded()
+        guard abs(offset) <= Double(BodyClock.maxOffset) else { return nil }
+        return (bodies[min(rx, ry)], bodies[max(rx, ry)], Int(offset))
+    }
+
+    /// 正在后台补序列号的场次（同一场别重复起）。
+    private var serialBackfillSession: URL?
+
+    /// 这一版之前分析的场次，manifest 里没有机身序列号：照片文件夹还在的话只读文件头补上（不解码、
+    /// 不重新分析），写回 manifest，下次打开不用再读。补出同型号两台机身才重新分场、排序；单机身、
+    /// 不同型号的补完 key 还是型号，什么都不动。界面上在后台读（3000 张 RAW 在移动硬盘上要好几秒），
+    /// 无头模式读完再往下走，输出才确定。
+    private func backfillBodySerials(_ photos: [Photo]) {
+        let missing = photos.filter { $0.bodySerial == nil }.map { (id: $0.id, path: $0.decodePath ?? $0.rawPath) }
+        guard !missing.isEmpty, serialBackfillSession != sessionDir,
+              let dir = photoDir, FileManager.default.fileExists(atPath: dir.path) else { return }
+        let target = sessionDir
+        serialBackfillSession = target
+        if AppRuntime.headless {
+            finishSerialBackfill(Self.readBodySerials(missing), sessionDir: target)
+            return
+        }
+        Task.detached(priority: .utility) { [weak self] in
+            let found = Self.readBodySerials(missing)
+            await MainActor.run { [weak self] in self?.finishSerialBackfill(found, sessionDir: target) }
+        }
+    }
+
+    /// id → 序列号（"" = 读得了、没有；文件读不了的不在结果里，下次打开再补）。
+    nonisolated private static func readBodySerials(_ photos: [(id: String, path: String)]) -> [String: String] {
+        var serials = [String?](repeating: nil, count: photos.count)
+        let lock = NSLock()
+        DispatchQueue.concurrentPerform(iterations: photos.count) { i in
+            let serial = ImageLoader.bodySerial(of: URL(fileURLWithPath: photos[i].path))
+            lock.lock(); serials[i] = serial; lock.unlock()
+        }
+        var found: [String: String] = [:]
+        for (i, photo) in photos.enumerated() { if let s = serials[i] { found[photo.id] = s } }
+        return found
+    }
+
+    private func finishSerialBackfill(_ found: [String: String], sessionDir target: URL) {
+        if serialBackfillSession == target { serialBackfillSession = nil }
+        // 读的时候换了场次，或者开始重新分析了（引擎自己会补、会重写 manifest）：这份作废。
+        guard target == sessionDir, !isRunning, !found.isEmpty else { return }
+        let url = target.appendingPathComponent("manifest.json")
+        if let data = try? Data(contentsOf: url),
+           var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let photos = json["photos"] as? [[String: Any]] {
+            json["photos"] = photos.map { entry -> [String: Any] in
+                guard entry["body_serial"] == nil, let id = entry["id"] as? String, let serial = found[id] else { return entry }
+                var entry = entry
+                entry["body_serial"] = serial
+                return entry
+            }
+            if let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
+                try? out.write(to: url, options: .atomic)
+            }
+        }
+        var updated = items
+        for i in updated.indices {
+            if let serial = found[updated[i].id] { updated[i].bodySerial = serial }
+        }
+        let keys = CameraBody.keys(models: updated.map(\.camera), serials: updated.map(\.bodySerial))
+        guard keys != items.map(\.body) else { return }
+        reflowCaptureTimes(updated)
     }
 
     /// Recomputed on every status-bar render — DateFormatter construction is

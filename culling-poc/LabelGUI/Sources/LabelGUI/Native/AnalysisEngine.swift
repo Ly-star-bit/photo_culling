@@ -19,6 +19,8 @@ enum AnalysisEngine {
         /// SubSecTimeOriginal) — orders same-second burst frames deterministically.
         let captureSubsec: Double
         let cameraModel: String?
+        /// 机身序列号（读不到 = nil）：同型号的两台机身靠它分开（近似重复、场都按机身分）。
+        let bodySerial: String?
         let shutterSec: Double?
         let aperture: Double?
         let iso: Int?
@@ -152,6 +154,8 @@ enum AnalysisEngine {
                 var l1 = l1
                 // 旧版本分析的没查过文件完整性：补查一次尾巴（只读最后 64KB），之后就记在结果里了。
                 if l1["file_corrupt"] == nil { l1["file_corrupt"] = ImageLoader.jpegTruncated(file.decodeURL) }
+                // 旧版本没记机身序列号：只读文件头补上（不解码），近似重复才能按机身分开串。
+                if m["body_serial"] == nil { m["body_serial"] = ImageLoader.bodySerial(of: file.decodeURL) ?? "" }
                 // The analysis numbers are still valid, but the file layout may
                 // not be: a RAF copied in next to an analyzed JPG makes the RAW
                 // the primary (XMP goes beside it) — refresh paths every run.
@@ -234,16 +238,22 @@ enum AnalysisEngine {
         // stored capture time + phash so a new frame can join an old group.
         // A phash that fails to parse must match NOTHING (nil), not everything
         // (the old `?? 0` matched every neighbour within the time window).
-        var slots: [GroupSlot] = reusedEntries.map { entry in
+        // 双机位：按机身分开串（机身 key 和「场」用的同一套，CameraBody.keys）。
+        let models = reusedEntries.map { $0.manifest["camera"] as? String } + completed.map(\.cameraModel)
+        let serials = reusedEntries.map { $0.manifest["body_serial"] as? String } + completed.map(\.bodySerial)
+        let bodies = CameraBody.keys(models: models, serials: serials)
+        var slots: [GroupSlot] = reusedEntries.enumerated().map { i, entry in
             GroupSlot(
                 id: entry.id,
                 captureTime: (entry.layer1["capture_time"] as? String).flatMap(isoFormatter.date(from:)),
                 subsec: entry.layer1["capture_subsec"] as? Double ?? 0,
-                phash: (entry.layer1["phash"] as? String).flatMap { UInt64($0, radix: 16) }
+                phash: (entry.layer1["phash"] as? String).flatMap { UInt64($0, radix: 16) },
+                body: bodies[i]
             )
         }
-        slots += completed.map {
-            GroupSlot(id: $0.id, captureTime: $0.captureTime, subsec: $0.captureSubsec, phash: $0.phash)
+        slots += completed.enumerated().map { i, p in
+            GroupSlot(id: p.id, captureTime: p.captureTime, subsec: p.captureSubsec, phash: p.phash,
+                      body: bodies[reusedEntries.count + i])
         }
         let groups = assignGroups(slots)
         var reusedFinal = reusedEntries
@@ -377,6 +387,7 @@ enum AnalysisEngine {
             captureTime: loaded.captureTime,
             captureSubsec: loaded.captureSubsec,
             cameraModel: loaded.cameraModel,
+            bodySerial: loaded.bodySerial,
             shutterSec: loaded.shutterSec,
             aperture: loaded.aperture,
             iso: loaded.iso,
@@ -418,6 +429,8 @@ enum AnalysisEngine {
         let subsec: Double
         /// nil = unknown hash (unparseable legacy entry): never matches.
         let phash: UInt64?
+        /// 机身 key（CameraBody.keys）：只和同一台机身的照片串。
+        let body: String
     }
 
     /// Group id per slot (chronological ids, undated photos get singletons).
@@ -425,32 +438,40 @@ enum AnalysisEngine {
     /// compared in INPUT order, which differs between a full run (folder order)
     /// and an incremental one (reused first, fresh last) — groups shifted
     /// between two runs over the same photos.
+    ///
+    /// 每台机身各串各的：以前全部照片排成一条链只比相邻两张，第二机位插进来一张就把主机位的
+    /// 一组连拍拆成两个单张（组内闭眼基线、人脸质量对比、连拍去重全都失效）。串完按每组第一张的
+    /// 时间统一编号 —— 单机身时链本来就是按时间排的，组号和以前一模一样。
     private static func assignGroups(_ slots: [GroupSlot]) -> [Int] {
         var result = [Int](repeating: 0, count: slots.count)
-        var dated = slots.indices.filter { slots[$0].captureTime != nil }
-        let undated = slots.indices.filter { slots[$0].captureTime == nil }
-        dated.sort { a, b in
+        func before(_ a: Int, _ b: Int) -> Bool {
             let ta = slots[a].captureTime!.timeIntervalSince1970 + slots[a].subsec
             let tb = slots[b].captureTime!.timeIntervalSince1970 + slots[b].subsec
             if ta != tb { return ta < tb }
             return slots[a].id < slots[b].id
         }
+        let undated = slots.indices.filter { slots[$0].captureTime == nil }
+        let byBody = Dictionary(grouping: slots.indices.filter { slots[$0].captureTime != nil },
+                                by: { slots[$0].body })
 
-        var groupId = 0
-        var prev: Int?
-        for idx in dated {
-            if let p = prev {
-                let dt = slots[idx].captureTime!.timeIntervalSince(slots[p].captureTime!)
+        var chains: [[Int]] = []
+        for key in byBody.keys.sorted() {
+            var prev: Int?
+            for idx in byBody[key]!.sorted(by: before) {
                 var sameBurst = false
-                if let hp = slots[p].phash, let hi = slots[idx].phash {
+                if let p = prev, let hp = slots[p].phash, let hi = slots[idx].phash {
+                    let dt = slots[idx].captureTime!.timeIntervalSince(slots[p].captureTime!)
                     sameBurst = dt <= timeWindowSec && Metrics.hammingDistance(hp, hi) <= hashThreshold
                 }
-                if !sameBurst { groupId += 1 }
-            } else {
-                groupId += 1
+                if sameBurst { chains[chains.count - 1].append(idx) } else { chains.append([idx]) }
+                prev = idx
             }
-            result[idx] = groupId
-            prev = idx
+        }
+        chains.sort { before($0[0], $1[0]) }
+        var groupId = 0
+        for chain in chains {
+            groupId += 1
+            for idx in chain { result[idx] = groupId }
         }
         for idx in undated {
             groupId += 1
@@ -477,6 +498,8 @@ enum AnalysisEngine {
             "preview_path": p.previewRelPath,
             "capture_time": p.captureTime.map(isoFormatter.string(from:)) as Any,
             "camera": p.cameraModel as Any,
+            // "" = 读过、没有序列号（区别于老 manifest 里没有这个字段 = 没读过，打开时会补）。
+            "body_serial": p.bodySerial ?? "",
             "orientation": NSNull(),
             "exif": [
                 "shutter_sec": p.shutterSec as Any,

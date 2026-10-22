@@ -165,6 +165,7 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--session-key"),
 // LabelGUI --verdicts <photo_dir> [--dedupe] [--per-photo]
 // 加载该场次的缓存结果，套用当前阈值，打印判决/理由统计和多张连拍组的组内判决。
 // --per-photo：最后再逐张打印「id 判决 理由」（单张的场上面不打印），对比两次分析用。
+//   两台以上机身时每行后面再带机身、对时后的拍摄时间、章节，最后打每台机身和按拍摄时间的顺序（单机身输出不变）。
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
    CommandLine.arguments.count > flagIndex + 1 {
     let dir = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])
@@ -218,10 +219,13 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
         if CommandLine.arguments.contains("--per-photo") {
             let preset = store.currentPreset?.rawValue ?? "自定义"
             print("阈值: 锐度 \(store.sharpnessThreshold) · 曝光裁切 \(store.exposureThreshold) · 人脸质量 \(store.faceQualityThreshold) · 预设 \(preset)")
+            let multiBody = store.bodies.count >= 2
             for item in store.items.sorted(by: { $0.id < $1.id }) {
                 let reasons = item.rejectReasons.isEmpty ? "-" : item.rejectReasons.joined(separator: ",")
-                print("  \(item.id) \(item.verdict.rawValue) \(reasons)")
+                let body = multiBody ? BodyClockCLI.perPhotoSuffix(item, store: store) : ""
+                print("  \(item.id) \(item.verdict.rawValue) \(reasons)" + body)
             }
+            if multiBody { BodyClockCLI.printTimeline(store) }
         }
         // --clear-recents：打印完再点一次「全部清除」，数还剩哪些场次目录 —— 验证掉出菜单的旧场次
         // 判决不被顺手删掉。会删数据目录里的场次：只在临时 LABELGUI_DATA_DIR 下跑。
@@ -458,6 +462,15 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--export-xmp"),
         if exportError != nil { exit(1) }
     }
     exit(0)
+}
+
+// 按机身对时（会写这一场的 body_offsets.json，只在临时数据目录下跑）：
+// LABELGUI_DATA_DIR=<临时> LabelGUI --body-offset <photo_dir> [--body '<机身 key>' --seconds +180 | --align id,id] [--undo]
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--body-offset"),
+   CommandLine.arguments.count > flagIndex + 1 {
+    MainActor.assumeIsolated {
+        BodyClockCLI.run(flagIndex: flagIndex)
+    }
 }
 
 // 时间轴布局自检：LabelGUI --timeline-selftest（随机章节数/张数/宽度，验证不出界、不重叠）。

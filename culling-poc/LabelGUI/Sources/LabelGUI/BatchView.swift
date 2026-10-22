@@ -79,6 +79,8 @@ struct BatchView: View {
     @State private var acceptScope: Int?
     @State private var acceptPreview: (takes: Int, rejects: Int) = (0, 0)
     @State private var showStatsPopover = false
+    /// 状态栏「N 台机身」点开的对时面板。
+    @State private var showBodyClock = false
     /// 快捷键一览（状态栏右下角的键盘图标，或网格里按 ?）。
     @State private var showShortcuts = false
     /// 从访达拖文件夹进来时的高亮。
@@ -234,6 +236,7 @@ struct BatchView: View {
         .sheet(isPresented: $showISOSheet) { isoExportSheet }
         .sheet(isPresented: $showHighlightsSheet) { highlightsSheet }
         .sheet(isPresented: $showClientImport) { ClientImportSheet(store: store, isPresented: $showClientImport) }
+        .sheet(isPresented: $showBodyClock) { BodyClockSheet(store: store, isPresented: $showBodyClock) }
         .confirmationDialog(acceptTitle, isPresented: $showAcceptAllConfirm) {
             Button("定案 · \(acceptPreview.rejects) 张设为废片") {
                 let scope = acceptScope
@@ -440,7 +443,7 @@ struct BatchView: View {
             Button { store.undoLastOverride() } label: { Image(systemName: "arrow.uturn.backward") }
                 .keyboardShortcut("z", modifiers: .command)
                 .disabled(!store.canUndoOverride)
-                .help("撤销上一步：改判、导入 / 清除客户选中 (⌘Z)")
+                .help("撤销上一步：改判、导入 / 清除客户选中、按机身对时 (⌘Z)")
             Button { selectedIDs = Set(visibleItems.map(\.id)) } label: { Image(systemName: "checkmark.square") }
                 .keyboardShortcut("a", modifiers: .command)
                 .disabled(store.items.isEmpty)
@@ -521,6 +524,7 @@ struct BatchView: View {
                         .font(.caption).foregroundStyle(.purple)
                         .help("导入的客户选择（紫心）。顶栏「客户选中」只看这些；「导出」菜单里复制文件名、复制原片到精修文件夹")
                 }
+                if store.bodies.count >= 2 { bodyClockHint }
             }
             // 上次写 XMP 之后又改了判决：Lightroom / C1 那边还是旧的，提醒一下、点一下就重写。
             if store.xmpStaleCount > 0 {
@@ -589,6 +593,18 @@ struct BatchView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(.bar)
+    }
+
+    /// 双机位才有：「2 台机身」，点开按机身对时。对过的标出来（排序、章节已经按对过的时间排）。
+    private var bodyClockHint: some View {
+        let adjusted = store.bodies.contains { $0.offset != 0 }
+        let title = "\(store.bodies.count) 台机身" + (adjusted ? " · 已对时" : "")
+        return Button { showBodyClock = true } label: {
+            Label(title, systemImage: "camera.on.rectangle")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("这一场有 \(store.bodies.count) 台机身（同型号的按序列号分开），连拍的「场」各分各的。两台的钟不准时点这里对时")
     }
 
     // MARK: - JPG export sheet
@@ -1259,6 +1275,7 @@ struct BatchView: View {
                     .help("进连拍挑选。选中的都在同一场 = 整场挑（选中的先留、其余废，⏎ 确认）；" +
                           "跨场 = 把这几张并排比，点一张只留它")
             }
+            alignButton
             Button("拼图 (\(selectedIDs.count))") {
                 // 按网格里的顺序递过去（Set 没有顺序）。
                 let order = store.items.map(\.id).filter { selectedIDs.contains($0) }
@@ -1273,6 +1290,21 @@ struct BatchView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.bar)
+    }
+
+    /// 选了两台机身各一张：「把这两张对成同一时刻」，以照片多的那台为准调另一台的偏移（⌘Z 撤销）。
+    @ViewBuilder private var alignButton: some View {
+        let ids = Array(selectedIDs)
+        if ids.count == 2, let align = store.alignment(ids[0], ids[1]) {
+            let shift = BodyClock.formatOffset(align.offset)
+            Divider().frame(height: 16)
+            Button("把这两张对成同一时刻") {
+                withAnimation { store.setBodyOffsets([align.moved.key: align.offset]) }
+                selectedIDs.removeAll()
+            }
+            .buttonStyle(.bordered)
+            .help("两台机身同一瞬间拍的这两张（同一次闪光、同一个动作）：以「\(align.reference.name)」为准，「\(align.moved.name)」整台的对时偏移设成 \(shift)，排序、分场、章节跟着重排。⌘Z 撤销，状态栏「N 台机身」里可以再改")
+        }
     }
 
     // MARK: - Chapter timeline (跨章节导航 + 覆盖保护可视化，见 ChapterTimeline.swift)
