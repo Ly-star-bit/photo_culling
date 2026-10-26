@@ -41,6 +41,40 @@ enum CollageLooks {
         return out
     }
 
+    // MARK: - 分层色调：格 > 页 > 工程
+
+    /// 页级色调换进工程的样式：渲染一页、压字摆位、水印「自动深浅」都从这份工程读 style.look —— 照片、主图取色的
+    /// 底色、模糊底、字的深浅都按这一页的色调走。页没设 = 原样返回（和没有页级色调时逐像素一样）。
+    /// 印样页自己的纸（contactSheet.paper）同样换进来：这一页的底色是那张纸的纯色（注记的笔色、水印深浅跟着它）。
+    static func project(_ project: CollageProject, page: CollagePage?) -> CollageProject {
+        let paper = page?.contactSheet?.paper
+        guard page?.look != nil || paper != nil else { return project }
+        var out = project
+        if let look = page?.look {
+            out.style.look = look.look
+            out.style.lookStrength = look.strength
+        }
+        if let paper {
+            out.style.background = paper
+            out.style.backgroundMode = .solid
+        }
+        return out
+    }
+
+    /// 这一格实际的色调：格子自己设了用格子的，否则用样式里的（已经换过页级色调的那份）。
+    static func setting(style: CollageStyle, cell: CollageCell?) -> CollageLookSetting {
+        cell?.look ?? CollageLookSetting(look: style.look, strength: style.lookStrength)
+    }
+
+    /// 格子单独设了色调：这张照片的调色换成格子的色调（统一到主图的增益照留）。没设 = 原样。
+    static func ops(_ base: Ops?, cell: CollageCell) -> Ops? {
+        guard let look = cell.look else { return base }
+        var ops = base ?? Ops()
+        ops.look = look.look
+        ops.strength = look.strength
+        return ops
+    }
+
     /// 平均色（线性光）。
     struct Stats: Hashable {
         var r: Double
@@ -263,6 +297,35 @@ enum CollageLooks {
         case .sepia:
             let v = curve(l, lift: 0.07, gain: 0.94, contrast: 0.15)
             return (clamp01(v * 1.07 + 0.01), clamp01(v), clamp01(v * 0.86))
+        case .newsprint:
+            // 报纸黑白：反差比黑白大，墨不到纯黑、纸不到纯白，整体一丝暖灰（新闻纸的墨是暗灰，纸是暖灰）。
+            // 加网的照片（style.halftone）网点那一步自己还会压一次范围、上墨色纸色：报纸风开网点时色调用
+            // 高反差或不设，别再叠这一层抬黑。
+            let v = curve(l, lift: 0.075, gain: 0.93, contrast: 0.45)
+            let warm: Double = 0.012 * (1 - v)
+            return (clamp01(v + warm), clamp01(v + warm * 0.4), clamp01(v * 0.975 - warm * 0.6))
+        case .contrastMono:
+            // 瑞士网格的高反差黑白：黑到底、白到顶，中间调陡。
+            let v = curve(l, lift: 0.01, gain: 0.992, contrast: 0.5)
+            return (v, v, v)
+        case .muted:
+            // 留白杂志的哑光：黑位抬一点、白位压一点、反差略低，偏一丝暖红、去一点蓝，饱和 0.8。
+            var c = [curve(r, lift: 0.035, gain: 0.965, contrast: 0.05),
+                     curve(g, lift: 0.035, gain: 0.965, contrast: 0.05),
+                     curve(b, lift: 0.035, gain: 0.965, contrast: 0.05)]
+            c[0] += 0.012
+            c[2] -= 0.018
+            return saturate(c, 0.8)
+        case .fineArt:
+            // 婚礼 fine-art：黑位抬得更多、反差放低（反 S）、饱和 0.8，只在高光里暖一点（暗部保持中性）。
+            // 和「复古」（偏黄、抬黑 0.1）、「日系」（偏青、提亮中间调）分开。
+            var c = [curve(r, lift: 0.05, gain: 0.96, contrast: -0.08),
+                     curve(g, lift: 0.05, gain: 0.96, contrast: -0.08),
+                     curve(b, lift: 0.05, gain: 0.96, contrast: -0.08)]
+            c[0] += 0.016 * wh
+            c[1] += 0.004 * wh
+            c[2] -= 0.012 * wh
+            return saturate(c, 0.8)
         }
     }
 

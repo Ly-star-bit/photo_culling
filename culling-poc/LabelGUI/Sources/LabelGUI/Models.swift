@@ -106,6 +106,9 @@ struct Layer1Result: Codable {
     let frameLuma: Double?
     let frameLumaP99: Double?
     let burstGroup: Int?
+    /// 拍摄时间的小数秒（EXIF SubSecTimeOriginal）。引擎一直写进 JSON，以前没解码；同一秒连拍的先后靠它。
+    /// 老结果、没有这个 EXIF 的 = nil。
+    let captureSubsec: Double?
     /// 引擎查出文件是坏的（JPEG 截断）。旧版本分析的没有这个字段 = 没查过、当好的。
     let fileCorrupt: Bool?
     let error: String?
@@ -131,6 +134,7 @@ struct Layer1Result: Codable {
         case frameLuma = "frame_luma"
         case frameLumaP99 = "frame_luma_p99"
         case burstGroup = "burst_group"
+        case captureSubsec = "capture_subsec"
     }
 }
 

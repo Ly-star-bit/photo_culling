@@ -455,15 +455,35 @@ enum CollageWatermarks {
     }
 
     /// 整页水印挪进留白带时要躲开的（成品坐标）：文字格、自由图层（贴纸、胶带、手写字、相纸，转过的取外接框）。
+    /// 油性笔不算（同 printedCorners）：圈、叉里面是空的，圈住最下一排的照片时圈会冲进页边，整个外框都算的话
+    /// 签名就被挤出留白带。它的笔迹见 inkObstacles。
     static func obstacles(page: CollagePage, frames: [CollageLayout.Frame], canvas: CollageCanvas) -> [CGRect] {
         let cells = page.freeform ? [] : frames.filter { $0.cell.kind == .text }.map(\.rect.cgRect)
-        return cells + page.items.map { CollageItems.bounds($0, canvas: canvas) }
+        return cells + page.items.filter { !CollageItems.isPencil($0) }.map { CollageItems.bounds($0, canvas: canvas) }
+    }
+
+    /// 油性笔的笔迹（成品坐标，一小段一个框）：整页水印在留白带里能换到另一头躲开就躲，躲不开照样留在留白带里
+    /// （签名压一点笔迹，不为一道笔迹挤出留白带、压到照片上）。
+    static func inkObstacles(page: CollagePage, canvas: CollageCanvas) -> [CGRect] {
+        page.items.flatMap { CollageItems.inkBoxes($0, canvas: canvas) }
+    }
+
+    /// 印样页（page.contactSheet）另外要躲的：白边上的手写注记并进 obstacles（同文字格），圈、叉的笔迹并进
+    /// inkObstacles（同油性笔贴纸）；片条、黑场不在这里：留白带本来就按片条外面那圈空纸算（Sheet.content），
+    /// 照旧排时躲它们的四边形（Sheet.film）。按渲染同一份版式现算（CollageContact.obstacles），
+    /// vars = 这一页的占位符（和渲染同一份：{no} 定记号的种子）。别的页 = 空。
+    static func contactObstacles(page: CollagePage, canvas: CollageCanvas, photos: [String: CollagePhotoRef],
+                                 vars: [String: String]) -> (text: [CGRect], ink: [CGRect]) {
+        guard let sheet = page.contactSheet else { return ([], []) }
+        return CollageContact.obstacles(sheet, canvas: canvas, photos: photos, vars: vars)
     }
 
     /// 整页层在这一页上排在哪（不画、不着色）：检视器「整张一次切开后在第几片」按它说。和渲染走同一个
     /// Painter.prepare（同样的区域、留白带、文字格和图层、主图的字、缓存的签名），换到留白带另一头、签名读不了
     /// 都算进去。一样东西一个框（成品坐标）；平铺的签名 kind = "tile"。
-    static func pagePlacement(project: CollageProject, page: CollagePage) -> [(kind: String, rect: CGRect)] {
+    static func pagePlacement(project base: CollageProject, page: CollagePage) -> [(kind: String, rect: CGRect)] {
+        // 和渲染一样：页级色调换进样式（水印「自动深浅」看调完色的照片）。
+        let project = CollageLooks.project(base, page: page)
         var options = CollageRender.Options()
         options.watermark = true
         guard project.watermark?.page != nil,
@@ -473,8 +493,7 @@ enum CollageWatermarks {
         for p in project.photos where photos[p.id] == nil { photos[p.id] = p }
         let canvas = project.canvas
         let style = project.style
-        let frames = CollageLayout.geometry(page.root, in: CollageLayout.contentRect(canvas: canvas, style: style),
-                                            gutter: CollageLayout.gutterPixels(canvas: canvas, style: style)).frames
+        let frames = CollageLayout.pageGeometry(page.root, canvas: canvas, style: style).frames
         let vars = CollageTypeset.variables(project: project, root: page.root, photos: photos,
                                             pagePhotoIDs: page.photoIDs, pageID: page.id)
         painter.prepare(page: page, pagePhotoIDs: page.photoIDs, photos: photos, vars: vars, frames: frames)
@@ -557,6 +576,8 @@ enum CollageWatermarks {
             /// drawn = 照片画的那块（toLocal 那一侧的坐标）。
             var mapper: CollageOverlays.Mapper
             var photo: CollagePhotoRef
+            /// 这张照片实际的色调（格子单独设的 / 页面的 / 工程的）：亮度按调完色的算。
+            var look: CollageLookSetting
         }
         var spots: [Spot] = []
     }
@@ -571,6 +592,11 @@ enum CollageWatermarks {
         /// 页上图层（相纸、贴纸、手写字）转过之后的四个角，顺序同 page.items；导出里不印的 = nil。
         /// 它们都画在格子之后、相纸按顺序一张压一张：水印不躲进后画的图层底下。
         var items: [[CGPoint]?] = []
+        /// 印样页的「版心」= 片条、黑场真画到哪儿（CollageContact.content）：留白带按它算，水印进的是片条外面
+        /// 那圈空纸，不压在片条、黑场上（印样自己的留白和工程的外边距不是一回事）。别的页 = nil（按外边距）。
+        var content: CGRect?
+        /// 印样页的片条、黑场（转过的四个角，CollageContact.content）：靠边的那样进不了留白带、照旧排时躲开它们。
+        var film: [[CGPoint]] = []
     }
 
     /// 一次渲染里画水印要的东西（render() 开头备好一次）。
@@ -617,9 +643,31 @@ enum CollageWatermarks {
             var tags = WatermarkEngine.ExifTags(source: nil)
             tags.values = values
             sheet.tags = tags
-            let obstacles = CollageWatermarks.obstacles(page: page, frames: frames, canvas: canvas)
+            let contact = CollageWatermarks.contactObstacles(page: page, canvas: canvas, photos: photos, vars: vars)
+            let film = page.contactSheet.map { CollageContact.content($0, canvas: canvas, vars: vars) }
+            sheet.content = film?.bounds
+            sheet.film = film?.quads ?? []
+            let obstacles = CollageWatermarks.obstacles(page: page, frames: frames, canvas: canvas) + contact.text
+            let ink = CollageWatermarks.inkObstacles(page: page, canvas: canvas) + contact.ink
+            // 留在留白带里的有几样（签名、字各算一样）。
+            func kept(_ m: Marks?) -> Int {
+                (m?.plans ?? []).filter(\.inMargin).reduce(0) { n, p in
+                    n + (p.layout.signature == nil ? 0 : 1) + (p.layout.text == nil ? 0 : 1)
+                }
+            }
             sheet.pageAreas = pageAreas().map { owner, area in
-                let banded = layer.preferMargin ? marginMarks(layer, in: area, tags: tags, obstacles: obstacles) : nil
+                // 印样页：手写注记、圈叉都硬躲，靠边的也不压片条、黑场（见 contactMarks）—— 一页上就这几笔，
+                // 水印压上去就压在卷号、选片记号上。
+                if sheet.content != nil {
+                    return (owner, area, contactMarks(layer, in: area, tags: tags, avoid: obstacles + ink))
+                }
+                var banded = layer.preferMargin ? marginMarks(layer, in: area, tags: tags, obstacles: obstacles) : nil
+                // 油性笔的笔迹：连它一起躲之后留在留白带里的一样不少才躲（换到另一头），不然照不躲的排。
+                if banded != nil, !ink.isEmpty,
+                   let dodged = marginMarks(layer, in: area, tags: tags, obstacles: obstacles + ink),
+                   kept(dodged) >= kept(banded) {
+                    banded = dodged
+                }
                 return (owner, area, banded ?? layout(layer, in: area, cut: true, tags: tags))
             }
             sheet.pageBoxes = sheet.pageAreas.flatMap { $0.marks?.boxes ?? [] }
@@ -668,10 +716,16 @@ enum CollageWatermarks {
                       background: CollageColor, ctx: CGContext) {
             guard watermark.photos != nil || underlay != nil else { return }
             let style = project.style
+            // 封面取景、人物挡字的格子：取景按 CollageCover 的决定（和渲染器、压字同一个）。
+            let decided = CollageCover.applies(to: cell)
+                ? CollageRender.cellWindow(cell: cell, frameRect: frameRect, project: project, photo: photo,
+                                           framing: framing, hints: hints, vars: vars, background: background)
+                : nil
             let g = CollageRender.overlayGeometry(cell: cell, frameRect: frameRect, style: style, photo: photo,
-                                                  framing: framing, hints: hints)
+                                                  framing: framing, hints: hints, window: decided)
             let mapper = CollageOverlays.Mapper(drawn: g.drawn, window: g.window)
-            underlay?.spots.append(.init(toLocal: .identity, mapper: mapper, photo: photo))
+            let look = CollageLooks.setting(style: style, cell: cell)
+            underlay?.spots.append(.init(toLocal: .identity, mapper: mapper, photo: photo, look: look))
             guard let layer = watermark.photos else { return }
             let owner = path.isEmpty ? "r" : path.map(String.init).joined()
             let shape = cell.shape ?? style.shape
@@ -685,17 +739,17 @@ enum CollageWatermarks {
             // 圆角：四角各让 0.3 × 圆角（45° 方向圆弧离直角 0.293r），框角不会被圆角切掉。
             if shape == .rounded { area = area.insetBy(dx: corner * 0.3, dy: corner * 0.3) }
             area = area.intersection(safeRect)
-            let avoid = cell.overlay.flatMap {
-                CollageRender.overlayPlacement($0, cell: cell, frameRect: frameRect, project: project, photo: photo,
-                                               framing: framing, hints: hints, vars: vars,
-                                               background: background)?.rect
-            }
+            // 这张照片上所有字块（刊头、左栏、右栏……）都躲：和渲染器同一个摆位函数、同一个先后。
+            let avoids = CollageRender.overlayPlacements(cell: cell, frameRect: frameRect, project: project, photo: photo,
+                                                         framing: framing, hints: hints, vars: vars,
+                                                         background: background).compactMap { $0?.rect }
             let tags = photoTags(photo, vars: vars)
-            geo.avoid = avoid
+            geo.avoid = avoids.first
+            geo.avoidMore = Array(avoids.dropFirst())
             // 页上的图层都画在格子之后：压在它们底下的水印看不见。
             let covers = sheet.items.compactMap { $0 }
             let placed = place(layer, area: area, cut: true, tags: tags) { box in
-                (avoid.map(box.intersects) ?? false) || yields(box) != nil || Cover.touches(box, .identity, covers)
+                avoids.contains(where: box.intersects) || yields(box) != nil || Cover.touches(box, .identity, covers)
             }
             var marks = placed?.marks
             // 四个方向都躲不开：压着整页水印的、大半被图层盖住的那样不画（记下原因）；压字的照原位置画，
@@ -705,13 +759,13 @@ enum CollageWatermarks {
                     yields(box) ?? (Cover.hidden(box, .identity, covers) >= CollageWatermarks.hiddenMax ? "被盖住" : nil)
                 }
             }
-            if placed?.stuck == true, let avoid, var m = marks {
-                for i in m.plans.indices where m.plans[i].boxes.contains(where: { $0.intersects(avoid) }) {
+            if placed?.stuck == true, !avoids.isEmpty, var m = marks {
+                for i in m.plans.indices where m.plans[i].boxes.contains(where: { b in avoids.contains(where: b.intersects) }) {
                     m.plans[i].conflict = true
                 }
                 marks = m
             }
-            marks = toned(marks, layer) { photoLum($0, photo: photo, mapper: mapper) ?? paper.flat }
+            marks = toned(marks, layer) { photoLum($0, photo: photo, mapper: mapper, look: look) ?? paper.flat }
             record(marks, layer: "photo", owner: owner, area: area, geo: geo)
             guard let marks, !marks.plans.isEmpty else { return }
             ctx.saveGState()
@@ -735,7 +789,8 @@ enum CollageWatermarks {
                       window: CollageCrop.Window, vars: [String: String], ctx: CGContext) {
             let toPage = CollageItems.transform(item, canvas: canvas)
             let mapper = CollageOverlays.Mapper(drawn: inner, window: window)
-            underlay?.spots.append(.init(toLocal: toPage.inverted(), mapper: mapper, photo: photo))
+            let look = CollageLooks.setting(style: project.style, cell: nil)
+            underlay?.spots.append(.init(toLocal: toPage.inverted(), mapper: mapper, photo: photo, look: look))
             guard let layer = watermark.photos else { return }
             let owner = "item\(index)"
             let outer = CollageItems.localRect(item, canvas: canvas).applying(toPage)
@@ -760,7 +815,7 @@ enum CollageWatermarks {
             let kept = placed?.stuck == true ? placed?.marks.dropping { box in
                 offence(box) ?? (Cover.hidden(box, toPage, above) >= CollageWatermarks.hiddenMax ? "被盖住" : nil)
             } : placed?.marks
-            let marks = toned(kept, layer) { photoLum($0, photo: photo, mapper: mapper) ?? paper.flat }
+            let marks = toned(kept, layer) { photoLum($0, photo: photo, mapper: mapper, look: look) ?? paper.flat }
             record(marks, layer: "photo", owner: owner, area: area, geo: geo, map: toPage)
             for plan in marks?.plans ?? [] { paint(plan, tags: tags, ctx: ctx) }
         }
@@ -843,7 +898,7 @@ enum CollageWatermarks {
         /// 正中、没有留白（margin = 0、留白全落在安全区里）、这块区域不贴着那条边 = nil。
         private func bandFit(_ anchor: WatermarkEngine.GridPosition, area: CGRect, natural: CGSize) -> BandFit? {
             guard anchor.row != 0 || anchor.column != 0, natural.width > 0, natural.height > 0 else { return nil }
-            let content = CollageLayout.contentRect(canvas: canvas, style: project.style).cgRect
+            let content = sheet.content ?? CollageLayout.contentRect(canvas: canvas, style: project.style).cgRect
             let s = safeRect
             let horizontal = anchor.row != 0
             let thick = anchor.row > 0 ? s.maxY - content.maxY : anchor.row < 0 ? content.minY - s.minY
@@ -918,6 +973,247 @@ enum CollageWatermarks {
             marks.plans += other.plans
             marks.notes += other.notes
             return marks
+        }
+
+        // MARK: 整页 —— 印样页
+
+        /// 印样页上的整页层（prepare 只在 sheet.content != nil 时进来）：片条外面那圈空纸就是留白，水印不压手写注记、
+        /// 圈叉（avoid = 注记 + 笔迹 + 文字格、图层），靠边的也不压片条、黑场（Sheet.film）。
+        /// - 开着「有留白时放在留白里」：签名、字各按 spots 排好的落点试（第一个就是它自己锚点那条带的那一头），
+        ///   排出来压着东西（字还不能压签名）的跳过。签名的前几个能放的落点各配一遍字（字躲开那个签名，挑它最好的
+        ///   能放的落点），两样合起来最好的那一对胜出 —— 签名占了注记旁边那段的正中、字只好缩成一小行挤在旁边时，
+        ///   签名让到那段的一头、字跟在它旁边。落点都不行的那样照旧排（overContent：躲开片条、注记、圈叉和留白里
+        ///   放好的那样，四个方向都不行才不画）。居中的那样没有留白带可进：照旧排，压在片子上（只躲注记、圈叉）——
+        ///   和普通页上居中的压在照片上一样。
+        /// - 关着：照旧排（overContent）。
+        /// 区域太小 = nil。
+        private func contactMarks(_ layer: CollageMarkLayer, in rawArea: CGRect, tags: WatermarkEngine.ExifTags,
+                                  avoid: [CGRect]) -> Marks? {
+            guard layer.preferMargin else { return overContent(layer, in: rawArea, tags: tags, avoid: avoid) }
+            let area = CollageWatermarks.snapped(rawArea)
+            let areaShort = min(area.width, area.height)
+            let areaLong = max(area.width, area.height)
+            guard areaShort >= CollageWatermarks.minSide else { return nil }
+            var base = CollageWatermarks.drawConfig(layer, areaShort: Double(areaShort))
+            base.landscapeOverrideEnabled = false
+            let anchor = area.width >= area.height ? (layer.landscapePosition ?? layer.position) : layer.position
+            func box(_ plans: [Plan], _ part: (WatermarkEngine.MarkLayout) -> CGRect?) -> CGRect? {
+                plans.compactMap { p in part(p.layout).map { $0.offsetBy(dx: p.region.minX, dy: p.region.minY) } }.first
+            }
+            func blocked(_ r: CGRect) -> Bool {
+                avoid.contains { $0.intersects(r) } || Cover.touches(r, .identity, sheet.film)
+            }
+            // 试排用的「放不下」不记（最后真排的那一遍才记）。
+            var scratch: [String] = []
+            typealias Sig = (fit: BandFit, w: Int)
+            typealias Text = (fit: BandFit, font: CGFloat)
+            // 签名：自然宽同 marginMarks（按整块区域算），落点缩到下限以下的不要；能放的前三个留着配字。
+            var sigs: [(sig: Sig?, box: CGRect?, cost: CGFloat)] = []
+            if layer.signatureOn, layer.tile == nil, watermark.signature != nil, signature != nil,
+               let w = signatureWidth(layer.sizeRatio, areaShort: areaShort, room: area, margin: 0, fit: false) {
+                let natural = CGSize(width: w, height: signatureHeight(w))
+                let floor = CollageWatermarks.signatureFloor(canvas).rounded(.up)
+                let queue = spots(anchor, area: area, natural: natural, blockers: avoid, edge: CGFloat(base.marginY),
+                                  margin: CGFloat(base.marginX)) { (CGFloat(w) * $0).rounded(.down) >= floor }
+                for spot in queue where sigs.count < 3 {
+                    let s = (fit: spot.fit, w: Int((CGFloat(w) * spot.fit.scale).rounded(.down)))
+                    let plans = bandPlans(sig: s, text: nil, base: base, tags: tags, notes: &scratch)
+                    guard let b = box(plans, \.signature), !blocked(b) else { continue }
+                    sigs.append((s, b, spot.cost))
+                }
+            }
+            if sigs.isEmpty { sigs = [(nil, nil, 0)] }
+            // 字：躲开签名（签名那块也拿来切带，字能叠到签名上面那一截、挪到签名和注记中间那段）。
+            func bestText(_ sig: Sig?, _ sigBox: CGRect?) -> (text: Text, cost: CGFloat)? {
+                guard let t = layer.text else { return nil }
+                let font = CGFloat(t.fontSizeRatio) * areaLong
+                guard let size = textSize(base, font: font, in: area, tags: tags) else { return nil }
+                let floor = CollageWatermarks.fontFloor(canvas)
+                let blockers = avoid + [sigBox].compactMap { $0 }
+                let queue = spots(t.position, area: area, natural: size, blockers: blockers,
+                                  edge: CGFloat(base.exifText.marginY), margin: CGFloat(base.exifText.marginX)) {
+                    font * $0 >= floor
+                }
+                for spot in queue {
+                    let candidate = (fit: spot.fit, font: font * spot.fit.scale)
+                    let plans = bandPlans(sig: sig, text: candidate, base: base, tags: tags, notes: &scratch)
+                    guard let b = box(plans, \.text), !blocked(b), !(sigBox?.intersects(b) ?? false),
+                          box(plans, \.signature) == sigBox else { continue }
+                    return (candidate, spot.cost)
+                }
+                return nil
+            }
+            // 签名挪一步比字挪一步贵一点（签名是主角，差不多的时候它留在原地）；字放不进留白的那一对多算一大截
+            // （宁可签名挪远一点，也让两样都在留白里）。
+            var best: (sig: Sig?, text: Text?, cost: CGFloat)?
+            for entry in sigs {
+                let paired = bestText(entry.sig, entry.box)
+                let missing: CGFloat = layer.text != nil && paired == nil ? 10 : 0
+                let cost: CGFloat = entry.cost * 1.25 + (paired?.cost ?? 0) + missing
+                if best == nil || cost < best?.cost ?? 0 { best = (entry.sig, paired?.text, cost) }
+            }
+            let sig = best?.sig
+            let text = best?.text
+            var marks = Marks()
+            if sig != nil || text != nil {
+                marks.plans = bandPlans(sig: sig, text: text, base: base, tags: tags, notes: &marks.notes)
+                for i in marks.plans.indices { marks.plans[i].inMargin = true }
+            }
+            var rest = layer
+            if sig != nil { rest.signatureOn = false }
+            if text != nil { rest.text = nil }
+            guard rest.hasContent(signature: watermark.signature != nil) else { return marks }
+            // 放不进留白的那样（居中的、哪儿都排不下的）照旧排，躲开留白里已经放好的。
+            guard let other = overContent(rest, in: rawArea, tags: tags, avoid: avoid + marks.boxes) else {
+                return marks.plans.isEmpty ? nil : marks
+            }
+            marks.plans += other.plans
+            marks.notes += other.notes
+            return marks
+        }
+
+        /// 印样页上一样东西（签名或字，自然大小 natural）在留白里能去的落点，好的在前。片条外面那圈空纸分成上下左右
+        /// 四条带（bandFit：带厚、缩放的规矩同普通页的留白带），上下带里有挡着的东西（blockers：注记、圈叉的笔迹、
+        /// 已经放好的签名）时再切：
+        /// - 整条带的左头、正中、右头；
+        /// - 挡着的东西上面、下面那一截，三个位置（贴着纸边的那截先让出一个边距 edge，不然离纸边只剩十几像素）；
+        /// - 挡着的东西左右空出来的几段（整条带厚），放在那一段正中（注记旁边那块空纸）。
+        /// 左右带只放正中（锚点在中排时它们排在前面）。每个落点按那一块的厚度、长度缩（不放大、两头各留 margin），
+        /// keep 不认的（缩到下限以下）不要。代价（cost，小的在前）= 离本来那个落点（锚点那条带、锚点那头）多远
+        /// （按区域短边算）+ 比本来缩了多少（按平方：缩一点不要紧，贴着纸边缩成一小行的排到远一点但不缩的后面）
+        /// + 换没换摆法（靠角的挪到正中、居中的挪到角上、上下的挪进左右带）。居中的 = 空。
+        private func spots(_ anchor: WatermarkEngine.GridPosition, area: CGRect, natural: CGSize, blockers: [CGRect],
+                           edge: CGFloat, margin: CGFloat, keep: (CGFloat) -> Bool) -> [(fit: BandFit, cost: CGFloat)] {
+            guard anchor != .center, natural.width > 0, natural.height > 0 else { return [] }
+            var all: [BandFit] = []
+            let rows = anchor.row != 0 ? [anchor.row, -anchor.row] : [1, -1]
+            for row in rows {
+                guard let whole = bandFit(.at(row: row, column: 0), area: area, natural: natural) else { continue }
+                let band = whole.band
+                func add(_ rect: CGRect, _ column: Int, _ scale: CGFloat) {
+                    all.append(BandFit(band: rect, anchor: .at(row: row, column: column), scale: scale, flipped: true))
+                }
+                for column in [-1, 0, 1] { add(band, column, whole.scale) }
+                let inside = blockers.filter { $0.intersects(band) }
+                guard !inside.isEmpty else { continue }
+                let lo = max(band.minY, inside.map(\.minY).min() ?? band.minY)
+                let hi = min(band.maxY, inside.map(\.maxY).max() ?? band.maxY)
+                // 上带的上面那截、下带的下面那截贴着纸边。
+                let top = row < 0
+                let y0 = top ? band.minY + edge : band.minY
+                let y1 = top ? band.maxY : band.maxY - edge
+                let above = CGRect(x: band.minX, y: y0, width: band.width, height: max(0, lo - y0))
+                let below = CGRect(x: band.minX, y: hi, width: band.width, height: max(0, y1 - hi))
+                for slice in [above, below] where slice.height >= natural.height * CollageWatermarks.bandMinFill {
+                    let scale = min(1, slice.height * CollageWatermarks.bandFill / natural.height)
+                    for column in [-1, 0, 1] { add(slice, column, scale) }
+                }
+                var spans: [(CGFloat, CGFloat)] = [(band.minX, band.maxX)]
+                for b in inside { spans = Self.cut(spans, b.minX, b.maxX) }
+                for s in spans where s.1 - s.0 >= CollageWatermarks.minSide {
+                    add(CGRect(x: s.0, y: band.minY, width: s.1 - s.0, height: band.height), 0, whole.scale)
+                }
+            }
+            let sides = anchor.row == 0 ? [anchor.column, -anchor.column] : [-1, 1]
+            for column in sides {
+                if var f = bandFit(.at(row: 0, column: column), area: area, natural: natural) {
+                    f.flipped = true
+                    all.append(f)
+                }
+            }
+            // 落在这一块里的缩放：厚度按 bandFit，沿着带也得放得下；东西的中心大概在哪（不排版，按缩完的大小估）。
+            func fitted(_ f: BandFit) -> CGFloat {
+                let along = f.horizontal ? f.band.width - 2 * margin : f.band.height
+                let extent = f.horizontal ? natural.width : natural.height
+                return min(f.scale, along / extent)
+            }
+            func center(_ f: BandFit, _ scale: CGFloat) -> CGPoint {
+                let half: CGFloat = natural.width * scale / 2
+                var x: CGFloat = f.band.midX
+                if f.horizontal, f.anchor.column < 0 { x = f.band.minX + margin + half }
+                if f.horizontal, f.anchor.column > 0 { x = f.band.maxX - margin - half }
+                return CGPoint(x: x, y: f.band.midY)
+            }
+            // 本来那个落点：锚点那条带（太薄放不进 = 区域里锚点那个角 / 那条边）。
+            let home = bandFit(anchor, area: area, natural: natural)
+            let homeScale = home.map(fitted) ?? 1
+            let homePoint: CGPoint
+            if let home {
+                homePoint = center(home, homeScale)
+            } else {
+                let halfW: CGFloat = natural.width / 2
+                let halfH: CGFloat = natural.height / 2
+                var x: CGFloat = area.midX
+                var y: CGFloat = area.midY
+                if anchor.column < 0 { x = area.minX + margin + halfW }
+                if anchor.column > 0 { x = area.maxX - margin - halfW }
+                if anchor.row < 0 { y = area.minY + halfH }
+                if anchor.row > 0 { y = area.maxY - halfH }
+                homePoint = CGPoint(x: x, y: y)
+            }
+            let short = max(1, min(area.width, area.height))
+            var ranked: [(fit: BandFit, cost: CGFloat)] = []
+            for var f in all {
+                let scale = fitted(f)
+                guard scale > 0, keep(scale) else { continue }
+                let p = center(f, scale)
+                let dx: CGFloat = p.x - homePoint.x
+                let dy: CGFloat = p.y - homePoint.y
+                let dist: CGFloat = hypot(dx, dy) / short
+                // 缩得少不要紧，缩得多才贵（按平方）：缩到 0.8 倍多算 0.1，缩到 0.4 倍多算 0.9。
+                let shrink: CGFloat = max(0, 1 - scale / max(homeScale, 0.01))
+                let shrinkCost: CGFloat = 2.5 * shrink * shrink
+                // 靠角的先在角上找（同一条带另一头、注记上面那截的这一头），居中的先在正中找，上下的先在上下带里找：
+                // 换了摆法的（角 ↔ 正中、上下带 ↔ 左右带）多算 0.3。
+                let turned = f.horizontal != (anchor.row != 0)
+                let recentred = f.horizontal && (f.anchor.column == 0) != (anchor.column == 0)
+                let style: CGFloat = turned || recentred ? 0.3 : 0
+                f.scale = scale
+                ranked.append((f, dist + shrinkCost + style))
+            }
+            // 一样好的照生成的先后（排序要稳定）。
+            let order = ranked.indices.sorted { a, b in
+                ranked[a].cost != ranked[b].cost ? ranked[a].cost < ranked[b].cost : a < b
+            }
+            return order.map { ranked[$0] }
+        }
+
+        /// 不进留白带的照旧排（layout）。印样页上照样躲手写注记、圈叉（avoid），开着「有留白时放在留白里」时靠边的
+        /// 那样连片条、黑场（Sheet.film）一起躲：挡着就左右、上下翻（place），四个方向都挡着的那样不画（记「躲印样
+        /// 记号」/「躲片条」）—— 水印不压在卷号、选片记号、片子上。居中的那样本来就压在片子上（同普通页压在照片上），
+        /// 只躲注记、圈叉；签名、字一个居中一个靠边时分开排（字再躲开签名）。别的页 = layout（不躲，旧行为）。
+        private func overContent(_ layer: CollageMarkLayer, in area: CGRect, tags: WatermarkEngine.ExifTags,
+                                 avoid: [CGRect]) -> Marks? {
+            guard sheet.content != nil else { return layout(layer, in: area, cut: true, tags: tags) }
+            let film = layer.preferMargin ? sheet.film : []
+            let anchor = area.width >= area.height ? (layer.landscapePosition ?? layer.position) : layer.position
+            let sigOn = layer.signatureOn && watermark.signature != nil
+            let sigOff = sigOn && anchor != .center && !film.isEmpty
+            let textOff = (layer.text.map { $0.position != .center } ?? false) && !film.isEmpty
+            func placed(_ l: CollageMarkLayer, avoid: [CGRect], offFilm: Bool) -> Marks? {
+                let onFilm = { (b: CGRect) in offFilm && Cover.touches(b, .identity, film) }
+                let bad = { (b: CGRect) in avoid.contains { $0.intersects(b) } || onFilm(b) }
+                guard !avoid.isEmpty || offFilm else { return layout(l, in: area, cut: true, tags: tags) }
+                guard let p = place(l, area: area, cut: true, tags: tags, bad: bad) else { return nil }
+                guard p.stuck else { return p.marks }
+                return p.marks.dropping { b in
+                    avoid.contains { $0.intersects(b) } ? "躲印样记号" : onFilm(b) ? "躲片条" : nil
+                }
+            }
+            guard sigOn, layer.text != nil, sigOff != textOff else {
+                return placed(layer, avoid: avoid, offFilm: sigOff || textOff)
+            }
+            var sigOnly = layer
+            sigOnly.text = nil
+            var textOnly = layer
+            textOnly.signatureOn = false
+            let s = placed(sigOnly, avoid: avoid, offFilm: sigOff)
+            let t = placed(textOnly, avoid: avoid + (s?.boxes ?? []), offFilm: textOff)
+            guard s != nil || t != nil else { return nil }
+            var out = s ?? Marks()
+            out.plans += t?.plans ?? []
+            out.notes += t?.notes ?? []
+            return out
         }
 
         /// 字照这个字号（成品像素）排出来的自然大小（最宽一行 + 内边距、总高）；字是空的 = nil。
@@ -1034,12 +1330,13 @@ enum CollageWatermarks {
             (0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b) / 255 >= 0.5
         }
 
-        /// 框（mapper 那一侧的坐标）底下照片的平均亮度（按这一页的色调调过）；照片读不了 = nil。
-        /// 用整张照片的亮度网格，不按取景：拖缝时取景每帧都变，按取景缓存的网格每帧都得重算。
-        private func photoLum(_ box: CGRect, photo: CollagePhotoRef, mapper: CollageOverlays.Mapper) -> Double? {
+        /// 框（mapper 那一侧的坐标）底下照片的平均亮度（按这张照片实际的色调调过：格子 > 页 > 工程）；
+        /// 照片读不了 = nil。用整张照片的亮度网格，不按取景：拖缝时取景每帧都变，按取景缓存的网格每帧都得重算。
+        private func photoLum(_ box: CGRect, photo: CollagePhotoRef, mapper: CollageOverlays.Mapper,
+                              look: CollageLookSetting) -> Double? {
             guard let grid = CollageOverlays.luminanceGrid(photo, window: .whole), let p = mapper.toPhoto(box),
                   let stats = grid.stats(in: p) else { return nil }
-            return CollageOverlays.graded(stats.mean, look: project.style.look, strength: project.style.lookStrength)
+            return CollageOverlays.graded(stats.mean, look: look.look, strength: look.strength)
         }
 
         /// 整页层的框底下多亮：压着的照片按面积摊（上面的先算），剩下的按框那儿的页底（模糊底、渐变底各处不一样）。
@@ -1052,7 +1349,7 @@ enum CollageWatermarks {
             for spot in spots.reversed() where covered < total {
                 let local = box.applying(spot.toLocal).intersection(spot.mapper.drawn)
                 guard !local.isNull, !local.isEmpty,
-                      let lum = photoLum(local, photo: spot.photo, mapper: spot.mapper) else { continue }
+                      let lum = photoLum(local, photo: spot.photo, mapper: spot.mapper, look: spot.look) else { continue }
                 let share = min(local.width * local.height, total - covered)
                 sum += Double(share) * lum
                 covered += share
@@ -1398,12 +1695,15 @@ enum CollageWatermarks {
             var visible: CGRect
             var shape: String
             var avoid: CGRect?
+            /// 同一张照片上第 2 个起的字块（记账另起一个键，只有一个字块的旧出图 .marks.json 一个键都不多）。
+            var avoidMore: [CGRect] = []
         }
 
         private func note(layer: String, owner: String, region: CGRect?, skipped: String, geo: Geometry) {
             report?.marks.append(CollageRender.MarkRecord(layer: layer, owner: owner, kind: nil, rect: nil,
                                                           region: region, skipped: skipped, cell: geo.cell,
-                                                          visible: geo.visible, shape: geo.shape, avoid: geo.avoid))
+                                                          visible: geo.visible, shape: geo.shape, avoid: geo.avoid,
+                                                          avoidMore: geo.avoidMore))
         }
 
         /// map = 相纸本地 → 成品坐标（记转过之后的外接框，另记没转之前的大小 local：下限按它核对）。
@@ -1425,7 +1725,8 @@ enum CollageWatermarks {
                     report.marks.append(CollageRender.MarkRecord(layer: layer, owner: owner, kind: kind, rect: box(r),
                                                                  region: region, skipped: flag, cell: geo.cell,
                                                                  visible: geo.visible, shape: geo.shape,
-                                                                 avoid: geo.avoid, font: font, contrast: tone.rawValue,
+                                                                 avoid: geo.avoid, avoidMore: geo.avoidMore, font: font,
+                                                                 contrast: tone.rawValue,
                                                                  inMargin: plan.inMargin,
                                                                  local: map.isIdentity ? nil : r.size,
                                                                  corners: map.isIdentity ? nil : Cover.quad(r, map)))

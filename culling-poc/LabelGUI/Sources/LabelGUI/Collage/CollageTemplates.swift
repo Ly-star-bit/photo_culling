@@ -100,9 +100,11 @@ enum CollageStyles {
             s.gutter = 0
             s.harmonize = 0.3
         }),
-    ]
+    ] + CollageStyleFashion.presets + CollageStyleMinimal.presets + CollageStyleNewspaper.presets
+        + CollageStyleSwiss.presets + CollageStyleFilm.presets + CollageStyleFineArt.presets
 
-    private static func make(_ body: (inout CollageStyle) -> Void) -> CollageStyle {
+    /// 从默认样式改几项（各风格文件 CollageStyle<X>.swift 的预设、模板也用它）。
+    static func make(_ body: (inout CollageStyle) -> Void) -> CollageStyle {
         var s = CollageStyle()
         body(&s)
         return s
@@ -134,6 +136,16 @@ enum CollageTemplates {
         cell.overlay = overlay
         return .leaf(cell)
     }
+
+    /// 一张照片压好几块字（刊头、左栏、右栏、底栏……）：按顺序摆，后面的让着前面已经摆好的。
+    static func photo(_ role: CollageRole = .support, shape: CollageShape? = nil,
+                      overlays: [CollageOverlay]) -> CollageNode {
+        var cell = CollageCell.photo(nil, role: role)
+        cell.shape = shape
+        cell.overlays = overlays
+        return .leaf(cell)
+    }
+
     static func empty() -> CollageNode { .leaf(CollageCell()) }
     static func row(_ r: Double, _ a: CollageNode, _ b: CollageNode) -> CollageNode { .split(.row, r, a, b) }
     static func col(_ r: Double, _ a: CollageNode, _ b: CollageNode) -> CollageNode { .split(.column, r, a, b) }
@@ -255,7 +267,10 @@ enum CollageTemplates {
 
     // MARK: - 内置模板
 
-    static let builtin: [CollageTemplate] = cover + magazine + chinese + grid9 + journal + cinema + basics
+    /// 模板库的分组顺序就是这里的顺序。六个新风格各在自己的文件里（CollageStyle<X>.swift）。
+    static let builtin: [CollageTemplate] = cover + CollageStyleFashion.templates + magazine
+        + CollageStyleMinimal.templates + CollageStyleNewspaper.templates + CollageStyleSwiss.templates
+        + CollageStyleFilm.templates + chinese + grid9 + journal + cinema + CollageStyleFineArt.templates + basics
 
     private static let xhs = CollageCanvas.social[0]
     private static let square9 = CollageCanvas.social[2]
@@ -578,11 +593,33 @@ enum CollageTemplates {
     /// 套模板得到一整页：网格版 = 切分树（+ 模板带的贴纸）；散落版 = 按参数现撒；
     /// 自己存的散落版 = 原样摆放，照片按顺序换成这组。
     /// 主图角色的格子先拿分数最高的，其余按给定顺序填；照片不够的格子留空（占位）。
+    /// 「按照片比例」（fitAspects）记在页上（fixedAspects）：存「我的模板」时默认照它 —— 套用、成套（出一期的
+    /// 引语单图）、缩略图都走这里，以前只有检视器套用时记，成套出的页存成模板再套，版式就按照片比例重排变了样。
     static func apply(_ template: CollageTemplate, photos: [CollagePhotoRef],
                       context: CollageLayout.Context, seed: UInt64 = 7) -> CollagePage {
+        var page = applied(template, photos: photos, context: context, seed: seed)
+        page.fixedAspects = !template.fitAspects
+        return page
+    }
+
+    private static func applied(_ template: CollageTemplate, photos: [CollagePhotoRef],
+                                context: CollageLayout.Context, seed: UInt64) -> CollagePage {
         // 模板自带的图层每次套用都换新 id（同一个模板套在两个跨页上，图层 id 不能撞）；
         // 相册里按整本的底色和中缝调一下。
         let decor = adapted(freshIDs(template.items), template: template, context: context)
+        // 印样 / 底片条：照片按拍摄先后排成一卷（不挑主图），模板带的贴纸、手写字照放。
+        if let sheet = template.contactSheet {
+            var page = CollageContact.page(photos: photos, spec: sheet)
+            page.items = decor.filter { $0.kind != .photo }
+            // 一页最多几个圈按帧数收（约四帧一个）：「印样 · 135 整卷」的 6 个是整卷 35 帧的数（R2 §7），套在 6 张的
+            // 托盘上会六帧圈五个（R2 §10 #8：张张都圈像假的）。21 帧还是 6 个、6×6 的 12 帧还是 3 个；成套（不限）
+            // 和检视器里自己改的不收。
+            if let frames = page.contactSheet?.frames.count, sheet.maxCircles > 0 {
+                let byFrames = max(1, (frames + 3) / 4)
+                page.contactSheet?.maxCircles = min(sheet.maxCircles, byFrames)
+            }
+            return page
+        }
         if let spec = template.scatter {
             return scattered(photos: photos, spec: spec, count: spec.count, decor: decor, context: context,
                              seed: seed, pageSpec: spec)
@@ -599,6 +636,10 @@ enum CollageTemplates {
         }
         var remaining = photos
         func takeBest() -> String? {
+            // 成套定好了主图（Context.heroID，出一期的封面）：主图格先拿它；没定 = 按分数（旧的调用方都不定，照旧）。
+            if let id = context.heroID, let i = remaining.firstIndex(where: { $0.id == id }) {
+                return remaining.remove(at: i).id
+            }
             guard let best = remaining.max(by: { $0.score < $1.score }) else { return nil }
             remaining.removeAll { $0.id == best.id }
             return best.id
@@ -633,6 +674,10 @@ enum CollageTemplates {
         }
         for i in items.indices where items[i].kind == .photo {
             items[i].photoID = takeNext()
+        }
+        // 婚礼相册的跨页模板：按这本册子的版心、这几张照片的横竖重排（小字不小于 2.8mm），见 CollageStyleFineArt。
+        if let fitted = CollageStyleFineArt.fitTemplate(template, root: root, photos: photos, context: context) {
+            root = fitted
         }
         if template.fitAspects {
             root = CollageLayout.refit(root, context: context)
@@ -725,6 +770,8 @@ enum CollageTemplates {
                 node.cell?.photoID = nil
                 node.cell?.crop = nil
                 node.cell?.locked = false
+                // 「人物挡字顺手换的封面」是对那张照片的记号：模板里的封面就是作者要的景别，关开关时不换回自动。
+                node.cell?.coverAuto = false
             }
         }
         // 换新 id 时贴纸的指向跟着换（以前各换各的，胶带和相纸的关系就断了）。
@@ -740,6 +787,13 @@ enum CollageTemplates {
                                 items: items, freeform: page.freeform)
         t.pageScatter = page.freeform ? page.scatter : nil
         t.savedAspect = page.freeform ? aspect : nil
+        // 印样存成模板：规格、排法、片边字都留着，帧（照片）和手动记号不留，套用时换成那时的托盘。
+        if var sheet = page.contactSheet {
+            sheet.frames = []
+            sheet.markOverrides = [:]
+            t.contactSheet = sheet
+            t.fitAspects = false
+        }
         return t
     }
 }

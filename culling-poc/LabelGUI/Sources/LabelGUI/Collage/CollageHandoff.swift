@@ -5,7 +5,7 @@ import Foundation
 enum CollageHandoff {
 
     static func fromWatermark(_ req: WatermarkCollageRequest, batch: BatchStore, collage: CollageStore) {
-        collage.attach(sessionDir: batch.photoDir == nil ? nil : batch.sessionDir, photoDir: batch.photoDir)
+        collage.attach(sessionDir: batch.photoDir == nil ? nil : batch.sessionDir, photoDir: batch.photoDir, batch: batch)
         switch req.action {
         case .newCollage(let urls):
             // 认得出是批量页的照片（解码路径或原文件路径相同）就按批量 id 带：人脸、分数、景别都有现成的；

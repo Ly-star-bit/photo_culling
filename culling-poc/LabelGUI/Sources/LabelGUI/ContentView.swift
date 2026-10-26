@@ -35,7 +35,7 @@ struct ContentView: View {
             guard let ids = request, !ids.isEmpty else { return }
             batchStore.collageRequest = nil
             collageStore.attach(sessionDir: batchStore.photoDir == nil ? nil : batchStore.sessionDir,
-                                photoDir: batchStore.photoDir)
+                                photoDir: batchStore.photoDir, batch: batchStore)
             collageStore.importFromBatch(ids: ids, batch: batchStore, layout: true)
             tab = .collage
         }

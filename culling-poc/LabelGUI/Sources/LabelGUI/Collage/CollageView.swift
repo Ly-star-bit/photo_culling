@@ -37,13 +37,17 @@ struct CollageView: View {
             Divider()
             statusBar
         }
-        .onAppear { attachSession() }
+        .onAppear {
+            attachSession()
+            // 主体蒙版的模型第一次加载要 0.1–1 秒：一进拼图 tab 先在后台空跑一次。
+            CollageMasks.warmUp()
+        }
         .onChange(of: batchStore.photoDir) { _, _ in attachSession() }
     }
 
     private func attachSession() {
         let dir = batchStore.photoDir
-        store.attach(sessionDir: dir == nil ? nil : batchStore.sessionDir, photoDir: dir)
+        store.attach(sessionDir: dir == nil ? nil : batchStore.sessionDir, photoDir: dir, batch: batchStore)
     }
 
     // MARK: - 顶栏
@@ -120,36 +124,63 @@ struct CollageView: View {
             Button { store.previousAlternative() } label: { Image(systemName: "chevron.left") }
                 .disabled(store.alternatives.isEmpty)
                 .help("上一版 (←)")
+            // 印样按拍摄先后排，没有备选版式（regenerate 只会提示一句）：→ 和「换一批」灰掉，备选条说去哪改。
             Button { store.nextAlternative() } label: { Image(systemName: "chevron.right") }
-                .disabled(store.root == nil)
+                .disabled(store.root == nil || store.isContactSheet)
                 .help("下一版 (→)")
             Button("换一批") { store.regenerate() }
-                .disabled(store.root == nil || store.isSolving)
-                .help("同样的照片重新求解一批备选；锁定的格子不动")
+                .disabled(store.root == nil || store.isSolving || store.isContactSheet)
+                .help(store.isContactSheet ? "印样按拍摄先后排，没有别的版：改规格、每条帧数在「版式 › 印样」里"
+                      : "同样的照片重新求解一批备选；锁定的格子不动")
             if store.isSolving { ProgressView().controlSize(.small) }
         }
     }
 
     private var albumControls: some View {
-        HStack(spacing: 8) {
+        // 编排主题：默认 / 婚礼 fine-art（一键成套「整本婚礼相册」设成 fine-art；之后的「自动编排」按它编）。
+        let fineArt = store.project.albumTheme == .fineArt
+        return HStack(spacing: 8) {
+            Picker("编排", selection: Binding(get: { store.project.albumTheme }, set: { store.setAlbumTheme($0) })) {
+                ForEach(CollageAlbumTheme.allCases, id: \.self) { Text($0.label).tag($0) }
+            }
+            .fixedSize()
+            .help("「自动编排」按哪套规则编：默认 = 分数最高的做扉页、横图铺满跨页；婚礼 fine-art = 扉页取宽景、"
+                  + "每章疏 → 密 → 精选收尾、竖图成对、每跨页最多 3 张、不跨中缝（换了点「自动编排」生效）。"
+                  + "纸、卡纸、≥ 25mm 的边距是样式：在「样式」里选「婚礼 fine-art」，一键成套「整本婚礼相册」两样一起设")
             Button("自动编排") { store.autoArrangeAlbum(dedupe: dedupeAlbum) }
                 .disabled(store.project.photos.isEmpty)
-                .help("托盘里的照片按时间和章节编成跨页：分数最高的做扉页，好片单独成页")
+                .help(fineArt ? "托盘里的照片按婚礼 fine-art 编成跨页：废片不要、同一场只留精选，扉页取宽景，每章疏 → 密 → 精选收尾"
+                      : "托盘里的照片按时间和章节编成跨页：分数最高的做扉页，好片单独成页")
             Toggle("相似只留一张", isOn: $dedupeAlbum)
                 .toggleStyle(.checkbox)
-                .help("连拍、同地同姿势的只留分数高的（拿掉的仍在托盘里，可以拖回任何跨页）")
-            Button("换一批") { store.regenerate() }
-                .disabled(store.root == nil || store.isSolving)
-                .help("当前跨页重新求解；锁定的格子不动")
+                .help(fineArt ? "只管画面相似的（关掉也不会全上：fine-art 一直是同一场只留精选、连拍只留一张）；拿掉的仍在托盘里，可以拖回任何跨页"
+                      : "连拍、同地同姿势的只留分数高的（拿掉的仍在托盘里，可以拖回任何跨页）")
+            if fineArt {
+                Toggle("整章黑白", isOn: Binding(get: { store.project.albumChapterMono },
+                                              set: { store.setAlbumTheme(.fineArt, chapterMono: $0) }))
+                    .toggleStyle(.checkbox)
+                    .help("一章里黑白照片占三分之一以上，整章的跨页都转黑白（R7：黑白按整章用，不零星撒）；下次「自动编排」生效")
+            }
+            // 婚礼 fine-art 的跨页按编排出版式（完整显示、卡纸留白），没有「换一批」（编排换回「默认」才有）：
+            // 不摆一个永远灰着的按钮 —— 窗口最窄（960）时它占的地方正好让「整章黑白」放得下。
+            if !fineArt {
+                Button("换一批") { store.regenerate() }
+                    .disabled(store.root == nil || store.isSolving)
+                    .help("当前跨页重新求解；锁定的格子不动")
+            }
             if store.isSolving { ProgressView().controlSize(.small) }
         }
+        // 整组按自己要的宽度排（不折行、不截字）：顶栏的 HStack 按份给宽度，不先让右边的空当（Spacer）让出来 ——
+        // 以前 960 宽、fine-art 时「相似只留一张」挤成两行；只给勾选框 fixedSize 又轮到「自动编排」截成「自动…」。
+        .fixedSize()
     }
 
     // MARK: - 底部：跨页条 + 备选版式
 
     private var bottomStrips: some View {
         VStack(spacing: 0) {
-            if store.isAlbum {
+            // 相册的跨页条；单张拼图有好几页（一键成套的一期杂志、小红书轮播组图）时也显示（页条）。
+            if store.isAlbum || store.project.pages.count > 1 {
                 CollagePageStrip(store: store)
                 Divider()
             }
@@ -225,7 +256,8 @@ struct CollageTray: View {
                     LazyVGrid(columns: columns, spacing: 6) {
                         ForEach(store.project.photos) { photo in
                             CollageTrayItem(photo: photo, used: store.usedPhotoIDs.contains(photo.id),
-                                            dropped: store.albumDropped.contains { $0.id == photo.id })
+                                            dropped: store.albumDropped.contains { $0.id == photo.id },
+                                            fineArt: store.isAlbum && store.project.albumTheme == .fineArt)
                                 .onDrag { NSItemProvider(object: photo.id as NSString) }
                                 .contextMenu { menu(for: photo) }
                         }
@@ -325,6 +357,8 @@ struct CollageTrayItem: View {
     let photo: CollagePhotoRef
     let used: Bool
     let dropped: Bool
+    /// 婚礼 fine-art 编排拿掉的不全是「相似」（同一场只留精选拿掉的更多）：角标写「拿掉」。
+    var fineArt = false
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -347,7 +381,7 @@ struct CollageTrayItem: View {
         }
         .overlay(alignment: .bottomLeading) {
             if dropped {
-                Text("相似")
+                Text(fineArt ? "拿掉" : "相似")
                     .font(.system(size: 9, weight: .semibold))
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1)
@@ -356,7 +390,7 @@ struct CollageTrayItem: View {
                     .padding(3)
             }
         }
-        .help(photo.id + (photo.isPick ? " · 精选" : "") + (used ? " · 已用" : "") + (dropped ? " · 相册去重拿掉的" : ""))
+        .help(photo.id + (photo.isPick ? " · 精选" : "") + (used ? " · 已用" : "") + (dropped ? (fineArt ? " · fine-art 编排没上（同一场只留精选 / 相似）" : " · 相册去重拿掉的") : ""))
     }
 }
 
@@ -370,7 +404,13 @@ struct CollageAlternativeStrip: View {
             Text("备选").font(.caption).foregroundStyle(.secondary)
                 .frame(width: 32)
             if store.alternativeThumbs.isEmpty {
-                Text(store.root == nil ? "自动排版后这里是几十个备选版式，← → 切换" : "点「换一批」或 → 出一批备选版式")
+                // 婚礼 fine-art 编排的相册没有「换一批」（按钮灰着）：别叫人去点它。
+                Text(store.root == nil ? "自动排版后这里是几十个备选版式，← → 切换"
+                     : store.isAlbum && store.project.albumTheme == .fineArt
+                     ? "婚礼 fine-art 的跨页按编排出版式，没有备选：想重排点「自动编排」"
+                     : store.isContactSheet
+                     ? "印样按拍摄先后排，没有备选：改规格、每条帧数在「版式 › 印样」里"
+                     : "点「换一批」或 → 出一批备选版式")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                 Spacer()
@@ -407,9 +447,12 @@ struct CollageAlternativeStrip: View {
 struct CollagePageStrip: View {
     @ObservedObject var store: CollageStore
 
+    /// 相册叫「跨页」，单张拼图的多页叫「页」。
+    private var unit: String { store.isAlbum ? "跨页" : "页" }
+
     var body: some View {
         HStack(spacing: 8) {
-            Text("跨页").font(.caption).foregroundStyle(.secondary)
+            Text(unit).font(.caption).foregroundStyle(.secondary)
                 .frame(width: 32)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
@@ -424,7 +467,7 @@ struct CollagePageStrip: View {
                             .background(Color.gray.opacity(0.15), in: RoundedRectangle(cornerRadius: 4))
                     }
                     .buttonStyle(.plain)
-                    .help("在当前跨页后面加一个空跨页")
+                    .help("在当前\(unit)后面加一个空\(unit)")
                 }
                 .padding(.vertical, 6)
             }
@@ -457,8 +500,8 @@ struct CollagePageStrip: View {
             Button("往前挪") { store.movePage(index, by: -1) }.disabled(index == 0)
             Button("往后挪") { store.movePage(index, by: 1) }.disabled(index == store.project.pages.count - 1)
             Divider()
-            Button("删除这个跨页", role: .destructive) { store.deletePage(index) }
+            Button("删除这个\(unit)", role: .destructive) { store.deletePage(index) }
         }
-        .help("跨页 \(index + 1) · \(page.photoIDs.count) 张（右键挪动/删除）")
+        .help("\(unit) \(index + 1) · \(page.photoIDs.count) 张（右键挪动/删除）")
     }
 }

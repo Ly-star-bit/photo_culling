@@ -1,0 +1,18 @@
+UnifrakturCook Bold（哥特体，报纸风刊头用）
+
+来源：https://github.com/google/fonts/tree/main/ofl/unifrakturcook
+  文件  UnifrakturCook-Bold.ttf（42688 字节）
+  sha256 ea002fa9c65f1a612af100e00d87ab65f16381f450020ec3d021f3dbf79a6dcd
+  PostScript 名 UnifrakturCook-Bold
+许可：SIL Open Font License 1.1（全文见同目录 OFL.txt）。Reserved Font Name：UnifrakturCook。
+作者：j. 'mach' wust（2010），Peter Wiegel（2009）。
+
+字体原样（未修改）以 base64 嵌在
+  culling-poc/LabelGUI/Sources/LabelGUI/Collage/CollageEmbeddedFonts.swift
+运行时用 CTFontManagerCreateFontDescriptorsFromData 解出字体描述，只给拼图用，不装进系统字体表。
+没有用 SwiftPM resources：Bundle.module 在 .app 里找不到资源包会直接崩。
+build_app.sh 把这个目录（许可证）拷进 选片工具.app/Contents/Resources/fonts/。
+
+重新生成嵌入数据：
+  base64 -b 100 -i UnifrakturCook-Bold.ttf
+把输出整段替换 CollageEmbeddedFonts.swift 里 unifrakturCookBase64 的内容，并更新上面的 sha256。

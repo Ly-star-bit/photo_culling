@@ -69,8 +69,8 @@ enum CollageHit {
     case item(CollageItem)
     case rotateHandle(CollageItem)
     case resizeHandle(CollageItem)
-    /// 选中格子上压的字（拖它换位置）。
-    case overlay(CollageLayout.Frame, CGRect)
+    /// 选中格子上压的第几个字块（拖它换位置）。
+    case overlay(CollageLayout.Frame, Int, CGRect)
     case none
 
     /// 图层在格子、缝之上：先看选中图层的把手，再从最上面一层往下找，再看压字，最后才是缝和格子。
@@ -85,13 +85,19 @@ enum CollageHit {
         }
         let c = layout.toCanvas(p)
         let slop = 3 / max(0.01, layout.scale)
-        for item in store.items.reversed() where CollageItems.contains(item, point: c, canvas: canvas, slop: slop) {
+        for item in store.items.reversed() where CollageItems.hits(item, point: c, canvas: canvas, slop: slop) {
             return .item(item)
         }
         if let path = store.selection, let frame = geometry.frames.first(where: { $0.path == path }),
-           frame.cell.overlay != nil, let placement = store.overlayPlacement(for: frame),
-           placement.rect.insetBy(dx: -slop * 2, dy: -slop * 2).contains(c) {
-            return .overlay(frame, placement.rect)
+           !frame.cell.overlays.isEmpty {
+            let placed = store.overlayPlacements(for: frame)
+            let hits = placed.indices.reversed().filter { i in
+                placed[i]?.rect.insetBy(dx: -slop * 2, dy: -slop * 2).contains(c) == true
+            }
+            // 叠在一起时先认正在编辑的那一个（拖它不会被压在上面的那块抢走），再从最上面一层往下找。
+            if let i = hits.first(where: { $0 == store.overlayIndex }) ?? hits.first, let p = placed[i] {
+                return .overlay(frame, i, p.rect)
+            }
         }
         return at(p, geometry: geometry, layout: layout)
     }
@@ -138,7 +144,7 @@ struct CollageCanvasView: View {
         case item(CollageItem)
         case rotate(CollageItem, CGPoint)
         case resize(CollageItem, CGPoint, CGFloat)
-        case overlay([Int], CGRect, CGPoint)
+        case overlay([Int], Int, CGRect, CGPoint)
     }
 
     @State private var dragMode: DragMode?
@@ -262,8 +268,9 @@ struct CollageCanvasView: View {
         switch CollageHit.at(p, store: store, geometry: geometry, layout: layout) {
         case .item(let item), .rotateHandle(let item), .resizeHandle(let item):
             store.selectItem(item.id)
-        case .overlay(let f, _):
+        case .overlay(let f, let i, _):
             store.selection = f.path
+            store.overlayIndex = i
         case .gutter(let g):
             if NSEvent.modifierFlags.contains(.option) { store.flipGutter(g.path) }
         case .cell(let f):
@@ -284,8 +291,9 @@ struct CollageCanvasView: View {
             if item.kind == .text { onEditText() }
             return
         }
-        if case .overlay(let f, _) = hit {
+        if case .overlay(let f, let i, _) = hit {
             store.selection = f.path
+            store.overlayIndex = i
             onEditText()
             return
         }
@@ -334,10 +342,11 @@ struct CollageCanvasView: View {
             store.beginContinuousEdit()
             let center = CollageItemHandles(item: item, canvas: store.project.canvas, layout: layout).center
             return .resize(item, center, max(4, hypot(p.x - center.x, p.y - center.y)))
-        case .overlay(let f, let rect):
+        case .overlay(let f, let i, let rect):
             store.selection = f.path
+            store.overlayIndex = i
             store.beginContinuousEdit()
-            return .overlay(f.path, store.overlayArea(for: f), CGPoint(x: rect.midX, y: rect.midY))
+            return .overlay(f.path, i, store.overlayArea(for: f), CGPoint(x: rect.midX, y: rect.midY))
         case .gutter(let g):
             store.beginContinuousEdit()
             return .gutter(g)
@@ -357,7 +366,8 @@ struct CollageCanvasView: View {
         case .gutter(let g):
             let c = layout.toCanvas(value.location)
             let position = g.axis == .row ? Double(c.x) : Double(c.y)
-            let gutterWidth = CollageLayout.gutterPixels(canvas: store.project.canvas, style: store.project.style)
+            // 这条缝自己的宽度（相册设了四边边距时中缝比别的缝宽：两页的内边距）。
+            let gutterWidth = g.axis == .row ? g.rect.width : g.rect.height
             let minPixels = store.project.canvas.shortSide * 0.06
             let ratio = CollageLayout.ratio(forDrag: position, gutter: g, gutterWidth: gutterWidth, minPixels: minPixels)
             store.setRatio(ratio, at: g.path)
@@ -387,12 +397,12 @@ struct CollageCanvasView: View {
                 item.width = max(0.015, base.width * k)
                 item.height = max(0.008, base.height * k)
             }
-        case .overlay(let path, let area, let startCenter):
+        case .overlay(let path, let index, let area, let startCenter):
             let cx = startCenter.x + value.translation.width / layout.scale
             let cy = startCenter.y + value.translation.height / layout.scale
             let x = Double((cx - area.minX) / max(1, area.width))
             let y = Double((cy - area.minY) / max(1, area.height))
-            store.setOverlayPosition(x: x, y: y, at: path)
+            store.setOverlayPosition(x: x, y: y, at: path, index: index)
         }
     }
 
@@ -567,9 +577,15 @@ struct CollageCanvasOverlay: View {
                 dropHighlight(frame, edge: target.edge)
             }
             if let path = store.selection, !store.cropEditing,
-               let frame = geometry.frames.first(where: { $0.path == path }), frame.cell.overlay != nil,
-               let placement = store.overlayPlacement(for: frame) {
-                overlayBox(layout.toView(placement.rect))
+               let frame = geometry.frames.first(where: { $0.path == path }), !frame.cell.overlays.isEmpty {
+                // 每个字块一个虚框：正在编辑的那个实一点，别的淡一点（点一下切过去）。
+                let placed = store.overlayPlacements(for: frame)
+                ForEach(Array(placed.enumerated()), id: \.offset) { item in
+                    if let p = item.element {
+                        overlayBox(layout.toView(p.rect))
+                            .opacity(item.offset == store.overlayIndex ? 1 : 0.45)
+                    }
+                }
             }
             if let item = store.selectedItemValue {
                 itemSelection(CollageItemHandles(item: item, canvas: store.project.canvas, layout: layout))
@@ -665,7 +681,7 @@ struct CollageCanvasOverlay: View {
     @ViewBuilder
     private func badges(for frame: CollageLayout.Frame) -> some View {
         let r = viewRect(frame)
-        let window = store.window(for: frame)
+        let window = store.window(for: frame, waitForMask: false)
         let cut = window?.cutsFace ?? false
         // 路人只在选中的那一格标（景区照片几乎格格有路人，以前满屏橙色角标）；切脸一直标。
         let bystander = (window?.hitsBystander ?? false) && store.selection == frame.path
@@ -729,7 +745,7 @@ struct CollageCanvasOverlay: View {
 
     private func faceRects(_ frame: CollageLayout.Frame, in r: CGRect) -> [CGRect] {
         guard let id = frame.cell.photoID, let photo = store.photoMap[id],
-              let window = store.window(for: frame) else { return [] }
+              let window = store.window(for: frame, waitForMask: false) else { return [] }
         let area = layout.toView(store.photoArea(for: frame))
         let drawn = CollageCrop.drawnRect(window: window, photo: photo, cell: frame.cell, in: area)
         return CollageCrop.faceBoxes(photo: photo, window: window, in: drawn)
@@ -770,8 +786,10 @@ struct CollageCanvasDropDelegate: DropDelegate {
             _ = provider.loadObject(ofClass: NSString.self) { object, _ in
                 guard let id = object as? String else { return }
                 Task { @MainActor in
-                    // 散落版：落点放一张相纸。
-                    if store.isFreeform {
+                    // 印样：接在这一卷最后（先判它：渲染也是印样优先）。散落版：落点放一张相纸。
+                    if store.isContactSheet {
+                        store.addContactFrame(id)
+                    } else if store.isFreeform {
                         store.addPhotoItem(id, at: point)
                     } else if let where_ {
                         store.place(photoID: id, at: where_.path, edge: where_.edge)

@@ -16,6 +16,14 @@ enum CollageCrop {
         var bystanders: [[Double]] = []
         /// 无脸照片的主体框（Vision 前景分割）。
         var subject: [Double]?
+        /// 1024 预览的平均亮度 0…1、是不是黑白（顺手算的，抄进托盘的 CollagePhotoRef：编排、成套用）。
+        var meanLuma: Double?
+        var isMonochrome: Bool?
+        /// 主体蒙版算完抄过来的（CollageMasks）：每张脸的头顶（脸横向范围里蒙版最上面那一行，归一化 y；
+        /// 没找到 = −1）、蒙版占画面多少。只给挑主图这类便宜的用处看；渲染、封面取景直接问 CollageMasks
+        /// （同步拿，不等后台），预览和导出才是同一个头顶。
+        var headTop: [Double]?
+        var maskCoverage: Double?
 
         init(bystanders: [[Double]] = [], subject: [Double]? = nil) {
             self.bystanders = bystanders
@@ -45,7 +53,7 @@ enum CollageCrop {
             let d = min(rect.width, rect.height)
             outer = CGRect(x: rect.midX - d / 2, y: rect.midY - d / 2, width: d, height: d)
         }
-        return isFramed(cell: cell, style: style) ? borderInner(outer, style.border) : outer
+        return isFramed(cell: cell, style: style) ? borderInner(outer, style.border, mat: style.matWidth) : outer
     }
 
     /// 形状外框（月洞门 = 正方形），相纸/胶片的框画在这里面。
@@ -57,11 +65,15 @@ enum CollageCrop {
 
     static func isFramed(cell: CollageCell, style: CollageStyle) -> Bool {
         let shape = cell.shape ?? style.shape
-        return (style.border == .polaroid || style.border == .film) && (shape == .rect || shape == .rounded)
+        let framedBorder = style.border == .polaroid || style.border == .film || style.border == .mat
+        return framedBorder && (shape == .rect || shape == .rounded)
     }
 
-    /// 相纸：上左右窄、下宽；胶片：长边两侧留齿孔带。
-    static func borderInner(_ outer: CGRect, _ border: CollageBorder) -> CGRect {
+    /// 卡纸底边比另外三边宽多少（装裱惯例 bottom weighting：底边宽 1/4"–1/2"，不加的话画看起来往下掉）。
+    static let matBottomWeight = 1.2
+
+    /// 相纸：上左右窄、下宽；胶片：长边两侧留齿孔带；卡纸：四边 mat × 短边，底边再宽两成。
+    static func borderInner(_ outer: CGRect, _ border: CollageBorder, mat: Double = 0.07) -> CGRect {
         let m = min(outer.width, outer.height)
         switch border {
         case .polaroid:
@@ -69,6 +81,11 @@ enum CollageCrop {
             let bottom = m * 0.19
             return CGRect(x: outer.minX + side, y: outer.minY + side,
                           width: outer.width - side * 2, height: outer.height - side - bottom)
+        case .mat:
+            let side = m * CGFloat(mat)
+            let bottom = m * CGFloat(mat * matBottomWeight)
+            return CGRect(x: outer.minX + side, y: outer.minY + side,
+                          width: max(2, outer.width - side * 2), height: max(2, outer.height - side - bottom))
         case .film:
             if outer.width >= outer.height {
                 let band = outer.height * 0.1
@@ -260,6 +277,194 @@ enum CollageCrop {
         win.cutsFace = cut || (safe.map { !contains(win.rect, $0) } ?? false)
         win.hitsBystander = hits
         return win
+    }
+
+    // MARK: - 封面取景（CollageFraming.cover）
+
+    /// 封面取景的目标，全是这一格的成品坐标（1 倍）：刊头最大那一行的字顶、基线，头顶压进字高的比例 t。
+    /// behind = 人在字前（头顶压进刊头）；false = 字在人前（头顶落到基线下面，字不压脸）。
+    struct CoverTarget {
+        var area: CGRect
+        var capTop: Double
+        var baseline: Double
+        var depth: Double
+        var behind = true
+        /// 头顶（归一化照片 y）：有蒙版用实测，没有用脸框上沿 − 0.3 脸高。
+        var headTop: Double
+        /// 放大上限（成品像素 / 原图像素）：超了就不再拉近，改提高 t。
+        var upscaleLimit = 1.2
+        /// 最多拉近几倍（相对最大窗口；nil = 不限）：CollageOverlay.maxZoom。
+        var maxZoom: Double?
+        /// 横向挪：0 = 脸居中对着格子中线（刊头居中，头压在中间的字母上）；正 = 窗口往右挪（照片坐标）。
+        var shiftX = 0.0
+        /// 导出往出血外延的那几条边（零边距印刷、贴着成品边）：窗口连同外延都要在照片里。
+        var reserve = Reserve()
+    }
+
+    /// 导出时窗口往外延多少（相对窗口自己的宽 / 高：外延像素 ÷ 这一格的宽 / 高）。全 0 = 不外延。
+    struct Reserve: Hashable {
+        var left = 0.0
+        var top = 0.0
+        var right = 0.0
+        var bottom = 0.0
+
+        var isEmpty: Bool { left + top + right + bottom <= 0 }
+    }
+
+    /// 定好的取景连同出血外延要在照片里（导出时外延正好装得下，不用整块平移、也不用重新取景 —— 那样头就不在
+    /// 预览里定的位置上了）：放不下就以中心缩一点（拉近），再整块挪回照片里。没有外延 = 原样。
+    static func reserved(_ win: Window, _ r: Reserve) -> Window {
+        guard !r.isEmpty, win.w > 0, win.h > 0 else { return win }
+        let spanX: Double = 1 + r.left + r.right
+        let spanY: Double = 1 + r.top + r.bottom
+        let k: Double = min(1, 1 / (win.w * spanX), 1 / (win.h * spanY))
+        var out = win
+        if k < 1 {
+            out.w = win.w * k
+            out.h = win.h * k
+            out.x = win.x + (win.w - out.w) / 2
+            out.y = win.y + (win.h - out.h) / 2
+        }
+        let hiX: Double = 1 - out.w - r.right * out.w
+        let hiY: Double = 1 - out.h - r.bottom * out.h
+        out.x = clamp(out.x, r.left * out.w, hiX)
+        out.y = clamp(out.y, r.top * out.h, hiY)
+        return out
+    }
+
+    /// 解封面窗口（C2 §5 方案 a）：头顶落在字顶下 t 个字高；眼睛要么在字高 45–70% 处（脸嵌在字母之间），
+    /// 要么在基线下 0–8% 格高，两种里挑要放大更少的；放大受 upscaleLimit 管，管不住就把 t 提高（头再往下）。
+    /// 字在人前时头顶落在基线下 2% 格高、窗口尽量大。窗口出了照片上沿就再拉近一点（头顶上面没那么多天）。
+    static func coverWindow(photo: CollagePhotoRef, cellAspect: Double, target c: CoverTarget, hints: Hints?) -> Window {
+        let maxW = maxWindow(photoAspect: photo.aspect, cellAspect: cellAspect)
+        guard let f = photo.faces.first(where: isValidBox), c.area.height > 1 else {
+            return window(for: photo, cellAspect: cellAspect, framing: .full, override: nil, hints: hints)
+        }
+        let areaH = Double(c.area.height)
+        let fh = f[3] - f[1]
+        let eye: Double = f[1] + 0.42 * fh
+        let ht = min(c.headTop, f[1])
+        let de = max(1e-4, eye - ht)
+        let capH = max(1, c.baseline - c.capTop)
+        // 最大的窗口：连同导出的出血外延都在照片里（没有外延 = maxW.h）。
+        let r = c.reserve
+        let spanX: Double = 1 + r.left + r.right
+        let spanY: Double = 1 + r.top + r.bottom
+        let fullH: Double = min(maxW.h, 1 / spanY, maxW.h / (maxW.w * spanX))
+        // 不放大超过上限、不拉近超过 maxZoom 的最小窗口高（归一化照片高）。
+        let hPixels: Double = areaH / (c.upscaleLimit * Double(max(1, photo.height)))
+        let hZoom: Double = c.maxZoom.map { fullH / max(1, $0) } ?? 0
+        let hMin = min(fullH, max(hPixels, hZoom))
+        var t = c.depth
+        var h = fullH
+        var headY: Double
+        if c.behind {
+            // 两种眼位：字高 45–70%，或基线下 0–8% 格高。D = 眼到头顶的成品距离 = de × 格高 / h。
+            let spans: [(Double, Double)] = [((0.45 - t) * capH, (0.70 - t) * capH),
+                                            ((1 - t) * capH, (1 - t) * capH + 0.08 * areaH)]
+            var best: Double?
+            for (lo, hi) in spans where lo > 0 {
+                let hLo = de * areaH / hi
+                let hHi = de * areaH / lo
+                let top = min(fullH, hHi)
+                guard top >= max(hMin, hLo) - 1e-9 else { continue }
+                best = max(best ?? 0, top)
+            }
+            if let best {
+                h = best
+            } else if de * areaH / fullH > (1 - t) * capH + 0.08 * areaH {
+                // 脸大：最大窗口眼睛都在基线下面老远，不拉近。
+                h = fullH
+            } else {
+                // 要放大超过上限才够得着：停在上限，把 t 提高到眼睛落到字高 45% 处（头再往下）。
+                h = hMin
+                let reach = de * areaH / h
+                t = max(t, min(1.2, 0.45 - reach / capH))
+            }
+            headY = c.capTop + t * capH
+        } else {
+            headY = c.baseline + 0.02 * areaH
+        }
+        // 头顶落在格子里的比例。窗口上沿不能出照片：头顶上面天不够就拉近（不超过放大上限）。人在字后时下沿也不能出：
+        // 竖图放进稍宽的封面，最大窗口上下只有一点余量，不拉近头就顶不到刊头里（会被照片下沿卡住、掉到刊头下面）。
+        // 出血外延也算在照片里（上沿留 r.top·h、下沿留 r.bottom·h；没有外延时就是原来那两条）。
+        let tau = max(0, (headY - Double(c.area.minY)) / areaH)
+        let topNeed: Double = tau + r.top
+        let bottomNeed: Double = 1 - tau + r.bottom
+        if topNeed > 1e-6, ht - tau * h < r.top * h { h = max(hMin, min(h, ht / topNeed)) }
+        if c.behind, bottomNeed > 1e-6, ht - tau * h + h * (1 + r.bottom) > 1 {
+            h = max(hMin, min(h, (1 - ht) / bottomNeed))
+        }
+        // 要留在窗口里的（同 CollageCrop.window 的安全区：合影里旁边那个人也不能切掉）：主脸的头 ∪ 其余每张脸的安全区。
+        let head = CGRect(x: f[0], y: max(0, ht), width: f[2] - f[0], height: max(0, f[3] - max(0, ht)))
+        let keep = coverKeep(photo.faces, head: head)
+        // 字在人前（退回人前那一版、封面取景刊头在人前）：下沿出了照片也拉近 —— 不拉近 y 就被照片底边夹住，
+        // 头掉到刊头下面老远（竖 2:3 放进 3:4、头在照片偏下）。拉近到头顶落在最下面那行基线下 2%，
+        // 不超过放大上限，也不切要留的人：最低的下巴还在窗口里、所有人的宽度装得下。
+        if !c.behind, bottomNeed > 1e-6, ht - tau * h + h * (1 + r.bottom) > 1 {
+            let byChin: Double = (Double(keep.maxY) - ht) / max(1e-6, 1 - tau)
+            let byWidth: Double = Double(keep.width) * maxW.h / maxW.w
+            let floorH: Double = max(hMin, byChin, byWidth)
+            h = min(fullH, max(floorH, min(h, (1 - ht) / bottomNeed)))
+        }
+        let w = h * maxW.w / maxW.h
+        var loY: Double = r.top * h
+        var hiY: Double = max(loY, 1 - h - r.bottom * h)
+        // 竖向听头顶的目标（头顶压进刊头），只在装得下所有人时收紧到不切人；装不下（或和照片边、出血外延冲突）
+        // 就照原样（切没切人下面按窗口实际装没装下判）。keep 的上沿不低于主脸头顶，收紧不会把头顶切掉。
+        let needLoY: Double = Double(keep.maxY) - h
+        let needHiY = Double(keep.minY)
+        let fitLoY = max(loY, needLoY)
+        let fitHiY = min(hiY, needHiY)
+        if fitLoY <= fitHiY + 1e-9 {
+            loY = fitLoY
+            hiY = max(fitLoY, fitHiY)
+        }
+        let y = clamp(ht - tau * h, loY, hiY)
+        let fc = (f[0] + f[2]) / 2
+        // 横向：脸居中，再按 shiftX 挪；所有人（主脸加头顶、其余的脸加留白）不能出窗口；左右的出血外延也要在照片里。
+        // 装不下所有人：退回只管主脸（刊头压的是主脸的头），切脸照实记。
+        var loX: Double = r.left * w
+        var hiX: Double = max(loX, 1 - w - r.right * w)
+        let needLoX: Double = Double(keep.maxX) - w
+        let needHiX = Double(keep.minX)
+        let fitLoX = max(loX, needLoX)
+        let fitHiX = min(hiX, needHiX)
+        if fitLoX <= fitHiX + 1e-9 {
+            loX = fitLoX
+            hiX = max(fitLoX, fitHiX)
+        } else {
+            let faceLo = f[2] - w
+            let faceHi = f[0]
+            if faceLo <= faceHi {
+                loX = max(loX, faceLo)
+                hiX = min(hiX, faceHi)
+            }
+            if loX > hiX { hiX = loX }
+        }
+        let x = clamp(fc - w / 2 + c.shiftX, loX, hiX)
+        var win = Window(x: x, y: y, w: w, h: h)
+        win.cutsFace = !contains(win.rect, keep)
+        win.hitsBystander = overlap(win.rect, hints?.bystanders ?? []) > 0.0005
+        return win
+    }
+
+    /// 封面取景要留在窗口里的：主脸只要头（头顶用实测、不另加留白 —— 单人照和以前一样，刊头压的就是这个头），
+    /// 其余每张脸照 safeRegion 留白（按主脸大小：上 0.3 张脸、其余 0.06）。只有一张脸 = head。
+    static func coverKeep(_ faces: [[Double]], head: CGRect) -> CGRect {
+        let valid = faces.filter(isValidBox)
+        guard let primary = valid.first, valid.count > 1 else { return head }
+        let fw = primary[2] - primary[0]
+        let fh = primary[3] - primary[1]
+        var keep = head
+        for g in valid.dropFirst() {
+            let left = max(0, g[0] - 0.06 * fw)
+            let top = max(0, g[1] - 0.3 * fh)
+            let right = min(1, g[2] + 0.06 * fw)
+            let bottom = min(1, g[3] + 0.06 * fh)
+            keep = keep.union(CGRect(x: left, y: top, width: right - left, height: bottom - top))
+        }
+        return keep
     }
 
     /// 照片实际画在格子里的哪一块：完整显示 = 按比例居中；否则铺满格子。

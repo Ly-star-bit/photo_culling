@@ -121,6 +121,8 @@ struct BatchItem: Identifiable {
     var faceLuma: Double?
     var frameLuma: Double?
     var frameLumaP99: Double?
+    /// 拍摄时间的小数秒（layer1 的 capture_subsec）：captureTime 只到整秒，同一秒连拍的先后看它。没有 = nil。
+    var captureSubsec: Double?
 
     /// Below the safety-shutter rule — motion blur likely; info badge, not a reject.
     var slowShutter: Bool { exif?.slowShutter ?? false }
@@ -1023,6 +1025,8 @@ final class BatchStore: ObservableObject {
             && dir.lastPathComponent != "default"
             && !keep.contains(dir.lastPathComponent) {
             try? fm.removeItem(at: dir.appendingPathComponent("previews"))
+            // 拼图的主体蒙版（派生数据，进拼图 tab 会按需重算）跟着预览一起清。
+            try? fm.removeItem(at: dir.appendingPathComponent("collage_masks"))
             // 什么都没剩（只打开过、从没分析过的空场次）才连目录一起删。打开时就写下的 thresholds.json 不算。
             let left = (try? fm.contentsOfDirectory(atPath: dir.path))?.filter { $0 != "thresholds.json" }
             if left?.isEmpty == true {
@@ -1605,7 +1609,8 @@ final class BatchStore: ObservableObject {
             fileCorrupt: a.fileCorrupt,
             faceLuma: a.faceLuma,
             frameLuma: a.frameLuma,
-            frameLumaP99: a.frameLumaP99
+            frameLumaP99: a.frameLumaP99,
+            captureSubsec: a.captureSubsec
         )
     }
 
@@ -2055,6 +2060,7 @@ final class BatchStore: ObservableObject {
             item.faceLuma = l1.faceLuma
             item.frameLuma = l1.frameLuma
             item.frameLumaP99 = l1.frameLumaP99
+            item.captureSubsec = l1.captureSubsec
             return item
         }
         Self.applyBodyClock(&loaded, offsets: bodyOffsets)

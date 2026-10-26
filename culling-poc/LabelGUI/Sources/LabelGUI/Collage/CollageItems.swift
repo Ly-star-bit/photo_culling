@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import CoreText
+import CoreImage
 
 /// 自由图层：几何（中心 + 大小 + 旋转）、命中测试、绘制（相纸/白边/胶片/相角、胶带、标签、
 /// 邮戳、回形针、手写字）。纯函数，任何线程都能跑。
@@ -41,6 +42,30 @@ enum CollageItems {
     static func contains(_ item: CollageItem, point: CGPoint, canvas: CollageCanvas, slop: CGFloat = 0) -> Bool {
         let local = point.applying(transform(item, canvas: canvas).inverted())
         return localRect(item, canvas: canvas).insetBy(dx: -slop, dy: -slop).contains(local)
+    }
+
+    /// 画布上点选：油性笔的圈、叉、裁切线只有笔迹附近算点中（里面是空的，点进去选的是底下的照片格）。
+    static func hits(_ item: CollageItem, point: CGPoint, canvas: CollageCanvas, slop: CGFloat = 0) -> Bool {
+        guard contains(item, point: point, canvas: canvas, slop: slop) else { return false }
+        guard item.kind == .sticker, item.sticker == .greasePencil else { return true }
+        let local = point.applying(transform(item, canvas: canvas).inverted())
+        let r = localRect(item, canvas: canvas)
+        let u = abs(Double(local.x - r.midX) / max(1, Double(r.width) / 2))
+        let v = abs(Double(local.y - r.midY) / max(1, Double(r.height) / 2))
+        switch item.mark {
+        case .dot:
+            // 点是实心一团，整个外框都算。
+            return true
+        case .circle:
+            let d = (u * u + v * v).squareRoot()
+            return d >= 0.72 && d <= 1.15
+        case .cross:
+            // 只认两条对角线附近（u、v 取了绝对值，两条对角线都是 u = v，框角也在上面）；框边上没有墨，
+            // 点下去选的是底下那一格。
+            return abs(u - v) < 0.14
+        case .cropLine:
+            return max(u, v) >= 0.78
+        }
     }
 
     /// 外接矩形（成品坐标）。
@@ -208,6 +233,11 @@ enum CollageItems {
         var canvasHeight: Int
         /// 水印（nil = 这次渲染不画水印）：「每张照片」层画在相纸上；整页层「自动深浅」要知道相纸在哪。
         var marks: CollageWatermarks.Painter?
+        /// 照片加网（同格子：点距按这次渲染的缩放、纸色 = 页面底色）；nil = 不加。
+        var screen: CollageScreening.Spec? = nil
+        /// 纸纹压在照片上（style.paperOverPhotos）、纸色（页面底色；模糊底、渐变底时是盖在上面的底色块）。
+        var paperOver = 0.0
+        var background: CollageColor = .paper
     }
 
     /// 导出里不印的图层：没分到照片的相纸（照片不够、从托盘拿掉了）和贴在它上面的东西。
@@ -221,10 +251,13 @@ enum CollageItems {
 
     /// 每个图层转过之后的四个角（成品坐标），顺序同 items；导出里不印的 = nil（预览里的灰色占位也算不印：
     /// 水印躲不躲它，预览和导出得一样）。
+    /// 油性笔记号只是一道笔迹（圈、叉里面是空的）：不算盖住底下的照片，水印照常躲它的外框以外的东西。
     static func printedCorners(_ items: [CollageItem], photos: [String: CollagePhotoRef],
                                canvas: CollageCanvas) -> [[CGPoint]?] {
         let skip = unprinted(items, photos: photos)
-        return items.map { skip.contains($0.id) ? nil : corners($0, canvas: canvas) }
+        return items.map { it in
+            return skip.contains(it.id) || isPencil(it) ? nil : corners(it, canvas: canvas)
+        }
     }
 
     static func draw(_ items: [CollageItem], ctx: CGContext, dc: DrawContext) {
@@ -243,8 +276,11 @@ enum CollageItems {
                 drawPhotoItem(item, index: index, outer: outer, ctx: ctx, dc: dc)
             case .text:
                 if let text = item.text {
+                    // 这里的 CTM 已经按渲染缩放 scaleBy 过、short 是成品尺寸：花字投影（设备空间）要再乘一次缩放，
+                    // 不然预览里的投影比导出大 1/scale 倍。
                     CollageTypeset.draw(text, in: outer, ctx: ctx, short: dc.canvas.shortSide, vars: dc.vars,
-                                        canvasHeight: dc.canvasHeight)
+                                        canvasHeight: dc.canvasHeight, shadowScale: dc.scale,
+                                        owner: "\(dc.vars["no"] ?? "")|item\(index)")
                 }
             case .sticker:
                 drawSticker(item, outer: outer, ctx: ctx, dc: dc)
@@ -260,10 +296,13 @@ enum CollageItems {
                                       dc: DrawContext) {
         let short = dc.canvas.shortSide
         let inner = photoArea(item.frame, outer: outer)
+        // 抠图贴纸：只画主体（主体蒙版同步拿，预览、导出一样），相纸框、底下的投影都不画；认不出主体照常画。
+        let cutoutMask = item.cutout == nil ? nil
+            : item.photoID.flatMap { dc.photos[$0] }.flatMap { CollageMasks.mask(for: $0) }
         // 投影：CG 的阴影偏移在设备空间（y 朝上，不跟旋转走）—— 光从上方来，影子永远往下落。
         let s = CGFloat(item.shadow)
         let px = CGFloat(dc.scale)
-        if s > 0 {
+        if s > 0, cutoutMask == nil {
             ctx.saveGState()
             ctx.setShadow(offset: CGSize(width: 0, height: -CGFloat(short) * 0.005 * s * px),
                           blur: CGFloat(short) * 0.018 * s * px,
@@ -272,7 +311,7 @@ enum CollageItems {
             ctx.fill(item.frame == .none || item.frame == .mounts ? inner : outer)
             ctx.restoreGState()
         }
-        if item.frame != .none && item.frame != .mounts {
+        if item.frame != .none && item.frame != .mounts, cutoutMask == nil {
             ctx.setFillColor(frameFill(item.frame).cgColor)
             ctx.fill(outer)
             if item.frame == .film {
@@ -292,19 +331,41 @@ enum CollageItems {
             if let tile = CollageRender.cellImage(photo: photo, window: w, width: pw, height: ph,
                                                   sharpen: dc.sharpen, radius: dc.sharpenRadius,
                                                   export: dc.options.export, report: dc.options.report,
-                                                  color: dc.colorOps[id]) {
-                ctx.saveGState()
-                ctx.clip(to: inner)
-                CollageRender.drawImageTopLeft(ctx, tile, inner)
-                ctx.restoreGState()
+                                                  color: dc.colorOps[id], screen: dc.screen) {
+                if let report = dc.options.report, let screen = dc.screen {
+                    report.halftone.append(CollageRender.halftoneRecord(screen, owner: "item\(index)", photoID: id))
+                }
+                if let cutoutMask {
+                    let guide = CollageRender.tileGuide(photo, color: dc.colorOps[id], sharpen: dc.sharpen,
+                                                        radius: dc.sharpenRadius, export: dc.options.export,
+                                                        screen: dc.screen)
+                    let shown = CollageRender.Shown(tile: tile, drawn: inner, window: w,
+                                                    clip: CGPath(rect: inner, transform: nil), guide: guide)
+                    CollageRender.drawSubject(ctx, shown: shown, mask: cutoutMask, scale: dc.scale, short: short * dc.scale,
+                                              region: nil, cutout: item.cutout)
+                } else {
+                    ctx.saveGState()
+                    ctx.clip(to: inner)
+                    CollageRender.drawImageTopLeft(ctx, tile, inner)
+                    ctx.restoreGState()
+                    // 纸纹压在照片上：局部坐标已经按缩放放大过，纸纹块按设备像素和页面那层一样粗。
+                    if dc.paperOver > 0 {
+                        let k: Double = max(0.2, min(1, dc.scale)) / max(0.01, dc.scale)
+                        CollageRender.drawPaperOver(ctx, clips: [CGPath(rect: inner, transform: nil)],
+                                                    intensity: dc.paperOver, paper: dc.background,
+                                                    tint: dc.screen == nil, scale: dc.scale, tileScale: k)
+                    }
+                }
             }
         } else if dc.options.placeholders {
             ctx.setFillColor(CGColor(gray: 0.82, alpha: 1))
             ctx.fill(inner)
         }
-        if item.frame == .polaroid, !item.caption.isEmpty {
+        // 这张相纸自己的占位符（{frame} 帧号）：下沿手写字、水印的字用它。
+        let itemVars = CollageTypeset.cellVariables(dc.vars, photo: item.photoID.flatMap { dc.photos[$0] })
+        if item.frame == .polaroid, !item.caption.isEmpty, cutoutMask == nil {
             let band = CGRect(x: inner.minX, y: inner.maxY, width: inner.width, height: outer.maxY - inner.maxY)
-            let caption = CollageTypeset.fill(item.caption, vars: dc.vars)
+            let caption = CollageTypeset.fill(item.caption, vars: itemVars)
             if !caption.isEmpty, band.height > 4 {
                 let sizeRel = Double(band.height) * 0.36 / short
                 var t = CollageText(lines: [CollageTextLine(caption, font: .hanzipen, weight: .regular,
@@ -312,13 +373,13 @@ enum CollageItems {
                                     vertical: false, alignH: .center, alignV: .center)
                 t.lineSpacing = 0
                 CollageTypeset.draw(t, in: band.insetBy(dx: band.width * 0.06, dy: band.height * 0.12), ctx: ctx,
-                                    short: short, vars: dc.vars, canvasHeight: dc.canvasHeight)
+                                    short: short, vars: itemVars, canvasHeight: dc.canvasHeight)
             }
         }
-        if item.frame == .mounts { drawMounts(ctx, rect: inner, px: CGFloat(dc.scale)) }
+        if item.frame == .mounts, cutoutMask == nil { drawMounts(ctx, rect: inner, px: CGFloat(dc.scale)) }
         // 水印压在相角上面、跟着相纸转（区域躲开相角）。
         if let marks = dc.marks, let id = item.photoID, let photo = dc.photos[id], let window {
-            marks.drawItem(item, index: index, inner: inner, photo: photo, window: window, vars: dc.vars, ctx: ctx)
+            marks.drawItem(item, index: index, inner: inner, photo: photo, window: window, vars: itemVars, ctx: ctx)
         }
     }
 
@@ -402,10 +463,14 @@ enum CollageItems {
         return Double(raw) / 1000
     }
 
-    /// 按 id 定的随机数：同一张胶带每次画出来的纹理一样。
-    private static func seed(_ item: CollageItem) -> UInt64 {
+    /// 按 id 定的随机数：同一张胶带每次画出来的纹理一样。门禁（AppRuntime.stableSeeds）按几何定：
+    /// 新撒的图层每次运行 id 都不一样，两次出图要逐像素相同。
+    static func seed(_ item: CollageItem) -> UInt64 {
+        let source = AppRuntime.stableSeeds
+            ? "\(item.sticker.rawValue)|\(item.cx)|\(item.cy)|\(item.width)|\(item.height)|\(item.rotation)"
+            : item.id.uuidString
         var h: UInt64 = 1469598103934665603
-        for b in item.id.uuidString.utf8 {
+        for b in source.utf8 {
             h ^= UInt64(b)
             h = h &* 1099511628211
         }
@@ -422,7 +487,134 @@ enum CollageItems {
             drawPostmark(item, outer: outer, ctx: ctx, dc: dc)
         case .clip:
             drawClip(item, outer: outer, ctx: ctx, px: CGFloat(dc.scale))
+        case .barcode:
+            drawBarcode(item, outer: outer, ctx: ctx, dc: dc)
+        case .greasePencil:
+            CollagePencil.draw(item.mark, in: outer, color: item.color, seed: seed(item), ctx: ctx,
+                               lineWidth: pencilLineWidth(item, outer: outer, canvas: dc.canvas))
         }
+    }
+
+    /// 油性笔贴纸的线宽（局部坐标 = 成品像素）：按记号大小定（帧高的 4–6%，R2 §7），但不超过画布短边的 1.7%
+    /// （大照片上圈一圈也还是一支笔的粗细）：1440 宽上 24 像素，六宫格一格（约 586 像素）圈下来是帧高的 4.2%，
+    /// 更大的帧才被这个上限压细。画和整页水印躲笔迹（inkBoxes）用同一个。
+    static func pencilLineWidth(_ item: CollageItem, outer: CGRect, canvas: CollageCanvas) -> CGFloat {
+        let short = CGFloat(canvas.shortSide)
+        let lw = min(CollagePencil.defaultLineWidth(item.mark, in: outer), short * 0.017)
+        return max(short * 0.0015, lw)
+    }
+
+    /// 油性笔贴纸：只是一道笔迹（圈、叉里面是空的），水印不把它的外框当成挡着的东西。
+    static func isPencil(_ item: CollageItem) -> Bool { item.kind == .sticker && item.sticker == .greasePencil }
+
+    /// 油性笔的笔迹在哪（成品坐标，一小段一个框，转过的取外接框）；别的图层 = 空。整页水印在留白带里挑哪一头时躲它
+    /// （CollageWatermarks.inkObstacles）。
+    static func inkBoxes(_ item: CollageItem, canvas: CollageCanvas) -> [CGRect] {
+        guard isPencil(item) else { return [] }
+        let outer = localRect(item, canvas: canvas)
+        let t = transform(item, canvas: canvas)
+        let lw = pencilLineWidth(item, outer: outer, canvas: canvas)
+        return CollagePencil.inkBoxes(item.mark, in: outer, seed: seed(item), lineWidth: lw).map { $0.applying(t) }
+    }
+
+    /// 换油性笔记号：外框按两种记号对那一帧的倍数换算（圈 → 叉：外接椭圆缩回那一帧），中心不动。
+    static func withMark(_ item: CollageItem, _ mark: CollagePencilMark) -> CollageItem {
+        var out = item
+        guard mark != item.mark else { return out }
+        let k = mark.frameScale / item.mark.frameScale
+        out.width = min(3, max(0.005, item.width * k))
+        out.height = min(3, max(0.005, item.height * k))
+        out.mark = mark
+        return out
+    }
+
+    /// 装饰条码：白底、黑条、下面一行字。编的是 Code 128（日期或随机串），不是 EAN/UPC/ISBN/ISSN ——
+    /// 只是封面角上的纹理，扫出来也只是这串字，不会被当成真实出版物的商品码。
+    private static func drawBarcode(_ item: CollageItem, outer: CGRect, ctx: CGContext, dc: DrawContext) {
+        let raw = CollageTypeset.fill(item.label, vars: dc.vars)
+        let message = barcodeMessage(raw, seed: seed(item))
+        guard let modules = barcodeModules(message), !modules.isEmpty else { return }
+        ctx.saveGState()
+        ctx.setFillColor(item.color.cgColor)
+        ctx.fill(outer)
+        let ink = item.color.luminance > 0.5 ? CollageColor(hex: 0x111111) : CollageColor.white
+        let quiet = outer.width * 0.07
+        let barsRect = CGRect(x: outer.minX + quiet, y: outer.minY + outer.height * 0.1,
+                              width: outer.width - quiet * 2, height: outer.height * 0.62)
+        let unit = barsRect.width / CGFloat(modules.count)
+        ctx.setFillColor(ink.cgColor)
+        var i = 0
+        while i < modules.count {
+            guard modules[i] else {
+                i += 1
+                continue
+            }
+            var j = i
+            while j < modules.count, modules[j] { j += 1 }
+            ctx.fill(CGRect(x: barsRect.minX + CGFloat(i) * unit, y: barsRect.minY,
+                            width: CGFloat(j - i) * unit, height: barsRect.height))
+            i = j
+        }
+        ctx.restoreGState()
+        let band = CGRect(x: barsRect.minX, y: barsRect.maxY + outer.height * 0.03, width: barsRect.width,
+                          height: outer.maxY - barsRect.maxY - outer.height * 0.06)
+        guard band.height > 2 else { return }
+        let sizeRel = Double(band.height) * 0.82 / dc.canvas.shortSide
+        var t = CollageText(lines: [CollageTextLine(message, font: .typewriter, weight: .regular, size: sizeRel,
+                                                    tracking: 0.14, color: ink)],
+                            vertical: false, alignH: .center, alignV: .center)
+        t.lineSpacing = 0
+        CollageTypeset.draw(t, in: band, ctx: ctx, short: dc.canvas.shortSide, vars: [:], canvasHeight: dc.canvasHeight)
+    }
+
+    /// 条码上编的字：用户的字（展开占位符）只留 Code 128 能编的 ASCII；空 = 一串固定种子的随机数字。
+    static func barcodeMessage(_ raw: String, seed s: UInt64) -> String {
+        let ascii = String(raw.unicodeScalars.filter { $0.value >= 32 && $0.value < 127 }.map(Character.init))
+            .trimmingCharacters(in: .whitespaces)
+        if !ascii.isEmpty { return String(ascii.prefix(24)) }
+        var rng = SeededRandom(seed: s ^ 0xBA5C0DE)
+        var digits = (0..<12).map { _ in Int(rng.next() % 10) }
+        // 12 位数字碰巧过了 UPC-A 的校验位（十个种子里约一个）就是一个合法的 GTIN-12：最后一位故意错开一个
+        // （DESIGN §0.4：装饰条码不能是合法的 EAN / UPC / ISBN / ISSN）。
+        let odd = stride(from: 0, to: 11, by: 2).reduce(0) { $0 + digits[$1] }
+        let even = stride(from: 1, to: 11, by: 2).reduce(0) { $0 + digits[$1] }
+        let check = (10 - (odd * 3 + even) % 10) % 10
+        if digits[11] == check { digits[11] = (check + 1) % 10 }
+        return digits.map(String.init).joined()
+    }
+
+    private static let barcodeLock = NSLock()
+    private static var barcodeCache: [String: [Bool]] = [:]
+
+    /// Code 128 的模块（true = 黑条），CICode128BarcodeGenerator 出 1 像素一个模块、不留静区的图，读第一行。
+    static func barcodeModules(_ message: String) -> [Bool]? {
+        barcodeLock.lock()
+        if let hit = barcodeCache[message] {
+            barcodeLock.unlock()
+            return hit
+        }
+        barcodeLock.unlock()
+        guard let data = message.data(using: .ascii), let gen = CIFilter(name: "CICode128BarcodeGenerator") else { return nil }
+        gen.setValue(data, forKey: "inputMessage")
+        gen.setValue(0, forKey: "inputQuietSpace")
+        gen.setValue(1, forKey: "inputBarcodeHeight")
+        guard let image = gen.outputImage else { return nil }
+        let extent = image.extent.integral
+        let w = Int(extent.width)
+        guard w > 0, w < 4096 else { return nil }
+        var row = [UInt8](repeating: 255, count: w * 4)
+        row.withUnsafeMutableBytes { buf in
+            guard let base = buf.baseAddress else { return }
+            CollageRender.ciContext.render(image, toBitmap: base, rowBytes: w * 4,
+                                           bounds: CGRect(x: extent.minX, y: extent.minY, width: CGFloat(w), height: 1),
+                                           format: .RGBA8, colorSpace: CollageRender.srgb)
+        }
+        let modules = (0..<w).map { row[$0 * 4] < 128 }
+        barcodeLock.lock()
+        if barcodeCache.count > 64 { barcodeCache.removeAll() }
+        barcodeCache[message] = modules
+        barcodeLock.unlock()
+        return modules
     }
 
     /// 胶带：两头撕口是锯齿，半透明能透出底下照片的边。
@@ -688,8 +880,6 @@ enum CollageScatter {
         let grids = CollageLayout.solve(CollageLayout.Request(photos: photos.compactMap { fake[$0.id] },
                                                               context: gridContext, tries: 4000, keep: 10, seed: seed))
         guard !grids.isEmpty else { return [] }
-        let content = CollageLayout.contentRect(canvas: gridCanvas, style: style)
-        let gutter = CollageLayout.gutterPixels(canvas: gridCanvas, style: style)
         let hero = photos.max { $0.score < $1.score }
         var results: [CollageLayout.Scored] = []
         var rng = SeededRandom(seed: seed &* 31 &+ 7)
@@ -697,7 +887,7 @@ enum CollageScatter {
             // 同一个网格撒两次（不同的挪动和倾斜），留好的那次。
             var bestForGrid: CollageLayout.Scored?
             for _ in 0..<3 {
-                let frames = CollageLayout.geometry(grid.root, in: content, gutter: gutter).frames
+                let frames = CollageLayout.pageGeometry(grid.root, canvas: gridCanvas, style: style).frames
                 var items: [CollageItem] = []
                 var sign: Double = Bool.random(using: &rng) ? 1 : -1
                 for f in frames {

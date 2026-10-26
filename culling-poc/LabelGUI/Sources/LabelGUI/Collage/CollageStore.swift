@@ -24,8 +24,14 @@ final class CollageStore: ObservableObject {
     }
     /// 选中的格子（当前页的叶子路径）。和选中的图层互斥。
     @Published var selection: [Int]? {
-        didSet { if selection != nil, selectedItem != nil { selectedItem = nil } }
+        didSet {
+            if selection != nil, selectedItem != nil { selectedItem = nil }
+            // 换了格子：从这张照片的第一个字块（刊头）编起。
+            if selection != oldValue, overlayIndex != 0 { overlayIndex = 0 }
+        }
     }
+    /// 选中的照片上正在编辑第几个字块（0 = 刊头 / 唯一那个）：检视器的字块列表、画布上拖哪一个。
+    @Published var overlayIndex = 0
     /// 选中的自由图层（相纸、胶带、手写字）。
     @Published var selectedItem: UUID? {
         didSet { if selectedItem != nil, selection != nil { selection = nil } }
@@ -77,6 +83,8 @@ final class CollageStore: ObservableObject {
     private(set) var hints: [String: CollageCrop.Hints] = [:]
     /// 路人/主体算完一批就 +1：模板缩略图等着它重渲（裁切要避路人）。
     @Published private(set) var hintsVersion = 0
+    /// 主体蒙版预热完一批就 +1（检视器的「刊名被挡」读数跟着刷新）。渲染自己同步拿蒙版，不等它。
+    @Published private(set) var masksVersion = 0
     /// 色调样张（这一页的主图套每个色调）。
     @Published private(set) var lookThumbs: [CollageLook: NSImage] = [:]
     private var lookThumbKey = ""
@@ -85,6 +93,14 @@ final class CollageStore: ObservableObject {
     private var styleThumbKey = ""
     private var styleThumbTask: Task<Void, Never>?
     private var hintTask: Task<Void, Never>?
+    /// 还没跑完的路人信息批次（每次 computeHints 一批，跑完、作废都减一）。
+    private var hintRunsPending = 0
+    /// 主体蒙版预热（路人信息那一批抄完之后另起一个任务，一批接一批）：新的路人信息不用等它。
+    private var maskTask: Task<Void, Never>?
+    private var maskRunsPending = 0
+    /// 路人信息（和蒙版预热）还在后台算：命令行出图、排版前等它归零 —— 不然算到第几张就用第几张的，出图跟着机器
+    /// 快慢变（蒙版的头顶、覆盖率会抄进 Hints，挑主图看它）。
+    var hintsPending: Bool { hintRunsPending > 0 || maskRunsPending > 0 }
     @Published private(set) var userTemplates: [CollageTemplate] = []
     /// 模板库缩略图（按模板名；用托盘里的照片现套现渲）。
     @Published private(set) var templateThumbs: [String: NSImage] = [:]
@@ -154,6 +170,10 @@ final class CollageStore: ObservableObject {
     private var projectSaveTask: Task<Void, Never>?
     private var stateSaveTask: Task<Void, Never>?
     private var terminateObserver: NSObjectProtocol?
+    private var analysisObserver: NSObjectProtocol?
+    /// 批量页（attach 时给）：托盘里批量页照片的判决、场、名次跟着它刷新；一键成套从它拿这一场的全部照片
+    /// （印样要废片和整场的帧）。弱引用：两边都是整个 app 一份。
+    private(set) weak var batch: BatchStore?
 
     init(dataDir: URL) {
         stateDir = dataDir.appendingPathComponent("collage")
@@ -168,6 +188,12 @@ final class CollageStore: ObservableObject {
                 self?.flushProjectSave()
                 self?.flushStateSave()
             }
+        }
+        // 重新分析、重新判（VLM 复审、调阈值之后重载）：托盘里的判决、场、名次跟着换（只认同一个场次）。
+        analysisObserver = NotificationCenter.default.addObserver(
+            forName: .analysisDidFinish, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshFromBatch() }
         }
     }
 
@@ -186,12 +212,10 @@ final class CollageStore: ObservableObject {
         CollageLayout.Context(canvas: project.canvas, style: project.style, photos: photoMap, hints: hints, heroID: nil)
     }
 
-    /// 成品像素坐标里的几何（画布叠加层、拖缝、落点都用它）。散落版没有格子。
+    /// 成品像素坐标里的几何（画布叠加层、拖缝、落点都用它）。散落版、印样没有格子。
     var geometry: CollageLayout.Geometry {
-        guard let root, !isFreeform else { return CollageLayout.Geometry() }
-        let content = CollageLayout.contentRect(canvas: project.canvas, style: project.style)
-        let gutter = CollageLayout.gutterPixels(canvas: project.canvas, style: project.style)
-        return CollageLayout.geometry(root, in: content, gutter: gutter)
+        guard let root, !isFreeform, !isContactSheet else { return CollageLayout.Geometry() }
+        return CollageLayout.pageGeometry(root, canvas: project.canvas, style: project.style)
     }
 
     var selectedCell: CollageCell? {
@@ -200,6 +224,8 @@ final class CollageStore: ObservableObject {
     }
 
     var isFreeform: Bool { page?.freeform ?? false }
+    /// 这一页是印样 / 底片条（整页按片条画，没有格子可选、可拖）。
+    var isContactSheet: Bool { page?.contactSheet != nil }
     var items: [CollageItem] { page?.items ?? [] }
 
     var selectedItemValue: CollageItem? {
@@ -215,14 +241,39 @@ final class CollageStore: ObservableObject {
         CollageCrop.photoArea(cell: frame.cell, rect: frame.rect.cgRect, style: project.style)
     }
 
-    /// 当前页每格的取景（界面画人脸框、切脸警告用）—— 和渲染器同一个取景区域。
-    func window(for frame: CollageLayout.Frame) -> CollageCrop.Window? {
+    /// 当前页每格的取景（界面画人脸框、切脸警告用）—— 和渲染器同一个取景区域（封面取景、人物挡字的格子按
+    /// CollageCover 的决定）。
+    /// waitForMask = false（画布的角标、脸框：在 SwiftUI 的 body 里问）：封面取景、人物挡字、抠图格的蒙版还没算好
+    /// （大托盘刚带进来、预热排在后面）就先按普通取景给，不在主线程上现跑 Vision（一张 35–270 ms）；蒙版算好
+    /// masksVersion 一变，画布跟着刷新。
+    func window(for frame: CollageLayout.Frame, waitForMask: Bool = true) -> CollageCrop.Window? {
         guard frame.cell.kind == .photo, let id = frame.cell.photoID, let photo = photoMap[id] else { return nil }
         let geo = geometry
         let framing = CollageLayout.effectiveFraming(path: frame.path, cell: frame.cell, in: geo.frames,
                                                      photos: photoMap, tight: project.style.tightSmallCells)
+        if CollageCover.applies(to: frame.cell), waitForMask || CollageMasks.isSettled(photo),
+           let decided = coverResolution(for: frame) {
+            return decided.window
+        }
         return CollageCrop.window(for: photo, cell: frame.cell, cellAspect: CollageCrop.aspect(of: photoArea(for: frame)),
                                   framing: framing, hints: hints[id])
+    }
+
+    /// 这一格的人物挡字 / 封面取景决定（检视器读数、取景都按它）；不走这一套的格子 = nil。
+    func coverResolution(for frame: CollageLayout.Frame) -> CollageCover.Resolution? {
+        guard frame.cell.kind == .photo, let page, let id = frame.cell.photoID else { return nil }
+        let map = photoMap
+        guard let photo = map[id] else { return nil }
+        let ids = page.photoIDs
+        let framing = CollageLayout.effectiveFraming(path: frame.path, cell: frame.cell, in: geometry.frames,
+                                                     photos: map, tight: project.style.tightSmallCells)
+        let project = CollageLooks.project(self.project, page: page)
+        let vars = CollageTypeset.cellVariables(
+            CollageTypeset.variables(project: project, root: page.root, photos: map, pagePhotoIDs: ids, pageID: page.id),
+            photo: photo)
+        let bg = CollageRender.backgroundColor(project: project, pagePhotoIDs: ids, photos: map)
+        return CollageCover.resolve(cell: frame.cell, frameRect: frame.rect.cgRect, project: project, photo: photo,
+                                    framing: framing, hints: hints[id], vars: vars, background: bg)
     }
 
     /// 压字能放的区域（照片实际画的区域 ∩ 月洞门、拱窗里面最大的矩形）：拖字按它换算位置 ——
@@ -237,40 +288,71 @@ final class CollageStore: ObservableObject {
                                              hints: frame.cell.photoID.flatMap { hints[$0] }).textArea
     }
 
-    /// 选中格子上压的字在成品上的位置（和渲染器同一套算法：画布上的虚线框、拖字用）。
-    func overlayPlacement(for frame: CollageLayout.Frame) -> CollageOverlays.Placement? {
-        guard let overlay = frame.cell.overlay, let page else { return nil }
+    /// 选中格子上第 index 个字块在成品上的位置（画布上的虚线框、拖字用）。
+    func overlayPlacement(for frame: CollageLayout.Frame, index: Int = 0) -> CollageOverlays.Placement? {
+        let all = overlayPlacements(for: frame)
+        return all.indices.contains(index) ? all[index] : nil
+    }
+
+    /// 这一格全部字块的位置（和渲染器同一套算法、同一个先后：后面的让着前面的）。
+    func overlayPlacements(for frame: CollageLayout.Frame) -> [CollageOverlays.Placement?] {
+        guard !frame.cell.overlays.isEmpty, let page else { return [] }
         let map = photoMap
         let ids = page.photoIDs
         let photo = frame.cell.photoID.flatMap { map[$0] }
         let framing = CollageLayout.effectiveFraming(path: frame.path, cell: frame.cell, in: geometry.frames,
                                                      photos: map, tight: project.style.tightSmallCells)
-        let vars = CollageTypeset.variables(project: project, root: page.root, photos: map, pagePhotoIDs: ids,
-                                            pageID: page.id)
+        // 和渲染器一样：页级色调换进样式（底色取色、字的深浅按它），{frame} 按这一格的照片。
+        let project = CollageLooks.project(self.project, page: page)
+        let vars = CollageTypeset.cellVariables(
+            CollageTypeset.variables(project: project, root: page.root, photos: map, pagePhotoIDs: ids, pageID: page.id),
+            photo: photo)
         let bg = CollageRender.backgroundColor(project: project, pagePhotoIDs: ids, photos: map)
-        return CollageRender.overlayPlacement(overlay, cell: frame.cell, frameRect: frame.rect.cgRect,
-                                              project: project, photo: photo, framing: framing,
-                                              hints: frame.cell.photoID.flatMap { hints[$0] }, vars: vars,
-                                              background: bg)
+        return CollageRender.overlayPlacements(cell: frame.cell, frameRect: frame.rect.cgRect, project: project,
+                                               photo: photo, framing: framing,
+                                               hints: frame.cell.photoID.flatMap { hints[$0] }, vars: vars,
+                                               background: bg)
+    }
+
+    /// 这一格照片上的字块展开占位符用的值（和 overlayPlacements、渲染器同一套：页级色调换进样式，{frame} 按这一格的
+    /// 照片）：检视器字块按钮上的名字按展开后的字写（SHIGUANG、MARCH ISSUE，不是 masthead、[[month.）。
+    func overlayVariables(at path: [Int]) -> [String: String] {
+        guard let page else { return [:] }
+        let map = photoMap
+        let photo = page.root.node(at: path)?.cell?.photoID.flatMap { map[$0] }
+        let project = CollageLooks.project(self.project, page: page)
+        return CollageTypeset.cellVariables(
+            CollageTypeset.variables(project: project, root: page.root, photos: map, pagePhotoIDs: page.photoIDs,
+                                     pageID: page.id),
+            photo: photo)
     }
 
     // MARK: - 场次
 
     /// 批量页换了场次：存当前的，读新场次的拼图项目。没打开文件夹时用一个默认项目文件，
     /// 那时做的拼图也不会丢。
-    func attach(sessionDir: URL?, photoDir: URL?) {
+    /// `batch`：批量页（托盘按它刷新判决、场、名次；成套从它拿全部照片）。不给 = 沿用上次给的。
+    func attach(sessionDir: URL?, photoDir: URL?, batch: BatchStore? = nil) {
+        if let batch { self.batch = batch }
         let newURL = sessionDir?.appendingPathComponent("collage.json")
             ?? stateDir.appendingPathComponent("scratch.json")
-        guard newURL != projectURL else { return }
+        guard newURL != projectURL else {
+            // 同一个场次（切回拼图 tab）：批量页那边可能改过判决、调过场的间隔。
+            refreshFromBatch()
+            return
+        }
         finishCropEditForNavigation()
         flushProjectSave()
         projectURL = newURL
+        // 主体蒙版跟着工程放（场次目录 / 拼图资料目录下的 collage_masks/）。
+        CollageMasks.setDirectory(newURL.deletingLastPathComponent().appendingPathComponent("collage_masks"))
         self.photoDir = photoDir
         sessionToken = UUID()
         solveGeneration += 1
         isSolving = false
         busyText = nil
         hintTask?.cancel()
+        maskTask?.cancel()
         hints = [:]
         undoStack.removeAll()
         redoStack.removeAll()
@@ -304,9 +386,65 @@ final class CollageStore: ObservableObject {
         project = loaded
         pageIndex = min(pageIndex, max(0, project.pages.count - 1))
         if project.pages.isEmpty { pageIndex = 0 }
+        // 存盘时的快照会过时（之后重新判过、调过场的间隔）：按批量页现在的样子刷一遍。
+        refreshFromBatch()
         computeHints(for: project.photos)
         setNeedsRender()
         schedulePageThumbs()
+    }
+
+    /// 托盘里批量页的照片按批量页现状刷新（判决、手动、场、场内名次、近似重复组、睁眼、EXIF、机身、帧号）。
+    /// 只在批量页开着的就是这个工程的文件夹时做（换场次的通知先于 attach 到，别把上一场的同名照片刷进来）。
+    /// 不进撤销；撤销栈里的旧工程一起刷 —— 撤销一步不会把旧判决带回来。
+    func refreshFromBatch() {
+        guard let batch, let photoDir, let batchDir = batch.photoDir,
+              batchDir.standardizedFileURL.path == photoDir.standardizedFileURL.path,
+              !project.photos.isEmpty else { return }
+        let facts = CollageBridge.Facts(batch: batch)
+        func refreshed(_ p: CollageProject) -> CollageProject? {
+            var out = p
+            var changed = false
+            for i in out.photos.indices {
+                guard let item = batch.item(withID: out.photos[i].id) else { continue }
+                var ref = out.photos[i]
+                CollageBridge.refresh(&ref, from: item, facts: facts)
+                if ref != out.photos[i] {
+                    out.photos[i] = ref
+                    changed = true
+                }
+            }
+            return changed ? out : nil
+        }
+        guard let now = refreshed(project) else { return }
+        undoStack = undoStack.map { refreshed($0) ?? $0 }
+        redoStack = redoStack.map { refreshed($0) ?? $0 }
+        project = now
+        scheduleProjectSave()
+        setNeedsRender()
+        schedulePageThumbs()
+    }
+
+    /// 路人信息里顺手算的亮度、黑白抄进托盘的照片（编排、成套看 CollagePhotoRef 就够，不用再翻 hints）。
+    /// 撤销栈里的一起抄：撤销回去的工程照样带着。
+    private func adoptHintFacts() {
+        func adopted(_ p: CollageProject) -> CollageProject? {
+            var out = p
+            var changed = false
+            for i in out.photos.indices {
+                guard let h = hints[out.photos[i].id] else { continue }
+                if out.photos[i].meanLuma != h.meanLuma || out.photos[i].isMonochrome != h.isMonochrome {
+                    out.photos[i].meanLuma = h.meanLuma
+                    out.photos[i].isMonochrome = h.isMonochrome
+                    changed = true
+                }
+            }
+            return changed ? out : nil
+        }
+        guard let now = adopted(project) else { return }
+        undoStack = undoStack.map { adopted($0) ?? $0 }
+        redoStack = redoStack.map { adopted($0) ?? $0 }
+        project = now
+        scheduleProjectSave()
     }
 
     // MARK: - 托盘：导入
@@ -315,17 +453,17 @@ final class CollageStore: ObservableObject {
     /// `layout` = 带进来之后直接排一版。
     func importFromBatch(ids: [String], batch: BatchStore, layout: Bool) {
         let items = ids.compactMap { batch.item(withID: $0) }
-        addRefs(from: items, layout: layout ? .solve(ids) : .none)
+        addRefs(from: items, layout: layout ? .solve(ids) : .none, facts: CollageBridge.Facts(batch: batch))
     }
 
     func importVerdicts(batch: BatchStore, includeUsable: Bool) {
         let items = batch.items.filter { $0.verdict == .pick || (includeUsable && $0.verdict == .usable) }
-        addRefs(from: items, layout: .none)
+        addRefs(from: items, layout: .none, facts: CollageBridge.Facts(batch: batch))
     }
 
     func importTop(_ n: Int, batch: BatchStore) {
         let ids = batch.topPicks(n).ids
-        addRefs(from: ids.compactMap { batch.item(withID: $0) }, layout: .none)
+        addRefs(from: ids.compactMap { batch.item(withID: $0) }, layout: .none, facts: CollageBridge.Facts(batch: batch))
     }
 
     /// 水印页「拼图 (N) →」带过来的原图：认得出是批量页的照片按批量 id 进（带人脸、分数），认不出的按
@@ -345,8 +483,10 @@ final class CollageStore: ObservableObject {
         case handoff([String], then: (Bool) -> Void)
     }
 
-    /// `files`：外部文件（id 见 CollageBridge.fileID）。
-    private func addRefs(from items: [BatchItem], files: [URL] = [], layout: AfterImport) {
+    /// `files`：外部文件（id 见 CollageBridge.fileID）。`facts`：场内名次、手动判的（不给 = 按 attach 时的批量页）。
+    private func addRefs(from items: [BatchItem], files: [URL] = [], layout: AfterImport,
+                         facts given: CollageBridge.Facts? = nil) {
+        let facts = given ?? batch.map { CollageBridge.Facts(batch: $0) } ?? CollageBridge.Facts()
         guard !items.isEmpty || !files.isEmpty else {
             setNotice("没有可带进来的照片")
             if case .handoff(_, let then) = layout { then(false) }
@@ -372,7 +512,8 @@ final class CollageStore: ObservableObject {
         let limit = pickLimit
         Task { [weak self] in
             let (refs, picked) = await Task.detached(priority: .userInitiated) { () -> ([CollagePhotoRef], [String]?) in
-                let refs = items.compactMap(CollageBridge.ref(from:)) + files.compactMap(CollageBridge.ref(fromFile:))
+                let refs = items.compactMap { CollageBridge.ref(from: $0, facts: facts) }
+                    + files.compactMap(CollageBridge.ref(fromFile:))
                 return (refs, limit.map { CollageSelect.pick($0, from: refs).map(\.id) })
             }.value
             guard let self, self.sessionToken == token else { return }
@@ -517,6 +658,7 @@ final class CollageStore: ObservableObject {
                 root.update(at: path) { $0.cell?.photoID = nil; $0.cell?.crop = nil }
             }
             project.pages[i].root = root
+            project.pages[i].contactSheet?.frames.removeAll { $0 == id }
             project.pages[i].items.removeAll { $0.kind == .photo && $0.photoID == id }
             // 贴在那张相纸上的胶带一起拿掉（以前留在原地悬空）。
             project.pages[i].items = CollageItems.pinAll(project.pages[i].items, canvas: project.canvas)
@@ -547,10 +689,16 @@ final class CollageStore: ObservableObject {
 
     private func computeHints(for photos: [CollagePhotoRef]) {
         let todo = photos.filter { hints[$0.id] == nil }
+        // 已经算过路人信息的（这一场早先进过托盘、拿出去又带回来）：亮度、黑白直接抄进新的托盘照片。以前只在一批
+        // 算完时抄，都算过就不抄，再带进来的照片「黑白」「亮度」是空的，自动编排的整章黑白就没了。
+        if todo.count < photos.count { adoptHintFacts() }
         guard !todo.isEmpty else { return }
         let previous = hintTask
         let token = sessionToken
+        hintRunsPending += 1
         hintTask = Task { [weak self] in
+            // 换了场次、作废了也算跑完（早退走这里）；正常跑完在抄完事实、+1 版本号之后才减。
+            defer { self?.hintRunsPending -= 1 }
             await previous?.value
             for p in todo {
                 if Task.isCancelled { return }
@@ -558,8 +706,48 @@ final class CollageStore: ObservableObject {
                 guard let self, self.sessionToken == token else { return }
                 self.hints[p.id] = h
             }
+            self?.adoptHintFacts()
             self?.hintsVersion += 1
             self?.setNeedsRender()
+            // 蒙版预热另起一个任务（在这一批减一之前排上，命令行等的计数不会中间断一下）。
+            self?.prewarmMasks(todo, token: token)
+        }
+    }
+
+    /// 主体蒙版预热：这一页的先算，其余按分数从高到低（多半是主图）。渲染用到时自己同步拿，这里只是先填好内存和
+    /// 磁盘缓存；头顶、覆盖率抄进 Hints 给挑主图这类便宜的用处看。一批接一批（Vision 只有一个在算），不放在路人信息
+    /// 的任务里：新加进托盘的照片不用等上一批蒙版（几十张 × 15–20 ms）算完才开始算路人。
+    private func prewarmMasks(_ photos: [CollagePhotoRef], token: UUID) {
+        let previous = maskTask
+        maskRunsPending += 1
+        maskTask = Task { [weak self] in
+            defer { self?.maskRunsPending -= 1 }
+            await previous?.value
+            guard let order = self?.maskOrder(photos) else { return }
+            for p in order {
+                if Task.isCancelled { return }
+                let m = await Task.detached(priority: .utility) { CollageMasks.mask(for: p) }.value
+                guard let self, self.sessionToken == token else { return }
+                if let m, var h = self.hints[p.id] {
+                    h.headTop = m.headTop
+                    h.maskCoverage = m.coverage
+                    self.hints[p.id] = h
+                }
+            }
+            self?.masksVersion += 1
+            self?.setNeedsRender()
+        }
+    }
+
+    /// 蒙版预热的先后：当前页上的照片先，其余按分数从高到低。
+    private func maskOrder(_ photos: [CollagePhotoRef]) -> [CollagePhotoRef] {
+        let onPage = Set(page?.photoIDs ?? [])
+        return photos.sorted { a, b in
+            let pa = onPage.contains(a.id)
+            let pb = onPage.contains(b.id)
+            if pa != pb { return pa }
+            if a.score != b.score { return a.score > b.score }
+            return a.id < b.id
         }
     }
 
@@ -628,7 +816,10 @@ final class CollageStore: ObservableObject {
             if toScatter {
                 p.scatter = p.scatter ?? CollageScatterSpec()
                 p.items = itemsKeptForScatter(from: page)
-                p.gridRoot = page.root
+                // 帧全拿掉了的印样：离开印样（不然一页又是散落又是印样，渲染走印样、拖进来的却放成相纸）；
+                // 印样的切分树是个空叶子，没有网格可记。
+                p.gridRoot = page.contactSheet == nil ? page.root : nil
+                p.contactSheet = nil
                 p.root = .leaf(CollageCell())
             } else if let grid = restoredGrid(from: page) {
                 p.items = decorationsForGrid(from: page, consumed: consumedSourceItems(page))
@@ -753,9 +944,7 @@ final class CollageStore: ObservableObject {
     /// 网格的文字格变成同位置、同大小的手写字图层（散落版不画格子，标题不能凭空没了）。
     private func textItems(fromGrid root: CollageNode) -> [CollageItem] {
         let canvas = project.canvas
-        let content = CollageLayout.contentRect(canvas: canvas, style: project.style)
-        let gutter = CollageLayout.gutterPixels(canvas: canvas, style: project.style)
-        let frames = CollageLayout.geometry(root, in: content, gutter: gutter).frames
+        let frames = CollageLayout.pageGeometry(root, canvas: canvas, style: project.style).frames
         let textPaths = root.leafPaths().filter { root.node(at: $0)?.cell?.kind == .text }
         var out: [CollageItem] = []
         for (index, path) in textPaths.enumerated() {
@@ -814,6 +1003,16 @@ final class CollageStore: ObservableObject {
     /// 结构（只换了照片位置，看起来等于没换）—— 落版时避开这一页最近出过的几种形状。
     func regenerate() {
         guard let root, let page else { return }
+        if isAlbum, project.albumTheme == .fineArt {
+            // fine-art 跨页是编排按版心算的（完整显示、卡纸留白、不跨缝），求解器的满铺网格会把它拆掉。
+            setNotice("婚礼 fine-art 的跨页按编排出版式，没有「换一批」：想重排点「自动编排」，或把编排换回「默认」")
+            return
+        }
+        if page.contactSheet != nil {
+            // 印样的版式由帧和规格定（一卷就是一卷），没有「换一版」。
+            setNotice("印样按拍摄先后排，没有别的版：改规格、每条帧数在「版式 › 印样」里")
+            return
+        }
         if page.freeform {
             scatter(photoIDs: page.photoIDs, spec: page.scatter ?? CollageScatterSpec())
             return
@@ -973,6 +1172,8 @@ final class CollageStore: ObservableObject {
             out = CollagePage(root: root, items: decorations, freeform: false, scatter: old?.scatter)
         }
         out.id = old?.id ?? out.id
+        // 这一页单独设的色调（整页黑白）是页的设置，换一批、换备选都留着。
+        out.look = old?.look
         return out
     }
 
@@ -1049,6 +1250,71 @@ final class CollageStore: ObservableObject {
         }
     }
 
+    // MARK: - 一键成套
+
+    /// 一键成套：后台生成一整套，落下来替换当前工程（一步撤销）。生成期间套了模板、撤销、换了场次 = 作废。
+    /// 还没做的（生成返回 nil）只提示，不动工程、不记撤销。`then`：落下来（或作废、没生成）之后（命令行等它）。
+    /// coverStep：「换封面」（出一期）在主图候选里往后轮几张（0 = 照常出一套）。
+    func applyKit(_ kit: CollageKitID, coverStep: Int = 0, then: (() -> Void)? = nil) {
+        let items = batch?.items ?? []
+        let facts = batch.map { CollageBridge.Facts(batch: $0) } ?? CollageBridge.Facts()
+        guard !project.photos.isEmpty || !items.isEmpty else {
+            setNotice("托盘是空的：先带照片进来")
+            then?()
+            return
+        }
+        cancelPendingSolve()
+        solveSeed &+= 1
+        let context = CollageKits.Context(project: project, tray: project.photos, batchItems: { items }, facts: facts,
+                                          hints: hints, seed: solveSeed, coverStep: coverStep)
+        let busy = "成套「\(kit.name)」…"
+        busyText = busy
+        let ticket = beginSolve()
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) { kit.generate(context) }.value
+            defer { then?() }
+            guard let self, self.sessionToken == ticket.session else { return }
+            if self.busyText == busy { self.busyText = nil }
+            guard ticket.generation == self.solveGeneration else { return }
+            self.isSolving = false
+            guard let generated = result, !generated.pages.isEmpty else {
+                // 三套都做好了：没出来是因为没有能用的照片（整本婚礼相册只编托盘里的，不从这一场借）。
+                let why = kit == .weddingAlbum && self.project.photos.isEmpty
+                    ? "按托盘里的照片编：托盘是空的，先带精选进来" : "托盘（和这一场）里没有能用的照片"
+                self.setNotice("「\(kit.name)」没出来：\(why)，工程没动")
+                return
+            }
+            // 什么都没变（「换封面」没有别的主图候选、同一套又出一遍）：不记撤销，说一声。
+            guard generated != self.project else {
+                self.setNotice(coverStep > 0 ? "「换封面」：没有别的主图候选，封面没换" : "「\(kit.name)」：和现在的一样，工程没动")
+                return
+            }
+            self.pushUndo()
+            if generated.watermark != self.project.watermark { self.watermarkRevision += 1 }
+            self.project = generated
+            self.pageIndex = 0
+            if generated.mode == .single, let first = generated.pages.first {
+                self.layoutStyle = first.freeform ? .scatter : .grid
+                self.scheduleStateSave()
+            }
+            self.clearAlternatives()
+            self.selection = nil
+            self.selectedItem = nil
+            // fine-art 编排的成套相册（整本婚礼相册）：没上版的（同一场只留精选、相似拿掉的；废片不算）在托盘里标「拿掉」，
+            // 和「自动编排」一样。别的成套（单张、印样……）没有「拿掉」这回事，照旧清空。
+            let used = generated.usedPhotoIDs
+            self.albumDropped = generated.mode == .album && generated.albumTheme == .fineArt
+                ? generated.photos.filter { !used.contains($0.id) && $0.verdict != .reject } : []
+            self.commitEdit()
+            // 成套可能带进托盘里没有的照片（印样的废片、整场的帧）：补算路人信息。
+            self.computeHints(for: generated.photos)
+            let unit = generated.mode == .album ? "个跨页" : "页"
+            let cover = coverStep > 0 ? CollageStyleFashion.coverPhotoID(generated) : nil
+            self.setNotice(cover.map { "「换封面」：封面换成 \($0)（不满意可以撤销）" }
+                           ?? "「\(kit.name)」：\(generated.pages.count) \(unit)（不满意可以撤销）")
+        }
+    }
+
     // MARK: - 模板
 
     var allTemplates: [CollageTemplate] { CollageTemplates.builtin + userTemplates }
@@ -1056,7 +1322,10 @@ final class CollageStore: ObservableObject {
     /// 套模板：照片 = 当前页上的（不够就从托盘按分数补）。模板带的画布/样式一起换上。
     func applyTemplate(_ template: CollageTemplate) {
         var ids = Self.unique(page?.photoIDs ?? [])
-        if ids.count < template.photoSlots {
+        if template.contactSheet != nil {
+            // 印样：托盘的照片按拍摄先后排成一卷（不按分数挑；相册里别的跨页用了的不拿；跨页上放在右页）。
+            ids = contactPool.map(\.id)
+        } else if ids.count < template.photoSlots {
             // 相册：别的跨页已经用了的不拿（同一张不能出现在两个跨页上）。
             let used = Set(ids).union(isAlbum ? usedPhotoIDs : [])
             let extra = project.photos.filter { !used.contains($0.id) }.sorted { $0.score > $1.score }
@@ -1066,12 +1335,23 @@ final class CollageStore: ObservableObject {
         let photos = ids.compactMap { map[$0] }
         cancelPendingSolve()
         pushUndo()
-        if let canvas = template.canvas, !isAlbum { project.canvas = canvas }
-        // 相册的样式是整本共用的：套模板只换这一页的版式，不把其他跨页的底色、色调一起改了。
-        if let style = template.style, !isAlbum { project.style = style }
+        // 相册的样式是整本共用的：套模板只换这一页的版式，不把其他跨页的底色、色调一起改了。单张模式里有好几页的
+        // （出一期四页、按卷出印样一卷一页）同样：画布、样式是整套共用的，只换这一页 —— 以前在第 2 页套报纸风，
+        // 没动过的封面也成了网点米色纸。
+        let shared = isAlbum || project.pages.count > 1
+        let otherCanvas: Bool = template.canvas.map { $0 != project.canvas } ?? false
+        let otherStyle: Bool = template.style.map { $0 != project.style } ?? false
+        let keptLook = !isAlbum && shared && (otherCanvas || otherStyle)
+        if let canvas = template.canvas, !shared { project.canvas = canvas }
+        if let style = template.style, !shared { project.style = style }
         solveSeed &+= 1
         var newPage = CollageTemplates.apply(template, photos: photos, context: context, seed: solveSeed)
         newPage.id = page?.id ?? newPage.id
+        // 版式、压字跟模板走；这一页、这几张照片单独设的色调（整页黑白、彩色里那张黑白）留着。
+        if newPage.look == nil { newPage.look = page?.look }
+        if let old = page, !old.freeform, !newPage.freeform {
+            newPage.root = CollageLayout.carryCellLooks(from: old.root, into: newPage.root)
+        }
         setPage(newPage)
         if !isAlbum {
             layoutStyle = newPage.freeform ? .scatter : .grid
@@ -1081,7 +1361,16 @@ final class CollageStore: ObservableObject {
         selection = nil
         selectedItem = nil
         commitEdit()
-        setNotice("已套用「\(template.name)」" + (isAlbum && template.style != nil ? "（相册里只换版式，样式整本统一）" : ""))
+        // 印样模板：一页最多一卷（或模板给的格数），托盘多出来的说一声。
+        let dropped = template.contactSheet == nil ? 0 : photos.count - (newPage.contactSheet?.frames.count ?? 0)
+        // 婚礼相册的跨页模板在单张模式里套：画布换成了 30×30 跨页，画布菜单里没有它 —— 说一声该去哪排整本。
+        let spreadInSingle = !shared && template.category == CollageStyleFineArt.category
+        let others = project.pages.count - 1
+        setNotice("已套用「\(template.name)」" + (isAlbum && template.style != nil ? "（相册里只换版式，样式整本统一）" : "")
+                  + (keptLook ? "（这一套有 \(others + 1) 页：只换这一页的版式，画布和样式各页共用、没跟着模板换，"
+                     + "别的 \(others) 页没动；要整套换样式用「样式」里的预设）" : "")
+                  + (dropped > 0 ? "（这一页放不下的 \(dropped) 张没上）" : "")
+                  + (spreadInSingle ? "（这是相册跨页模板，画布换成了 30×30cm 跨页；排整本婚礼相册请切到「相册」模式）" : ""))
     }
 
     /// 和内置模板重名的用户模板自动加后缀：列表按名字当 id，重名会让 SwiftUI 列表错乱。
@@ -1197,6 +1486,10 @@ final class CollageStore: ObservableObject {
     func place(photoID: String, at target: [Int], edge: CollageLayout.Edge?) {
         // 画布收的是纯文本拖放：别的 app 拖进来一段字不能当成照片 id。
         guard photoMap[photoID] != nil else { return }
+        if isContactSheet {
+            addContactFrame(photoID)
+            return
+        }
         guard let root, !isFreeform else {
             if isFreeform { addPhotoItem(photoID, at: CGPoint(x: 0.5, y: 0.5)) } else { layoutFresh(photoIDs: [photoID]) }
             return
@@ -1286,6 +1579,8 @@ final class CollageStore: ObservableObject {
             cell.framing = framing
             cell.crop = nil
             cell.contain = false
+            // 自己选过景别：关掉人物挡字时不再换回自动。
+            cell.coverAuto = false
         }
     }
 
@@ -1390,11 +1685,11 @@ final class CollageStore: ObservableObject {
             // 相册切了跨页：迟到的提交不能写进别页同一路径上的文字格。
             guard page?.id == pageID else { return }
             updateText(text, at: path)
-        case .overlay(let path, let photoID, let pageID):
+        case .overlay(let path, let photoID, let pageID, let index):
             // 换一批之后压字跟着照片走了：路径上已经是另一张照片，迟到的提交不能写到它的字上。
-            guard page?.id == pageID, let cell = root?.node(at: path)?.cell, cell.overlay != nil,
+            guard page?.id == pageID, let cell = root?.node(at: path)?.cell, cell.overlays.indices.contains(index),
                   cell.photoID == photoID else { return }
-            updateOverlay(at: path, coalesce: true) { $0.text = text }
+            updateOverlay(at: path, index: index, coalesce: true) { $0.text = text }
         case .item(let id):
             guard page?.items.contains(where: { $0.id == id && $0.kind == .text }) == true else { return }
             updateItem(id, coalesce: true) { $0.text = text }
@@ -1415,10 +1710,11 @@ final class CollageStore: ObservableObject {
                 out.update(at: path) { node in node.cell?.text = updated }
                 return out
             }
-        case .overlay(let path, let photoID, let pageID):
+        case .overlay(let path, let photoID, let pageID, let block):
             guard page?.id == pageID, let cell = root?.node(at: path)?.cell, cell.photoID == photoID,
-                  let o = cell.overlay, o.text.lines.indices.contains(index) else { return }
-            updateOverlay(at: path) { o in
+                  cell.overlays.indices.contains(block), cell.overlays[block].text.lines.indices.contains(index)
+            else { return }
+            updateOverlay(at: path, index: block) { o in
                 preset.apply(&o.text.lines[index])
                 if let tone = preset.tone { o.tone = tone }
             }
@@ -1433,17 +1729,40 @@ final class CollageStore: ObservableObject {
 
     // MARK: - 照片上的字
 
-    func setOverlay(_ overlay: CollageOverlay?, at path: [Int]) {
+    /// 换掉第 index 个字块；nil = 删掉它（后面的往前挪，第一个删了第二个就成了刊头）；index 超出 = 加在最后。
+    func setOverlay(_ overlay: CollageOverlay?, at path: [Int], index: Int = 0) {
         guard root?.node(at: path)?.cell?.kind == .photo else { return }
         mutateRoot { r in
             var out = r
-            out.update(at: path) { $0.cell?.overlay = overlay }
+            out.update(at: path) { node in
+                guard var cell = node.cell else { return }
+                var list = cell.overlays
+                if let overlay {
+                    if list.indices.contains(index) { list[index] = overlay } else { list.append(overlay) }
+                } else if list.indices.contains(index) {
+                    list.remove(at: index)
+                }
+                cell.overlays = list
+                node.cell = cell
+            }
             return out
         }
+        let count = root?.node(at: path)?.cell?.overlays.count ?? 0
+        if overlayIndex >= count { overlayIndex = max(0, count - 1) }
     }
 
-    func updateOverlay(at path: [Int], coalesce: Bool = false, _ body: (inout CollageOverlay) -> Void) {
-        guard let current = root?.node(at: path)?.cell?.overlay else { return }
+    /// 在这张照片上再加一个字块（摆在已有字块之后、让着它们），并切到它。
+    func addOverlay(_ overlay: CollageOverlay, at path: [Int]) {
+        guard let cell = root?.node(at: path)?.cell, cell.kind == .photo else { return }
+        let index = cell.overlays.count
+        setOverlay(overlay, at: path, index: index)
+        if selection == path { overlayIndex = index }
+    }
+
+    func updateOverlay(at path: [Int], index: Int = 0, coalesce: Bool = false,
+                       _ body: (inout CollageOverlay) -> Void) {
+        guard let list = root?.node(at: path)?.cell?.overlays, list.indices.contains(index) else { return }
+        let current = list[index]
         var overlay = current
         body(&overlay)
         // 点的是已经选中的那一项：不记空撤销、不清重做栈。
@@ -1451,25 +1770,84 @@ final class CollageStore: ObservableObject {
         let updated = overlay
         mutateRoot(coalesce: coalesce) { r in
             var out = r
-            out.update(at: path) { $0.cell?.overlay = updated }
+            out.update(at: path) { node in
+                guard var cell = node.cell, cell.overlays.indices.contains(index) else { return }
+                cell.overlays[index] = updated
+                node.cell = cell
+            }
             return out
         }
     }
 
+    /// 人物挡字开关（第 index 块字在人后 / 人前）。打开时这一格还是「自动」取景、没手动裁过，就顺手换成「封面」
+    /// 取景（头顶压进刊头），同一步撤销，并记下是顺手换的（coverAuto）；关掉时，别的字块也都不在人后、还是
+    /// 那个没裁过的封面取景，就换回自动（用户自己选的封面不动）。
+    func setOverlayLayer(_ layer: CollageTextLayer, at path: [Int], index: Int = 0) {
+        guard let cell = root?.node(at: path)?.cell, cell.overlays.indices.contains(index),
+              cell.overlays[index].layer != layer else { return }
+        let fixed = cell.overlays[index].anchor != .auto && !cell.overlays[index].anchor.isSide
+        let autoCover = layer == .behindSubject && fixed && cell.framing == .auto && cell.crop == nil && !cell.contain
+        let othersBehind = cell.overlays.indices.contains { $0 != index && cell.overlays[$0].layer == .behindSubject }
+        let backToAuto = layer == .front && cell.coverAuto && cell.framing == .cover && cell.crop == nil
+            && !cell.contain && !othersBehind
+        mutateRoot { r in
+            var out = r
+            out.update(at: path) { node in
+                guard var c = node.cell, c.overlays.indices.contains(index) else { return }
+                c.overlays[index].layer = layer
+                if autoCover {
+                    c.framing = .cover
+                    c.coverAuto = true
+                }
+                if backToAuto {
+                    c.framing = .auto
+                    c.coverAuto = false
+                }
+                node.cell = c
+            }
+            return out
+        }
+    }
+
+    /// 抠图格：只画主体，背景透出页面（nil = 照常画整张）。coalesce = 白边、投影滑杆拖动中（一次拖动记一步撤销）。
+    func setCutout(_ cutout: CollageCutout?, at path: [Int], coalesce: Bool = false) {
+        guard let cell = root?.node(at: path)?.cell, cell.kind == .photo, cell.cutout != cutout else { return }
+        mutateRoot(coalesce: coalesce) { r in
+            var out = r
+            out.update(at: path) { node in node.cell?.cutout = cutout }
+            return out
+        }
+    }
+
+    /// 命令行合成数据：直接改托盘里这张照片的人脸框（验多人合影的退让；不进撤销，重新载入就恢复）。
+    func overrideFacesForTesting(_ id: String, faces: [[Double]]) -> Bool {
+        guard let i = project.photos.firstIndex(where: { $0.id == id }) else { return false }
+        project.photos[i].faces = faces.filter(CollageCrop.isValidBox)
+        hints[id]?.headTop = nil
+        setNeedsRender()
+        return true
+    }
+
     /// 拖字：开始记一次撤销（beginContinuousEdit），拖动中只改位置。
-    func setOverlayPosition(x: Double, y: Double, at path: [Int]) {
-        guard let root, var overlay = root.node(at: path)?.cell?.overlay else { return }
+    func setOverlayPosition(x: Double, y: Double, at path: [Int], index: Int = 0) {
+        guard let root, let list = root.node(at: path)?.cell?.overlays, list.indices.contains(index) else { return }
+        var overlay = list[index]
         // 第一次拖：把按位置定下的对齐（右上角 = 右对齐）存进字里，拖起来不会突然换对齐。
         if overlay.anchor != .custom, !overlay.text.vertical,
            let frame = geometry.frames.first(where: { $0.path == path }),
-           let placed = overlayPlacement(for: frame) {
+           let placed = overlayPlacement(for: frame, index: index) {
             overlay.text.alignH = placed.text.alignH
         }
         overlay.anchor = .custom
         overlay.x = min(1, max(0, x))
         overlay.y = min(1, max(0, y))
         var out = root
-        out.update(at: path) { $0.cell?.overlay = overlay }
+        let moved = overlay
+        out.update(at: path) { node in
+            guard var cell = node.cell, cell.overlays.indices.contains(index) else { return }
+            cell.overlays[index] = moved
+            node.cell = cell
+        }
         setRoot(out)
         scheduleProjectSave()
         setNeedsRender()
@@ -1537,9 +1915,26 @@ final class CollageStore: ObservableObject {
         item.width = kind.defaultSize.w
         item.height = kind.defaultSize.h
         item.rotation = kind == .postmark ? -8 : (kind.isTape ? -6 : 0)
-        if kind == .label { item.label = "{date}" }
+        if kind == .label || kind == .barcode { item.label = "{date}" }
         let canvas = project.canvas
-        if kind.isTape || kind == .clip, let anchor = selectedItemValue, anchor.kind == .photo {
+        let short = canvas.shortSide
+        if kind == .greasePencil, let anchor = selectedItemValue, anchor.kind == .photo {
+            // 油性笔圈：圈住选中的那张相纸（外接椭圆 ≈ 相纸 × 1.4，跟着它的角度）。
+            let half = CollageItems.size(anchor, canvas: canvas)
+            item.cx = anchor.cx
+            item.cy = anchor.cy
+            item.width = min(1.2, Double(half.width) * item.mark.frameScale / short)
+            item.height = min(1.2, Double(half.height) * item.mark.frameScale / short)
+            item.rotation = anchor.rotation
+        } else if kind == .greasePencil, !isFreeform, let path = selection,
+                  let frame = geometry.frames.first(where: { $0.path == path }), frame.cell.kind == .photo {
+            // 网格版选中了照片格：圈住那一格。
+            let r = frame.rect.cgRect
+            item.cx = Double(r.midX) / Double(canvas.width)
+            item.cy = Double(r.midY) / Double(canvas.height)
+            item.width = min(1.2, Double(r.width) * item.mark.frameScale / short)
+            item.height = min(1.2, Double(r.height) * item.mark.frameScale / short)
+        } else if kind.isTape || kind == .clip, let anchor = selectedItemValue, anchor.kind == .photo {
             let t = CollageItems.transform(anchor, canvas: canvas)
             let half = CollageItems.size(anchor, canvas: canvas)
             let p = CGPoint(x: kind == .clip ? half.width * 0.3 : 0, y: -half.height / 2).applying(t)
@@ -1552,6 +1947,19 @@ final class CollageStore: ObservableObject {
             let r = frame.rect.cgRect
             item.cx = Double(r.midX) / Double(canvas.width)
             item.cy = Double(r.minY) / Double(canvas.height)
+        } else if kind == .barcode {
+            // 条码放右下角（封面惯例：离边约 4% 短边），离的是版心（页边距 / 四边边距以内）的边：零边距封面上
+            // 版心就是成品，照旧离成品边 4%；有页边距的版式上条码整块落在照片里，不会冲出照片右下角几像素。
+            let w = Double(canvas.width)
+            let h = Double(canvas.height)
+            let content = CollageLayout.contentRect(canvas: canvas, style: project.style)
+            let inset: Double = 0.04 * short
+            let halfW: Double = item.width * short / 2
+            let halfH: Double = item.height * short / 2
+            let right: Double = Double(content.x1) - inset - halfW
+            let bottom: Double = Double(content.y1) - inset - halfH
+            item.cx = min(1, max(0, right / w))
+            item.cy = min(1, max(0, bottom / h))
         } else {
             item.cx = canvas.seams == .fold ? 0.75 : 0.5
             item.cy = kind.isTape ? 0.12 : 0.5
@@ -1702,11 +2110,14 @@ final class CollageStore: ObservableObject {
 
     /// `coalesce`：滑杆、取色器连续拖动合成一步；点色块、选预设、切开关每次一步。
     func setStyle(_ style: CollageStyle, coalesce: Bool = true) {
+        // 婚礼 fine-art 的边距按这本册子算（预设里是 30×30 的数）；别的样式、自己改过边距的原样。
+        let style = CollageStyleFineArt.adapted(style, to: project.canvas) ?? style
         guard style != project.style else { return }
         pushUndo(coalesce: coalesce)
         project.style = style
-        // 下次新建拼图沿用：只在你改过之后才记（以前退出时把出厂值写回 state.json）。
-        defaultStyle = style
+        // 下次新建拼图沿用：只在你改过之后才记（以前退出时把出厂值写回 state.json）。fine-art 的边距按新建时的画布记
+        // （单张画布 = 预设本来的数），不把这本册子重算过的带到下一张拼图上。
+        defaultStyle = CollageStyleFineArt.adapted(style, from: project.canvas, to: defaultCanvas) ?? style
         scheduleStateSave()
         commitEdit()
     }
@@ -1719,6 +2130,11 @@ final class CollageStore: ObservableObject {
         pushUndo(coalesce: coalesce)
         let old = project.canvas
         project.canvas = canvas
+        // 婚礼 fine-art：边距跟着册子尺寸重算，排好的页上的小字不小于 2.8mm（别的样式原样）。
+        if let adapted = CollageStyleFineArt.adapted(project.style, from: old, to: canvas) {
+            project.style = adapted
+            project.pages = CollageStyleFineArt.readable(project.pages, on: canvas)
+        }
         refitFreeformPages(from: old)
         if !isAlbum {
             defaultCanvas = canvas
@@ -1752,10 +2168,10 @@ final class CollageStore: ObservableObject {
                       let id = cell.photoID, let photo = map[id] else { continue }
                 var solo = CollageAlbum.layout(CollageAlbum.Spread(kind: .solo, photos: [photo]),
                                                previousSignature: "", context: ctx, seed: UInt64(i + 1))
-                // 照片上压的字跟着照片走。
-                if let overlay = cell.overlay,
+                // 照片上压的字（全部字块）跟着照片走。
+                if !cell.overlays.isEmpty,
                    let p = solo.leafPaths().first(where: { solo.node(at: $0)?.cell?.photoID == id }) {
-                    solo.update(at: p) { $0.cell?.overlay = overlay }
+                    solo.update(at: p) { $0.cell?.overlays = cell.overlays }
                 }
                 project.pages[i].root = solo
                 fixed += 1
@@ -1948,19 +2364,31 @@ final class CollageStore: ObservableObject {
         let style = project.style
         var photos: [String: CollagePhotoRef] = [:]
         for p in project.photos where photos[p.id] == nil { photos[p.id] = p }
-        let content = CollageLayout.contentRect(canvas: canvas, style: style)
-        let gutter = CollageLayout.gutterPixels(canvas: canvas, style: style)
         var out: [UpscaleIssue] = []
         for (i, page) in project.pages.enumerated() {
             if !page.freeform {
-                let frames = CollageLayout.geometry(page.root, in: content, gutter: gutter).frames
+                let frames = CollageLayout.pageGeometry(page.root, canvas: canvas, style: style).frames
+                // 封面取景、人物挡字的格子按 CollageCover 的决定（封面会拉近，放大倍数要按它算）；
+                // 这一页没有这种格子就照旧（不算占位符、底色）。
+                let covered = frames.contains { CollageCover.applies(to: $0.cell) }
+                let paged = CollageLooks.project(project, page: page)
+                let ids = page.photoIDs
+                let pageVars = covered ? CollageTypeset.variables(project: paged, root: page.root, photos: photos,
+                                                                  pagePhotoIDs: ids, pageID: page.id) : [:]
+                let bg = covered ? CollageRender.backgroundColor(project: paged, pagePhotoIDs: ids, photos: photos)
+                    : style.background
                 for f in frames where f.cell.kind == .photo {
                     guard let id = f.cell.photoID, let photo = photos[id] else { continue }
                     let framing = CollageLayout.effectiveFraming(path: f.path, cell: f.cell, in: frames, photos: photos,
                                                                  tight: style.tightSmallCells)
                     let area = CollageCrop.photoArea(cell: f.cell, rect: f.rect.cgRect, style: style)
-                    let window = CollageCrop.window(for: photo, cell: f.cell, cellAspect: CollageCrop.aspect(of: area),
-                                                    framing: framing, hints: hints[id])
+                    let window = CollageCover.applies(to: f.cell)
+                        ? CollageRender.cellWindow(cell: f.cell, frameRect: f.rect.cgRect, project: paged, photo: photo,
+                                                   framing: framing, hints: hints[id],
+                                                   vars: CollageTypeset.cellVariables(pageVars, photo: photo),
+                                                   background: bg)
+                        : CollageCrop.window(for: photo, cell: f.cell, cellAspect: CollageCrop.aspect(of: area),
+                                             framing: framing, hints: hints[id])
                     let drawn = CollageCrop.drawnRect(window: window, photo: photo, cell: f.cell, in: area)
                     let k = CollageCrop.upscale(photo: photo, window: window, drawn: drawn)
                     if k > limit { out.append(UpscaleIssue(page: i, photoID: id, factor: k)) }
@@ -1987,8 +2415,6 @@ final class CollageStore: ObservableObject {
         guard canvas.seams == .fold else { return [] }
         let mid = CGFloat(canvas.width) / 2
         let map = photoMap
-        let content = CollageLayout.contentRect(canvas: canvas, style: project.style)
-        let gutter = CollageLayout.gutterPixels(canvas: canvas, style: project.style)
         func crosses(_ r: CGRect) -> Bool { r.minX < mid - 1 && r.maxX > mid + 1 }
         var out: [Int] = []
         for (i, page) in project.pages.enumerated() {
@@ -2000,7 +2426,7 @@ final class CollageStore: ObservableObject {
                 if hit { out.append(i) }
                 continue
             }
-            let frames = CollageLayout.geometry(page.root, in: content, gutter: gutter).frames
+            let frames = CollageLayout.pageGeometry(page.root, canvas: canvas, style: project.style).frames
             let hit = frames.contains { f in
                 guard f.cell.kind == .photo, let id = f.cell.photoID, let photo = map[id] else { return false }
                 let area = CollageCrop.photoArea(cell: f.cell, rect: f.rect.cgRect, style: project.style)
@@ -2035,6 +2461,153 @@ final class CollageStore: ObservableObject {
         commitEdit()
     }
 
+    /// 刊头（{masthead}）：空 = 按标题生成（见 CollageTypeset.mastheadText）。
+    func setMasthead(_ masthead: String) {
+        guard masthead != project.masthead else { return }
+        pushUndo(coalesce: true)
+        project.masthead = masthead
+        commitEdit()
+    }
+
+    /// 期号（{issue}）：空 = 页码。
+    func setIssue(_ issue: String) {
+        guard issue != project.issue else { return }
+        pushUndo(coalesce: true)
+        project.issue = issue
+        commitEdit()
+    }
+
+    // MARK: - 分层色调
+
+    /// 这一页单独的色调（nil = 跟整个工程）。
+    func setPageLook(_ look: CollageLookSetting?, coalesce: Bool = false) {
+        guard project.pages.indices.contains(pageIndex), project.pages[pageIndex].look != look else { return }
+        pushUndo(coalesce: coalesce)
+        project.pages[pageIndex].look = look
+        commitEdit()
+    }
+
+    /// 选中格子单独的色调（nil = 跟页面）。只对照片格。
+    func setCellLook(_ look: CollageLookSetting?, coalesce: Bool = false) {
+        guard selectedCell?.kind == .photo, selectedCell?.look != look else { return }
+        updateSelectedCell(coalesce: coalesce) { $0.look = look }
+    }
+
+    // MARK: - 印样 / 底片条
+
+    /// 这一页改成印样：托盘照片按拍摄先后排成一卷（spec 给了就按它的规格、排法；没给 = 按照片比例挑规格）。
+    /// 页上的贴纸、手写字留着；格子里的压字、文字格不要（印样没有格子）。一步撤销。
+    func makeContactSheet(_ spec: CollageContactSheet? = nil) {
+        let pool = contactPool
+        guard !pool.isEmpty else {
+            setNotice(project.photos.isEmpty ? "托盘是空的：先带照片进来" : "托盘里的照片都在别的跨页上了")
+            return
+        }
+        cancelPendingSolve()
+        pushUndo()
+        var sheet = spec ?? CollageContactSheet(format: CollageContact.suggestedFormat(pool))
+        if let old = page?.contactSheet, spec == nil { sheet = old }
+        // 新建的印样（这一页原来不是印样）落在偏深的底色上：换成白相纸（黑场压在深色上分不出来）。
+        // 底片条放在什么底上都行，照用页面底色；已经是印样的「按托盘重排」不动纸。
+        if page?.contactSheet == nil, sheet.layout == .sheet, sheet.paper == nil, let current = page {
+            let projected = CollageLooks.project(project, page: current)
+            let bg = CollageRender.backgroundColor(project: projected, pagePhotoIDs: current.photoIDs, photos: photoMap)
+            if !CollageContact.suitsSheet(bg) { sheet.paper = CollageContact.defaultPaper(.sheet) }
+        }
+        var newPage = CollageContact.page(photos: pool, spec: sheet)
+        if let old = page {
+            newPage.id = old.id
+            newPage.look = old.look
+            // 散落版的相纸（和贴在相纸上的胶带）是那一版的照片，不带过来。
+            newPage.items = old.freeform ? old.items.filter { $0.kind != .photo && $0.attach == nil } : old.items
+        }
+        setPage(newPage)
+        clearAlternatives()
+        selection = nil
+        commitEdit()
+        let n = newPage.contactSheet?.frames.count ?? 0
+        let dropped = pool.count - n
+        // 底片条模板（choice = best）托盘比格子多时是每场挑一张（同检视器的帧数那一行）。
+        let picked = newPage.contactSheet?.choice == .best && dropped > 0
+        let order = picked ? "每场挑最好的一张、按拍摄先后排" : "按拍摄先后排"
+        setNotice("印样：\(n) 帧\(order)" + (dropped > 0 ? "（这一页放不下的 \(dropped) 张没上）" : ""))
+    }
+
+    /// 印样换白相纸（检视器「印样」框在深色纸上提示）：只换这一页印样自己的纸（contactSheet.paper），
+    /// 工程的底色、相册里别的页不动；一步撤销。
+    func useWhitePaper() {
+        updateContactSheet { $0.paper = CollageContact.defaultPaper(.sheet) }
+    }
+
+    /// 印样能用的照片：托盘全部（相册里别的跨页用了的不拿，同一张不出现在两个跨页上）。
+    private var contactPool: [CollagePhotoRef] {
+        guard isAlbum else { return project.photos }
+        let here = Set(page?.photoIDs ?? [])
+        let used = usedPhotoIDs.subtracting(here)
+        return project.photos.filter { !used.contains($0.id) }
+    }
+
+    /// 改印样的设置（规格、排法、记号、片边字……）。coalesce：拖滑杆、打字连成一步撤销。
+    func updateContactSheet(coalesce: Bool = false, _ body: (inout CollageContactSheet) -> Void) {
+        guard project.pages.indices.contains(pageIndex), var sheet = project.pages[pageIndex].contactSheet else { return }
+        let before = sheet
+        body(&sheet)
+        refillContactFrames(&sheet, from: before)
+        guard sheet != project.pages[pageIndex].contactSheet else { return }
+        pushUndo(coalesce: coalesce)
+        project.pages[pageIndex].contactSheet = sheet
+        commitEdit()
+        // 容量变小（换成 120、改少了条数……）：放不下的帧照常记着（改回来还在），说一声没上的有几张。
+        let left = max(0, sheet.frames.count - sheet.frameLimit)
+        if left > max(0, before.frames.count - before.frameLimit) {
+            setNotice("印样：这一页放得下 \(sheet.frameLimit) 帧，后面 \(left) 张没上")
+        }
+    }
+
+    /// 容量变大（换规格、改每条帧数、条数，或者改成自动）而这一卷还是「托盘按拍摄先后的前 N 张」（帧没手动改过）
+    /// 时，按新容量从托盘补齐：不然 6×6 模板建的 12 帧，换成 135 7×5 还是 12 帧，得再点一次「按托盘重排」。
+    /// 这一步本身在改帧（拖进来一张、contactframes）、帧动过、容量变小，都不动帧（变小时放不下的照常记成放不下）。
+    private func refillContactFrames(_ sheet: inout CollageContactSheet, from before: CollageContactSheet) {
+        guard sheet.frames == before.frames else { return }
+        let oldCapacity = before.frameLimit
+        let newCapacity = sheet.frameLimit
+        guard newCapacity > oldCapacity else { return }
+        let roll = CollageContact.rollOrder(contactPool).map(\.id)
+        let n = sheet.frames.count
+        guard n < roll.count, Array(roll.prefix(n)) == sheet.frames else { return }
+        sheet.frames = Array(roll.prefix(newCapacity))
+    }
+
+    /// 托盘里的一张拖进印样：接在这一卷最后（已经在卷里的不动）。一卷满了（frameLimit）不接：接上也画不出来。
+    func addContactFrame(_ photoID: String) {
+        if let sheet = page?.contactSheet, !sheet.frames.contains(photoID), sheet.frames.count >= sheet.frameLimit {
+            setNotice("印样满了（这一页 \(sheet.frameLimit) 帧）：在「印样」里加条数、每条帧数再拖")
+            return
+        }
+        updateContactSheet { sheet in
+            guard !sheet.frames.contains(photoID) else { return }
+            sheet.frames.append(photoID)
+        }
+    }
+
+    /// 印样改回网格：这一卷的精选（没有就前几帧，最多 9 张）排一版；贴纸、手写字留着。
+    func leaveContactSheet() {
+        guard let sheet = page?.contactSheet else { return }
+        let map = photoMap
+        // 画得出来的那几帧（放不下的不算，同 CollagePage.photoIDs）。
+        let frames = sheet.frames.prefix(sheet.frameLimit).filter { map[$0] != nil }
+        let picks = frames.filter { map[$0]?.verdict == .pick || (map[$0]?.verdict == nil && map[$0]?.isPick == true) }
+        let ids = Array((picks.isEmpty ? frames : picks).prefix(9))
+        guard !ids.isEmpty else {
+            pushUndo()
+            if project.pages.indices.contains(pageIndex) { project.pages[pageIndex].contactSheet = nil }
+            commitEdit()
+            return
+        }
+        // solve 落下来时整页换成新的切分树（pageFor 不带 contactSheet），这一步就是撤销点。
+        solve(photoIDs: ids)
+    }
+
     // MARK: - 相册
 
     func setMode(_ mode: CollageMode) {
@@ -2042,16 +2615,22 @@ final class CollageStore: ObservableObject {
         cancelPendingSolve()
         pushUndo()
         let oldCanvas = project.canvas
+        // 相册切回单张：只留当前这个跨页（单张一页一张画布），留了第几个、原来几个 —— 提示一句（撤销找得回来）。
+        var trimmed: (kept: Int, of: Int)?
         project.mode = mode
         if mode == .album {
             if project.canvas.seams != .fold { project.canvas = CollageCanvas.albums[0] }
         } else if project.canvas.seams == .fold {
             project.canvas = CollageCanvas.social[0]
             if project.pages.count > 1 {
-                project.pages = [project.pages[min(pageIndex, project.pages.count - 1)]]
+                let kept = min(pageIndex, project.pages.count - 1)
+                trimmed = (kept + 1, project.pages.count)
+                project.pages = [project.pages[kept]]
             }
             pageIndex = 0
         }
+        // 切到相册换了画布：婚礼 fine-art 的边距按册子重算（别的样式原样）。
+        project.style = CollageStyleFineArt.adapted(project.style, from: oldCanvas, to: project.canvas) ?? project.style
         refitFreeformPages(from: oldCanvas)
         clearAlternatives()
         selection = nil
@@ -2061,6 +2640,21 @@ final class CollageStore: ObservableObject {
         if oldCanvas != project.canvas, let page, page.freeform, !page.photoIDs.isEmpty {
             scatter(photoIDs: page.photoIDs, spec: page.scatter ?? CollageScatterSpec(), recordUndo: false)
         }
+        if let trimmed {
+            setNotice("切回单张：只留了第 \(trimmed.kept) 个跨页（原来 \(trimmed.of) 个），别的跨页撤销可以找回")
+        }
+    }
+
+    /// 相册编排主题（之后的「自动编排」按它编）、fine-art 的整章黑白。已经排好的跨页不动。
+    func setAlbumTheme(_ theme: CollageAlbumTheme, chapterMono: Bool? = nil) {
+        let mono = chapterMono ?? project.albumChapterMono
+        guard theme != project.albumTheme || mono != project.albumChapterMono else { return }
+        let what = theme != project.albumTheme ? "编排换成「\(theme.label)」" : "整章黑白" + (mono ? "开了" : "关了")
+        pushUndo()
+        project.albumTheme = theme
+        project.albumChapterMono = mono
+        commitEdit()
+        if !project.pages.isEmpty { setNotice(what + "：点「自动编排」按它重排（已经排好的跨页没动）") }
     }
 
     /// 托盘里的全部照片自动编排成相册（去重可关）。
@@ -2071,13 +2665,19 @@ final class CollageStore: ObservableObject {
             return
         }
         let ctx = context
+        // 编排主题跟着工程（「整本婚礼相册」之后再点自动编排还是 fine-art 的规则）。
+        let theme = project.albumTheme
+        let chapterMono = project.albumChapterMono
+        let title = project.title
         busyText = "编排相册…"
         // 编排也在作废机制里：编排期间切回单张、撤销、套模板，结果回来不能盖掉。
         let ticket = beginSolve()
         Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) { () -> ([CollagePage], [CollagePhotoRef]) in
-                let plan = CollageAlbum.plan(photos, dedupe: dedupe)
-                return (CollageAlbum.build(plan, context: ctx, seed: 11), plan.dropped)
+            let result = await Task.detached(priority: .userInitiated) { () -> ([CollagePage], [CollagePhotoRef], String?) in
+                let plan = CollageAlbum.plan(photos, dedupe: dedupe, theme: theme, chapterMono: chapterMono, title: title)
+                // fine-art：拿掉的分开说（同一场只留精选一直开着，「相似只留一张」只管画面相似的）。
+                let note = theme == .fineArt && !plan.dropped.isEmpty ? CollageStyleFineArt.droppedNote(photos, plan: plan) : nil
+                return (CollageAlbum.build(plan, context: ctx, seed: 11), plan.dropped, note)
             }.value
             // 编排期间换了场次：结果属于上一个场次，丢掉（不能写进新场次的项目）。
             guard let self, self.sessionToken == ticket.session else { return }
@@ -2090,7 +2690,11 @@ final class CollageStore: ObservableObject {
             self.pageIndex = 0
             self.clearAlternatives()
             self.commitEdit()
-            self.setNotice("编排好 \(result.0.count) 个跨页" + (result.1.isEmpty ? "" : "，相似的拿掉 \(result.1.count) 张（可在托盘里拖回）"))
+            if let note = result.2 {
+                self.setNotice("编排好 \(result.0.count) 个跨页，\(note) 张（可在托盘里拖回）")
+            } else {
+                self.setNotice("编排好 \(result.0.count) 个跨页" + (result.1.isEmpty ? "" : "，相似的拿掉 \(result.1.count) 张（可在托盘里拖回）"))
+            }
         }
     }
 
@@ -2157,9 +2761,7 @@ final class CollageStore: ObservableObject {
             return
         }
         let targetRoot = project.pages[target].root
-        let content = CollageLayout.contentRect(canvas: project.canvas, style: project.style)
-        let gutter = CollageLayout.gutterPixels(canvas: project.canvas, style: project.style)
-        let frames = CollageLayout.geometry(targetRoot, in: content, gutter: gutter).frames
+        let frames = CollageLayout.pageGeometry(targetRoot, canvas: project.canvas, style: project.style).frames
         let newTarget: CollageNode
         var filledEmptySlot = false
         // 那一页有待放照片的空格（新开的跨页、胶装的空半页）：放进最大的那个空格，不在空格旁边再劈一刀。
@@ -2194,18 +2796,26 @@ final class CollageStore: ObservableObject {
 
     // MARK: - 色调样张
 
-    /// 这一页分数最高的照片（没有就托盘里最高的）套每个色调，方形小图。
+    /// 这一页分数最高的照片（没有就托盘里最高的）套每个色调，方形小图。开了照片加网时样张也加网：
+    /// 每个色调加网后的明暗不一样，彩色色调会变成同一副墨色纸色 —— 样张照实给看。
     func renderLookThumbs() {
         let map = photoMap
         let pool = (page?.photoIDs ?? []).compactMap { map[$0] }
         guard let hero = (pool.isEmpty ? project.photos : pool).max(by: { $0.score < $1.score }) else { return }
-        let key = sessionToken.uuidString + hero.id
+        // 样张 120 像素见方，点距一律不到 3 像素：只调影调不出点（点距不影响），纸色先按页面底色定死。
+        var halftone = project.style.halftone
+        if let h = halftone {
+            halftone?.paper = CollageScreening.paper(h, background: project.style.background)
+            halftone?.pitch = 0.001
+        }
+        let key = sessionToken.uuidString + hero.id + (halftone.map { "|\($0)" } ?? "")
         guard key != lookThumbKey else { return }
         lookThumbKey = key
         var base = project
         base.canvas = CollageCanvas(name: "look", width: 240, height: 240)
         base.style = CollageStyle()
         base.style.margin = 0
+        base.style.halftone = halftone
         let page = CollagePage(root: .leaf(.photo(hero.id)))
         base.pages = [page]
         let hints = self.hints
@@ -2236,6 +2846,18 @@ final class CollageStore: ObservableObject {
         let c = project.canvas
         return "\(sessionToken)|\(page.id)|\(page.root.signature)|\(page.photoIDs.joined(separator: ","))|"
             + "\(page.items.count)|\(page.freeform)|\(c.width)x\(c.height)|\(hintsVersion)|\(project.title)"
+            + "|\(project.masthead)|\(project.issue)|\(Self.lookSignature(page))"
+            + (page.contactSheet.map { "|cs\($0.hashValue)" } ?? "")
+    }
+
+    /// 这一页单独设的色调 + 每格单独设的色调（切分树的 signature 不含它）：改了一页、一格的色调，预设样张、
+    /// 模板缩略图要跟着重渲。散落页没有格子色调。
+    static func lookSignature(_ page: CollagePage?) -> String {
+        guard let page else { return "" }
+        let own = page.look.map { "\($0.look.rawValue)\($0.strength)" } ?? "-"
+        guard !page.freeform else { return own }
+        let cells = page.root.leaves.map { $0.look.map { "\($0.look.rawValue)\($0.strength)" } ?? "" }
+        return own + "|" + cells.joined(separator: ",")
     }
 
     /// 这一页套每个风格预设渲一张小图：预设按钮上直接看到「纸白、墨黑、相纸、画廊」是什么样（以前只有名字，
@@ -2293,15 +2915,24 @@ final class CollageStore: ObservableObject {
             .sorted { $0.score > $1.score }.map(\.id)
         let map = photoMap
         let photos = ids.prefix(16).compactMap { map[$0] }
+        // 印样模板套用时拿托盘全部（按拍摄先后，相册里别的跨页用了的不拿，见 applyTemplate）：缩略图也拿这么多，
+        // 不然「135 整卷」的缩略图只有 16 帧，套下去却是一整卷。
+        let rollPhotos = CollageContact.rollOrder(project.photos.filter { !otherPages.contains($0.id) })
+        let rollKey = "|roll" + rollPhotos.map(\.id).joined(separator: ",")
         // 按照片集合认（换一批、置顶只改顺序，不用整批重渲）；标题、副标题也算（模板里的 {title}，
         // 以前填了标题缩略图还写着「拾光」）。
+        // 套下去会留着这一页、这几张照片单独设的色调（applyTemplate）：缩略图也带上，键里也算上。
+        let pageLook = page?.look
+        let lookSource = page.flatMap { $0.freeform ? nil : $0.root }
+        let lookKey = Self.lookSignature(page)
         let photoKey = photos.map(\.id).sorted().joined(separator: ",") + "|\(hintsVersion)|\(album)"
-            + "|\(project.title)|\(project.subtitle)"
+            + "|\(project.title)|\(project.subtitle)|\(project.masthead)|\(project.issue)|\(lookKey)"
         let styleKey = "|s\(project.style.hashValue)"
         let canvasKey = "|c\(project.canvas.hashValue)"
         var todo: [(CollageTemplate, String)] = []
         for t in templates {
             var key = photoKey + "|\(t.hashValue)"
+            if t.contactSheet != nil { key += rollKey }
             if album || t.style == nil { key += styleKey }
             if album || t.canvas == nil { key += canvasKey }
             if templateThumbKeys[t.name] != key { todo.append((t, key)) }
@@ -2322,8 +2953,10 @@ final class CollageStore: ObservableObject {
             try? await Task.sleep(for: .milliseconds(200))
             for (template, key) in todo {
                 if Task.isCancelled { return }
+                let source = template.contactSheet != nil ? rollPhotos : photos
                 let thumb = await Task.detached(priority: .utility) { () -> NSImage? in
-                    Self.templateThumb(template, base: base, photos: photos, hints: hints, album: album)
+                    Self.templateThumb(template, base: base, photos: source, hints: hints, album: album,
+                                       pageLook: pageLook, lookSource: lookSource)
                 }.value
                 guard let self, self.sessionToken == token, !Task.isCancelled else { return }
                 if let thumb {
@@ -2336,7 +2969,9 @@ final class CollageStore: ObservableObject {
 
     nonisolated private static func templateThumb(_ template: CollageTemplate, base: CollageProject,
                                                   photos: [CollagePhotoRef],
-                                                  hints: [String: CollageCrop.Hints], album: Bool) -> NSImage? {
+                                                  hints: [String: CollageCrop.Hints], album: Bool,
+                                                  pageLook: CollageLookSetting? = nil,
+                                                  lookSource: CollageNode? = nil) -> NSImage? {
         var project = base
         if !album {
             if let s = template.style { project.style = s }
@@ -2345,8 +2980,12 @@ final class CollageStore: ObservableObject {
         var map: [String: CollagePhotoRef] = [:]
         for p in project.photos { map[p.id] = p }
         let ctx = CollageLayout.Context(canvas: project.canvas, style: project.style, photos: map, hints: hints, heroID: nil)
-        let page = CollageTemplates.apply(template, photos: Array(photos.prefix(max(1, template.photoSlots))),
-                                          context: ctx, seed: 7)
+        // 印样自己按容量截（容量自动 = 整卷都上），不按 photoSlots 截。
+        let given = template.contactSheet != nil ? photos : Array(photos.prefix(max(1, template.photoSlots)))
+        var page = CollageTemplates.apply(template, photos: given, context: ctx, seed: 7)
+        // 和 applyTemplate 一样留着页、格单独设的色调。
+        if page.look == nil { page.look = pageLook }
+        if let lookSource, !page.freeform { page.root = CollageLayout.carryCellLooks(from: lookSource, into: page.root) }
         project.pages = [page]
         let scale = min(1, 300 / Double(max(project.canvas.width, project.canvas.height)))
         var opts = CollageRender.Options(scale: scale)
@@ -2422,6 +3061,8 @@ final class CollageStore: ObservableObject {
         }
         cropEditing = false
         cropUndoPending = false
+        // 撤销到托盘里有、但这份快照还没抄过亮度 / 黑白的照片（快照比路人信息早）：补上。
+        adoptHintFacts()
         // 撤销回去的版不一定是备选里的任何一个：备选作废。
         clearAlternatives()
         lastUndoPush = .distantPast
@@ -2438,7 +3079,7 @@ final class CollageStore: ObservableObject {
 
     /// 每次编辑之后：存盘 + 重渲。选中的路径如果已经不是一格（删格、换版之后结构变了），清掉。
     private func commitEdit() {
-        if let s = selection, isFreeform || root?.node(at: s)?.isLeaf != true {
+        if let s = selection, isFreeform || isContactSheet || root?.node(at: s)?.isLeaf != true {
             selection = nil
             cropEditing = false
         }
@@ -2453,7 +3094,8 @@ final class CollageStore: ObservableObject {
 
     /// 相册跨页条：编辑停下 0.25 秒后把每页渲一张小图（一页几毫秒）。
     func schedulePageThumbs() {
-        guard isAlbum else {
+        // 单张拼图有好几页（一键成套出的一期杂志、轮播组图）也要页条。
+        guard isAlbum || project.pages.count > 1 else {
             if !pageThumbs.isEmpty { pageThumbs = [:] }
             return
         }
@@ -2571,6 +3213,7 @@ final class CollageStore: ObservableObject {
             var lowRes: [String] = []
             var missing: [String] = []
             var signatureLost = false
+            var fillerBody = false
             for (i, page) in snapshot.pages.enumerated() {
                 if self?.exportCancelled ?? true { break }
                 let result = await Task.detached(priority: .userInitiated) { () -> PageResult in
@@ -2588,7 +3231,8 @@ final class CollageStore: ObservableObject {
                         let data = try Self.writePage(image, files: plan.pages[i], project: snapshot,
                                                       options: options, dir: folder, wantPDF: wantPDF)
                         return PageResult(pdfData: data, error: nil, lowRes: report.lowRes, missing: report.missing,
-                                          signatureLost: Self.signatureLost(report))
+                                          signatureLost: Self.signatureLost(report),
+                                          fillerBody: Self.fillerBody(report, canvas: snapshot.canvas))
                     } catch {
                         return PageResult(pdfData: nil, error: error.localizedDescription, lowRes: [], missing: [])
                     }
@@ -2598,6 +3242,7 @@ final class CollageStore: ObservableObject {
                 lowRes += result.lowRes
                 missing += result.missing
                 signatureLost = signatureLost || result.signatureLost
+                fillerBody = fillerBody || result.fillerBody
                 guard let self else { return }
                 self.progressFraction = Double(i + 1) / Double(snapshot.pages.count)
                 self.progressText = "导出 \(i + 1)/\(snapshot.pages.count)…"
@@ -2632,14 +3277,17 @@ final class CollageStore: ObservableObject {
                 self.progressText = "导出完成\(clean) → \(main)" + (files.count > 1 ? "（共 \(files.count) 个文件）" : "")
                 AppRuntime.revealInFinder(files.map { folder.appendingPathComponent($0) })
             }
-            if let warning = Self.exportWarning(missing: missing, lowRes: lowRes, signatureLost: signatureLost) {
+            if let warning = Self.exportWarning(missing: missing, lowRes: lowRes, signatureLost: signatureLost,
+                                                fillerBody: fillerBody) {
                 self.lastError = warning
             }
         }
     }
 
     /// 成品里有退化的地方：说清楚是哪几张、缺了什么（导出本身不算失败）。命令行 renderexport 也打印这一句。
-    static func exportWarning(missing: [String], lowRes: [String], signatureLost: Bool) -> String? {
+    /// fillerBody = 印刷画布上的正文还是灰条 / 占位字（社交尺寸上那只是纹理，印出来是要被人读的）。
+    static func exportWarning(missing: [String], lowRes: [String], signatureLost: Bool,
+                              fillerBody: Bool = false) -> String? {
         var parts: [String] = []
         if !missing.isEmpty {
             parts.append("\(Set(missing).count) 张照片读不了，格子空着：" + Set(missing).sorted().prefix(4).joined(separator: " "))
@@ -2647,7 +3295,15 @@ final class CollageStore: ObservableObject {
             parts.append("\(Set(lowRes).count) 张原图读不了，用了 1024 预览（印刷会糊）：" + Set(lowRes).sorted().prefix(4).joined(separator: " "))
         }
         if signatureLost { parts.append(CollageWatermarks.signatureLostWarning) }
+        if fillerBody { parts.append(fillerBodyWarning) }
         return parts.isEmpty ? nil : parts.joined(separator: "；")
+    }
+
+    static let fillerBodyWarning = "正文还是灰条或占位字：印出来是要被人读的，在「文字」里换成自己的字"
+
+    /// 印刷画布（≥ 150 dpi）上有正文是灰条 / 占位字。
+    nonisolated static func fillerBody(_ report: CollageRender.RenderReport, canvas: CollageCanvas) -> Bool {
+        canvas.isPrint && report.texts.contains { $0.hasFillerBody }
     }
 
     /// 这一页该有签名、签名图却读不了（渲染记账里的「签名读不了」）。
@@ -2676,6 +3332,7 @@ final class CollageStore: ObservableObject {
         var lowRes: [String]
         var missing: [String]
         var signatureLost = false
+        var fillerBody = false
     }
 
     /// 一页落盘：单张按画布切缝写九宫格/轮播；相册每个跨页一张（带出血）。
@@ -2746,9 +3403,12 @@ final class CollageStore: ObservableObject {
 
     /// `files`：这一页的文件名（exportPlan 给的：第一个是整张，后面是九宫格 / 轮播切片）。
     nonisolated private static func writePage(_ image: CGImage, files: [String], project: CollageProject,
-                                              options: ExportOptions, dir: URL, wantPDF: Bool) throws -> Data? {
+                                              options base: ExportOptions, dir: URL, wantPDF: Bool) throws -> Data? {
         let canvas = project.canvas
         guard let mainName = files.first else { return nil }
+        // 加了网的照片：JPEG 质量低于 0.9 网点边上会起振铃（一圈脏点），压到 0.9 以上。
+        var options = base
+        if project.style.halftone != nil { options.quality = max(0.9, options.quality) }
         if project.mode == .album {
             let url = dir.appendingPathComponent(mainName)
             if options.format == .jpeg {
@@ -2924,7 +3584,7 @@ final class CollageStore: ObservableObject {
 enum CollageTextTarget: Hashable {
     /// 路径 + 所在页（相册切了跨页，迟到的提交不认）。
     case cell([Int], UUID?)
-    /// 路径 + 那一格当时的照片 + 所在页（换一批后路径上换了照片就不认）。
-    case overlay([Int], String?, UUID?)
+    /// 路径 + 那一格当时的照片 + 所在页（换一批后路径上换了照片就不认）+ 第几个字块。
+    case overlay([Int], String?, UUID?, Int)
     case item(UUID)
 }

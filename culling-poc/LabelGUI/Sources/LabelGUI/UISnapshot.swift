@@ -19,6 +19,8 @@ import AppKit
 /// 离屏快照里假装鼠标停在这张上（离屏窗口收不到鼠标，悬停才出现的按钮只能这样看）。界面运行时永远是 nil。
 enum SnapshotPreview {
     @MainActor static var hoverID: String?
+    /// 拼图检视器「印样 › 逐帧」一开始就展开（--collage-ui --contact-frames）。界面运行时永远是 false。
+    @MainActor static var contactFramesOpen = false
 }
 
 /// 离屏快照的辅助功能树（--ax-dump）：AppKit 那几样控件（滑杆、分段、输入框、菜单按钮）带着值和能不能点，

@@ -10,16 +10,28 @@ import CryptoKit
 ///   选片   --ids a,b,c | --auto N（默认 6，按分数+多样性从精选/可用里挑）
 ///   画布   --canvas 3:4 | 1:1 | grid9 | 4:5 | 9:16 | 16:9 | carousel3 | a4 | album30 | album25 | album20 | album3020 | 宽x高
 ///   版式   --template <名字> | --alt K（第 K 个备选，默认 0）| --list（打印前 12 个备选）
-///   样式   --style grid|white|dark|editorial|chinese|film|polaroid|gallery|tinted
+///   样式   --style grid|white|dark|editorial|chinese|film|polaroid|gallery|tinted|frosted|gradient|airy|cinema|journal|cover
+///          |fashion|minimal|newspaper|swiss|weddingFineArt|weddingCanon（时尚刊、留白杂志、报纸、瑞士、婚礼 fine-art、古典版心；
+///          两个婚礼预设按画布 / 册子尺寸算边距）
 ///          --margin 0.045 --gutter 0.011 --no-tight --title 标题 --seed N --tries N
-///   色调   --look film|airy|faded|cinema|cool|mono|sepia [--look-strength 0.8] [--harmonize 0.6]
+///          --bg solid|fromPhoto|blurPhoto|gradient（底色：纯色 / 主图取色 / 主图模糊 / 渐变）
+///   色调   --look film|airy|faded|cinema|cool|mono|sepia|newsprint|contrastMono|muted|fineArt [--look-strength 0.8]
+///          [--harmonize 0.6]
 ///   压字   --overlay masthead|corner|subtitle|vertical|number|script|handwrite [--overlay-at 路径] [--anchor top…]
-///          --subtitle 副标题
+///          [--overlay-behind]（这块字在人后：人物挡字；定死位置时「自动」取景顺手换成「封面」，打印每块字的决定）
+///          --overlay-front（所有字块放回人前）--subtitle 副标题
 ///   散落   --scatter [--frame polaroid|white|none|film|mounts] [--tilt 6] [--tape 0.6]
-///   贴纸   --sticker washi@0.5,0.1,20（种类@中心x,y,旋转；可多次）
-///   模板册 --template-sheet 出图.jpg（全部内置模板套这组照片，拼成一张总览）
-///   相册   --album [--spreads N] [--pdf] [--marks] [--no-dedupe]
+///   贴纸   --sticker washi@0.5,0.1,20（种类@中心x,y,旋转；可多次；另有 barcode 装饰条码、greasePencil 油性笔圈）
+///   模板册 --template-sheet 出图.jpg [--only 分类或名字里的几个字]（全部内置模板套这组照片，拼成一张总览）
+///          --look-sheet 出图.jpg（每个色调套这组照片并排）
+///   相册   --album [--spreads N] [--pdf] [--marks] [--no-dedupe] [--binding layflat|glued]（装订：平铺对裱 / 胶装锁线）
+///          [--album-theme classic|fineArt]（fineArt = 婚礼 fine-art 编排：章节开篇、疏密、呼吸页、竖图成对；没给 --style
+///          就用 fine-art 样式按册子尺寸算边距）[--no-chapter-mono]（不整章转黑白）
+///   刊头   --masthead 刊名（空 = 标题转大写 / 拼音）--issue 期号（空 = 页码）
+///   成套   --kit fashionIssue|contactRoll|weddingAlbum（或 出一期 / 按卷出印样 / 整本婚礼相册）：出全部页 名_01…
+///          --cover-step N（出一期：封面用第 N+1 个主图候选，「换封面」同一套候选；负数按 0）
 ///   输出   --out 文件或目录（九宫格/轮播/相册写目录）  --debug 叠人脸框/安全区/路人/切缝
+///   调试   --sim（打印分数最高 20 张两两的画面距离就退出）--bench N（预览同款渲染跑 N 次的平均耗时）
 ///
 /// 只读分析结果、只写 --out；不碰 UserDefaults。
 enum CollageCLI {
@@ -34,7 +46,10 @@ enum CollageCLI {
         let dir = URL(fileURLWithPath: args[flagIndex + 1])
         let store = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         store.switchSession(to: dir)
-        let pool = store.items.filter { $0.verdict != .reject }.compactMap(CollageBridge.ref(from:))
+        // 主体蒙版缓存和界面同一个地方（场次目录下 collage_masks/）。
+        CollageMasks.setDirectory(store.sessionDir.appendingPathComponent("collage_masks"))
+        let facts = CollageBridge.Facts(batch: store)
+        let pool = store.items.filter { $0.verdict != .reject }.compactMap { CollageBridge.ref(from: $0, facts: facts) }
         guard !pool.isEmpty else {
             print("没有可用的照片（先 --analyze）")
             exit(1)
@@ -51,6 +66,8 @@ enum CollageCLI {
         if let m = option("--bg").flatMap(CollageBackgroundMode.init(rawValue:)) { project.style.backgroundMode = m }
         project.title = option("--title") ?? ""
         project.subtitle = option("--subtitle") ?? ""
+        project.masthead = option("--masthead") ?? ""
+        project.issue = option("--issue") ?? ""
         let out = URL(fileURLWithPath: option("--out") ?? "collage.jpg")
         let debug = args.contains("--debug")
         let seed = UInt64(option("--seed") ?? "7") ?? 7
@@ -59,11 +76,29 @@ enum CollageCLI {
         for p in pool { photoMap[p.id] = p }
 
         if args.contains("--album") {
+            if let t = option("--album-theme") {
+                guard let theme = CollageAlbumTheme(rawValue: t) else {
+                    print("没有编排主题「\(t)」：" + CollageAlbumTheme.allCases.map(\.rawValue).joined(separator: " / "))
+                    exit(1)
+                }
+                project.albumTheme = theme
+            }
+            project.albumChapterMono = !args.contains("--no-chapter-mono")
             runAlbum(project: project, photoMap: photoMap, out: out, debug: debug, seed: seed,
+                     style: option("--style") == nil,
                      spreads: Int(option("--spreads") ?? "0") ?? 0,
                      pdf: args.contains("--pdf"), marks: args.contains("--marks"),
                      dedupe: !args.contains("--no-dedupe"),
                      binding: option("--binding").flatMap(CollageBinding.init(rawValue:)) ?? .layflat)
+        }
+
+        if let name = option("--kit") {
+            guard let kit = CollageKitID.find(name) else {
+                print("没有成套「\(name)」：" + CollageKitID.allCases.map { "\($0.rawValue)（\($0.name)）" }.joined(separator: " / "))
+                exit(1)
+            }
+            runKit(kit, project: project, batch: store, out: out, seed: seed,
+                   coverStep: max(0, Int(option("--cover-step") ?? "0") ?? 0))
         }
 
         // --sim：打印候选两两的画面距离（校准相似度扣分用）。
@@ -182,12 +217,40 @@ enum CollageCLI {
             root = results[alt].root
             page = CollagePage(root: root)
         }
-        // 压字：放在主图那一格（或 --overlay-at 指定的格）。
+        // 压字：放在主图那一格（或 --overlay-at 指定的格）。--overlay-behind = 这块字放到人后（人物挡字）：
+        // 和检视器的开关同一条规矩 —— 定死位置的字、这一格还是「自动」取景且没裁过，顺手换成「封面」取景。
         if let key = option("--overlay"), var overlay = CollageOverlays.preset(key), !page.freeform {
             if let a = option("--anchor").flatMap(CollageAnchor.init(rawValue:)) { overlay.anchor = a }
+            let behind = args.contains("--overlay-behind")
+            if behind { overlay.layer = .behindSubject }
+            let fixed = overlay.anchor != .auto && !overlay.anchor.isSide
             let target = option("--overlay-at").map { $0.compactMap { $0.wholeNumberValue } }
                 ?? heroPath(page.root, photoMap: photoMap)
-            if let target { page.root.update(at: target) { $0.cell?.overlay = overlay } }
+            if let target {
+                page.root.update(at: target) { node in
+                    guard var cell = node.cell else { return }
+                    cell.overlay = overlay
+                    if behind, fixed, cell.framing == .auto, cell.crop == nil, !cell.contain {
+                        cell.framing = .cover
+                        cell.coverAuto = true
+                    }
+                    node.cell = cell
+                }
+            }
+        }
+        // --overlay-front：所有字块都放到人前（关掉模板里的人物挡字，对照用）。
+        if args.contains("--overlay-front") {
+            for leaf in page.root.leafPaths() {
+                page.root.update(at: leaf) { node in
+                    guard var cell = node.cell, !cell.overlays.isEmpty else { return }
+                    cell.overlays = cell.overlays.map { o in
+                        var out = o
+                        out.layer = .front
+                        return out
+                    }
+                    node.cell = cell
+                }
+            }
         }
         for raw in args.indices.filter({ args[$0] == "--sticker" && $0 + 1 < args.count }).map({ args[$0 + 1] }) {
             let parts = raw.split(separator: "@").map(String.init)
@@ -207,7 +270,7 @@ enum CollageCLI {
             page.items.append(item)
         }
         project.pages = [page]
-        printTable(page.root, project: project, hints: hints)
+        printTable(page, project: project, hints: hints)
         if !page.items.isEmpty { printItems(page.items, project: project, hints: hints) }
 
         // --bench N：界面预览同款渲染（缓存预热后、半尺寸、不走导出解码）跑 N 次的平均耗时。
@@ -225,14 +288,45 @@ enum CollageCLI {
         var opts = CollageRender.Options(scale: 1)
         opts.debug = debug
         opts.export = true
+        // 走人物挡字 / 封面取景 / 抠图的格子：出图时记下每块字的决定，打印出来（别的出图不挂记录，和以前一样）。
+        let covered = page.root.leafPaths().contains { path in
+            page.root.node(at: path)?.cell.map(CollageCover.applies(to:)) ?? false
+        }
+        let report: CollageRender.RenderReport? = covered ? CollageRender.RenderReport() : nil
+        opts.report = report
         let t3 = Date()
         guard let image = CollageRender.render(page: page, project: project, hints: hints, options: opts) else {
             print("渲染失败")
             exit(1)
         }
         print(String(format: "渲染 %dx%d · %.2fs", image.width, image.height, Date().timeIntervalSince(t3)))
+        for t in report?.texts ?? [] {
+            guard let o = t.occlusion else { continue }
+            print("  [\(t.owner)] \(t.layer) · " + occlusionLine(o))
+        }
+        for c in report?.crops ?? [] where c.framing == CollageFraming.cover.rawValue {
+            let w = c.window
+            print(String(format: "  [%@] 封面取景 %.3f,%.3f %.3fx%.3f", c.owner, w.minX, w.minY, w.width, w.height))
+        }
         write(image, project: project, out: out)
         exit(0)
+    }
+
+    /// 人物挡字一块字的读数（ops 的 dumptexts、--collage 单张出图共用）。
+    static func occlusionLine(_ o: CollageRender.OcclusionRecord) -> String {
+        let per = o.perLetter.map { String(format: "%.0f", $0 * 100) }.joined(separator: " ")
+        let lines = o.perLine.map { String(format: "%.0f", $0 * 100) }.joined(separator: " ")
+        let head = o.measured
+            ? String(format: "人物挡字：总 %.1f%%（上限 %.0f%%%@）首 %.1f%% 末 %.1f%% 过半 %d/%d 个 · 每个字母 [%@] · 每行 [%@]",
+                     o.total * 100, o.limit * 100, o.rule == "total" ? "，只限总量" : "", o.first * 100, o.last * 100,
+                     o.heavy, o.perLetter.count, per, lines)
+            : "人物挡字：没量"
+        let eyes = o.eyesClear.map { $0 ? " · 眼睛没被字压" : " · 眼睛被字压了" } ?? ""
+        let clamp = o.eyeClamp.map { ["bottom": "，照片下沿卡住", "top": "，头顶上面天不够", "face": "，脸太大"][$0] ?? "" } ?? ""
+        let below = o.eyeBelow.map { String(format: " · 眼睛在基线下 %.1f%%%@", $0 * 100, o.eyeFar ? "（远\(clamp)）" : "") } ?? ""
+        return head + " → \(o.decision)\(o.moved ? "·挪开头" : "")（要求 \(o.requested)）" + eyes + below
+            + (o.reason.map { " · " + $0 } ?? "")
+            + " · 头顶 \(o.headTopSource) · \(o.faces) 张脸"
     }
 
     /// --collage-ui / --collage-ops 会改拼图工程（清托盘、换模式、存全局设置）：只在 LABELGUI_DATA_DIR
@@ -248,23 +342,43 @@ enum CollageCLI {
 
     @MainActor
     private static func runAlbum(project base: CollageProject, photoMap: [String: CollagePhotoRef], out: URL,
-                                 debug: Bool, seed: UInt64, spreads limit: Int, pdf: Bool, marks: Bool,
-                                 dedupe: Bool, binding: CollageBinding) -> Never {
+                                 debug: Bool, seed: UInt64, style: Bool = false, spreads limit: Int, pdf: Bool,
+                                 marks: Bool, dedupe: Bool, binding: CollageBinding) -> Never {
         var project = base
         if project.canvas.seams != .fold { project.canvas = CollageCanvas.albums[0] }
         project.canvas.binding = binding
         var hints: [String: CollageCrop.Hints] = [:]
         for p in project.photos { hints[p.id] = CollageVision.hints(for: p) }
+        // fine-art 编排：没指定样式就用 fine-art 样式（边距按这本册子算）；亮度、黑白从路人信息补进 ref。
+        var photos = project.photos
+        var photoMap = photoMap
+        // --style weddingFineArt / weddingCanon：边距按这本册子重算（预设里是 30×30 的数）；别的样式原样。
+        project.style = CollageStyleFineArt.adapted(project.style, to: project.canvas) ?? project.style
+        if project.albumTheme == .fineArt {
+            if style { project.style = CollageStyleFineArt.style(for: project.canvas) }
+            for i in photos.indices {
+                photos[i].meanLuma = photos[i].meanLuma ?? hints[photos[i].id]?.meanLuma
+                photos[i].isMonochrome = photos[i].isMonochrome ?? hints[photos[i].id]?.isMonochrome
+                photoMap[photos[i].id] = photos[i]
+            }
+            project.photos = photos
+        }
         let context = CollageLayout.Context(canvas: project.canvas, style: project.style, photos: photoMap,
                                             hints: hints, heroID: nil)
-        let plan = CollageAlbum.plan(project.photos, dedupe: dedupe)
+        let plan = CollageAlbum.plan(photos, dedupe: dedupe, theme: project.albumTheme,
+                                     chapterMono: project.albumChapterMono, title: project.title)
         let used = plan.spreads.reduce(0) { $0 + $1.photos.count }
-        print("相册 \(project.canvas.name) · \(project.canvas.width)x\(project.canvas.height)px · 出血 \(project.canvas.bleed)px · \(project.photos.count) 张 → 用 \(used) 张（相似拿掉 \(plan.dropped.count)）→ \(plan.spreads.count) 个跨页")
+        // fine-art：拿掉的分开说（同一场只留精选一直开着，「相似」才是 --no-dedupe 关的那个）。
+        let droppedText = plan.theme == .fineArt ? CollageStyleFineArt.droppedNote(photos, plan: plan)
+            : "相似拿掉 \(plan.dropped.count)"
+        print("相册 \(project.canvas.name) · \(project.canvas.width)x\(project.canvas.height)px · 出血 \(project.canvas.bleed)px · \(project.photos.count) 张 → 用 \(used) 张（\(droppedText)）→ \(plan.spreads.count) 个跨页")
         if !plan.dropped.isEmpty { print("  拿掉: " + plan.dropped.map(\.id).joined(separator: " ")) }
         let pages = CollageAlbum.build(plan, context: context, seed: seed)
         for (i, spread) in plan.spreads.enumerated() {
             let s = CollageLayout.score(pages[i].root, m: nil, context: context)
-            print("  跨页 \(i + 1) [\(spread.kind.rawValue)]: \(spread.photos.map(\.id).joined(separator: " ")) · 切脸 \(s.cutFaces) · 中缝压脸 \(s.seamFaces)")
+            let kind = spread.fineArt.map { "\(spread.kind.rawValue)/\($0.kind.rawValue) 第\($0.chapter + 1)章" } ?? spread.kind.rawValue
+            print("  跨页 \(i + 1) [\(kind)]: \(spread.photos.map(\.id).joined(separator: " ")) · 切脸 \(s.cutFaces) · 中缝压脸 \(s.seamFaces)"
+                  + (pages[i].look.map { " · 色调 \($0.look.rawValue)" } ?? ""))
         }
         project.pages = pages
         try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
@@ -277,7 +391,8 @@ enum CollageCLI {
             let report = CollageRender.RenderReport()
             opts.report = report
             let t0 = Date()
-            guard let image = CollageRender.render(root: pages[i].root, project: project, hints: hints, options: opts),
+            // 整页渲染（不是只画版式树）：带自由图层的跨页也不丢东西（相册编排以后会生成图层）。
+            guard let image = CollageRender.render(page: pages[i], project: project, hints: hints, options: opts),
                   let data = CollageExport.encode(image, format: .jpeg, quality: 0.92, dpi: project.canvas.dpi) else {
                 print("跨页 \(i + 1) 渲染失败")
                 continue
@@ -315,6 +430,44 @@ enum CollageCLI {
             } catch {
                 print(error.localizedDescription)
             }
+        }
+        exit(0)
+    }
+
+    // MARK: - 一键成套
+
+    /// --kit：和界面里「一键成套」同一个生成函数；出全部页（单页 = --out，多页 = 名_01、名_02…；相册跨页
+    /// 也按页写）。还没做的成套打印一句、退出码 1。
+    @MainActor
+    private static func runKit(_ kit: CollageKitID, project base: CollageProject, batch: BatchStore, out: URL,
+                               seed: UInt64, coverStep: Int = 0) -> Never {
+        var hints: [String: CollageCrop.Hints] = [:]
+        for p in base.photos { hints[p.id] = CollageVision.hints(for: p) }
+        let items = batch.items
+        let context = CollageKits.Context(project: base, tray: base.photos, batchItems: { items },
+                                          facts: CollageBridge.Facts(batch: batch), hints: hints, seed: seed,
+                                          coverStep: coverStep)
+        let t0 = Date()
+        guard let project = kit.generate(context), !project.pages.isEmpty else {
+            print("成套「\(kit.name)」没出来（托盘里没有能用的照片），没有出图")
+            exit(1)
+        }
+        print(String(format: "成套「%@」%d 页 · %@ · %.2fs", kit.name, project.pages.count, project.canvas.name,
+                     Date().timeIntervalSince(t0)))
+        for p in project.photos where hints[p.id] == nil { hints[p.id] = CollageVision.hints(for: p) }
+        let stem = out.deletingPathExtension()
+        let ext = out.pathExtension.isEmpty ? "jpg" : out.pathExtension
+        for (i, page) in project.pages.enumerated() {
+            var opts = CollageRender.Options(scale: 1)
+            opts.export = true
+            let url = project.pages.count == 1 ? out : URL(fileURLWithPath: stem.path + String(format: "_%02d.", i + 1) + ext)
+            printTable(page, project: project, hints: hints)
+            if !page.items.isEmpty { printItems(page.items, project: project, hints: hints) }
+            guard let image = CollageRender.render(page: page, project: project, hints: hints, options: opts) else {
+                print("第 \(i + 1) 页渲染失败")
+                continue
+            }
+            write(image, project: project, out: url)
         }
         exit(0)
     }
@@ -363,13 +516,22 @@ enum CollageCLI {
     }
 
     /// 每格一行：路径、照片、格子尺寸、景别、取景窗口、裁掉多少、切脸/路人。
-    private static func printTable(_ root: CollageNode, project: CollageProject, hints: [String: CollageCrop.Hints]) {
+    private static func printTable(_ page: CollagePage, project: CollageProject, hints: [String: CollageCrop.Hints]) {
+        let root = page.root
         let canvas = project.canvas
         let style = project.style
         var photos: [String: CollagePhotoRef] = [:]
         for p in project.photos { photos[p.id] = p }
-        let geo = CollageLayout.geometry(root, in: CollageLayout.contentRect(canvas: canvas, style: style),
-                                         gutter: CollageLayout.gutterPixels(canvas: canvas, style: style))
+        let geo = CollageLayout.pageGeometry(root, canvas: canvas, style: style)
+        // 封面取景、人物挡字、抠图的格子：取景按 CollageCover 的决定（真画出来的那个，同 CollageStore.upscaleIssues）；
+        // 这一页没有这种格子就照旧（不算占位符、底色）。
+        let covered = geo.frames.contains { CollageCover.applies(to: $0.cell) }
+        let paged = covered ? CollageLooks.project(project, page: page) : project
+        let ids = page.photoIDs
+        let pageVars = covered ? CollageTypeset.variables(project: paged, root: root, photos: photos, pagePhotoIDs: ids,
+                                                          pageID: page.id) : [:]
+        let bg = covered ? CollageRender.backgroundColor(project: paged, pagePhotoIDs: ids, photos: photos)
+            : style.background
         print("画布 \(canvas.width)x\(canvas.height) · 边距 \(CollageLayout.contentRect(canvas: canvas, style: style).x0)px · 缝 \(CollageLayout.gutterPixels(canvas: canvas, style: style))px · \(root.signature)")
         for f in geo.frames {
             let path = f.path.map(String.init).joined()
@@ -382,8 +544,12 @@ enum CollageCLI {
                 let framing = CollageLayout.effectiveFraming(path: f.path, cell: f.cell, in: geo.frames,
                                                              photos: photos, tight: style.tightSmallCells)
                 let area = CollageCrop.photoArea(cell: f.cell, rect: f.rect.cgRect, style: style)
-                let w = CollageCrop.window(for: p, cell: f.cell, cellAspect: CollageCrop.aspect(of: area),
-                                           framing: framing, hints: hints[id])
+                let w = CollageCover.applies(to: f.cell)
+                    ? CollageRender.cellWindow(cell: f.cell, frameRect: f.rect.cgRect, project: paged, photo: p,
+                                               framing: framing, hints: hints[id],
+                                               vars: CollageTypeset.cellVariables(pageVars, photo: p), background: bg)
+                    : CollageCrop.window(for: p, cell: f.cell, cellAspect: CollageCrop.aspect(of: area),
+                                         framing: framing, hints: hints[id])
                 let kept = w.w * w.h
                 let flags = (w.cutsFace ? " !!切脸" : "") + (w.hitsBystander ? " 路人" : "")
                 print("  [\(path)] \(id) \(f.rect.width)x\(f.rect.height) \(framing.label) 窗口 \(fmt(w.w))x\(fmt(w.h)) 裁掉 \(Int(((1 - kept) * 100).rounded()))%\(flags)")
@@ -577,7 +743,12 @@ enum CollageCLI {
 // MARK: - 界面离屏快照（不开 GUI：禁止激活、窗口从不显示）
 
 /// LabelGUI --collage-ui <photo_dir> <out.png> [--album] [--tab 版式|样式|文字|水印|导出] [--select 路径如 10]
-/// [--crop] [--size 1440x900] [--adopt photos|page[:水印页预设名]] [--inspector-width 300] [--notice 提示文字]
+/// [--crop] [--overlay-index N] [--size 1440x900] [--adopt photos|page[:水印页预设名]] [--inspector-width 300] [--notice 提示文字]
+/// [--contact-frames]（印样的「逐帧」一开始就展开）[--light]（浅色外观）[--ax-dump]
+/// 截图前先改工程（都可选）：--relayout [--count 6]（托盘重新自动排版，几张；工程里还没有版式时也排）、
+/// --layout grid|scatter、--template <模板名>、--title 标题、--subtitle 副标题、--look <色调>、
+/// --overlay <压字预设>（放在主图那一格并选中它）、--page N（相册第 N 个跨页，从 0 起；先换页再选格子）、
+/// --select-item N（选中第 N 个自由图层）。
 /// --inspector-width N：只截检视器、宽 N pt（高取 --size 的高）—— 窗口里检视器能拖到 300…380，
 /// 分栏视图给多宽外面定不准，单独截才能逐个宽度看有没有挤出去。
 /// --tab 水印 时另外打印面板上每层显示什么（「水印面板」行）；--ax-dump 打印辅助功能树（滑杆、分段、输入框）。
@@ -602,7 +773,7 @@ enum CollageUISnapshot {
         let batch = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         batch.switchSession(to: dir)
         let store = CollageStore(dataDir: appDataDir)
-        store.attach(sessionDir: batch.sessionDir, photoDir: dir)
+        store.attach(sessionDir: batch.sessionDir, photoDir: dir, batch: batch)
 
         func spin(_ seconds: Double, until done: () -> Bool = { false }) {
             let deadline = Date().addingTimeInterval(seconds)
@@ -659,6 +830,8 @@ enum CollageUISnapshot {
         if let sel = option("--select") {
             store.selection = sel.compactMap { $0.wholeNumberValue }
             if args.contains("--crop"), let path = store.selection { store.enterCropEdit(path) }
+            // --overlay-index N：选中照片上第 N 个字块（检视器的字块列表、画布上实一点的那个虚框）。
+            if let i = option("--overlay-index").flatMap(Int.init) { store.overlayIndex = max(0, i) }
         }
         if let i = option("--select-item").flatMap(Int.init), store.items.indices.contains(i) {
             store.selectItem(store.items[i].id)
@@ -676,6 +849,8 @@ enum CollageUISnapshot {
                       + " · 提示：" + (store.notice ?? "无"))
             }
         }
+        // --contact-frames：印样的「逐帧」一开始就展开（离屏点不了展开箭头）。
+        SnapshotPreview.contactFramesOpen = args.contains("--contact-frames")
         let tab: CollageInspector.Tab = CollageInspector.Tab.allCases.first { $0.rawValue == option("--tab") } ?? .layout
         let sizeParts = (option("--size") ?? "1440x900").split(separator: "x").compactMap { Double($0) }
         let size = NSSize(width: sizeParts.first ?? 1440, height: sizeParts.count > 1 ? sizeParts[1] : 900)
@@ -753,14 +928,67 @@ private struct CollageSnapshotHost: View {
 /// LABELGUI_DATA_DIR=<临时目录> LabelGUI --collage-ops <photo_dir> --ops "swap:00>10,move:00>11:left,remove:10,
 ///     flip:r,ratio:0=0.4,lock:00,regen,framing:10=half,shape:10=circle,contain:10,crop:10=0.5;0.4;2,
 ///     text:00=bottom,place:DSCF7209>11:top,undo,redo,savetpl:名字,applytpl:名字,exporttpl:/path.json,
-///     importtpl:/path.json,frombatch:DSCF7209;DSCF7211,render:文件名" [--out 目录] [--count 6]
+///     importtpl:/path.json,frombatch:DSCF7209;DSCF7211,render:文件名" [--out 目录] [--count 6] [--title 标题] [--subtitle 副标题]
+/// 起手：清托盘、单张 3:4、默认样式、没有水印，托盘 = 精选 + 可用，按固定的几张（DSCF7232、7208、7222…前 --count 张）
+/// 排一版；标题 / 副标题用 --title / --subtitle（不给 = 空）。
 /// 路径写成数字串（"10" = 根的第二个孩子的第一个孩子），根节点写 r；一步里的几个数用分号分（逗号分步）。
 /// 每步打印版式树、图层（~ 自动撒的，@7232 贴在那张相纸上）和撤销栈。出图不走导出：renderclean = 界面
 /// 预览同款，renderexport = 导出同款（成品尺寸带出血）。必须设 LABELGUI_DATA_DIR（起手会清托盘）。
 /// renderclean:<文件名>@0.3 按这个缩放出预览；bench:<次数>:<缩放> / benchdrag:<次数>:<缩放>[:<缝>] 量预览渲染耗时；
-/// exifprobe:<路径> 核对水印用的 EXIF 缓存。
+/// exifprobe:<路径> 核对水印用的 EXIF 缓存；toneprobe:<路径;…> 打印亮度和黑白判定（CollageVision.tone）。
+/// renderclean / renderexport 每次都在旁边写 <文件名>.marks.json（水印、页上图层、texts = 每个文字块、
+/// crops = 每格取景；见 CollageWatermarkCLI.writeMarks）。出图、dumptexts、bench 之前先等后台的路人信息算完，
+/// 起手那一版也等（出图不随机器快慢变）；每格单独的色调打印成 /色调mono，这一页的打印成（这一页色调sepia）。
+/// style:<预设 key>（同 --style）、title:<标题>、subtitle:<副标题>、masthead:<刊头>、issue:<期号>（空 = 清掉）；
+/// kit:<成套 key 或中文名>（一键成套，同界面菜单；先等路人信息算完）；nextcover[:N]（出一期「换封面」：主图候选往后轮 N 张，
+/// N 不到 1 按 1；只换封面那张）；herodump（出一期挑封面的候选、罚分、原因）；albumtheme:classic|fineArt、chaptermono:on|off（相册自动编排的主题、
+/// fine-art 的整章黑白；arrange 按它编）；pagelook:<色调>[@强度]|none、celllook:<路径>=<色调>[@强度]|none
+/// （页级、格级色调）；insets:上;下;内;外|none（四边边距，相对短边）；datevars:2026-10-23（打印这一天的日期占位符）；
+/// fonts（每个字体 × 字重实际解析成哪个 PostScript 名、在哪）；photofacts（托盘每张照片从批量页带来的字段）；
+/// applytpl:<模板名 | 分类名 | 名字里的几个字>；dumptexts = 打印每页所有文字块展开后的字、字体字号、位置。
+/// 一张照片多个字块：overlay:P[.i]=KEY|none、anchor:P[.i]=RAW（另有 leftColumn / rightColumn / bottomBand）、
+/// overlaypos:P[.i]=x;y、overlaytext:P[.i]=字、effect:P[.i]=预设[@行]（00.1 = 00 那张照片上第 2 块；不写 = 第 1 块）、
+/// overlayadd:P=KEY（再加一块，让着已有的）、overlaydel:P.i；tset:目标=键=值;…（文字格 / 照片字块 / itemN 的参数：
+/// 转向、细线样式、行距、铺满宽度、压窄、大小写、多栏正文……，键表见 applyTextSettings；值里的逗号写 %2C）。
+/// 人物挡字（CollageCover）：overlayfront:P[.i]=on|off（off = 字在人后）、depth:P[.i]=0.2（压字深度 0…0.3）、
+/// framing:P=cover（封面取景）、cutout:P=on|off[;白边;投影][;edge]（抠图格；edge = 人得延伸到成品底边，浮在纸上就整张照放；
+/// cutoutdrag:P=白边;投影 = 拖滑杆的一格，连着拖记一步撤销）、
+/// itemcutout:N=on|off[;白边;投影]（抠图贴纸）、tset 的 depth / maxOcclusion /
+/// occlusionRule=masthead|total（total = 装饰大字只限总量，不管首末字母）/ maxZoom=1.5（封面取景最多拉近几倍，0 = 不限）/ tightEdge=on（人后主体的边压利落）；coverdump（每格的
+/// 取景、头顶、每块字的遮挡和决定）、maskdump[:<目录>]（托盘每张的主体蒙版，给了目录就拷 PNG）、
+/// fakefaces:ID=x0;y0;x1;y1/…（合成数据：改托盘里这张的人脸框，验合影退让）。
+/// 时尚刊的字块参数：tset 行级 L<n>.spreadShort=on（短刊头加字距不放大）、L<n>.accent=on（颜色从照片取），
+/// 字块级 clearBottom=0.104（不进底部遮挡带）、scrim=off（干净的字：不垫雾面，按字形定深浅、看不清落光晕）、
+/// matchTone=on（同一格里这几块统一深浅）、fade=0.55（底部平滑压暗，最深多黑）、inkTop=0.025（字墨的顶离上边）。
+/// 渲染件：halftone:dot|line[;点距;网角;锐度;网点增大;墨色;纸色|page]|none（照片加网，点距相对短边；实际不到 3 像素只调影调；
+/// page = 纸色跟页面底色（模糊底、渐变底时跟底色块），深色页配深墨时换成纸白；.marks.json 的 halftone 记每张的实际点距、出没出点、墨色纸色）、border:none|hairline|polaroid|film|mat[=卡纸色]、mat:0.07（卡纸宽，
+/// 顺手换成卡纸边）、paperover:0.5（纸纹压在照片上）、grain:0.4（底下的纸纹）；贴纸 sticker:barcode / sticker:greasePencil
+/// （先 sel:路径 选中照片格 = 圈住那一格）、itemmark:N=circle|cross|dot|cropLine（换记号，外框按记号换算）、
+/// itemcolor:N=hex、itemlabel:N=字（标签、邮戳、条码上的字）。
+/// 印样 / 底片条：contact:135|645|66|67|auto[;每条帧数;条数;sheet|strip]（这一页改成印样，托盘按拍摄先后排成一卷；
+/// 已经是印样的只改给了的几项）| contact:off（改回网格）；contactset:键=值;…（format layout perStrip strips upright fill
+/// marks cross color roll note edge iso edgeprint jitter tilt margin circles gap paper choice；改 layout 时纸跟着换）；
+/// contactmark:ID=circle|cross|dot|cropLine|none|auto；
+/// contactframes:ID;ID;…|tray；contactdump（每帧帧号 ↔ 照片、记号、转没转；.marks.json 的 contactSheet 是同一份）。
 /// 水印：wm:photos:/sig.png、wmpos:photos:top_left、wmadopt:page:/水印页state.json、
-///     wmhandoff:/水印页state.json;/原图1;/原图2 …（全部见 CollageWatermarkCLI）。
+///     wmhandoff:/水印页state.json;/原图1;/原图2 …（wmhandoffnowait = 发起就走、不等照片读完，之后用 wait 等）、
+///     wmdump（整个水印的 JSON）（wm* 全部见 CollageWatermarkCLI）。
+/// 上面没列的：
+/// 版式：refit（贴合原比例：结构不变、按照片原比例重算缝）、sel:P（选中格子）、containblur:P（完整显示、四周用本图模糊填）、margin:0（外边距，相对短边）、
+///     bg:solid|fromPhoto|blurPhoto|gradient[=底色 hex]、look:<色调>、strength:0.8（色调强度）、harmonize:0.6（统一色温）、
+///     layout:grid|scatter、autolayout:N（托盘前 N 张重新自动排版）、relayout:ID;ID（这一页的照片再加这几张重排）；
+///     layoutnowait / autolayoutnowait = 同上但不等排版落下，wait = 等排版落下。
+/// 托盘 / 批量页：untray:ID、cleartray、waittray:N（等托盘有 N 张再等排版）、spintray:N（等到 N 张就走，不等排版）、
+///     addfiles:/a.jpg;/b.jpg（托盘「添加文件…」）、batchverdict:ID=pick|usable|reject（批量页手动改判）、
+///     reattach（同一场再 attach 一次 = 从批量页切回拼图 tab）、batchswitch（批量页重新载入这一场）。
+/// 自由图层（N = 第几个图层，从 0 起）：itemtext（加一个文字图层）、additem:ID@x;y（加一张相纸）、selitem:N、itemmove:N=x;y、
+///     itemrot:N=角度、itemsize:N=倍数、itemfront:N / itemback:N（叠放顺序）、itemdel:N、itemdup:N。
+/// 相册：mode:album|single、canvas:<同 --canvas>、binding:layflat|glued、arrange[:all]（自动编排；all = 不去重）、page:N、
+///     addpage、delpage:N、movepage:N=±k、tonext:P（这一格的照片挪到下一个跨页）、upscale[:1.2]（打印放大超过阈值的照片）、
+///     crossfold（打印压中缝的跨页）。
+/// 核对：notice（打印状态栏提示）、digest（整个工程的指纹，核对撤销）、tplthumbs[:前缀]（模板缩略图，给了前缀就存 PNG）、
+///     altthumb:序号=文件名（存第几个备选的缩略图）、render:<文件名>（半尺寸 + 调试框）。
+/// export:<目录> = 走导出全流程（无头模式不弹访达；会真的写出文件，测试脚本用 renderexport）；exportname:<名字>（导出文件名）。
 enum CollageOpsScript {
     @MainActor
     static func run(flagIndex: Int) -> Never {
@@ -776,7 +1004,7 @@ enum CollageOpsScript {
         let batch = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         batch.switchSession(to: dir)
         let store = CollageStore(dataDir: appDataDir)
-        store.attach(sessionDir: batch.sessionDir, photoDir: dir)
+        store.attach(sessionDir: batch.sessionDir, photoDir: dir, batch: batch)
 
         func spin(_ seconds: Double, until done: () -> Bool) {
             let deadline = Date().addingTimeInterval(seconds)
@@ -785,8 +1013,30 @@ enum CollageOpsScript {
                 if done() { break }
             }
         }
-        func idle() { spin(60) { !store.isSolving && store.busyText == nil } }
+        // 路人信息是后台一张张算的（每张一次 Vision）：出图、排版要等它算完，不然用到的是「算到第几张」的
+        // 那一份 —— 裁切避路人、主图挑哪张跟着机器快慢变，同一段脚本两次出图对不上（门禁偶发变红就是这个）。
+        // 等满 60 秒还没算完就照常往下走，但留一行字：门禁哪天又对不上，日志里看得出是这里。
+        func noteHintsTimeout() {
+            if store.hintsPending { print("  路人信息 60 秒没算完，照常往下走（这一步的出图可能跟着机器快慢变）") }
+        }
+        func hintsSettled() {
+            // 先看一眼：已经算完就不转 runloop（spin 先转 20 ms 再查，以前每次出图白等 20 ms —— 门禁里老模板
+            // 「慢了 4–12%」全是这个）。计数是排任务时同步加的（computeHints / prewarmMasks），没排上的不会漏等。
+            // 只改这一处：idle() 等的「正在排版 / 忙」没逐个核对是不是排任务时同步设上，那边照旧先转一下。
+            guard store.hintsPending else { return }
+            spin(60) { !store.hintsPending }
+            noteHintsTimeout()
+        }
+        func idle() {
+            spin(60) { !store.isSolving && store.busyText == nil && !store.hintsPending }
+            noteHintsTimeout()
+        }
         func path(_ s: String) -> [Int] { s == "r" ? [] : s.compactMap { $0.wholeNumberValue } }
+        // 「路径.第几个字块」：00.1 = 00 那张照片上的第 2 个字块；不写点 = 第 1 个（刊头 / 唯一那个）。
+        func block(_ s: String) -> (path: [Int], index: Int) {
+            let parts = s.split(separator: ".", maxSplits: 1).map(String.init)
+            return (path(parts.first ?? ""), parts.count > 1 ? Int(parts[1]) ?? 0 : 0)
+        }
         func describe() -> String {
             // 水印标签（没有就不加）：每步都看得出「接着拼，水印还在」。
             let mark = store.project.watermark.map { "  ‖ 水印[\($0.summary)]" } ?? ""
@@ -799,7 +1049,11 @@ enum CollageOpsScript {
                 if let s = cell?.shape { tag += "/" + s.label }
                 if cell?.contain == true { tag += cell?.containBlur == true ? "/完整+模糊" : "/完整" }
                 if let c = cell?.crop { tag += String(format: "/裁%.2f,%.2f×%.1f", c.cx, c.cy, c.zoom) }
-                if let o = cell?.overlay { tag += "/压字(\(o.anchor.label))" }
+                if let list = cell?.overlays, !list.isEmpty {
+                    tag += "/压字(" + list.map { $0.anchor.label + ($0.layer == .front ? "" : "·人后") }.joined(separator: "+") + ")"
+                }
+                if let l = cell?.look { tag += "/色调" + l.look.rawValue }
+                if let c = cell?.cutout { tag += c.toEdge ? "/抠图·贴底边" : "/抠图" }
                 return (p.isEmpty ? "r" : p.map(String.init).joined()) + "=" + tag
             }
             let all = store.items
@@ -810,8 +1064,9 @@ enum CollageOpsScript {
                 case .text: name = it.sourceCell.map { "字格\($0)" } ?? "手写"
                 case .sticker: name = it.sticker.label
                 }
-                // ~ = 自动撒的；@7232 = 贴在那张相纸上
+                // ~ = 自动撒的；@7232 = 贴在那张相纸上；✂ = 抠图贴纸
                 if it.generated { name = "~" + name }
+                if it.cutout != nil { name += "✂" }
                 if let a = it.attach {
                     let host = all.first { $0.id == a.to }?.photoID.map { String($0.suffix(4)) } ?? "?"
                     name += "@" + host
@@ -820,8 +1075,16 @@ enum CollageOpsScript {
                 return String(format: "%@%d:%@(%.2f,%.2f %.0f°)", sel, i, name, it.cx, it.cy, it.rotation)
             }
             var head = store.isFreeform ? "散落" : root.signature + "  |  " + leaves.joined(separator: " ")
+            if let cs = store.page?.contactSheet {
+                // 帧数只算画得出来的（放不下的另报「放不下N」，同检视器、CollagePage.photoIDs）。
+                let left = max(0, cs.frames.count - cs.frameLimit)
+                head = "印样[\(cs.format.label) \(cs.layout.label) \(cs.frames.count - left) 帧"
+                    + " 每条\(cs.perStrip == 0 ? "自动" : "\(cs.perStrip)") × \(cs.strips == 0 ? "自动" : "\(cs.strips)") 条"
+                    + (left > 0 ? " 放不下\(left)" : "") + "]"
+            }
             if store.isFreeform, let spec = store.page?.scatter { head += "[\(spec.frame.label)]" }
             if store.page?.gridRoot != nil { head += "(记着网格)" }
+            if let l = store.page?.look { head += "(这一页色调\(l.look.rawValue))" }
             if store.layoutStyle != store.effectiveLayoutStyle { head += "(偏好\(store.layoutStyle.label))" }
             return head + (items.isEmpty ? "" : "  || 图层 " + items.joined(separator: " ")) + mark
         }
@@ -829,13 +1092,137 @@ enum CollageOpsScript {
             guard let i = Int(s), store.items.indices.contains(i) else { return nil }
             return store.items[i].id
         }
+        // dumptexts：每一页的所有文字块（压字、文字格、文字图层）—— 展开占位符之后的字、字体、实际字号、
+        // 字块外框（成品坐标）。和 .marks.json 的 texts 同一份记录：按预览的规矩（空格子上的压字也算）小尺寸渲染一遍收。
+        func dumpTexts() {
+            let pages = store.project.pages
+            for (i, page) in pages.enumerated() {
+                var opts = CollageRender.Options(scale: 0.25)
+                opts.includeBleed = false
+                opts.placeholders = true
+                let report = CollageRender.RenderReport()
+                opts.report = report
+                _ = CollageRender.render(page: page, project: store.project, hints: store.hints, options: opts)
+                let current = i == store.pageIndex ? "（当前）" : ""
+                print("  第 \(i + 1)/\(pages.count) 页\(current) · 文字块 \(report.texts.count) 个")
+                for t in report.texts {
+                    let r = t.rect
+                    let sizes = t.sizes.map { String(format: "%.0f", $0) }.joined(separator: "/")
+                    let extra = (t.vertical ? " 竖排" : "") + (t.rotation != 0 ? " 转\(t.rotation)°" : "")
+                        + (t.body.map { " 正文=" + $0 } ?? "")
+                    let head = String(format: "    [%@] %@/%@ (%.0f,%.0f,%.0f,%.0f) %@ %@px%@：", t.owner, t.kind, t.layer,
+                                      r.minX, r.minY, r.width, r.height, t.font, sizes, extra)
+                    print(head + t.lines.joined(separator: " ⏎ "))
+                    if let o = t.occlusion { print("      " + CollageCLI.occlusionLine(o)) }
+                }
+            }
+        }
+
+        // contactdump：这一页印样每帧的帧号 ↔ 照片、场、判决、记号、转没转、黑边，每条的转角，片边字印没印。
+        // 和 .marks.json 的 contactSheet 同一份记录（按预览的规矩、成品尺寸渲染一遍收）。
+        func dumpContact() {
+            guard let page = store.page, page.contactSheet != nil else {
+                print("  这一页不是印样")
+                return
+            }
+            // 按成品尺寸渲一遍（片边字缩得太小不印：0.25 倍的预览里常常不印，看不出导出印没印）。
+            var opts = CollageRender.Options(scale: 1)
+            opts.includeBleed = false
+            opts.placeholders = true
+            let report = CollageRender.RenderReport()
+            opts.report = report
+            _ = CollageRender.render(page: page, project: store.project, hints: store.hints, options: opts)
+            guard let r = report.contactSheet else { return }
+            print(String(format: "  印样 %@ · %@ · 卷 %@ · 每毫米 %.2f px · 每条 %d 帧 × %d 条 · 帧号偏 %.2f 帧距 · 片边字%@",
+                         r.format, r.layout, r.roll, r.unit, r.perStrip, r.strips, r.numberOffset,
+                         r.edgePrinted ? "印了" : "没印（太小）"))
+            for st in r.stripRecords {
+                print(String(format: "    条 %d：%d 帧 · 转 %.2f° · 齿孔 %d", st.index, st.frames, st.angle, st.holes))
+            }
+            for f in r.frames {
+                let flags = (f.rotated ? " 转90°" : "") + (f.letterboxed ? " 黑边" : "") + (f.drawn == nil ? " 没画出" : "")
+                let take = f.take.map { "场\($0)" } ?? "—"
+                print(String(format: "    %@ → %@ · %@ · %@ · 记号 %@ · (%.0f,%.0f,%.0f,%.0f)%@", f.label, f.photoID, take,
+                             f.verdict ?? "—", f.mark ?? "—", f.rect.minX, f.rect.minY, f.rect.width, f.rect.height, flags))
+            }
+            if !r.overflow.isEmpty { print("    放不下：" + r.overflow.joined(separator: " ")) }
+            // 一帧都没有时两个框都是 nil：打「—」。
+            func box(_ b: CGRect?) -> String {
+                guard let b, !b.isNull else { return "—" }
+                return String(format: "(%.0f,%.0f,%.0f,%.0f)", b.minX, b.minY, b.width, b.height)
+            }
+            print("    片条外框 \(box(r.bounds)) · 圈留到 \(box(r.inkBounds))")
+            let note = r.noteRect.map { String(format: " (%.0f,%.0f,%.0f,%.0f)", $0.minX, $0.minY, $0.width, $0.height) } ?? ""
+            print("    注记：" + (r.note ?? "（没写）") + note)
+        }
+
+        func dumpMasks(_ photos: [CollagePhotoRef], copyTo dir: URL?) {
+            if let dir { try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true) }
+            let folder = CollageMasks.currentDirectory?.path ?? "（只在内存）"
+            print("  蒙版目录 \(folder) · maskVersion \(CollageMasks.maskVersion)")
+            for p in photos {
+                guard let m = CollageMasks.mask(for: p) else {
+                    print("    \(p.id) 认不出主体")
+                    continue
+                }
+                let heads = m.headTop.map { $0 < 0 ? "—" : String(format: "%.3f", $0) }.joined(separator: ",")
+                let faceTop = p.faces.first.map { String(format: "%.3f", $0[1]) } ?? "—"
+                print(String(format: "    %@ %dx%d 覆盖 %.3f 头顶 [%@]（脸框上沿 %@）实例 %d 选 %@ · %@ %.0f ms · %@",
+                             p.id, m.width, m.height, m.coverage, heads, faceTop, m.instances,
+                             m.selected.map(String.init).joined(separator: "+"), m.fromDisk ? "读盘" : "现算", m.millis,
+                             m.key))
+                if !m.people.isEmpty {
+                    let boxes = m.people.map { b in "[" + b.map { String(format: "%.3f", $0) }.joined(separator: " ") + "]" }
+                    print("      别的人 \(m.people.count)：" + boxes.joined(separator: " "))
+                }
+                if let dir, let src = CollageMasks.file(for: p), FileManager.default.fileExists(atPath: src.path) {
+                    let dest = dir.appendingPathComponent("mask_\(p.id).png")
+                    try? FileManager.default.removeItem(at: dest)
+                    try? FileManager.default.copyItem(at: src, to: dest)
+                }
+            }
+        }
+        func dumpCover() {
+            guard store.page != nil else { return }
+            for frame in store.geometry.frames {
+                guard let r = store.coverResolution(for: frame) else { continue }
+                let w = r.window
+                let tag = frame.path.isEmpty ? "r" : frame.path.map(String.init).joined()
+                print(String(format: "  [%@] %@ 取景 %.3f,%.3f %.3fx%.3f%@ · 头顶 %@ %@ · 蒙版 %@ · %d 张脸", tag,
+                             frame.cell.photoID ?? "-", w.x, w.y, w.w, w.h, w.cutsFace ? " 切脸" : "",
+                             r.headTop.map { String(format: "%.3f", $0) } ?? "—", r.headTopSource,
+                             r.mask.map { String(format: "覆盖 %.3f", $0.coverage) } ?? "无", r.faces))
+                if let up = store.upscale(for: frame) { print(String(format: "      放大 %.2f×", up)) }
+                if let line = CollageCover.edgeDump(cell: frame.cell, r) { print(line) }
+                for (i, b) in r.blocks.enumerated() {
+                    guard let b else { continue }
+                    let occ = b.occlusion.map { o in
+                        String(format: "总 %.1f%% 首 %.1f%% 末 %.1f%% 过半 %d/%d", o.total * 100, o.first * 100,
+                               o.last * 100, o.heavy, o.letters)
+                    } ?? "没量"
+                    let h = r.maxHeights[i].map { String(format: " 限高 %.0fpx", $0) } ?? ""
+                    let tags = (b.rule == .total ? " 只限总量" : "") + (b.moved ? " 挪开头" : "")
+                    print("      第 \(i + 1) 块\(b.band ? "（刊头）" : "") → \(b.layer.rawValue)/\(b.step.rawValue)\(tags) · \(occ)\(h)"
+                          + (b.reason.map { " · " + $0 } ?? ""))
+                }
+            }
+        }
+
+        // 检视器「文字」页那句不拦截的提示（刊头像真实刊名）会不会出现：title: / masthead: 之后打印。
+        func printMastheadHint() {
+            guard CollageTypeset.mastheadLooksReal(masthead: store.project.masthead, title: store.project.title) else { return }
+            let shown = CollageTypeset.mastheadText(store.project.masthead, title: store.project.title)
+            print("  检视器提示：刊头「\(shown)」像是真实杂志的名字（不拦）")
+        }
 
         // 读回来的工程是什么画布、带没带水印（核对旧工程的容错解码 / 升级、水印存盘，下面马上会重置）。
         let loaded = store.project.canvas
         let loadedMark = store.project.watermark.map { "水印[\($0.summary)]" } ?? "无水印"
         // 「导出带水印」跟着拼图存：没有水印就无所谓开关（—）。
         let loadedExport = store.project.watermark.map { $0.exportEnabled ? "开" : "关" } ?? "—"
-        print("载入  \(loaded.name) \(loaded.width)x\(loaded.height) seams=\(loaded.seams.rawValue) · \(store.project.pages.count) 页 · \(loadedMark) · 导出带水印 \(loadedExport)")
+        // 托盘里有帧号的 = attach 时按批量页刷新过（旧工程存的快照里没有帧号）。
+        let framed = store.project.photos.filter { $0.frameNo != nil }.count
+        print("载入  \(loaded.name) \(loaded.width)x\(loaded.height) seams=\(loaded.seams.rawValue) · \(store.project.pages.count) 页 · \(loadedMark) · 导出带水印 \(loadedExport) · 托盘 \(store.project.photos.count) 张（带帧号 \(framed)）")
         if let wm = store.project.watermark { print("  读回水印 " + CollageWatermarkCLI.json(wm)) }
 
         // 起手：单张 3:4、托盘 = 精选+可用，排一版（每次都从头来，脚本结果可复现）。
@@ -849,6 +1236,8 @@ enum CollageOpsScript {
         store.setWatermark(nil)
         store.importVerdicts(batch: batch, includeUsable: true)
         spin(20) { !store.project.photos.isEmpty && store.busyText == nil }
+        // 起手这一版也等路人信息：求解打分看它（裁切压不压路人）。
+        hintsSettled()
         store.solve(photoIDs: ["DSCF7232", "DSCF7208", "DSCF7222", "DSCF7215", "DSCF7212", "DSCF7214"]
             .prefix(Int(option("--count") ?? "6") ?? 6).map { $0 })
         idle()
@@ -862,6 +1251,170 @@ enum CollageOpsScript {
             return kv.count == 2 ? (kv[0], kv[1]) : nil
         }
         let edges: [String: CollageLayout.Edge] = ["left": .left, "right": .right, "top": .top, "bottom": .bottom]
+
+        // tset：读出目标那块字 → 逐个键改 → 走界面同一个入口写回（照片上字块自己的参数走 updateOverlay）。
+        // 键：vertical alignH alignV lineSpacing rule ruleStyle rotation lines（只留前 N 行）seal；
+        //     L<n>.text|font|weight|italic|size|tracking|color|indent|fitWidth|widthScale|textCase|spreadShort|accent|effect
+        //     （n = 行数时加一行）；
+        //     body=on|off、body.text|file|columns|justified|columnRule|dropCap|font|weight|size|leading|indent|gap|color|
+        //     vertical|filler|traditional|balanced；照片上的字块另有 anchor maxWidth inset tone shadow layer x y、
+        //     人物挡字的 depth maxOcclusion occlusionRule maxZoom tightEdge、时尚刊的 clearBottom scrim matchTone fade inkTop。
+        //     写错一个键整步算「参数不对」。
+        func applyTextSettings(_ arg: String) -> Bool {
+            guard let (target, rest) = pair(arg, "=") else { return false }
+            // 值可以是空的（body.text= 清空正文成灰条、L0.text= 清空一行）：等号后面的空串要留着。
+            let settings: [(String, String)] = rest.split(separator: ";").compactMap { item in
+                let kv = item.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+                guard kv.count == 2 else { return nil }
+                return (kv[0], kv[1].removingPercentEncoding ?? kv[1])
+            }
+            guard !settings.isEmpty else { return false }
+            func flag(_ v: String) -> Bool? {
+                ["1": true, "on": true, "true": true, "yes": true, "0": false, "off": false, "false": false, "no": false][v]
+            }
+            func color(_ v: String) -> CollageColor? {
+                UInt32(v.hasPrefix("#") ? String(v.dropFirst()) : v, radix: 16).map { CollageColor(hex: $0) }
+            }
+            // 目标：文字图层 / 文字格 / 照片上的第 i 个字块。
+            var text: CollageText
+            let textTarget: CollageTextTarget
+            var overlayIndex: Int?
+            let b = block(target)
+            if target.hasPrefix("item"), let id = itemID(String(target.dropFirst(4))),
+               let item = store.items.first(where: { $0.id == id }), let t = item.text {
+                text = t
+                textTarget = .item(id)
+            } else if let cell = store.root?.node(at: b.path)?.cell, cell.kind == .text, let t = cell.text {
+                text = t
+                textTarget = .cell(b.path, store.page?.id)
+            } else if let cell = store.root?.node(at: b.path)?.cell, cell.overlays.indices.contains(b.index) {
+                text = cell.overlays[b.index].text
+                textTarget = .overlay(b.path, cell.photoID, store.page?.id, b.index)
+                overlayIndex = b.index
+            } else {
+                return false
+            }
+            var overlayEdits: [(inout CollageOverlay) -> Void] = []
+            func setLine(_ i: Int, _ key: String, _ v: String) -> Bool {
+                guard i >= 0, i <= text.lines.count else { return false }
+                if i == text.lines.count {
+                    var line = text.lines.last ?? CollageTextLine("")
+                    line.text = ""
+                    line.fitWidth = false
+                    text.lines.append(line)
+                }
+                var line = text.lines[i]
+                switch key {
+                case "text": line.text = v.replacingOccurrences(of: "\\n", with: "\n")
+                case "font": guard let f = CollageFont(rawValue: v) else { return false }; line.font = f
+                case "weight": guard let w = CollageWeight(rawValue: v) else { return false }; line.weight = w
+                case "italic": guard let x = flag(v) else { return false }; line.italic = x
+                case "size": guard let x = Double(v), x > 0 else { return false }; line.size = x
+                case "tracking": guard let x = Double(v) else { return false }; line.tracking = x
+                case "color": guard let c = color(v) else { return false }; line.color = c
+                case "indent": guard let x = Double(v) else { return false }; line.indent = x
+                case "fitWidth": guard let x = flag(v) else { return false }; line.fitWidth = x
+                case "widthScale": guard let x = Double(v) else { return false }; line.widthScale = min(1, max(0.85, x))
+                case "textCase": guard let c = CollageTextCase(rawValue: v) else { return false }; line.textCase = c
+                case "spreadShort": guard let x = flag(v) else { return false }; line.spreadShort = x
+                case "accent": guard let x = flag(v) else { return false }; line.accentFromPhoto = x
+                case "effect":
+                    guard let preset = CollageTextEffects.preset(v) else { return false }
+                    preset.apply(&line)
+                default: return false
+                }
+                text.lines[i] = line
+                return true
+            }
+            func setBody(_ key: String, _ v: String) -> Bool {
+                var body = text.body ?? CollageBody()
+                switch key {
+                case "text": body.text = v.replacingOccurrences(of: "\\n", with: "\n")
+                case "file":
+                    guard let s = try? String(contentsOfFile: v, encoding: .utf8) else { return false }
+                    body.text = s
+                case "columns": guard let n = Int(v), n >= 1 else { return false }; body.columns = min(12, n)
+                case "justified": guard let x = flag(v) else { return false }; body.justified = x
+                case "columnRule": guard let x = flag(v) else { return false }; body.columnRule = x
+                case "dropCap": guard let n = Int(v), n >= 0 else { return false }; body.dropCap = min(6, n)
+                case "font": guard let f = CollageFont(rawValue: v) else { return false }; body.font = f
+                case "weight": guard let w = CollageWeight(rawValue: v) else { return false }; body.weight = w
+                case "size": guard let x = Double(v), x > 0 else { return false }; body.size = x
+                case "leading": guard let x = Double(v), x >= 0.8 else { return false }; body.leading = x
+                case "indent": guard let x = Double(v), x >= 0 else { return false }; body.firstLineIndent = x
+                case "gap": guard let x = Double(v), x > 0 else { return false }; body.gap = x
+                case "color": guard let c = color(v) else { return false }; body.color = c
+                case "vertical": guard let x = flag(v) else { return false }; body.vertical = x
+                case "filler": guard let x = flag(v) else { return false }; body.filler = x
+                case "traditional": guard let x = flag(v) else { return false }; body.traditional = x
+                case "balanced": guard let x = flag(v) else { return false }; body.balanced = x
+                default: return false
+                }
+                text.body = body
+                return true
+            }
+            for (key, v) in settings {
+                var good = true
+                if key.hasPrefix("L"), let dot = key.firstIndex(of: "."), let i = Int(key[key.index(after: key.startIndex)..<dot]) {
+                    good = setLine(i, String(key[key.index(after: dot)...]), v)
+                } else if key.hasPrefix("body.") {
+                    good = setBody(String(key.dropFirst(5)), v)
+                } else {
+                    switch key {
+                    case "vertical": if let x = flag(v) { text.vertical = x } else { good = false }
+                    case "alignH": if let a = CollageAlign(rawValue: v) { text.alignH = a } else { good = false }
+                    case "alignV": if let a = CollageAlign(rawValue: v) { text.alignV = a } else { good = false }
+                    case "lineSpacing": if let x = Double(v) { text.lineSpacing = max(-0.15, x) } else { good = false }
+                    case "rule": if let x = flag(v) { text.rule = x } else { good = false }
+                    case "ruleStyle": if let r = CollageRuleStyle(rawValue: v) { text.ruleStyle = r } else { good = false }
+                    case "rotation":
+                        if let r = Int(v), [0, 90, -90].contains(r) { text.rotation = r } else { good = false }
+                    case "lines": if let n = Int(v), n >= 1 { text.lines = Array(text.lines.prefix(n)) } else { good = false }
+                    case "seal": text.seal = v == "none" ? nil : CollageSeal(text: String(v.prefix(4)))
+                    case "body":
+                        if let x = flag(v) { text.body = x ? (text.body ?? CollageBody()) : nil } else { good = false }
+                    case "anchor", "maxWidth", "inset", "tone", "shadow", "layer", "x", "y", "depth", "maxOcclusion",
+                         "occlusionRule", "maxZoom", "tightEdge", "clearBottom", "scrim", "matchTone", "fade", "inkTop":
+                        guard overlayIndex != nil else { good = false; break }
+                        switch key {
+                        case "anchor": if let a = CollageAnchor(rawValue: v) { overlayEdits.append { $0.anchor = a } } else { good = false }
+                        case "scrim": if let x = flag(v) { overlayEdits.append { $0.scrim = x } } else { good = false }
+                        case "matchTone": if let x = flag(v) { overlayEdits.append { $0.matchTone = x } } else { good = false }
+                        case "occlusionRule":
+                            if let r = CollageOcclusionRule(rawValue: v) { overlayEdits.append { $0.occlusionRule = r } } else { good = false }
+                        case "tone": if let t = CollageTone(rawValue: v) { overlayEdits.append { $0.tone = t } } else { good = false }
+                        case "layer": if let l = CollageTextLayer(rawValue: v) { overlayEdits.append { $0.layer = l } } else { good = false }
+                        case "tightEdge": if let x = flag(v) { overlayEdits.append { $0.tightEdge = x } } else { good = false }
+                        default:
+                            guard let x = Double(v) else { good = false; break }
+                            switch key {
+                            case "maxWidth": overlayEdits.append { $0.maxWidth = min(1, max(0.2, x)) }
+                            case "inset": overlayEdits.append { $0.inset = min(0.3, max(0, x)) }
+                            case "shadow": overlayEdits.append { $0.shadow = min(1, max(0, x)) }
+                            case "depth": overlayEdits.append { $0.depth = min(0.3, max(0, x)) }
+                            case "maxOcclusion": overlayEdits.append { $0.maxOcclusion = min(0.33, max(0.05, x)) }
+                            case "maxZoom": overlayEdits.append { $0.maxZoom = x >= 1 ? min(8, x) : nil }  // 0 = 不限
+                            case "clearBottom": overlayEdits.append { $0.clearBottom = min(0.4, max(0, x)) }
+                            case "fade": overlayEdits.append { $0.fade = min(0.7, max(0, x)) }
+                            case "inkTop": overlayEdits.append { $0.inkTop = min(0.2, max(0, x)) }
+                            case "x": overlayEdits.append { $0.x = min(1, max(0, x)) }
+                            default: overlayEdits.append { $0.y = min(1, max(0, x)) }
+                            }
+                        }
+                    default: good = false
+                    }
+                }
+                if !good {
+                    print("  tset 认不得 \(key)=\(v)")
+                    return false
+                }
+            }
+            store.updateText(text, target: textTarget)
+            if let i = overlayIndex, !overlayEdits.isEmpty {
+                store.updateOverlay(at: b.path, index: i) { o in for edit in overlayEdits { edit(&o) } }
+            }
+            return true
+        }
 
         for raw in (option("--ops") ?? "").split(separator: ",") {
             let op = raw.trimmingCharacters(in: .whitespaces)
@@ -904,7 +1457,8 @@ enum CollageOpsScript {
                 idle()
             case "framing":
                 if let (p, v) = pair(arg, "="),
-                   let f = ["auto": CollageFraming.auto, "full": .full, "half": .half, "close": .close][v] {
+                   let f = ["auto": CollageFraming.auto, "full": .full, "half": .half, "close": .close,
+                            "cover": .cover][v] {
                     store.selection = path(p)
                     store.setFraming(f)
                 } else { ok = false }
@@ -922,14 +1476,14 @@ enum CollageOpsScript {
                 let kv = arg.split(separator: "=", maxSplits: 1).map(String.init)
                 let spec = (at(kv, 1) ?? "").split(separator: "@").map(String.init)
                 let lineIndex = Int(at(spec, 1) ?? "0") ?? 0
-                if let p = at(kv, 0), let preset = at(spec, 0).flatMap(CollageTextEffects.preset),
-                   let cell = store.root?.node(at: path(p))?.cell {
-                    // 和界面里点预设走同一个入口（照片上的字会连深浅一起定）。
+                if let p = at(kv, 0).map(block), let preset = at(spec, 0).flatMap(CollageTextEffects.preset),
+                   let cell = store.root?.node(at: p.path)?.cell {
+                    // 和界面里点预设走同一个入口（照片上的字会连深浅一起定）。路径.第几个字块 = 照片上别的字块。
                     if cell.kind == .text {
-                        store.applyTextEffect(preset, line: lineIndex, target: .cell(path(p), store.page?.id))
-                    } else if cell.overlay != nil {
+                        store.applyTextEffect(preset, line: lineIndex, target: .cell(p.path, store.page?.id))
+                    } else if cell.overlays.indices.contains(p.index) {
                         store.applyTextEffect(preset, line: lineIndex,
-                                              target: .overlay(path(p), cell.photoID, store.page?.id))
+                                              target: .overlay(p.path, cell.photoID, store.page?.id, p.index))
                     } else { ok = false }
                 } else { ok = false }
             case "margin":
@@ -966,30 +1520,108 @@ enum CollageOpsScript {
                     store.addTextCell(edge: edge, vertical: edge == .left || edge == .right)
                 } else { ok = false }
             case "overlay":
+                // overlay:P[.i]=KEY|none：换掉（none = 删掉）这张照片上的第 i 个字块；i 超出 = 加在最后。
                 let kv = arg.split(separator: "=", maxSplits: 1).map(String.init)
-                if let p = at(kv, 0) {
-                    store.selection = path(p)
+                if let p = at(kv, 0).map(block) {
+                    store.selection = p.path
                     let key = at(kv, 1) ?? "none"
-                    store.setOverlay(key != "none" ? CollageOverlays.preset(key) : nil, at: path(p))
+                    let preset = key != "none" ? CollageOverlays.preset(key) : nil
+                    if key != "none", preset == nil { ok = false } else {
+                        store.setOverlay(preset, at: p.path, index: p.index)
+                    }
+                } else { ok = false }
+            case "overlayadd":
+                // overlayadd:P=KEY：在这张照片上再加一个字块（摆在已有的之后、让着它们）。
+                if let (p, key) = pair(arg, "="), let preset = CollageOverlays.preset(key),
+                   store.root?.node(at: path(p))?.cell?.kind == .photo {
+                    store.selection = path(p)
+                    store.addOverlay(preset, at: path(p))
+                } else { ok = false }
+            case "overlaydel":
+                // overlaydel:P.i：删掉第 i 个字块（后面的往前挪）。
+                let p = block(arg)
+                if store.root?.node(at: p.path)?.cell?.overlays.indices.contains(p.index) == true {
+                    store.setOverlay(nil, at: p.path, index: p.index)
                 } else { ok = false }
             case "anchor":
                 if let (p, v) = pair(arg, "="), let a = CollageAnchor(rawValue: v) {
-                    store.updateOverlay(at: path(p)) { $0.anchor = a }
+                    let b = block(p)
+                    store.updateOverlay(at: b.path, index: b.index) { $0.anchor = a }
                 } else { ok = false }
             case "overlaypos":
                 let n = nums(pair(arg, "=")?.1)
                 if let (p, _) = pair(arg, "="), n.count == 2 {
+                    let b = block(p)
                     store.beginContinuousEdit()
-                    store.setOverlayPosition(x: n[0], y: n[1], at: path(p))
+                    store.setOverlayPosition(x: n[0], y: n[1], at: b.path, index: b.index)
                     store.endContinuousEdit()
                 } else { ok = false }
             case "overlaytext":
-                if let (p, v) = pair(arg, "="), let o = store.root?.node(at: path(p))?.cell?.overlay {
-                    var t = o.text
+                // overlaytext:P[.i]=TEXT：第 i 个字块的第一行。
+                if let (p, v) = pair(arg, "="), case let b = block(p),
+                   let list = store.root?.node(at: b.path)?.cell?.overlays, list.indices.contains(b.index) {
+                    var t = list[b.index].text
                     if !t.lines.isEmpty { t.lines[0].text = v }
-                    let pid = store.root?.node(at: path(p))?.cell?.photoID
-                    store.updateText(t, target: .overlay(path(p), pid, store.page?.id))
+                    let pid = store.root?.node(at: b.path)?.cell?.photoID
+                    store.updateText(t, target: .overlay(b.path, pid, store.page?.id, b.index))
                 } else { ok = false }
+            case "tset":
+                // tset:目标=键=值;键=值…：直接改一个文字块的参数（样张、自测用）。目标 = 文字格路径、照片路径[.i]
+                // （照片上第 i 个字块）、item<N>（第 N 个文字图层）。值里的逗号、分号写成 %2C、%3B。
+                ok = applyTextSettings(arg)
+            case "overlayfront":
+                // overlayfront:P[.i]=on|off：on = 这块字在人前（关掉人物挡字），off = 在人后（同检视器的开关：
+                // 定死位置的字块、「自动」取景时顺手换成封面取景；关掉时、别的字块也不在人后，换回自动）。
+                if let (p, v) = pair(arg, "="), v == "on" || v == "off", case let b = block(p),
+                   store.root?.node(at: b.path)?.cell?.overlays.indices.contains(b.index) == true {
+                    store.setOverlayLayer(v == "on" ? .front : .behindSubject, at: b.path, index: b.index)
+                } else { ok = false }
+            case "depth":
+                // depth:P[.i]=0.2：压字深度（头顶落在字顶下多少字高，0…0.3）。
+                if let (p, v) = pair(arg, "="), let x = Double(v), case let b = block(p),
+                   store.root?.node(at: b.path)?.cell?.overlays.indices.contains(b.index) == true {
+                    store.updateOverlay(at: b.path, index: b.index) { $0.depth = min(0.3, max(0, x)) }
+                } else { ok = false }
+            case "cutout":
+                // cutout:P=on|off[;描边;投影][;edge]：抠图格（只画主体，背景透出页面）；描边相对短边、投影 0…1；
+                // edge = 人得延伸到成品底边（CollageCutout.toEdge，浮在纸上就不抠）。
+                if let (p, v) = pair(arg, "=") {
+                    let bits = v.split(separator: ";").map(String.init)
+                    let n = bits.dropFirst().compactMap(Double.init)
+                    if bits.first == "on" {
+                        store.setCutout(CollageCutout(stroke: n.first ?? 0, shadow: n.count > 1 ? n[1] : 0,
+                                                      toEdge: bits.contains("edge")), at: path(p))
+                    } else if bits.first == "off" {
+                        store.setCutout(nil, at: path(p))
+                    } else { ok = false }
+                } else { ok = false }
+            case "cutoutdrag":
+                // cutoutdrag:P=白边;投影：同检视器拖白边 / 投影滑杆的一格（连着拖只记一步撤销）。格子得已经是抠图格。
+                if let (p, v) = pair(arg, "="), let old = store.root?.node(at: path(p))?.cell?.cutout {
+                    let n = v.split(separator: ";").compactMap { Double(String($0)) }
+                    if n.count == 2 {
+                        var c = old
+                        c.stroke = n[0]
+                        c.shadow = n[1]
+                        store.setCutout(c, at: path(p), coalesce: true)
+                    } else { ok = false }
+                } else { ok = false }
+            case "maskdump":
+                // maskdump[:<出图目录>]：托盘每张照片的主体蒙版（覆盖率、每张脸的头顶、实例、耗时、文件）；
+                // 给了目录就把蒙版 PNG 也拷过去（读图看）。蒙版没有就现算。
+                hintsSettled()
+                dumpMasks(store.project.photos, copyTo: arg.isEmpty ? nil : URL(fileURLWithPath: arg))
+            case "fakefaces":
+                // fakefaces:ID=x0;y0;x1;y1/x0;y0;x1;y1/…：合成数据 —— 直接改托盘里这张照片的人脸框（验多人合影的
+                // 退让）。不进撤销；reattach、batchswitch 会按批量页刷回去。
+                if let (id, v) = pair(arg, "=") {
+                    let boxes = v.split(separator: "/").map { nums(String($0)) }.filter { $0.count == 4 }
+                    ok = !boxes.isEmpty && store.overrideFacesForTesting(id, faces: boxes)
+                } else { ok = false }
+            case "coverdump":
+                // coverdump：当前页每个走人物挡字 / 封面取景的格子：取景、头顶、每块字的决定和原因（同检视器读数）。
+                hintsSettled()
+                dumpCover()
             case "look":
                 var st = store.project.style
                 st.look = CollageLook(rawValue: arg) ?? .none
@@ -1004,6 +1636,330 @@ enum CollageOpsScript {
                 store.setStyle(st)
             case "subtitle":
                 store.setSubtitle(arg)
+            case "title":
+                // title:<文字>：标题（{title}、刊头预设用的就是它）。逗号是分步符，文字里不能带。
+                store.setTitle(arg)
+                printMastheadHint()
+            case "style":
+                // style:<预设 key>：整页换成那个风格预设（同样式页点预设；key 同 --style）。写错的 key 不悄悄退回默认。
+                if CollageStyles.all.contains(where: { $0.key == arg }) {
+                    store.setStyle(CollageStyles.preset(arg), coalesce: false)
+                } else { ok = false }
+            case "herodump":
+                // herodump：出一期挑封面的主图候选（按真套上封面的决定打分，罚分从低到高）和原因。
+                hintsSettled()
+                let base = CollageStyleFashion.issueBase(store.project)
+                let picks = CollageStyleFashion.heroCandidates(store.project.photos.filter { $0.verdict != .reject },
+                                                               hints: store.hints, base: base)
+                for (k, h) in picks.enumerated() {
+                    let occ = h.block?.occlusion.map { String(format: "挡 %.1f%%", $0.total * 100) } ?? "没量"
+                    let layer = h.block.map { $0.layer.rawValue + "/" + $0.step.rawValue } ?? "—"
+                    print(String(format: "  %2d %@ 罚分 %.2f · %@ · %@", k + 1, h.photo.id, h.penalty, layer, occ)
+                          + (h.notes.isEmpty ? "" : " · " + h.notes.joined(separator: "、")))
+                }
+            case "nextcover":
+                // nextcover[:N]：「换封面」（出一期）—— 主图候选里往后轮 N 张（默认 1），只换封面那张，内页留着。
+                var landed = false
+                hintsSettled()
+                store.applyKit(.fashionIssue, coverStep: max(1, Int(arg) ?? 1)) { landed = true }
+                spin(300) { landed }
+                idle()
+                print("  换封面 · 封面 \(CollageStyleFashion.coverPhotoID(store.project) ?? "—") · 提示: " + (store.notice ?? "无"))
+            case "masthead":
+                // masthead:<刊头>（{masthead}；空 = 按标题生成：拉丁字母转大写、中文转拼音大写）。
+                store.setMasthead(arg)
+                printMastheadHint()
+            case "issue":
+                // issue:<期号>（{issue}；空 = 页码）。
+                store.setIssue(arg)
+            case "kit":
+                // kit:<成套>：和界面「一键成套 ▾」同一个入口；还没做的只打印提示（这一步不算失败）。
+                if let kit = CollageKitID.find(arg) {
+                    var landed = false
+                    hintsSettled()
+                    store.applyKit(kit) { landed = true }
+                    spin(300) { landed }
+                    idle()
+                    print("  成套「\(kit.name)」· \(store.project.pages.count) 页 · 提示: " + (store.notice ?? "无")
+                          + (store.albumDropped.isEmpty ? "" : " · 托盘标「拿掉」\(store.albumDropped.count) 张"))
+                } else { ok = false }
+            case "pagelook", "celllook":
+                // pagelook:mono@0.6 | pagelook:none；celllook:10=sepia@0.8 | celllook:10=none
+                let kv = name == "celllook" ? arg.split(separator: "=", maxSplits: 1).map(String.init) : ["", arg]
+                let spec = (at(kv, 1) ?? "").split(separator: "@").map(String.init)
+                let key = at(spec, 0) ?? ""
+                let strength = at(spec, 1).flatMap(Double.init) ?? 0.8
+                let look: CollageLookSetting?? = key == "none" ? .some(nil)
+                    : CollageLook(rawValue: key).map { CollageLookSetting(look: $0, strength: strength) }
+                if let look {
+                    if name == "pagelook" {
+                        store.setPageLook(look)
+                    } else if let p = at(kv, 0) {
+                        store.selection = path(p)
+                        store.setCellLook(look)
+                    } else { ok = false }
+                } else { ok = false }
+            case "halftone":
+                // halftone:none | halftone:dot[;点距;网角;锐度;网点增大;墨色;纸色]（点距相对短边，默认 0.004；
+                // 墨色、纸色写 hex，纸色写 page 或不写 = 跟页面底色，深色页配深墨时换成纸白）。line = 线网。
+                var st = store.project.style
+                let bits = arg.split(separator: ";", omittingEmptySubsequences: false).map(String.init)
+                if arg == "none" {
+                    st.halftone = nil
+                    store.setStyle(st, coalesce: false)
+                } else if let kind = at(bits, 0).flatMap(CollageScreen.init(rawValue:)) {
+                    var h = st.halftone ?? CollageHalftone()
+                    h.screen = kind
+                    var good = true
+                    func num(_ i: Int, _ apply: (Double) -> Void) {
+                        guard let raw = at(bits, i), !raw.isEmpty else { return }
+                        if let v = Double(raw), v.isFinite { apply(v) } else { good = false }
+                    }
+                    let pitchRange = CollageHalftone.pitchRange
+                    num(1) { h.pitch = min(pitchRange.upperBound, max(pitchRange.lowerBound, $0)) }
+                    num(2) { h.angle = $0 }
+                    num(3) { h.sharpness = min(1, max(0, $0)) }
+                    num(4) { h.gain = min(1, max(0, $0)) }
+                    if let raw = at(bits, 5), !raw.isEmpty {
+                        if let hex = UInt32(raw, radix: 16) { h.ink = CollageColor(hex: hex) } else { good = false }
+                    }
+                    if let raw = at(bits, 6), !raw.isEmpty {
+                        if raw == "page" { h.paper = nil } else if let hex = UInt32(raw, radix: 16) {
+                            h.paper = CollageColor(hex: hex)
+                        } else { good = false }
+                    }
+                    if good {
+                        st.halftone = h
+                        store.setStyle(st, coalesce: false)
+                    } else { ok = false }
+                } else { ok = false }
+            case "border":
+                // border:none|hairline|polaroid|film|mat（可带颜色 border:mat=F6F1E7）
+                let kv = arg.split(separator: "=", maxSplits: 1).map(String.init)
+                if let b = at(kv, 0).flatMap(CollageBorder.init(rawValue:)) {
+                    var st = store.project.style
+                    st.border = b
+                    if let hex = at(kv, 1).flatMap({ UInt32($0, radix: 16) }) { st.borderColor = CollageColor(hex: hex) }
+                    store.setStyle(st, coalesce: false)
+                } else { ok = false }
+            case "mat":
+                // mat:0.07（卡纸宽，相对格子短边；顺手把边框换成卡纸）
+                if let v = Double(arg), v.isFinite {
+                    var st = store.project.style
+                    st.border = .mat
+                    st.matWidth = min(0.3, max(0.01, v))
+                    store.setStyle(st, coalesce: false)
+                } else { ok = false }
+            case "paperover", "grain":
+                // paperover:0.5（纸纹压在照片上 0…1）；grain:0.4（底下的纸纹）
+                if let v = Double(arg), v.isFinite {
+                    var st = store.project.style
+                    if name == "grain" { st.grain = min(1, max(0, v)) } else { st.paperOverPhotos = min(1, max(0, v)) }
+                    store.setStyle(st, coalesce: false)
+                } else { ok = false }
+            case "contact":
+                // contact:135|645|66|67|auto[;每条帧数;条数;sheet|strip]：这一页改成印样，托盘照片按拍摄先后排成一卷
+                // （auto = 按照片比例挑规格；0 = 自动）。已经是印样的只改给了的几项，帧不动。contact:off = 改回网格。
+                if arg == "off" {
+                    if store.isContactSheet {
+                        store.leaveContactSheet()
+                        idle()
+                    } else { ok = false }
+                } else {
+                    let bits = arg.split(separator: ";", omittingEmptySubsequences: false).map(String.init)
+                    let head = at(bits, 0) ?? ""
+                    let format = CollageFilmFormat(rawValue: head)
+                    let per = at(bits, 1).flatMap { Int($0) }
+                    let strips = at(bits, 2).flatMap { Int($0) }
+                    let layoutRaw = at(bits, 3) ?? ""
+                    let layout = CollageContactLayout(rawValue: layoutRaw)
+                    if (head != "auto" && format == nil) || (!layoutRaw.isEmpty && layout == nil) {
+                        ok = false
+                    } else if store.isContactSheet {
+                        store.updateContactSheet { s in
+                            if let format { s.format = format }
+                            if let per { s.perStrip = min(12, max(0, per)) }
+                            if let strips { s.strips = min(12, max(0, strips)) }
+                            // 换排法 = 换纸、笔配新纸（同检视器的「排法」）。
+                            if let layout { CollageContact.switchLayout(&s, to: layout) }
+                        }
+                    } else {
+                        var spec = CollageContactSheet(format: format ?? CollageContact.suggestedFormat(store.project.photos))
+                        spec.perStrip = min(12, max(0, per ?? 0))
+                        spec.strips = min(12, max(0, strips ?? 0))
+                        if let layout { spec.layout = layout }
+                        store.makeContactSheet(spec)
+                    }
+                }
+            case "contactset":
+                // contactset:键=值;…（这一页印样的设置）：format layout perStrip strips upright fill marks cross
+                // color=C8302A roll=3|auto note=字 edge=字 iso=400 edgeprint jitter tilt=-8 margin=0.05
+                // circles=6（一页最多自动圈几个，0 = 不限）gap=0.02|auto（条缝，片宽的比例）
+                // paper=F7F6F2|page（这一页的纸；page = 跟着工程底色）choice=roll|best（放不下时上哪几帧，下次按托盘重排时用）；
+                // 改 layout 时纸跟着换成那种排法的纸、笔配新纸（同检视器），同一步给了 paper / color 就按给的。
+                // 开关写 on/off；字里的逗号、分号写 %2C、%3B。写错一个键整步算「参数不对」。
+                let settings: [(String, String)] = arg.split(separator: ";").compactMap { item in
+                    let kv = item.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+                    guard kv.count == 2 else { return nil }
+                    return (kv[0], kv[1].removingPercentEncoding ?? kv[1])
+                }
+                guard var sheet = store.page?.contactSheet, !settings.isEmpty else {
+                    ok = false
+                    break
+                }
+                func flag(_ v: String) -> Bool? {
+                    ["1": true, "on": true, "true": true, "yes": true, "0": false, "off": false, "false": false, "no": false][v]
+                }
+                for (k, v) in settings {
+                    switch k {
+                    case "format": if let f = CollageFilmFormat(rawValue: v) { sheet.format = f } else { ok = false }
+                    case "layout":
+                        if let l = CollageContactLayout(rawValue: v) {
+                            if l != sheet.layout, !settings.contains(where: { $0.0 == "paper" }) {
+                                sheet.paper = CollageContact.defaultPaper(l)
+                                // 笔配新纸（白笔换到白相纸上换回红笔）；同一步给了 color 就按给的。
+                                if !settings.contains(where: { $0.0 == "color" }) { CollageContact.fitPen(&sheet) }
+                            }
+                            sheet.layout = l
+                        } else { ok = false }
+                    case "paper":
+                        if v == "page" || v.isEmpty {
+                            sheet.paper = nil
+                        } else if let hex = UInt32(v.hasPrefix("#") ? String(v.dropFirst()) : v, radix: 16) {
+                            sheet.paper = CollageColor(hex: hex)
+                        } else { ok = false }
+                    case "choice": if let c = CollageContactChoice(rawValue: v) { sheet.choice = c } else { ok = false }
+                    case "perStrip": if let n = Int(v) { sheet.perStrip = min(12, max(0, n)) } else { ok = false }
+                    case "strips": if let n = Int(v) { sheet.strips = min(12, max(0, n)) } else { ok = false }
+                    case "upright": if let x = flag(v) { sheet.uprightPortraits = x } else { ok = false }
+                    case "fill": if let x = flag(v) { sheet.fillFrames = x } else { ok = false }
+                    case "marks": if let x = flag(v) { sheet.marks = x } else { ok = false }
+                    case "cross": if let x = flag(v) { sheet.crossRejects = x } else { ok = false }
+                    case "edgeprint": if let x = flag(v) { sheet.edgePrint = x } else { ok = false }
+                    case "jitter": if let x = flag(v) { sheet.jitter = x } else { ok = false }
+                    case "color":
+                        if let hex = UInt32(v.hasPrefix("#") ? String(v.dropFirst()) : v, radix: 16) {
+                            sheet.markColor = CollageColor(hex: hex)
+                        } else { ok = false }
+                    case "roll":
+                        if v == "auto" || v.isEmpty { sheet.roll = nil } else if let n = Int(v) { sheet.roll = min(999, max(1, n)) } else { ok = false }
+                    case "note": sheet.note = v
+                    case "edge": sheet.edgeText = v
+                    case "iso": sheet.iso = v
+                    case "tilt":
+                        let range = CollageContactSheet.tiltRange
+                        if let x = Double(v), x.isFinite { sheet.tilt = min(range.upperBound, max(range.lowerBound, x)) } else { ok = false }
+                    case "margin":
+                        let range = CollageContactSheet.marginRange
+                        if let x = Double(v), x.isFinite { sheet.margin = min(range.upperBound, max(range.lowerBound, x)) } else { ok = false }
+                    case "circles":
+                        let range = CollageContactSheet.maxCirclesRange
+                        if let n = Int(v) { sheet.maxCircles = min(range.upperBound, max(range.lowerBound, n)) } else { ok = false }
+                    case "gap":
+                        let range = CollageContactSheet.stripGapRange
+                        if v == "auto" || v.isEmpty {
+                            sheet.stripGap = nil
+                        } else if let x = Double(v), x.isFinite {
+                            sheet.stripGap = min(range.upperBound, max(range.lowerBound, x))
+                        } else { ok = false }
+                    default: ok = false
+                    }
+                }
+                if ok {
+                    let final = sheet
+                    store.updateContactSheet { $0 = final }
+                }
+            case "contactmark":
+                // contactmark:照片 id=circle|cross|dot|cropLine|none|auto（手动定这一帧的记号；auto = 回到自动）。
+                if let (id, v) = pair(arg, "="), store.page?.contactSheet?.frames.contains(id) == true,
+                   v == "auto" || v == "none" || CollagePencilMark(rawValue: v) != nil {
+                    store.updateContactSheet { s in s.markOverrides[id] = v == "auto" ? nil : v }
+                } else { ok = false }
+            case "contactframes":
+                // contactframes:ID;ID;…（这一卷的帧，照给的顺序）| contactframes:tray（托盘照片按拍摄先后重排）。
+                if !store.isContactSheet {
+                    ok = false
+                } else if arg == "tray" {
+                    store.makeContactSheet()
+                } else {
+                    let ids = arg.split(separator: ";").map(String.init)
+                    if ids.isEmpty || ids.contains(where: { store.photoMap[$0] == nil }) {
+                        ok = false
+                    } else {
+                        store.updateContactSheet { $0.frames = ids }
+                    }
+                }
+            case "contactdump":
+                hintsSettled()
+                dumpContact()
+            case "insets":
+                // insets:0.05;0.08;0.06;0.04（上;下;内;外，相对短边）| insets:none（回到统一外边距）
+                let n = nums(arg)
+                var st = store.project.style
+                if arg == "none" {
+                    st.insets = nil
+                    store.setStyle(st, coalesce: false)
+                } else if n.count == 4, n.allSatisfy(\.isFinite) {
+                    // 和读工程文件一样收到 0…0.4（nan、inf、1e300 以前一渲染就崩：边距换算成整数像素时溢出）。
+                    let c = n.map { min(0.4, max(0, $0)) }
+                    st.insets = CollageInsets(top: c[0], bottom: c[1], inner: c[2], outer: c[3])
+                    store.setStyle(st, coalesce: false)
+                } else { ok = false }
+            case "datevars":
+                // datevars:2026-10-23[T10:00:00]：这一天的日期占位符（和压字、文字格展开用的是同一个函数）。
+                let parser = DateFormatter()
+                parser.locale = Locale(identifier: "en_US_POSIX")
+                parser.dateFormat = arg.contains("T") ? "yyyy-MM-dd'T'HH:mm:ss" : "yyyy-MM-dd"
+                if let date = parser.date(from: arg) {
+                    let v = CollageTypeset.dateVariables(date)
+                    let keys = ["date", "date_cn_full", "weekday_cn", "weekday_en", "month_en", "month_en_title",
+                                "day", "day_num", "lunar", "ganzhi", "year_roman"]
+                    print("  " + arg + " → " + keys.map { "{\($0)}=\(v[$0] ?? "")" }.joined(separator: " "))
+                } else { ok = false }
+            case "fonts":
+                // fonts：每个字体、每个字重（含斜体）实际解析成哪个 PostScript 名 —— 首选 / 退路、系统自带 /
+                // 按需下载（AssetsV2）/ 程序内置。字体菜单里的每一项都在这里过一遍。
+                for font in CollageFont.allCases {
+                    var cells: [String] = []
+                    for weight in CollageWeight.allCases {
+                        for italic in [false, true] {
+                            let wanted = CollageTypeset.postScriptNames(font, weight, italic: italic)
+                            let f = CollageTypeset.font(font, weight, italic: italic, size: 20)
+                            let got = CTFontCopyPostScriptName(f) as String
+                            let url = CTFontCopyAttribute(f, kCTFontURLAttribute) as? URL
+                            let place = url == nil ? "内置" : (url!.path.contains("/AssetsV2/") ? "下载" : "系统")
+                            let rank = wanted.firstIndex(of: got).map { $0 == 0 ? "" : "↓\($0)" } ?? "!系统字体"
+                            cells.append("\(weight.rawValue)\(italic ? "i" : "")=\(got)\(rank)[\(place)]")
+                        }
+                    }
+                    print("  \(font.rawValue)（\(font.label)）: " + cells.joined(separator: " "))
+                }
+                print("  内置字体: " + CollageEmbeddedFonts.loadedNames.joined(separator: " "))
+                // 启动时注册进了本进程的字体表：按名字找（CoreText、NSFont）也要找得到。
+                for name in CollageEmbeddedFonts.loadedNames {
+                    let ct = CTFontCopyPostScriptName(CTFontCreateWithName(name as CFString, 20, nil)) as String
+                    let ns = NSFont(name: name, size: 20)?.fontName ?? "nil"
+                    print("  进程字体表: \(name) 按名字 CoreText → \(ct) · NSFont → \(ns)"
+                          + (ct == name && ns == name ? "（已注册）" : "（没注册上）"))
+                }
+            case "photofacts":
+                // photofacts：托盘每张照片从批量页带来的字段（帧号、场、场内名次、判决、手动、近似重复组、小数秒、
+                // 睁眼、黑白、亮度、EXIF、机身）—— 核对 CollageBridge.refresh 和路人信息里顺手算的那两项。
+                // 路人信息是后台一张张算的：等这一批都算完（最多 60 秒）再打印。解不出预览的照片没有亮度，不卡。
+                hintsSettled()
+                // photofacts:DSCF7207 = 只看这一张。
+                for p in store.project.photos where arg.isEmpty || p.id == arg {
+                    let exif = p.exif?.summary ?? "-"
+                    let luma = p.meanLuma.map { String(format: "%.3f", $0) } ?? "-"
+                    let subsec = p.captureSubsec.map { String(format: "%.2f", $0) } ?? "-"
+                    print("  \(p.id) 帧\(p.frameNo ?? "-") 场\(p.take.map(String.init) ?? "-")#\(p.takeRank.map(String.init) ?? "-") "
+                          + "\(p.verdict?.rawValue ?? "-")\(p.isManual ? "(手动)" : "") 组\(p.burstGroup.map(String.init) ?? "-") "
+                          + "秒+\(subsec) 睁眼\(p.eyesOpen.map { $0 ? "是" : "否" } ?? "-") "
+                          + "黑白\(p.isMonochrome.map { $0 ? "是" : "否" } ?? "-") 亮度\(luma) \(exif) 机身\(p.body ?? "-")")
+                }
+            case "dumptexts":
+                hintsSettled()
+                dumpTexts()
             case "layout":
                 store.setLayoutStyle(arg == "scatter" ? .scatter : .grid)
                 idle()
@@ -1033,6 +1989,25 @@ enum CollageOpsScript {
                 guard let n = Int(arg) else { ok = false; break }
                 spin(60) { store.project.photos.count >= n }
                 print("  托盘 \(store.project.photos.count) 张 · 排版" + (store.isSolving ? "还在算" : "已落下"))
+            case "batchverdict":
+                // batchverdict:DSCF7207=pick|usable|reject：在批量页改判（手动）—— 核对拼图托盘跟着刷新。
+                let verdicts: [String: Verdict] = ["pick": .pick, "usable": .usable, "reject": .reject]
+                if let (id, v) = pair(arg, "="), let verdict = verdicts[v], batch.item(withID: id) != nil {
+                    batch.applyOverrides([id: verdict])
+                } else { ok = false }
+            case "reattach":
+                // reattach：同一个场次再 attach 一次（= 从批量页切回拼图 tab），托盘按批量页现状刷新。
+                store.attach(sessionDir: batch.sessionDir, photoDir: dir, batch: batch)
+            case "batchswitch":
+                // batchswitch：批量页重新载入这个场次（会发「分析结果变了」的通知，拼图托盘跟着刷新）。
+                batch.switchSession(to: dir)
+                spin(1) { false }
+            case "addfiles":
+                // addfiles:/图1.jpg;/图2.jpg：托盘「添加文件…」（外部照片：现场跑人脸，帧号按文件名）。
+                let before = store.project.photos.count
+                store.addFiles(arg.split(separator: ";").map { URL(fileURLWithPath: String($0)) })
+                spin(60) { store.project.photos.count > before && store.busyText == nil }
+                idle()
             case "frombatch":
                 // 批量页多选「拼图 (N)」：frombatch:DSCF7209;DSCF7211（相册里应该新开一个跨页）。
                 store.importFromBatch(ids: arg.split(separator: ";").map(String.init), batch: batch, layout: true)
@@ -1040,6 +2015,21 @@ enum CollageOpsScript {
                 idle()
             case "sticker":
                 if let k = CollageSticker(rawValue: arg) { store.addSticker(k) } else { ok = false }
+            case "itemmark":
+                // itemmark:N=circle|cross|dot|cropLine：第 N 个图层（油性笔）画什么。
+                if let (n, v) = pair(arg, "="), let id = itemID(n), let m = CollagePencilMark(rawValue: v) {
+                    store.updateItem(id) { it in it = CollageItems.withMark(it, m) }
+                } else { ok = false }
+            case "itemcolor":
+                // itemcolor:N=C8302A：贴纸颜色（油性笔的墨、条码的底、胶带的颜色）。
+                if let (n, v) = pair(arg, "="), let id = itemID(n), let hex = UInt32(v, radix: 16) {
+                    store.updateItem(id) { $0.color = CollageColor(hex: hex) }
+                } else { ok = false }
+            case "itemlabel":
+                // itemlabel:N=字：标签、邮戳、条码上的字（占位符照常展开；空 = 默认）。
+                if let (n, v) = pair(arg, "="), let id = itemID(n) {
+                    store.updateItem(id) { $0.label = v }
+                } else { ok = false }
             case "itemtext":
                 store.addItemText()
             case "additem":
@@ -1067,6 +2057,18 @@ enum CollageOpsScript {
                 } else { ok = false }
             case "itemfront":
                 if let id = itemID(arg) { store.moveItemInStack(id, toFront: true) } else { ok = false }
+            case "itemcutout":
+                // itemcutout:N=on[;白边;投影]|off：第 N 个图层（相纸）做成抠图贴纸。
+                if let (n, v) = pair(arg, "="), let id = itemID(n) {
+                    let bits = v.split(separator: ";").map(String.init)
+                    let k = bits.dropFirst().compactMap(Double.init)
+                    if bits.first == "on" {
+                        let c = CollageCutout(stroke: k.first ?? 0.006, shadow: k.count > 1 ? k[1] : 0.5)
+                        store.updateItem(id) { $0.cutout = c }
+                    } else if bits.first == "off" {
+                        store.updateItem(id) { $0.cutout = nil }
+                    } else { ok = false }
+                } else { ok = false }
             case "itemback":
                 if let id = itemID(arg) { store.moveItemInStack(id, toFront: false) } else { ok = false }
             case "itemdel":
@@ -1120,6 +2122,8 @@ enum CollageOpsScript {
                 let frames = max(1, at(bp, 0).flatMap(Int.init) ?? 30)
                 let scale = at(bp, 1).flatMap(Double.init) ?? 0.3
                 let divider = path(at(bp, 2) ?? "r")
+                // 后台还在跑 Vision 的话量出来的是抢 CPU 的时间。
+                hintsSettled()
                 func timed() -> Double {
                     guard let page = store.page else { return 0 }
                     var opts = CollageRender.Options(scale: scale)
@@ -1149,6 +2153,19 @@ enum CollageOpsScript {
                 let values = CollageTypeset.exifValues(file)
                 print("  EXIF \(values.count) 项 · " + (CollageTypeset.exifCached(file) ? "缓存了" : "没缓存")
                       + (values["model"].map { " · \($0)" } ?? ""))
+            case "toneprobe":
+                // toneprobe:/a.jpg;/b.jpg：按 1024 解（同路人信息用的预览尺寸），打印亮度、黑白和判定用的三个量
+                // （去偏色后色度 95 分位 < 0.05 / 色相一致度 ≥ 0.95 且按亮度拟合的残差 < 0.08）。
+                for file in arg.split(separator: ";").map(String.init) {
+                    guard let image = CollageImages.decode(path: file, maxPixel: 1024),
+                          let t = CollageVision.tone(of: image) else {
+                        print("  \(file) 解不出")
+                        continue
+                    }
+                    print(String(format: "  %@ 亮度 %.3f 色度 %.4f 色相一致 %.3f 残差 %.4f → %@",
+                                 (file as NSString).lastPathComponent, t.luma, t.spread, t.hueAlign, t.lumaResidual,
+                                 t.mono ? "黑白" : "彩色"))
+                }
             case "digest":
                 // digest：整个工程（托盘、每页版式、水印）的指纹 —— 撤销之后核对「全都回去了」。
                 print("  工程指纹 " + CollageWatermarkCLI.digest(store.project)
@@ -1194,9 +2211,17 @@ enum CollageOpsScript {
             case "redo":
                 store.redo()
             case "savetpl":
-                store.saveTemplate(named: arg, fitAspects: true)
+                // 同界面开关的默认：套固定比例的模板来的页存出来也是固定比例。
+                store.saveTemplate(named: arg, fitAspects: !(store.page?.fixedAspects ?? false))
             case "applytpl":
-                if let t = store.allTemplates.first(where: { $0.name == arg }) { store.applyTemplate(t) } else { ok = false }
+                // 先按全名找，找不到再按名字里含这几个字找（同 --template）；套了哪个打印出来。
+                // 写分类名（时尚刊、九宫格…）= 套这个分类的第一个。
+                if let t = store.allTemplates.first(where: { $0.name == arg })
+                    ?? store.allTemplates.first(where: { $0.builtin && $0.category == arg })
+                    ?? store.allTemplates.first(where: { $0.name.contains(arg) }) {
+                    store.applyTemplate(t)
+                    if t.name != arg { print("  套用「\(t.name)」（\(t.builtin ? t.category : "我的模板")）") }
+                } else { ok = false }
             case "exporttpl":
                 store.exportTemplates(to: URL(fileURLWithPath: arg))
             case "importtpl":
@@ -1224,6 +2249,17 @@ enum CollageOpsScript {
             case "crossfold":
                 let pages = store.crossFoldPages()
                 print("  压中缝的跨页: " + (pages.isEmpty ? "无" : pages.map { "\($0 + 1)" }.joined(separator: " ")))
+            case "albumtheme":
+                // albumtheme:classic|fineArt（相册自动编排的主题；arrange 按它编）。
+                if let t = CollageAlbumTheme(rawValue: arg) {
+                    store.setAlbumTheme(t)
+                    print("  编排主题 \(t.label)")
+                } else { ok = false }
+            case "chaptermono":
+                // chaptermono:on|off（fine-art 编排的「整章黑白」）。
+                if arg == "on" || arg == "off" {
+                    store.setAlbumTheme(store.project.albumTheme, chapterMono: arg == "on")
+                } else { ok = false }
             case "arrange":
                 store.autoArrangeAlbum(dedupe: arg != "all")
                 spin(60) { store.busyText == nil && !store.project.pages.isEmpty }
@@ -1252,6 +2288,8 @@ enum CollageOpsScript {
                 // render = 半尺寸 + 调试框；renderclean = 和界面预览一样（占位、不带出血）；
                 // renderexport = 和导出一样（成品尺寸、带出血、不画占位）。
                 // renderclean:<文件名>@0.3：按这个缩放出预览（界面预览的缩放跟着窗口大小变，常见 0.3 左右）。
+                // 只等路人信息（输入），不等排版：「…nowait」那几步就是要在排版落下之前出图核对。
+                hintsSettled()
                 let sep = name == "renderclean" ? arg.lastIndex(of: "@") : nil
                 let previewScale = sep.flatMap { Double(arg[arg.index(after: $0)...]) }
                 let file = previewScale == nil ? arg : String(arg[..<(sep ?? arg.endIndex)])
@@ -1270,19 +2308,23 @@ enum CollageOpsScript {
                     // 名字以 .png 结尾就存 PNG（逐像素核对水印用：JPEG 会把差异抹到整个 8×8 块）。
                     let png = file.hasSuffix(".png")
                     let url = outDir.appendingPathComponent(png ? file : file + ".jpg")
-                    try? CollageExport.write(image, to: url, format: png ? .png : .jpeg, quality: 0.85, dpi: 72)
+                    // 加了网的照片 JPEG 质量低了网点边上起振铃：同导出，至少 0.9（没开网点的照旧 0.85，门禁不变）。
+                    let quality = store.project.style.halftone != nil ? 0.92 : 0.85
+                    try? CollageExport.write(image, to: url, format: png ? .png : .jpeg, quality: quality, dpi: 72)
                     let vars = CollageTypeset.variables(project: store.project, root: page.root, photos: store.photoMap,
                                                         pagePhotoIDs: page.photoIDs, pageID: page.id)
                     print("  出图 \(url.lastPathComponent) · 第 \(store.pageIndex + 1)/\(store.project.pages.count) 页 · {no}=\(vars["no"] ?? "")")
                     // 导出完会弹的提示（同一个函数）：格子空着、签名图找不到……
                     if name == "renderexport", let warning = CollageStore.exportWarning(
-                        missing: report.missing, lowRes: report.lowRes, signatureLost: CollageStore.signatureLost(report)) {
+                        missing: report.missing, lowRes: report.lowRes, signatureLost: CollageStore.signatureLost(report),
+                        fillerBody: CollageStore.fillerBody(report, canvas: store.project.canvas)) {
                         print("  导出提示: " + warning)
                     }
-                    if name != "render", store.project.watermark != nil {
-                        print("  " + CollageWatermarkCLI.marksSummary(report.marks))
+                    // .marks.json 每次都写（以前只有带水印才写）：文字块、取景也在里面，断言脚本不用先开水印。
+                    if name != "render" {
+                        if store.project.watermark != nil { print("  " + CollageWatermarkCLI.marksSummary(report.marks)) }
                         let stem = png ? String(file.dropLast(4)) : file
-                        CollageWatermarkCLI.writeMarks(report.marks, image: image, opts: opts, project: store.project,
+                        CollageWatermarkCLI.writeMarks(report, image: image, opts: opts, project: store.project,
                                                        page: page, to: outDir.appendingPathComponent(stem + ".marks.json"))
                     }
                 }
@@ -1514,18 +2556,36 @@ enum CollageWatermarkCLI {
         return s
     }
 
-    /// report.marks → JSON（断言脚本读）：rect / region = [x, y, w, h]（成品坐标），外加这次出图的缩放、出血，
-    /// 和画布的尺寸、安全区、切带、外边距，整页水印进留白时要躲的东西（obstacles），脚本不用再猜。
-    static func writeMarks(_ marks: [CollageRender.MarkRecord], image: CGImage, opts: CollageRender.Options,
+    /// 矩形 → [x, y, w, h]；nil、CGRect.null（空的外接框：x、y 是无穷大）、有不是有限数的分量 = null。
+    /// JSONSerialization 碰到无穷大直接抛 Objective-C 异常（整个进程退出），所以一律在这里挡掉。
+    static func rectJSON(_ r: CGRect?) -> Any {
+        guard let r, !r.isNull else { return NSNull() }
+        let v = [Double(r.minX), Double(r.minY), Double(r.width), Double(r.height)]
+        return v.allSatisfy(\.isFinite) ? v : NSNull()
+    }
+
+    /// report → JSON（断言脚本读）：rect / region = [x, y, w, h]（成品坐标），外加这次出图的缩放、出血，
+    /// 和画布的尺寸、安全区、切带、外边距，整页水印进留白时要躲的东西（obstacles；油性笔的笔迹另记 inkObstacles），
+    /// 脚本不用再猜。
+    /// texts = 每个文字块（压字 / 文字格 / 文字图层）、crops = 每格照片的取景（见 CollageRender.TextRecord / CropRecord）；
+    /// masks（主体蒙版）、contactSheet（印样帧号）、halftone（网点）先占位，后面的功能填。
+    static func writeMarks(_ report: CollageRender.RenderReport, image: CGImage, opts: CollageRender.Options,
                            project: CollageProject, page: CollagePage, to url: URL) {
-        func arr(_ r: CGRect?) -> Any { r.map { [Double($0.minX), Double($0.minY), Double($0.width), Double($0.height)] } ?? NSNull() }
+        func arr(_ r: CGRect?) -> Any { rectJSON(r) }
+        func points(_ ps: [CGPoint]?) -> Any { ps.map { $0.map { [Double($0.x), Double($0.y)] } } ?? NSNull() }
+        let marks = report.marks
         let list: [[String: Any]] = marks.map { m in
-            ["layer": m.layer, "owner": m.owner, "kind": m.kind ?? NSNull(), "rect": arr(m.rect),
-             "region": arr(m.region), "skipped": m.skipped ?? NSNull(), "cell": arr(m.cell),
-             "visible": arr(m.visible), "shape": m.shape ?? NSNull(), "avoid": arr(m.avoid),
-             "font": m.font ?? NSNull(), "contrast": m.contrast ?? NSNull(), "inMargin": m.inMargin,
-             "local": m.local.map { [Double($0.width), Double($0.height)] } ?? NSNull(),
-             "corners": m.corners.map { $0.map { [Double($0.x), Double($0.y)] } } ?? NSNull()]
+            var entry: [String: Any] = [
+                "layer": m.layer, "owner": m.owner, "kind": m.kind ?? NSNull(), "rect": arr(m.rect),
+                "region": arr(m.region), "skipped": m.skipped ?? NSNull(), "cell": arr(m.cell),
+                "visible": arr(m.visible), "shape": m.shape ?? NSNull(), "avoid": arr(m.avoid),
+                "font": m.font ?? NSNull(), "contrast": m.contrast ?? NSNull(), "inMargin": m.inMargin,
+                "local": m.local.map { [Double($0.width), Double($0.height)] } ?? NSNull(),
+                "corners": m.corners.map { $0.map { [Double($0.x), Double($0.y)] } } ?? NSNull(),
+            ]
+            // 同一张照片上有好几个字块：第 2 个起的另起一个键（只有一个字块的旧出图一个键都不多）。
+            if !m.avoidMore.isEmpty { entry["avoidMore"] = m.avoidMore.map { arr($0) } }
+            return entry
         }
         // 页上图层按画的顺序（后面的压在前面的上面）：转过之后的四个角、导出里印不印。
         var photos: [String: CollagePhotoRef] = [:]
@@ -1536,18 +2596,96 @@ enum CollageWatermarkCLI {
              "corners": CollageItems.corners(it, canvas: project.canvas).map { [Double($0.x), Double($0.y)] }]
         }
         let c = project.canvas
-        let canvas: [String: Any] = ["width": c.width, "height": c.height, "bleed": c.bleed, "safe": c.safe,
+        var canvas: [String: Any] = ["width": c.width, "height": c.height, "bleed": c.bleed, "safe": c.safe,
                                      "dpi": c.dpi, "corner": project.style.corner, "margin": project.style.margin,
                                      "seams": c.seams.rawValue, "slides": c.slides, "binding": c.binding.rawValue,
                                      "seamBands": CollageLayout.seamLines(c).map { arr($0) }]
-        let frames = CollageLayout.geometry(page.root, in: CollageLayout.contentRect(canvas: c, style: project.style),
-                                            gutter: CollageLayout.gutterPixels(canvas: c, style: project.style)).frames
-        let obstacles = CollageWatermarks.obstacles(page: page, frames: frames, canvas: c).map { arr($0) }
-        let obj: [String: Any] = ["scale": opts.scale, "includeBleed": opts.includeBleed, "watermark": opts.watermark,
+        // 四边边距（上、下、内、外，相对短边）：设了才写 —— 没设的旧出图 canvas 一个键都不多，门禁照旧严格比。
+        if let i = project.style.insets { canvas["insets"] = [i.top, i.bottom, i.inner, i.outer] }
+        let frames = CollageLayout.pageGeometry(page.root, canvas: c, style: project.style).frames
+        // 印样页：手写注记、圈叉的笔迹也算（和 Painter.prepare 同一份，占位符和渲染同一份）；别的页一个框都不多。
+        let contact: (text: [CGRect], ink: [CGRect]) = page.contactSheet == nil ? ([], []) : CollageWatermarks.contactObstacles(
+            page: page, canvas: c, photos: photos,
+            vars: CollageTypeset.variables(project: CollageLooks.project(project, page: page), root: page.root,
+                                           photos: photos, pagePhotoIDs: page.photoIDs, pageID: page.id))
+        let obstacles = (CollageWatermarks.obstacles(page: page, frames: frames, canvas: c) + contact.text).map { arr($0) }
+        let texts: [[String: Any]] = report.texts.map { t in
+            var entry: [String: Any] = [
+                "owner": t.owner, "kind": t.kind, "layer": t.layer, "rect": arr(t.rect), "corners": points(t.corners),
+                "font": t.font, "size": t.size, "lines": t.lines, "sizes": t.sizes, "vertical": t.vertical,
+                "occlusion": t.occlusion.map(occlusionJSON) ?? NSNull(),
+            ]
+            // 转了 90°、带正文的才多这两个键（旧出图的 texts 不变）。
+            if t.rotation != 0 { entry["rotation"] = t.rotation }
+            if let body = t.body { entry["body"] = body }
+            return entry
+        }
+        let crops: [[String: Any]] = report.crops.map { r in
+            ["owner": r.owner, "photoID": r.photoID, "framing": r.framing, "window": arr(r.window), "drawn": arr(r.drawn),
+             "cutsFace": r.cutsFace, "contain": r.contain, "faces": r.faces,
+             "eyeY": r.eyeY ?? NSNull(), "eyeFrac": r.eyeFrac ?? NSNull(),
+             "headTopY": r.headTopY ?? NSNull(), "headTopFrac": r.headTopFrac ?? NSNull(), "headTopSource": r.headTopSource]
+        }
+        var obj: [String: Any] = ["scale": opts.scale, "includeBleed": opts.includeBleed, "watermark": opts.watermark,
                                   "image": [image.width, image.height], "canvas": canvas, "marks": list,
-                                  "obstacles": obstacles, "items": items]
+                                  "obstacles": obstacles, "items": items, "texts": texts, "crops": crops,
+                                  "masks": report.masks.map(maskJSON),
+                                  "contactSheet": report.contactSheet.map(contactJSON) ?? NSNull(),
+                                  "halftone": report.halftone.map(halftoneJSON)]
+        // 油性笔的笔迹（整页水印在留白带里能躲就躲的，一小段一个框）：页上有油性笔、印样上有圈叉才写，旧出图一个键都不多。
+        let ink = CollageWatermarks.inkObstacles(page: page, canvas: c) + contact.ink
+        if !ink.isEmpty { obj["inkObstacles"] = ink.map { arr($0) } }
         guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) else { return }
         try? data.write(to: url)
+    }
+
+    /// 印样（contactSheet）：每帧的帧号 ↔ 照片 id、画面四个角和外接框、照片实际画出来的那块、转没转、黑边、记号；
+    /// 每条的四个角、转角、齿孔数；labels = 帧号 → 照片 id（断言用）。mmPx = 每毫米多少成品像素。
+    /// markInk = 这一帧记号的笔迹实际画到哪儿；inkBounds = 排版给圈留的那一圈（圈都在它里面、它不出画布）。
+    static func contactJSON(_ r: CollageContact.Record) -> [String: Any] {
+        func arr(_ v: CGRect?) -> Any { rectJSON(v) }
+        func points(_ ps: [CGPoint]) -> [[Double]] { ps.map { [Double($0.x), Double($0.y)] } }
+        let frames: [[String: Any]] = r.frames.map { f in
+            ["index": f.index, "label": f.label, "photoID": f.photoID, "strip": f.strip, "rect": arr(f.rect),
+             "corners": points(f.corners), "rotated": f.rotated, "drawn": arr(f.drawn), "letterboxed": f.letterboxed,
+             "mark": f.mark ?? NSNull(), "markInk": arr(f.markInk), "verdict": f.verdict ?? NSNull(),
+             "take": f.take ?? NSNull()]
+        }
+        let strips: [[String: Any]] = r.stripRecords.map { s in
+            ["index": s.index, "frames": s.frames, "angle": s.angle, "corners": points(s.corners), "holes": s.holes]
+        }
+        var labels: [String: String] = [:]
+        for f in r.frames { labels[f.label] = f.photoID }
+        return ["format": r.format, "layout": r.layout, "roll": r.roll, "mmPx": r.unit, "perStrip": r.perStrip,
+                "strips": r.strips, "tilt": r.tilt, "edgePrinted": r.edgePrinted, "numberOffset": r.numberOffset,
+                "frames": frames, "stripGeometry": strips, "labels": labels, "note": r.note ?? NSNull(),
+                "noteRect": arr(r.noteRect), "overflow": r.overflow, "bounds": arr(r.bounds),
+                "inkBounds": arr(r.inkBounds)]
+    }
+
+    /// 人物挡字一块字的遮挡量和决定（texts[].occlusion）。比例都是 0…1。
+    static func occlusionJSON(_ o: CollageRender.OcclusionRecord) -> [String: Any] {
+        ["measured": o.measured, "total": o.total, "perLetter": o.perLetter, "perLine": o.perLine, "first": o.first,
+         "last": o.last,
+         "heavy": o.heavy, "letters": o.perLetter.count, "decision": o.decision, "requested": o.requested,
+         "reason": o.reason ?? NSNull(), "limit": o.limit, "depth": o.depth, "eyesClear": o.eyesClear ?? NSNull(),
+         "band": o.band, "faces": o.faces, "headTopSource": o.headTopSource, "rule": o.rule, "moved": o.moved,
+         "mainLine": o.mainLine, "eyeBelow": o.eyeBelow ?? NSNull(), "eyeFar": o.eyeFar,
+         "eyeClamp": o.eyeClamp ?? NSNull()]
+    }
+
+    /// 一张加了网的照片（halftone）：实际点距（这次渲染的像素）、出没出点（不到 3 像素只调影调）、网型、网角、
+    /// 实际用的墨色和纸色。
+    static func halftoneJSON(_ h: CollageRender.HalftoneRecord) -> [String: Any] {
+        ["owner": h.owner, "photoID": h.photoID, "screen": h.screen, "pitchPx": h.pitchPx, "screened": h.screened,
+         "angle": h.angle, "ink": h.ink, "paper": h.paper]
+    }
+
+    /// 一格用到的主体蒙版（masks）：蒙版文件名、尺寸、覆盖率、每张脸的头顶、实例、主体以外的人（照片坐标框）。
+    static func maskJSON(_ m: CollageRender.MaskRecord) -> [String: Any] {
+        ["owner": m.owner, "photoID": m.photoID, "key": m.key, "size": m.size, "coverage": m.coverage,
+         "headTop": m.headTop, "instances": m.instances, "selected": m.selected, "cutout": m.cutout,
+         "behind": m.behind, "people": m.people]
     }
 
     /// 整个工程的指纹（键排序的 JSON 取 sha1 前 12 位）：同一次运行里撤销前后比对。

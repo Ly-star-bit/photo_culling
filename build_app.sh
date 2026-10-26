@@ -88,6 +88,11 @@ cp "$POC/runtime/pyproject.toml" "$RES/pyproject.toml"
 cp "$POC/runtime/uv.lock" "$RES/uv.lock"
 find "$RES" -name __pycache__ -prune -exec rm -rf {} +
 
+# 拼图内置字体（UnifrakturCook，OFL 1.1）的许可证全文和来源：字体本身以 base64 嵌在二进制里
+# （CollageEmbeddedFonts.swift），OFL 要求随字体一起分发许可证。
+mkdir -p "$APP/Contents/Resources/fonts"
+cp -R "$ROOT/third_party/fonts/." "$APP/Contents/Resources/fonts/"
+
 echo "==> 签名"
 codesign --force --sign - "$APP"
 

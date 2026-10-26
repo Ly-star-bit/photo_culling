@@ -51,36 +51,50 @@ enum CollageLayout {
     static let minRatio = 0.04
 
     /// 自顶向下整数切：缝宽恒为 gutter，舍入误差全落在格子上。
-    static func geometry(_ root: CollageNode, in rect: IntRect, gutter: Int) -> Geometry {
+    /// foldGap：相册跨页设了四边边距时，中缝那一刀（foldPath）的缝宽 = 两页各自的内边距之和，不是 gutter。
+    /// nil（没设四边边距、不是跨页）= 和以前一模一样。
+    static func geometry(_ root: CollageNode, in rect: IntRect, gutter: Int, foldGap: Int? = nil) -> Geometry {
         var g = Geometry()
-        place(root, path: [], rect: rect, gutter: max(0, gutter), into: &g)
+        let fold = foldGap == nil ? nil : foldPath(root)
+        place(root, path: [], rect: rect, gutter: max(0, gutter), fold: fold, foldGap: max(0, foldGap ?? 0), into: &g)
         return g
     }
 
-    private static func place(_ node: CollageNode, path: [Int], rect: IntRect, gutter: Int, into g: inout Geometry) {
+    /// 一页的几何：画布 + 样式（外边距或四边边距、缝宽、跨页中缝两侧的内边距）。
+    static func pageGeometry(_ root: CollageNode, canvas: CollageCanvas, style: CollageStyle,
+                             scale: Double = 1) -> Geometry {
+        geometry(root, in: contentRect(canvas: canvas, style: style, scale: scale),
+                 gutter: gutterPixels(canvas: canvas, style: style, scale: scale),
+                 foldGap: foldGap(canvas: canvas, style: style, scale: scale))
+    }
+
+    private static func place(_ node: CollageNode, path: [Int], rect: IntRect, gutter: Int, fold: [Int]?,
+                              foldGap: Int, into g: inout Geometry) {
         if node.isLeaf {
             g.frames.append(Frame(path: path, rect: rect, cell: node.cell ?? CollageCell()))
             return
         }
         let ratio = min(1 - minRatio, max(minRatio, node.ratio))
+        // 只有中缝那一刀换成 foldGap，它下面两页里的缝照旧是 gutter。
+        let seamWidth = path == fold ? foldGap : gutter
         if node.axis == .row {
-            let avail = Double(max(0, rect.width - gutter))
+            let avail = Double(max(0, rect.width - seamWidth))
             let split = rect.x0 + Int((avail * ratio).rounded())
             let first = IntRect(x0: rect.x0, y0: rect.y0, x1: split, y1: rect.y1)
-            let second = IntRect(x0: split + gutter, y0: rect.y0, x1: rect.x1, y1: rect.y1)
-            let seam = IntRect(x0: split, y0: rect.y0, x1: split + gutter, y1: rect.y1)
+            let second = IntRect(x0: split + seamWidth, y0: rect.y0, x1: rect.x1, y1: rect.y1)
+            let seam = IntRect(x0: split, y0: rect.y0, x1: split + seamWidth, y1: rect.y1)
             g.gutters.append(Gutter(path: path, axis: .row, rect: seam, region: rect))
-            place(node.children[0], path: path + [0], rect: first, gutter: gutter, into: &g)
-            place(node.children[1], path: path + [1], rect: second, gutter: gutter, into: &g)
+            place(node.children[0], path: path + [0], rect: first, gutter: gutter, fold: fold, foldGap: foldGap, into: &g)
+            place(node.children[1], path: path + [1], rect: second, gutter: gutter, fold: fold, foldGap: foldGap, into: &g)
         } else {
-            let avail = Double(max(0, rect.height - gutter))
+            let avail = Double(max(0, rect.height - seamWidth))
             let split = rect.y0 + Int((avail * ratio).rounded())
             let first = IntRect(x0: rect.x0, y0: rect.y0, x1: rect.x1, y1: split)
-            let second = IntRect(x0: rect.x0, y0: split + gutter, x1: rect.x1, y1: rect.y1)
-            let seam = IntRect(x0: rect.x0, y0: split, x1: rect.x1, y1: split + gutter)
+            let second = IntRect(x0: rect.x0, y0: split + seamWidth, x1: rect.x1, y1: rect.y1)
+            let seam = IntRect(x0: rect.x0, y0: split, x1: rect.x1, y1: split + seamWidth)
             g.gutters.append(Gutter(path: path, axis: .column, rect: seam, region: rect))
-            place(node.children[0], path: path + [0], rect: first, gutter: gutter, into: &g)
-            place(node.children[1], path: path + [1], rect: second, gutter: gutter, into: &g)
+            place(node.children[0], path: path + [0], rect: first, gutter: gutter, fold: fold, foldGap: foldGap, into: &g)
+            place(node.children[1], path: path + [1], rect: second, gutter: gutter, fold: fold, foldGap: foldGap, into: &g)
         }
     }
 
@@ -99,12 +113,27 @@ enum CollageLayout {
     // MARK: - 画布内的排版区
 
     /// 成品坐标系（不含出血）里的排版区：画布减外边距。
+    /// 四边边距（style.insets）：上、下各自；单页左 = 内、右 = 外；相册跨页左右两头都是外（内边距在中缝两侧，
+    /// 见 foldGap）。
     static func contentRect(canvas: CollageCanvas, style: CollageStyle, scale: Double = 1) -> IntRect {
         let short = canvas.shortSide * scale
-        let margin = Int((style.margin * short).rounded())
         let w = Int((Double(canvas.width) * scale).rounded())
         let h = Int((Double(canvas.height) * scale).rounded())
+        if let insets = style.insets {
+            let px: (Double) -> Int = { Int(($0 * short).rounded()) }
+            let left = canvas.seams == .fold ? px(insets.outer) : px(insets.inner)
+            return IntRect(x0: left, y0: px(insets.top), x1: w - px(insets.outer), y1: h - px(insets.bottom))
+        }
+        let margin = Int((style.margin * short).rounded())
         return IntRect(x0: margin, y0: margin, x1: w - margin, y1: h - margin)
+    }
+
+    /// 相册跨页设了四边边距：中缝那一刀的宽度 = 左右两页的内边距（各一份）。不是跨页、没设四边边距 = nil
+    /// （中缝和别的缝一样宽，旧行为）。
+    static func foldGap(canvas: CollageCanvas, style: CollageStyle, scale: Double = 1) -> Int? {
+        guard canvas.seams == .fold, let insets = style.insets else { return nil }
+        let short = canvas.shortSide * scale
+        return Int((2 * insets.inner * short).rounded())
     }
 
     static func gutterPixels(canvas: CollageCanvas, style: CollageStyle, scale: Double = 1) -> Int {
@@ -263,9 +292,7 @@ enum CollageLayout {
     /// 分数越低越好。m 为 nil 表示不是按比例解出来的（模板、手动），不计裁切项。
     static func score(_ root: CollageNode, m: Double?, context: Context) -> Scored {
         let canvas = context.canvas
-        let content = contentRect(canvas: canvas, style: context.style)
-        let gutter = gutterPixels(canvas: canvas, style: context.style)
-        let geo = geometry(root, in: content, gutter: gutter)
+        let geo = pageGeometry(root, canvas: canvas, style: context.style)
         let short = canvas.shortSide
 
         var s = 0.0
@@ -457,6 +484,8 @@ enum CollageLayout {
         let aspects = cells.map { preferredAspect($0, photos: photoMap) }
         let content = contentRect(canvas: req.context.canvas, style: req.context.style)
         let g = Double(gutterPixels(canvas: req.context.canvas, style: req.context.style))
+        // 中缝那一刀的宽度（跨页设了四边边距 = 两页的内边距；否则和别的缝一样）。
+        let foldG = foldGap(canvas: req.context.canvas, style: req.context.style).map(Double.init) ?? g
         let width = Double(content.width)
         let height = Double(content.height)
         var rng = SeededRandom(seed: req.seed)
@@ -466,7 +495,7 @@ enum CollageLayout {
             let canvas = req.context.canvas
             if canvas.seams == .fold, !canvas.allowsCrossFold {
                 var cell = cells[0]
-                let pageW = max(1, (width - g) / 2)
+                let pageW = max(1, (width - foldG) / 2)
                 if cell.kind == .photo, let id = cell.photoID, let p = req.context.photos[id] {
                     let win = CollageCrop.maxWindow(photoAspect: p.aspect, cellAspect: pageW / max(1, height))
                     if 1 - win.w * win.h > 0.12 { cell.contain = true }
@@ -480,7 +509,8 @@ enum CollageLayout {
         // 相册跨页：中缝那一刀固定在正中，照片分到左右两页各自排 —— 整张跨页一起解，照片常常
         // 横跨中缝、被书脊吃掉一条（扣分压不住裁切项）。换一批、散落版的底稿、编排都走这里。
         if req.context.canvas.seams == .fold {
-            return solveSpread(cells: cells, aspects: aspects, width: width, height: height, g: g, req: req)
+            return solveSpread(cells: cells, aspects: aspects, width: width, height: height, g: g, foldG: foldG,
+                               req: req)
         }
 
         let indices = Array(0..<cells.count)
@@ -510,9 +540,9 @@ enum CollageLayout {
     /// 跨页：根是一刀 0.5 的竖切（缝正好压在中缝上），左右两页各自随机切分、各自按比例解。
     /// 一页只有一张照片时比例和页面差得多就完整显示（四周留白），不把竖图硬裁成方的。
     private static func solveSpread(cells: [CollageCell], aspects: [Double], width: Double, height: Double,
-                                    g: Double, req: Request) -> [Scored] {
+                                    g: Double, foldG: Double, req: Request) -> [Scored] {
         let n = cells.count
-        let pageW = max(1, (width - g) / 2)
+        let pageW = max(1, (width - foldG) / 2)
         var rng = SeededRandom(seed: req.seed)
         func page(_ slice: [Int], _ lo: Double, _ hi: Double) -> CollageNode? {
             if slice.count == 1 {
@@ -626,17 +656,19 @@ enum CollageLayout {
         let height = Double(content.height)
         // 相册跨页：中缝那一刀不动，两页各自贴合（整版一起解会把这一刀挪走，照片又横跨中缝）。
         if context.canvas.seams == .fold, let path = foldPath(root) {
-            return refitSpread(root, path: path[...], width: width, height: height, g: g, photos: context.photos)
+            let foldG = foldGap(canvas: context.canvas, style: context.style).map(Double.init) ?? g
+            return refitSpread(root, path: path[...], width: width, height: height, g: g, foldG: foldG,
+                               photos: context.photos)
         }
         return refitNode(root, width: width, height: height, g: g, photos: context.photos)
     }
 
     /// 沿着 foldPath 往下：上下的文字横条比例不动，到了中缝那一刀两页各自贴合。
     private static func refitSpread(_ n: CollageNode, path: ArraySlice<Int>, width: Double, height: Double,
-                                    g: Double, photos: [String: CollagePhotoRef]) -> CollageNode {
+                                    g: Double, foldG: Double, photos: [String: CollagePhotoRef]) -> CollageNode {
         var out = n
         guard let i = path.first else {
-            let pageW = max(1, (width - g) / 2)
+            let pageW = max(1, (width - foldG) / 2)
             out.ratio = 0.5
             out.children[0] = refitNode(n.children[0], width: pageW, height: height, g: g, photos: photos)
             out.children[1] = refitNode(n.children[1], width: pageW, height: height, g: g, photos: photos)
@@ -645,7 +677,7 @@ enum CollageLayout {
         let avail = max(1, height - g)
         let first = avail * min(1 - minRatio, max(minRatio, n.ratio))
         out.children[i] = refitSpread(n.children[i], path: path.dropFirst(), width: width,
-                                      height: i == 0 ? first : avail - first, g: g, photos: photos)
+                                      height: i == 0 ? first : avail - first, g: g, foldG: foldG, photos: photos)
         return out
     }
 
@@ -734,9 +766,7 @@ enum CollageLayout {
         collect([])
         guard !freePaths.isEmpty else { return [score(current, m: nil, context: context)] }
 
-        let content = contentRect(canvas: context.canvas, style: context.style)
-        let gutter = gutterPixels(canvas: context.canvas, style: context.style)
-        let geo = geometry(current, in: content, gutter: gutter)
+        let geo = pageGeometry(current, canvas: context.canvas, style: context.style)
         // 自由区的像素矩形 = 其中所有叶子的外包框。
         var regionRects: [IntRect] = []
         for p in freePaths {
@@ -758,7 +788,7 @@ enum CollageLayout {
 
         let photoMap = context.photos
         let aspects = movable.map { preferredAspect($0, photos: photoMap) }
-        let g = Double(gutter)
+        let g = Double(gutterPixels(canvas: context.canvas, style: context.style))
         let areas = regionRects.map { Double($0.area) }
         let totalArea = max(1, areas.reduce(0, +))
         var rng = SeededRandom(seed: seed)
@@ -818,16 +848,44 @@ enum CollageLayout {
     /// 换一批、换备选之后：原来压在哪张照片上的字，跟着那张照片走到新位置
     /// （求解器按照片重新建格子，不带这些）。
     static func carryOverlays(from old: CollageNode, into new: CollageNode) -> CollageNode {
-        var overlays: [String: CollageOverlay] = [:]
+        // 一张照片上的全部字块一起带（刊头、左栏、右栏……）。
+        var overlays: [String: [CollageOverlay]] = [:]
         for cell in old.leaves where cell.kind == .photo {
-            if let id = cell.photoID, let o = cell.overlay { overlays[id] = o }
+            if let id = cell.photoID, !cell.overlays.isEmpty { overlays[id] = cell.overlays }
         }
-        guard !overlays.isEmpty else { return new }
+        // 这一格单独设的色调（彩色里放一张黑白）跟着照片走，和压字一样：换一批之后那张还是黑白。
+        let looks = cellLooks(old)
+        guard !overlays.isEmpty || !looks.isEmpty else { return new }
         var out = new
         for path in new.leafPaths() {
             out.update(at: path) { node in
-                guard let id = node.cell?.photoID, let o = overlays[id], node.cell?.overlay == nil else { return }
-                node.cell?.overlay = o
+                guard let id = node.cell?.photoID else { return }
+                if let o = overlays[id], node.cell?.overlays.isEmpty == true { node.cell?.overlays = o }
+                if let look = looks[id], node.cell?.look == nil { node.cell?.look = look }
+            }
+        }
+        return out
+    }
+
+    /// 每张照片格单独设的色调（按照片 id）。
+    static func cellLooks(_ root: CollageNode) -> [String: CollageLookSetting] {
+        var out: [String: CollageLookSetting] = [:]
+        for cell in root.leaves where cell.kind == .photo {
+            if let id = cell.photoID, let look = cell.look { out[id] = look }
+        }
+        return out
+    }
+
+    /// 只带色调（套模板：压字、文字跟模板走，照片自己的黑白 / 色调留着）。目标格自己设了的不盖。
+    /// 上一个模板自带的（fromTemplate）不带：那是模板的版式，不是用户给这张照片设的。
+    static func carryCellLooks(from old: CollageNode, into new: CollageNode) -> CollageNode {
+        let looks = cellLooks(old).filter { !$0.value.fromTemplate }
+        guard !looks.isEmpty else { return new }
+        var out = new
+        for path in new.leafPaths() {
+            out.update(at: path) { node in
+                guard let id = node.cell?.photoID, let look = looks[id], node.cell?.look == nil else { return }
+                node.cell?.look = look
             }
         }
         return out

@@ -47,6 +47,8 @@ func syncEmbeddedPipeline(to dataDir: URL) {
 AppRuntime.headless = CommandLine.arguments.contains { AppRuntime.headlessFlags.contains($0) }
 
 syncEmbeddedPipeline(to: appDataDir)
+// 内置字体（报纸风刊头的哥特体）进本进程的字体表：按名字找字体的地方也认得它（见 CollageEmbeddedFonts）。
+CollageEmbeddedFonts.registerForProcess(in: appDataDir)
 
 let appConfig = AppConfig.load(from: appDataDir)
 
@@ -487,6 +489,25 @@ for flag in ["--batch-ui", "--compare-ui"] {
         }
     }
 }
+
+// 主体蒙版 / 人物挡字自检：LabelGUI --mask-selftest <photo_dir>（见 CollageMaskSelfTest.swift）。
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--mask-selftest") {
+    MainActor.assumeIsolated {
+        CollageMaskSelfTest.run(flagIndex: flagIndex)
+    }
+}
+
+if let i = CommandLine.arguments.firstIndex(of: "--film-selftest") { MainActor.assumeIsolated { CollageStyleFilmSelfTest.run(flagIndex: i) } }  // 底片印样自检：LabelGUI --film-selftest <photo_dir> [--out 目录]
+// 留白杂志模板自检：LabelGUI --minimal-selftest [photo_dir]（见 CollageStyleMinimalSelfTest.swift）。
+if let i = CommandLine.arguments.firstIndex(of: "--minimal-selftest") { MainActor.assumeIsolated { CollageStyleMinimalSelfTest.run(flagIndex: i) } }
+if CommandLine.arguments.contains("--swiss-selftest") { MainActor.assumeIsolated { CollageSwissSelfTest.run() } }
+// 婚礼相册 fine-art 编排自检：LabelGUI --album-selftest [<photo_dir> --out <dir>]（见 CollageStyleFineArtSelfTest.swift）。
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--album-selftest") {
+    MainActor.assumeIsolated { CollageStyleFineArtSelfTest.run(flagIndex: flagIndex) }
+}
+// 时尚刊自检（挑主图、出一期、换封面、文案商标、字块不重叠）：LabelGUI --fashion-selftest <photo_dir>（CollageStyleFashionSelfTest.swift）。
+if let i = CommandLine.arguments.firstIndex(of: "--fashion-selftest") { MainActor.assumeIsolated { CollageStyleFashionSelfTest.run(flagIndex: i) } }
+if let i = CommandLine.arguments.firstIndex(of: "--newspaper-selftest") { MainActor.assumeIsolated { CollageStyleNewspaperSelfTest.run(flagIndex: i) } }  // 报纸风自检（CollageStyleNewspaperSelfTest.swift）
 
 // 拼图编辑操作脚本：LabelGUI --collage-ops <photo_dir> --ops "..."（见 CollageCLI.swift）。
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--collage-ops"),

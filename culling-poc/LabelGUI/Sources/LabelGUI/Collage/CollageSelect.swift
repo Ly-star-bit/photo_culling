@@ -20,11 +20,33 @@ enum CollageBridge {
         return s
     }
 
-    static func ref(from item: BatchItem) -> CollagePhotoRef? {
+    /// 只有 BatchStore 才有、BatchItem 上没有的：场内名次、哪些是手动判的。在主线程从 BatchStore 取好
+    /// （它是 @MainActor），后台建 ref、刷新时带着。
+    struct Facts {
+        var takeRank: [String: Int] = [:]
+        var manual: Set<String> = []
+
+        init() {}
+
+        @MainActor
+        init(batch: BatchStore) {
+            takeRank = batch.takeRank
+            manual = Set(batch.items.lazy.map(\.id).filter { batch.isManual($0) })
+        }
+    }
+
+    static func ref(from item: BatchItem, facts: Facts = Facts()) -> CollagePhotoRef? {
         guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: item.decodePath) as CFURL, nil),
               let size = WatermarkEngine.uprightSize(of: source) else { return nil }
         var ref = CollagePhotoRef(id: item.id, path: item.decodePath, previewPath: item.previewPath,
                                   width: size.width, height: size.height)
+        refresh(&ref, from: item, facts: facts)
+        return ref
+    }
+
+    /// 托盘里的照片按批量页的现状刷新（重新判过、调过场的间隔、重新分析之后）：分析和判决带来的字段都换成
+    /// 新的；文件路径、尺寸不动（同一个 id 就是同一张文件，不为刷新重新开文件）。建 ref 也走这里。
+    static func refresh(_ ref: inout CollagePhotoRef, from item: BatchItem, facts: Facts) {
         var faces = item.faces.map(\.bbox).filter { $0.count == 4 }
         if faces.isEmpty, let primary = item.faceBbox, primary.count == 4 { faces = [primary] }
         ref.faces = faces
@@ -34,7 +56,32 @@ enum CollageBridge {
         ref.chapter = item.chapter
         ref.captureTime = item.captureTime
         ref.faceAreaPct = item.faceAreaPct
-        return ref
+        ref.burstGroup = item.burstGroup
+        ref.takeRank = facts.takeRank[item.id]
+        ref.frameNo = frameNumber(item.rawPath)
+        ref.captureSubsec = item.captureSubsec
+        ref.verdict = verdict(item.verdict)
+        ref.isManual = facts.manual.contains(item.id)
+        ref.eyesOpen = item.dynamicEyeClosed.map { !$0 }
+        ref.exif = item.exif
+        ref.body = item.body.isEmpty ? nil : item.body
+    }
+
+    static func verdict(_ v: Verdict) -> CollageVerdict {
+        switch v {
+        case .pick: return .pick
+        case .usable: return .usable
+        case .reject: return .reject
+        }
+    }
+
+    /// 帧号 = 原文件名（不带扩展名）末尾那串数字：DSCF7207.RAF → "7207"、IMG_0001 → "0001"。用文件名不用 id：
+    /// 两个文件夹有同名照片时 id 带着文件夹前缀。末尾不是数字 = nil。
+    static func frameNumber(_ path: String) -> String? {
+        // 只去最后一个扩展名：2026.03.21_DSCF7207.jpg 按第一个点切会剩下 2026。
+        let stem = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+        let digits = stem.reversed().prefix { $0.isASCII && $0.isNumber }
+        return digits.isEmpty ? nil : String(digits.reversed())
     }
 
     /// 外部文件在托盘里的 id（导入完按 id 排版的地方要用同一个写法）。
@@ -46,6 +93,7 @@ enum CollageBridge {
               let size = WatermarkEngine.uprightSize(of: source) else { return nil }
         let id = fileID(url)
         var ref = CollagePhotoRef(id: id, path: url.path, previewPath: nil, width: size.width, height: size.height)
+        ref.frameNo = frameNumber(url.path)
         if let image = CollageImages.decode(path: url.path, maxPixel: 1536),
            let face = FaceAnalyzer.analyze(in: image).face {
             ref.faces = face.subjectFaces.map(\.bbox)
@@ -130,7 +178,124 @@ enum CollageVision {
         if subjects.isEmpty, let s = FaceAnalyzer.subjectRect(in: image) {
             subject = [s.x0, s.y0, s.x1, s.y1]
         }
-        return CollageCrop.Hints(bystanders: bystanders, subject: subject)
+        var hints = CollageCrop.Hints(bystanders: bystanders, subject: subject)
+        if let t = tone(of: image) {
+            hints.meanLuma = t.luma
+            hints.isMonochrome = t.mono
+        }
+        return hints
+    }
+
+    /// 亮度、黑白判定，外加判定用的三个量（命令行 toneprobe 打印，调阈值时看得见离线多远）。
+    struct Tone {
+        var luma: Double
+        var mono: Bool
+        /// 去掉整体偏色之后色度的 95 分位。
+        var spread: Double
+        /// 有颜色的像素单位色相向量平均起来多长（1 = 全朝一个方向）。
+        var hueAlign: Double
+        /// 色度按亮度二次拟合之后剩下的 95 分位（调色黑白的颜色只跟着亮度走，接近 0）。
+        var lumaResidual: Double
+    }
+
+    /// 调色黑白的「颜色只跟着亮度走」：二次拟合的残差 95 分位上限。实测棕褐调 0.040–0.049，
+    /// 钨丝灯 2800K–3500K 的彩色照片 0.19–0.27、暖色调色 0.16–0.22、photot 21 张 0.20–0.33。
+    static let monoLumaResidual = 0.08
+
+    /// 平均亮度、是不是黑白：缩到 32×32 看。黑白有两种：
+    /// - 中性或整体偏一个色（冷调、暖调的黑白）：去掉整体偏色之后 95% 的像素色度都 < 0.05；
+    /// - 调色黑白（棕褐、蓝调，暗处淡、亮处浓）：有颜色的像素色相几乎都朝一个方向（单位色相向量的平均长度
+    ///   ≥ 0.95），**而且**颜色只跟着亮度走（色度对亮度二次拟合的残差 95 分位 < monoLumaResidual）。
+    /// 彩色照片里总有方向相反的颜色（肤色和天空、衣服和树）：photot 21 张色相一致度 0.03–0.60，棕褐调的黑白 0.98。
+    /// 但整体偏暖的彩色照片（钨丝灯、暖白平衡）色相也全朝橙色那边（0.98），只看方向会被判成黑白：
+    /// 它们同一亮度上还有红灯笼、蓝裙子，残差下不来 —— 第二条要两个都满足。
+    static func tone(of image: CGImage) -> Tone? {
+        let side = 32
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        let ok: Bool = pixels.withUnsafeMutableBytes { buf in
+            guard let ctx = CGContext(data: buf.baseAddress, width: side, height: side, bitsPerComponent: 8,
+                                      bytesPerRow: side * 4, space: CollageRender.srgb,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return false }
+            ctx.interpolationQuality = .medium
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
+            return true
+        }
+        guard ok else { return nil }
+        let n = side * side
+        var luma = 0.0
+        var l = [Double](repeating: 0, count: n)
+        var a = [Double](repeating: 0, count: n)
+        var b = [Double](repeating: 0, count: n)
+        for i in 0..<n {
+            let r = Double(pixels[i * 4]) / 255
+            let g = Double(pixels[i * 4 + 1]) / 255
+            let bl = Double(pixels[i * 4 + 2]) / 255
+            l[i] = 0.2126 * r + 0.7152 * g + 0.0722 * bl
+            luma += l[i]
+            a[i] = r - g
+            b[i] = (r + g) / 2 - bl
+        }
+        let meanA = a.reduce(0, +) / Double(n)
+        let meanB = b.reduce(0, +) / Double(n)
+        let deviation = (0..<n).map { i -> Double in
+            let da = a[i] - meanA
+            let db = b[i] - meanB
+            return (da * da + db * db).squareRoot()
+        }.sorted()
+        let p95 = deviation[min(n - 1, Int(Double(n) * 0.95))]
+        // 色相一致：色度 > 0.03 的像素各取单位色相向量，平均起来有多长（1 = 全朝一个方向）。
+        var sumX = 0.0
+        var sumY = 0.0
+        var chromatic = 0.0
+        for i in 0..<n {
+            let c = (a[i] * a[i] + b[i] * b[i]).squareRoot()
+            guard c > 0.03 else { continue }
+            sumX += a[i] / c
+            sumY += b[i] / c
+            chromatic += 1
+        }
+        let resultant: Double = chromatic > 0 ? (sumX * sumX + sumY * sumY).squareRoot() / chromatic : 1
+        // 颜色是不是只跟着亮度走：a、b 各按亮度二次拟合，看剩下的。
+        let fa = quadraticFit(l, a)
+        let fb = quadraticFit(l, b)
+        let residual = (0..<n).map { i -> Double in
+            let x = l[i]
+            let pa: Double = fa.0 + fa.1 * x + fa.2 * x * x
+            let pb: Double = fb.0 + fb.1 * x + fb.2 * x * x
+            let da = a[i] - pa
+            let db = b[i] - pb
+            return (da * da + db * db).squareRoot()
+        }.sorted()
+        let r95 = residual[min(n - 1, Int(Double(n) * 0.95))]
+        let toned = resultant >= 0.95 && r95 < monoLumaResidual
+        return Tone(luma: luma / Double(n), mono: p95 < 0.05 || toned, spread: p95, hueAlign: resultant,
+                    lumaResidual: r95)
+    }
+
+    /// 最小二乘 y ≈ c0 + c1·x + c2·x²（3×3 正规方程，列主元消去）。x 几乎全一样（纯色图）解不出时退回平均值。
+    static func quadraticFit(_ x: [Double], _ y: [Double]) -> (Double, Double, Double) {
+        var m = [[Double]](repeating: [0, 0, 0, 0], count: 3)
+        for i in x.indices {
+            let x1 = x[i]
+            let x2 = x1 * x1
+            let f = [1, x1, x2]
+            for r in 0..<3 {
+                for c in 0..<3 { m[r][c] += f[r] * f[c] }
+                m[r][3] += f[r] * y[i]
+            }
+        }
+        let mean = x.isEmpty ? 0 : y.reduce(0, +) / Double(x.count)
+        for col in 0..<3 {
+            var pivot = col
+            for r in col..<3 where abs(m[r][col]) > abs(m[pivot][col]) { pivot = r }
+            guard abs(m[pivot][col]) > 1e-9 else { return (mean, 0, 0) }
+            m.swapAt(col, pivot)
+            for r in 0..<3 where r != col {
+                let k = m[r][col] / m[col][col]
+                for c in col..<4 { m[r][c] -= k * m[col][c] }
+            }
+        }
+        return (m[0][3] / m[0][0], m[1][3] / m[1][1], m[2][3] / m[2][2])
     }
 
     /// Vision 是左下原点。
@@ -327,17 +492,27 @@ enum CollageAlbum {
     struct Spread {
         var kind: SpreadKind
         var photos: [CollagePhotoRef]
+        /// fine-art 主题的跨页说明（哪种跨页、第几章、左页的字、整章黑白）；默认主题 = nil。
+        var fineArt: CollageFineArtSpread? = nil
     }
 
     struct Plan {
         var spreads: [Spread]
         /// 去重拿掉的（界面上可以一键加回）。
         var dropped: [CollagePhotoRef]
+        /// 按哪个主题编的（build 按它出版式）。
+        var theme: CollageAlbumTheme = .classic
     }
 
     /// 编排：去重 → 分数最高的做扉页 → 其余按时间、按章节分组，疏密交替（4-3-5-2-4-3）；
     /// 分数排前一成多的竖图和下一张组成一页一张的对页，横图单独铺满。
-    static func plan(_ photos: [CollagePhotoRef], dedupe: Bool = true, maxPerSpread: Int = 5) -> Plan {
+    /// theme = .fineArt：婚礼 fine-art 的编排（CollageStyleFineArt.plan，chapterMono = 整章黑白，title = 工程标题：
+    /// 扉页标题是西文就不加字距）；默认主题照旧。
+    static func plan(_ photos: [CollagePhotoRef], dedupe: Bool = true, maxPerSpread: Int = 5,
+                     theme: CollageAlbumTheme = .classic, chapterMono: Bool = true, title: String = "") -> Plan {
+        if theme == .fineArt {
+            return CollageStyleFineArt.plan(photos, dedupe: dedupe, chapterMono: chapterMono, title: title)
+        }
         var kept = photos
         var dropped: [CollagePhotoRef] = []
         var similar: [String: Set<String>] = [:]
@@ -427,6 +602,7 @@ enum CollageAlbum {
     /// 一个跨页的版式。grid 走求解器（和上一个跨页的结构不同），其余走固定版。
     static func layout(_ spread: Spread, previousSignature: String, context: CollageLayout.Context,
                        seed: UInt64) -> CollageNode {
+        if let info = spread.fineArt { return CollageStyleFineArt.layout(spread, info: info, context: context) }
         switch spread.kind {
         case .opener:
             var cell = CollageCell.photo(spread.photos[0].id, role: .hero)
@@ -481,6 +657,7 @@ enum CollageAlbum {
     }
 
     static func build(_ plan: Plan, context: CollageLayout.Context, seed: UInt64 = 1) -> [CollagePage] {
+        if plan.theme == .fineArt { return CollageStyleFineArt.build(plan, context: context) }
         var pages: [CollagePage] = []
         var previous = ""
         for (i, spread) in plan.spreads.enumerated() {
