@@ -70,6 +70,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # 只取 release-notes/（发布说明）。要在下载产物之前：checkout 会清空工作目录，放后面会把 DMG 删掉。
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: release-notes
+
       - uses: actions/download-artifact@v4
         with:
           name: PhotoCulling-dmg
@@ -82,12 +87,19 @@ jobs:
           # 资产名必须 ASCII — GitHub 会把非 ASCII 字符从文件名里剥掉
           # (选片工具-v1.1.2.dmg 上传后变成 -v1.1.2.dmg)。
           cp 选片工具.dmg "PhotoCulling-${GITHUB_REF_NAME}.dmg"
-          # Release 已存在就只补/换资产：半途失败后点 "Re-run jobs" 时
+          # 发布说明：有 release-notes/<tag>.md 就放在正文最前面（这一版新增 / 修改了什么），
+          # 后面接 GitHub 自动生成的提交对比；没有就只有自动生成的。
+          NOTES="release-notes/${GITHUB_REF_NAME}.md"
+          NOTES_ARGS=()
+          if [ -f "$NOTES" ]; then NOTES_ARGS=(--notes-file "$NOTES"); fi
+          # Release 已存在就只补/换资产（有说明文件就顺手换正文）：半途失败后点 "Re-run jobs" 时
           # gh release create 会以 422 already_exists 再次失败。
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "PhotoCulling-${GITHUB_REF_NAME}.dmg" --clobber
+            if [ -f "$NOTES" ]; then gh release edit "$GITHUB_REF_NAME" --notes-file "$NOTES"; fi
           else
             gh release create "$GITHUB_REF_NAME" "PhotoCulling-${GITHUB_REF_NAME}.dmg" \
               --title "选片工具 $GITHUB_REF_NAME" \
+              "${NOTES_ARGS[@]}" \
               --generate-notes
           fi
