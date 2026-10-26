@@ -14,6 +14,7 @@ enum AppRuntime {
         "--swiss-selftest",
         "--album-selftest",
         "--newspaper-selftest",
+        "--app-ui",
     ]
 
     /// true = 无头跑（测试、自动化）。

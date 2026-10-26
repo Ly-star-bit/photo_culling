@@ -490,6 +490,16 @@ for flag in ["--batch-ui", "--compare-ui"] {
     }
 }
 
+// 整窗离屏快照（测试用，窗口不显示）：LABELGUI_DATA_DIR=<临时> LabelGUI --app-ui <photo_dir> <out.png>
+//     [--tab 批量处理|水印|拼图|标注校准] [--size 1440x900] [--wait 4]（见 AppSnapshot.swift）。
+// 和 app 同一个 AppModel.make、同一个 ContentView —— 只有它拍得到 tab 之间的接线和标注校准 tab。
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--app-ui"),
+   CommandLine.arguments.count > flagIndex + 2 {
+    MainActor.assumeIsolated {
+        AppUISnapshot.run(flagIndex: flagIndex)
+    }
+}
+
 // 主体蒙版 / 人物挡字自检：LabelGUI --mask-selftest <photo_dir>（见 CollageMaskSelfTest.swift）。
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--mask-selftest") {
     MainActor.assumeIsolated {
@@ -586,24 +596,22 @@ if let unknown = CommandLine.arguments.dropFirst().first(where: { $0.hasPrefix("
 }
 
 struct LabelGUIApp: App {
-    @StateObject private var batchStore: BatchStore
-    @StateObject private var labelStore: LabelStore
-    /// 插卡检测：跟着 app 活（不放在某个 tab 里 —— 没打开的 tab 不一定被建出来）。
-    @StateObject private var cardCenter: CardImportCenter
+    /// 五个 store 和当前 tab（见 AppModel.swift）：跟着 app 活，整个进程一份。
+    @StateObject private var model: AppModel
 
     init() {
-        let batch = BatchStore(
+        // 先建好再包：store 在这里就建出来，不等 SwiftUI 第一次取。
+        let model = AppModel.make(
             dataDir: appDataDir,
-            pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir)
+            pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir),
+            bridge: .gui
         )
-        _batchStore = StateObject(wrappedValue: batch)
-        _labelStore = StateObject(wrappedValue: LabelStore(dataDir: batch.sessionDir))
-        _cardCenter = StateObject(wrappedValue: CardImportCenter(store: batch))
+        _model = StateObject(wrappedValue: model)
     }
 
     var body: some Scene {
         WindowGroup {
-            ContentView(store: labelStore, batchStore: batchStore, cardCenter: cardCenter)
+            ContentView(model: model)
                 // 深色是产品的一部分，不跟随系统外观：照片必须在中性深底上
                 // 判断，浅色系统下半白半黑的窗口曾被当成"主题坏了"报障。
                 .preferredColorScheme(.dark)
