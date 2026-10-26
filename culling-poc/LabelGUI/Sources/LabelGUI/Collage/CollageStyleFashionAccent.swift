@@ -169,9 +169,12 @@ extension CollageStyleFashion {
         guard pts.count >= 20 else { return [] }
         let k = 5
         let byL = pts.sorted { $0.l < $1.l }
-        var centres: [(Double, Double, Double)] = (0..<k).map { c in
-            let p = byL[min(byL.count - 1, (2 * c + 1) * byL.count / (2 * k))]
-            return (p.l, p.a, p.b)
+        // 拆成循环和带类型的 let：Xcode 16（Swift 6.1）的类型检查器对闭包里这一串整数运算会超时
+        var centres: [(Double, Double, Double)] = []
+        for c in 0..<k {
+            let rank: Int = (2 * c + 1) * byL.count / (2 * k)
+            let p = byL[min(byL.count - 1, rank)]
+            centres.append((p.l, p.a, p.b))
         }
         var assign = [Int](repeating: 0, count: pts.count)
         for _ in 0..<8 {

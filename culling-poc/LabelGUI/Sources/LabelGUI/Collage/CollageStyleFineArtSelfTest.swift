@@ -298,10 +298,21 @@ enum CollageStyleFineArtSelfTest {
     }
 
     static func signature(_ plan: CollageAlbum.Plan) -> String {
-        plan.spreads.map { s in
-            (s.fineArt.map { $0.kind.rawValue + "\($0.chapter)" + ($0.caption ?? "") + ($0.look?.look.rawValue ?? "") }
-             ?? s.kind.rawValue) + ":" + s.photos.map(\.id).joined(separator: ",")
-        }.joined(separator: "|") + "/" + plan.dropped.map(\.id).joined(separator: ",")
+        // 拆成带类型的 let：Xcode 16（Swift 6.1）的类型检查器对一整串 ?? 和 + 会超时
+        let spreads: [String] = plan.spreads.map { s in
+            let head: String
+            if let f = s.fineArt {
+                let caption: String = f.caption ?? ""
+                let look: String = f.look?.look.rawValue ?? ""
+                head = f.kind.rawValue + "\(f.chapter)" + caption + look
+            } else {
+                head = s.kind.rawValue
+            }
+            let ids: String = s.photos.map(\.id).joined(separator: ",")
+            return head + ":" + ids
+        }
+        let dropped: String = plan.dropped.map(\.id).joined(separator: ",")
+        return spreads.joined(separator: "|") + "/" + dropped
     }
 
     // MARK: - 编排断言
