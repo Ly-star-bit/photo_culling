@@ -2,21 +2,28 @@ import SwiftUI
 import UniformTypeIdentifiers
 import ImageIO
 
+// 给 AI 用的 MCP（--mcp / --mcp-call / --mcp-tools，见 MCP/MCPServerMain.swift）：第一条可执行语句就接管 stdio。
+// 之后 print、NSLog、C 的 stdio 都落到 stderr，协议走私有 fd，任何共用代码打印的东西都混不进 JSON-RPC。
+let mcpFDs: StdioTakeover.FDs? = MCPServerMain.mode(CommandLine.arguments) != nil ? StdioTakeover.takeOver() : nil
+
 /// Analysis artifacts (previews, manifest/layer JSONs, labels.csv, settings.json)
 /// live in Application Support — always writable by the app, no TCC prompt, works
 /// when launched from /Applications, independent of username.
+/// 这里只算路径，不建目录（ensureAppDataDir 建）：main.swift 的顶层全局量执行到这一行就求值，
+/// 以前在这里建目录，任何启动方式（--mcp、写错参数被挡下的）都会在从没开过 app 的机器上建出数据目录。
 let appDataDir: URL = {
     // CI 的无头回归用临时目录，别碰 runner 上的 Application Support。
     if let override = ProcessInfo.processInfo.environment["LABELGUI_DATA_DIR"], !override.isEmpty {
-        let dir = URL(fileURLWithPath: override)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+        return URL(fileURLWithPath: override)
     }
     let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-    let dir = base.appendingPathComponent("选片工具")
-    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    return dir
+    return base.appendingPathComponent("选片工具")
 }()
+
+/// 建数据目录（以前 appDataDir 初始化时顺手建的那两处）。MCP 的入口和不开界面的闸都在它前面：它们不往这里写一个字节。
+func ensureAppDataDir() {
+    try? FileManager.default.createDirectory(at: appDataDir, withIntermediateDirectories: true)
+}
 
 /// The Python pipeline (layer2.py etc.) ships INSIDE the app bundle
 /// (Contents/Resources/culling-poc) and is synced to App Support on every
@@ -46,6 +53,20 @@ func syncEmbeddedPipeline(to dataDir: URL) {
 // 无头参数在任何分派之前认出来：之后走到的共用代码（导出完「在访达里显示」之类）一律不弹界面。
 AppRuntime.headless = CommandLine.arguments.contains { AppRuntime.headlessFlags.contains($0) }
 
+// 不开界面的第一道闸（见 MCP/NoGUIGate.swift）：拼错的无头参数、LABELGUI_NO_GUI=1 却没有无头参数、
+// 像是被 MCP 客户端起的（父进程不是 launchd、stdin 不是终端）都在这里退出 —— 还什么都没写。
+NoGUIGate.early()
+
+// MCP 的三个入口：不建数据目录、不同步 Python 运行时、不注册字体，对数据目录只读（DESIGN §10.0、§10.5）。永不返回。
+if let mcpMode = MCPServerMain.mode(CommandLine.arguments), let mcpFDs {
+    MCPServerMain.run(mcpMode, fds: mcpFDs)
+}
+// MCP 这一层纯函数的自检（含不开界面那道闸的判断表）：LabelGUI --mcp-selftest [--json]，不读写任何文件。
+if CommandLine.arguments.contains("--mcp-selftest") {
+    MCPSelfTest.run()
+}
+
+ensureAppDataDir()
 syncEmbeddedPipeline(to: appDataDir)
 // 内置字体（报纸风刊头的哥特体）进本进程的字体表：按名字找字体的地方也认得它（见 CollageEmbeddedFonts）。
 CollageEmbeddedFonts.registerForProcess(in: appDataDir)
@@ -620,4 +641,6 @@ struct LabelGUIApp: App {
     }
 }
 
+// 不开界面的最后一道闸：LABELGUI_NO_GUI=1，或者父进程不是 launchd 而且 stdin 不是终端（LABELGUI_ALLOW_GUI=1 绕过）→ 退出。
+NoGUIGate.last()
 LabelGUIApp.main()
