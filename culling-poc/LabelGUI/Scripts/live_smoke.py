@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-"""实时桥冒烟（DESIGN §9.8.2、§10.7；STEP 2：桥本身）：起 --live-host（.prohibited，窗口从不显示），经脚本自己起的
---mcp 驱动；test.* 直接连宿主的 socket。
+"""实时桥冒烟（DESIGN §9.8.2、§10.7；STEP 2：桥本身，STEP 3a：读和图片）：起 --live-host（.prohibited，窗口从不显示），
+经脚本自己起的 --mcp 驱动；test.* 直接连宿主的 socket。
 
 用法: python3 -I Scripts/live_smoke.py <LabelGUI> --ci [--work <目录>] [--keep] [--only A,B,…]
-      python3 -I Scripts/live_smoke.py <LabelGUI> --photos <照片目录> --data <已分析的数据目录> [--work …] [--keep] [--only …]
-  --ci      Fixtures 场次（照片文件夹不存在，和 verdict_regression.sh 同一个约定）；app 里的二进制只在 --ci 下收
+      python3 -I Scripts/live_smoke.py <LabelGUI> --photos <照片目录> --data <已分析的数据目录> [--collage-data <目录>]
+                                        [--work …] [--keep] [--only …]
+  --ci      Fixtures 场次（照片文件夹不存在，和 verdict_regression.sh 同一个约定）+ sips 合成图；app 里的二进制只在 --ci 下收
   --photos / --data  本地 photot 模式：数据目录每个宿主拷一份新的
+  --collage-data     （本地）有拼图工程的同一场的数据目录（STEP 0 的 data-seeded）：collage_get_state 的预览用它
   --work    工作目录（不存在、空的、或者本脚本上次建的才用；socket 也放在这下面，经 /tmp 下一个短的符号链接接过去）
 
 组：A 没有宿主  B 起宿主（R6 T1–T4、T10、T11、T13、T17，hello、积压、连接上限、桥关、自愈、窗口、取消、截止时间……）
     C 杀掉 / 重起 / 抢锁（R6 T5–T9、T12、T14、T16、T18，CLOEXEC）  D SIGPIPE 矩阵（R6 §4.3 五行）  E --app-ui 不开桥
+    F 读和图片（§10.7 第 31–36、38 条：fixture 读和 --verdicts 对账、cursor、预览、受保护位置不读原图、并发、取消、NaN、
+      输出目录）
+每个 --mcp 都带自己的 LABELGUI_MCP_OUT（工作目录里），绝不写 ~/Pictures/xuanpian-mcp。
 
 不碰用户（§9.8.2 的四道闸，一条不改）：
 1. 每个宿主、每个 --mcp 都带临时的 LABELGUI_DATA_DIR（realpath 或 dev:ino 等于真实数据目录就 exit 2）和 LABELGUI_NO_GUI=1；
@@ -20,7 +25,7 @@
 只给脚本自己起的进程发信号（按 Popen 拿到的 pid），从不 pkill。跑前跑后 defaults export LabelGUI / local.culling.labelgui 不变。
 原型：R6 的 tests.py（T1–T18）、sigpipe_matrix.py。
 """
-import ctypes, errno, fcntl, hashlib, json, os, pwd, re, select, shutil, signal, socket, subprocess, sys
+import base64, ctypes, errno, fcntl, hashlib, json, os, pwd, random, re, select, shutil, signal, socket, struct, subprocess, sys
 import tempfile, threading, time, unicodedata, uuid
 
 ARGS = sys.argv[1:]
@@ -38,8 +43,9 @@ def opt(name):
     return ARGS[ARGS.index(name) + 1] if name in ARGS and ARGS.index(name) + 1 < len(ARGS) else None
 
 
-ONLY = set((opt("--only") or "ABCDE").upper().replace(",", ""))
+ONLY = set((opt("--only") or "ABCDEF").upper().replace(",", ""))
 PHOTOS_SRC, DATA_SRC = opt("--photos"), opt("--data")
+COLLAGE_SRC = opt("--collage-data")
 if not CI and not (PHOTOS_SRC and DATA_SRC):
     print("要么 --ci，要么 --photos <照片目录> --data <已分析的数据目录>")
     sys.exit(2)
@@ -206,6 +212,8 @@ def base_env(data, root, **extra):
             guard_data(data)
         env["LABELGUI_DATA_DIR"] = data
     env["LABELGUI_LIVE_SOCK_ROOT"] = root
+    # 预览输出目录（§10.3）：测试绝不写 ~/Pictures/xuanpian-mcp
+    env["LABELGUI_MCP_OUT"] = os.path.join(WORK, "mcp-out")
     for k, v in extra.items():
         if v is None:
             env.pop(k, None)
@@ -220,7 +228,7 @@ READY = re.compile(r"^ready sock=(\S+) pid=(\d+) data_dir_id=(\S+) bridge=(\S+) 
 
 
 class Host:
-    def __init__(self, label, data=None, root=None, photos=None, args=(), wait=True, env_extra=None, **extra):
+    def __init__(self, label, data=None, root=None, photos=None, args=(), wait=True, env_extra=None, wrap=(), **extra):
         self.label = label
         self.data = data or fresh_data(label)
         self.root = root or sock_root(label)
@@ -229,7 +237,7 @@ class Host:
                        LABELGUI_LIVE_TEST_SELFCHECK_MS="500", **extra)
         env.update(env_extra or {})
         self.t0 = time.monotonic()
-        self.proc = subprocess.Popen([BIN, "--live-host", photos or PHOTO_DIR, *args], env=env, stdin=subprocess.DEVNULL,
+        self.proc = subprocess.Popen([*wrap, BIN, "--live-host", photos or PHOTO_DIR, *args], env=env, stdin=subprocess.DEVNULL,
                                      stdout=subprocess.PIPE, stderr=open(self.err_path, "w"), cwd=WORK)
         PROCS.append(self)
         self.sock = self.data_dir_id = self.bridge = self.reason = None
@@ -411,10 +419,14 @@ APP_TOOLS = ["cull_session_overview", "cull_list_photos", "cull_get_photos", "cu
 
 
 def minimal_args(tool, session):
-    """够过 session 核对的最小参数（STEP 2 不做参数校验，只看路由）。"""
+    """够过参数校验和 session 核对的最小参数（STEP 3a 起读工具在 live 时先查参数；写工具在 STEP 3b）。"""
     a = {"session": session}
     if tool == "app_undo":
         a = {"target": "collage"}
+    if tool in ("cull_get_photos", "cull_preview_photos"):
+        a["ids"] = ["DSCF7208"]
+    if tool == "cull_list_groups":
+        a["kind"] = "scene"
     return a
 
 
@@ -495,6 +507,169 @@ class Mcp:
     def term(self, timeout=3):
         if self.alive():
             self.close()
+
+
+# ---------------------------------------------------------------- STEP 3a：读工具、合成图（F 组用）
+
+V_CN = {"精选": "pick", "可用": "usable", "废片": "reject"}
+
+
+def parse_verdicts(text):
+    """`--verdicts [--per-photo]` 的输出 → 计数、近似重复、场、理由、「场 N」那几行、每张的判决和理由。"""
+    out = {"reasons": {}, "scene_lines": [], "per_photo": {}}
+    m = re.search(r"^照片 (\d+) · 精选 (\d+) · 可用 (\d+) · 废片 (\d+)$", text, re.M)
+    out["counts"] = tuple(int(x) for x in m.groups()) if m else None
+    m = re.search(r"^近似重复 (\d+) 组 / (\d+) 张", text, re.M)
+    out["dups"] = tuple(int(x) for x in m.groups()) if m else None
+    m = re.search(r"^场 \(间隔≤\d+s\) (\d+) 个多张场 / (\d+) 张 · 待处理 (\d+)$", text, re.M)
+    out["scenes"] = tuple(int(x) for x in m.groups()) if m else None
+    for r_, n in re.findall(r"^  理由 (\S+): (\d+)$", text, re.M):
+        out["reasons"][r_] = int(n)
+    for take, members in re.findall(r"^  场 (\d+) \(\d+ 张\): (.+)$", text, re.M):
+        row = []
+        for tok in members.split():
+            mm = re.match(r"^(.+)=(精选|可用|废片)(?:#(\d+))?$", tok)
+            row.append((mm.group(1), V_CN[mm.group(2)], int(mm.group(3)) if mm.group(3) else None))
+        out["scene_lines"].append((int(take), row))
+    if re.search(r"^阈值: ", text, re.M):
+        for pid, v, reasons in re.findall(r"^  (\S+) (精选|可用|废片) (\S+)", text, re.M):
+            out["per_photo"][pid] = (V_CN[v], reasons)
+    return out if out["counts"] else None
+
+
+def verdicts_cli():
+    """本地 photot：在同一份数据的另一个拷贝上跑 `--verdicts --per-photo`。它会给 batch.* 两个设置赋值（didSet 写裸二进制的
+    LabelGUI 域），所以只在那两个键已经是 0 时跑（verdict_regression.sh 每次都写同样的值）；收尾照样比 defaults export。"""
+    vals = [subprocess.run(["defaults", "read", "LabelGUI", k], capture_output=True, text=True).stdout.strip()
+            for k in ("batch.rejectBurstDuplicates", "batch.minKeepersPerChapter")]
+    if vals != ["0", "0"]:
+        skip(f"LabelGUI 域的 batch.* 不是 0 / 0（{vals}）：不跑 --verdicts，免得改用户的设置")
+        return None
+    d = fresh_data("F-verdicts")
+    r = subprocess.run([BIN, "--verdicts", PHOTO_DIR, "--per-photo"], env=base_env(d, sock_root("F-verdicts")),
+                       capture_output=True, timeout=120, cwd=WORK, stdin=subprocess.DEVNULL)
+    return parse_verdicts(r.stdout.decode(errors="replace")) if r.returncode == 0 else None
+
+
+def fresh_copy(src, label):
+    """别的数据目录拷一份（和 fresh_data 一样补上写权限：STEP 0 留下的那份是只读的）。"""
+    DATA_N[0] += 1
+    d = os.path.join(WORK, f"data-{DATA_N[0]}-{label}")
+    shutil.copytree(src, d, symlinks=True, ignore=shutil.ignore_patterns(".live.lock"))
+    for dp, dns, fns in os.walk(d):
+        for n in dns + fns:
+            p_ = os.path.join(dp, n)
+            if not os.path.islink(p_):
+                os.chmod(p_, os.stat(p_).st_mode | 0o200)
+    os.chmod(d, os.stat(d).st_mode | 0o200)
+    guard_data(d)
+    return d
+
+
+def mcp_full(env, tool, args=None, timeout=60):
+    """--mcp-call 的整个结果（content 里的 image 块也要）+ text 解出来的对象。"""
+    t = time.monotonic()
+    r = subprocess.run([BIN, "--mcp-call", tool, json.dumps(args or {}, ensure_ascii=False)], env=env, capture_output=True,
+                       timeout=timeout * SLACK, cwd=WORK, stdin=subprocess.DEVNULL)
+    ms = (time.monotonic() - t) * 1000
+    try:
+        out = json.loads(r.stdout.decode().strip().splitlines()[-1])
+        return out, json.loads(out["content"][0]["text"]), ms
+    except Exception:
+        return None, None, ms
+
+
+def image_blocks(out):
+    return [base64.b64decode(c["data"]) for c in (out or {}).get("content", [])[1:] if c.get("type") == "image"]
+
+
+def cur_first(env):
+    _, p_, _ = mcp_call(env, "cull_list_photos", {"session": KEY, "limit": 1})
+    return (p_ or {}).get("next_cursor") or "x"
+
+
+def make_bmp(path, w, h, seed, amp=16):
+    """24 位 BMP：四个象限四种颜色（左上红、右上绿、左下蓝、右下黄）+ 噪声，JPEG 才有一两百 KB（纯色只有几 KB，测不出什么）。"""
+    rnd = random.Random(seed)
+    rb = w * 3
+    pad = (4 - rb % 4) % 4
+    table = bytes((b * amp) // 256 for b in range(256))
+    half = w // 2
+    tl, tr, bl, br = bytes((40, 40, 200)), bytes((40, 180, 40)), bytes((200, 60, 40)), bytes((40, 190, 200))
+    top = int.from_bytes(tl * half + tr * (w - half), "big")
+    bot = int.from_bytes(bl * half + br * (w - half), "big")
+    body = bytearray()
+    for y in range(h):              # BMP 从下往上
+        base = bot if y < h // 2 else top
+        noise = int.from_bytes(rnd.randbytes(rb).translate(table), "big")
+        body += (base + noise).to_bytes(rb, "big") + b"\0" * pad
+    hdr = struct.pack("<2sIHHI", b"BM", 54 + len(body), 0, 0, 54)
+    hdr += struct.pack("<IiiHHIIiiII", 40, w, h, 1, 24, 0, len(body), 2835, 2835, 0, 0)
+    with open(path, "wb") as f:
+        f.write(hdr + body)
+
+
+def to_jpeg(bmp, jpg):
+    r = subprocess.run(["sips", "-s", "format", "jpeg", "-s", "formatOptions", "80", bmp, "--out", jpg], capture_output=True)
+    os.unlink(bmp)
+    return r.returncode == 0 and os.path.isfile(jpg)
+
+
+SYN_IDS = None
+SYN_CACHE = os.path.join(WORK, "合成图缓存")
+
+
+def synth_session(label, photos_dir=None):
+    """合成图场次：照片文件夹（原图 1800×1200）+ 一份新数据目录（sessions/<key>/ 下 manifest、layer1（fixture 前 6 张的，
+    带人脸框）、previews/<id>.jpg 1024×683）。manifest 带 body_serial：打开时不去读原图补序列号。"""
+    global SYN_IDS
+    man = json.load(open(os.path.join(FIX, "manifest.json")))
+    l1 = json.load(open(os.path.join(FIX, "layer1_results.json")))
+    photos = man["photos"][:6]
+    SYN_IDS = [p["id"] for p in photos]
+    if not os.path.isdir(SYN_CACHE):
+        os.makedirs(os.path.join(SYN_CACHE, "orig"))
+        os.makedirs(os.path.join(SYN_CACHE, "prev"))
+        for i, p in enumerate(photos):
+            for kind, (w, h) in (("orig", (1800, 1200)), ("prev", (1024, 683))):
+                bmp = os.path.join(SYN_CACHE, kind, p["id"] + ".bmp")
+                make_bmp(bmp, w, h, seed=i * 2 + (kind == "prev"))
+                if not to_jpeg(bmp, os.path.join(SYN_CACHE, kind, p["id"] + ".jpg")):
+                    print("sips 转不出 JPEG：合成图场次做不出来")
+                    sys.exit(2)
+    pdir = photos_dir or os.path.join(WORK, f"syn-{label}")
+    if not os.path.isdir(pdir):
+        shutil.copytree(os.path.join(SYN_CACHE, "orig"), pdir)
+    # key 让二进制自己算（BatchStore.sessionKey 走 standardizedFileURL：/private/tmp/… 会变成 /tmp/…，Python 这边算不准）
+    r = subprocess.run([BIN, "--session-key", pdir], env=base_env(os.path.join(WORK, "session-key-data"), LINK),
+                       capture_output=True, text=True, timeout=30, cwd=WORK, stdin=subprocess.DEVNULL)
+    key = r.stdout.strip().splitlines()[-1] if r.returncode == 0 and r.stdout.strip() else ""
+    if not re.match(r"^[0-9a-f]{16}$", key):
+        print(f"--session-key 算不出 {pdir} 的 key：{r.stdout!r} {r.stderr[-300:]!r}")
+        sys.exit(2)
+    data = os.path.join(WORK, f"data-syn-{label}")
+    sdir = os.path.join(data, "sessions", key)
+    shutil.copytree(os.path.join(SYN_CACHE, "prev"), os.path.join(sdir, "previews"))
+    rows = []
+    for p in photos:
+        q = dict(p)
+        q["raw_path"] = q["decode_path"] = os.path.join(pdir, p["id"] + ".jpg")
+        q["preview_path"] = f"previews/{p['id']}.jpg"
+        q["body_serial"] = "SYN0001"
+        rows.append(q)
+    json.dump({"photo_dir": pdir, "photos": rows}, open(os.path.join(sdir, "manifest.json"), "w"), ensure_ascii=False)
+    keep = set(SYN_IDS)
+    l1o = dict(l1)
+    l1o["results"] = [r for r in l1["results"] if r["id"] in keep]
+    json.dump(l1o, open(os.path.join(sdir, "layer1_results.json"), "w"), ensure_ascii=False)
+    json.dump([{"key": key, "path": pdir, "name": os.path.basename(pdir), "lastAnalyzed": "2026-10-29T10:00:00Z",
+                "photoCount": len(rows)}], open(os.path.join(data, "sessions.json"), "w"), ensure_ascii=False)
+    guard_data(data)
+    syn_keys[pdir] = key
+    return {"dir": pdir, "key": key, "data": data, "ids": SYN_IDS}
+
+
+syn_keys = {}
 
 
 # ---------------------------------------------------------------- 进程的 fd（CLOEXEC 从外面看）
@@ -652,7 +827,7 @@ try:
               and st.get("next") == "cull_session_overview", f"app_status：live（{ms:.0f} ms）")
         check(live.get("socket") == h.sock, f"ready 行的 S 和 app_status.live.socket 逐字节相同（{h.sock}）")
         check(live.get("exact_build_match") is True and live.get("proto") == 1 and live.get("bridge") == "on"
-              and live.get("capabilities") == ["collage.state"] and live.get("window_state") == "visible"
+              and live.get("capabilities") == ["collage.state", "cull.preview", "cull.read"] and live.get("window_state") == "visible"
               and live.get("windows") == 1 and live.get("tab") == "batch" and live.get("analysis") == {"running": False, "progress_text": ""},
               f"live 对象的字段：{ {k: live.get(k) for k in ('exact_build_match', 'proto', 'capabilities', 'window_state', 'tab', 'analysis')} }")
         check(open_.get("session") == KEY and open_.get("folder") == PHOTO_DIR and open_.get("photo_count") == 21,
@@ -668,7 +843,7 @@ try:
               and hr.get("proto_max") == 1 and isinstance(hr.get("main_beat_ms"), int)
               and {"name", "version", "build", "uuid", "pid", "exe"} <= set(hr.get("app", {})),
               f"hello 字段齐：data_dir_id、peer（uid {os.getuid()}、pid 是脚本）、ready、proto 区间、app、main_beat_ms")
-        # 路由：collage_get_state 转给 app；session 填 key / 路径 / 别的；其余 14 个 → app_version_mismatch（app_too_old）
+        # 路由：collage_get_state 转给 app；session 填 key / 路径 / 别的；6 个读工具转给 app，9 个写 → app_version_mismatch（app_too_old）
         _, cs, ms = mcp_call(env, "collage_get_state")
         check((cs or {}).get("source") == "app" and cs.get("session") == KEY and cs.get("window_visible") is True
               and cs.get("pending_writes") == 0 and "undo" in cs and "busy" in cs,
@@ -679,9 +854,13 @@ try:
         check(err_code(cs3) == "session_not_open" and (cs3["error"].get("data") or {}).get("open_session", {}).get("session") == KEY,
               f"别的场次 → session_not_open，data.open_session 对（{err_code(cs3)}）")
         codes = all_tools(env, KEY)
-        codes.pop("collage_get_state")
+        reads = {t: codes.pop(t) for t in APP_TOOLS[:6]}
         bad = {t: c for t, c in codes.items() if c != "app_version_mismatch"}
-        check(not bad, f"其余 14 个：app 的 capabilities 里没有它们的方法 → app_version_mismatch {bad}")
+        check(not bad, f"9 个写工具：app 的 capabilities 里还没有它们的方法（STEP 3b）→ app_version_mismatch {bad}")
+        # --ci 的 fixture 没有分析预览、照片文件夹也不存在：预览回 preview_missing（正是 §10.3 那一条），其余照常
+        want_prev = "preview_missing" if CI else None
+        check(reads.pop("cull_preview_photos") == want_prev and set(reads.values()) == {None},
+              f"6 个读工具带最小参数都照常回（--ci 的预览是 preview_missing）{reads}")
         _, body, _ = mcp_call(env, "cull_set_verdicts", {"session": KEY, "ids": ["x"], "verdict": "pick"})
         check(((body or {}).get("error") or {}).get("data", {}).get("reason") == "app_too_old", "data.reason = app_too_old（§10.2）")
         _, ls, _ = mcp_call(env, "cull_list_sessions")
@@ -759,11 +938,16 @@ try:
         check(hello_ms < 50 * SLACK and ping_ms < 50 * SLACK and get_ms > 900 and (st.get("live") or {}).get("state") == "live"
               and st_ms < 900, f"T3b 主线程忙：connect+hello {hello_ms:.1f} ms、ping {ping_ms:.1f} ms、--mcp app_status {st_ms:.0f} ms"
               f"（live），collage.state 排了 {get_ms:.0f} ms")
-        # T4 客户端半路断开：慢写发完就关；8 MB 回复只读 10 KB 就关
+        # T4 客户端半路断开：慢写开始以后就关；8 MB 回复只读 10 KB 就关。
+        # STEP 3a 起读到 EOF 就置 clientGone（§10.2）：还没轮到的请求不执行 —— 包括在写 FIFO 里排在别的写后面的
+        # （那一半见 F 组第 35 条）；已经开始的照常落地。所以这里一个一个来：等它开始（FIFO 空着，100 ms 足够）再关，
+        # 等它落地再发下一个，断言的是「已经开始的写照样生效」。
         for i in range(3):
             c = Raw(h)
             c.req("test.write", {"key": f"t4.{i}", "value": "v", "async_ms": 300}, op_id=f"t4-{i}")
+            time.sleep(0.1)
             c.close()
+            time.sleep(0.3)
         for _ in range(3):
             c = Raw(h)
             c.req("test.blob", {"bytes": 8_000_000})
@@ -933,11 +1117,12 @@ try:
         test_call(h, "test.set_bridge", {"enabled": False, "for_ms": 3000})
         st_off, _ = status(env)
         _, cs_off, _ = mcp_call(env, "collage_get_state")
+        _, rd_off, _ = mcp_call(env, "cull_list_groups", {"session": KEY, "kind": "scene"})
         lock_line = json.loads(open(os.path.join(h.data, ".live.lock")).read().splitlines()[0])
         sock_gone = not os.path.exists(h.sock)
         time.sleep(3.5)
         st_on, _ = status(env)
-        check((st_off.get("live") or {}).get("state") == "bridge_off" and err_code(cs_off) == "bridge_off"
+        check((st_off.get("live") or {}).get("state") == "bridge_off" and err_code(cs_off) == "bridge_off" and err_code(rd_off) == "bridge_off"
               and lock_line.get("bridge") == "off" and sock_gone and (st_on.get("live") or {}).get("state") == "live",
               "桥关着：bridge_off（读写都是），socket 删了、锁文件写 bridge:off；3 s 后自己开回来 → live")
         # socket 被删（R6 T15）：立刻 unreachable；自检（500 ms）以后恢复
@@ -946,10 +1131,11 @@ try:
         os.unlink(h.sock)
         st_u, _ = status(env)
         _, cs_u, _ = mcp_call(env, "collage_get_state")
+        _, rd_u, _ = mcp_call(env, "cull_session_overview", {"session": KEY})
         probe_ms = (time.monotonic() - t_un) * 1000
         time.sleep(1.2)
         st_h, _ = status(env)
-        check((st_u.get("live") or {}).get("state") == "unreachable" and err_code(cs_u) == "app_unreachable"
+        check((st_u.get("live") or {}).get("state") == "unreachable" and err_code(cs_u) == "app_unreachable" and err_code(rd_u) == "app_unreachable"
               and (st_h.get("live") or {}).get("state") == "live" and "重新 bind 好了" in h.log(),
               f"T15 socket 被删：立刻 unreachable（锁还在，不当成没开；两次探测共 {probe_ms:.0f} ms，在下一次自检之前），1.2 s 内自愈 → live")
         # socket 目录整个被删：自愈时按 0700 重建
@@ -992,12 +1178,17 @@ try:
             x.s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
             x.send({"id": 11, "method": "test.blob", "params": {"bytes": 300_000}})
             x.send({"id": 12, "method": "collage.state"})
+            # STEP 3a：读到 EOF 就当客户端走了（clientGone，§10.2），还没轮到的请求不执行。等两个都开始了再半关，
+            # 300 KB 的回复写到一半时读线程退出，这条竞态才测得到
+            time.sleep(0.05)
             x.s.shutdown(socket.SHUT_WR)
             time.sleep(0.15)
             ids = []
             try:
                 while True:
-                    ids.append(x.recv().get("id"))
+                    f_ = x.recv()
+                    # 两条都要是结果（不是 client_gone 之类的错误）：300 KB 的回复真的在和读线程退出赛跑
+                    ids.append(f_.get("id") if "result" in f_ else ("error", f_.get("id")))
             except (EOFError, OSError):
                 pass
             both += ids == [11, 12]
@@ -1177,10 +1368,12 @@ try:
         h.signal(signal.SIGSTOP)
         st, ms = status(env)
         _, cs, cs_ms = mcp_call(env, "collage_get_state")
+        _, rd9, _ = mcp_call(env, "cull_preview_photos", {"session": KEY, "ids": ["DSCF7208"]})
         h.signal(signal.SIGCONT)
         time.sleep(0.3)
         st2, _ = status(env)
         check((st.get("live") or {}).get("state") == "unresponsive" and 950 < ms < 2500 * SLACK and err_code(cs) == "app_unresponsive"
+              and err_code(rd9) == "app_unresponsive"
               and (st2.get("live") or {}).get("state") == "live" and st.get("gui_running") is True,
               f"T9 SIGSTOP：app_status {ms:.0f} ms 后 unresponsive，collage_get_state → app_unresponsive；SIGCONT 后 live")
         # T16 无头写者占着锁：headless_writer；要 app 的工具等 2 s 重探；app 起来时等锁
@@ -1195,10 +1388,12 @@ try:
         _, ls16, _ = mcp_call(env16, "cull_list_sessions")
         t = time.monotonic()
         _, busy, busy_ms = mcp_call(env16, "collage_get_state")
+        _, busy_r, _ = mcp_call(env16, "cull_get_photos", {"session": KEY, "ids": ["DSCF7208"]})
         check((st.get("live") or {}).get("state") == "headless_writer" and st.get("gui_running") is False
               and "headless_writer" in [w.get("code") for w in (ls16 or {}).get("warnings", [])],
               "T16 无头写者占着锁：app_status headless_writer；cull_list_sessions 照常列、带 warning")
-        check(err_code(busy) == "busy" and ((busy or {}).get("error") or {}).get("data", {}).get("reason") == "headless_writer"
+        check(err_code(busy) == "busy" and err_code(busy_r) == "busy"
+              and ((busy or {}).get("error") or {}).get("data", {}).get("reason") == "headless_writer"
               and busy_ms > 1900, f"要 app 的工具等 2 s 重探，还是这样 → busy（headless_writer，{busy_ms:.0f} ms）")
         threading.Timer(1.0, lambda: (fcntl.flock(lf, fcntl.LOCK_UN), os.close(lf))).start()
         _, nr, nr_ms = mcp_call(env16, "collage_get_state")
@@ -1225,18 +1420,28 @@ try:
         env = h.env()
         st, _ = status(env)
         _, cs, _ = mcp_call(env, "collage_get_state")
+        _, rd12, _ = mcp_call(env, "cull_list_photos", {"session": KEY})
         check((st.get("live") or {}).get("state") == "proto_mismatch" and err_code(cs) == "app_version_mismatch"
+              and err_code(rd12) == "app_version_mismatch"
               and ((cs or {}).get("error") or {}).get("data", {}).get("reason") == "proto_mismatch",
               "T12 协议版本不符：proto_mismatch；读也回 app_version_mismatch（reason proto_mismatch）")
         h.term()
         # 少一个方法（旧版 app）：只有那个工具回 app_version_mismatch（app_too_old）
+        h_r = Host("C12r", LABELGUI_LIVE_TEST_DROP_CAP="cull.read")
+        codes_r = {t: err_code(mcp_call(h_r.env(), t, minimal_args(t, KEY))[1]) for t in APP_TOOLS[:6]}
+        h_r.term()
+        check(all(codes_r[t] == "app_version_mismatch" for t in APP_TOOLS[:4])
+              and codes_r["cull_preview_photos"] == ("preview_missing" if CI else None) and codes_r["collage_get_state"] is None,
+              f"旧版 app 少了 cull.read：只有那 4 个工具回 app_version_mismatch，预览、拼图照常 {codes_r}")
         h = Host("C12c", LABELGUI_LIVE_TEST_DROP_CAP="collage.state")
         env = h.env()
         st, _ = status(env)
         _, cs, _ = mcp_call(env, "collage_get_state")
-        check((st.get("live") or {}).get("state") == "live" and (st.get("live") or {}).get("capabilities") == []
-              and err_code(cs) == "app_version_mismatch" and cs["error"].get("data", {}).get("reason") == "app_too_old",
-              "旧版 app 少了 collage.state：照样 live，collage_get_state → app_version_mismatch（app_too_old）")
+        _, ov12, _ = mcp_call(env, "cull_session_overview", {"session": KEY})
+        check((st.get("live") or {}).get("state") == "live" and (st.get("live") or {}).get("capabilities") == ["cull.preview", "cull.read"]
+              and err_code(cs) == "app_version_mismatch" and cs["error"].get("data", {}).get("reason") == "app_too_old"
+              and (ov12 or {}).get("photo_count") == 21,
+              "旧版 app 少了 collage.state：照样 live，collage_get_state → app_version_mismatch（app_too_old），概览照常")
         # T12b 数据目录不符：宿主开着时数据目录被换成一个新目录（同一个路径、不同的 dev:ino）
         moved = h.data + ".moved"
         os.rename(h.data, moved)
@@ -1381,6 +1586,415 @@ __attribute__((constructor)) static void init(void) {
         check(not os.path.exists(os.path.join(data, ".live.lock")) and not os.listdir(os.path.join(SOCKS, os.path.basename(root))),
               "--app-ui 跑完：数据目录里没有 .live.lock，socket 根目录里什么都没有")
         check(not os.path.exists(os.path.join(data, "runtime")), "--app-ui 不同步 Python 运行时（没有 runtime/）")
+
+    # ============================================================ F. 读和图片（STEP 3a：§10.7 第 31–36、38 条）
+    if "F" in ONLY:
+        print("F. 读和图片")
+        # ---------- 31 fixture 读：概览 / 场 / 每张的判决和 --verdicts 的输出一样
+        if CI:
+            ref = parse_verdicts(open(os.path.join(FIX, "expected_verdicts.txt"), encoding="utf-8").read())
+            ref_src = "expected_verdicts.txt"
+        else:
+            ref = verdicts_cli()
+            ref_src = "--verdicts --per-photo（同一份数据的另一个拷贝）"
+        h = Host("F31")
+        env = h.env()
+        _, ov, ov_ms = mcp_call(env, "cull_session_overview", {"session": KEY})
+        ov = ov or {}
+        vc = ov.get("verdict_counts") or {}
+        check(ref is not None and (ov.get("photo_count"), vc.get("pick"), vc.get("usable"), vc.get("reject")) == ref["counts"],
+              f"概览的计数 = {ref_src} 第 2 行 {ref and ref['counts']}：{(ov.get('photo_count'), vc)}（{ov_ms:.0f} ms）")
+        nd, sc = ov.get("near_duplicates") or {}, ov.get("scenes") or {}
+        check(ref is not None and (nd.get("groups"), nd.get("photos")) == ref["dups"]
+              and (sc.get("multi_photo_scenes"), sc.get("photos"), sc.get("pending")) == ref["scenes"]
+              and (ov.get("reason_counts") or {}) == ref["reasons"],
+              f"近似重复 / 场 / 理由 = 第 3、4 行和理由行：{nd} {sc} {ov.get('reason_counts')}")
+        check((ov.get("settings") or {}).get("source") == "app" and ov.get("analysis") == {"running": False}
+              and ov.get("pending_writes") == 0 and not any(k in ov for k in ("recently_modified_sec", "dedupe")),
+              "概览：settings.source=app、analysis.running、pending_writes；没有 §10.1 删掉的字段")
+        groups, cur, pages = [], None, 0
+        while pages < 20:
+            a = {"session": KEY, "kind": "scene", "limit": 2}
+            if cur:
+                a["cursor"] = cur
+            _, g, _ = mcp_call(env, "cull_list_groups", a)
+            groups += (g or {}).get("groups") or []
+            cur = (g or {}).get("next_cursor")
+            pages += 1
+            if not cur:
+                break
+        got_scenes = [(x["key"], [(m["id"], m["verdict"], m.get("rank")) for m in x["members"]]) for x in groups]
+        check(ref is not None and got_scenes == ref["scene_lines"],
+              f"cull_list_groups kind=scene（每页 2 组、{pages} 页）= 「场 N」那几行（id、判决、名次）：{len(got_scenes)} 组")
+        if ref and ref.get("per_photo"):
+            rows = []
+            _, p_, _ = mcp_call(env, "cull_list_photos", {"session": KEY, "sort": "id", "limit": 100})
+            rows = (p_ or {}).get("rows") or []
+            mine = {r["id"]: (r["verdict"], ",".join(r["reasons"]) or "-") for r in rows}
+            check(mine == ref["per_photo"], f"cull_list_photos 每张的判决和理由 = --per-photo（{len(mine)} 张）")
+        # 翻页：limit=5，21 个 id 各出现一次；翻到一半在宿主里改判一张 → 下一页带 session_changed:true
+        seen, cur, changed_at, n_pages = [], None, None, 0
+        while n_pages < 10:
+            a = {"session": KEY, "limit": 5}
+            if cur:
+                a["cursor"] = cur
+            _, p_, _ = mcp_call(env, "cull_list_photos", a)
+            p_ = p_ or {}
+            seen += [r["id"] for r in p_.get("rows") or []]
+            if p_.get("session_changed"):
+                changed_at = changed_at or n_pages
+            n_pages += 1
+            cur = p_.get("next_cursor")
+            if n_pages == 2:
+                test_call(h, "test.set_override", {"id": seen[0], "verdict": "reject"})
+            if not cur:
+                break
+        check(sorted(seen) == sorted(set(seen)) and len(seen) == 21 and changed_at == 2,
+              f"cull_list_photos limit=5 顺着 cursor 翻 {n_pages} 页：21 个 id 各出现一次（{len(seen)} 个、{len(set(seen))} 个不同）；"
+              f"第 2 页之后在宿主里改判一张 → 下一页 session_changed:true（第 {changed_at} 页）")
+        _, p_, _ = mcp_call(env, "cull_list_photos", {"session": KEY, "manual_only": True})
+        check([r["id"] for r in (p_ or {}).get("rows") or []] == [seen[0]] and p_["rows"][0]["verdict"] == "reject"
+              and p_["rows"][0]["manual"] is True, "manual_only：刚才改判的那一张，reject、manual:true（读的是内存，不等落盘）")
+        _, gp, _ = mcp_call(env, "cull_get_photos", {"session": KEY, "ids": ["DSCF7208", "NOPE-1", "DSCF7208"]})
+        ph = ((gp or {}).get("photos") or [{}])[0]
+        check((gp or {}).get("missing_ids") == ["NOPE-1"] and len(gp.get("photos") or []) == 1
+              and {"original_path", "exif", "faces_detail", "capture_time", "scene", "chapter"} <= set(ph)
+              and all(len(f["bbox"]) == 4 for f in ph.get("faces_detail") or []),
+              f"cull_get_photos：重复的 id 去重、不存在的进 missing_ids，字段齐（{sorted(ph)[:6]}…）")
+        _, gp2, _ = mcp_call(env, "cull_get_photos", {"session": KEY, "ids": ["NOPE-1"]})
+        check(err_code(gp2) == "photo_not_found", f"全部 id 都不存在 → photo_not_found（{err_code(gp2)}）")
+        bad = [mcp_call(env, t, a)[1] for t, a in (
+            ("cull_list_photos", {"session": KEY, "limit": 0}), ("cull_list_photos", {"session": KEY, "verdict": ["good"]}),
+            ("cull_list_photos", {"session": KEY, "bogus": 1}), ("cull_list_groups", {"session": KEY}),
+            ("cull_get_photos", {"session": KEY, "ids": []}), ("cull_list_photos", {"session": KEY, "cursor": "garbage"}),
+            ("cull_list_photos", {"session": KEY, "verdict": ["pick"], "cursor": cur_first(env)}),
+            ("cull_preview_photos", {"session": KEY, "ids": ["a", "b", "c", "d", "e"]}),
+            ("cull_preview_photos", {"session": KEY, "ids": ["DSCF7208"], "max_edge": 2000}),
+            ("collage_get_state", {"max_edge": 1500}))]
+        check(all(err_code(b) == "invalid_argument" for b in bad),
+              f"参数不对 → invalid_argument（limit 0、verdict 不认、多余参数、缺 kind、ids 空、坏 cursor、换了条件的 cursor、"
+              f"5 张、max_edge 2000、拼图 max_edge 1500）{[err_code(b) for b in bad]}")
+        # text 上限（LABELGUI_MCP_TEXT_MAX）：截在 app 那一侧，next_cursor 接得上
+        env_t = h.env(LABELGUI_MCP_TEXT_MAX="2000")
+        seen_t, cur, n_t, trunc = [], None, 0, False
+        while n_t < 30:
+            a = {"session": KEY, "limit": 100}
+            if cur:
+                a["cursor"] = cur
+            _, p_, _ = mcp_call(env_t, "cull_list_photos", a)
+            p_ = p_ or {}
+            trunc = trunc or p_.get("truncated") is True
+            seen_t += [r["id"] for r in p_.get("rows") or []]
+            cur = p_.get("next_cursor")
+            n_t += 1
+            if not cur:
+                break
+        check(trunc and sorted(seen_t) == sorted(set(seen_t)) and len(seen_t) == 21,
+              f"LABELGUI_MCP_TEXT_MAX=2000：每页被截（truncated:true），顺着 next_cursor {n_t} 页还是 21 个各一次")
+        # 38 NaN：宿主往 store 里塞非有限数，读工具回 null，宿主没闪退（app 端也经 MCPJSON.sanitize）
+        test_call(h, "test.poke_nonfinite", {"id": "DSCF7209"})
+        _, nan, _ = mcp_call(env, "cull_get_photos", {"session": KEY, "ids": ["DSCF7209"]})
+        p9 = ((nan or {}).get("photos") or [{}])[0]
+        check(h.alive() and all(p9.get(k, "missing") is None for k in ("face_luma", "frame_luma", "frame_luma_p99", "capture_subsec")),
+              f"第 38 条：NaN / ±inf 塞进 store → cull_get_photos 那几个字段是 null，宿主活着 "
+              f"{ {k: p9.get(k, 'missing') for k in ('face_luma', 'frame_luma', 'frame_luma_p99', 'capture_subsec')} }")
+        _, ov2, _ = mcp_call(env, "cull_session_overview", {"session": KEY})
+        check(h.alive() and (ov2 or {}).get("photo_count") == 21, "塞了非有限数以后概览照常回")
+        # 36 场次：别的场次 → session_not_open；用户切到空文件夹以后旧场次的读也是 session_not_open
+        reads = [("cull_session_overview", {}), ("cull_list_photos", {}), ("cull_get_photos", {"ids": ["DSCF7208"]}),
+                 ("cull_list_groups", {"kind": "scene"}), ("cull_preview_photos", {"ids": ["DSCF7208"]}),
+                 ("collage_get_state", {"include_preview": False})]
+        other = [mcp_call(env, t, dict(a, session="0123456789abcdef"))[1] for t, a in reads]
+        check(all(err_code(b) == "session_not_open" and ((b["error"].get("data") or {}).get("open_session") or {}).get("session") == KEY
+                  for b in other), f"6 个读工具带别的场次 → session_not_open，data.open_session 对 {[err_code(b) for b in other]}")
+        sw = test_call(h, "test.switch_session", {"photo_dir": EMPTY_PHOTOS}).get("result") or {}
+        old = [mcp_call(env, t, dict(a, session=KEY))[1] for t, a in reads]
+        _, ov_e, _ = mcp_call(env, "cull_session_overview", {"session": EMPTY_PHOTOS})
+        check(all(err_code(b) == "session_not_open" for b in old) and (ov_e or {}).get("photo_count") == 0
+              and ov_e.get("session") == sw.get("session"),
+              f"用户切到没分析过的空文件夹：旧场次的读都 session_not_open；新场次能读、0 张（open_session 不是 null："
+              f"STEP 2 的定义，只有一个文件夹都没开时才是 null）")
+        test_call(h, "test.switch_session", {"photo_dir": PHOTO_DIR})
+        h.term()
+
+        # ---------- 合成图场次（32–35）：原图 1800×1200、分析预览 1024×683，四个象限四种颜色 + 噪声
+        syn = synth_session("syn")
+        hs = Host("F32", data=syn["data"], photos=syn["dir"])
+        out = os.path.join(WORK, "F-out")
+        env = hs.env(LABELGUI_MCP_OUT=out)
+        st0, _ = status(env)
+        check(not os.path.exists(out) and st0.get("preview_cache_bytes") == 0,
+              f"输出目录启动时、app_status 时都不建（{out} 不存在，preview_cache_bytes 0）")
+        sk = syn["key"]
+        res, body, ms = mcp_full(env, "cull_preview_photos", {"session": sk, "ids": [syn["ids"][1]]})
+        img = ((body or {}).get("images") or [{}])[0]
+        blk = image_blocks(res)
+        f1 = img.get("file")
+        check(res is not None and len(blk) == 1 and blk[0][:2] == b"\xff\xd8" and img.get("index") == 0
+              and max(img.get("width", 0), img.get("height", 0)) == 1024 and img.get("source") == "preview"
+              and f1 and os.path.dirname(f1) == os.path.realpath(os.path.join(out, "previews", sk))
+              and open(f1, "rb").read() == blk[0] and len(blk[0]) == img.get("bytes"),
+              f"crop=full 单张：长边 1024、source preview、image 块是 JPEG、和 previews/<key>/ 下的文件逐字节相同（{ms:.0f} ms）")
+        check(os.path.isfile(os.path.join(out, ".xuanpian-mcp")), "第一次存图才建输出目录，根上有 .xuanpian-mcp 标记")
+        res2, body2, _ = mcp_full(env, "cull_preview_photos", {"session": sk, "ids": [syn["ids"][1]]})
+        check(((body2 or {}).get("images") or [{}])[0].get("file") == f1, "同样的请求调两次：同一个文件（按内容寻址）")
+        res, body, _ = mcp_full(env, "cull_preview_photos", {"session": sk, "ids": [syn["ids"][2]], "max_edge": 1568})
+        img = ((body or {}).get("images") or [{}])[0]
+        check(img.get("source") == "original" and max(img.get("width", 0), img.get("height", 0)) <= 1568
+              and img.get("bytes", 0) <= 350 * 1024 and len(image_blocks(res)) == 1,
+              f"max_edge=1568 单张：从原图解（source original），长边 {max(img.get('width', 0), img.get('height', 0))}、"
+              f"{img.get('bytes', 0) // 1024} KB ≤ 350 KB")
+        res, body, ms4 = mcp_full(env, "cull_preview_photos", {"session": sk, "ids": syn["ids"][:4]})
+        imgs = (body or {}).get("images") or []
+        blk = image_blocks(res)
+        check(len(imgs) == 4 and len(blk) == 4 and all(max(i["width"], i["height"]) <= 768 for i in imgs)
+              and sum(len(b) for b in blk) <= 600 * 1024 and [i["index"] for i in imgs] == [0, 1, 2, 3]
+              and all(b[:2] == b"\xff\xd8" for b in blk),
+              f"4 张：每张长边 ≤ 768、合计 {sum(len(b) for b in blk) // 1024} KB ≤ 600 KB、index 0–3 对应 image 块（{ms4:.0f} ms）")
+        res, body, msf = mcp_full(env, "cull_preview_photos", {"session": sk, "ids": [syn["ids"][3]], "crop": "face"})
+        img = ((body or {}).get("images") or [{}])[0]
+        check(img.get("source") == "original" and img.get("crop") == "face" and len(image_blocks(res)) == 1
+              and img.get("file", "").endswith("-face.jpg") and state(hs)["original_opens"]["count"] >= 2,
+              f"crop=face：CompareZoom 裁原图（source original），文件名 …-face.jpg（{msf:.0f} ms）")
+        res, body, _ = mcp_full(env, "cull_preview_photos", {"session": sk, "ids": syn["ids"][:2], "inline": False})
+        check(not image_blocks(res) and all(os.path.isfile(i.get("file") or "") and i.get("index") is None
+                                             for i in (body or {}).get("images") or []) and (body or {}).get("inline") is False,
+              "inline:false：没有 image 块，只给文件路径（index 是 null）")
+        res, body, _ = mcp_full(hs.env(LABELGUI_MCP_OUT=out, LABELGUI_MCP_INLINE_KB="150"), "cull_preview_photos",
+                                {"session": sk, "ids": syn["ids"][:4]})
+        imgs = (body or {}).get("images") or []
+        given = [i for i in imgs if i.get("index") is not None]
+        check((body or {}).get("truncated") is True and 1 <= len(given) < 4 and len(image_blocks(res)) == len(given)
+              and all(i.get("truncated") and i.get("file") is None for i in imgs if i not in given)
+              and "budget_truncated" in [w.get("code") for w in body.get("warnings") or []],
+              f"LABELGUI_MCP_INLINE_KB=150：前 {len(given)} 张给图，后面的标 truncated、没有字节和文件，warning budget_truncated")
+        _, nf, _ = mcp_call(env, "cull_preview_photos", {"session": sk, "ids": ["NOPE"]})
+        check(err_code(nf) == "photo_not_found", "预览：id 都不存在 → photo_not_found")
+        # 预览文件没有（掉出最近 15 场被清掉）→ 从原图现解，带 warning
+        moved = os.path.join(syn["data"], "sessions", sk, "previews", syn["ids"][4] + ".jpg")
+        os.rename(moved, moved + ".away")
+        _, pm, _ = mcp_call(env, "cull_preview_photos", {"session": sk, "ids": [syn["ids"][4]]})
+        os.rename(moved + ".away", moved)
+        check(((pm or {}).get("images") or [{}])[0].get("source") == "original"
+              and "preview_file_missing" in [w.get("code") for w in (pm or {}).get("warnings") or []],
+              "分析预览不在了：从原图现解（source original）、warning preview_file_missing")
+        # 34 并发：每轮同时发 4 个带 >120 KB 图的调用，5 轮，0 损坏（R3 #263 的场景，现在经过桥）
+        m = Mcp(env)
+        m.initialize()
+        bad_frames, big, n_ok = [], 0, 0
+        for rnd in range(5):
+            ids_ = [f"c{rnd}-{i}" for i in range(4)]
+            for i, cid in enumerate(ids_):
+                m.call(cid, "cull_preview_photos", {"session": sk, "ids": [syn["ids"][(rnd + i) % len(syn["ids"])]],
+                                                    "max_edge": 1024})
+            for cid in ids_:
+                f = m.wait_id(cid, timeout=60)
+                try:
+                    body_ = json.loads(f["result"]["content"][0]["text"])
+                    data_ = base64.b64decode(f["result"]["content"][1]["data"])
+                    im = body_["images"][0]
+                    ok = data_[:2] == b"\xff\xd8" and len(data_) == im["bytes"] and open(im["file"], "rb").read() == data_
+                    big += len(data_) > 120 * 1024
+                    n_ok += ok
+                    if not ok:
+                        bad_frames.append(cid)
+                except Exception as e:
+                    bad_frames.append(f"{cid}:{e!r}")
+        m.close()
+        check(not bad_frames and n_ok == 20 and big == 20,
+              f"34 并发：5 轮 × 4 个同时发，{n_ok}/20 帧完整（字节 = bytes、和文件相同、FF D8），{big} 张 > 120 KB，坏帧 {bad_frames[:3]}")
+        # 35 取消：主线程卡 3 s 期间发一个读、一个写（test.write），各自断开 → 4 s 内这个 id 没有消息，ping 照常回；
+        # 主线程恢复以后，这两个请求都没执行（clientGone，§10.2）
+        st_before = state(hs)
+        m = Mcp(env)
+        m.initialize()
+        r = Raw(hs)
+        r.req("test.block_main", {"ms": 3000})
+        time.sleep(0.1)
+        m.call("cx", "cull_session_overview", {"session": sk})
+        w_ = Raw(hs)
+        w_.req("test.write", {"key": "gone", "value": "1"}, op_id=str(uuid.uuid4()))
+        time.sleep(0.3)
+        m.send({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": "cx", "reason": "test"}})
+        w_.close()
+        pr = Raw(hs, timeout=2)
+        t_p = time.monotonic()
+        pong = pr.call("ping")
+        ping_ms = (time.monotonic() - t_p) * 1000
+        pr.close()
+        late = m.wait_id("cx", timeout=4)
+        r.recv()
+        r.close()
+        time.sleep(0.3)
+        st_after = state(hs)
+        m.close()
+        skipped = st_after["counters"].get("skipped_client_gone", 0) - st_before["counters"].get("skipped_client_gone", 0)
+        check(late is None and (pong.get("result") or {}).get("pong") is True and ping_ms < 500
+              and st_after["test_applied"] == st_before["test_applied"] and "gone" not in st_after["test_values"]
+              and skipped == 2,
+              f"35 取消：卡着的时候取消一个读、断开一个写 → 这个 id 4 s 内没有消息，ping {ping_ms:.0f} ms 回；"
+              f"恢复以后两个都没执行（skipped_client_gone +{skipped}，test.write 没生效）")
+        hs.term()
+        # 输出目录的规矩（§10.3、§4.2）：不空又没有标记 → 内联照常、不写文件；inline:false → output_dir_unusable；
+        # 受保护位置、相对路径不用；清理只删服务器起名的旧文件
+        hs = Host("F32o", data=syn["data"], photos=syn["dir"])
+        foreign = os.path.join(WORK, "F-foreign")
+        os.makedirs(foreign)
+        open(os.path.join(foreign, "我的照片.jpg"), "wb").write(b"user")
+        before = sorted(os.listdir(foreign))
+        res, body, _ = mcp_full(hs.env(LABELGUI_MCP_OUT=foreign), "cull_preview_photos", {"session": sk, "ids": [syn["ids"][0]]})
+        _, b_off, _ = mcp_call(hs.env(LABELGUI_MCP_OUT=foreign), "cull_preview_photos",
+                               {"session": sk, "ids": [syn["ids"][0]], "inline": False})
+        check(len(image_blocks(res)) == 1 and ((body or {}).get("images") or [{}])[0].get("file") is None
+              and "output_dir_unusable" in [w.get("code") for w in (body or {}).get("warnings") or []]
+              and err_code(b_off) == "output_dir_unusable" and sorted(os.listdir(foreign)) == before,
+              "LABELGUI_MCP_OUT 不空又没有标记：图照常内联、不存文件、warning；inline:false → output_dir_unusable；目录里一个字节没多")
+        fh = os.path.join(WORK, "F-家")
+        os.makedirs(os.path.join(fh, "Desktop"))
+        _, b_p, _ = mcp_call(hs.env(LABELGUI_MCP_OUT=os.path.join(fh, "Desktop", "out"), CFFIXED_USER_HOME=fh, HOME=fh),
+                             "cull_preview_photos", {"session": sk, "ids": [syn["ids"][0]], "inline": False})
+        _, b_r, _ = mcp_call(hs.env(LABELGUI_MCP_OUT="relative/out"), "cull_preview_photos",
+                             {"session": sk, "ids": [syn["ids"][0]], "inline": False})
+        check(err_code(b_p) == "output_dir_unusable" and not os.path.exists(os.path.join(fh, "Desktop", "out"))
+              and err_code(b_r) == "output_dir_unusable" and not os.path.exists(os.path.join(WORK, "relative")),
+              "输出目录在（假的家目录的）桌面 / 是相对路径：output_dir_unusable，什么都不建")
+        # 还不存在的输出目录在数据目录 / 已登记的照片文件夹里面：先查再建，一级都不建（§10.0 第 3 条）
+        made = []
+        for base in (syn["data"], syn["dir"]):
+            target = os.path.join(base, "never", "out")
+            _, b_in, _ = mcp_call(hs.env(LABELGUI_MCP_OUT=target), "cull_preview_photos",
+                                  {"session": sk, "ids": [syn["ids"][0]], "inline": False})
+            res, b_in2, _ = mcp_full(hs.env(LABELGUI_MCP_OUT=target), "cull_preview_photos", {"session": sk, "ids": [syn["ids"][0]]})
+            made.append((err_code(b_in), "output_dir_unusable" in [w.get("code") for w in (b_in2 or {}).get("warnings") or []],
+                         len(image_blocks(res)), os.path.lexists(os.path.join(base, "never"))))
+        check(all(m_ == ("output_dir_unusable", True, 1, False) for m_ in made),
+              f"LABELGUI_MCP_OUT 是数据目录 / 照片文件夹里还不存在的子目录：inline:false → output_dir_unusable，"
+              f"内联照常 + warning，never/ 没被建出来 {made}")
+        hs.term()
+        # 到这里输出目录里只有标记和服务器起名的预览（previews/<16 位十六进制>/<sha1 前 16>-….jpg），没有临时文件
+        stray = [os.path.relpath(os.path.join(dp, f_), out) for dp, _, fs in os.walk(out) for f_ in fs
+                 if not (dp == out and f_ == ".xuanpian-mcp")
+                 and not (re.match(r"^[0-9a-f]{16}$", os.path.basename(dp)) and os.path.dirname(dp) == os.path.join(out, "previews")
+                          and re.match(r"^[0-9a-f]{16}-.+-(full|face)\.jpg$", f_))]
+        check(not stray and set(os.listdir(out)) == {".xuanpian-mcp", "previews"},
+              f"输出目录里只有 .xuanpian-mcp 和 previews/<key>/ 下服务器起名的文件（没有临时文件、没有别的）{stray[:3]}")
+        # 清理：只在带标记的根上、只删 previews/<16 位十六进制>/ 下面服务器起名的旧文件
+        pdir = os.path.join(out, "previews", sk)
+        old_server = os.path.join(pdir, "0123456789abcdef-OLD-768-full.jpg")
+        old_temp = os.path.join(pdir, ".0123456789abcdef-T-768-full.jpg.tmp-1-0badf00d")
+        keep_user = os.path.join(pdir, "my-notes.jpg")
+        keep_other = os.path.join(out, "previews", "not-a-key", "0123456789abcdef-X-768-full.jpg")
+        keep_link_target = os.path.join(WORK, "F-link-target.jpg")
+        os.makedirs(os.path.dirname(keep_other))
+        for p_ in (old_server, old_temp, keep_user, keep_other, keep_link_target):
+            open(p_, "wb").write(b"\xff\xd8x")
+        link = os.path.join(pdir, "fedcba9876543210-LINK-768-full.jpg")
+        os.symlink(keep_link_target, link)
+        old = time.time() - 8 * 86400
+        for p_ in (old_server, old_temp, keep_user, keep_other, link):
+            os.utime(p_, (old, old), follow_symlinks=False)
+        fresh_files = [os.path.join(pdir, f_) for f_ in os.listdir(pdir) if re.match(r"^[0-9a-f]{16}-.+\.jpg$", f_)
+                       and not f_.startswith("0123") and not os.path.islink(os.path.join(pdir, f_))]
+        st_c, _ = status(base_env(syn["data"], sock_root("F-cl"), LABELGUI_MCP_OUT=out))
+        m = Mcp(base_env(syn["data"], sock_root("F-cl2"), LABELGUI_MCP_OUT=out))
+        m.initialize()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and os.path.exists(old_server):
+            time.sleep(0.05)
+        m.close()
+        check(not os.path.exists(old_server) and not os.path.exists(old_temp) and os.path.exists(keep_user)
+              and os.path.exists(keep_other) and os.path.lexists(link) and os.path.exists(keep_link_target)
+              and all(os.path.exists(f_) for f_ in fresh_files) and fresh_files,
+              f"回完 initialize 后台清理：删了 8 天前的服务器文件和临时文件；用户的文件、不是 key 的目录、符号链接、"
+              f"新的 {len(fresh_files)} 个预览都还在")
+        check(st_c.get("preview_cache_bytes", 0) >= sum(os.path.getsize(f_) for f_ in fresh_files) > 0,
+              f"app_status.preview_cache_bytes 数的是服务器起名的文件：{st_c.get('preview_cache_bytes')}")
+
+        # ---------- 33 受保护位置不读原图：sandbox-exec 里起宿主，读原图（文件内容）就 SIGKILL
+        sandbox = "/usr/bin/sandbox-exec"
+        if not os.access(sandbox, os.X_OK):
+            skip("找不到 sandbox-exec：第 33 条只有 test.state 的原图打开记录作证")
+        sbq = lambda p_: '"' + p_.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+        def deny_originals(d):
+            rp = os.path.realpath(d)
+            return ("(version 1)(allow default)(deny file-read-data (regex " + sbq("^" + re.escape(rp) + "/[^/]+\\.jpg$")
+                    + ") (with send-signal SIGKILL))")
+
+        def protected_case(label, photos_dir, data_dir, extra):
+            if os.access(sandbox, os.X_OK):
+                wrap = [sandbox, "-p", deny_originals(photos_dir)]
+            else:
+                wrap = []
+            hp = Host(label, data=data_dir, photos=photos_dir, wrap=wrap, args=("--no-view",), **extra)
+            envp = hp.env(LABELGUI_MCP_OUT=out, **{k: v for k, v in extra.items() if k in ("CFFIXED_USER_HOME", "HOME")})
+            key_ = syn_keys[photos_dir]
+            _, fb, _ = mcp_call(envp, "cull_preview_photos", {"session": key_, "ids": [syn["ids"][3]], "crop": "face"})
+            _, bb, _ = mcp_call(envp, "cull_preview_photos", {"session": key_, "ids": [syn["ids"][2]], "max_edge": 1568})
+            opens = (state(hp).get("original_opens") or {}).get("count") if hp.alive() else None
+            alive = hp.alive()
+            hp.term()
+            fi = ((fb or {}).get("images") or [{}])[0]
+            bi = ((bb or {}).get("images") or [{}])[0]
+            ok = (alive and opens == 0 and fi.get("source") == "preview" and fi.get("crop") == "face"
+                  and "protected_location" in [w.get("code") for w in (fb or {}).get("warnings") or []]
+                  and bi.get("source") == "preview" and max(bi.get("width", 0), bi.get("height", 0)) == 1024)
+            return ok, (alive, opens, fi.get("source"), bi.get("source"))
+
+        ok_a, info_a = protected_case("F33-prefix", syn["dir"], fresh_copy(syn["data"], "F33a"),
+                                      {"LABELGUI_LIVE_TEST_PROTECTED_PREFIX": syn["dir"]})
+        check(ok_a, f"33 LABELGUI_LIVE_TEST_PROTECTED_PREFIX=合成图目录：crop=face → source preview + protected_location，"
+                    f"max_edge 1568 → 1024 预览；原图打开记录 0、sandbox 里没被杀 {info_a}")
+        fh = os.path.join(WORK, "F33-home")
+        desk = os.path.join(fh, "Desktop", "syn")
+        shutil.copytree(syn["dir"], desk)
+        syn_d = synth_session("desk", photos_dir=desk)
+        ok_b, info_b = protected_case("F33-desk", desk, syn_d["data"], {"CFFIXED_USER_HOME": fh, "HOME": fh})
+        check(ok_b, f"33 照片在（假的家目录的）~/Desktop 下：同上，按真正的 ProtectedPaths 判成受保护 {info_b}")
+        if os.access(sandbox, os.X_OK):
+            hc = Host("F33-ctl", data=fresh_copy(syn["data"], "F33c"), photos=syn["dir"], args=("--no-view",),
+                      wrap=[sandbox, "-p", deny_originals(syn["dir"])])
+            up = hc.alive() and hc.bridge == "on"
+            mcp_call(hc.env(LABELGUI_MCP_OUT=out), "cull_preview_photos", {"session": sk, "ids": [syn["ids"][3]], "crop": "face"})
+            time.sleep(0.3)
+            rc_c = hc.proc.poll()
+            hc.term()
+            check(up and rc_c == -signal.SIGKILL,
+                  f"（对照）同一条 sandbox 规则、不当受保护：宿主起得来（{up}），crop=face 去读原图 → 宿主被杀（{rc_c}）")
+        skip("33 的 app_open_session 那一半（切到受保护前缀下的场次 → protected_location）在 STEP 3b")
+
+        # ---------- collage_get_state：带预览（本地 photot 用 STEP 0 有拼图工程的那份数据；CI 没有，只看没有预览时的 warning）
+        seeded = COLLAGE_SRC
+        if seeded and not CI:
+            hc = Host("F-collage", data=fresh_copy(seeded, "Fc"))
+            envc = hc.env(LABELGUI_MCP_OUT=out)
+            # 预览是 app 在后台渲的：宿主刚起来时可能还没有（warning no_preview，「过一秒再调」），等它出来
+            tries = 0
+            while True:
+                tries += 1
+                res, cs, ms = mcp_full(envc, "collage_get_state")
+                if (cs or {}).get("preview") or tries >= 20:
+                    break
+                time.sleep(0.3)
+            pv = (cs or {}).get("preview") or {}
+            blk = image_blocks(res)
+            check(cs and cs.get("pages", 0) >= 1 and len(blk) == 1 and blk[0][:2] == b"\xff\xd8"
+                  and max(pv.get("width", 0), pv.get("height", 0)) <= 768 and pv.get("file", "").endswith("-collage.jpg")
+                  and open(pv["file"], "rb").read() == blk[0] and cs.get("digest") == state(hc).get("edit_digest")
+                  and len(cs.get("cells") or []) >= 1 and "preview_jpeg_b64" not in cs,
+                  f"collage_get_state：{cs and cs.get('pages')} 页、{len((cs or {}).get('cells') or [])} 格，预览长边 ≤ 768、"
+                  f"存成 …-collage.jpg，digest = test.state 的 edit_digest（第 {tries} 次有预览，{ms:.0f} ms）")
+            res, cs2, _ = mcp_full(envc, "collage_get_state", {"include_preview": False})
+            check(not image_blocks(res) and "preview" not in (cs2 or {}), "include_preview:false：没有图")
+            hc.term()
+        else:
+            skip("collage_get_state 的预览：要一份有拼图工程的数据（本地给 --collage-data），CI 只看没有预览时的 warning")
+            hc = Host("F-collage0")
+            _, cs, _ = mcp_call(hc.env(LABELGUI_MCP_OUT=out), "collage_get_state")
+            check(cs and cs.get("pages") == 0 and "no_preview" in [w.get("code") for w in cs.get("warnings") or []]
+                  and "digest" in cs and cs.get("undo", {}).get("top_is_ai") is False,
+                  "collage_get_state 没有拼图：pages 0、warning no_preview、有 digest、top_is_ai false")
+            hc.term()
 
     # ============================================================ grep：Live/ 的禁用词（§5 第 7 层、§9.5.6）
     print("grep")

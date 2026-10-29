@@ -92,6 +92,8 @@ final class MCPStdioServer: @unchecked Sendable {
     private var inflight: [String: CancelFlag] = [:]
     private var clientInfo: ClientInfo?
     private var signalSources: [DispatchSourceSignal] = []
+    /// 第一次 initialize 回完以后在后台跑一次（预览缓存清理，§10.3）。--mcp-call / --mcp-tools 没有握手，不跑。
+    var afterInitialize: (() -> Void)?
     private static let exitLock = NSLock()
     private static var exiting = false
 
@@ -308,6 +310,9 @@ final class MCPStdioServer: @unchecked Sendable {
         var result: JSON = ["protocolVersion": answered, "serverInfo": serverInfo, "instructions": instructions]
         result["capabilities"] = ["tools": ["listChanged": false] as JSON] as JSON
         send(["jsonrpc": "2.0", "id": id, "result": result])
+        if let hook = afterInitialize {
+            DispatchQueue.global(qos: .utility).async(execute: hook)
+        }
     }
 
     private func call(id: Any, params: JSON, decorate: @escaping (JSON) -> JSON) {

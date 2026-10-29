@@ -125,6 +125,13 @@ enum LiveHost {
             o.sigpipe = layers
         }
         o.rejectPeers = env["LABELGUI_LIVE_TEST_REJECT_PEERS"] == "1"
+        if let raw = env["LABELGUI_LIVE_TEST_PROTECTED_PREFIX"], !raw.isEmpty {
+            guard raw.hasPrefix("/") else {
+                print("LABELGUI_LIVE_TEST_PROTECTED_PREFIX 要是绝对路径：\(raw)")
+                return nil
+            }
+            o.protectedPrefix = raw
+        }
         return o
     }
 
@@ -276,6 +283,30 @@ enum LiveHost {
             live.refreshSnapshot()
             return .result(["session": model.batch.photoDir == nil ? NSNull() : model.batch.sessionDir.lastPathComponent])
         }
+        live.register("test.set_override", kind: .read) { req in
+            // 模拟用户在网格里按 1/2/3/0 改判（setOverride，和界面同一条路）：给 cursor 的 session_changed 用例
+            // （cull_set_verdicts 在 STEP 3b）。只有宿主有。
+            let names: [String: Verdict?] = ["pick": .pick, "usable": .usable, "reject": .reject, "auto": nil]
+            guard let id = req.params["id"] as? String, model.batch.item(withID: id) != nil,
+                  let raw = req.params["verdict"] as? String, let verdict = names[raw] else {
+                return .failure("invalid_argument", "test.set_override 要 {id: 这一场有的 id, verdict: pick|usable|reject|auto}", nil)
+            }
+            model.batch.setOverride(id, verdict)
+            return .result(["id": id, "verdict": raw])
+        }
+        live.register("test.poke_nonfinite", kind: .read) { req in
+            // §10.7 第 38 条：往 store 里塞非有限数（JSON 文件里写不进 NaN / inf：JSONDecoder 整个文件都不认，
+            // STEP 3a 实测），看读工具的回复是不是 null、宿主有没有闪退。只改这一张的几个可变字段，只有宿主有。
+            guard let id = req.params["id"] as? String,
+                  let idx = model.batch.items.firstIndex(where: { $0.id == id }) else {
+                return .failure("invalid_argument", "test.poke_nonfinite 要 {id: 这一场有的 id}", nil)
+            }
+            model.batch.items[idx].faceLuma = .nan
+            model.batch.items[idx].frameLuma = .infinity
+            model.batch.items[idx].frameLumaP99 = -.infinity
+            model.batch.items[idx].captureSubsec = .nan
+            return .result(["id": id, "fields": ["face_luma", "frame_luma", "frame_luma_p99", "capture_subsec"]])
+        }
         live.register("test.quit", kind: .read) { _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(200)) {
                 live.shutdown()
@@ -306,6 +337,13 @@ enum LiveHost {
         settings["minKeepersPerChapter"] = model.batch.minKeepersPerChapter
         settings["sortOrder"] = model.batch.sortOrder.rawValue
         out["settings"] = settings
+        // 受保护位置不读原图（§10.7 第 33 条）：cull.preview 每次要从原图解码之前都记一笔
+        let opens = LiveImages.originalOpens.snapshot
+        out["original_opens"] = ["count": opens.count, "recent": opens.recent]
+        // 拼图的两个指纹（§9.8.1 第二轮加）：编辑指纹和 collage_get_state 的 digest 是同一个函数；整工程的只给测试
+        out["edit_digest"] = LiveHandlers.editDigest(model.collage.project)
+        out["full_digest"] = CollageWatermarkCLI.digest(model.collage.project)
+        out["hints_pending"] = model.collage.hintsPending
         // 宿主从不变成前台 / key（§10.7 第 39 条之外的另一半证据）：只读 NSApp 的状态，不调任何会改它的方法
         var app: [String: Any] = ["active": NSApp.isActive, "key_window": NSApp.keyWindow != nil]
         app["main_window"] = NSApp.mainWindow != nil

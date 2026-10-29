@@ -62,7 +62,8 @@ enum MCPStatus {
         }
 
         out["output_root"] = MCPPaths.outputRoot.path
-        out["preview_cache_bytes"] = 0  // STEP 3a 由输出目录（MCPOutput）统计；S1 还没有写预览的路径
+        // 预览缓存（§10.3）：只数带标记的输出目录里服务器起名的文件；目录不在就是 0，不建
+        out["preview_cache_bytes"] = MCPOutput.cacheBytes()
         var limits: [String: Any] = ["deadline_sec": MCPConfig.deadlineCap, "inline_kb": MCPConfig.inlineKB]
         limits["max_edge"] = MCPConfig.maxEdge
         limits["text_max_chars"] = MCPJSON.textMax

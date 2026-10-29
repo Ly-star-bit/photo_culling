@@ -11,8 +11,8 @@
 模板 / 分类数和源码里的模板库、画布别名和 CLI 的表、style / look / kit 和 schema 的 enum 对得上；category / include / 截断）
 3 只读不变量  4 不建目录  5 无界面  6 不进程序坞  7 RSS
 
-不碰用户：每个进程都带 LABELGUI_NO_GUI=1 和 `--` 开头的无头参数，LABELGUI_DATA_DIR 和 LABELGUI_LIVE_SOCK_ROOT
-都是自己的临时目录（指到真实数据目录就退出 2）；只杀自己起的子进程。会开界面的反向用例（写错的参数、管道起）
+不碰用户：每个进程都带 LABELGUI_NO_GUI=1 和 `--` 开头的无头参数，LABELGUI_DATA_DIR、LABELGUI_LIVE_SOCK_ROOT 和
+LABELGUI_MCP_OUT 都是自己的临时目录（指到真实数据目录就退出 2）；只杀自己起的子进程。会开界面的反向用例（写错的参数、管道起）
 只在 CI 上跑（--ci 而且 GITHUB_ACTIONS=true）；本地靠 --mcp-selftest 拿假输入测那道闸的判断。
 "不设 LABELGUI_DATA_DIR" 的用例也只在 CI 上跑（$HOME 改不掉 Application Support 的位置，DESIGN §10.5）。
 原型：R3 的 client/mcp_client_test.py（协议、泄漏、取消）和 client/stress.py（并发大响应）。
@@ -79,11 +79,16 @@ def same_dir(a, b):
         return os.path.realpath(a) == os.path.realpath(b)
 
 
+MCP_OUT = os.path.join(WORK, "mcp-out")
+
+
 def env_for(data_dir, **extra):
     """子进程的环境：总是带 LABELGUI_NO_GUI=1、自己的数据目录和 socket 根目录。data_dir=None 只给 CI 上那一条用。"""
     env = {k: v for k, v in os.environ.items() if not k.startswith("LABELGUI_")}
     env["LABELGUI_NO_GUI"] = "1"
     env["LABELGUI_LIVE_SOCK_ROOT"] = SOCK_ROOT
+    # 预览输出目录（§10.3）：测试绝不碰 ~/Pictures/xuanpian-mcp；这里没有 app、存不了图，所以它一直不该被建出来
+    env["LABELGUI_MCP_OUT"] = MCP_OUT
     if data_dir is not None:
         if same_dir(data_dir, REAL_DATA) or os.path.realpath(data_dir) == os.path.realpath(REAL_DATA):
             print(f"LABELGUI_DATA_DIR 指到了真实数据目录 {REAL_DATA}：不跑")
@@ -1376,6 +1381,7 @@ for d, before in fixture_before.items():
     check(tree_manifest(d) == before, f"{os.path.basename(d)} 整棵树（大小、mtime、sha256）跑前跑后逐项相同；没有 runtime/、fonts/")
 for d, before in defaults_before.items():
     check(defaults_export(d) == before, f"defaults export {d} 跑前跑后相同")
+check(not os.path.lexists(MCP_OUT), f"预览输出目录 {MCP_OUT} 从没被建出来（只在第一次存图时建；没有 app 就没有图）")
 procs_after = labelgui_processes()
 extra = {p: c for p, c in procs_after.items() if p not in procs_before}
 check(not extra, f"进程表里没有多出这个二进制的进程：{extra}")

@@ -16,6 +16,9 @@ struct LiveTestOptions {
     var sigpipe = LiveServer.SigpipeLayers.all
     /// LABELGUI_LIVE_TEST_REJECT_PEERS=1：把所有对端都当成别的 uid，走拒绝那条路（R6 T14）。
     var rejectPeers = false
+    /// LABELGUI_LIVE_TEST_PROTECTED_PREFIX=<目录>：cull.preview 把它当成受保护前缀（§10.7 第 33 条：合成图目录
+    /// 假装在桌面上，证明受保护位置不读原图）。
+    var protectedPrefix: String?
 }
 
 /// 实时桥的服务端（DESIGN §9.2–§9.4，原型 R6 的 Server.swift）。
@@ -152,6 +155,12 @@ final class LiveServer: @unchecked Sendable {
         return false
     }
 
+    /// 测试宿主的假受保护前缀（LiveHandlers.isProtectedFolder 用；GUI 永远是 nil）。
+    var testProtectedPrefix: String? {
+        if case .testHost(let o) = mode { return o.protectedPrefix }
+        return nil
+    }
+
     // 下面这些由 `state` 锁着（accept 线程、连接线程、自检队列、主线程都会碰）。
     private let state = NSLock()
     private var lock: LiveLock?
@@ -286,9 +295,7 @@ final class LiveServer: @unchecked Sendable {
     @MainActor
     func attach(_ model: AppModel) {
         self.model = model
-        register("collage.state", kind: .read) { [weak self] req in
-            self?.collageState(req) ?? .failure("not_ready", "选片工具正在退出", nil)
-        }
+        LiveHandlers.register(self, model: model)
         observe(model)
         if case .gui = mode { observeWindows() }
         refreshSnapshot()
@@ -721,7 +728,7 @@ final class LiveServer: @unchecked Sendable {
     }
 
     /// hello 里的 capabilities（§10.4）：注册了的方法，去掉 test.*（不是给 MCP 的）和测试宿主假装没有的那一个。
-    /// ping 是协议本身的，不列。STEP 2 只有 collage.state；cull.read 这些在 STEP 3a / 3b 注册。
+    /// ping 是协议本身的，不列。STEP 3a 是 cull.read、cull.preview、collage.state；写方法在 STEP 3b 注册。
     func capabilities() -> [String] {
         withState { mainMethods.keys.filter { !$0.hasPrefix("test.") && $0 != dropCapability }.sorted() }
     }
@@ -766,6 +773,7 @@ final class LiveServer: @unchecked Sendable {
     private func execute(_ method: MainMethod, _ req: Request) async -> Reply {
         guard method.kind == .write else {
             if let e = expired(req) { return e }
+            if let g = clientGone(req) { return g }
             return await method.run(req)
         }
         guard let op = req.opID, !op.isEmpty, op.utf8.count <= 128 else {
@@ -784,6 +792,7 @@ final class LiveServer: @unchecked Sendable {
             await previous?.value
             if let cached = opCache[op] { return replayed(cached) }
             if let e = expired(req) { return e }
+            if let g = clientGone(req) { return g }
             let r = await method.run(req)
             if case .result(let dict) = r { remember(op, dict) }
             return r
@@ -805,6 +814,16 @@ final class LiveServer: @unchecked Sendable {
         return .failure("expired", "在 app 主线程上排队 \(Int(queued)) ms，超过了截止时间 \(req.deadlineMs) ms：没有执行", data)
     }
 
+    /// §10.2 的取消：这个连接的读线程已经读到 EOF（`--mcp` 收到 notifications/cancelled 就关连接，或者它自己死了）
+    /// → 轮到主线程时**不执行**（还没开始的写不会生效，读也不白算）。回复写不出去，只记一笔给 test.state 看。
+    /// 和 op_id 重发不冲突：连接断了而请求还没开始，app 就没做，重发时照常做。
+    @MainActor
+    private func clientGone(_ req: Request) -> Reply? {
+        guard req.clientGone.isSet else { return nil }
+        bump("skipped_client_gone")
+        return .failure("client_gone", "客户端已经断开，没有执行", ["executed": false])
+    }
+
     @MainActor
     private func replayed(_ dict: [String: Any]) -> Reply {
         var r = dict
@@ -819,44 +838,6 @@ final class LiveServer: @unchecked Sendable {
         if opOrder.count > 256 { opCache[opOrder.removeFirst()] = nil }
     }
 
-    // MARK: - collage.state（STEP 2 先给工程摘要，把主线程这条路跑通；预览、digest、格子在 STEP 3a）
-
-    @MainActor
-    private func collageState(_ req: Request) -> Reply {
-        guard let model else { return .failure("not_ready", "选片工具正在退出", nil) }
-        let batch = model.batch
-        let current: String? = batch.photoDir == nil ? nil : batch.sessionDir.lastPathComponent
-        if let raw = req.params["session"], !(raw is NSNull) {
-            guard let want = raw as? String else { return .failure("invalid_argument", "session 要是字符串", nil) }
-            guard want == current else {
-                let open: Any = openSessionObject(model) ?? NSNull()
-                return .failure("session_not_open", "app 当前打开的不是这一场", ["open_session": open])
-            }
-        }
-        let collage = model.collage
-        let project = collage.project
-        var out: [String: Any] = ["source": "app"]
-        out["session"] = current ?? NSNull()
-        out["page"] = project.pages.isEmpty ? 0 : collage.pageIndex + 1
-        out["pages"] = project.pages.count
-        out["title"] = project.title
-        out["subtitle"] = project.subtitle
-        out["masthead"] = project.masthead
-        out["issue"] = project.issue
-        out["tray"] = project.photos.count
-        var undo: [String: Any] = ["collage_depth": collage.undoDepth, "can_undo": collage.canUndo]
-        undo["can_redo"] = collage.canRedo
-        undo["verdict_can_undo"] = batch.canUndoOverride
-        out["undo"] = undo
-        out["busy"] = ["solving": collage.isSolving, "hints_pending": collage.hintsPending]
-        out["tab"] = Self.tabName(model.tab)
-        let (_, ws) = windowState()
-        out["window_state"] = ws
-        out["window_visible"] = ws == "visible"
-        out["pending_writes"] = pendingWrites
-        return .result(out)
-    }
-
     // MARK: - hello 的快照
 
     static func tabName(_ tab: AppTab) -> String {
@@ -869,7 +850,7 @@ final class LiveServer: @unchecked Sendable {
     }
 
     @MainActor
-    private func openSessionObject(_ model: AppModel) -> [String: Any]? {
+    func openSessionObject(_ model: AppModel) -> [String: Any]? {
         let batch = model.batch
         guard let dir = batch.photoDir else { return nil }
         var open: [String: Any] = ["session": batch.sessionDir.lastPathComponent, "folder": dir.path]
@@ -1062,13 +1043,29 @@ final class LiveServer: @unchecked Sendable {
     }
 }
 
-/// 跨线程的一个旗子（连接的 clientGone）。
+/// 跨线程的一个旗子（连接的 clientGone）。`link` 挂上的取消旗子（CompareZoom.load 用的那种）跟着一起置上。
 final class LiveFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var value = false
+    private var linked: [AnalysisEngine.CancelFlag] = []
     func set() {
         lock.lock()
         value = true
+        let flags = linked
+        linked = []
+        lock.unlock()
+        for f in flags { f.set() }
+    }
+
+    /// 已经置上就立刻置 `flag`；否则等这个旗子置上时一起置。
+    func link(_ flag: AnalysisEngine.CancelFlag) {
+        lock.lock()
+        if value {
+            lock.unlock()
+            flag.set()
+            return
+        }
+        linked.append(flag)
         lock.unlock()
     }
     var isSet: Bool {

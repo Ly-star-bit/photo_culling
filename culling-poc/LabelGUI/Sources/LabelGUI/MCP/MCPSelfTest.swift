@@ -171,6 +171,8 @@ enum MCPSelfTest {
         pathChecks(check, dump: dump)
         // 9–11. 实时桥：探测的判定表、状态 → 错误码、路由、线上格式（STEP 2，MCPSelfTestLive.swift）
         liveChecks(check)
+        // 12–15. 读工具的参数、cursor、输出目录的文件名、图片字节的核对（STEP 3a，MCPSelfTestRead.swift）
+        readChecks(check)
 
         for f in failures { print("FAIL " + f) }
         if failures.isEmpty {

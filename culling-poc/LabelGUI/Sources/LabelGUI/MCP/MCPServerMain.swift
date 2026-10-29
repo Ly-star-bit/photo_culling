@@ -37,6 +37,8 @@ enum MCPServerMain {
             let server = MCPStdioServer(name: "xuanpian", title: "选片工具", version: MCPConfig.version,
                                         instructions: MCPToolDefs.instructions(live: live), tools: tools,
                                         input: fds.input, output: fds.output)
+            // 回完 initialize 以后在后台清一次预览缓存（§10.3）：只在带标记的输出目录里、只删服务器起名的文件，不建任何东西
+            server.afterInitialize = { _ = MCPOutput.cleanup() }
             server.run()
         case .tools:
             var out: [String: Any] = ["tools": tools.map(\.definition)]
@@ -123,6 +125,9 @@ enum MCPConfig {
 
     /// 预览长边上限（§3.2）。
     static let maxEdge = 1568
+
+    /// 单张预览的字节上限（KB，§4.4）：app 出图时照它压（LiveImages），inline:false 时一次最多 4 张都给。
+    static let perImageKB = 350
 
     /// 版本和构建号：app 里的二进制取 Info.plist；开发用的裸二进制没有 Info.plist，报 dev。
     static var version: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev" }

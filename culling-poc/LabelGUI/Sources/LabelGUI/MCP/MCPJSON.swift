@@ -52,25 +52,33 @@ enum MCPJSON {
         return #"{"error":{"code":"internal","message":"结果里有编不成 JSON 的值","hint":"换个参数再调；还不行就是服务器的 bug"}}"#
     }
 
-    /// text 超过上限时从 `key` 那个列表的尾部截掉（§3.0）：二分找最多能留几条。
+    /// text 超过上限时从 `key` 那个列表的尾部截掉（§3.0）：二分找最多能留几条（至少留 1 条）。
     /// `mark` 给截过的对象补 truncated / next_cursor 之类（参数是留下的条数），它补的字段也算进长度。
     static func fitting(_ object: Object, list key: String, limit: Int = textMax,
                         mark: (inout Object, Int) -> Void = { object, _ in object["truncated"] = true }) -> String {
         let whole = string(object)
-        guard whole.count > limit, let list = object[key] as? [Any], !list.isEmpty else { return whole }
-        func render(_ kept: Int) -> String {
-            var cut = object
-            cut[key] = Array(list.prefix(kept))
-            mark(&cut, kept)
-            return string(cut)
+        guard whole.count > limit else { return whole }
+        return string(fittingObject(object, list: key, limit: limit, mark: mark))
+    }
+
+    /// 同上，交回截好的对象（app 端的桥回复要的是对象，编码在连接队列上做）。放得下就原样交回。
+    static func fittingObject(_ object: Object, list key: String, limit: Int,
+                              mark: (inout Object, Int) -> Void) -> Object {
+        guard string(object).count > limit, let list = object[key] as? [Any], list.count > 1 else { return object }
+        func cut(_ kept: Int) -> Object {
+            var o = object
+            o[key] = Array(list.prefix(kept))
+            mark(&o, kept)
+            return o
         }
-        // lo 条一定放得下（0 条放不下也只能给 0 条），hi 条放不下。
-        var lo = 0
+        // 至少给 1 条（这一条自己就超了也给）：给 0 条的话 next_cursor 原地不动，模型照着翻永远翻不完。
+        // lo 条放得下（或者 lo 是 1），hi 条放不下。
+        var lo = 1
         var hi = list.count
         while hi - lo > 1 {
             let mid = (lo + hi) / 2
-            if render(mid).count <= limit { lo = mid } else { hi = mid }
+            if string(cut(mid)).count <= limit { lo = mid } else { hi = mid }
         }
-        return render(lo)
+        return cut(lo)
     }
 }
