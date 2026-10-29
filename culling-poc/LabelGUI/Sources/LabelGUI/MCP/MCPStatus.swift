@@ -1,8 +1,9 @@
 import Foundation
 
 /// `app_status`（title：状态自检，DESIGN §3.1，按 §10.1 第 1 行改）：进程内，不读照片，在任何状态下都正常返回。
-/// S1：live.state 固定报 not_running（LABELGUI_MCP_LIVE=0 时 disabled），不探测、不碰锁和 socket；
-/// STEP 2 接上 LiveClient.probe() 以后，live 对象取自 hello，gui_running 按锁判断。
+/// live 对象取自 hello（LiveClient.probe，不经 app 主线程：app 卡住时照样秒回）；不是 live 时 warnings 写原因和 hint。
+/// gui_running 按锁判断：锁被 role=app 的进程占着，或者 hello 成功（开发版裸二进制开的 GUI 也认得出来）；
+/// 旧版 app（old_app）是 NSRunningApplication 认出来的，只在默认数据目录时看（§9.1）。
 enum MCPStatus {
     static let writesReason = "v1 只有实时：app 开着时读和改都交给 app；app 没开时只能看状态、列场次和模板"
 
@@ -10,7 +11,6 @@ enum MCPStatus {
         if let extra = call.arguments.keys.sorted().first {
             return .error("invalid_argument", "app_status 不收参数（收到了 \(extra)）。", hint: "参数传 {}")
         }
-        let live = MCPConfig.liveEnabled
         let dir = MCPPaths.dataDirState()
         let index = MCPPaths.readSessionsIndex()
         var warnings: [[String: Any]] = []
@@ -25,7 +25,6 @@ enum MCPStatus {
         out["data_dir_exists"] = dir.exists
         out["data_dir_readable"] = dir.readable
         out["sessions"] = index.entries.count
-        out["gui_running"] = false
 
         if !dir.exists {
             warnings.append(warning("data_dir_missing",
@@ -40,14 +39,26 @@ enum MCPStatus {
             warnings.append(warning("sessions_index_unreadable", problem, hint: "请用户在选片工具里打开一次任意场次，app 会重写这个文件"))
         }
 
-        let state = live ? "not_running" : "disabled"
-        out["live"] = ["state": state]
-        if live {
-            warnings.append(warning("app_not_running", "选片工具没开。",
-                                    hint: "请用户自己打开选片工具，并在 app 里打开要处理的场次；MCP 不会启动它。"))
-        } else {
+        let probe = LiveClient.probe(client: call.client)
+        let state = probe.state.rawValue
+        out["live"] = liveObject(probe)
+        out["gui_running"] = guiRunning(probe)
+        warnings.append(contentsOf: probe.warnings)
+        switch probe.state {
+        case .live:
+            if probe.hello?["exact_build_match"] as? Bool == false { warnings.append(buildMismatchWarning(probe.hello)) }
+            if probe.openSession == nil {
+                warnings.append(warning("no_open_session", "选片工具开着，但没有打开任何场次。",
+                                        hint: "cull_list_sessions 找到要处理的那一场，再 app_open_session（或者请用户在 app 里打开）"))
+            }
+        case .disabled:
             warnings.append(warning("live_disabled", "这个服务器设了 LABELGUI_MCP_LIVE=0：不连正在运行的 app。",
                                     hint: "只能看状态、列场次和模板；要实时操作，去掉这个环境变量再重连 MCP 服务器"))
+        case .notRunning where probe.reason == "data_dir_missing":
+            break  // 上面已经有 data_dir_missing
+        default:
+            let (message, hint) = LiveClient.explain(probe)
+            warnings.append(warning(probe.state == .notRunning ? "app_not_running" : probe.state.rawValue, message, hint: hint))
         }
 
         out["output_root"] = MCPPaths.outputRoot.path
@@ -56,7 +67,7 @@ enum MCPStatus {
         limits["max_edge"] = MCPConfig.maxEdge
         limits["text_max_chars"] = MCPJSON.textMax
         out["limits"] = limits
-        out["writes"] = ["live": false, "headless": false, "reason": writesReason] as [String: Any]
+        out["writes"] = ["live": probe.state == .live, "headless": false, "reason": writesReason] as [String: Any]
         if let client = call.client {
             out["client"] = ["name": client.name, "version": client.version, "requested_protocol": client.requested]
         } else {
@@ -77,5 +88,76 @@ enum MCPStatus {
 
     static func warning(_ code: String, _ message: String, hint: String) -> [String: Any] {
         ["code": code, "message": message, "hint": hint]
+    }
+
+    /// live 对象（§3.1）：live 时字段全部取自 hello；not_running 时只有 state；其余状态带 socket 和锁文件那一行里说的谁。
+    static func liveObject(_ p: LiveClient.Probe) -> [String: Any] {
+        var live: [String: Any] = ["state": p.state.rawValue]
+        switch p.state {
+        case .live:
+            guard let h = p.hello else { return live }
+            live["bridge"] = h["bridge"] ?? "on"
+            if let app = h["app"] as? [String: Any] {
+                var a: [String: Any] = ["version": app["version"] ?? NSNull(), "build": app["build"] ?? NSNull()]
+                a["pid"] = app["pid"] ?? NSNull()
+                a["uuid"] = app["uuid"] ?? NSNull()
+                live["app"] = a
+            }
+            live["exact_build_match"] = h["exact_build_match"] ?? false
+            live["proto"] = h["proto"] ?? NSNull()
+            if let open = p.openSession {
+                var o: [String: Any] = ["session": open["session"] ?? NSNull(), "folder": open["folder"] ?? NSNull()]
+                o["name"] = open["name"] ?? NSNull()
+                o["photo_count"] = open["photo_count"] ?? NSNull()
+                live["open_session"] = o
+            } else {
+                live["open_session"] = NSNull()
+            }
+            live["tab"] = h["tab"] ?? NSNull()
+            live["windows"] = h["windows"] ?? 0
+            live["window_state"] = h["window_state"] ?? NSNull()
+            if let a = h["analysis"] as? [String: Any] {
+                live["analysis"] = ["running": a["running"] ?? false, "progress_text": a["progress_text"] ?? ""]
+            }
+            live["capabilities"] = p.capabilities
+            live["main_beat_ms"] = h["main_beat_ms"] ?? NSNull()
+            live["socket"] = p.paths?.socketPath ?? NSNull()
+        case .notRunning, .disabled:
+            break
+        default:
+            if let r = p.reason { live["reason"] = r }
+            if let s = p.paths?.socketPath { live["socket"] = s }
+            if let l = p.lock {
+                var lock: [String: Any] = ["role": l.role ?? NSNull(), "bridge": l.bridge ?? NSNull()]
+                lock["pid"] = l.pid ?? NSNull()
+                live["lock"] = lock
+            }
+        }
+        return live
+    }
+
+    /// 锁被 role=app 的进程占着、hello 成功过、或者认出了旧版 app，就算 GUI 开着。
+    /// LABELGUI_MCP_LIVE=0（disabled）不碰锁：退回 NSRunningApplication（只认 .app，§9.1 表外那一段），
+    /// 而且和 old_app 一样只在默认数据目录时看 —— 设了 LABELGUI_DATA_DIR 时，认出来的 app 多半用的是别的数据目录。
+    static func guiRunning(_ p: LiveClient.Probe) -> Bool {
+        switch p.state {
+        case .live, .unresponsive, .protoMismatch, .oldApp, .notReady, .dataDirMismatch, .bridgeOff:
+            return true
+        case .unreachable:
+            return p.lock?.role == "app"
+        case .disabled:
+            return !MCPPaths.dataDirOverridden && LiveClient.oldAppRunning()
+        case .notRunning, .headlessWriter, .peerRejected:
+            return false
+        }
+    }
+
+    /// exact_build_match:false 但协议兼容：照常工作，提醒一句（§9.2.5）。
+    static func buildMismatchWarning(_ hello: [String: Any]?) -> [String: Any] {
+        let app: [String: Any] = hello?["app"] as? [String: Any] ?? [:]
+        let version: String = app["version"] as? String ?? "?"
+        let build: String = app["build"] as? String ?? "?"
+        let message = "app 是 \(version) (\(build))，MCP 是 \(MCPConfig.version) (\(MCPConfig.build))：不是同一次构建。"
+        return warning("build_mismatch", message, hint: "照常能用；建议请用户重开选片工具、在客户端里重连 MCP 服务器")
     }
 }

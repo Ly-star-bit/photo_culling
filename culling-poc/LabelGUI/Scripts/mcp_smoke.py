@@ -967,6 +967,7 @@ LABELS = {  # label → (argv[1] 算拼错, 有写对的无头参数)
     "--mcp-server": (True, False), "-collage-ui": (True, False), "em-dash-app-ui": (True, False), "app-ui": (True, False),
     "serve": (False, False), "--bogus": (False, False), "-NSDocumentRevisionsDebugMode": (False, False),
     "-psn": (False, False), "photo-dir": (False, False), "title-mcp": (False, True),
+    "--live-host": (False, True), "em-dash-live-host": (True, False),
 }
 r = run_cli(["--mcp-selftest", "--json"], os.path.join(WORK, "never-selftest"))
 rows = [json.loads(l) for l in r.stdout.decode().splitlines() if l.startswith("{")]
@@ -1275,10 +1276,12 @@ MCP_BANNED = ["NSWorkspace", "NSApp", "NSApplication", "NSOpenPanel", "NSSavePan
               r"CollageStore\(", "posix_spawn", r"\bfork\(", r"\bsystem\(", r"\bpopen\(",
               # 比 §10.5 严一点：stderr 读端关了它会抛异常、把进程 abort；MCP/ 里写日志只走 MCPLog.stderr
               r"standardError\.write\("]
-LIVE_BANNED = [r"NSApp\.activate", "activateIgnoringOtherApps", "makeKeyAndOrderFront", "orderFront", "deminiaturize",
-               r"unhide\(", "requestUserAttention", "NSOpenPanel", "NSSavePanel", "NSAlert", "runModal", "beginSheet",
-               "openWindow", "NSWorkspace", "/usr/bin/open", "revealInFinder", "startVLMServer", "CardImportCenter",
-               r"export\(", "posix_spawn", r"\bfork\(", r"\bsystem\(", r"\bpopen\("]
+# STEP 2 补：§9.5.6 窗口状态只看不动 —— 任何激活、变 key / main、取消隐藏、显示窗口的调用都不许（和 live_smoke.py 同一份）
+LIVE_BANNED = [r"NSApp\.activate", r"\bactivate\(", "activateIgnoringOtherApps", "makeKeyAndOrderFront", r"makeKey\w*\(",
+               r"makeMain\w*\(", r"becomeKey\(", "orderFront", "deminiaturize", r"\bunhide", "requestUserAttention",
+               "NSOpenPanel", "NSSavePanel", "NSAlert", "runModal", "beginSheet", "openWindow", "NSWorkspace", "/usr/bin/open",
+               "revealInFinder", "startVLMServer", "CardImportCenter", r"export\(", "posix_spawn", r"\bfork\(", r"\bsystem\(",
+               r"\bpopen\(", r"setIsVisible\("]
 FILE_ACCESS = [r"Data\(contentsOf:", "contentsOfDirectory", r"FileManager\.default", r"fopen\(", r"\.write\(to:", r"\bopen\("]
 FILE_ACCESS_OK = {"MCPPaths.swift", "MCPOutput.swift", "LiveClient.swift", "StdioTakeover.swift"}
 # S2 加（比 §10.5 严）：stat 一族、链接、在不在；还有几个会悄悄查文件系统的 Foundation 路径函数（S2 拿 sandbox-exec 实测）——
@@ -1328,10 +1331,13 @@ if os.path.isdir(MCP_DIR):
     h = grep(MCP_DIR, NEEDS_ISDIR, code_only=True, unless=r"isDirectory:")
     check(not h, f"URL(fileURLWithPath:) / appendingPathComponent 都带 isDirectory（不带会先 stat 一下）{h[:5]}")
     h = grep(LIVE_DIR, LIVE_BANNED)
-    if h is None:
-        print("  skip Live/ 还不存在（STEP 2 加）")
-    else:
-        check(not h, f"Live/ 里没有禁用词 {h[:5]}")
+    check(h is not None and not h, f"Live/ 里没有禁用词 {h[:5] if h else h}")
+    # MCP/ 里只有 LiveClient.probeLockFile() 能打开锁文件（§10.5）：LiveClient.swift 其余地方不许有 open(
+    lc = open(os.path.join(MCP_DIR, "LiveClient.swift"), encoding="utf-8").read()
+    fn = re.search(r"static func probeLockFile\(.*?\n    }\n", lc, re.S)
+    outside = [l for l in lc.replace(fn.group(0), "").splitlines() if re.search(r"\bopen\(", re.sub(r"(^|\s)//.*$", "", l))] if fn else ["?"]
+    check(fn is not None and "O_CREAT" not in fn.group(0) and not outside,
+          f"LiveClient.swift 只在 probeLockFile() 里 open（不带 O_CREAT）{outside[:3]}")
 else:
     print(f"  skip 找不到源码目录 {MCP_DIR}，grep 检查不跑")
 

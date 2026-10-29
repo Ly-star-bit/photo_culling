@@ -3,7 +3,7 @@ import Foundation
 /// 另外两个进程内工具（DESIGN §3.1，按 §10.1 第 2、3 行改）：不探测 app、不读照片。
 /// - cull_list_sessions：只读 sessions.json（MCPPaths.readSessionsIndex）；照片文件夹只看在不在（MCPPaths.foldersOnline），
 ///   受保护位置只按字符串标 protected_location:true、folder_online:null，连 stat 都不做。open_in_app 只在
-///   live.state=live 时才有（取自 hello，STEP 2），现在不出现。
+///   live.state=live 时才有（取自 hello 的 open_session，§3.1）；app 开着却连不上时照常列，加一条 warning（§10.2）。
 /// - collage_list_templates：代码里的静态表（CollageTemplates.builtin、CollageKitID、CollageStyles.all、CollageLook、
 ///   CLI 的画布别名），不碰任何文件。
 enum MCPInProcessTools {
@@ -32,6 +32,16 @@ enum MCPInProcessTools {
         }
         let shown = Array(index.entries.prefix(limit))
         let checks = MCPPaths.foldersOnline(shown.map(\.folder))
+        let probe = LiveClient.probe(client: call.client)
+        let openKey: String? = probe.state == .live ? probe.openSession?["session"] as? String : nil
+        switch probe.state {
+        case .live, .notRunning, .disabled:
+            break
+        default:
+            let (message, hint) = LiveClient.explain(probe)
+            warnings.append(MCPStatus.warning(probe.state.rawValue, message + "照常列出场次（读的是磁盘上的 sessions.json），open_in_app 不知道。",
+                                              hint: hint))
+        }
         let rows: [[String: Any]] = zip(shown, checks).map { e, check in
             var row: [String: Any] = ["session": e.key, "folder": e.folder, "name": e.name]
             row["photo_count"] = e.photoCount
@@ -39,6 +49,7 @@ enum MCPInProcessTools {
             row["in_recent_list"] = true
             row["folder_online"] = check.online.map { $0 as Any } ?? NSNull()
             row["protected_location"] = check.protected
+            if probe.state == .live { row["open_in_app"] = e.key == openKey }
             return row
         }
         if checks.contains(where: { $0.online == nil && !$0.protected }) {

@@ -11,6 +11,7 @@ import Foundation
 /// 3. MCPServerMain.mode：只认整个参数相等的 --mcp / --mcp-tools / --mcp-call。
 /// 4. 工具定义：18 个 / 3 个、顺序、schema 规则（§3.0）、enum 和代码里的名单一致、没有漏填的占位。
 /// 5–8. 受保护位置、session 参数、逐段解析、拼图静态表（S2，MCPSelfTestPaths.swift）。--json 时第 5 组每条也打一行。
+/// 9–11. 实时桥的判定表、状态 → 错误码、路由、线上格式（STEP 2，MCPSelfTestLive.swift）。
 enum MCPSelfTest {
     private struct Variant {
         let label: String
@@ -46,6 +47,8 @@ enum MCPSelfTest {
         Variant(label: "-psn", args: ["-psn_0_12345"], typo: false, headless: false),
         Variant(label: "photo-dir", args: ["/Users/x/Pictures/20261021"], typo: false, headless: false),
         Variant(label: "title-mcp", args: ["--collage", "/p", "--title", "mcp"], typo: false, headless: true),
+        Variant(label: "--live-host", args: ["--live-host", "/p"], typo: false, headless: true),
+        Variant(label: "em-dash-live-host", args: ["—live-host", "/p"], typo: true, headless: false),
     ]
 
     static func run() -> Never {
@@ -166,6 +169,8 @@ enum MCPSelfTest {
 
         // 5–8. 受保护位置、session 参数、逐段解析、拼图静态表
         pathChecks(check, dump: dump)
+        // 9–11. 实时桥：探测的判定表、状态 → 错误码、路由、线上格式（STEP 2，MCPSelfTestLive.swift）
+        liveChecks(check)
 
         for f in failures { print("FAIL " + f) }
         if failures.isEmpty {

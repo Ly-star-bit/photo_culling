@@ -1,0 +1,1231 @@
+import Foundation
+import AppKit
+import Combine
+
+/// 测试宿主（--live-host）才有的开关，LiveHost 从 LABELGUI_LIVE_TEST_* 读进来；GUI 进程不读这些变量（§9.8.1）。
+struct LiveTestOptions {
+    /// LABELGUI_LIVE_SOCK_ROOT：测试自己的 socket 根目录（LiveHost 已经拒绝了解析到真实 SockDir 的）。
+    var sockRoot: String
+    /// LABELGUI_LIVE_TEST_PROTO=min,max：假装别的协议区间（§9.8.2 第 16 条）。
+    var proto: (min: Int, max: Int)?
+    /// LABELGUI_LIVE_TEST_DROP_CAP=<方法>：假装旧版 app 少一个方法。
+    var dropCapability: String?
+    /// LABELGUI_LIVE_TEST_SELFCHECK_MS：自检间隔，默认 10 s，测试设 500。
+    var selfCheckMs: Int?
+    /// LABELGUI_LIVE_TEST_SIGPIPE：只给 sigpipe 矩阵单独开某一层（R6 §4.3），默认三层全开。
+    var sigpipe = LiveServer.SigpipeLayers.all
+    /// LABELGUI_LIVE_TEST_REJECT_PEERS=1：把所有对端都当成别的 uid，走拒绝那条路（R6 T14）。
+    var rejectPeers = false
+}
+
+/// 实时桥的服务端（DESIGN §9.2–§9.4，原型 R6 的 Server.swift）。
+/// GUI（`.gui`）和 --live-host（`.testHost`）是同一个类、同一套代码，只差 socket 根目录、测试开关和窗口状态从哪来；
+/// --app-ui（bridge: .none）根本不建它：不拿锁、不建 SockDir、不 bind（§5 第 7 层）。
+///
+/// 线程：accept 线程（poll + accept，500 ms，外加一根唤醒管道）→ 每个连接一个读线程（阻塞读、按行切）和一条串行写队列
+/// → hello / ping 在读线程上直接回（不经主线程：主线程卡住时 hello 照样秒回，客户端由此分清「忙」和「死」，R6 T3b、T9）
+/// → 其余请求 `Task { @MainActor }`：读直接执行，写排进主线程上的一条 FIFO（上一个写落地之前下一个不开始，§9.2.3）
+/// → 结果交回这个连接自己的写队列，JSON 编码和写 socket 都不在主线程上。
+/// 桥上永远不调任何会激活 app、把窗口拉到前面、取消最小化 / 隐藏的方法（§9.5.6；禁用词见 §5 第 7 层，live_smoke / mcp_smoke 的 grep）。
+final class LiveServer: @unchecked Sendable {
+    enum Mode {
+        case gui
+        case testHost(LiveTestOptions)
+    }
+
+    /// SIGPIPE 三层（§9.2.4，R6 §4.3 矩阵）：只在 accept 之后设 SO_NOSIGPIPE 不够 —— 客户端在 accept 之前就走了时
+    /// setsockopt 回 EINVAL，接着一写整个 app 就被 SIGPIPE 杀掉。所以监听 socket 上设（accept 出来的继承）、accept 后再设一次
+    /// 并查返回值（失败就关，一个字节都不写）、所有写都 send(…, MSG_NOSIGNAL)。只有 sigpipe 矩阵的测试宿主会关掉其中几层。
+    struct SigpipeLayers: Equatable {
+        var listen = true
+        var accepted = true
+        var noSignal = true
+        /// accept 后那一次设失败就关（只在三层全开时；单开「accept 后」那一层时照原型的写法，失败也接着用）。
+        var closeOnFailure = true
+
+        static let all = SigpipeLayers()
+
+        static func named(_ name: String) -> SigpipeLayers? {
+            switch name {
+            case "all": return .all
+            case "none": return SigpipeLayers(listen: false, accepted: false, noSignal: false, closeOnFailure: false)
+            case "accepted_only": return SigpipeLayers(listen: false, accepted: true, noSignal: false, closeOnFailure: false)
+            case "listen_inherit": return SigpipeLayers(listen: true, accepted: false, noSignal: false, closeOnFailure: false)
+            case "msg_nosignal": return SigpipeLayers(listen: false, accepted: false, noSignal: true, closeOnFailure: false)
+            default: return nil
+            }
+        }
+    }
+
+    /// 桥现在的样子（hello 的 bridge、锁文件那一行、测试宿主的 ready 行）。
+    enum Bridge: Equatable {
+        case on
+        /// 设置里关了 / test.set_bridge：socket 关掉删掉，锁照常持有（§9.2.1 末尾）。
+        case off(String)
+        /// 开不了：数据目录、socket 路径太长、SockDir 不安全、bind 失败、另一个实例占着、等锁、锁丢了。
+        case unavailable(String)
+
+        var word: String {
+            switch self {
+            case .on: return "on"
+            case .off: return "off"
+            case .unavailable: return "unavailable"
+            }
+        }
+
+        var reason: String? {
+            switch self {
+            case .on: return nil
+            case .off(let r), .unavailable(let r): return r
+            }
+        }
+    }
+
+    enum MethodKind {
+        case read, write
+    }
+
+    /// 一个请求（主线程上的方法拿到的）。`clientGone`：这个连接的读线程读到 EOF 就置上（§10.2 的取消，STEP 3a 用）。
+    struct Request: @unchecked Sendable {
+        let method: String
+        let params: [String: Any]
+        let opID: String?
+        let deadlineMs: Int
+        let received: Double
+        let clientGone: LiveFlag
+    }
+
+    enum Reply: @unchecked Sendable {
+        case result([String: Any])
+        case failure(String, String, [String: Any]?)
+
+        func frame(id: Any) -> [String: Any] {
+            switch self {
+            case .result(let r):
+                return ["id": id, "result": r]
+            case .failure(let code, let message, let data):
+                var e: [String: Any] = ["code": code, "message": message]
+                if let data { e["data"] = data }
+                return ["id": id, "error": e]
+            }
+        }
+    }
+
+    struct MainMethod: @unchecked Sendable {
+        let kind: MethodKind
+        let run: @MainActor (Request) async -> Reply
+    }
+
+    /// 在连接线程上直接回的方法（只有测试宿主的 test.pause_accept 这类不碰 store 的）。
+    typealias DirectMethod = ([String: Any]) -> Reply
+
+    /// hello 的内容：主线程在场次、tab、窗口、分析状态变化时更新，连接线程加锁读（§9.2.2）。
+    private struct Snapshot {
+        var ready = false
+        var windows = 0
+        var windowState = "no_window"
+        var tab = "batch"
+        var openSession: [String: Any]?
+        var analysisRunning = false
+        var progressText = ""
+        var mainBeat = LiveWire.nowMs()
+        var helloCount = 0
+        var lastHelloMs: Double?
+        var lastClient: String?
+    }
+
+    let mode: Mode
+    let paths: LivePaths?
+    let protoMin: Int
+    let protoMax: Int
+    let selfCheckMs: Int
+    let layers: SigpipeLayers
+    let rejectPeers: Bool
+    let dropCapability: String?
+    let maxConnections = 16
+    let helloTimeoutMs = 2_000
+    let idleTimeoutMs = 120_000
+    let started = ISO8601DateFormatter().string(from: Date())
+
+    var isTestHost: Bool {
+        if case .testHost = mode { return true }
+        return false
+    }
+
+    // 下面这些由 `state` 锁着（accept 线程、连接线程、自检队列、主线程都会碰）。
+    private let state = NSLock()
+    private var lock: LiveLock?
+    private var bridge: Bridge
+    private var listenFd: Int32 = -1
+    private var boundIno: UInt64 = 0
+    /// 换下来的监听 fd：drain = 重新 bind 以后旧 fd 上已经排队的连接照常 accept 完再关；否则直接关（桥关掉了）。
+    private var retired: [(fd: Int32, drain: Bool)] = []
+    private var pausedUntil = 0.0
+    private var connections = 0
+    private var nextConnID = 0
+    private var snap = Snapshot()
+    private var mainMethods: [String: MainMethod] = [:]
+    private var directMethods: [String: DirectMethod] = [:]
+    private var counters: [String: Int] = [:]
+    private var wakeR: Int32 = -1
+    private var wakeW: Int32 = -1
+    private var acceptStarted = false
+    private var shuttingDown = false
+    private var selfCheckTimer: DispatchSourceTimer?
+    private var lockRetryTimer: DispatchSourceTimer?
+    private let selfCheckQueue = DispatchQueue(label: "xuanpian.live.selfcheck")
+    /// 开桥、关桥、自检一次只做一个（主线程上的菜单 / test.set_bridge 和自检队列会同时来）：不然自检刚看到「桥开着、
+    /// socket 不在」，菜单那边把桥关了，自检又把它重新开起来。可重入：自检里会调 openBridge。
+    private let bridgeOps = NSRecursiveLock()
+
+    // 主线程上的（和 store 同一个隔离域）。
+    @MainActor private weak var model: AppModel?
+    @MainActor private var writeTail: Task<Void, Never>?
+    /// op_id → 当时的结果（最近 256 个，§9.2.3）：客户端超时 / 断线后带同一个 op_id 重发，拿到的是第一次的结果。
+    @MainActor private var opCache: [String: [String: Any]] = [:]
+    @MainActor private var opOrder: [String] = []
+    @MainActor private var opRunning: [String: Task<Reply, Never>] = [:]
+    /// 排着队或正在落地的写（读的结果里带 pending_writes，§9.2.3）。
+    @MainActor private(set) var pendingWrites = 0
+    /// 测试宿主模拟最小化 / 别的桌面（test.set_window_state）：只改报出去的值，不碰任何窗口。
+    @MainActor var windowOverride: String?
+    @MainActor private var observers: [AnyCancellable] = []
+    @MainActor private var tokens: [NSObjectProtocol] = []
+    @MainActor private var heartbeat: DispatchSourceTimer?
+
+    private init(mode: Mode, dataDir: URL) {
+        self.mode = mode
+        var sockRoot: String?
+        var proto = (min: LiveWire.protoMin, max: LiveWire.protoMax)
+        var layers = SigpipeLayers.all
+        var reject = false
+        var drop: String?
+        var interval = 10_000
+        if case .testHost(let o) = mode {
+            sockRoot = o.sockRoot
+            proto = o.proto ?? proto
+            layers = o.sigpipe
+            reject = o.rejectPeers
+            drop = o.dropCapability
+            interval = max(100, o.selfCheckMs ?? interval)
+        }
+        protoMin = proto.min
+        protoMax = proto.max
+        self.layers = layers
+        rejectPeers = reject
+        dropCapability = drop
+        selfCheckMs = interval
+        switch LivePaths.resolve(dataDir: dataDir.path, sockRoot: sockRoot) {
+        case .success(let p):
+            paths = p
+            bridge = .unavailable("starting")
+        case .failure(let problem):
+            paths = nil
+            bridge = .unavailable(problem == .noTempDir ? "no_temp_dir" : "data_dir")
+        }
+    }
+
+    static func log(_ text: String) {
+        MCPLog.stderr("[live \(getpid())] \(text)\n")
+    }
+
+    // MARK: - 启动（AppModel.make 里两步：建 store 之前 prepare 拿锁，建好以后 attach 开桥）
+
+    /// §9.2.1 第 1 步：open + flock(LOCK_EX|LOCK_NB)。拿不到就对 S 发一次 hello、等 500 ms：有回复 = 另一个 app 实例占着
+    /// 这个数据目录，本实例照常启动、不开桥；没回复 = 锁在无头写者（v2）或另一个正在启动的实例手里，每 100 ms 重试，
+    /// 最多 3 s；还拿不到就照常启动、先不开桥，attach 以后后台每 1 s 重试（R6 §3.2）。阻塞的是调用方（GUI 的主线程）。
+    static func prepare(_ mode: Mode, dataDir: URL) -> LiveServer {
+        let server = LiveServer(mode: mode, dataDir: dataDir)
+        server.acquireAtStartup()
+        return server
+    }
+
+    private func acquireAtStartup() {
+        guard let paths else { return }
+        let start = LiveWire.nowMs()
+        while true {
+            switch LiveLock.tryAcquire(paths.lockPath) {
+            case .acquired(let l):
+                setLocked { lock = l }
+                return
+            case .failed(let why):
+                Self.log("拿不到 \(paths.lockPath)：\(why)；不开桥")
+                setLocked { bridge = .unavailable("lock_failed") }
+                return
+            case .busy:
+                if Self.answersHello(paths) {
+                    Self.log("另一个选片工具正在用这个数据目录（它回了 hello）：本实例不开桥")
+                    setLocked { bridge = .unavailable("another_instance") }
+                    return
+                }
+                if LiveWire.nowMs() - start > 3_000 {
+                    Self.log("等锁 3 s 还没拿到：先不开桥，后台每 1 s 再试")
+                    setLocked { bridge = .unavailable("waiting_for_lock") }
+                    return
+                }
+                usleep(100_000)
+            }
+        }
+    }
+
+    /// 锁的主人回不回 hello（500 ms 内有任何一行回复都算活着）。
+    private static func answersHello(_ paths: LivePaths) -> Bool {
+        guard !paths.socketTooLong, case .connected(let fd) = LiveConnect.connect(paths.socketPath, timeoutMs: 500) else { return false }
+        defer { close(fd) }
+        var client: [String: Any] = ["name": "选片工具", "pid": Int(getpid())]
+        client["uuid"] = LiveBuildInfo.uuid
+        var params: [String: Any] = ["proto": LiveWire.proto, "data_dir": paths.dataDir, "data_dir_id": paths.dataDirID]
+        params["client"] = client
+        let frame: [String: Any] = ["id": 0, "method": "hello", "params": params]
+        if case .line = LiveConnect.exchange(fd, frame, timeoutMs: 500, maxLine: LiveWire.maxReplyLine) { return true }
+        return false
+    }
+
+    /// store 建好以后（AppModel.make 的最后）：方法表、观察 store、主线程心跳；拿到了锁就写那一行，设置开着才开 socket
+    /// （§9.2.1 第 3–5 步）。
+    @MainActor
+    func attach(_ model: AppModel) {
+        self.model = model
+        register("collage.state", kind: .read) { [weak self] req in
+            self?.collageState(req) ?? .failure("not_ready", "选片工具正在退出", nil)
+        }
+        observe(model)
+        if case .gui = mode { observeWindows() }
+        refreshSnapshot()
+        startHeartbeat()
+        let (held, waiting) = withState { (lock != nil, bridge == .unavailable("waiting_for_lock")) }
+        if held {
+            enableBridgeIfAllowed()
+        } else if waiting {
+            startLockRetry()
+        }
+    }
+
+    /// GUI：UserDefaults 里的 live.bridgeEnabled，没有这个键 = 开（§9.6a；菜单开关在 STEP 3b）。只读不写。
+    /// 测试宿主的桥总是开着，不读也不写这个键（§9.8.1：.app 里的二进制和用户的 app 共用设置域）。
+    @MainActor
+    private var bridgeAllowed: Bool {
+        switch mode {
+        case .gui:
+            guard !AppRuntime.headless, ProcessInfo.processInfo.environment["LABELGUI_NO_GUI"] != "1" else { return false }
+            return UserDefaults.standard.object(forKey: "live.bridgeEnabled") as? Bool ?? true
+        case .testHost:
+            return true
+        }
+    }
+
+    /// 拿着锁就开自检定时器，不管桥开没开成：开桥失败（SockDir 不安全、bind 失败）靠它下一轮再试，
+    /// 桥关着时锁文件被删也靠它重建（§9.2.4）。只在 openBridge 成功时才开的话，这两种都永远不会被发现。
+    @MainActor
+    private func enableBridgeIfAllowed() {
+        if bridgeAllowed {
+            openBridge()
+        } else {
+            setLocked { bridge = .off("disabled_in_settings") }
+            writeLockInfo()
+        }
+        startSelfCheck()
+    }
+
+    /// 后台每 1 s 再拿一次锁（启动时等了 3 s 没拿到的那种）；拿到了就照常开桥。
+    private func startLockRetry() {
+        guard let paths else { return }
+        let timer = DispatchSource.makeTimerSource(queue: selfCheckQueue)
+        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            guard case .acquired(let l) = LiveLock.tryAcquire(paths.lockPath) else { return }
+            self.setLocked {
+                self.lock = l
+                self.bridge = .unavailable("starting")
+            }
+            self.lockRetryTimer?.cancel()
+            Self.log("后台拿到了锁")
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self.enableBridgeIfAllowed() }
+            }
+        }
+        setLocked { lockRetryTimer = timer }
+        timer.resume()
+    }
+
+    // MARK: - 开桥、关桥、重新 bind（§9.2.1 第 4、5 步，§9.2.4 自愈）
+
+    /// 开桥：建 / 检查 SockDir → 删掉自己的残留 socket → bind → 写锁文件那一行 → accept 线程和自检定时器。
+    /// 任何一步不行就不开桥（bridge = unavailable，带原因），下一次自检再试（路径太长、另一个实例那几种不试）。
+    @discardableResult
+    func openBridge() -> Bool {
+        bridgeOps.lock()
+        defer { bridgeOps.unlock() }
+        guard let paths, withState({ lock != nil && !shuttingDown }) else { return false }
+        if paths.socketTooLong {
+            Self.log("socket 路径 \(paths.socketPath.utf8.count) 字节，超过 sun_path 的 \(LiveSockAddr.maxPathBytes) 字节：不开桥")
+            setLocked { bridge = .unavailable("socket_path_too_long") }
+            writeLockInfo()
+            return false
+        }
+        if let why = Self.ensureSockDir(paths.sockDir) {
+            Self.log("socket 目录不能用：\(why)；不开桥")
+            setLocked { bridge = .unavailable("sock_dir_unsafe") }
+            writeLockInfo()
+            return false
+        }
+        guard Self.removeStaleSocket(paths.socketPath) else {
+            setLocked { bridge = .unavailable("socket_path_occupied") }
+            writeLockInfo()
+            return false
+        }
+        let fd: Int32
+        let ino: UInt64
+        switch bindNew(paths.socketPath) {
+        case .success(let pair):
+            (fd, ino) = pair
+        case .failure(let why):
+            Self.log(why.text)
+            setLocked { bridge = .unavailable("bind_failed") }
+            writeLockInfo()
+            return false
+        }
+        setLocked {
+            if listenFd >= 0 { retired.append((listenFd, true)) }
+            listenFd = fd
+            boundIno = ino
+            bridge = .on
+            snap.ready = true
+        }
+        writeLockInfo()
+        startAcceptThread()
+        startSelfCheck()
+        wakeAcceptThread()
+        Self.log("桥开了：\(paths.socketPath)")
+        return true
+    }
+
+    /// 关桥（设置关掉 / test.set_bridge）：关监听 fd、删自己那个 socket、锁文件写 bridge:"off"，锁继续持有（§9.2.1 末尾）。
+    func closeBridge(_ reason: String) {
+        bridgeOps.lock()
+        defer { bridgeOps.unlock() }
+        setLocked {
+            if listenFd >= 0 { retired.append((listenFd, false)) }
+            listenFd = -1
+            bridge = .off(reason)
+            snap.ready = false
+        }
+        unlinkOwnSocket()
+        writeLockInfo()
+        wakeAcceptThread()
+    }
+
+    /// 退出（GUI 的 willTerminate、测试宿主的 SIGTERM / test.quit）：ready=false、关监听 fd、socket 的 inode 还是自己那个才删；
+    /// 锁由内核在进程退出时放掉。
+    func shutdown() {
+        bridgeOps.lock()
+        defer { bridgeOps.unlock() }
+        setLocked {
+            shuttingDown = true
+            snap.ready = false
+            if listenFd >= 0 { retired.append((listenFd, false)) }
+            listenFd = -1
+        }
+        unlinkOwnSocket()
+        wakeAcceptThread()
+    }
+
+    private func unlinkOwnSocket() {
+        guard let paths else { return }
+        let ino = withState { boundIno }
+        var st = stat()
+        if lstat(paths.socketPath, &st) == 0, (st.st_mode & S_IFMT) == S_IFSOCK, st.st_uid == geteuid(), UInt64(st.st_ino) == ino {
+            unlink(paths.socketPath)
+        }
+    }
+
+    /// SockDir 不存在就以 0700 建；存在的话必须是目录（lstat：不是符号链接）、属主是自己、组和其他人不可写。
+    private static func ensureSockDir(_ dir: String) -> String? {
+        var st = stat()
+        if lstat(dir, &st) != 0 {
+            if mkdir(dir, 0o700) != 0 && errno != EEXIST { return "mkdir \(dir)：\(LiveWire.errnoText())" }
+            if lstat(dir, &st) != 0 { return "lstat \(dir)：\(LiveWire.errnoText())" }
+        }
+        if (st.st_mode & S_IFMT) != S_IFDIR { return "\(dir) 不是目录（可能是符号链接）" }
+        if st.st_uid != geteuid() { return "\(dir) 的属主不是当前用户" }
+        if (st.st_mode & 0o022) != 0 { return "\(dir) 对组或其他用户可写" }
+        return nil
+    }
+
+    /// lstat(S)：不存在 → 好；是 socket、属主是自己 → unlink（我持有锁，它一定是残留）；是别的东西 → 不碰，不开桥。
+    private static func removeStaleSocket(_ path: String) -> Bool {
+        var st = stat()
+        guard lstat(path, &st) == 0 else { return true }
+        guard (st.st_mode & S_IFMT) == S_IFSOCK, st.st_uid == geteuid() else {
+            log("\(path) 已经有了，又不是自己的 socket：不删，不开桥")
+            return false
+        }
+        unlink(path)
+        log("stale socket replaced：\(path)")
+        return true
+    }
+
+    private struct BindError: Error {
+        let text: String
+    }
+
+    /// socket → CLOEXEC → 监听 socket 上 SO_NOSIGPIPE → bind → chmod 0600 → listen(64)。chmod 在 listen 之前，
+    /// 中间没有能连进来的窗口。积压 64（§9.1 第二轮：macOS 积压满了 connect 直接 ECONNREFUSED），同时在线另限 16 个。
+    private func bindNew(_ path: String) -> Result<(Int32, UInt64), BindError> {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        if fd < 0 { return .failure(BindError(text: "socket：\(LiveWire.errnoText())")) }
+        LiveFD.setCloexec(fd)
+        if layers.listen { LiveFD.setNoSigpipe(fd) }
+        guard let rc = LiveSockAddr.with(path, { bind(fd, $0, $1) }) else {
+            close(fd)
+            return .failure(BindError(text: "socket 路径超过 \(LiveSockAddr.maxPathBytes) 字节：\(path)"))
+        }
+        if rc != 0 {
+            let e = LiveWire.errnoText()
+            close(fd)
+            return .failure(BindError(text: "bind \(path)：\(e)"))
+        }
+        chmod(path, 0o600)
+        if listen(fd, 64) != 0 {
+            let e = LiveWire.errnoText()
+            close(fd)
+            unlink(path)
+            return .failure(BindError(text: "listen：\(e)"))
+        }
+        var st = stat()
+        lstat(path, &st)
+        return .success((fd, UInt64(st.st_ino)))
+    }
+
+    /// 锁文件那一行（§9.2.1 第 3 步）：谁持有、桥开没开、版本。
+    func writeLockInfo() {
+        let (l, b) = withState { (lock, bridge) }
+        guard let l else { return }
+        l.writeInfo(lockInfo(b))
+    }
+
+    private func lockInfo(_ b: Bridge) -> [String: Any] {
+        var info: [String: Any] = ["role": "app", "pid": Int(getpid()), "bridge": b.word]
+        if let r = b.reason { info["reason"] = r }
+        info["proto"] = [protoMin, protoMax]
+        info["version"] = LiveBuildInfo.version
+        info["build"] = LiveBuildInfo.build
+        info["uuid"] = LiveBuildInfo.uuid
+        info["exe"] = LiveBuildInfo.exe
+        info["started"] = started
+        info["socket"] = paths?.socketPath ?? ""
+        return info
+    }
+
+    /// 每 10 s 一次（测试宿主可以改，§9.2.4）：
+    /// - 锁：inode 对不上 / 锁文件不在了 → 重新建、重新拿；拿不到就关桥；
+    /// - socket 还在、inode 没变 → utimes(S) 和 utimes(SockDir)（防 dirhelper 按「3 天没访问」清，connect 不刷新 atime）；
+    ///   不在了 / 被换了 → 整段重做开桥那一步（SockDir 也可能被整个清掉，照样重建、照样检查）；
+    /// - 开桥失败过的（bind、SockDir）这里再试一次。
+    private func startSelfCheck() {
+        let already = withState { selfCheckTimer != nil }
+        guard !already else { return }
+        let timer = DispatchSource.makeTimerSource(queue: selfCheckQueue)
+        timer.schedule(deadline: .now() + .milliseconds(selfCheckMs), repeating: .milliseconds(selfCheckMs))
+        timer.setEventHandler { [weak self] in self?.selfCheck() }
+        setLocked { selfCheckTimer = timer }
+        timer.resume()
+    }
+
+    private func selfCheck() {
+        bridgeOps.lock()
+        defer { bridgeOps.unlock() }
+        guard let paths else { return }
+        let (l, b, stopping) = withState { (lock, bridge, shuttingDown) }
+        guard let l, !stopping else { return }
+        bump("selfchecks")
+        switch l.selfCheck(info: lockInfo(b)) {
+        case .ok:
+            break
+        case .reacquired:
+            bump("lock_reacquired")
+            Self.log("锁文件被删 / 换过：重新建好、重新拿到了")
+        case .lost(let why):
+            bump("lock_lost")
+            Self.log("锁丢了（\(why)）：AI 实时操作停了，重开 app 恢复")
+            closeBridge("lock_lost")
+            setLocked { bridge = .unavailable("lock_lost") }
+            return
+        }
+        switch b {
+        case .on:
+            break
+        case .unavailable(let r) where ["bind_failed", "sock_dir_unsafe", "socket_path_occupied"].contains(r):
+            _ = openBridge()
+            return
+        default:
+            return
+        }
+        let ino = withState { boundIno }
+        var st = stat()
+        if lstat(paths.socketPath, &st) == 0, (st.st_mode & S_IFMT) == S_IFSOCK, UInt64(st.st_ino) == ino {
+            utimes(paths.socketPath, nil)
+            utimes(paths.sockDir, nil)
+            return
+        }
+        Self.log("socket 文件不在了或被换了：重新 bind")
+        bump("rebinds")
+        if openBridge() {
+            Self.log("重新 bind 好了")
+        }
+    }
+
+    // MARK: - accept
+
+    private func startAcceptThread() {
+        let start: Bool = withState {
+            if acceptStarted { return false }
+            acceptStarted = true
+            var fds: [Int32] = [-1, -1]
+            if pipe(&fds) == 0 {
+                LiveFD.setCloexec(fds[0])
+                LiveFD.setCloexec(fds[1])
+                _ = fcntl(fds[0], F_SETFL, O_NONBLOCK)
+                _ = fcntl(fds[1], F_SETFL, O_NONBLOCK)
+                wakeR = fds[0]
+                wakeW = fds[1]
+            }
+            return true
+        }
+        guard start else { return }
+        let thread = Thread { [weak self] in self?.acceptLoop() }
+        thread.name = "xuanpian.live.accept"
+        thread.start()
+    }
+
+    private func wakeAcceptThread() {
+        let w = withState { wakeW }
+        guard w >= 0 else { return }
+        var byte: UInt8 = 1
+        _ = write(w, &byte, 1)
+    }
+
+    private func acceptLoop() {
+        var drainBuf = [UInt8](repeating: 0, count: 64)
+        while true {
+            let (lfd, old, paused, wr, stop) = withState { () -> (Int32, [(fd: Int32, drain: Bool)], Double, Int32, Bool) in
+                let o = retired
+                retired = []
+                return (listenFd, o, pausedUntil, wakeR, shuttingDown)
+            }
+            for item in old {
+                if item.drain { drainQueued(item.fd) }
+                close(item.fd)
+            }
+            if stop && lfd < 0 { return }
+            let now = LiveWire.nowMs()
+            if paused > now || lfd < 0 {
+                // 暂停 accept（test.pause_accept）或桥关着：只等唤醒管道，积压留在内核里
+                var pfd = pollfd(fd: wr, events: Int16(POLLIN), revents: 0)
+                let wait = lfd < 0 ? Int32(500) : Int32(max(1, min(500, paused - now)))
+                _ = poll(&pfd, wr >= 0 ? 1 : 0, wait)
+                if pfd.revents != 0 { _ = read(wr, &drainBuf, drainBuf.count) }
+                continue
+            }
+            var pfds = [pollfd(fd: lfd, events: Int16(POLLIN), revents: 0), pollfd(fd: wr, events: Int16(POLLIN), revents: 0)]
+            let pr = poll(&pfds, wr >= 0 ? 2 : 1, 500)
+            if pr <= 0 { continue }
+            if wr >= 0 && pfds[1].revents != 0 {
+                _ = read(wr, &drainBuf, drainBuf.count)
+                continue
+            }
+            if pfds[0].revents != 0 {
+                let cfd = accept(lfd, nil, nil)
+                if cfd >= 0 { handleAccepted(cfd) }
+            }
+        }
+    }
+
+    /// 换下来的旧监听 fd：上面已经排队的连接照常 accept 完（§9.2.4 第二轮补）。
+    private func drainQueued(_ fd: Int32) {
+        while true {
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            guard poll(&pfd, 1, 0) > 0 else { return }
+            let cfd = accept(fd, nil, nil)
+            if cfd < 0 { return }
+            handleAccepted(cfd)
+        }
+    }
+
+    private func handleAccepted(_ cfd: Int32) {
+        LiveFD.setCloexec(cfd)
+        let inherited = LiveFD.noSigpipe(cfd)
+        if layers.accepted && LiveFD.setNoSigpipe(cfd) != 0 {
+            // 对端已经断了（典型：客户端 hello 超时走了，这边才 accept）。三层全开时一个字节都不写，直接关。
+            Self.log("accept 后 setsockopt(SO_NOSIGPIPE) 失败：\(LiveWire.errnoText()) inherited=\(inherited)")
+            if layers.closeOnFailure {
+                bump("sigpipe_closed")
+                close(cfd)
+                return
+            }
+        }
+        // 对端检查：读任何一个字节之前。
+        var uid: uid_t = 0
+        var gid: gid_t = 0
+        let okPeer = getpeereid(cfd, &uid, &gid) == 0 && uid == geteuid() && !rejectPeers
+        var peerPid: pid_t = 0
+        var plen = socklen_t(MemoryLayout<pid_t>.size)
+        _ = getsockopt(cfd, SOL_LOCAL, LOCAL_PEERPID, &peerPid, &plen)
+        if !okPeer {
+            Self.log("reject peer uid=\(uid) pid=\(peerPid)")
+            bump("rejected_peers")
+            close(cfd)
+            return
+        }
+        let (full, cid): (Bool, Int) = withState {
+            let full = connections >= maxConnections
+            if !full {
+                connections += 1
+                nextConnID += 1
+            }
+            return (full, nextConnID)
+        }
+        if full {
+            bump("too_many_connections")
+            let frame: [String: Any] = ["id": NSNull(), "error": ["code": "too_many_connections", "message": "同时在线的连接已满 \(maxConnections) 个"]]
+            _ = LiveFD.sendAll(cfd, LiveWire.encode(frame), noSignal: layers.noSignal)
+            close(cfd)
+            return
+        }
+        let conn = LiveConnection(id: cid, fd: cfd, peerUID: Int(uid), peerPID: Int(peerPid), server: self)
+        let thread = Thread { conn.run() }
+        thread.name = "xuanpian.live.conn.\(cid)"
+        thread.start()
+    }
+
+    fileprivate func connectionClosed() {
+        setLocked { connections -= 1 }
+    }
+
+    /// test.pause_accept：accept 线程停 ms 毫秒（把积压塞满，测 §9.1 的 ECONNREFUSED 重连）。
+    func pauseAccept(ms: Int) {
+        setLocked { pausedUntil = LiveWire.nowMs() + Double(ms) }
+        wakeAcceptThread()
+    }
+
+    // MARK: - 方法表
+
+    /// 注册一个主线程上的方法（GUI 和测试宿主都有的在 attach 里注册；test.* 只有 LiveHost 会注册）。
+    func register(_ name: String, kind: MethodKind, _ run: @escaping @MainActor (Request) async -> Reply) {
+        setLocked { mainMethods[name] = MainMethod(kind: kind, run: run) }
+    }
+
+    func registerDirect(_ name: String, _ run: @escaping DirectMethod) {
+        setLocked { directMethods[name] = run }
+    }
+
+    /// hello 里的 capabilities（§10.4）：注册了的方法，去掉 test.*（不是给 MCP 的）和测试宿主假装没有的那一个。
+    /// ping 是协议本身的，不列。STEP 2 只有 collage.state；cull.read 这些在 STEP 3a / 3b 注册。
+    func capabilities() -> [String] {
+        withState { mainMethods.keys.filter { !$0.hasPrefix("test.") && $0 != dropCapability }.sorted() }
+    }
+
+    fileprivate enum Lookup {
+        case main(MainMethod)
+        case direct(DirectMethod)
+        case unknown
+    }
+
+    fileprivate func lookup(_ name: String) -> Lookup {
+        withState {
+            if name == dropCapability { return .unknown }
+            if let m = mainMethods[name] { return .main(m) }
+            if let d = directMethods[name] { return .direct(d) }
+            return .unknown
+        }
+    }
+
+    /// 连接线程 → 主线程。App Nap：活动在跳主线程之前就开（§9.4.3 第 1 步），回复写出去以后再关。
+    fileprivate func dispatch(_ method: MainMethod, name: String, id: Any, params: [String: Any],
+                              deadlineMs: Int, opID: String?, conn: LiveConnection) {
+        let received = LiveWire.nowMs()
+        let activity = LiveBox(ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                                     reason: "AI 操作"))
+        conn.beginRequest()
+        let box = LiveBox((id, params))
+        Task { @MainActor [self] in
+            let (id, params) = box.value
+            let req = Request(method: name, params: params, opID: opID, deadlineMs: deadlineMs,
+                              received: received, clientGone: conn.gone)
+            let reply = await self.execute(method, req)
+            conn.send(reply.frame(id: id)) {
+                ProcessInfo.processInfo.endActivity(activity.value)
+            }
+            conn.endRequest()
+        }
+    }
+
+    /// §9.4.3 第 3、4 步：deadline 超了 → expired（不执行）；写请求排进 FIFO、查 op_id 缓存。
+    @MainActor
+    private func execute(_ method: MainMethod, _ req: Request) async -> Reply {
+        guard method.kind == .write else {
+            if let e = expired(req) { return e }
+            return await method.run(req)
+        }
+        guard let op = req.opID, !op.isEmpty, op.utf8.count <= 128 else {
+            return .failure("invalid_argument", "写请求必须带 op_id（1–128 字节）", nil)
+        }
+        if let cached = opCache[op] { return replayed(cached) }
+        if let running = opRunning[op] {
+            // 同一个 op_id 正在执行：等它做完，回同一份结果，不会做两遍
+            let r = await running.value
+            if case .result(let dict) = r { return replayed(dict) }
+            return r
+        }
+        pendingWrites += 1
+        let previous = writeTail
+        let task = Task { @MainActor [self] () -> Reply in
+            await previous?.value
+            if let cached = opCache[op] { return replayed(cached) }
+            if let e = expired(req) { return e }
+            let r = await method.run(req)
+            if case .result(let dict) = r { remember(op, dict) }
+            return r
+        }
+        opRunning[op] = task
+        writeTail = Task { @MainActor in _ = await task.value }
+        let r = await task.value
+        opRunning[op] = nil
+        pendingWrites -= 1
+        return r
+    }
+
+    @MainActor
+    private func expired(_ req: Request) -> Reply? {
+        let queued = LiveWire.nowMs() - req.received
+        guard queued > Double(req.deadlineMs) else { return nil }
+        var data: [String: Any] = ["executed": false, "queued_ms": Int(queued)]
+        data["deadline_ms"] = req.deadlineMs
+        return .failure("expired", "在 app 主线程上排队 \(Int(queued)) ms，超过了截止时间 \(req.deadlineMs) ms：没有执行", data)
+    }
+
+    @MainActor
+    private func replayed(_ dict: [String: Any]) -> Reply {
+        var r = dict
+        r["replayed"] = true
+        return .result(r)
+    }
+
+    @MainActor
+    private func remember(_ op: String, _ dict: [String: Any]) {
+        opCache[op] = dict
+        opOrder.append(op)
+        if opOrder.count > 256 { opCache[opOrder.removeFirst()] = nil }
+    }
+
+    // MARK: - collage.state（STEP 2 先给工程摘要，把主线程这条路跑通；预览、digest、格子在 STEP 3a）
+
+    @MainActor
+    private func collageState(_ req: Request) -> Reply {
+        guard let model else { return .failure("not_ready", "选片工具正在退出", nil) }
+        let batch = model.batch
+        let current: String? = batch.photoDir == nil ? nil : batch.sessionDir.lastPathComponent
+        if let raw = req.params["session"], !(raw is NSNull) {
+            guard let want = raw as? String else { return .failure("invalid_argument", "session 要是字符串", nil) }
+            guard want == current else {
+                let open: Any = openSessionObject(model) ?? NSNull()
+                return .failure("session_not_open", "app 当前打开的不是这一场", ["open_session": open])
+            }
+        }
+        let collage = model.collage
+        let project = collage.project
+        var out: [String: Any] = ["source": "app"]
+        out["session"] = current ?? NSNull()
+        out["page"] = project.pages.isEmpty ? 0 : collage.pageIndex + 1
+        out["pages"] = project.pages.count
+        out["title"] = project.title
+        out["subtitle"] = project.subtitle
+        out["masthead"] = project.masthead
+        out["issue"] = project.issue
+        out["tray"] = project.photos.count
+        var undo: [String: Any] = ["collage_depth": collage.undoDepth, "can_undo": collage.canUndo]
+        undo["can_redo"] = collage.canRedo
+        undo["verdict_can_undo"] = batch.canUndoOverride
+        out["undo"] = undo
+        out["busy"] = ["solving": collage.isSolving, "hints_pending": collage.hintsPending]
+        out["tab"] = Self.tabName(model.tab)
+        let (_, ws) = windowState()
+        out["window_state"] = ws
+        out["window_visible"] = ws == "visible"
+        out["pending_writes"] = pendingWrites
+        return .result(out)
+    }
+
+    // MARK: - hello 的快照
+
+    static func tabName(_ tab: AppTab) -> String {
+        switch tab {
+        case .batch: return "batch"
+        case .watermark: return "watermark"
+        case .collage: return "collage"
+        case .labeling: return "labeling"
+        }
+    }
+
+    @MainActor
+    private func openSessionObject(_ model: AppModel) -> [String: Any]? {
+        let batch = model.batch
+        guard let dir = batch.photoDir else { return nil }
+        var open: [String: Any] = ["session": batch.sessionDir.lastPathComponent, "folder": dir.path]
+        open["name"] = dir.lastPathComponent
+        open["photo_count"] = batch.items.count
+        return open
+    }
+
+    /// 场次、tab、分析状态、窗口：主线程上取，放进加锁的快照（hello 在连接线程上读它）。
+    @MainActor
+    func refreshSnapshot() {
+        guard let model else { return }
+        let open = openSessionObject(model)
+        let tab = Self.tabName(model.tab)
+        let running = model.batch.isRunning
+        let progress = model.batch.progressText
+        let (count, ws) = windowState()
+        setLocked {
+            snap.openSession = open
+            snap.tab = tab
+            snap.analysisRunning = running
+            snap.progressText = progress
+            snap.windows = count
+            snap.windowState = ws
+        }
+    }
+
+    /// 窗口的样子（§9.5.6）：hidden（⌘H）> minimized（全部最小化）> occluded（没有一个窗口可见：被挡住、在别的桌面、
+    /// 全屏 app 占着当前桌面，AppKit 不区分）> visible；没有窗口是 no_window。只看，不动任何窗口。
+    /// 测试宿主的窗口从不 order front，真算的话永远是 occluded / no_window：固定报 visible、1 个窗口，
+    /// 只有 test.set_window_state 能改（§9.8.1 第二轮补）。
+    @MainActor
+    func windowState() -> (Int, String) {
+        if isTestHost { return (1, windowOverride ?? "visible") }
+        // AppModel.make 在 LabelGUIApp.init 里跑，那时应用对象可能还没建好：不碰它，当作还没有窗口
+        guard let app = NSApp else { return (0, "no_window") }
+        let mains = app.windows.filter { $0.canBecomeMain }
+        let shown = mains.filter { $0.isVisible || $0.isMiniaturized }
+        if app.isHidden { return (mains.count, "hidden") }
+        if shown.isEmpty { return (0, "no_window") }
+        if shown.allSatisfy({ $0.isMiniaturized }) { return (shown.count, "minimized") }
+        if !shown.contains(where: { $0.occlusionState.contains(.visible) }) { return (shown.count, "occluded") }
+        return (shown.count, "visible")
+    }
+
+    @MainActor
+    private func observe(_ model: AppModel) {
+        let batch = model.batch
+        let changes: [AnyPublisher<Void, Never>] = [
+            model.$tab.map { _ in () }.eraseToAnyPublisher(),
+            batch.$photoDir.map { _ in () }.eraseToAnyPublisher(),
+            batch.$items.map { _ in () }.eraseToAnyPublisher(),
+            batch.$isRunning.map { _ in () }.eraseToAnyPublisher(),
+            batch.$progressText.map { _ in () }.eraseToAnyPublisher(),
+        ]
+        // receive(on:) 不能省：@Published 在赋值之前就发，回调里直接读拿到的还是旧值。
+        observers = changes.map { change in
+            change.receive(on: DispatchQueue.main).sink { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshSnapshot() }
+            }
+        }
+    }
+
+    /// GUI：窗口状态变化时更新快照（只是观察，不做任何动作）。被挡住、换桌面都走遮挡通知；
+    /// §9.5.6 里那个「当前桌面换了」的通知是工作区对象发的，Live/ 里整个禁用那个类，不用 —— 换桌面时窗口的遮挡状态
+    /// 本来就会变，真窗口里是不是每次都发，留给验收第 9 条。另外每 0.5 s 的心跳也会顺手重算一次。
+    @MainActor
+    private func observeWindows() {
+        let names: [Notification.Name] = [
+            NSWindow.didChangeOcclusionStateNotification, NSWindow.didMiniaturizeNotification,
+            NSWindow.didDeminiaturizeNotification, NSWindow.willCloseNotification, NSWindow.didBecomeMainNotification,
+            NSApplication.didHideNotification, NSApplication.didUnhideNotification,
+        ]
+        for name in names {
+            let token = NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                // willClose 的时候窗口还在列表里：下一轮再算
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { self?.refreshSnapshot() }
+                }
+            }
+            tokens.append(token)
+        }
+        let quit = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil,
+                                                          queue: .main) { [weak self] _ in
+            self?.shutdown()
+        }
+        tokens.append(quit)
+    }
+
+    /// 主线程 0.5 s 心跳：main_beat_ms 只作诊断（App Nap 下定时器会被合并，数会变大，但 app 没卡，§9.2.2）。
+    @MainActor
+    private func startHeartbeat() {
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + .milliseconds(500), repeating: .milliseconds(500))
+        timer.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.setLocked { self.snap.mainBeat = LiveWire.nowMs() }
+                if !self.isTestHost { self.refreshSnapshot() }
+            }
+        }
+        timer.resume()
+        heartbeat = timer
+    }
+
+    // MARK: - hello（连接线程上回）
+
+    fileprivate func helloReply(_ params: [String: Any], peerUID: Int, peerPID: Int) -> (ok: Bool, body: [String: Any]) {
+        let client = params["client"] as? [String: Any] ?? [:]
+        let s: Snapshot = withState {
+            snap.helloCount += 1
+            snap.lastHelloMs = LiveWire.nowMs()
+            // 只记报了 MCP 客户端名字的（标题栏「Claude Code 已连接」用它，STEP 3b）；测试脚本的裸连接不报，不盖掉它
+            if let name = client["mcp_client"] as? String { snap.lastClient = name }
+            return snap
+        }
+        var app: [String: Any] = ["name": "选片工具", "version": LiveBuildInfo.version, "build": LiveBuildInfo.build]
+        app["uuid"] = LiveBuildInfo.uuid
+        app["pid"] = Int(getpid())
+        app["exe"] = LiveBuildInfo.exe
+        var base: [String: Any] = ["proto_min": protoMin, "proto_max": protoMax, "app": app]
+        base["data_dir"] = paths?.dataDir ?? ""
+        base["data_dir_id"] = paths?.dataDirID ?? ""
+        let proto = LiveWire.int(params["proto"]) ?? -1
+        guard proto >= protoMin && proto <= protoMax else {
+            let message = "选片工具的桥协议是 \(protoMin)–\(protoMax)，MCP 是 \(proto)"
+            return (false, ["code": "proto_mismatch", "message": message, "data": base])
+        }
+        guard let id = params["data_dir_id"] as? String, id == paths?.dataDirID else {
+            let message = "选片工具的数据目录是 \(paths?.dataDir ?? "?")（\(paths?.dataDirID ?? "?")），MCP 说的不是同一个"
+            return (false, ["code": "data_dir_mismatch", "message": message, "data": base])
+        }
+        var body = base
+        body["proto"] = proto
+        body["exact_build_match"] = (client["uuid"] as? String) == LiveBuildInfo.uuid
+        body["peer"] = ["uid": peerUID, "pid": peerPID]
+        body["ready"] = s.ready
+        body["bridge"] = "on"
+        body["windows"] = s.windows
+        body["window_state"] = s.windowState
+        body["tab"] = s.tab
+        body["open_session"] = s.openSession ?? NSNull()
+        body["analysis"] = ["running": s.analysisRunning, "progress_text": s.progressText]
+        body["main_beat_ms"] = Int(LiveWire.nowMs() - s.mainBeat)
+        body["capabilities"] = capabilities()
+        return (true, body)
+    }
+
+    // MARK: - 给测试宿主看的（test.state）
+
+    /// 计数、fd 的 CLOEXEC（F_GETFD 自报，live_smoke 另外从外面用 proc_pidfdinfo 核对）、桥、连接数、hello 次数。
+    func debugState() -> [String: Any] {
+        withState {
+            var out: [String: Any] = ["bridge": bridge.word, "bridge_reason": bridge.reason ?? NSNull()]
+            out["connections"] = connections
+            out["hello_count"] = snap.helloCount
+            out["counters"] = counters
+            out["socket"] = paths?.socketPath ?? NSNull()
+            out["lock_path"] = paths?.lockPath ?? NSNull()
+            out["data_dir_id"] = paths?.dataDirID ?? NSNull()
+            var fds: [String: Any] = [:]
+            if let l = lock { fds["lock"] = ["fd": Int(l.fd), "cloexec": LiveFD.isCloexec(l.fd)] }
+            if listenFd >= 0 { fds["listen"] = ["fd": Int(listenFd), "cloexec": LiveFD.isCloexec(listenFd)] }
+            if wakeR >= 0 { fds["wake"] = ["fd": [Int(wakeR), Int(wakeW)], "cloexec": LiveFD.isCloexec(wakeR) && LiveFD.isCloexec(wakeW)] }
+            out["fds"] = fds
+            out["last_client"] = snap.lastClient ?? NSNull()
+            return out
+        }
+    }
+
+    /// 测试宿主 ready 行用：桥开没开、为什么。
+    var bridgeState: Bridge { withState { bridge } }
+
+    // MARK: - 锁着改 / 读
+
+    private func withState<T>(_ body: () -> T) -> T {
+        state.lock()
+        defer { state.unlock() }
+        return body()
+    }
+
+    private func setLocked(_ body: () -> Void) {
+        state.lock()
+        body()
+        state.unlock()
+    }
+
+    private func bump(_ key: String) {
+        setLocked { counters[key, default: 0] += 1 }
+    }
+}
+
+/// 跨线程的一个旗子（连接的 clientGone）。
+final class LiveFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set() {
+        lock.lock()
+        value = true
+        lock.unlock()
+    }
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+/// 一个连接：读线程按行切、串行写队列。fd 只在「读线程结束而且没有在途请求」之后才关：
+/// 不然 fd 号被复用，迟到的回复会写进别人的连接（R6 §3.5）。
+final class LiveConnection: @unchecked Sendable {
+    let id: Int
+    let fd: Int32
+    let peerUID: Int
+    let peerPID: Int
+    let gone = LiveFlag()
+    private unowned let server: LiveServer
+    private let writeQueue: DispatchQueue
+    private let lock = NSLock()
+    private var alive = true
+    private var closed = false
+    private var pending = 0
+    private var readerDone = false
+
+    init(id: Int, fd: Int32, peerUID: Int, peerPID: Int, server: LiveServer) {
+        self.id = id
+        self.fd = fd
+        self.peerUID = peerUID
+        self.peerPID = peerPID
+        self.server = server
+        writeQueue = DispatchQueue(label: "xuanpian.live.conn.\(id).write", autoreleaseFrequency: .workItem)
+    }
+
+    /// 还能往 fd 上写：没被判死，fd 也还没关（关了的 fd 号可能已经分给了别的连接）。
+    private var isAlive: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return alive && !closed
+    }
+
+    private func markDead() {
+        lock.lock()
+        alive = false
+        lock.unlock()
+        shutdown(fd, SHUT_RDWR)
+    }
+
+    private func maybeClose() {
+        lock.lock()
+        let should = readerDone && pending == 0 && !closed
+        if should { closed = true }
+        lock.unlock()
+        if should {
+            close(fd)
+            server.connectionClosed()
+        }
+    }
+
+    func beginRequest() {
+        lock.lock()
+        pending += 1
+        lock.unlock()
+    }
+
+    /// 在途计数在写队列上减：这时这个请求的回复（之前 send 排进同一个串行队列的）已经写完或丢掉了。
+    /// 在调用方线程上减的话，读线程退出时排进去的 maybeClose 可能先跑，看到 pending == 0 就关了 fd，
+    /// 回复接着写进关掉的 fd、甚至写进复用了这个 fd 号的别人的连接（审查实测：40 轮里 4 轮串到了别的客户端）。
+    func endRequest() {
+        writeQueue.async { [self] in
+            lock.lock()
+            pending -= 1
+            lock.unlock()
+            maybeClose()
+        }
+    }
+
+    /// 编码和写都在这个连接自己的队列上（不在主线程）。写失败 = 客户端已经走了：丢掉这条回复、关连接；
+    /// 写操作本身已经生效，靠 op_id 对齐（§9.2.3）。
+    func send(_ frame: [String: Any], thenClose: Bool = false, done: (() -> Void)? = nil) {
+        let box = LiveBox(frame)
+        writeQueue.async { [self] in
+            defer { done?() }
+            guard isAlive else { return }
+            let data = LiveWire.encode(box.value)
+            if !LiveFD.sendAll(fd, data, noSignal: server.layers.noSignal) {
+                LiveServer.log("conn \(id)：write failed（\(LiveWire.errnoText())）—— 客户端走了，丢掉这条回复")
+                markDead()
+            } else if thenClose {
+                markDead()
+            }
+        }
+    }
+
+    func run() {
+        let reader = LiveLineReader(fd: fd, maxLine: LiveWire.maxRequestLine)
+        var helloDone = false
+        loop: while isAlive {
+            let timeout = helloDone ? server.idleTimeoutMs : server.helloTimeoutMs
+            switch reader.next(timeoutMs: timeout) {
+            case .eof:
+                gone.set()
+                break loop
+            case .error:
+                gone.set()
+                break loop
+            case .timeout:
+                LiveServer.log("conn \(id)：\(helloDone ? "空闲" : "hello") 超时，关掉")
+                break loop
+            case .tooLong:
+                let e: [String: Any] = ["code": "request_too_large", "message": "请求一行超过 \(LiveWire.maxRequestLine) 字节"]
+                send(["id": NSNull(), "error": e], thenClose: true)
+                break loop
+            case .line(let line):
+                guard let req = LiveWire.decode(line) else {
+                    // 坏 JSON 只回 parse_error，连接继续可用（R6 T13）
+                    send(["id": NSNull(), "error": ["code": "parse_error", "message": "不是 JSON 对象"]])
+                    continue
+                }
+                let rid = req["id"] ?? NSNull()
+                let method = req["method"] as? String ?? ""
+                let params = req["params"] as? [String: Any] ?? [:]
+                if method == "hello" {
+                    let r = server.helloReply(params, peerUID: peerUID, peerPID: peerPID)
+                    if r.ok {
+                        helloDone = true
+                        send(["id": rid, "result": r.body])
+                    } else {
+                        send(["id": rid, "error": r.body], thenClose: true)
+                        break loop
+                    }
+                    continue
+                }
+                guard helloDone else {
+                    send(["id": rid, "error": ["code": "hello_required", "message": "第一条必须是 hello"]], thenClose: true)
+                    break loop
+                }
+                if method == "ping" {
+                    send(["id": rid, "result": ["pong": true]])  // 不经主线程
+                    continue
+                }
+                let deadline = min(max(LiveWire.int(req["deadline_ms"]) ?? 10_000, 1), 600_000)
+                switch server.lookup(method) {
+                case .unknown:
+                    send(["id": rid, "error": ["code": "unknown_method", "message": "没有这个方法：\(method)"]])
+                case .direct(let run):
+                    send(run(params).frame(id: rid))
+                case .main(let m):
+                    server.dispatch(m, name: method, id: rid, params: params, deadlineMs: deadline,
+                                    opID: req["op_id"] as? String, conn: self)
+                }
+            }
+        }
+        lock.lock()
+        readerDone = true
+        lock.unlock()
+        // 读线程退出不等于连接作废：在途请求照样在主线程上执行完（写已经生效），回复写不出去就丢掉。
+        writeQueue.async { [self] in maybeClose() }
+    }
+}

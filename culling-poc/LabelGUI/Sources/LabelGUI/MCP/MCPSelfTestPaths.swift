@@ -7,8 +7,8 @@ import Foundation
 /// 7. 逐段解析（MCPPaths.walk）：在假的文件系统上走，断言受保护的路径一次都没被 lstat 过；WalkJob 拿一个卡住的假 lstat
 ///    测「同一个路径共用一次」「等不到回 null」「做完再要是新的一次」。
 /// 8. collage_list_templates 的静态表：和 CollageTemplates.builtin 一致、照片格数对得上、画布别名正好盖住全部画布。
-/// 只有第 6 组对照 key 时调了 MCPPaths.appSessionKey（就是 BatchStore.sessionKey(for:)，它会查文件系统），用的是根下
-/// 不存在的 /nonexistent-xp-mcp-selftest/…；其余都是纯函数。
+/// 只有第 6 组对照 key 时调了 MCPPaths.appSessionKey（就是 BatchStore.sessionKey(for:)，它会查文件系统），和第 10 组
+/// 按路径核对 session 时逐段 lstat 了，用的都是根下不存在的 /nonexistent-xp-mcp-selftest/…；其余都是纯函数。
 extension MCPSelfTest {
     typealias Check = (Bool, @autoclosure () -> String) -> Void
 

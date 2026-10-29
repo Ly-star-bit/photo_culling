@@ -66,8 +66,19 @@ if CommandLine.arguments.contains("--mcp-selftest") {
     MCPSelfTest.run()
 }
 
+// --app-ui、--live-host 是测试宿主：整套 store 都会写数据目录，所以 LABELGUI_DATA_DIR 没设、或者指到真实数据目录的，
+// 在建目录、注册字体之前就退出（它们自己的分派里还会再查一遍，那时已经晚了）。不跑 Python，不同步运行时（§9.7、§10.5）；
+// 字体照常注册（要渲染）。
+let testHostFlag: String? = CommandLine.arguments.contains("--live-host") ? "--live-host"
+    : CommandLine.arguments.contains("--app-ui") ? "--app-ui" : nil
+if let testHostFlag {
+    CollageCLI.requireIsolatedDataDir(testHostFlag)
+    AppUISnapshot.requireNotRealDataDir(testHostFlag)
+}
 ensureAppDataDir()
-syncEmbeddedPipeline(to: appDataDir)
+if testHostFlag == nil {
+    syncEmbeddedPipeline(to: appDataDir)
+}
 // 内置字体（报纸风刊头的哥特体）进本进程的字体表：按名字找字体的地方也认得它（见 CollageEmbeddedFonts）。
 CollageEmbeddedFonts.registerForProcess(in: appDataDir)
 
@@ -518,6 +529,15 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--app-ui"),
    CommandLine.arguments.count > flagIndex + 2 {
     MainActor.assumeIsolated {
         AppUISnapshot.run(flagIndex: flagIndex)
+    }
+}
+
+// 实时桥的无头测试宿主（测试用，窗口不显示）：LABELGUI_DATA_DIR=<临时> LABELGUI_LIVE_SOCK_ROOT=<测试目录>
+// LABELGUI_LIVE_TEST_OUT=<快照目录> LabelGUI --live-host <photo_dir> [--size …] [--tab …] [--no-view]（见 Live/LiveHost.swift）。
+// 和 app 同一个 AppModel.make、同一个 LiveServer，只差 socket 根目录和 test.* 方法；测试脚本是 Scripts/live_smoke.py。
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--live-host") {
+    MainActor.assumeIsolated {
+        LiveHost.run(flagIndex: flagIndex)
     }
 }
 

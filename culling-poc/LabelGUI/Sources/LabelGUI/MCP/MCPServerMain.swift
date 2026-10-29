@@ -62,8 +62,8 @@ enum MCPServerMain {
         }
     }
 
-    /// 这一次 tools/list 里的工具和处理函数（顺序 = §10.1）。S1：要 app 的 15 个一律回 app_not_running
-    /// （live.state 固定是 not_running，不探测；STEP 2 接上 LiveClient）。
+    /// 这一次 tools/list 里的工具和处理函数（顺序 = §10.1）。要 app 的 15 个按 §10.2 路由（MCPLiveTools）：每次调用探一次，
+    /// app 没开一律 app_not_running，服务器绝不启动 app。
     static func registry(live: Bool) -> [MCPStdioServer.Tool] {
         MCPToolDefs.tools(live: live).compactMap { def in
             guard let name = def["name"] as? String else { return nil }
@@ -72,16 +72,12 @@ enum MCPServerMain {
             case "app_status": handler = MCPStatus.appStatus
             case "cull_list_sessions": handler = MCPInProcessTools.listSessions
             case "collage_list_templates": handler = MCPInProcessTools.listTemplates
-            default: handler = { _ in appNotRunning() }
+            default:
+                guard let routed = MCPLiveTools.handler(name) else { return nil }
+                handler = routed
             }
             return MCPStdioServer.Tool(name: name, definition: def, handler: handler)
         }
-    }
-
-    /// §10.2：app 没开时要 app 的工具都回这个（读写共用）。
-    static func appNotRunning() -> MCPStdioServer.ToolResult {
-        .error("app_not_running", "选片工具没开。",
-               hint: "请用户自己打开选片工具，并在 app 里打开要处理的场次，再调一次；MCP 不会启动它。")
     }
 
     /// --mcp-tools / --mcp-call 的输出：一行 JSON 写到私有 stdout。
