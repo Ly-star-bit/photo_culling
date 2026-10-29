@@ -135,8 +135,8 @@ enum MCPToolDefs {
      "annotations":"$READ","_meta":"$ALWAYS_LOAD"},
 
     {"name":"collage_list_templates","title":"拼图模板与成套",
-     "description":"列出拼图和相册能用的东西：内置模板（现在 {{template_count}} 个，{{category_count}} 个分类：{{categories}}），每个模板的分类、照片格数、需要几张横图和竖图；一键成套 kits（{{kits}}）；样式 style、色调 look、画布 canvas。collage_apply_template 的 template、collage_run_kit 的 kit、collage_set_style 的 style/look 就取这里的值。",
-     "description_disabled":"列出拼图和相册能用的东西：内置模板（现在 {{template_count}} 个，{{category_count}} 个分类：{{categories}}），每个模板的分类、照片格数、需要几张横图和竖图；一键成套 kits（{{kits}}）；样式 style、色调 look、画布 canvas。这个服务器设了 LABELGUI_MCP_LIVE=0，不连 app，只能列出来看。",
+     "description":"列出拼图和相册能用的东西：内置模板（现在 {{template_count}} 个，{{category_count}} 个分类：{{categories}}），每个模板的分类、照片格数、需要几张横图和竖图（photo_cells；fit_aspects 为 true 的套用时还会按照片比例重排）；一键成套 kits（{{kits}}）；样式 style、色调 look、画布 canvas（这一版没有换画布的工具，要换请用户在 app 里换）。collage_apply_template 的 template、collage_run_kit 的 kit、collage_set_style 的 style/look 就取这里的值。",
+     "description_disabled":"列出拼图和相册能用的东西：内置模板（现在 {{template_count}} 个，{{category_count}} 个分类：{{categories}}），每个模板的分类、照片格数、需要几张横图和竖图（photo_cells；fit_aspects 为 true 的套用时还会按照片比例重排）；一键成套 kits（{{kits}}）；样式 style、色调 look、画布 canvas。这个服务器设了 LABELGUI_MCP_LIVE=0，不连 app，只能列出来看。",
      "inputSchema":{"type":"object","properties":{
        "category":{"type":"string","maxLength":40,"description":"只列这个分类（或名字里含这几个字）的模板"},
        "include":{"type":"array","items":{"type":"string","enum":["templates","kits","styles","looks","canvases"]},"uniqueItems":true,"description":"只要这几部分，默认全部"}},

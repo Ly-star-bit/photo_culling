@@ -1,6 +1,7 @@
 import Foundation
 
-/// `LabelGUI --mcp-selftest [--json]`：MCP 这一层几个纯函数的自检，不起服务器、不读写任何文件。
+/// `LabelGUI --mcp-selftest [--json]`：MCP 这一层几个纯函数的自检，不起服务器、不读写任何文件
+/// （只有第 6 组对照 session key 时查了几条根下不存在的路径，见 MCPSelfTestPaths.swift）。
 /// 1. 不开界面的闸（NoGUIGate.decide）：拼错的参数、单横线、长短破折号、前面多空格、serve、没有参数……
 ///    × 父进程是不是 launchd × stdin 是不是终端 × LABELGUI_NO_GUI × LABELGUI_ALLOW_GUI × 两道闸。
 ///    反向用例只拿假的 argv / ppid / tty 喂给纯函数，绝不真的起一个可能开界面的进程。
@@ -9,6 +10,7 @@ import Foundation
 /// 2. MCPJSON：NaN / inf → null、不转义斜杠、键排序、编不了不抛异常、超长截断。
 /// 3. MCPServerMain.mode：只认整个参数相等的 --mcp / --mcp-tools / --mcp-call。
 /// 4. 工具定义：18 个 / 3 个、顺序、schema 规则（§3.0）、enum 和代码里的名单一致、没有漏填的占位。
+/// 5–8. 受保护位置、session 参数、逐段解析、拼图静态表（S2，MCPSelfTestPaths.swift）。--json 时第 5 组每条也打一行。
 enum MCPSelfTest {
     private struct Variant {
         let label: String
@@ -161,6 +163,9 @@ enum MCPSelfTest {
             let first = instructions.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
             check(instructions.count <= 4_096 && first.count <= 512, "instructions 超长（全文 \(instructions.count)，第一段 \(first.count)）")
         }
+
+        // 5–8. 受保护位置、session 参数、逐段解析、拼图静态表
+        pathChecks(check, dump: dump)
 
         for f in failures { print("FAIL " + f) }
         if failures.isEmpty {

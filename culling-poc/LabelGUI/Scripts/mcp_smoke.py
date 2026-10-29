@@ -6,6 +6,9 @@
   --protocol-only  给 build_app.sh 打出来的 app 里的二进制用：不跑第 2 组（fixture 场次、工具语义）和第 7 组（RSS），
                    其余照跑 —— sync、设置域、Bundle 这几条只有 app 里的二进制才走得到
 1 协议（握手、tools/list 和 schema、错误码、stdout 纯净、并发、busy、取消、压力、客户端 fd 的怪样子、退出） 2 没有 app
+（S2：fixture 场次的各个字段、最多 15 场、sessions.json 坏了 / 缺字段 / 没有；受保护位置（含换个写法的：ſ、ﬆ、K、
+/.nofollow/…）拿 sandbox-exec 证明一次都没碰；
+模板 / 分类数和源码里的模板库、画布别名和 CLI 的表、style / look / kit 和 schema 的 enum 对得上；category / include / 截断）
 3 只读不变量  4 不建目录  5 无界面  6 不进程序坞  7 RSS
 
 不碰用户：每个进程都带 LABELGUI_NO_GUI=1 和 `--` 开头的无头参数，LABELGUI_DATA_DIR 和 LABELGUI_LIVE_SOCK_ROOT
@@ -14,7 +17,8 @@
 "不设 LABELGUI_DATA_DIR" 的用例也只在 CI 上跑（$HOME 改不掉 Application Support 的位置，DESIGN §10.5）。
 原型：R3 的 client/mcp_client_test.py（协议、泄漏、取消）和 client/stress.py（并发大响应）。
 """
-import base64, hashlib, json, os, re, select, shutil, signal, subprocess, sys, tempfile, threading, time
+import base64, collections, glob, hashlib, json, os, pwd, re, select, shutil, signal, subprocess, sys, tempfile, threading, time
+import unicodedata
 
 ARGS = sys.argv[1:]
 if not ARGS or ARGS[0].startswith("-"):
@@ -93,18 +97,20 @@ def env_for(data_dir, **extra):
     return env
 
 
-def run_cli(args, data_dir, timeout=20, stdin=subprocess.DEVNULL, **extra):
+def run_cli(args, data_dir, timeout=20, stdin=subprocess.DEVNULL, wrap=(), **extra):
+    """wrap：套在 LabelGUI 前面的命令（第 2 组的 sandbox-exec）。LabelGUI 自己的参数照样必须 -- 开头。"""
     assert args and args[0].startswith("--"), "本地起的进程必须带 -- 开头的无头参数"
-    return subprocess.run([BIN, *args], env=env_for(data_dir, **extra), stdin=stdin, capture_output=True,
+    return subprocess.run([*wrap, BIN, *args], env=env_for(data_dir, **extra), stdin=stdin, capture_output=True,
                           timeout=timeout, cwd=WORK)
 
 
 class Server:
     """起一个 `--mcp`：stdout 按需读（不读就是给服务器背压），stderr 后台收。"""
 
-    def __init__(self, data_dir, args=("--mcp",), **extra):
+    def __init__(self, data_dir, args=("--mcp",), wrap=(), **extra):
+        assert args and args[0].startswith("--"), "本地起的进程必须带 -- 开头的无头参数"
         self.spawned = time.time()
-        self.proc = subprocess.Popen([BIN, *args], env=env_for(data_dir, **extra), stdin=subprocess.PIPE,
+        self.proc = subprocess.Popen([*wrap, BIN, *args], env=env_for(data_dir, **extra), stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0, cwd=WORK)
         self.fd = self.proc.stdout.fileno()
         self.buf = b""
@@ -276,16 +282,245 @@ check(re.fullmatch(r"[0-9a-f]{16}", KEY) is not None, f"--session-key 算出 16 
 # 对照：同一个二进制走普通 CLI 会建数据目录、注册字体（app 里的二进制还会同步 runtime/）；后面 --mcp* 的数据目录里就不能有这些。
 check(os.path.isdir(os.path.join(KEYCALC, "fonts")),
       f"对照：普通 CLI 在它的数据目录里建了 fonts/（{sorted(os.listdir(KEYCALC)) if os.path.isdir(KEYCALC) else '目录没建'}）")
+
+
+def session_key(path):
+    """BatchStore.sessionKey(for:)：FNV-1a 算在文件 URL 的 path 上，那是分解形式（NFD；这里的路径都是 ASCII 和汉字，两种一样）。"""
+    h = 0xcbf29ce484222325
+    for b in unicodedata.normalize("NFD", path).encode():
+        h = ((h ^ b) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+    return f"{h:016x}"
+
+
+check(session_key(FIXTURE_PHOTOS) == KEY, f"脚本自己算的 key 和 --session-key 一样（{session_key(FIXTURE_PHOTOS)}）")
+# 受保护位置的 key 只能脚本自己算：--session-key 走 standardizedFileURL，会去 stat 那个路径。
+# 这些路径本脚本也一次都不 stat（os.path.exists、realpath 都不调）：桌面上的那个一碰就可能以终端的名义弹授权框。
+HOME = pwd.getpwuid(os.getuid()).pw_dir            # 和 NSHomeDirectory() 一样取用户记录里的，不看 $HOME
+TAG = f"xp-mcp_smoke-{os.getpid()}-{int(time.time())}"
+DESK_GHOST = os.path.join(HOME, "Desktop", TAG, "never")
+VOL_GHOST = os.path.join("/Volumes", TAG)
+ONLINE = os.path.join(WORK, "在线照片")
+LINK_DESK = os.path.join(WORK, "link-to-desktop")   # 符号链接 → 桌面上那个：光看字符串不受保护，逐段走才看得出来
+LINK_ONLINE = os.path.join(WORK, "link-online")
+A_FILE = os.path.join(WORK, "a-file.jpg")           # 在，但不是文件夹
+os.makedirs(ONLINE)
+os.symlink(DESK_GHOST, LINK_DESK)
+os.symlink(ONLINE, LINK_ONLINE)
+open(A_FILE, "wb").close()
+
+
+def entry(path, count, **kw):
+    e = {"key": session_key(path), "path": path, "name": os.path.basename(path),
+         "lastAnalyzed": "2026-10-26T17:00:00Z", "photoCount": count}
+    e.update(kw)
+    return {k: v for k, v in e.items() if v is not None}
+
+
+# (sessions.json 里的一条, 期望的 folder_online, 期望的 protected_location)；顺序就是 app「最近场次」的顺序
+SESSIONS = [
+    (entry(FIXTURE_PHOTOS, 21, key=KEY, name="labelgui-fixture-photot", bookmark=base64.b64encode(b"not-a-bookmark").decode()),
+     False, False),
+    (entry(DESK_GHOST, 3), None, True),
+    (entry(VOL_GHOST, 4), None, True),
+    (entry(ONLINE, 5), True, False),
+    (entry(LINK_DESK, 6), None, True),
+    (entry(LINK_ONLINE, 7), True, False),
+    (entry(A_FILE, 8), False, False),
+]
 FIXTURE = os.path.join(WORK, "data-fixture")
 os.makedirs(os.path.join(FIXTURE, "sessions", KEY))
 if os.path.isdir(FIX):
     for name in ("manifest.json", "layer1_results.json"):
         shutil.copy(os.path.join(FIX, name), os.path.join(FIXTURE, "sessions", KEY, name))
 with open(os.path.join(FIXTURE, "sessions.json"), "w") as f:
-    json.dump([{"key": KEY, "path": FIXTURE_PHOTOS, "name": "labelgui-fixture-photot",
-                "lastAnalyzed": "2026-10-26 10:00", "photoCount": 21}], f)
-fixture_before = tree_manifest(FIXTURE)
+    json.dump([e for e, _, _ in SESSIONS], f, ensure_ascii=False)
+# 另外三个数据目录：17 场（app 只认前 15）、sessions.json 坏了、sandbox 的对照（那一场在 sandbox 禁掉的非受保护位置）
+MANY = os.path.join(WORK, "data-many")
+os.makedirs(MANY)
+with open(os.path.join(MANY, "sessions.json"), "w") as f:
+    json.dump([entry(os.path.join(WORK, "many", f"shoot{i:02d}"), i) for i in range(17)], f)
+BAD = os.path.join(WORK, "data-bad")
+os.makedirs(BAD)
+with open(os.path.join(BAD, "sessions.json"), "w") as f:
+    f.write('[{"key": "0123456789abcdef", "path": ')
+CTL_GHOST = os.path.join(WORK, "ctl-ghost", "never")
+CTL = os.path.join(WORK, "data-ctl")
+os.makedirs(CTL)
+with open(os.path.join(CTL, "sessions.json"), "w") as f:
+    json.dump([entry(CTL_GHOST, 1)], f)
+# 一条缺 name：app 的 JSONDecoder 整个解不出来（「最近场次」是空的），MCP 也只能列空的；数据目录在、没有 sessions.json
+NONAME = os.path.join(WORK, "data-noname")
+os.makedirs(NONAME)
+with open(os.path.join(NONAME, "sessions.json"), "w") as f:
+    json.dump([entry(ONLINE, 5), entry(os.path.join(WORK, "noname"), 1, name=None)], f, ensure_ascii=False)
+NOINDEX = os.path.join(WORK, "data-noindex")
+os.makedirs(NOINDEX)
+
+# 换个写法指进受保护位置（S2 评审）：APFS 按 Unicode 完整的大小写折叠比名字（ſ = s、ﬆ = st、K = k），根下的
+# /.nofollow/、/.resolve/<n>/ 是内核认的前缀。只会 lowercased() 的判断会把这些当成普通路径去 lstat，落点就是真的桌面。
+# 折成 ASCII 的字符用 Python 自己的 Unicode 表找（和 Swift 的 Foundation 是两份实现），每个先在 WORK 里实测：建 ASCII
+# 名字的目录，换了字符的写法 lstat 必须找得到（APFS 真把它们当成同一个名字），不然这条 ghost 指不进去，证明不了什么。
+# 这几条指的是假 home 里的桌面、文稿、下载（子进程 HOME 指过去，ProtectedPaths 认 $HOME）：哪天判断又漏了，被 sandbox
+# 杀掉的也只是对假 home 的访问，不会以终端的名义去碰真的桌面。/Volumes 用真的（和 VOL_GHOST 一样，根下的查找）。
+FOLD_CHARS = {}
+for cp in range(0x80, 0x110000):
+    folded = unicodedata.normalize("NFC", unicodedata.normalize("NFC", chr(cp)).casefold())
+    if folded and all("a" <= x <= "z" for x in folded):
+        FOLD_CHARS[chr(cp)] = folded
+APFS_PROBE = os.path.join(WORK, "apfs-fold")
+apfs_distinct = []
+for i, (ch, folded) in enumerate(sorted(FOLD_CHARS.items())):
+    os.makedirs(os.path.join(APFS_PROBE, f"{i}-{folded}-x"))
+    if not os.path.lexists(os.path.join(APFS_PROBE, f"{i}-{ch}-x")):
+        apfs_distinct.append(ch)
+check(len(FOLD_CHARS) >= 8 and not apfs_distinct,
+      f"APFS 和 Unicode 完整折叠一致：{len(FOLD_CHARS)} 个折成 ASCII 的字符（{''.join(sorted(FOLD_CHARS))}）换进名字里都找得到 {apfs_distinct}")
+FAKEHOME = os.path.join(WORK, "fakehome")
+for d in ("Desktop", "Documents", "Downloads"):
+    os.makedirs(os.path.join(FAKEHOME, d))
+REAL_FAKEHOME = os.path.realpath(FAKEHOME)
+
+
+def fold_variants(name):
+    """name 里第一处能被某个字符折出来的子串换成那个字符，每个字符一种写法。"""
+    out = []
+    for ch, folded in sorted(FOLD_CHARS.items()):
+        i = name.lower().find(folded)
+        if i >= 0:
+            out.append(name[:i] + ch + name[i + len(folded):])
+    return out
+
+
+FOLD_GHOSTS = []      # (路径, 能不能拿 /bin/test -e 对照：落点在 sandbox 禁掉的地方)
+for d in ("Desktop", "Documents", "Downloads"):
+    FOLD_GHOSTS += [(os.path.join(FAKEHOME, v, TAG, "never"), True) for v in fold_variants(d)]
+FOLD_GHOSTS += [(os.path.join("/", v, TAG), True) for v in fold_variants("Volumes")]
+FOLD_GHOSTS += [("/" + v + "/Volumes/Data" + os.path.join(REAL_FAKEHOME, "Desktop", TAG, "never"), True)
+                for v in fold_variants("System")]
+FOLD_GHOSTS += [("/.nofollow" + os.path.join(REAL_FAKEHOME, "Desktop", TAG, "never"), True),
+                ("/.resolve/1" + os.path.join(REAL_FAKEHOME, "Desktop", TAG, "never"), False)]
+FOLD_GHOSTS += [(os.path.join(WORK, v, "a"), False) for v in fold_variants("x.photoslibrary")]
+FOLD_DIRS = []        # sessions.json 一份最多 15 条（app 只认前 15），多了分几份
+for i in range(0, len(FOLD_GHOSTS), 15):
+    d = os.path.join(WORK, f"data-fold{i // 15}")
+    os.makedirs(d)
+    with open(os.path.join(d, "sessions.json"), "w") as f:
+        json.dump([entry(g, 1) for g, _ in FOLD_GHOSTS[i:i + 15]], f, ensure_ascii=False)
+    FOLD_DIRS.append(d)
+fixture_before = {d: tree_manifest(d) for d in (FIXTURE, MANY, BAD, CTL, NONAME, NOINDEX, *FOLD_DIRS)}
 procs_before = labelgui_processes()
+
+# ---------------------------------------------------------------- 0. 受保护位置（门禁：先跑）
+# 后面几组都拿这份 fixture 不在 sandbox 里跑（列场次、压力、RSS）。万一 --mcp 真去碰了桌面，不在 sandbox 里就是以终端的
+# 名义碰，可能弹授权框 —— 所以这一组放在最前面，没过就不往下跑。
+
+def call_body(r):
+    """--mcp-call 的结果：text 块解析出来的 JSON；不是一行 JSON 就是 None。"""
+    try:
+        return json.loads(json.loads(r.stdout.decode().splitlines()[0])["content"][0]["text"])
+    except Exception:
+        return None
+
+
+def check_session_rows(res, ls, label):
+    """fixture 的 7 场：顺序、folder_online / protected_location、字段（S2，§3.1）。"""
+    rows_ = (ls or {}).get("sessions", [])
+    got = [(r_.get("session"), r_.get("folder"), r_.get("folder_online"), r_.get("protected_location")) for r_ in rows_]
+    want = [(e["key"], e["path"], online, prot) for e, online, prot in SESSIONS]
+    check(not res.get("isError") and (ls or {}).get("total") == len(SESSIONS) and (ls or {}).get("truncated") is False
+          and got == want,
+          f"{label} cull_list_sessions：{len(SESSIONS)} 场按顺序；桌面、/Volumes、指进桌面的符号链接 → folder_online:null + "
+          f"protected_location:true；在线的、指向在线的链接 → true；不存在的、是个文件的 → false" + ("" if got == want else f"：{got}"))
+    keys = {"session", "folder", "name", "photo_count", "last_analyzed", "in_recent_list", "folder_online", "protected_location"}
+    check(rows_ and all(set(r_) == keys for r_ in rows_),
+          f"{label} 每一行恰好这些字段（没有 open_in_app、bookmark）：{[sorted(set(r_) ^ keys) for r_ in rows_]}")
+    check([r_.get("name") for r_ in rows_] == [e["name"] for e, _, _ in SESSIONS]
+          and [r_.get("photo_count") for r_ in rows_] == [e["photoCount"] for e, _, _ in SESSIONS]
+          and all(r_.get("in_recent_list") is True and r_.get("last_analyzed") == "2026-10-26T17:00:00Z" for r_ in rows_),
+          f"{label} name、photo_count、last_analyzed、in_recent_list")
+    check(not (ls or {}).get("warnings"), f"{label} 没有 warning：{(ls or {}).get('warnings')}")
+
+
+# 受保护位置一次都没碰：在 sandbox-exec 里跑，规则是「碰到这些路径（读、写、连查一下在不在都算）就 SIGKILL」。
+# file-test-existence 管的正是对不存在路径的 stat / lstat / access（S2 实测：只禁 file-read* 时，stat 一个不存在的
+# 路径不会触发；加上它以后，不存在的路径本身、更深的子路径、经符号链接、换大小写都会触发）。规则在系统调用进内核时
+# 判断，不管调用来自 Foundation 还是 libc、走哪个函数名，都绕不过去（DYLD 插桩做不到这一点）。
+# 对照：同一条 deny 里还放了一个不受保护、只是被规则禁掉的 CTL_GHOST；只有那一场的数据目录上，同一个二进制被杀，
+# 证明这条规则确实生效、而且抓得到 folderOnline 真正用的那个系统调用。所以 FIXTURE 上没被杀 = 从没碰过桌面、文稿、
+# 下载、/Volumes、/Network、/net 下的任何路径（包括指进桌面的那个符号链接的目标）。
+print("0. 受保护位置一次都没碰（sandbox-exec，碰一下就 SIGKILL；所有模式都先跑这一组）")
+gate_start = len(failures)
+SANDBOX = "/usr/bin/sandbox-exec"
+sb_str = lambda p_: '"' + p_.replace("\\", "\\\\").replace('"', '\\"') + '"'
+# sandbox 的路径规则比的是内核解析完的真实路径（WORK 在 /var/folders 下，内核看到的是 /private/var/folders/…：
+# 第一次写成 WORK 原样，对照那一条就没被杀 —— 这正是对照要抓的「规则没生效」）。所以规则里的路径都先 realpath：
+# HOME 本身可以 realpath（碰的是家目录，不是桌面），桌面、文稿、下载只按字符串接在后面，不去 realpath 它们。
+# 对照禁的是 ctl-ghost 这一段：逐段走到第一个不存在的段就停，禁它下面的 never 抓不到。
+REAL_HOME = os.path.realpath(HOME)
+DENY = ([os.path.join(h_, d) for h_ in (REAL_HOME, REAL_FAKEHOME) for d in ("Desktop", "Documents", "Downloads")]
+        + ["/Volumes", "/Network", "/net"] + [os.path.join(os.path.realpath(WORK), "ctl-ghost")])
+# 经 firmlink 走进去（/System/Volumes/Data/Users/x/Desktop/…）时，sandbox 比的是这个写法，不是 /Users/x/Desktop（S2 实测）：
+# 两种都禁。
+DENY += ["/System/Volumes/Data" + d for d in DENY]
+PROFILE = ("(version 1)(allow default)(deny file-read* file-write* file-test-existence "
+           + " ".join(f"(subpath {sb_str(d)})" for d in DENY) + " (with send-signal SIGKILL))")
+SB = (SANDBOX, "-p", PROFILE)
+if not os.access(SANDBOX, os.X_OK):
+    check(False, f"找不到 {SANDBOX}：「受保护位置一次都没碰」这一条证明不了")
+else:
+    r = run_cli(["--mcp-call", "cull_list_sessions", "{}"], CTL, wrap=SB)
+    check(r.returncode == -signal.SIGKILL,
+          f"对照：同一份规则下，那一场在被禁掉的（不受保护的）不存在路径上 → 进程被 SIGKILL（退出码 {r.returncode}）")
+    r = run_cli(["--mcp-call", "cull_list_sessions", "{}"], FIXTURE, wrap=SB)
+    body = call_body(r)
+    check(r.returncode == 0 and body is not None, f"sandbox 里 --mcp-call cull_list_sessions 正常跑完（退出码 {r.returncode}，被杀是 -9）")
+    check_session_rows({}, body, "sandbox 里 --mcp-call")
+    r = run_cli(["--mcp-call", "app_status", "{}"], FIXTURE, wrap=SB)
+    check(r.returncode == 0 and (call_body(r) or {}).get("sessions") == len(SESSIONS), f"sandbox 里 --mcp-call app_status（退出码 {r.returncode}）")
+    s = Server(FIXTURE, wrap=SB)
+    s.initialize()
+    s.request("sbl", "tools/list")
+    tl_sb = s.reply("sbl")
+    _, st_sb, _ = s.tool("sb1", "app_status")
+    res_sb, ls_sb, _ = s.tool("sb2", "cull_list_sessions")
+    _, ls_sb2, _ = s.tool("sb3", "cull_list_sessions", {"limit": 5})
+    _, lt_sb, _ = s.tool("sb4", "collage_list_templates")
+    _, b_sb, _ = s.tool("sb5", "cull_session_overview", {"session": DESK_GHOST})
+    rc, dt = s.close()
+    check(rc == 0 and tl_sb is not None and st_sb is not None and ls_sb2 is not None and lt_sb is not None
+          and (b_sb or {}).get("error", {}).get("code") == "app_not_running",
+          f"sandbox 里的 --mcp：握手、tools/list、app_status、两次 cull_list_sessions、collage_list_templates、session 填桌面"
+          f"路径的 cull_session_overview（app_not_running）都照常回，EOF 退出码 {rc}（被杀是 -9）")
+    check_session_rows(res_sb, ls_sb, "sandbox 里的 --mcp")
+    # 换写法的 ghost：先拿 /bin/test -e 在同一份规则下对照（被杀 = 这个写法真的落进被禁的位置），再看 --mcp-call 没被杀、
+    # 每一行都是 protected_location:true、folder_online:null。/.resolve/1/… 和 .photoſlibrary 对照不了（后者不在禁的地方），
+    # 只看行。
+    not_killed = []
+    for g, ctl in FOLD_GHOSTS:
+        if ctl and subprocess.run([*SB, "/bin/test", "-e", g], env=env_for(None), cwd=WORK).returncode != -signal.SIGKILL:
+            not_killed.append(g)
+    check(not not_killed, f"对照：{sum(c for _, c in FOLD_GHOSTS)} 条换写法的路径（Deſktop、DesKtop、Volumeſ、Syﬆem/…、/.nofollow/…）"
+          f"同一份规则下 /bin/test -e 被杀，说明内核确实把它们解析进了被禁的位置 {not_killed}")
+    fold_rows, fold_rc = [], []
+    for d in FOLD_DIRS:
+        r = run_cli(["--mcp-call", "cull_list_sessions", '{"limit":100}'], d, wrap=SB, HOME=FAKEHOME)
+        fold_rc.append(r.returncode)
+        fold_rows += (call_body(r) or {}).get("sessions", [])
+    bad_rows = [(r_.get("folder"), r_.get("folder_online"), r_.get("protected_location")) for r_ in fold_rows
+                if r_.get("folder_online") is not None or r_.get("protected_location") is not True]
+    check(set(fold_rc) == {0} and [r_.get("folder") for r_ in fold_rows] == [g for g, _ in FOLD_GHOSTS] and not bad_rows,
+          f"sandbox 里 {len(FOLD_GHOSTS)} 条换写法的场次：没被杀（退出码 {fold_rc}），全部 protected_location:true、"
+          f"folder_online:null {bad_rows}")
+
+gate_failed = failures[gate_start:]
+if gate_failed:
+    print("受保护位置这一组没过：后面的用例不跑（不在 sandbox 里再跑，就可能真的以终端的名义去碰桌面）")
+    for f in gate_failed:
+        print("  FAIL " + f)
+    shutil.rmtree(SOCK_ROOT, ignore_errors=True)
+    if not KEEP:
+        shutil.rmtree(WORK, ignore_errors=True)
+    sys.exit(1)
 
 # ---------------------------------------------------------------- 1. 协议
 
@@ -735,6 +970,11 @@ LABELS = {  # label → (argv[1] 算拼错, 有写对的无头参数)
 }
 r = run_cli(["--mcp-selftest", "--json"], os.path.join(WORK, "never-selftest"))
 rows = [json.loads(l) for l in r.stdout.decode().splitlines() if l.startswith("{")]
+prot_rows = [x for x in rows if x.get("kind") == "protected"]
+rows = [x for x in rows if "kind" not in x]
+prot_bad = [x["path"] for x in prot_rows if x["expected"] != x["actual"]]
+check(len(prot_rows) >= 80 and not prot_bad,
+      f"--mcp-selftest 的受保护位置表：{len(prot_rows)} 条手写期望值全对 {prot_bad[:4]}（另有 session 解析、逐段解析、模板表几组，见退出码）")
 mismatch = []
 for row in rows:
     typo, headless = LABELS.get(row["label"], (None, None))
@@ -768,29 +1008,134 @@ check(all(v == "refuse" for k, v in pick.items() if k[0] in ("-mcp", "em-dash-mc
 
 # ---------------------------------------------------------------- 2. 没有 app
 
+
+def source_templates():
+    """源码里的模板库：每个 `builtin: true, category: …` 算一个（category 写成常量的，取这个文件的 static let category）。"""
+    counts = collections.Counter()
+    total = 0
+    for f in sorted(glob.glob(os.path.join(SRC, "Collage", "*.swift"))):
+        text = open(f, encoding="utf-8").read()
+        const = re.search(r'static let category = "([^"]+)"', text)
+        total += len(re.findall(r"\bbuiltin:\s*true\b", text))
+        for m in re.finditer(r'\bbuiltin:\s*true,\s*category:\s*(?:"([^"]*)"|(category)\b)', text):
+            counts[m.group(1) if m.group(1) is not None else (const.group(1) if const else "?")] += 1
+    return counts, total
+
+
+def source_canvas_aliases():
+    """CollageCLI.canvas(_:) 的 switch 里的别名，按源码顺序。"""
+    text = open(os.path.join(SRC, "Collage", "CollageCLI.swift"), encoding="utf-8").read()
+    body = text[text.index("static func canvas(_ spec: String)"):]
+    return re.findall(r'case "([^"]+)": return', body[:body.index("default:")])
+
+
+def check_templates(s, lt, text):
+    """collage_list_templates：数目和描述、源码对得上；enum；字段；category / include；参数不对（S2，§3.1）。"""
+    lt = lt or {}
+    field = lambda x, k: x.get(k) if isinstance(x, dict) else None   # 旧格式（字符串列表）要判失败，不能把脚本弄崩
+    tpls = [t for t in lt.get("templates", []) if isinstance(t, dict)]
+    cats = [c for c in lt.get("categories", []) if isinstance(c, dict)]
+    desc = by_name["collage_list_templates"]["description"]
+    m = re.search(r"现在 (\d+) 个，(\d+) 个分类：([^）]+)）", desc)
+    by_cat = collections.Counter(t.get("category") for t in tpls)
+    print(f"  模板 {len(tpls)} 个、{len(cats)} 个分类：" + "、".join(f"{c.get('name')} {c.get('count')}" for c in cats))
+    check(m is not None and len(tpls) == int(m[1]) and len(cats) == int(m[2]) and [c["name"] for c in cats] == m[3].split("、")
+          and {c["name"]: c["count"] for c in cats} == dict(by_cat) and sum(c["count"] for c in cats) == len(tpls),
+          "collage_list_templates 的模板数、分类和每类个数，和描述里的数字、templates 自己数出来的一致")
+    if os.path.isdir(os.path.join(SRC, "Collage")):
+        src, total = source_templates()
+        check(total == sum(src.values()) and dict(src) == dict(by_cat) and len(tpls) == total,
+              f"和源码里的模板库对得上：{total} 个 builtin: true、{len(src)} 个分类"
+              + ("，每类个数一样" if dict(src) == dict(by_cat) else f"：源码 {dict(src)}"))
+        aliases = source_canvas_aliases()
+        canv = lt.get("canvases", [])
+        check(aliases and [field(c, "key") for c in canv] == aliases
+              and all(field(c, "name") and (field(c, "width") or 0) > 0 and (field(c, "height") or 0) > 0 for c in canv),
+              f"canvases 的 key 就是 CollageCLI.canvas(_:) 里的 {len(aliases)} 个别名，带名字和尺寸")
+    else:
+        print(f"  skip 找不到源码目录 {SRC}，模板数没和源码对")
+    props = lambda tool: by_name[tool]["inputSchema"]["properties"]
+    styles, looks, kits = lt.get("styles", []), lt.get("looks", []), lt.get("kits", [])
+    check([field(x, "key") for x in styles] == props("collage_set_style")["style"]["enum"]
+          and [field(x, "key") for x in looks] == props("collage_set_style")["look"]["enum"]
+          and [field(x, "id") for x in kits] == props("collage_run_kit")["kit"]["enum"]
+          and all(field(x, "name") for x in styles + looks + kits),
+          f"styles / looks / kits 和 schema 的 enum 一致、都有中文名（{len(styles)} 个样式、{len(looks)} 个色调、{len(kits)} 套）")
+    keys = {"name", "category", "photo_slots", "fit_aspects", "photo_cells", "scatter", "contact_sheet"}
+    bad = [t.get("name") for t in tpls
+           if set(t) != keys or not isinstance(t["photo_slots"], int) or not isinstance(t["fit_aspects"], bool)
+           or (t["photo_cells"] is None) != (t["scatter"] or t["contact_sheet"])
+           or (t["photo_cells"] is not None and (set(t["photo_cells"]) != {"landscape", "portrait", "square"}
+                                                 or sum(t["photo_cells"].values()) != t["photo_slots"]))]
+    check(tpls and not bad and len({t["name"] for t in tpls}) == len(tpls),
+          f"每个模板字段齐、没有重名；网格模板的 photo_cells（横 / 竖 / 方）加起来等于 photo_slots，散落和印样是 null {bad[:4]}")
+    check(len(text) <= 20000 and "\\/" not in text, f"collage_list_templates 的 text {len(text)} 字（≤ 20000）")
+    res, f1, _ = s.tool("tc1", "collage_list_templates", {"category": "时尚刊", "include": ["templates"]})
+    n1 = by_cat.get("时尚刊", 0)
+    check(f1 is not None and set(f1) == {"categories", "templates"} and n1 > 0 and len(f1["templates"]) == n1
+          and all(t["category"] == "时尚刊" for t in f1["templates"]), f"category=时尚刊：{n1} 个，只有 categories + templates")
+    res, f2, _ = s.tool("tc2", "collage_list_templates", {"category": "杂志"})
+    rows2 = [t for t in (f2 or {}).get("templates", []) if isinstance(t, dict)]
+    got2 = [t.get("name") for t in rows2]
+    want2 = [t["name"] for t in tpls if "杂志" in t["category"] or "杂志" in t["name"]]
+    check(got2 == want2 and {"日系杂志", "留白杂志"} <= {t.get("category") for t in rows2},
+          f"category=杂志：分类或名字里含「杂志」的 {len(want2)} 个，按模板库的顺序")
+    res, f3, _ = s.tool("tc3", "collage_list_templates", {"include": ["looks", "looks"]})
+    check(f3 is not None and set(f3) == {"looks"}, "include=[looks, looks]：去重，只给 looks")
+    wrong_args = []
+    for i, a in enumerate(({"category": "__没有这个__"}, {"category": ""}, {"category": 3}, {"include": []},
+                           {"include": ["bogus"]}, {"include": "styles"}, {"x": 1})):
+        res, b, _ = s.tool(f"tc4-{i}", "collage_list_templates", a)
+        if not (res.get("isError") and (b or {}).get("error", {}).get("code") == "invalid_argument" and b["error"].get("hint")):
+            wrong_args.append(a)
+    check(not wrong_args, f"参数不对 → invalid_argument + hint {wrong_args}")
+    res, b, _ = s.tool("tc5", "collage_list_templates", {"category": "__没有这个__"})
+    hint = ((b or {}).get("error") or {}).get("hint", "")
+    check(bool(cats) and all(c.get("name", "") in hint for c in cats), "找不到这个分类：hint 里列出全部分类")
+    r = run_cli(["--mcp-call", "collage_list_templates", "{}"], FIXTURE, LABELGUI_MCP_TEXT_MAX="5000")
+    cut = call_body(r) or {}
+    txt = json.loads(r.stdout.decode().splitlines()[0])["content"][0]["text"] if cut else ""
+    check(len(txt) <= 5000 and cut.get("truncated") is True and 0 < len(cut.get("templates", [])) < len(tpls)
+          and [t["name"] for t in cut["templates"]] == [t["name"] for t in tpls[:len(cut["templates"])]],
+          f"LABELGUI_MCP_TEXT_MAX=5000：text {len(txt)} 字，模板从尾部截掉（留 {len(cut.get('templates', []))} 个）、truncated:true")
+
+
 if not PROTOCOL_ONLY:
     print("2. 没有 app")
     s = Server(FIXTURE)
     s.initialize()
     res, st, _ = s.tool("a1", "app_status")
-    check(st is not None and st["sessions"] == 1 and st["data_dir_exists"] and st["data_dir_readable"]
-          and st["data_dir"] == FIXTURE and st["data_dir_override"] is True, f"app_status：fixture 数据目录、1 场")
+    check(st is not None and st["sessions"] == len(SESSIONS) and st["data_dir_exists"] and st["data_dir_readable"]
+          and st["data_dir"] == FIXTURE and st["data_dir_override"] is True, f"app_status：fixture 数据目录、{len(SESSIONS)} 场")
     check(st is not None and [w["code"] for w in st["warnings"]] == ["app_not_running"], f"app_status.warnings：{(st or {}).get('warnings')}")
     res, ls, _ = s.tool("a2", "cull_list_sessions")
     rows_ = (ls or {}).get("sessions", [])
-    check(not res.get("isError") and ls.get("total") == 1 and len(rows_) == 1 and rows_[0]["session"] == KEY
-          and rows_[0]["folder"] == FIXTURE_PHOTOS and rows_[0]["photo_count"] == 21, f"cull_list_sessions 列出 fixture 场次：{rows_}")
+    check_session_rows(res, ls, "--mcp")
+    res, ls2, _ = s.tool("a2b", "cull_list_sessions", {"limit": 2})
+    check(ls2 is not None and [r_["session"] for r_ in ls2.get("sessions", [])] == [e["key"] for e, _, _ in SESSIONS[:2]]
+          and ls2.get("total") == len(SESSIONS) and ls2.get("truncated") is True, "cull_list_sessions limit:2 → 前 2 场、total 7、truncated")
+    # Claude Code 会并行调只读工具。这里一口气发 6 个，只能说明结果稳定：查一次只要几微秒，不一定真的重叠。
+    # 「同一个文件夹共用一次查询、后来的等同一个结果、等不到记 null」由 --mcp-selftest 的 WalkJob 组拿卡住的假 lstat 确定地测。
+    for i in range(6):
+        s.call(f"par{i}", "cull_list_sessions")
+    par = [s.reply(f"par{i}") for i in range(6)]
+    want_par = [(o_, p_) for _, o_, p_ in SESSIONS]
+    got_par = []
+    for m_ in par:
+        try:
+            b_ = json.loads(m_["result"]["content"][0]["text"])
+            got_par.append(([(r_["folder_online"], r_["protected_location"]) for r_ in b_["sessions"]], b_["warnings"]))
+        except Exception:
+            got_par.append(None)
+    check(all(g_ == (want_par, []) for g_ in got_par),
+          "6 个一口气发的 cull_list_sessions 结果都一样、没有 warning（不保证真的重叠；共用那条路径见 --mcp-selftest）")
     res, bad1, _ = s.tool("a3", "cull_list_sessions", {"limit": 0})
     res2, bad2, _ = s.tool("a4", "cull_list_sessions", {"limit": True})
     res3, bad3, _ = s.tool("a5", "app_status", {"x": 1})
     check(all(r_.get("isError") and b["error"]["code"] == "invalid_argument" for r_, b in ((res, bad1), (res2, bad2), (res3, bad3))),
           "参数不对 → invalid_argument（limit:0、limit:true、app_status 带参数）")
-    res, lt, _ = s.tool("a6", "collage_list_templates")
-    schema_props = lambda tool: by_name[tool]["inputSchema"]["properties"]
-    check(lt is not None and [x["key"] for x in lt.get("styles", [])] == schema_props("collage_set_style")["style"]["enum"]
-          and lt.get("looks") == schema_props("collage_set_style")["look"]["enum"]
-          and [x["id"] for x in lt.get("kits", [])] == schema_props("collage_run_kit")["kit"]["enum"],
-          f"collage_list_templates 的 styles / looks / kits 和 schema 的 enum 一致（{len(lt.get('styles', []))} 个样式）")
+    res, lt, lt_text = s.tool("a6", "collage_list_templates")
+    check_templates(s, lt, lt_text)
     # 15 个要 app 的工具：带合理参数、也带空参数，一律 app_not_running + hint（§10.2）
     sample = {"session": KEY, "ids": ["DSCF7208"], "kind": "scene", "verdict": "pick", "template": "时尚刊",
               "kit": "fashionIssue", "target": "collage"}
@@ -807,6 +1152,29 @@ if not PROTOCOL_ONLY:
     socks = [os.path.join(dp, f) for dp, _, fs in os.walk(SOCK_ROOT) for f in fs]
     check(not socks, f"socket 根目录里什么都没有：{socks}")
     check(not os.path.exists(os.path.join(FIXTURE, ".live.lock")), "数据目录里没有 .live.lock")
+
+    print("2c. 最多 15 场、sessions.json 坏了、text 截断")
+    b = call_body(run_cli(["--mcp-call", "cull_list_sessions", '{"limit":100}'], MANY))
+    st_many = call_body(run_cli(["--mcp-call", "app_status", "{}"], MANY))
+    many_keys = [entry(os.path.join(WORK, "many", f"shoot{i:02d}"), i)["key"] for i in range(15)]
+    check(b is not None and [r_["session"] for r_ in b["sessions"]] == many_keys and b["total"] == 15 and b["truncated"] is False
+          and (st_many or {}).get("sessions") == 15, "sessions.json 有 17 条：和 app 一样只认前 15 条（列表、total、app_status.sessions）")
+    for d, what in ((BAD, "sessions.json 坏了"), (NONAME, "有一条缺 name（app 的 JSONDecoder 整个解不出来）")):
+        b = call_body(run_cli(["--mcp-call", "cull_list_sessions", "{}"], d))
+        st_bad = call_body(run_cli(["--mcp-call", "app_status", "{}"], d))
+        check(b is not None and b["sessions"] == [] and b["total"] == 0
+              and [w["code"] for w in b["warnings"]] == ["sessions_index_unreadable"]
+              and (st_bad or {}).get("sessions") == 0 and "sessions_index_unreadable" in [w["code"] for w in st_bad["warnings"]],
+              f"{what}：空列表 + warning sessions_index_unreadable（cull_list_sessions 和 app_status）")
+    b = call_body(run_cli(["--mcp-call", "cull_list_sessions", "{}"], NOINDEX))
+    check(b is not None and b["sessions"] == [] and b["total"] == 0
+          and [w["code"] for w in b["warnings"]] == ["sessions_index_missing"],
+          f"数据目录在、没有 sessions.json：空列表 + warning sessions_index_missing（没有 data_dir_missing）{(b or {}).get('warnings')}")
+    r = run_cli(["--mcp-call", "cull_list_sessions", "{}"], FIXTURE, LABELGUI_MCP_TEXT_MAX="1000")
+    b = call_body(r) or {}
+    txt = json.loads(r.stdout.decode().splitlines()[0])["content"][0]["text"] if b else ""
+    check(len(txt) <= 1000 and b.get("truncated") is True and b.get("total") == len(SESSIONS)
+          and 0 < len(b.get("sessions", [])) < len(SESSIONS), f"LABELGUI_MCP_TEXT_MAX=1000：cull_list_sessions 截到 {len(b.get('sessions', []))} 场、truncated:true")
 
 # ---------------------------------------------------------------- 4. 不建目录（第 3 组放在最后，等所有进程都跑完再比）
 
@@ -830,7 +1198,8 @@ for label, x in (("--mcp-call", st), ("--mcp", st2)):
     check(x.get("data_dir_exists") is False and x.get("sessions") == 0 and x.get("live", {}).get("state") == "not_running"
           and "data_dir_missing" in [w["code"] for w in x.get("warnings", [])],
           f"{label} app_status：data_dir_exists:false、sessions:0、not_running、warning data_dir_missing")
-check(ls2 is not None and ls2.get("sessions") == [] and ls2.get("total") == 0, "cull_list_sessions：空列表 + warning")
+check(ls2 is not None and ls2.get("sessions") == [] and ls2.get("total") == 0
+      and [w["code"] for w in ls2.get("warnings", [])] == ["data_dir_missing"], "cull_list_sessions：空列表 + warning data_dir_missing")
 check(res.get("isError") and b["error"]["code"] == "app_not_running", "要 app 的工具：app_not_running")
 if ON_GITHUB and os.path.exists(REAL_DATA) is False:
     # 只在 CI 上：不设 LABELGUI_DATA_DIR（runner 上没有真实数据目录），跑完那个目录仍然不存在。
@@ -912,9 +1281,23 @@ LIVE_BANNED = [r"NSApp\.activate", "activateIgnoringOtherApps", "makeKeyAndOrder
                r"export\(", "posix_spawn", r"\bfork\(", r"\bsystem\(", r"\bpopen\("]
 FILE_ACCESS = [r"Data\(contentsOf:", "contentsOfDirectory", r"FileManager\.default", r"fopen\(", r"\.write\(to:", r"\bopen\("]
 FILE_ACCESS_OK = {"MCPPaths.swift", "MCPOutput.swift", "LiveClient.swift", "StdioTakeover.swift"}
+# S2 加（比 §10.5 严）：stat 一族、链接、在不在；还有几个会悄悄查文件系统的 Foundation 路径函数（S2 拿 sandbox-exec 实测）——
+# 不带 isDirectory 的 URL(fileURLWithPath:) 和 appendingPathComponent(_:) 也只许在这四个文件里，而且要带 isDirectory；
+# standardizedFileURL、NSString.standardizingPath、resolvingSymlinksInPath、fileSystemRepresentation（转不了会抛 ObjC 异常）
+# 在 MCP/ 里一处都不许有。这几条只看代码，不看注释（注释里要写清楚为什么不用它们）。
+FILE_ACCESS_S2 = [r"\blstat\(", r"\bstat\(", r"\bfstat\(", r"\bfstatat\(", r"\bstatfs\(", r"readlink\(", r"\brealpath\(",
+                  r"\baccess\(", r"fileExists", "getattrlist", r"opendir\(", "attributesOfItem", "resourceValues",
+                  "fileURLWithPath:", r"appendingPathComponent\(",
+                  # S2 评审补的：别的读文件写法（String / NSData / NSDictionary(contentsOf…)，数组的 append / insert(contentsOf:)
+                  # 不算；FileHandle、流、另起的 FileManager）
+                  r"(?<!append)(?<!insert)\(contentsOf\w*:", r"FileHandle\(for", r"InputStream\(", r"OutputStream\(", r"FileManager\(\)",
+                  r"contents\(atPath", "checkResourceIsReachable", r"\bopenat\(", r"\bmmap\("]
+HIDDEN_FS = ["standardizedFileURL", "standardizingPath", "resolvingSymlinksInPath", "fileSystemRepresentation"]
+NEEDS_ISDIR = ["fileURLWithPath:", r"appendingPathComponent\("]
 
 
-def grep(dirpath, patterns, allowed=()):
+def grep(dirpath, patterns, allowed=(), code_only=False, unless=None):
+    """code_only：去掉 // 注释再看（行首的，和前面有空白的行尾注释）。unless：这一行里有它就不算。"""
     hits = []
     if not os.path.isdir(dirpath):
         return None
@@ -923,6 +1306,10 @@ def grep(dirpath, patterns, allowed=()):
             if not f.endswith(".swift") or f in allowed:
                 continue
             for n, line in enumerate(open(os.path.join(dp, f), encoding="utf-8"), 1):
+                if code_only:
+                    line = re.sub(r"(^|\s)//.*$", "", line)
+                if unless and re.search(unless, line):
+                    continue
                 for pat in patterns:
                     if re.search(pat, line):
                         hits.append(f"{f}:{n} {pat}")
@@ -934,6 +1321,12 @@ if os.path.isdir(MCP_DIR):
     check(not h, f"MCP/ 里没有禁用词 {h[:5]}")
     h = grep(MCP_DIR, FILE_ACCESS, FILE_ACCESS_OK)
     check(not h, f"MCP/ 的文件访问只在 MCPPaths / MCPOutput / LiveClient / StdioTakeover {h[:5]}")
+    h = grep(MCP_DIR, FILE_ACCESS_S2, FILE_ACCESS_OK, code_only=True)
+    check(not h, f"stat / lstat / readlink / access / fileExists / 路径 URL 也只在这四个文件里 {h[:5]}")
+    h = grep(MCP_DIR, HIDDEN_FS, code_only=True)
+    check(not h, f"MCP/ 里没有会悄悄查文件系统的 standardizedFileURL / standardizingPath / resolvingSymlinksInPath {h[:5]}")
+    h = grep(MCP_DIR, NEEDS_ISDIR, code_only=True, unless=r"isDirectory:")
+    check(not h, f"URL(fileURLWithPath:) / appendingPathComponent 都带 isDirectory（不带会先 stat 一下）{h[:5]}")
     h = grep(LIVE_DIR, LIVE_BANNED)
     if h is None:
         print("  skip Live/ 还不存在（STEP 2 加）")
@@ -973,7 +1366,8 @@ if not PROTOCOL_ONLY:
 # ---------------------------------------------------------------- 3. 只读不变量（所有进程都跑完以后比）
 
 print("3. 只读不变量")
-check(tree_manifest(FIXTURE) == fixture_before, "fixture 数据目录整棵树（大小、mtime、sha256）跑前跑后逐项相同；没有 runtime/、fonts/")
+for d, before in fixture_before.items():
+    check(tree_manifest(d) == before, f"{os.path.basename(d)} 整棵树（大小、mtime、sha256）跑前跑后逐项相同；没有 runtime/、fonts/")
 for d, before in defaults_before.items():
     check(defaults_export(d) == before, f"defaults export {d} 跑前跑后相同")
 procs_after = labelgui_processes()
