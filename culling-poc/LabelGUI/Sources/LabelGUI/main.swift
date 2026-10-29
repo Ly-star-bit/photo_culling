@@ -658,6 +658,11 @@ struct LabelGUIApp: App {
                 .preferredColorScheme(.dark)
         }
         .defaultSize(width: 1280, height: 850)
+        // 没有「新建窗口」（⌘N）：五个 store 只有一份（AppModel），第二个窗口和第一个共用同一套 store、同一个 tab，
+        // 像镜子一样，没有用处；AI 的实时桥也就不用分「该发给哪个窗口」（DESIGN §9.5.6）。系统恢复出来的多个窗口照样能用。
+        .commands {
+            CommandGroup(replacing: .newItem) {}
+        }
     }
 }
 
