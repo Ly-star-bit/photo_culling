@@ -19,6 +19,10 @@ struct LiveTestOptions {
     /// LABELGUI_LIVE_TEST_PROTECTED_PREFIX=<目录>：cull.preview 把它当成受保护前缀（§10.7 第 33 条：合成图目录
     /// 假装在桌面上，证明受保护位置不读原图）。
     var protectedPrefix: String?
+    /// LABELGUI_LIVE_TEST_CONNECTED_MS / LABELGUI_LIVE_TEST_JUSTDID_MS：标题栏「已连接」（120 s）、「刚做完」（10 s）
+    /// 留多久（§9.8.2 第 21 条：测试把它们缩短，不用干等两分钟）。
+    var connectedMs: Double?
+    var justDidMs: Double?
 }
 
 /// 实时桥的服务端（DESIGN §9.2–§9.4，原型 R6 的 Server.swift）。
@@ -198,6 +202,8 @@ final class LiveServer: @unchecked Sendable {
     @MainActor private(set) var pendingWrites = 0
     /// 测试宿主模拟最小化 / 别的桌面（test.set_window_state）：只改报出去的值，不碰任何窗口。
     @MainActor var windowOverride: String?
+    /// 测试宿主的「菜单开关」（test.set_bridge）：只在内存里，宿主从不读写 UserDefaults（§9.8.1）。
+    @MainActor private var testBridgeAllowed = true
     @MainActor private var observers: [AnyCancellable] = []
     @MainActor private var tokens: [NSObjectProtocol] = []
     @MainActor private var heartbeat: DispatchSourceTimer?
@@ -304,6 +310,10 @@ final class LiveServer: @unchecked Sendable {
         }
         refreshSnapshot()
         startHeartbeat()
+        // 标题栏指示（§9.6a）：菜单那一项的勾按设置来；另一个实例占着这个数据目录时副标题说一句
+        if case .testHost(let o) = mode { model.indicator.configure(connectedMs: o.connectedMs, justDidMs: o.justDidMs) }
+        model.indicator.setBridgeEnabled(bridgeAllowed)
+        if bridgeState == .unavailable("another_instance") { model.indicator.setAnotherInstance(true) }
         let (held, waiting) = withState { (lock != nil, bridge == .unavailable("waiting_for_lock")) }
         if held {
             enableBridgeIfAllowed()
@@ -312,8 +322,9 @@ final class LiveServer: @unchecked Sendable {
         }
     }
 
-    /// GUI：UserDefaults 里的 live.bridgeEnabled，没有这个键 = 开（§9.6a；菜单开关在 STEP 3b）。只读不写。
-    /// 测试宿主的桥总是开着，不读也不写这个键（§9.8.1：.app 里的二进制和用户的 app 共用设置域）。
+    /// GUI：UserDefaults 里的 live.bridgeEnabled，没有这个键 = 开（§9.6a）。这里只读；写它的只有 main.swift 里的菜单开关。
+    /// 测试宿主不读也不写这个键（§9.8.1：.app 里的二进制和用户的 app 共用设置域），用内存里的 testBridgeAllowed
+    /// （默认开，test.set_bridge 改它）。
     @MainActor
     private var bridgeAllowed: Bool {
         switch mode {
@@ -321,9 +332,36 @@ final class LiveServer: @unchecked Sendable {
             guard !AppRuntime.headless, ProcessInfo.processInfo.environment["LABELGUI_NO_GUI"] != "1" else { return false }
             return UserDefaults.standard.object(forKey: "live.bridgeEnabled") as? Bool ?? true
         case .testHost:
-            return true
+            return testBridgeAllowed
         }
     }
+
+    /// 「允许 AI 实时操作（MCP）」开关（§9.6a；GUI 的菜单和测试宿主的 test.set_bridge 都经 AppModel.setLiveBridge 到这里）。
+    /// 关：关监听 fd、删自己的 socket、锁文件写 bridge:"off"，锁继续持有（§9.2.1 末尾）；`--mcp` 读写都回 bridge_off，
+    /// app 照常开着。开：重做 §9.2.1 第 4、5 步。没拿到锁（另一个实例占着、启动时还在等锁）或者锁丢了时只记下开关：
+    /// 拿到锁时 enableBridgeIfAllowed 照它开不开。GUI 的设置（UserDefaults）由菜单先写好，这里不碰。
+    /// 关的那一刻已经过了第 6a 步的写（还在算的一键成套 / 换封面）照常落地、照常记 aiLog：和用户自己点的一样一步 ⌘Z 撤得掉；
+    /// 排在后面的、正在等用户停手的写，轮到时在第 5 / 6a 步回 bridge_off（§9.6a、§10.8 第 8 条只说关了以后来的调用）。
+    @MainActor
+    func setBridgeEnabled(_ on: Bool) {
+        if case .testHost = mode { testBridgeAllowed = on }
+        model?.indicator.setBridgeEnabled(on)
+        guard withState({ lock != nil && !shuttingDown }) else { return }
+        switch bridgeState {
+        case .off:
+            if on { openBridge() }
+        case .on:
+            if !on { closeBridge("disabled_in_settings") }
+        case .unavailable(let r) where Self.retryable.contains(r):
+            // 开桥失败、自检在重试的那几种：关掉就别再重试了；开着就让自检接着试
+            if !on { closeBridge("disabled_in_settings") }
+        case .unavailable:
+            break
+        }
+    }
+
+    /// 开桥失败以后自检接着重试的原因（路径太长、另一个实例、锁丢了这些不试）。
+    static let retryable: Set<String> = ["bind_failed", "sock_dir_unsafe", "socket_path_occupied"]
 
     /// 拿着锁就开自检定时器，不管桥开没开成：开桥失败（SockDir 不安全、bind 失败）靠它下一轮再试，
     /// 桥关着时锁文件被删也靠它重建（§9.2.4）。只在 openBridge 成功时才开的话，这两种都永远不会被发现。
@@ -567,7 +605,7 @@ final class LiveServer: @unchecked Sendable {
         switch b {
         case .on:
             break
-        case .unavailable(let r) where ["bind_failed", "sock_dir_unsafe", "socket_path_occupied"].contains(r):
+        case .unavailable(let r) where Self.retryable.contains(r):
             _ = openBridge()
             return
         default:
@@ -778,6 +816,11 @@ final class LiveServer: @unchecked Sendable {
         guard method.kind == .write else {
             if let e = expired(req) { return e }
             if let g = clientGone(req) { return g }
+            // 菜单里刚关掉桥：已经连上的连接上排着的读也不做（写由 LiveHandlers 第 5、6a 步挡）。test.* 不挡
+            if case .off = bridgeState, !req.method.hasPrefix("test.") {
+                return .failure("bridge_off", "用户在选片工具菜单里关了「允许 AI 实时操作」：这次没有执行",
+                                ["executed": false, "hint": "请用户在选片工具菜单里打开它；MCP 不会替用户打开"])
+            }
             return await method.run(req)
         }
         guard let op = req.opID, !op.isEmpty, op.utf8.count <= 128 else {
@@ -1021,6 +1064,17 @@ final class LiveServer: @unchecked Sendable {
         return (true, body)
     }
 
+    /// 标题栏「Claude Code 已连接」（§9.6a）：只认 `--mcp` 的 hello（LiveClient.hello 报的 client.name）；另一个实例启动时的
+    /// 探测（answersHello）、测试脚本直接连 socket 的都不算。连接线程上调，经主线程转给指示，hello 本身不等这一跳。
+    fileprivate func noteHello(_ params: [String: Any]) {
+        let client = params["client"] as? [String: Any] ?? [:]
+        guard client["name"] as? String == "xuanpian-mcp" else { return }
+        let name = client["mcp_client"] as? String
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.model?.indicator.sawHello(client: name) }
+        }
+    }
+
     // MARK: - 给测试宿主看的（test.state）
 
     /// 计数、fd 的 CLOEXEC（F_GETFD 自报，live_smoke 另外从外面用 proc_pidfdinfo 核对）、桥、连接数、hello 次数。
@@ -1215,6 +1269,7 @@ final class LiveConnection: @unchecked Sendable {
                     if r.ok {
                         helloDone = true
                         send(["id": rid, "result": r.body])
+                        server.noteHello(params)
                     } else {
                         send(["id": rid, "error": r.body], thenClose: true)
                         break loop

@@ -6,11 +6,62 @@ import Foundation
 /// 17. app_undo 的判定（LiveAILog.check）：AI 写了能撤；用户之后又改过 → undo_not_ours；用户自己撤过 → already_undone_by_user；
 ///     换过场次 → session_switched；没改出东西的写不挡后面的撤销；AI 连撤两步只在中间没插用户的改动时成立。
 /// 18. 忙信号挡哪些写（LiveInteraction.blocks，§9.6b 的表照字面写一遍）。
+/// 19. 标题栏指示（LiveIndicator，§9.6a 的表）：显示什么、谁盖过谁、认不认得客户端的名字、关掉以后忘掉来过谁。
 extension MCPSelfTest {
     static func writeChecks(_ check: Check) {
         writeArgChecks(check)
         undoChecks(check)
         busyChecks(check)
+        indicatorChecks(check)
+    }
+
+    private static func indicatorChecks(_ check: Check) {
+        MainActor.assumeIsolated {
+            let i = LiveIndicator()
+            check(i.text == "" && i.stateName == "none" && i.bridgeEnabled, "没有 AI：副标题是空的，菜单那一项打着勾")
+            i.finished(notice: "AI：不该出现")
+            check(i.text == "", "没开始过的写收尾：什么都不变")
+            i.sawHello(client: "claude-code 2.1.303")
+            check(i.text == "Claude Code 已连接" && i.stateName == "connected", "claude-code 的 hello → 「Claude Code 已连接」：\(i.text)")
+            for (client, want) in [("Claude-Code 2", "Claude Code"), ("claude-ai 0.1", "Claude"), ("cursor-vscode 1", "AI"),
+                                   ("", "AI")] as [(String, String)] {
+                i.sawHello(client: client)
+                check(i.text == want + " 已连接", "mcp_client「\(client)」→「\(want) 已连接」：\(i.text)")
+            }
+            i.sawHello(client: nil)
+            check(i.text == "AI 已连接", "--mcp-call 没有 initialize → 「AI 已连接」：\(i.text)")
+            i.sawHello(client: "claude-code 2.1.303")
+            i.began("套模板")
+            check(i.text == "AI 正在操作：套模板…" && i.stateName == "working", "写在执行 → 「AI 正在操作：套模板…」：\(i.text)")
+            i.sawHello(client: "claude-code 2.1.303")
+            check(i.stateName == "working", "在途写的时候又来一个 hello：还是「正在操作」")
+            let done = "AI：套了模板「封面 · 刊头大图」· 在拼图页 ⌘Z 撤销"
+            i.finished(notice: done)
+            check(i.text == done && i.stateName == "just_did", "做成了 → 和那一页的提示同一句话：\(i.text)")
+            i.sawHello(client: "claude-code 2.1.303")
+            check(i.text == done, "刚做完的那句不被之后的 hello 盖掉")
+            i.began("改判")
+            i.finished(notice: nil)
+            check(i.text == "Claude Code 已连接", "没做成（user_busy、出错、没改出东西）→ 直接回「已连接」：\(i.text)")
+            i.setAnotherInstance(true)
+            check(i.text == "另一个选片工具正在用这个数据目录：AI 只连那一个", "没拿到锁、另一个实例占着：\(i.text)")
+            i.setAnotherInstance(false)
+            i.setBridgeEnabled(false)
+            check(i.text == "" && !i.bridgeEnabled, "菜单里关了：不显示，那一项没打勾")
+            i.setAnotherInstance(true)
+            i.began("套模板")
+            check(i.text == "", "关着的时候什么都不显示（另一个实例、在途的写也一样）")
+            i.finished(notice: done)
+            i.setAnotherInstance(false)
+            i.setBridgeEnabled(true)
+            check(i.text == "" && i.bridgeEnabled, "再打开：不拿关之前的 hello、关着时做完的那句说事（\(i.text)）")
+            i.configure(connectedMs: 0, justDidMs: 0)
+            i.sawHello(client: "claude-code 2.1.303")
+            check(i.text == "", "超过「已连接」的时长（这里设成 0）→ 淡掉：\(i.text)")
+            i.began("改判")
+            i.finished(notice: done)
+            check(i.text == "", "超过「刚做完」的时长 → 不再显示那句：\(i.text)")
+        }
     }
 
     private static func writeArgChecks(_ check: Check) {

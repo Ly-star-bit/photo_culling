@@ -662,6 +662,15 @@ struct LabelGUIApp: App {
         // 像镜子一样，没有用处；AI 的实时桥也就不用分「该发给哪个窗口」（DESIGN §9.5.6）。系统恢复出来的多个窗口照样能用。
         .commands {
             CommandGroup(replacing: .newItem) {}
+            // 「选片工具」菜单里带勾的「允许 AI 实时操作（MCP）」（DESIGN §9.6a）：默认开（没有这个键 = 开）。关掉以后 AI 读写
+            // 都回 bridge_off、标题栏不再显示 AI，app 照常开着；再打开就恢复。设置只在这里写（app 自己的 UserDefaults 域）：
+            // 桥那边（AppModel.setLiveBridge）和测试宿主的 test.set_bridge 都不碰 UserDefaults。
+            CommandGroup(after: .appInfo) {
+                LiveBridgeToggle(indicator: model.indicator) { on in
+                    UserDefaults.standard.set(on, forKey: "live.bridgeEnabled")
+                    model.setLiveBridge(on)
+                }
+            }
         }
     }
 }

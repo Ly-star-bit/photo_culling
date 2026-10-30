@@ -214,7 +214,7 @@ final class BatchStore: ObservableObject {
     @Published var viewRequest: ViewRequest?
     /// BatchView 消费 viewRequest 以后回报的结果（桥读：选中了哪些、哪些被筛选藏起来了）。不发布。
     var viewApplied: ViewApplied?
-    /// AI 改判以后批量页顶栏的一句提示（§9.4.3 第 11 步，桥写；顶栏怎么显示在下一部分做）。
+    /// AI 改判 / 撤销改判以后批量页的一句提示（§9.4.3 第 11 步，桥写，10 s 后桥自己清掉；BatchView 的状态栏显示）。
     @Published var externalNotice: String?
     /// 批量页此刻开着哪些「一直忙」的东西（BatchView 写，桥读，§9.6b）。不发布：界面不跟着它重画。
     var liveUI = LiveUIFlags()

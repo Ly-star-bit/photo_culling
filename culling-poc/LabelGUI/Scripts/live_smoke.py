@@ -17,6 +17,9 @@
       输出目录）
     G 写（§9.8.2 第 3–12、25–27、29 条，§10.7 第 8、9、13、16、33、35–37 条：一个请求恰好一步撤销、app_undo 回到原样、
       op_id 重放、忙信号、切场次、受保护位置、一键成套 / 换封面、找模板、取消、kill -9 → app_outcome_unknown）
+    H 标题栏指示和菜单开关（§9.6a、§9.8.2 第 21 条、§10.8 第 1、2、8 条）：没有 AI 不显示 → 「Claude Code 已连接」→
+      等用户停手时不变 →「AI 正在操作…」→ 那一页的提示 → 淡掉；带标题栏的宿主（--titled）里 AppKit 窗口的副标题跟着走；
+      菜单开关关掉 → 读写都 bridge_off、进程内的照常、不写 UserDefaults，打开 → 恢复；另一个实例的那一句
 每个 --mcp 都带自己的 LABELGUI_MCP_OUT（工作目录里），绝不写 ~/Pictures/xuanpian-mcp。
 
 不碰用户（§9.8.2 的四道闸，一条不改；第 4 道 2026-10-29 收紧）：
@@ -49,7 +52,7 @@ def opt(name):
     return ARGS[ARGS.index(name) + 1] if name in ARGS and ARGS.index(name) + 1 < len(ARGS) else None
 
 
-ONLY = set((opt("--only") or "ABCDEFG").upper().replace(",", ""))
+ONLY = set((opt("--only") or "ABCDEFGH").upper().replace(",", ""))
 PHOTOS_SRC, DATA_SRC = opt("--photos"), opt("--data")
 COLLAGE_SRC = opt("--collage-data")
 
@@ -781,8 +784,8 @@ def bundle_gate_selfcheck():
     check(rcs == [2] * 6 and not os.path.exists(marker),
           f"第 4 道闸：假 .app 路径（符号链接在 .app 里 / .APP 大写 / 外面的链接指进 .app）× (--ci、本地) 都在起进程之前 exit 2 "
           f"{rcs}，假二进制一次都没被启动")
-    check(plan == "plan bundle=1 no_kill=1 groups=ABEFG"
-          and (bare == "exit 2" if BUNDLE else bare.startswith("plan bundle=0 no_kill=0 groups=ABCDEFG")),
+    check(plan == "plan bundle=1 no_kill=1 groups=ABEFGH"
+          and (bare == "exit 2" if BUNDLE else bare.startswith("plan bundle=0 no_kill=0 groups=ABCDEFGH")),
           f"CI 上收 app 里的二进制时不跑杀进程 / sandbox 的组（{plan!r}；裸二进制 {bare!r}）")
 
 
@@ -2634,6 +2637,202 @@ __attribute__((constructor)) static void init(void) {
                   and err_code(r2) == "app_not_running",
                   f"13 一键成套落地之前 kill -9 宿主：app_outcome_unknown（data.op_id {edata(b).get('op_id')}），没改走别处；"
                   f"之后 not_running、读写都 app_not_running")
+
+    # ============================================================ H. 标题栏指示、菜单开关（§9.6a、§9.8.2 第 21 条、§10.8 第 1、2、8 条）
+    if "H" in ONLY:
+        print("H. 标题栏指示、菜单开关")
+        # 带标题栏的宿主（--titled，照样从不显示）：NSHostingView 管窗口的标题和副标题，test.state 的 window_subtitle 是 AppKit
+        # 窗口上真的那个。「已连接」「刚做完」缩短成 6 s、1.5 s（§9.8.2 第 21 条：宿主认测试变量，不用干等 120 s）
+        CONN_MS, DID_MS = 6000, 1500
+        hh = Host("H", args=("--titled",), LABELGUI_LIVE_TEST_CONNECTED_MS=str(CONN_MS), LABELGUI_LIVE_TEST_JUSTDID_MS=str(DID_MS))
+        env = hh.env()
+        defaults_h = {d: defaults_export(d) for d in ("LabelGUI", "local.culling.labelgui")}
+
+        def ind(timeout=2):
+            """(指示的文字, 状态, AppKit 窗口的副标题)。SwiftUI 把副标题交给窗口要等下一次更新：两边对上了、或者等满 timeout 才回。"""
+            deadline = time.monotonic() + timeout * SLACK
+            while True:
+                s_ = state(hh)
+                got = (s_.get("indicator"), s_.get("indicator_state"), s_.get("window_subtitle"))
+                if got[0] == got[2] or time.monotonic() > deadline:
+                    return got
+                time.sleep(0.05)
+
+        def wait_state(name, timeout=30):
+            deadline = time.monotonic() + timeout * SLACK
+            got = ind()
+            while got[1] != name and time.monotonic() < deadline:
+                time.sleep(0.05)
+                got = ind()
+            return got
+
+        def chrome(name):
+            r_ = test_call(hh, "test.chrome", {"name": name, "wait_ms": 300}).get("result") or {}
+            return open(r_["file"], "rb").read() if r_.get("file") else None, r_
+
+        def shot(name, tab):
+            r_ = test_call(hh, "test.snapshot", {"name": name, "tab": tab, "wait_ms": 800}).get("result") or {}
+            return open(r_["file"], "rb").read() if r_.get("file") else None
+
+        # ---------- 没有 AI：副标题是空的（§10.8 第 1 条），菜单那一项打着勾；测试脚本自己连 socket 的 hello 不算
+        s0 = state(hh)
+        check(s0.get("indicator") == "" and s0.get("indicator_state") == "none" and s0.get("bridge_enabled") is True
+              and s0.get("window_subtitle") == "" and "标题栏指示：「」" in hh.log(),
+              f"21 没有 AI：副标题空（指示「{s0.get('indicator')}」、AppKit 窗口「{s0.get('window_subtitle')}」），菜单那一项打着勾；"
+              f"test.* 的裸连接不算 AI")
+        c_none1, _ = chrome("h-chrome-none-1")
+        c_none2, cr = chrome("h-chrome-none-2")
+        b_none1, b_none2 = shot("h-batch-none-1", "批量处理"), shot("h-batch-none-2", "批量处理")
+        k_none = shot("h-collage-none", "拼图")
+        check(c_none1 is not None and c_none1 == c_none2 and b_none1 is not None and b_none1 == b_none2,
+              f"复现性：同一个状态拍两次，标题栏（{len(c_none1 or b'')} 字节）和批量页（{len(b_none1 or b'')} 字节）都逐字节相同")
+        # ---------- Claude Code 连上来（initialize 报 claude-code）：「Claude Code 已连接」；读不改它
+        m = Mcp(env)
+        m.initialize("claude-code", "2.1.303")
+        st1 = m.tool("h1", "app_status") or {}
+        t1 = wait_state("connected", 3)
+        m.tool("h2", "cull_session_overview", {"session": KEY})
+        t1r = ind()
+        c_conn, cr_conn = chrome("h-chrome-connected")
+        check((st1.get("live") or {}).get("state") == "live" and t1 == ("Claude Code 已连接", "connected", "Claude Code 已连接")
+              and t1r[1] == "connected" and c_conn is not None and c_conn != c_none1,
+              f"21 一次 app_status 以后：「{t1[0]}」，AppKit 窗口的副标题「{t1[2]}」；读（overview）不变成「正在操作」（{t1r[1]}）；"
+              f"标题栏的样子变了")
+        # ---------- 等用户停手的时候还不算「正在操作」（第 8 步在等待之后），做成了 → 那一页的提示（§9.4.3 第 11 步）
+        test_call(hh, "test.set_busy", {"reasons": ["pointer"], "ms": 1200})
+        res = {}
+        th = threading.Thread(target=lambda: res.update(v=m.tool("h3", "collage_set_text", {"session": KEY, "title": "标题栏指示"}, 30)))
+        th.start()
+        time.sleep(0.5)
+        t_wait = ind()
+        th.join(40)
+        b3 = res.get("v") or {}
+        t3 = ind()
+        s3 = state(hh)
+        note3 = (b3.get("live") or {}).get("notice")
+        check(t_wait[1] == "connected" and b3.get("changed") is True and note3 and note3.startswith("AI：")
+              and t3 == (note3, "just_did", note3) and (s3.get("collage") or {}).get("notice") == note3,
+              f"等用户停手的 1.2 s 里还是「{t_wait[0]}」；改了标题以后副标题 = 拼图页状态栏的那句 = live.notice「{note3}」")
+        c_did, _ = chrome("h-chrome-justdid")
+        k_did = shot("h-collage-notice", "拼图")
+        check(c_did is not None and c_did not in (c_none1, c_conn) and k_did is not None and k_did != k_none,
+              "「刚做完」的标题栏、拼图页状态栏（有那句提示）和之前的样子不一样")
+        # ---------- 「AI 正在操作：一键成套…」（短词，不是工具 title）：一键成套落地之前拖住（test.delay_next），窗口副标题跟着
+        test_call(hh, "test.delay_next", {"ms": 2000})
+        res = {}
+        th = threading.Thread(target=lambda: res.update(v=m.tool("h4", "collage_run_kit", {"session": KEY, "kit": "fashionIssue"}, 120)))
+        th.start()
+        t4 = wait_state("working", 60)
+        c_work, _ = chrome("h-chrome-working")
+        th.join(130)
+        b4 = res.get("v") or {}
+        t4b = ind()
+        note4 = (b4.get("live") or {}).get("notice")
+        check(t4 == ("AI 正在操作：一键成套…", "working", "AI 正在操作：一键成套…") and c_work not in (None, c_conn, c_did),
+              f"21 在途的写：「{t4[0]}」（AppKit 窗口「{t4[2]}」），标题栏的样子和「已连接」「刚做完」都不一样")
+        if b4.get("landing") == "landed":
+            check(note4 and t4b == (note4, "just_did", note4), f"成套落地以后：副标题 = live.notice「{note4}」")
+        else:
+            check(t4b[1] == "connected", f"成套没落地（{b4.get('landing') or err_code(b4)}）：副标题直接回「{t4b[0]}」")
+        # ---------- 没改出东西的写：直接回「已连接」，不留提示
+        b5 = m.tool("h6", "collage_set_text", {"session": KEY, "title": "标题栏指示"}) or {}
+        t5 = ind()
+        check(b5.get("changed") is False and t5[1] == "connected" and t5[0] == "Claude Code 已连接",
+              f"没改出东西的写（同样的标题）：changed false，副标题回到「{t5[0]}」")
+        # ---------- 「刚做完」到点回「已连接」，「已连接」到点淡掉（这一次调用的 hello 是最后一次：从它算 CONN_MS）
+        b6 = m.tool("h7", "cull_set_verdicts", {"session": KEY, "ids": ["DSCF7208"], "verdict": "reject"}) or {}
+        t_ret = time.monotonic()
+        note6 = (b6.get("live") or {}).get("notice")
+        t6 = ind()
+        s6 = state(hh)
+        b_did = shot("h-batch-notice-1", "批量处理")
+        b_did2 = shot("h-batch-notice-2", "批量处理")
+        check(note6 and t6 == (note6, "just_did", note6) and s6.get("external_notice") == note6 and "批量页" in note6,
+              f"改判：副标题 = 批量页状态栏的那句「{note6}」")
+        check(b_did is not None and b_did == b_did2 and b_did != b_none1,
+              "批量页状态栏有那句提示：拍两次逐字节相同，和没有 AI 时不一样")
+        vd_did = s6.get("verdict_digest")
+        time.sleep(max(0, t_ret + DID_MS / 1000 + 0.4 - time.monotonic()))
+        t7 = ind()
+        time.sleep(max(0, t_ret + CONN_MS / 1000 + 0.5 - time.monotonic()))
+        t8 = ind()
+        c_gone, _ = chrome("h-chrome-faded")
+        check(t7 == ("Claude Code 已连接", "connected", "Claude Code 已连接") and t8 == ("", "none", "") and c_gone == c_none1,
+              f"21 「刚做完」{DID_MS} ms 后回「{t7[0]}」，最后一次 hello {CONN_MS} ms 后淡掉（「{t8[0]}」）；标题栏和没有 AI 时逐字节相同")
+        # ---------- --mcp-call 没有 initialize（不知道是谁）：「AI 已连接」
+        mcp_call(env, "app_status")
+        t9 = wait_state("connected", 3)
+        check(t9[0] == "AI 已连接", f"不知道客户端名字（--mcp-call）：「{t9[0]}」")
+        # ---------- 标注校准 tab 自己有 .navigationTitle（§8 第 37 条）：副标题还在
+        test_call(hh, "test.chrome", {"name": "h-chrome-labeling", "tab": "标注校准", "wait_ms": 500})
+        s10 = state(hh)
+        test_call(hh, "test.chrome", {"name": "h-chrome-batch", "tab": "批量处理", "wait_ms": 300})
+        check(s10.get("window_subtitle") == "AI 已连接" and s10.get("tab") == "labeling",
+              f"37 标注校准 tab（自带 navigationTitle「{s10.get('window_title')}」）：AppKit 窗口的副标题还是「{s10.get('window_subtitle')}」")
+        # ---------- 菜单开关（§10.8 第 8 条）：关 → 读写都 bridge_off、进程内的照常、副标题不显示；不写 UserDefaults；开 → 恢复
+        raw = Raw(hh)  # 关之前就连上的连接：关了以后在它上面发的读写也不做
+        r_off = test_call(hh, "test.set_bridge", {"enabled": False, "for_ms": 4000}).get("result") or {}
+        t_off = time.monotonic()
+        rr = raw.call("cull.read", {"session": KEY, "kind": "overview", "args": {}})
+        rw = raw.call("collage.set_text", {"session": KEY, "title": "桥关着"}, op_id=str(uuid.uuid4()))
+        rs = raw.call("test.state").get("result") or {}  # test.* 不挡：测试脚本的连接跨过开关照样能看状态
+        raw.close()
+        st_off, _ = status(env)
+        _, ls_off, _ = mcp_call(env, "cull_list_sessions")
+        _, lt_off, _ = mcp_call(env, "collage_list_templates")
+        _, rd_off, _ = mcp_call(env, "cull_session_overview", {"session": KEY})
+        _, pv_off, _ = mcp_call(env, "cull_preview_photos", {"session": KEY, "ids": ["DSCF7208"]})
+        _, wr_off, _ = mcp_call(env, "collage_set_text", {"session": KEY, "title": "桥关着"})
+        _, un_off, _ = mcp_call(env, "app_undo", {"target": "collage"})
+        lock_off = json.loads(open(os.path.join(hh.data, ".live.lock")).read().splitlines()[0])
+        live_off = st_off.get("live") or {}
+        sess_off = [x.get("session") for x in (ls_off or {}).get("sessions") or []]
+        check(r_off.get("bridge") == "off" and r_off.get("indicator") == "" and not os.path.exists(hh.sock)
+              and lock_off.get("bridge") == "off" and lock_off.get("reason") == "disabled_in_settings" and hh.alive(),
+              f"关掉：socket 删了，锁文件 bridge:off（{lock_off.get('reason')}），副标题「{r_off.get('indicator')}」，宿主照常活着")
+        check(((rr.get("error") or {}).get("code"), (rw.get("error") or {}).get("code")) == ("bridge_off", "bridge_off")
+              and rs.get("bridge") == "off" and rs.get("bridge_enabled") is False and rs.get("indicator") == "",
+              f"关之前就连上的连接：之后发的读、写都 bridge_off（{(rr.get('error') or {}).get('code')}、{(rw.get('error') or {}).get('code')}），"
+              f"test.state 照常回（bridge {rs.get('bridge')}、菜单的勾 {rs.get('bridge_enabled')}、副标题「{rs.get('indicator')}」）")
+        check(live_off.get("state") == "bridge_off" and "菜单" in json.dumps(st_off, ensure_ascii=False)
+              and KEY in sess_off and len((lt_off or {}).get("templates") or []) > 0
+              and [err_code(x) for x in (rd_off, pv_off, wr_off, un_off)] == ["bridge_off"] * 4,
+              f"8 关着：app_status 是 bridge_off（不是 not_running，说明里提到菜单），列场次 / 模板照常，"
+              f"读、看图、写、撤销都 bridge_off {[err_code(x) for x in (rd_off, pv_off, wr_off, un_off)]}")
+        time.sleep(max(0, 4.0 - (time.monotonic() - t_off)) + 0.6)
+        s_on = state(hh)
+        st_on, _ = status(env)
+        _, wr_on, _ = mcp_call(env, "collage_set_text", {"session": KEY, "title": "桥开回来了"})
+        check(s_on.get("bridge") == "on" and s_on.get("bridge_enabled") is True and s_on.get("indicator") == ""
+              and (st_on.get("live") or {}).get("state") == "live" and (wr_on or {}).get("changed") is True,
+              f"再打开：bridge on、副标题「{s_on.get('indicator')}」（关之前的 hello 不算），live，写照常（changed {(wr_on or {}).get('changed')}）")
+        check(all(defaults_export(d) == defaults_h[d] for d in defaults_h),
+              "宿主的开关只在内存里：关、开前后 defaults export LabelGUI / local.culling.labelgui 都没变")
+        ns = state(hh)["nsapp"]
+        check(ns.get("active") is False and ns.get("key_window") is False and ns.get("visible_windows") == 0
+              and ns.get("host_window_visible") is False and ns.get("activation_policy") == 2,
+              f"带标题栏的宿主也从不变成前台、窗口从不显示：{ns}")
+        # ---------- 批量页状态栏那句提示真的画出来了：上面「和没有 AI 时不一样」被同一次改判（格子、顶栏计数）盖住，没有
+        # 这一行的旧二进制也过。提示 10 s 后自己清掉（batchNotice 写死的，DID_MS 管不到；这时离改判已经过了 10 s 多），
+        # 判决还是那时的（中间只有拼图写）：同一个判决状态，有那句提示和没有，批量页必须不一样
+        deadline = time.monotonic() + 15 * SLACK
+        s_late = state(hh)
+        while s_late.get("external_notice") is not None and time.monotonic() < deadline:
+            time.sleep(0.2)
+            s_late = state(hh)
+        b_late1, b_late2 = shot("h-batch-notice-gone-1", "批量处理"), shot("h-batch-notice-gone-2", "批量处理")
+        check(s_late.get("external_notice") is None and vd_did and s_late.get("verdict_digest") == vd_did
+              and b_late1 is not None and b_late1 == b_late2 and b_late1 != b_did,
+              f"那句提示清掉以后（判决没变：{s_late.get('verdict_digest') == vd_did}）批量页拍两次相同，和有提示时不一样：状态栏那一行真的画了")
+        m.close()
+        # ---------- 同一个数据目录的第二个实例：不开桥，副标题说一句（只能从它的日志看：它没有 socket）
+        h2 = Host("H2", data=hh.data, root=hh.root, args=("--no-view",))
+        log2 = h2.log()
+        check(h2.bridge == "unavailable" and h2.reason == "another_instance"
+              and "标题栏指示：「另一个选片工具正在用这个数据目录：AI 只连那一个」" in log2,
+              f"另一个实例占着这个数据目录：第二个不开桥（{h2.reason}），副标题「另一个选片工具正在用这个数据目录：AI 只连那一个」")
+        h2.term()
+        hh.term()
 
     # ============================================================ grep：Live/ 的禁用词（§5 第 7 层、§9.5.6）
     print("grep")

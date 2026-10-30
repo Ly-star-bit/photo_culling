@@ -54,6 +54,8 @@ struct ContentView: View {
             CardImportSheet(center: cardCenter, store: batchStore) { model.tab = .batch }
         }
         .onAppear { cardCenter.start() }
+        // 标题栏副标题：AI 连着 / 正在操作 / 刚做了什么（§9.6a，四个 tab 都在）。不连 AI 时是空的，和以前一样。
+        .modifier(LiveIndicatorSubtitle(indicator: model.indicator))
     }
 
     private var labelingTab: some View {

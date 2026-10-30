@@ -32,6 +32,8 @@ final class AppModel: ObservableObject {
     let interaction = LiveInteraction()
     /// AI 经桥做过的写（app_undo 只撤 AI 自己那一步，§9.3）。
     var aiLog = LiveAILog()
+    /// 标题栏副标题的 AI 指示和菜单开关的勾（§9.6a）。没有桥（--app-ui）时文字一直是空的。
+    let indicator = LiveIndicator()
 
     /// 批量页切场次 → 拼图工程跟着换。
     private var photoDirWatch: AnyCancellable?
@@ -76,6 +78,13 @@ final class AppModel: ObservableObject {
         model.live = live
         live?.attach(model)
         return model
+    }
+
+    /// 「允许 AI 实时操作（MCP）」开关（§9.6a）：GUI 的菜单和测试宿主的 test.set_bridge 走这同一条。关掉 = socket 关掉删掉、
+    /// 锁照常持有、锁文件写 bridge:"off"，`--mcp` 读写都回 bridge_off；app 照常开着。设置（UserDefaults）只由 GUI 的菜单写，
+    /// 这里不碰。
+    func setLiveBridge(_ on: Bool) {
+        live?.setBridgeEnabled(on)
     }
 
     /// 拼图工程挂到批量页当前的场次（同一场再挂只按批量页刷一遍托盘）。和 CollageView.attachSession() 同两行。

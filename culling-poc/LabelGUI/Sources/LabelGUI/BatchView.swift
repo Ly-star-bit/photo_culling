@@ -604,6 +604,12 @@ struct BatchView: View {
                 }
             }
             Spacer()
+            // AI 刚在这一页做了什么（改判、撤销改判，§9.4.3 第 11 步；10 s 后自己消失）。放状态栏不放顶栏（顶栏在 1280pt
+            // 已经挤满），和拼图页状态栏的提示同一个位置、同一个样子：一行放不下就截掉尾巴（悬停看全文）。没有 AI 时这里什么都没有。
+            if let notice = store.externalNotice {
+                Text(notice).font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.tail).help(notice)
+            }
             if !store.progressText.isEmpty {
                 Text(store.progressText).font(.caption).foregroundStyle(.secondary)
                     .lineLimit(1)

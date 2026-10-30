@@ -5,11 +5,13 @@ import CryptoKit
 // MARK: - 无头测试宿主（DESIGN §9.8.1；测试用，不开 GUI：禁止激活、窗口从不显示）
 
 /// LABELGUI_DATA_DIR=<临时> LABELGUI_LIVE_SOCK_ROOT=<测试 socket 根目录> LABELGUI_LIVE_TEST_OUT=<快照目录>
-///   LabelGUI --live-host <photo_dir> [--size 1440x900] [--tab 批量处理|水印|拼图|标注校准] [--no-view]
+///   LabelGUI --live-host <photo_dir> [--size 1440x900] [--tab 批量处理|水印|拼图|标注校准] [--no-view | --titled]
 ///
 /// 和 GUI 同一个 AppModel.make、同一个 LiveServer（bridge: .testHost），区别只在 socket 根目录、测试开关和 test.* 方法；
 /// 和 --app-ui 同一个离屏窗口（AppUISnapshot.offscreenWindow）。`--no-view`：只建 AppModel 和桥，不建 ContentView、
-/// 不建任何 NSWindow（CI 上建不了离屏窗口时的退路，test.snapshot 回 unknown_method）。
+/// 不建任何 NSWindow（CI 上建不了离屏窗口时的退路，test.snapshot 回 unknown_method）。`--titled`：窗口换成带标题栏的
+/// （照样从不显示），NSHostingView 管窗口的标题和副标题：标题栏指示（§9.6a）在 AppKit 里落成什么样，test.state 的
+/// window_subtitle 读得到、test.chrome 拍得到（无边框窗口没有标题栏，§7.4）。
 /// 就绪时往 stdout 打一行 `ready sock=<S> pid=<pid> data_dir_id=<dev:ino> bridge=<on|off|unavailable> reason=<…>`，
 /// 测试脚本只用这一行里的 S（§9.2.1：脚本不自己算）。收到 test.quit 或 SIGTERM / SIGINT 退出。
 /// 用户永远走不到这里：只认 `--` 开头的参数，必须设临时数据目录和测试 socket 根目录，从不读写 UserDefaults。
@@ -78,7 +80,8 @@ enum LiveHost {
         if !args.contains("--no-view") {
             let parts = (option("--size") ?? "1440x900").split(separator: "x").compactMap { Double($0) }
             let size = NSSize(width: parts.first ?? 1440, height: parts.count > 1 ? parts[1] : 900)
-            let (w, host) = AppUISnapshot.offscreenWindow(model: model, size: size)
+            let (w, host) = args.contains("--titled") ? titledWindow(model: model, size: size)
+                                                      : AppUISnapshot.offscreenWindow(model: model, size: size)
             host.layoutSubtreeIfNeeded()
             window = w
             hostView = host
@@ -94,6 +97,8 @@ enum LiveHost {
         let bridge = live.bridgeState
         print("ready sock=\(paths.socketPath) pid=\(getpid()) data_dir_id=\(paths.dataDirID) bridge=\(bridge.word)"
               + " reason=\(bridge.reason ?? "-")")
+        // 标题栏指示的起点（没开桥的宿主 —— 另一个实例占着这个数据目录 —— 连不上 test.state，只能从这一行看）
+        LiveServer.log("标题栏指示：「\(model.indicator.text)」")
         RunLoop.main.run()
         exit(0)
     }
@@ -125,6 +130,15 @@ enum LiveHost {
             o.sigpipe = layers
         }
         o.rejectPeers = env["LABELGUI_LIVE_TEST_REJECT_PEERS"] == "1"
+        for (key, name) in [("LABELGUI_LIVE_TEST_CONNECTED_MS", "connected"), ("LABELGUI_LIVE_TEST_JUSTDID_MS", "justDid")] {
+            guard let raw = env[key], !raw.isEmpty else { continue }
+            // inf、nan、天文数字都不收：LiveIndicator 定时器换算成纳秒时会溢出、宿主直接崩
+            guard let ms = Double(raw), ms.isFinite, ms >= 100, ms <= 600_000 else {
+                print("\(key) 要是 100–600000 的毫秒数：\(raw)")
+                return nil
+            }
+            if name == "connected" { o.connectedMs = ms } else { o.justDidMs = ms }
+        }
         if let raw = env["LABELGUI_LIVE_TEST_PROTECTED_PREFIX"], !raw.isEmpty {
             guard raw.hasPrefix("/") else {
                 print("LABELGUI_LIVE_TEST_PROTECTED_PREFIX 要是绝对路径：\(raw)")
@@ -255,15 +269,16 @@ enum LiveHost {
             return .result(["paused_ms": ms])
         }
         live.register("test.set_bridge", kind: .read) { req in
-            // 模拟菜单里关掉桥：for_ms 后自己重新打开（关着的时候 socket 不在，测试没法再发「打开」）。只改内存，不写 UserDefaults。
+            // 模拟菜单里关掉桥：走和菜单同一条 AppModel.setLiveBridge（只差不写 UserDefaults：宿主的开关只在内存里），
+            // for_ms 后自己重新打开（关着的时候 socket 不在，测试没法再发「打开」）。回复在关之后才写出去：这个连接还在
             guard req.params["enabled"] as? Bool == false, let ms = LiveWire.int(req.params["for_ms"]), (1...60_000).contains(ms) else {
                 return .failure("invalid_argument", "test.set_bridge 只认 {enabled:false, for_ms:1–60000}", nil)
             }
-            live.closeBridge("test")
+            model.setLiveBridge(false)
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) {
-                live.openBridge()
+                model.setLiveBridge(true)
             }
-            return .result(["off_ms": ms])
+            return .result(["off_ms": ms, "bridge": live.bridgeState.word, "indicator": model.indicator.text])
         }
         live.register("test.set_window_state", kind: .read) { req in
             let allowed = ["visible", "occluded", "minimized", "hidden", "no_window"]
@@ -371,6 +386,7 @@ enum LiveHost {
         }
         if view {
             live.register("test.snapshot", kind: .read) { req in await snapshot(req, model: model) }
+            live.register("test.chrome", kind: .read) { req in await chrome(req, model: model) }
         }
     }
 
@@ -430,6 +446,13 @@ enum LiveHost {
             out["disk_edit_digest"] = NSNull()
         }
         out["external_notice"] = batch.externalNotice ?? NSNull()
+        // 标题栏指示（§9.6a）：副标题此刻的文字、状态、菜单那一项的勾；--titled 时另给 AppKit 窗口上真的标题和副标题
+        let indicator = model.indicator
+        out["indicator"] = indicator.text
+        out["indicator_state"] = indicator.stateName
+        out["bridge_enabled"] = indicator.bridgeEnabled
+        out["window_title"] = titled ? window?.title ?? NSNull() : NSNull()
+        out["window_subtitle"] = titled ? window?.subtitle ?? NSNull() : NSNull()
         out["view_request"] = batch.viewRequest.map { ["ids": $0.ids, "select": $0.select] as [String: Any] } ?? NSNull()
         out["view_applied"] = batch.viewApplied.map { v -> [String: Any] in
             ["selected": v.selected, "focus": v.focus ?? NSNull(), "hidden": v.hidden]
@@ -467,6 +490,66 @@ enum LiveHost {
             }
         }
         return out
+    }
+
+    /// --titled：和 AppUISnapshot.offscreenWindow 一样（那个是 --app-ui 的，不动它），只是窗口带标题栏，NSHostingView 管
+    /// 窗口的标题和副标题（SwiftUI 自己的 WindowGroup 窗口本来就这样）。照样从不 order front、不 makeKey、不激活。
+    @MainActor private static var titled = false
+
+    @MainActor
+    private static func titledWindow(model: AppModel, size: NSSize) -> (NSWindow, NSView) {
+        titled = true
+        let view = ContentView(model: model)
+            .frame(width: size.width, height: size.height)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .environment(\.colorScheme, .dark)
+        let host = NSHostingView(rootView: view)
+        host.sceneBridgingOptions = [.title]
+        host.frame = NSRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                              backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.title = "选片工具"
+        window.contentView = host
+        return (window, host)
+    }
+
+    /// test.chrome {name, tab, wait_ms}（只有 --titled）：标题栏那一条（窗口的框架视图顶上，contentView 以外的部分）
+    /// 拍成 <LABELGUI_LIVE_TEST_OUT>/<name>.png，回窗口的标题和副标题。name 规则同 test.snapshot。
+    @MainActor
+    private static func chrome(_ req: LiveServer.Request, model: AppModel) async -> LiveServer.Reply {
+        guard titled, let w = window, let frame = w.contentView?.superview else {
+            return .failure("invalid_state", "test.chrome 要 --titled 的宿主", nil)
+        }
+        guard let name = req.params["name"] as? String, (1...64).contains(name.count),
+              name.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-").contains($0) }) else {
+            return .failure("invalid_argument", "name 只能是 1–64 个 [A-Za-z0-9_-]", nil)
+        }
+        if let t = req.params["tab"] as? String {
+            guard let found = AppUISnapshot.tabNames.first(where: { $0.0 == t }) else {
+                return .failure("invalid_argument", "tab 只认 " + AppUISnapshot.tabNames.map(\.0).joined(separator: "|"), nil)
+            }
+            model.tab = found.1
+        }
+        let wait = min(max(LiveWire.int(req.params["wait_ms"]) ?? 500, 0), 20_000)
+        try? await Task.sleep(nanoseconds: UInt64(wait) * 1_000_000)
+        frame.layoutSubtreeIfNeeded()
+        let content = w.contentLayoutRect
+        let bar = NSRect(x: 0, y: content.maxY, width: frame.bounds.width, height: max(1, frame.bounds.height - content.maxY))
+        guard let dir = outDir, let rep = frame.bitmapImageRepForCachingDisplay(in: bar) else {
+            return .failure("internal", "拍不了标题栏", nil)
+        }
+        frame.cacheDisplay(in: bar, to: rep)
+        guard let data = rep.representation(using: .png, properties: [:]) else { return .failure("internal", "PNG 编不出来", nil) }
+        let file = dir.appendingPathComponent(name + ".png", isDirectory: false)
+        do {
+            try data.write(to: file)
+        } catch {
+            return .failure("internal", "写不出 \(file.path)", nil)
+        }
+        var out: [String: Any] = ["file": file.path, "bytes": data.count, "title": w.title, "subtitle": w.subtitle]
+        out["indicator"] = model.indicator.text
+        return .result(out)
     }
 
     /// test.snapshot {tab, name, wait_ms}：先设 tab、等渲染，cacheDisplay 存成 <LABELGUI_LIVE_TEST_OUT>/<name>.png。

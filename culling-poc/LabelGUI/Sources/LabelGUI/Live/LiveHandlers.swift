@@ -376,11 +376,13 @@ struct PreviewJob: @unchecked Sendable {
 /// 6. 忙信号（§9.6b）：一时的原因每 50 ms 看一次、最多等 busy_wait_ms，一直的原因立刻 user_busy；
 /// 6a. 等过之后把 deadline、clientGone 和第 5 步原样再做一遍 —— 从这里到执行那一行同步 store 调用之间不再有 await，
 ///     核对过的就是执行时的状态（等的那 2 s 里用户可能自己切了场次、开始了分析、改了版式）；
-/// 7. 拼图操作先 ensureCollageAttached；9. 执行（同步的拼图写包在 externalEdit 里，成套 / 换封面 await 它的结局）；
+/// 7. 拼图操作先 ensureCollageAttached；8. 标题栏 → 「AI 正在操作：套模板…」（settle 放行的那一刻；成套 / 换封面在等路人
+///    信息之前就亮：那一段可能等到 20 s，画布不动，标题栏得说 app 在忙 AI 的事）；
+/// 9. 执行（同步的拼图写包在 externalEdit 里，成套 / 换封面 await 它的结局）；
 /// 10. 改判之后 refreshFromBatch、拼图写之后 flushSaves，记 aiLog（op_id 缓存在 LiveServer）；
-/// 11. 提示发到受影响的那一页（拼图页状态栏 / 批量页的 externalNotice），reveal 时切 tab（不激活 app）；
-/// 12–13. 等预览重渲完（最多 1.5 s），编码离开主线程；JSON 编码和写出在连接自己的队列上。
-/// 标题栏「AI 正在操作…」那一行（第 8 步）和窗口里怎么显示 externalNotice 在 STEP 3b 第二部分。
+/// 11. 提示发到受影响的那一页（拼图页 / 批量页的状态栏，后者经 externalNotice），reveal 时切 tab（不激活 app）；同一句话
+///     在标题栏副标题上留 10 s（registerWrites 的包装取结果里的 live.notice 交给 LiveIndicator）；
+/// 12–13. 等预览重渲完（最多 1.5 s），编码离开主线程；JSON 编码和写出在连接自己的队列上；标题栏回到「已连接」。
 extension LiveHandlers {
     typealias Request = LiveServer.Request
     typealias Reply = LiveServer.Reply
@@ -394,7 +396,13 @@ extension LiveHandlers {
         for (name, run) in methods {
             live.register(name, kind: .write) { [weak live, weak model] req in
                 guard let live, let model else { return quitting }
-                return await run(req, live, model)
+                let reply = await run(req, live, model)
+                // 第 11、13 步的标题栏：做成了就留那句提示 10 s，没做成（user_busy、作废、出错）直接回「已连接」。
+                // 写是一个接一个的（FIFO），所以这里收的就是 settle 里点亮的那一个
+                var notice: String?
+                if case .result(let r) = reply { notice = (r["live"] as? [String: Any])?["notice"] as? String }
+                model.indicator.finished(notice: notice)
+                return reply
             }
         }
         // 场次换了（侧栏、存储卡导完自动打开、AI 的 app_open_session）：AI 之前的写都撤不了了（§9.5.1）。
@@ -500,11 +508,25 @@ extension LiveHandlers {
     }
 
     /// 第 6、6a 步：等用户不忙，再把 deadline、clientGone（§10.2：等的时候 `--mcp` 取消了 / 走了就不做）和第 5 步原样再查。
+    /// 都过了就是第 8 步：标题栏 → 「AI 正在操作：套模板…」（等用户停手的时候还是「已连接」：AI 还没动手）。
     static func settle(_ req: Request, _ gate: Gate, live: LiveServer, model: AppModel) async -> Reply? {
         if let stop = await waitUntilIdle(req, gate.scope, model: model) { return stop }
         if let stop = live.expired(req) { return stop }
         if let stop = live.clientGone(req) { return stop }
-        return precheck(req, gate, live: live, model: model, waited: true)
+        if let stop = precheck(req, gate, live: live, model: model, waited: true) { return stop }
+        model.indicator.began(workingLabel(req.method))
+        return nil
+    }
+
+    /// 标题栏「AI 正在操作：…」里的那个短词（§9.6a 的例子是「套模板」）。不用工具的 title：「在 app 里一键成套」
+    /// 「撤销 AI 刚做的一步」放在 app 自己的标题栏上又是「AI」又是「在 app 里」，读着别扭。
+    static func workingLabel(_ method: String) -> String {
+        let labels: [String: String] = [
+            "session.open": "切场次", "cull.set_verdicts": "改判", "cull.show": "定位照片",
+            "collage.apply_template": "套模板", "collage.run_kit": "一键成套", "collage.next_cover": "换封面",
+            "collage.set_text": "改字", "collage.set_style": "换样式", "undo": "撤销",
+        ]
+        return labels[method] ?? method
     }
 
     /// 第 5–6a 步。回 nil = 可以执行。
@@ -538,7 +560,7 @@ extension LiveHandlers {
         return u
     }
 
-    /// 批量页的提示（顶栏怎么显示在第二部分）：10 s 后自己清掉（还是这一句的话）。
+    /// 批量页的提示（BatchView 的状态栏显示）：10 s 后自己清掉（还是这一句的话）。
     static func batchNotice(_ batch: BatchStore, _ text: String) {
         batch.externalNotice = text
         Task { @MainActor [weak batch] in
@@ -880,6 +902,9 @@ extension LiveHandlers {
         // 一直的忙（对话框、裁切、导出……）立刻回，不先等路人信息
         let now = model.interaction.reasons(model, scope: .collage)
         if now.contains(where: { !$0.transient }) { return userBusy(now, waited: 0) }
+        // 第 8 步提前到等路人信息之前（最多 20 s，画布不动）：标题栏说「AI 正在操作：一键成套…」，不是干巴巴的「已连接」。
+        // 之后 settle 再点一次不变；没做成时 registerWrites 的包装照样回「已连接」
+        model.indicator.began(workingLabel(req.method))
         let budget = min(remainingMs(req) - 5_000, 20_000) / 1_000
         let settled = await collage.hintsSettled(timeout: max(0, budget))
         if let stop = await settle(req, gate, live: live, model: model) { return stop }
