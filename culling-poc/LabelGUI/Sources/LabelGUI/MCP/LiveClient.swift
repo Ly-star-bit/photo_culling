@@ -184,6 +184,10 @@ enum LiveClient {
         switch LivePaths.resolve(dataDir: MCPPaths.dataDir.path, sockRoot: LivePaths.clientSockRoot(env)) {
         case .success(let p):
             paths = p
+        case .failure(.dataDir(let e)) where e == EACCES || e == EPERM:
+            // 数据目录 realpath / stat 被拒（多半是宿主的沙箱连元数据都不让看）：看不出 app 开没开，不能当成「没开」
+            // （§9.1 锁文件打不开也是 unreachable，§8 第 27 条）；data_dir_unreadable 由调用方按 MCPPaths 报
+            return Probe(state: .unreachable, reason: Self.dataDirUnreadable + ":\(e)")
         case .failure(.dataDir):
             // 数据目录不存在：不建、不探锁（§10.5 第 4 条）；data_dir_missing 由调用方按 MCPPaths 报
             return Probe(state: .notRunning, reason: "data_dir_missing")
@@ -250,10 +254,13 @@ enum LiveClient {
         }
     }
 
-    /// 锁是空的，但有还没有桥的旧版 app 在跑（§9.1）：只读 LaunchServices 的进程表，不建应用对象。只在默认数据目录时调
-    /// （LABELGUI_MCP_LIVE=0 时 app_status.gui_running 也用它，§9.1 表外 disabled 那一段）。
+    /// 锁是空的，但有还没有桥的旧版 app 在跑（§9.1）：只读 LaunchServices 的进程表，不建应用对象。判 old_app 只在默认数据目录时调
+    /// （LABELGUI_MCP_LIVE=0 时 app_status.gui_running 也用它，§9.1 表外 disabled 那一段；设了 LABELGUI_DATA_DIR 而
+    /// not_running 时，app_status 拿它决定加不加 §6.3 那一句，MCPStatus.appRunningForOverrideCheck）。
+    /// 不算自己：app 里的二进制起的 --mcp 万一也被 LaunchServices 记进进程表，不能把自己认成开着的 app（本机不起 .app，测不了）。
     static func oldAppRunning() -> Bool {
-        !NSRunningApplication.runningApplications(withBundleIdentifier: "local.culling.labelgui").isEmpty
+        let me = getpid()
+        return NSRunningApplication.runningApplications(withBundleIdentifier: "local.culling.labelgui").contains { $0.processIdentifier != me }
     }
 
     private static func hello(_ fd: Int32, paths: LivePaths, client: MCPStdioServer.ClientInfo?,
@@ -396,7 +403,16 @@ enum LiveClient {
             // 「没开」和「开着、标题栏写着锁被拿走了」（§9.2.4）
             return ("选片工具没开。", "请用户自己打开选片工具，并在 app 里打开要处理的场次，再调一次；MCP 不会启动它。" + Self.lockLostAside)
         case .bridgeOff:
-            return ("选片工具开着，但用户在菜单里关了「允许 AI 实时操作」。", "请用户在选片工具菜单里打开它；MCP 不会替用户打开。")
+            return ("选片工具开着，但用户在菜单里关了「\(LiveBridgeNotice.menuTitle)」。", "请用户在选片工具菜单里打开它；MCP 不会替用户打开。")
+        case .unreachable where lockUnseen(p):
+            // 数据目录连 stat 都被拒、或者锁文件打不开（EACCES / EPERM）：锁到底有没有人拿着都没看到，app 开着、没开都有可能。
+            // 不能说成下面「锁被它占着」「10 秒内会自愈」那句
+            let what = (p.reason ?? "").hasPrefix(dataDirUnreadable + ":") ? "数据目录" : "数据目录里的锁文件"
+            return ("读不了\(what)（多半是宿主的沙箱不让读），看不出选片工具开没开，也就连不上它。", MCPStatus.sandboxHint)
+        case .unreachable where isSandboxDenied(p):
+            // 锁被 app 占着（app 开着），connect 被拒：宿主的沙箱不让连本用户临时目录里的 socket，等多久也不会自愈
+            return ("选片工具开着（数据目录的锁被它占着），但连不上本用户临时目录里它的 socket（\(p.reason ?? "")，多半是宿主的沙箱不让连）。",
+                    MCPStatus.sandboxHint)
         case .unreachable where p.reason == "lock_role_unknown":
             // 锁被占着、锁文件里却没有选片工具写的那一行：多半是锁被别的程序拿走了（app 开着时被拿走：自检关桥、标题栏说那一句，
             // §9.2.4；app 启动时就被占着：app 先不开桥、每秒再拿）；也可能是选片工具第一次启动、还没来得及写那一行。
@@ -429,6 +445,22 @@ enum LiveClient {
         case .disabled:
             return ("这个服务器设了 LABELGUI_MCP_LIVE=0：不连正在运行的 app。", "只能看状态、列场次和模板；要实时操作，去掉这个环境变量再重连 MCP 服务器")
         }
+    }
+
+    /// 数据目录 realpath / stat 被拒（EACCES / EPERM）时 probe 的 reason 前缀，后面接 ":<errno>"。
+    static let dataDirUnreadable = "data_dir_unreadable"
+
+    /// 数据目录 realpath / stat 被拒，或者锁文件 open 被拒（EACCES / EPERM；ELOOP 是锁被换成了符号链接，不算）：
+    /// 锁有没有人拿着都没看到，看不出 app 开没开（§9.1、§8 第 27 条）。
+    static func lockUnseen(_ p: Probe) -> Bool {
+        guard p.state == .unreachable, let r = p.reason else { return false }
+        return r.hasPrefix(dataDirUnreadable + ":") || r == "lock_unreadable:\(EACCES)" || r == "lock_unreadable:\(EPERM)"
+    }
+
+    /// 多半是宿主的沙箱：上面那种，或者锁被 app 占着、connect 本用户临时目录里的 socket 被拒（EPERM / EACCES，§8 第 27 条；
+    /// socket 在本用户自己的 0700 目录里，不是沙箱一般不会这样）。说明里不能说「10 秒内会自愈」，hint 是在宿主里放行。
+    static func isSandboxDenied(_ p: Probe) -> Bool {
+        lockUnseen(p) || (p.state == .unreachable && (p.reason == "connect:\(EPERM)" || p.reason == "connect:\(EACCES)"))
     }
 
     /// not_running / old_app 的 hint 后面那一句（锁是空的时候 --mcp 分不出是不是锁刚被别的程序放掉，§9.2.4）。

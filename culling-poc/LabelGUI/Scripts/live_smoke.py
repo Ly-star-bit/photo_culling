@@ -297,6 +297,9 @@ def base_env(data, root, **extra):
     env["LABELGUI_LIVE_SOCK_ROOT"] = root
     # 预览输出目录（§10.3）：测试绝不写 ~/Pictures/xuanpian-mcp
     env["LABELGUI_MCP_OUT"] = os.path.join(WORK, "mcp-out")
+    # §6.3 那条 warning（设了 LABELGUI_DATA_DIR、not_running、选片工具却开着）要看「选片工具开着」：钉成没开，
+    # 结果不跟着用户的真 app 开没开变，--mcp 也不去查用户的进程表
+    env["LABELGUI_MCP_TEST_GUI_RUNNING"] = "0"
     for k, v in extra.items():
         if v is None:
             env.pop(k, None)
@@ -987,6 +990,11 @@ try:
         data = fresh_data("A")
         root = sock_root("A")
         env = base_env(data, root)
+        # 没给照片文件夹：打用法提示、退出 1（测试用的 --titled 也列上，和 LiveHost.swift 文件头、main.swift 注释一致）
+        r = subprocess.run([BIN, "--live-host"], env=base_env(fresh_data("A-usage"), root), capture_output=True,
+                           timeout=30 * SLACK, cwd=WORK, stdin=subprocess.DEVNULL)
+        check(r.returncode == 1 and "[--no-view | --titled]" in r.stdout.decode(errors="replace"),
+              f"--live-host 不给照片文件夹：用法提示里有 [--no-view | --titled]，退出 {r.returncode}")
         st, ms = status(env)
         check((st.get("live") or {}) == {"state": "not_running"} and st.get("gui_running") is False
               and st.get("next") == "请用户自己打开选片工具", f"没有锁文件：live={st.get('live')}（{ms:.0f} ms）")
@@ -1516,6 +1524,19 @@ try:
         r.close()
         check(err_code(dl) == "deadline_exceeded" and 10_500 < dl_ms < 13_000 * SLACK,
               f"主线程卡 12.5 s：collage_get_state 等 deadline 10 s + 1 s 后回 deadline_exceeded（{dl_ms:.0f} ms）")
+        # 没给 deadline_seconds 也受 LABELGUI_MCP_DEADLINE_SEC 管（和 tools/list 写的 default 一样）：上限 5 s 时
+        # cull_preview_photos 的默认 30 s 截成 5 s，主线程卡 12.5 s → 5 + 1 s 就回 deadline_exceeded（截之前要等到宿主回过神来，
+        # 照常回图、不是 deadline_exceeded）。上界不乘 SLACK、比 12.5 s 小：时间上也分得出「6 s 回」和「卡完才回」
+        r = Raw(h)
+        r.req("test.block_main", {"ms": 12_500})
+        time.sleep(0.1)
+        _, dl5, dl5_ms = mcp_call(h.env(LABELGUI_MCP_DEADLINE_SEC="5"), "cull_preview_photos",
+                                  {"session": KEY, "ids": ["DSCF7208"]}, timeout=40)
+        r.recv()
+        r.close()
+        check(err_code(dl5) == "deadline_exceeded" and 5_500 < dl5_ms < 12_000,
+              f"LABELGUI_MCP_DEADLINE_SEC=5、没给 deadline_seconds：cull_preview_photos 5 + 1 s 后回 deadline_exceeded"
+              f"（{err_code(dl5)}，{dl5_ms:.0f} ms）")
         # LABELGUI_MCP_LIVE=0（§9.8.2 第 28 条）：tools/list 3 个、disabled、一次都不连
         n0 = state(h)["hello_count"]
         m = Mcp(h.env(LABELGUI_MCP_LIVE="0"))
@@ -2954,6 +2975,10 @@ __attribute__((constructor)) static void init(void) {
               and [err_code(x) for x in (rd_off, pv_off, wr_off, un_off)] == ["bridge_off"] * 4,
               f"8 关着：app_status 是 bridge_off（不是 not_running，说明里提到菜单），列场次 / 模板照常，"
               f"读、看图、写、撤销都 bridge_off {[err_code(x) for x in (rd_off, pv_off, wr_off, un_off)]}")
+        menu = "「允许 AI 实时操作（MCP）」"   # 和菜单那一项一字不差（LiveBridgeToggle），用户照着找得到
+        msg_app = (rr.get("error") or {}).get("message") or ""
+        msg_mcp = ((wr_off or {}).get("error") or {}).get("message") or ""
+        check(menu in msg_app and menu in msg_mcp, f"bridge_off 两处都写菜单那一项的全名：app「{msg_app}」，--mcp「{msg_mcp}」")
         time.sleep(max(0, 4.0 - (time.monotonic() - t_off)) + 0.6)
         s_on = state(hh)
         st_on, _ = status(env)

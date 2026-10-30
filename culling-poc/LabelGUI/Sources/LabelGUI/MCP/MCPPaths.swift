@@ -19,8 +19,19 @@ enum MCPPaths {
     /// 数据目录在不在（是目录才算）、能不能读。只 stat / access，不建、不改。
     static func dataDirState() -> (exists: Bool, readable: Bool) {
         var st = stat()
-        guard stat(dataDir.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR else { return (false, false) }
-        return (true, access(dataDir.path, R_OK | X_OK) == 0)
+        let ok = stat(dataDir.path, &st) == 0
+        let statErrno = ok ? 0 : errno
+        return dataDirState(statErrno: statErrno, isDirectory: ok && (st.st_mode & S_IFMT) == S_IFDIR,
+                            accessOK: ok && access(dataDir.path, R_OK | X_OK) == 0)
+    }
+
+    /// 上面的判断（纯函数，--mcp-selftest 逐行测）。stat 被拒（EACCES / EPERM：宿主的沙箱连目录的元数据都不让看，
+    /// 或者上一级没有 x 权限）不能当成「不存在」—— 那样 app_status 会说「这台机器上还没开过选片工具」，app 其实开着
+    /// （§9.1 对锁文件也是这么定的）：算「在、但读不了」，和 access 不过是同一个 data_dir_unreadable。
+    static func dataDirState(statErrno: Int32, isDirectory: Bool, accessOK: Bool) -> (exists: Bool, readable: Bool) {
+        if statErrno == EACCES || statErrno == EPERM { return (true, false) }
+        guard statErrno == 0, isDirectory else { return (false, false) }
+        return (true, accessOK)
     }
 
     // MARK: - sessions.json
@@ -41,25 +52,31 @@ enum MCPPaths {
     /// `missing`：数据目录或 sessions.json 不存在（从没开过 app 的机器就是这样），当作空列表，cull_list_sessions 加 warning（§10.1 第 2 行）。
     /// 解码和 app 一模一样（BatchStore.loadSessionsIndex：JSONDecoder 解 [SessionEntry]，一条坏了整个不认）：
     /// app 解不出来时「最近场次」是空的，这里也只能是空的 —— 列出 app 自己都不认的场次，STEP 2 打开时只会 session_not_found。
-    static func readSessionsIndex() -> (entries: [SessionEntry], problem: String?, missing: Bool) {
-        guard dataDirState().exists else { return ([], nil, true) }
+    /// 数据目录读不了（data_dir_unreadable）时照样试着读：目录只有 x 没有 r 时 sessions.json 照样读得到。读被拒
+    /// （没权限、宿主的沙箱）时 `denied`，problem 不填，由调用方的 data_dir_unreadable 说（再报一条「sessions.json
+    /// 读不了、请用户打开一次场次」是错的主意：是宿主不让读，不是文件坏了）。
+    static func readSessionsIndex() -> (entries: [SessionEntry], problem: String?, missing: Bool, denied: Bool) {
+        let dir = dataDirState()
+        guard dir.exists else { return ([], nil, true, false) }
         let url = dataDir.appendingPathComponent("sessions.json", isDirectory: false)
         let data: Data
         do {
             data = try Data(contentsOf: url)
         } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError {
-            return ([], nil, true)
+            return ([], nil, true, false)
+        } catch let error as NSError where !dir.readable && error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoPermissionError {
+            return ([], nil, false, true)
         } catch {
-            return ([], "读不了 sessions.json：\(error.localizedDescription)", false)
+            return ([], "读不了 sessions.json：\(error.localizedDescription)", false, false)
         }
         // bookmark 照样解成 Data（base64），不解析、不往外给
         guard let list = try? JSONDecoder().decode([BatchStore.SessionEntry].self, from: data) else {
-            return ([], "sessions.json 解析不了（选片工具自己也读不出「最近场次」）", false)
+            return ([], "sessions.json 解析不了（选片工具自己也读不出「最近场次」）", false, false)
         }
         let entries: [SessionEntry] = list.prefix(recentLimit).map { e in
             SessionEntry(key: e.key, folder: e.path, name: e.name, photoCount: e.photoCount, lastAnalyzed: e.lastAnalyzed)
         }
-        return (entries, nil, false)
+        return (entries, nil, false, false)
     }
 
     /// 预览输出目录（§10.3）：LABELGUI_MCP_OUT，默认 ~/Pictures/xuanpian-mcp。这里只算路径（isDirectory 显式给，

@@ -9,12 +9,14 @@ import Foundation
 ///    --json 时每一行判断打一行 JSON（mcp_smoke.py 用自己的一份规则再核一遍）。
 /// 2. MCPJSON：NaN / inf → null、不转义斜杠、键排序、编不了不抛异常、超长截断。
 /// 3. MCPServerMain.mode：只认整个参数相等的 --mcp / --mcp-tools / --mcp-call。
-/// 4. 工具定义：18 个 / 3 个、顺序、schema 规则（§3.0）、enum 和代码里的名单一致、没有漏填的占位。
+/// 4. 工具定义：18 个 / 3 个、顺序、schema 规则（§3.0）、enum 和代码里的名单一致、没有漏填的占位；
+///    collage_get_state 的描述说了会顺带存一次 collage.json。
 /// 5–8. 受保护位置、session 参数、逐段解析、拼图静态表（S2，MCPSelfTestPaths.swift）。--json 时第 5 组每条也打一行。
-/// 9–11. 实时桥的判定表、状态 → 错误码、路由、线上格式（STEP 2，MCPSelfTestLive.swift）。
+/// 9–11. 实时桥的判定表（含数据目录 stat 被拒、§6.3 设了 LABELGUI_DATA_DIR 的那一句）、状态 → 错误码、路由（含截止时间）、
+///    线上格式（STEP 2，MCPSelfTestLive.swift）。
 /// 12–15. 读工具的参数、cursor、输出目录、图片字节（STEP 3a，MCPSelfTestRead.swift）。
 /// 16–18. 写工具的参数、app_undo 的判定（LiveAILog）、忙信号挡哪些写（STEP 3b，MCPSelfTestWrite.swift）。
-/// 19–20. 标题栏指示、桥停了（锁丢了、开桥失败）回什么和标题栏说什么（STEP 3b，MCPSelfTestWrite.swift）。
+/// 19–20. 标题栏指示、桥停了（锁丢了、开桥失败）回什么和标题栏说什么、菜单关了说菜单那一项的全名（STEP 3b，MCPSelfTestWrite.swift）。
 enum MCPSelfTest {
     private struct Variant {
         let label: String
@@ -161,6 +163,10 @@ enum MCPSelfTest {
             let props = (def["inputSchema"] as? [String: Any])?["properties"] as? [String: Any] ?? [:]
             return (props[prop] as? [String: Any])?["enum"] as? [String] ?? []
         }
+        // collage_get_state 标的是只读，但会像切到拼图页那样接上工程、可能存一次 collage.json（STEP 3a 签过的偏离）：描述里要说
+        let stateDef = MCPToolDefs.tools(live: true).first { $0["name"] as? String == "collage_get_state" } ?? [:]
+        check((stateDef["description"] as? String ?? "").contains("可能顺带存一次 collage.json"),
+              "collage_get_state 的描述里说了会顺带存一次 collage.json")
         check(enumOf("collage_set_style", "style") == CollageStyles.all.map(\.key), "style enum 和 CollageStyles.all 不一致")
         check(enumOf("collage_set_style", "look") == CollageLook.allCases.map(\.rawValue), "look enum 和 CollageLook 不一致")
         check(enumOf("collage_run_kit", "kit") == CollageKitID.allCases.map(\.rawValue), "kit enum 和 CollageKitID 不一致")

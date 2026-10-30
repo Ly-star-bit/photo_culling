@@ -12,11 +12,13 @@ app 里的二进制（路径原样或解析符号链接以后在 *.app/Contents/
 1 协议（握手、tools/list 和 schema、错误码、stdout 纯净、并发、busy、取消、压力、客户端 fd 的怪样子、退出） 2 没有 app
 （S2：fixture 场次的各个字段、最多 15 场、sessions.json 坏了 / 缺字段 / 没有；受保护位置（含换个写法的：ſ、ﬆ、K、
 /.nofollow/…）拿 sandbox-exec 证明一次都没碰；
-模板 / 分类数和源码里的模板库、画布别名和 CLI 的表、style / look / kit 和 schema 的 enum 对得上；category / include / 截断）
+模板 / 分类数和源码里的模板库、画布别名和 CLI 的表、style / look / kit 和 schema 的 enum 对得上；category / include / 截断；
+§6.3 设了 LABELGUI_DATA_DIR 而 app 开着的那一句；宿主沙箱挡住数据目录（sandbox-exec，只挡不杀）是「读不了」不是「不存在」）
 3 只读不变量  4 不建目录  5 无界面  6 不进程序坞  7 RSS
 
 不碰用户：每个进程都带 LABELGUI_NO_GUI=1 和 `--` 开头的无头参数，LABELGUI_DATA_DIR、LABELGUI_LIVE_SOCK_ROOT 和
-LABELGUI_MCP_OUT 都是自己的临时目录（指到真实数据目录就退出 2）；只杀自己起的子进程。会开界面的反向用例（写错的参数、管道起）
+LABELGUI_MCP_OUT 都是自己的临时目录（指到真实数据目录就退出 2）；LABELGUI_MCP_TEST_GUI_RUNNING 钉住（不查用户的进程表，
+结果不跟着用户的 app 开没开变）；只杀自己起的子进程。会开界面的反向用例（写错的参数、管道起）
 只在 CI 上跑（--ci 而且 GITHUB_ACTIONS=true）；本地靠 --mcp-selftest 拿假输入测那道闸的判断。
 "不设 LABELGUI_DATA_DIR" 的用例也只在 CI 上跑（$HOME 改不掉 Application Support 的位置，DESIGN §10.5）。
 原型：R3 的 client/mcp_client_test.py（协议、泄漏、取消）和 client/stress.py（并发大响应）。
@@ -111,6 +113,9 @@ def env_for(data_dir, **extra):
     env["LABELGUI_LIVE_SOCK_ROOT"] = SOCK_ROOT
     # 预览输出目录（§10.3）：测试绝不碰 ~/Pictures/xuanpian-mcp；这里没有 app、存不了图，所以它一直不该被建出来
     env["LABELGUI_MCP_OUT"] = MCP_OUT
+    # §6.3 那条 warning（设了 LABELGUI_DATA_DIR、not_running、选片工具却开着）要看「选片工具开着」：钉成没开，
+    # 结果不跟着用户的真 app 开没开变，--mcp 也不去查用户的进程表（第 2d 组再钉成开着测那一句）
+    env["LABELGUI_MCP_TEST_GUI_RUNNING"] = "0"
     if data_dir is not None:
         if same_dir(data_dir, REAL_DATA) or os.path.realpath(data_dir) == os.path.realpath(REAL_DATA):
             print(f"LABELGUI_DATA_DIR 指到了真实数据目录 {REAL_DATA}：不跑")
@@ -1255,6 +1260,99 @@ if not PROTOCOL_ONLY:
     check(len(txt) <= 1000 and b.get("truncated") is True and b.get("total") == len(SESSIONS)
           and 0 < len(b.get("sessions", [])) < len(SESSIONS), f"LABELGUI_MCP_TEXT_MAX=1000：cull_list_sessions 截到 {len(b.get('sessions', []))} 场、truncated:true")
 
+    print("2d. §6.3 设了 LABELGUI_DATA_DIR 而 app 开着、数据目录读不了（宿主的沙箱、权限位）")
+    UNREADABLE = "读不了数据目录（多半是宿主的沙箱不让读）"
+    # §6.3：not_running 而「选片工具开着」（LABELGUI_MCP_TEST_GUI_RUNNING=1 钉住，不查真的进程表）→ 状态不改，多一句 warning
+    SPEC63 = "选片工具开着，但 MCP 用的数据目录是 LABELGUI_DATA_DIR={}，不是 app 的那个：去掉这个环境变量才能实时操作"
+    for d, first, what in ((FIXTURE, "app_not_running", "数据目录在"), (os.path.join(WORK, "typo", "never"), "data_dir_missing", "数据目录写错了（不存在）")):
+        st63 = call_body(run_cli(["--mcp-call", "app_status", "{}"], d, LABELGUI_MCP_TEST_GUI_RUNNING="1")) or {}
+        w63 = st63.get("warnings", [])
+        check(st63.get("live") == {"state": "not_running"} and [w["code"] for w in w63] == [first, "data_dir_override"]
+              and w63[-1].get("message", "").startswith(SPEC63.format(d)) and "LABELGUI_DATA_DIR" in w63[-1].get("hint", ""),
+              f"§6.3 · {what}、app 开着：live 还是 not_running，warnings {[w['code'] for w in w63]}，最后一条是 §6.3 那一句")
+    st63 = call_body(run_cli(["--mcp-call", "app_status", "{}"], FIXTURE, LABELGUI_MCP_TEST_GUI_RUNNING="1", LABELGUI_MCP_LIVE="0")) or {}
+    check(st63.get("live") == {"state": "disabled"} and "data_dir_override" not in [w["code"] for w in st63.get("warnings", [])],
+          "§6.3 · LABELGUI_MCP_LIVE=0：不是 not_running，没有那一句")
+    shutil.rmtree(os.path.join(WORK, "typo"), ignore_errors=True)
+    # 宿主的沙箱连数据目录的元数据都不让看（deny file-read*，不杀进程）：读不了 ≠ 不存在，app 开没开看不出来 ≠ not_running
+    SBDATA = os.path.join(WORK, "sb-unreadable")
+    shutil.copytree(FIXTURE, SBDATA)
+    DENY_DATA = ("/usr/bin/sandbox-exec", "-p",
+                 "(version 1)(allow default)(deny file-read* (subpath " + sb_str(os.path.realpath(SBDATA)) + "))")
+    if not os.access(DENY_DATA[0], os.X_OK):
+        check(False, f"找不到 {DENY_DATA[0]}：数据目录读不了这一条测不了")
+    else:
+        ctl = subprocess.run([*DENY_DATA, "/bin/test", "-e", os.path.join(SBDATA, "sessions.json")], env=env_for(None), cwd=WORK)
+        r = run_cli(["--mcp-call", "app_status", "{}"], SBDATA, wrap=DENY_DATA)
+        sb_st = call_body(r) or {}
+        sb_live = sb_st.get("live") or {}
+        ls_sb = call_body(run_cli(["--mcp-call", "cull_list_sessions", "{}"], SBDATA, wrap=DENY_DATA)) or {}
+        r_ov = run_cli(["--mcp-call", "cull_session_overview", json.dumps({"session": KEY})], SBDATA, wrap=DENY_DATA)
+        ov_err = (call_body(r_ov) or {}).get("error") or {}
+        check(ctl.returncode == 1, f"对照：同一份规则下 /bin/test -e 数据目录里的 sessions.json 看不到（退出码 {ctl.returncode}）")
+        sb_w = sb_st.get("warnings", [])
+        check(r.returncode == 0 and sb_st.get("data_dir_exists") is True and sb_st.get("data_dir_readable") is False
+              and sb_live.get("state") == "unreachable" and str(sb_live.get("reason", "")).startswith("data_dir_unreadable:")
+              and [w["code"] for w in sb_w] == ["data_dir_unreadable"] and sb_st.get("gui_running") is False
+              and sb_w[0].get("message") == UNREADABLE + "：看不出选片工具开没开，也列不出场次。" and "放行" in str(sb_st.get("next")),
+              f"沙箱里 app_status：data_dir_exists:true、data_dir_readable:false、unreachable（{sb_live}），"
+              f"只有一条 data_dir_unreadable {[w['code'] for w in sb_w]}（不是 data_dir_missing / not_running），"
+              f"next 是放行：{sb_st.get('next')}")
+        check(ls_sb.get("sessions") == [] and [w["code"] for w in ls_sb.get("warnings", [])] == ["data_dir_unreadable"],
+              f"沙箱里 cull_list_sessions：空列表 + 只有 data_dir_unreadable {[w['code'] for w in ls_sb.get('warnings', [])]}")
+        check(r_ov.returncode == 1 and ov_err.get("code") == "app_unreachable" and "沙箱" in ov_err.get("message", "")
+              and "放行" in ov_err.get("hint", "") and "锁被它占着" not in ov_err.get("message", ""),
+              f"沙箱里要 app 的工具：app_unreachable，说是沙箱、请用户放行：{ov_err.get('message')} / {ov_err.get('hint')}")
+        # 沙箱只挡读内容（deny file-read-data）：目录 stat 得到、access 不过，锁文件（app 开着时一定在）open 被拒 →
+        # 还是 data_dir_unreadable 一条，探测是 unreachable（lock_unreadable），说明是沙箱、不是「锁被它占着」
+        open(os.path.join(SBDATA, ".live.lock"), "w").close()
+        DENY_CONTENT = ("/usr/bin/sandbox-exec", "-p",
+                        "(version 1)(allow default)(deny file-read-data (subpath " + sb_str(os.path.realpath(SBDATA)) + "))")
+        sb_st = call_body(run_cli(["--mcp-call", "app_status", "{}"], SBDATA, wrap=DENY_CONTENT)) or {}
+        sb_live = sb_st.get("live") or {}
+        r_ov = run_cli(["--mcp-call", "cull_session_overview", json.dumps({"session": KEY})], SBDATA, wrap=DENY_CONTENT)
+        ov_err = (call_body(r_ov) or {}).get("error") or {}
+        check(sb_st.get("data_dir_exists") is True and sb_st.get("data_dir_readable") is False
+              and sb_live.get("state") == "unreachable" and str(sb_live.get("reason", "")).startswith("lock_unreadable:")
+              and [w["code"] for w in sb_st.get("warnings", [])] == ["data_dir_unreadable"] and "放行" in str(sb_st.get("next"))
+              and (sb_st.get("warnings") or [{}])[0].get("message") == UNREADABLE + "：看不出选片工具开没开，也列不出场次。",
+              f"沙箱只挡读内容：app_status unreachable（{sb_live.get('reason')}），只有 data_dir_unreadable "
+              f"{[w['code'] for w in sb_st.get('warnings', [])]}")
+        check(ov_err.get("code") == "app_unreachable" and "锁文件" in ov_err.get("message", "") and "沙箱" in ov_err.get("message", "")
+              and "锁被它占着" not in ov_err.get("message", "") and "自愈" not in ov_err.get("hint", ""),
+              f"沙箱只挡读内容：要 app 的工具 app_unreachable，说是沙箱挡了锁文件：{ov_err.get('message')} / {ov_err.get('hint')}")
+    shutil.rmtree(SBDATA, ignore_errors=True)
+    # 不靠沙箱、只靠权限位：0300（有 x 没有 r，access 不过）时 sessions.json 和锁文件照样看得到 —— 场次照常列，
+    # data_dir_unreadable 只剩前半句，不能和 app_not_running「选片工具没开」打架；0600（没有 x）时两样都看不到，和沙箱一样
+    if os.geteuid() == 0:
+        print("  skip root 不受权限位管，0300 / 0600 两条不跑")
+    else:
+        for mode, what in ((0o300, "0300：有 x 没有 r"), (0o600, "0600：没有 x")):
+            PMDATA = os.path.join(WORK, "perm-unreadable")
+            shutil.copytree(FIXTURE, PMDATA)
+            os.chmod(PMDATA, mode)
+            try:
+                pm = call_body(run_cli(["--mcp-call", "app_status", "{}"], PMDATA)) or {}
+                pl = call_body(run_cli(["--mcp-call", "cull_list_sessions", "{}"], PMDATA)) or {}
+            finally:
+                os.chmod(PMDATA, 0o700)
+                shutil.rmtree(PMDATA, ignore_errors=True)
+            pw = pm.get("warnings", [])
+            msg0 = (pw or [{}])[0].get("message")
+            if mode == 0o300:
+                ok = (pm.get("sessions") == len(SESSIONS) and [w["code"] for w in pw] == ["data_dir_unreadable", "app_not_running"]
+                      and msg0 == UNREADABLE + "。" and pm.get("live") == {"state": "not_running"}
+                      and pm.get("next") == "请用户自己打开选片工具" and len(pl.get("sessions", [])) == len(SESSIONS)
+                      and [w["code"] for w in pl.get("warnings", [])] == ["data_dir_unreadable"])
+            else:
+                ok = (pm.get("sessions") == 0 and [w["code"] for w in pw] == ["data_dir_unreadable"]
+                      and msg0 == UNREADABLE + "：看不出选片工具开没开，也列不出场次。"
+                      and str((pm.get("live") or {}).get("reason")).startswith("lock_unreadable:") and "放行" in str(pm.get("next"))
+                      and pl.get("sessions") == [] and [w["code"] for w in pl.get("warnings", [])] == ["data_dir_unreadable"])
+            check(pm.get("data_dir_exists") is True and pm.get("data_dir_readable") is False and ok,
+                  f"数据目录 {what}：app_status 场次 {pm.get('sessions')}、{pm.get('live')}、warnings {[w['code'] for w in pw]}「{msg0}」、"
+                  f"next {pm.get('next')}；cull_list_sessions {len(pl.get('sessions', []))} 场 {[w['code'] for w in pl.get('warnings', [])]}")
+
 # ---------------------------------------------------------------- 4. 不建目录（第 3 组放在最后，等所有进程都跑完再比）
 
 print("4. 不建目录")
@@ -1344,6 +1442,15 @@ if ON_GITHUB:
         check(rc == 2 and not os.path.exists(nd), f"CI 反向用例 {bad!r}：exit {rc}，数据目录没建")
 else:
     print("  skip 写错参数的真进程只在 CI 上起（本地用 --mcp-selftest 的判断表代替）")
+if not PROTOCOL_ONLY:
+    # 「不认识的参数」那道闸（开界面之前最后一道）：带着写对的无头参数、却没给够它的参数（--app-ui 后面什么都没有）就走到那里，
+    # 本地也能起（第一道闸见到无头参数放行；LABELGUI_NO_GUI=1 是第二道保险）。提示照 §7.1 带「；给 AI 用：--mcp」
+    nd = os.path.join(WORK, "unknown-arg-data")
+    r = run_cli(["--app-ui"], nd)
+    err = r.stderr.decode(errors="replace")
+    check(r.returncode == 2 and "不认识的参数 --app-ui，不开界面（无头参数见 README「从源码构建」；给 AI 用：--mcp）" in err,
+          f"不认识的参数：exit {r.returncode}，提示带「；给 AI 用：--mcp」：{err.strip()[-120:]}")
+    shutil.rmtree(nd, ignore_errors=True)
 
 # grep：MCP/、Live/ 的禁用词（§5 第 3、7 层，§10.5），MCP/ 的文件访问只在四个有名字的文件里
 MCP_DIR = os.path.join(SRC, "MCP")
@@ -1416,6 +1523,11 @@ if os.path.isdir(MCP_DIR):
     outside = [l for l in lc.replace(fn.group(0), "").splitlines() if re.search(r"\bopen\(", re.sub(r"(^|\s)//.*$", "", l))] if fn else ["?"]
     check(fn is not None and "O_CREAT" not in fn.group(0) and not outside,
           f"LiveClient.swift 只在 probeLockFile() 里 open（不带 O_CREAT）{outside[:3]}")
+    # 菜单关了时回给模型的那一句引用 LiveBridgeNotice.menuTitle：它得和菜单里 Toggle 的字面量一字不差（改了菜单名这里就红）
+    li = open(os.path.join(LIVE_DIR, "LiveIndicator.swift"), encoding="utf-8").read()
+    mt = re.search(r'static let menuTitle = "([^"]+)"', li)
+    check(mt is not None and f'Toggle("{mt.group(1)}"' in li,
+          f"LiveBridgeNotice.menuTitle（{mt.group(1) if mt else None}）和菜单里 Toggle 的字面量一样")
 else:
     print(f"  skip 找不到源码目录 {MCP_DIR}，grep 检查不跑")
 

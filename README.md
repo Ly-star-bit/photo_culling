@@ -219,7 +219,7 @@ swift build -c release
 #   MCP 这一层的自检（纯函数，不起服务器、不读写文件）: LabelGUI --mcp-selftest [--json]
 #   冒烟（CI 也跑，不需要照片、不起宿主）: python3 -I Scripts/mcp_smoke.py .build/release/LabelGUI --ci
 #   整窗离屏快照（测试用，窗口不显示）: LABELGUI_DATA_DIR=/tmp/lg LabelGUI --app-ui <照片文件夹> out.png [--tab 批量处理|水印|拼图|标注校准] [--size 1440x900] [--wait 4]
-#   实时桥测试宿主（测试用，窗口不显示）: LABELGUI_DATA_DIR=/tmp/lg LABELGUI_LIVE_SOCK_ROOT=<短目录> LABELGUI_LIVE_TEST_OUT=<快照目录> LabelGUI --live-host <照片文件夹> [--size 1440x900] [--tab 批量处理|水印|拼图|标注校准] [--no-view]
+#   实时桥测试宿主（测试用，窗口不显示）: LABELGUI_DATA_DIR=/tmp/lg LABELGUI_LIVE_SOCK_ROOT=<短目录> LABELGUI_LIVE_TEST_OUT=<快照目录> LabelGUI --live-host <照片文件夹> [--size 1440x900] [--tab 批量处理|水印|拼图|标注校准] [--no-view | --titled]
 #   实时桥冒烟（CI 也跑；本地真照片: --photos <照片文件夹> --data <分析过的数据目录>）: python3 -I Scripts/live_smoke.py .build/release/LabelGUI --ci
 ```
 
@@ -349,16 +349,16 @@ Claude Code 交互模式下，每个工具第一次调用都会问你。建议 9
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `LABELGUI_DATA_DIR` | 不设（`~/Library/Application Support/选片工具`） | 换数据目录，测试用。**MCP 配置里别设**：设了以后 MCP 找的是那个目录的锁和连接，和你开着的 app 对不上，app 明明开着却是 `not_running` |
+| `LABELGUI_DATA_DIR` | 不设（`~/Library/Application Support/选片工具`） | 换数据目录，测试用。**MCP 配置里别设**：设了以后 MCP 找的是那个目录的锁和连接，和你开着的 app 对不上，app 明明开着却是 `not_running`（`app_status` 会多一条 `data_dir_override` 警告） |
 | `LABELGUI_MCP_OUT` | `~/Pictures/xuanpian-mcp` | 预览存在哪（绝对路径），只用里面的 `previews/`。空目录、或者带 `.xuanpian-mcp` 标记的目录才用（不空又没标记的不用，免得清理删到你的文件）；不能在受保护位置、数据目录、照片文件夹里。不能用时图照常内联、带一条警告（`inline:false` 时回 `output_dir_unusable`） |
-| `LABELGUI_MCP_DEADLINE_SEC` | 50 | `deadline_seconds` 的上限（秒，5–600）。只有看照片（默认 30）、一键成套和换封面（默认 50）三个工具有这个参数；只管 AI 传了的 `deadline_seconds`，没传时照用 30 / 50 秒；其余读写都是 10 秒 |
+| `LABELGUI_MCP_DEADLINE_SEC` | 50 | `deadline_seconds` 的上限（秒，5–600）。只有看照片（默认 30）、一键成套和换封面（默认 50）三个工具有这个参数；AI 没传时用的默认值也不超过它（和工具定义里写的 default 一样）；其余读写都是 10 秒，不受它管 |
 | `LABELGUI_MCP_INLINE_KB` | 600 | 一次调用里内联图片的合计上限（KB，最大 20000）；超了的那几张不给图，标 `truncated:true` |
 | `LABELGUI_MCP_TEXT_MAX` | 20000 | 文字结果的长度上限（字符，1000–1000000；小于 1000 按默认）；超了就少给几条、标 `truncated:true`（列照片、分组带 `next_cursor` 接着翻） |
 | `LABELGUI_MCP_LIVE` | 不设（开） | `0` = 只注册 app 没开也能用的 3 个工具，从不连 app：保证 AI 碰不到开着的 app |
 | `LABELGUI_NO_GUI` | 不设 | `1` = 这个进程绝不开界面，命令行里没有无头参数就直接退出。上面的配置都带着它 |
 | `LABELGUI_ALLOW_GUI` | 不设 | `1` = 父进程不是 launchd、stdin 又不是终端时也允许开界面（从 Xcode、IDE、脚本里开 app 时用，见排错） |
 
-`LABELGUI_LIVE_SOCK_ROOT`、`LABELGUI_LIVE_TEST_*` 只给测试宿主 `--live-host` 用，不要写进 MCP 配置。
+`LABELGUI_LIVE_SOCK_ROOT`、`LABELGUI_LIVE_TEST_*` 只给测试宿主 `--live-host` 用，`LABELGUI_MCP_TEST_GUI_RUNNING` 只给冒烟脚本用，都不要写进 MCP 配置。
 
 ### 排错
 
@@ -369,7 +369,7 @@ Claude Code 交互模式下，每个工具第一次调用都会问你。建议 9
   | `live` | 能实时操作 | — |
   | `not_running` | app 没开（或者这台机器上还没开过 app、数据目录不存在） | 自己打开 app；MCP 不会替你开 |
   | `bridge_off` | 菜单里关了「允许 AI 实时操作（MCP）」 | 勾上 |
-  | `unreachable` | app 开着，连不上它的实时桥（socket 被系统清掉还没自愈、锁被别的程序拿走、桥开不起来） | 看标题栏上那句；一般 10 秒内自己恢复，不行就重开 app |
+  | `unreachable` | app 开着，连不上它的实时桥（socket 被系统清掉还没自愈、锁被别的程序拿走、桥开不起来）；或者宿主的沙箱挡着：不让读数据目录、看不出 app 开没开（`live` 里的 `reason` 是 `data_dir_unreadable:…` / `lock_unreadable:…`），或者不让连 socket（`connect:1`） | 看标题栏上那句；一般 10 秒内自己恢复，不行就重开 app。沙箱的那种见下面「宿主的沙箱」 |
   | `unresponsive` | app 开着，1 秒内没回应（卡住了） | 看一下 app，过一会儿再试 |
   | `proto_mismatch` | app 和 MCP 的实时桥版本对不上 | 重开 app；还不行就是两边差太多，更新 app |
   | `old_app` | 开着的是还没有实时桥的旧版 | 更新 app；标题栏写着「数据目录的锁被别的程序拿走了…」的话，重开 app 就行 |
@@ -378,14 +378,14 @@ Claude Code 交互模式下，每个工具第一次调用都会问你。建议 9
   | `peer_rejected` | 桥的另一头不是你这个用户的进程 | 看看是不是别的账户开着选片工具 |
   | `disabled` | 设了 `LABELGUI_MCP_LIVE=0` | 去掉它，重连 MCP |
 
-- **app 明明开着却是 `not_running`**：多半是 MCP 配置的 `env` 里设了 `LABELGUI_DATA_DIR`（比如照抄了「从源码构建」里的调试写法）。`app_status` 里 `data_dir_override` 是 `true` 就是这个原因，去掉它再重连。另一种：标题栏写着「数据目录的锁被别的程序拿走了…」，退出并重开 app。再一种：`warnings` 里是 `data_dir_missing`、可数据目录其实在，是宿主的沙箱连目录都不让看（见下面「宿主的沙箱」）。
+- **app 明明开着却是 `not_running`**：多半是 MCP 配置的 `env` 里设了 `LABELGUI_DATA_DIR`（比如照抄了「从源码构建」里的调试写法）。`app_status` 的 `warnings` 里有 `data_dir_override`（说 MCP 用的数据目录「不是 app 的那个：去掉这个环境变量才能实时操作」），或者 `data_dir_override` 是 `true`，就是这个原因，去掉它再重连（这条警告靠系统的进程表认 app，认不出自己构建的 `.build/release/LabelGUI` 开的界面）。另一种：标题栏写着「数据目录的锁被别的程序拿走了…」，退出并重开 app。
 - **改动「没出现」**：看结果里的 `live.window_state`：`hidden`（⌘H 隐藏了）、`minimized`（最小化了）、`occluded`（被挡住了或者在别的桌面上）、`no_window`（app 开着但没有窗口）。这时改动已经生效并存盘，切过去就能看到；AI 不会替你把窗口拉出来。
 - **一直 `user_busy`**：`transient:false` 是开着对话框、面板、连拍挑选、裁切或者正在导出，关掉就好；`transient:true` 是你正在拖动或打字，停手几秒。
 - **`protected_location`**：那一场的照片在受保护位置（见安全承诺），这一版没有放行开关：自己在侧栏「最近场次」里点开它，之后 AI 照常读和改。
 - **超时**：最长的一步（一键成套）在 50 秒以内，客户端的超时要比它长：Claude Code 项目级 `.mcp.json` 的 `"timeout":120000`、Antigravity 的 `timeoutSeconds:120`、Codex 的 `tool_timeout_sec`（≥60）。app 主线程正忙、读超时回 `deadline_exceeded`，过一会儿再调；写到一半超时或者断了回 `app_outcome_unknown`，AI 用结果里的 `op_id` 原样再调同一个工具，不会做两遍。
 - **图片和 `MAX_MCP_OUTPUT_TOKENS`**：Claude Code 默认把一次工具结果限制在 25000 token（`MAX_MCP_OUTPUT_TOKENS`）。在 Claude Code 2.1.312 上实测，内联图片不算进这个上限：1 张 1024、4 张 768、1 张 1568、2 张 1568（一次 523 KB，base64 约 70 万字符）、4 张脸部裁块、一张 768 的拼图预览都完整送到了模型，所以默认内联、一次合计 600 KB。这只是这一版 Claude Code 上测出来的，换了版本或客户端要是图被截掉、报结果太大：让 AI 用 `inline:false`（只给 `previews/` 里的文件路径，再按路径读），或者把 `LABELGUI_MCP_INLINE_KB` 调小；文字被截时启动 Claude Code 前设 `MAX_MCP_OUTPUT_TOKENS=50000`，或者把 `LABELGUI_MCP_TEXT_MAX` 调小让列表分页。
 - **按路径读预览**：Claude Code 默认只读工作目录里的文件。要让模型按 `file` 路径读预览，启动时加 `--add-dir ~/Pictures/xuanpian-mcp`，或者在设置里放行 `Read(//Users/<你>/Pictures/xuanpian-mcp/**)`。
-- **宿主的沙箱**：宿主（比如 Antigravity 的终端沙箱）不让读 `~/Library/Application Support` 或者本用户临时目录里的 socket 时，app 开着，`app_status` 却报 `data_dir_unreadable`、`unreachable`；沙箱连目录在不在都不让看时，报的是 `data_dir_exists:false`、`data_dir_missing` 和 `not_running`，看着像 app 没开。都是在宿主里放行。
+- **宿主的沙箱**：宿主（比如 Antigravity 的终端沙箱）不让读 `~/Library/Application Support` 时，`app_status` 报 `data_dir_unreadable`（`data_dir_exists:true`、`data_dir_readable:false`，沙箱连目录在不在都不让看时也是这样，不会当成还没开过 app），`live.state` 是 `unreachable`：看不出 app 开没开，要 app 的工具回 `app_unreachable`、说是宿主的沙箱。不让连本用户临时目录里的 socket 时，app 开着也是 `unreachable`（`reason` 是 `connect:1`），同样说是宿主的沙箱。这两种 `next` 都是请你在宿主里放行，放行数据目录和本用户临时目录里的 `xuanpian-live` 就好。只是目录没有读权限（`data_dir_readable:false`）、里面的文件照样读得到时，场次照常列、能不能实时操作照常判断。
 - **弹出「"选片工具"意外退出」**：app 窗口还在、或者 app 本来就没开的话，崩了（或者被强行结束）的是 AI 客户端起的 `--mcp` 进程（它是 app 里的程序，系统按 app 报）。这时点「忽略」，**不要点「重新打开」**：那会把 app 打开。然后在客户端里重连 MCP（Claude Code 用 `/mcp`）。
 - **从 Xcode / IDE 里开 app 直接退出**：父进程不是 launchd（访达、程序坞、启动台、`open` 打开的都是）、stdin 又不是终端时（Xcode 的 Run、IDE、调试器、某些脚本和启动器里常常是这样），app 会当成是被 MCP 客户端起的，不开界面、退出码 2，stderr 写「像是被 MCP 客户端启动的…」。真要开界面就设 `LABELGUI_ALLOW_GUI=1`（Xcode：Edit Scheme › Run › Arguments › Environment Variables）。访达、程序坞、启动台、`open` 打开的，终端里直接跑的都不受影响。
 

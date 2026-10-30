@@ -58,6 +58,15 @@ enum MCPLiveTools {
         "cull_session_overview": "overview", "cull_list_photos": "photos", "cull_get_photos": "get", "cull_list_groups": "groups",
     ]
 
+    /// 这次调用的截止时间（§10.2）：AI 给了 deadline_seconds 就用它（MCPArgs 已经按 LABELGUI_MCP_DEADLINE_SEC 查过上限）；
+    /// 没给时，有这个参数的三个工具（看照片 30 s、成套 / 换封面 50 s）用路由的默认值，但不超过上限 —— 和 tools/list 里
+    /// 写的 default 一样（MCPToolDefs.deadline）；其余工具没有这个参数，照用 10 s。纯函数，--mcp-selftest 逐行测。
+    static func effectiveDeadlineMs(_ name: String, _ route: Route, _ args: [String: Any], cap: Int) -> Int {
+        if let sec = args["deadline_seconds"].flatMap(MCPArgs.integer) { return sec * 1_000 }
+        guard MCPArgs.specs[name]?.props["deadline_seconds"] != nil else { return route.deadlineMs }
+        return min(route.deadlineMs, cap * 1_000)
+    }
+
     static func handler(_ name: String) -> ((MCPStdioServer.Call) -> MCPStdioServer.ToolResult)? {
         guard let route = routes[name] else { return nil }
         return { call in run(name, route, call) }
@@ -104,7 +113,7 @@ enum MCPLiveTools {
         if route.write {
             return write(name, route, call, probe: probe, sessionKey: sessionKey)
         }
-        var deadlineMs = route.deadlineMs
+        let deadlineMs = effectiveDeadlineMs(name, route, call.arguments, cap: MCPConfig.deadlineCap)
         switch route.method {
         case "cull.read":
             var args = call.arguments
@@ -118,7 +127,6 @@ enum MCPLiveTools {
             // 不内联，预算就只剩单张上限（4 张 × 350 KB），全部存成文件 —— 图片超限时的退路就是它（§10.3「输出目录」）
             let inline = call.arguments["inline"] as? Bool ?? true
             params["budget_kb"] = inline ? MCPConfig.inlineKB : 4 * MCPConfig.perImageKB
-            if let sec = call.arguments["deadline_seconds"].flatMap(MCPArgs.integer) { deadlineMs = sec * 1_000 }
         case "collage.state":
             for k in ["include_preview", "max_edge"] { if let v = call.arguments[k] { params[k] = v } }
         default:
@@ -173,8 +181,7 @@ enum MCPLiveTools {
         } else if let sessionKey {
             params["session"] = sessionKey
         }
-        var deadlineMs = route.deadlineMs
-        if let sec = call.arguments["deadline_seconds"].flatMap(MCPArgs.integer) { deadlineMs = sec * 1_000 }
+        let deadlineMs = effectiveDeadlineMs(name, route, call.arguments, cap: MCPConfig.deadlineCap)
         let opID = call.arguments["op_id"] as? String ?? UUID().uuidString.lowercased()
         let outcome: LiveClient.Outcome
         switch LiveClient.write(probe, method: route.method, params: params, deadlineMs: deadlineMs, opID: opID, call: call) {

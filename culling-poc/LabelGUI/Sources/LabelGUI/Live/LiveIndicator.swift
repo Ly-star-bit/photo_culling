@@ -194,6 +194,10 @@ enum LiveBridgeNotice {
     /// §9.2.4 原话。
     static let lockLost = "数据目录的锁被别的程序拿走了：AI 实时操作已停，重开 app 恢复"
 
+    /// app 菜单里那一项的名字（和下面 LiveBridgeToggle 里 Toggle 的字面量一字不差）：菜单关了时回给模型的两处
+    /// （app 在已经连上的连接上回的 bridge_off、`--mcp` 从锁文件那一行判出来的 bridge_off）都引用它，用户在菜单里找得到。
+    static let menuTitle = "允许 AI 实时操作（MCP）"
+
     /// 开不了桥的原因 → 标题栏那一句；nil = 这个原因不在标题栏说（另一个实例有自己的那一句；等锁、启动中是一时的；
     /// 锁丢了是上面那句）。原因的代号不上标题栏，换成一句短话；自检接着试的（LiveServer.retryable）说会自己再试。
     static func failed(_ reason: String) -> String? {

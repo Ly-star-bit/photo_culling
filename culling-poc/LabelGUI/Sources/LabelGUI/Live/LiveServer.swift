@@ -96,7 +96,7 @@ final class LiveServer: @unchecked Sendable {
         case .on:
             return nil
         case .off:
-            return .failure("bridge_off", "用户在选片工具菜单里关了「允许 AI 实时操作」：这次没有执行",
+            return .failure("bridge_off", "用户在选片工具菜单里关了「\(LiveBridgeNotice.menuTitle)」：这次没有执行",
                             ["executed": false, "hint": "请用户在选片工具菜单里打开它；MCP 不会替用户打开"])
         case .unavailable(let r):
             let why = LiveBridgeNotice.explain(r)

@@ -197,7 +197,7 @@ enum MCPToolDefs {
      "annotations":"$READ"},
 
     {"name":"collage_get_state","title":"看 app 里的拼图",
-     "description":"看 app 里当前拼图工程的状态（读的是 app 内存，含还没存盘的改动）：模式、页码和页数、模板、样式、色调、标题/副标题/刊头/期号、托盘张数、每个格子（path、照片 id、文字块数）、选中的格子、撤销深度（最上面那一步是不是 AI 做的）、是否还在算、digest（拼图写工具的 if_digest 就填它），后面跟一张 app 当前画面的预览图。session 不填就是 app 当前打开的那一场；填了别的场次回 session_not_open。",
+     "description":"看 app 里当前拼图工程的状态（读的是 app 内存，含还没存盘的改动）：模式、页码和页数、模板、样式、色调、标题/副标题/刊头/期号、托盘张数、每个格子（path、照片 id、文字块数）、选中的格子、撤销深度（最上面那一步是不是 AI 做的）、是否还在算、digest（拼图写工具的 if_digest 就填它），后面跟一张 app 当前画面的预览图。session 不填就是 app 当前打开的那一场；填了别的场次回 session_not_open。和用户切到拼图页一样，会先把这一场的拼图工程接上（托盘里照片的判决等信息按批量页刷新），所以可能顺带存一次 collage.json。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "include_preview":{"type":"boolean","default":true,"description":"要不要带 app 当前画面的预览图"},

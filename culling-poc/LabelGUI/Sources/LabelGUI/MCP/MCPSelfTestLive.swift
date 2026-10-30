@@ -3,7 +3,11 @@ import Foundation
 /// --mcp-selftest 的 STEP 2 部分（MCPSelfTest.run 调），全是纯函数，不连任何 socket、不碰锁文件：
 /// 9. 探测的判定表（LiveClient.afterConnectFailure / afterHello）：本机起不出来的状态（old_app、headless_writer、
 ///    peer_rejected、not_ready、data_dir_mismatch、锁读不了……）靠这张表测；期望值逐行手写，照 §9.1 的树。
-/// 10. 状态 → 错误码（§10.2）、15 个要 app 的工具 → 桥方法（§10.4）、session 核对（§10.2「session 怎么比」）。
+///    数据目录 stat 被拒（EACCES / EPERM）算「在、读不了」、探测报 unreachable，它和锁文件 open 被拒、connect 被拒都按宿主沙箱说，
+///    data_dir_unreadable 那一句只说真的看不到的；
+///    §6.3：设了 LABELGUI_DATA_DIR、not_running、app 却开着时 app_status 加的那一句（app 开没开用假的输入，不查进程表）。
+/// 10. 状态 → 错误码（§10.2）、15 个要 app 的工具 → 桥方法（§10.4）、session 核对（§10.2「session 怎么比」）、
+///    截止时间（没给 deadline_seconds 时也不超过 LABELGUI_MCP_DEADLINE_SEC，和 tools/list 的 default 一样）。
 /// 11. 线上格式：锁文件那一行的解析、socket 路径上限、SHA-256 前 16 位、编码时 NaN 变 null；--live-host 认不认得出
 ///     真实的 SockDir（只 realpath 已经存在的上一级：用户临时目录）。
 extension MCPSelfTest {
@@ -37,6 +41,7 @@ extension MCPSelfTest {
             (ENOENT, .denied(EACCES), false, true, .state(.unreachable, reason: "lock_unreadable:\(EACCES)"), "锁打不开（沙箱）≠ 没开"),
             (ENOENT, .denied(ELOOP), true, true, .state(.unreachable, reason: "lock_unreadable:\(ELOOP)"), "锁是符号链接"),
             (EACCES, .free, false, true, .state(.notRunning, reason: nil), "connect EACCES、锁是空的"),
+            (EPERM, .held(app), false, true, .state(.unreachable, reason: "connect:\(EPERM)"), "锁是 app、connect EPERM（宿主沙箱，§8 第 27 条）：不重连"),
             (ENAMETOOLONG, .missing, false, true, .state(.notRunning, reason: nil), "socket 路径太长、没有锁"),
         ]
         for (e, lock, old, budget, want, label) in rows {
@@ -69,6 +74,86 @@ extension MCPSelfTest {
             let got = C.afterHello(outcome, dataDirID: id, budgetLeft: budget)
             check(got == want, "hello · \(label)：\(got)，应该 \(want)")
         }
+        dataDirChecks(check)
+    }
+
+    /// 数据目录 stat 被拒（宿主的沙箱）≠ 不存在；设了 LABELGUI_DATA_DIR、not_running、app 却开着 → §6.3 那一句。
+    private static func dataDirChecks(_ check: Check) {
+        // (stat 的 errno, 是目录, access 过不过) → (在, 能读)
+        let states: [(Int32, Bool, Bool, Bool, Bool, String)] = [
+            (0, true, true, true, true, "正常"),
+            (0, true, false, true, false, "在、access 不过（chmod、沙箱只挡读内容）"),
+            (ENOENT, false, false, false, false, "不存在"),
+            (ENOTDIR, false, false, false, false, "上一级是个文件"),
+            (0, false, false, false, false, "是个文件"),
+            (EPERM, false, false, true, false, "stat 被沙箱拒（EPERM）：在、读不了，不是不存在"),
+            (EACCES, false, false, true, false, "上一级没有 x 权限（EACCES）：在、读不了"),
+        ]
+        for (e, isDir, acc, exists, readable, label) in states {
+            let got = MCPPaths.dataDirState(statErrno: e, isDirectory: isDir, accessOK: acc)
+            check(got.exists == exists && got.readable == readable, "数据目录 · \(label)：\(got)")
+        }
+        // probe 在数据目录被拒时报 unreachable（reason data_dir_unreadable:<errno>）；锁文件 open 被拒（lock_unreadable）同样是
+        // 沙箱，而且锁没看到：说明里不能说「锁被它占着」。锁被 app 占着而 connect 被拒（EPERM / EACCES，§8 第 27 条）也是沙箱，
+        // 锁看到了。是沙箱的都不能说「10 秒内会自愈」，hint 是放行。(reason, 是不是沙箱, 锁没看到, 说明里要有的字)
+        let denials: [(LiveState, String, Bool, Bool, String)] = [
+            (.unreachable, LiveClient.dataDirUnreadable + ":\(EPERM)", true, true, "读不了数据目录（"),
+            (.unreachable, LiveClient.dataDirUnreadable + ":\(EACCES)", true, true, "读不了数据目录（"),
+            (.unreachable, "lock_unreadable:\(EPERM)", true, true, "读不了数据目录里的锁文件"),
+            (.unreachable, "lock_unreadable:\(EACCES)", true, true, "读不了数据目录里的锁文件"),
+            (.unreachable, "connect:\(EPERM)", true, false, "连不上本用户临时目录里它的 socket（connect:\(EPERM)，"),
+            (.unreachable, "connect:\(EACCES)", true, false, "连不上本用户临时目录里它的 socket（connect:\(EACCES)，"),
+            (.unreachable, "lock_unreadable:\(ELOOP)", false, false, ""),
+            (.unreachable, "connect:\(ENOENT)", false, false, ""),
+            (.unreachable, "connect:\(ECONNREFUSED)", false, false, ""),
+            (.notRunning, "data_dir_missing", false, false, ""),
+        ]
+        for (state, reason, sandbox, unseen, part) in denials {
+            let p = LiveClient.Probe(state: state, reason: reason)
+            let (m, h) = LiveClient.explain(p)
+            let ok = sandbox ? (m.contains(part) && m.contains("沙箱") && m.contains("锁被它占着") != unseen && !h.contains("自愈")
+                                && h == MCPStatus.sandboxHint && LiveClient.errorCode(state) == "app_unreachable")
+                             : h != MCPStatus.sandboxHint
+            check(LiveClient.isSandboxDenied(p) == sandbox && LiveClient.lockUnseen(p) == unseen && ok,
+                  "沙箱 · \(state.rawValue) \(reason)：\(sandbox ? "是" : "不是")沙箱，锁\(unseen ? "没" : "")看到：\(m) / \(h)")
+        }
+        // data_dir_unreadable 那一句只说真的发生了的（锁没看到 → 看不出开没开；sessions.json 读被拒 → 列不出场次）：
+        // 目录只有 x 没有 r 时两样都看得到，不能和同一份 warnings 里的「选片工具没开」打架。(锁没看到, 读被拒, 期望的说明)
+        let base = "读不了数据目录（多半是宿主的沙箱不让读）"
+        let unreadable: [(Bool, Bool, String)] = [
+            (true, true, base + "：看不出选片工具开没开，也列不出场次。"),
+            (true, false, base + "：看不出选片工具开没开。"),
+            (false, true, base + "：列不出场次。"),
+            (false, false, base + "。"),
+        ]
+        for (unseen, denied, want) in unreadable {
+            let w = MCPStatus.dataDirUnreadableWarning(lockUnseen: unseen, sessionsDenied: denied)
+            check(w["code"] as? String == "data_dir_unreadable" && w["message"] as? String == want && w["hint"] as? String == MCPStatus.sandboxHint,
+                  "data_dir_unreadable · 锁\(unseen ? "没" : "")看到、sessions.json \(denied ? "读被拒" : "读得到")：\(w["message"] ?? "")")
+        }
+        // §6.3：(LABELGUI_DATA_DIR, 状态, app 开着) → 有没有那一句；app 开着没开只在前两条成立时才去看
+        let rows: [(String?, LiveState, Bool, Bool, String)] = [
+            ("/tmp/lg", .notRunning, true, true, "设了、not_running、app 开着"),
+            ("/tmp/lg", .notRunning, false, false, "app 没开"),
+            (nil, .notRunning, true, false, "没设（默认数据目录：那是 old_app 的事）"),
+            ("", .notRunning, true, false, "设成空的 = 没设"),
+            ("/tmp/lg", .live, true, false, "live"),
+            ("/tmp/lg", .unreachable, true, false, "unreachable"),
+            ("/tmp/lg", .disabled, true, false, "LABELGUI_MCP_LIVE=0"),
+        ]
+        for (env, state, running, want, label) in rows {
+            var asked = false
+            let w = MCPStatus.dataDirOverrideWarning(envDataDir: env, state: state, appRunning: { asked = true; return running }())
+            let text = w?["message"] as? String ?? ""
+            let spec = "选片工具开着，但 MCP 用的数据目录是 LABELGUI_DATA_DIR=\(env ?? "")，不是 app 的那个：去掉这个环境变量才能实时操作"
+            let lazy = asked == (env?.isEmpty == false && state == .notRunning)
+            check((w != nil) == want && lazy && (!want || (w?["code"] as? String == "data_dir_override" && text.hasPrefix(spec))),
+                  "§6.3 · \(label)：\(w == nil ? "没有" : text)；查没查进程表：\(asked)")
+        }
+        for (raw, want) in [("0", false), ("1", true)] {
+            check(MCPStatus.appRunningForOverrideCheck(["LABELGUI_MCP_TEST_GUI_RUNNING": raw]) == want,
+                  "LABELGUI_MCP_TEST_GUI_RUNNING=\(raw) 钉住「app 开着」= \(want)")
+        }
     }
 
     private static func routingChecks(_ check: Check) {
@@ -98,6 +183,29 @@ extension MCPSelfTest {
         let deadlines: [String: Int] = ["cull_preview_photos": 30_000, "collage_run_kit": 50_000, "collage_next_cover": 50_000]
         for (tool, route) in MCPLiveTools.routes {
             check(route.deadlineMs == (deadlines[tool] ?? 10_000), "\(tool) 的默认截止时间 \(route.deadlineMs) ms（§10.2）")
+        }
+        // 这次调用真正用的截止时间：没给 deadline_seconds 时，有这个参数的三个工具也不超过 LABELGUI_MCP_DEADLINE_SEC
+        // （和 tools/list 的 default 一样）；其余工具照用 10 s；给了就用给的。期望值手写：(工具, 参数, 上限, 期望 ms)
+        let effective: [(String, [String: Any], Int, Int)] = [
+            ("cull_preview_photos", [:], 50, 30_000), ("cull_preview_photos", [:], 20, 20_000), ("cull_preview_photos", [:], 5, 5_000),
+            ("collage_run_kit", [:], 50, 50_000), ("collage_run_kit", [:], 20, 20_000), ("collage_run_kit", [:], 600, 50_000),
+            ("collage_next_cover", [:], 30, 30_000), ("collage_next_cover", [:], 5, 5_000),
+            ("collage_run_kit", ["deadline_seconds": 40], 50, 40_000), ("cull_preview_photos", ["deadline_seconds": 7], 600, 7_000),
+            ("cull_list_photos", [:], 5, 10_000), ("collage_set_text", [:], 5, 10_000), ("collage_get_state", [:], 600, 10_000),
+        ]
+        for (tool, args, cap, want) in effective {
+            guard let route = MCPLiveTools.routes[tool] else { check(false, "没有 \(tool) 的路由"); continue }
+            let got = MCPLiveTools.effectiveDeadlineMs(tool, route, args, cap: cap)
+            check(got == want, "截止时间 · \(tool) \(args) 上限 \(cap) s：\(got) ms，应该 \(want)")
+        }
+        // 这个进程自己的上限下：tools/list 写的 default × 1000 = 没给参数时真正用的
+        for def in MCPToolDefs.tools(live: true) {
+            let name = def["name"] as? String ?? ""
+            let props = (def["inputSchema"] as? [String: Any])?["properties"] as? [String: Any] ?? [:]
+            guard let dl = props["deadline_seconds"] as? [String: Any], let route = MCPLiveTools.routes[name] else { continue }
+            let advertised = (dl["default"] as? Int ?? -1) * 1_000
+            let used = MCPLiveTools.effectiveDeadlineMs(name, route, [:], cap: MCPConfig.deadlineCap)
+            check(advertised == used, "\(name)：tools/list 的 default \(advertised) ms = 没给参数时用的 \(used) ms")
         }
         // session 核对：key / 路径 / 没打开任何场次 / 必填没给 / 可选没给
         let open: [String: Any] = ["session": "0123456789abcdef", "folder": "/nonexistent-xp-mcp-selftest/20261021"]

@@ -38,7 +38,7 @@ enum LiveHost {
             return args[i + 1]
         }
         guard args.count > flagIndex + 1, !args[flagIndex + 1].hasPrefix("--") else {
-            print("用法: --live-host <photo_dir> [--size 1440x900] [--tab 批量处理|水印|拼图|标注校准] [--no-view]")
+            print("用法: --live-host <photo_dir> [--size 1440x900] [--tab 批量处理|水印|拼图|标注校准] [--no-view | --titled]")
             exit(1)
         }
         // 整套 store 都会写数据目录：只在临时数据目录里跑，而且不能就是真实的那个。

@@ -533,7 +533,7 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--app-ui"),
 }
 
 // 实时桥的无头测试宿主（测试用，窗口不显示）：LABELGUI_DATA_DIR=<临时> LABELGUI_LIVE_SOCK_ROOT=<测试目录>
-// LABELGUI_LIVE_TEST_OUT=<快照目录> LabelGUI --live-host <photo_dir> [--size …] [--tab …] [--no-view]（见 Live/LiveHost.swift）。
+// LABELGUI_LIVE_TEST_OUT=<快照目录> LabelGUI --live-host <photo_dir> [--size …] [--tab …] [--no-view | --titled]（见 Live/LiveHost.swift）。
 // 和 app 同一个 AppModel.make、同一个 LiveServer，只差 socket 根目录和 test.* 方法；测试脚本是 Scripts/live_smoke.py。
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--live-host") {
     MainActor.assumeIsolated {
@@ -632,7 +632,7 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--export-jpeg"),
 // 走到这里就要开界面了。命令行里带着不认识的 `--参数`（拼错了、或者拿新的测试脚本跑旧版程序）时
 // 不开：测试 / 自动化以为自己在无头跑，结果弹出一个窗口。系统自己传的参数是单横线（-NSDocument…、-psn_…）。
 if let unknown = CommandLine.arguments.dropFirst().first(where: { $0.hasPrefix("--") }) {
-    FileHandle.standardError.write("不认识的参数 \(unknown)，不开界面（无头参数见 README「从源码构建」）\n".data(using: .utf8)!)
+    FileHandle.standardError.write("不认识的参数 \(unknown)，不开界面（无头参数见 README「从源码构建」；给 AI 用：--mcp）\n".data(using: .utf8)!)
     exit(2)
 }
 

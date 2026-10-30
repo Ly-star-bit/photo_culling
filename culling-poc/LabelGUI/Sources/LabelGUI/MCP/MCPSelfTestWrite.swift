@@ -62,6 +62,14 @@ extension MCPSelfTest {
                   "桥 \(bridge) → \(code ?? "照常执行")（应该 \(want ?? "照常执行")），hint「\(hint)」；只有菜单关了才说菜单")
             check(LiveServer.indicatorProblem(bridge) == problem, "桥 \(bridge) → 标题栏 \(String(describing: LiveServer.indicatorProblem(bridge)))")
         }
+        // 菜单关了：app 回的、--mcp 自己判出来的两处 bridge_off 都写菜单那一项的全名（和 LiveBridgeToggle 的字面量一样）
+        let menu = LiveBridgeNotice.menuTitle
+        check(menu == "允许 AI 实时操作（MCP）", "菜单那一项的名字：\(menu)")
+        var offMessage = ""
+        if case .failure(_, let m, _)? = LiveServer.bridgeDownReply(.off("disabled_in_settings")) { offMessage = m }
+        let offExplain = LiveClient.explain(LiveClient.Probe(state: .bridgeOff, reason: "disabled_in_settings")).message
+        check(offMessage.contains("「\(menu)」") && offExplain.contains("「\(menu)」"),
+              "bridge_off 两处都写「\(menu)」：app「\(offMessage)」，--mcp「\(offExplain)」")
         // --mcp：锁文件那一行（或者锁被不认识的程序占着）→ unreachable；hint 里是标题栏上的同一句话
         let probes: [(String, String)] = [
             ("lock_lost", lost), ("lock_role_unknown", lost), ("sock_dir_unsafe", unsafe), ("socket_path_too_long", tooLong),

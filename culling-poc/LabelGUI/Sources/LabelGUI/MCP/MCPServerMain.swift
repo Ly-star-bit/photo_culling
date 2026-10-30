@@ -111,7 +111,8 @@ enum MCPConfig {
     /// LABELGUI_MCP_LIVE=0：不连 app（从不探测），tools/list 只有 app 没开也能用的 3 个（§10.1）。
     static let liveEnabled = ProcessInfo.processInfo.environment["LABELGUI_MCP_LIVE"] != "0"
 
-    /// 单次调用的截止时间上限：LABELGUI_MCP_DEADLINE_SEC，默认 50，最多 600（§10.2）。
+    /// deadline_seconds 的上限：LABELGUI_MCP_DEADLINE_SEC，默认 50，最多 600（§10.2）。有这个参数的三个工具没给它时，
+    /// 默认的 30 / 50 s 也不超过它（MCPLiveTools.effectiveDeadlineMs）；其余工具固定 10 s，不受它管。
     static let deadlineCap: Int = {
         guard let raw = ProcessInfo.processInfo.environment["LABELGUI_MCP_DEADLINE_SEC"].flatMap({ Int($0) }) else { return 50 }
         return min(max(raw, 5), 600)

@@ -19,10 +19,15 @@ enum MCPInProcessTools {
             limit = n
         }
         let index = MCPPaths.readSessionsIndex()
+        let dir = MCPPaths.dataDirState()
+        // 先探测：data_dir_unreadable 那一句要看锁到底看没看到（warnings 的顺序不变）
+        let probe = LiveClient.probe(client: call.client)
         var warnings: [[String: Any]] = []
-        if !MCPPaths.dataDirState().exists {
+        if !dir.exists {
             warnings.append(MCPStatus.warning("data_dir_missing", "数据目录不存在：这台机器上还没有分析过的场次。",
                                               hint: "请用户自己打开选片工具分析一场"))
+        } else if !dir.readable {
+            warnings.append(MCPStatus.dataDirUnreadableWarning(lockUnseen: LiveClient.lockUnseen(probe), sessionsDenied: index.denied))
         } else if index.missing {
             warnings.append(MCPStatus.warning("sessions_index_missing", "数据目录里没有 sessions.json：选片工具里还没有「最近场次」。",
                                               hint: "请用户在选片工具里分析或打开一场"))
@@ -32,11 +37,12 @@ enum MCPInProcessTools {
         }
         let shown = Array(index.entries.prefix(limit))
         let checks = MCPPaths.foldersOnline(shown.map(\.folder))
-        let probe = LiveClient.probe(client: call.client)
         let openKey: String? = probe.state == .live ? probe.openSession?["session"] as? String : nil
         switch probe.state {
         case .live, .notRunning, .disabled:
             break
+        case .unreachable where LiveClient.lockUnseen(probe) && !dir.readable:
+            break  // 上面已经有 data_dir_unreadable（说了看不出开没开）
         default:
             let (message, hint) = LiveClient.explain(probe)
             warnings.append(MCPStatus.warning(probe.state.rawValue, message + "照常列出场次（读的是磁盘上的 sessions.json），open_in_app 不知道。",
