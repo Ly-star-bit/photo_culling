@@ -1,6 +1,6 @@
 # 选片工具 (photo_culling)
 
-给摄影师用的 AI 辅助批量选片工具，macOS 原生应用，全部本地运行，不上传任何照片。
+给摄影师用的 AI 辅助批量选片工具，macOS 原生应用，全部本地运行，不上传任何照片（除非你自己接上云端的 AI 助手，见「给 AI 用（MCP）」）。
 
 导入一场拍摄（支持 RAW / RAW+JPG / JPG），几秒内完成技术性废片检测（闭眼、虚焦、曝光问题、连拍去重），再用本地视觉模型对幸存照片做语义复核，最终以 XMP 星级色标写回 Lightroom / Capture One，或直接导出交付 JPG。
 
@@ -30,6 +30,7 @@
 - **JPG 交付（导出 JPG / 精华 Top N / 水印页共用一套设置）**：尺寸有原尺寸、长边 4096、长边 2048（微博）、朋友圈长边 1080、小红书 3:4（1080×1440 以内）、Instagram 4:5（1080×1350 以内）、自定义长边 / 短边，都是「放进去」：不裁切、不放大（规格表在 `DeliveryExport.swift`，加平台加一行）；水印页配上「画布比例扩展」补白就是精确尺寸（3:4 + 小红书 = 1080×1440）。缩小后补一刀屏幕输出锐化（不锐化 / 屏幕·标准 / 屏幕·高，和检视器同一套 Lanczos + USM；水印页先锐化照片再合成签名和文字，水印本身不被锐化），原尺寸从不锐化。色彩：缩小的默认转 sRGB（Adobe RGB / P3 原片真转换，不是改标签；相机设成 Adobe RGB 直出、没嵌 ICC 的 JPEG 也认得），原尺寸默认保留原色彩空间（给印厂），可以改。「去掉 GPS 位置」只去拍摄地点，时间、机身镜头、版权、方向照留（精华默认打开）。「限制在 X MB 以内」超了自动降质量，压到最低质量 40 还放不下的照写并点名。文件名模板 {原名} {序号:3} {日期} {名次:2} {相机} {星级}，旁边预览第一张叫什么；默认和以前一样（导出 JPG = 原名，水印页 = 原名 + _wm；水印页的 {星级} 先看旁边的 .xmp），重名另存 -2、-3 不覆盖（导出 JPG 勾了「覆盖」才覆盖）；导出 JPG 不能选拍摄文件夹本身或里面会被分析的子文件夹（勾了覆盖会换掉原片），拍摄文件夹/导出JPG/ 照常。精华 Top N 每次导到「导出JPG/精华/」下面一个新文件夹（Top20_2026-10-21_1530），文件名默认带名次（01_、02_…，按名字排序上传就是名次顺序），不和上次的混、不删任何东西，面板里有自己的质量（以前悄悄按质量 100 导）
 - **客户选片（确认表 → 导入客户选择 → 精修）**：「导出 › 导出选片确认表」出一个单文件 HTML（仅精选 / 精选 + 可用 / 选中的照片；菜单上先估好大小，约 120 KB 一张，导完报实际大小，超过 40 MB 建议只导精选或分批），微信直接发。客户点照片选中（紫色 ♥，再点取消），底部「已选 N 张 · 复制我的选择」复制出一段文字（第一行是表号，下面一行一个文件名），粘贴到微信发回来；选择记在客户的浏览器里（允许存的话），关掉再打开还在；复制不了就把文字摆出来让人长按复制；微信里网页点不了也没关系，回照片下面的文件名或编号一样能导。「导出 › 导入客户选择…」粘贴回复或打开 .txt / .csv：文件名带不带扩展名（扩展名对不上也认，比如这一场是 JPG、客户回 .CR3）、大小写、全角标点、「7207和7208」、Lightroom 清单、Pixieset 等导出的 CSV（第一行是表头才当表格，只用文件名那一列；别的列里带数字的格子列在没认出里，不悄悄扔）、文件号（7221 → DSCF7221，全场只有一张才算）、编号（12、35、78 · 12-15：按回复里带的表号对那张表，没带就按最近导出的那张，预览里写明是哪张）都认；认不出的、重号的、文件号和编号指向两张的都列出来，不猜。预览「认出 N 张 · 没认出 M 个：…」，再点「标记为客户选中」。客户选中是单独的标记，不改判决：缩略图上紫心、顶栏「客户选中 N」只看这些、状态栏计数，XMP 写紫色标（压过绿 / 红，星级不变；别人的 XMP 只改色标，取消后只在还是我们写的紫色时才拿掉）；再导是加上去（客户常分几次回），「清除客户选中」重来，都能 ⌘Z 一步撤回。「复制文件名」按选中的照片、没选就按当前筛选，三种格式：Lightroom（逗号分隔，粘到图库筛选器「文本 › 文件名 › 包含」；IMG_1 也会筛出 IMG_101 时提醒）、Capture One（空格分隔，「按文件名列表选择」）、一行一个（完整文件名，RAW+JPG 两个都列，给 Photo Mechanic「Load Selection」）。「复制原片到…」同一个范围，把原片复制（不移动）到你选的文件夹：RAW+JPG 和旁边的 .xmp 一起，目标里一模一样的跳过、同名不同内容的整张另存 -2，每个文件复制完校验大小和 SHA-256，原片一个字节不动，后台复制、顶栏能取消；不能选拍摄文件夹里面（下次分析会当成新照片），在旁边建一个精修文件夹就行；每场会记住上次选的文件夹
 - **拍摄复盘**：按焦段 / ISO 统计出片率；章节保护（整段时间的照片全灭时警告，防漏交场景）
+- **给 AI 用（MCP）**：Claude Code、Antigravity 这类 AI agent 能接上开着的选片工具：看当前这一场的判决、分组和照片（图由 app 出），替你改判、在网格里指出照片、套拼图模板、一键成套、换封面、改字、换样式，改动当场出现在窗口里，标题栏写着「Claude Code 已连接 / AI 正在操作…」，⌘Z 照样能撤；app 没开时只能看状态、列场次和模板，MCP 绝不会替你启动 app。「选片工具」菜单里「允许 AI 实时操作（MCP）」随时能关。配置、能做什么、安全承诺见下面「给 AI 用（MCP）」
 
 ## 架构
 
@@ -63,6 +64,8 @@ culling-poc/
 ├── LabelGUI/            # macOS 应用 (SwiftUI, swift build 即可构建)
 │   └── Sources/LabelGUI/
 │       ├── Native/      # 原生分析引擎: ImageLoader / FaceAnalyzer / Metrics / AnalysisEngine
+│       ├── MCP/         # 给 AI 用的 MCP 服务器 (LabelGUI --mcp: 不开界面、不读照片, 经实时桥交给 app)
+│       ├── Live/        # app 一侧的实时桥 (本机 Unix socket + 锁, AI 的改动由 app 自己执行)
 │       ├── BatchStore.swift   # 判决逻辑·会话管理·导出
 │       └── BatchView.swift    # 批量选片界面
 ├── layer1.py            # Python 版一阶段 (YuNet+MediaPipe, 已被原生引擎取代, 留作对照)
@@ -109,6 +112,8 @@ swift build -c release
 #   排队自检(两张卡排队 / 停下分析并导入): LABELGUI_DATA_DIR=/tmp/lg LabelGUI --card-queue-selftest <卡A> <卡B> --dest <目标>
 #   整套导入回归(CI 也跑，随机字节造假卡): python3 Scripts/card_import_regression.py .build/release/LabelGUI
 # 不认识的 --参数（拼错、新脚本配旧程序）直接退出，不会开界面
+# 从 Xcode / IDE / 调试器 / 脚本里开界面时，父进程不是 launchd、stdin 又不是终端（像是被 MCP 客户端起的）也直接退出 2：
+#   真要开界面设 LABELGUI_ALLOW_GUI=1；LABELGUI_NO_GUI=1 时一律不开界面。访达 / 程序坞 / open 打开的、终端里直接跑的不受影响
 # 时间轴布局自检 / 网格改判保持位置自检: LabelGUI --timeline-selftest / --ux-selftest
 # 按机身对时(测试用，会写这一场的 body_offsets.json，必须临时数据目录): LABELGUI_DATA_DIR=/tmp/lg LabelGUI --body-offset <照片文件夹> [--body 'X-T50 #SECOND-BODY-0002' --seconds +3:00 | --align B_0001,DSCF7207] [--undo]
 #   不带 --body / --align 只打印每台机身和偏移；两台以上机身时 --verdicts --per-photo 每行带机身、对时后的时间、章节，最后打按拍摄时间的顺序
@@ -206,6 +211,16 @@ swift build -c release
 #   [--strip-gps|--keep-gps] [--name '{名次:2}_{原名}'] [--max-mb 2] [--quality 90] [--overwrite]
 #   top:N 时 --dest 是「精华」那一层，里面每次新建 TopN_日期_时间
 #   导出设置那一段的离屏快照: LABELGUI_DATA_DIR=/tmp/lg LabelGUI --batch-ui <照片文件夹> out.png --delivery-ui jpeg|highlights|watermark [--delivery-json '{"size":"short:1200"}']
+# 给 AI agent 用（MCP，stdio；不开界面、不启动 app）: LabelGUI --mcp   （客户端配置见「给 AI 用（MCP）」）
+#   app 开着：读当前场次、改判、套模板、一键成套等交给 app 执行，窗口里实时可见、可 ⌘Z（app 菜单「允许 AI 实时操作（MCP）」可关）
+#   app 没开：只能看状态、列场次、列模板，其余工具回 app_not_running
+#   打印工具定义: LabelGUI --mcp-tools
+#   单次调用（调试用，和 --mcp 同一套分发；app 开着时一样交给 app）: LabelGUI --mcp-call app_status '{}'
+#   MCP 这一层的自检（纯函数，不起服务器、不读写文件）: LabelGUI --mcp-selftest [--json]
+#   冒烟（CI 也跑，不需要照片、不起宿主）: python3 -I Scripts/mcp_smoke.py .build/release/LabelGUI --ci
+#   整窗离屏快照（测试用，窗口不显示）: LABELGUI_DATA_DIR=/tmp/lg LabelGUI --app-ui <照片文件夹> out.png [--tab 批量处理|水印|拼图|标注校准] [--size 1440x900] [--wait 4]
+#   实时桥测试宿主（测试用，窗口不显示）: LABELGUI_DATA_DIR=/tmp/lg LABELGUI_LIVE_SOCK_ROOT=<短目录> LABELGUI_LIVE_TEST_OUT=<快照目录> LabelGUI --live-host <照片文件夹> [--size 1440x900] [--tab 批量处理|水印|拼图|标注校准] [--no-view]
+#   实时桥冒烟（CI 也跑；本地真照片: --photos <照片文件夹> --data <分析过的数据目录>）: python3 -I Scripts/live_smoke.py .build/release/LabelGUI --ci
 ```
 
 ## 使用流程
@@ -219,6 +234,161 @@ swift build -c release
 7. （可选）网格多选后点「拼图」，或在拼图 tab 带精选进来：自动排版出九宫格/小红书拼图，或切到相册模式编排印刷跨页；也可以「一键成套」出一期杂志、一卷印样或一本婚礼相册
 8. 确认无误后把废片移到废纸篓
 
+## 给 AI 用（MCP）
+
+app 里的程序本身就是一个 MCP 服务器（`LabelGUI --mcp`，stdio），Claude Code、Antigravity 这类 AI agent 接上以后能看你的选片结果、替你改判、排拼图。**这一版只做实时**：你开着 app 时，AI 读的是 app 当前打开的那一场（app 内存里的状态，含还没存盘的改动），改判、套模板、一键成套、换封面、改字、换样式、撤销都交给 app 自己执行，你在窗口里当场看到，⌘Z 照样能撤；app 没开时只能看状态、列场次、列模板，其余工具一律回 `app_not_running`，请你自己打开 app —— **MCP 绝不会替你启动 app**。app 没开时读场次、出拼图成品图，以及让 AI 分析新文件夹，这一版都没有。
+
+### 18 个工具
+
+app 没开时也能用的只有前 3 个；其余 15 个要 app 开着、而且 `session` 是 app 当前打开的那一场（不是就回 `session_not_open`，要换场次用 `app_open_session`）。
+
+| # | 工具 | 做什么 | app 没开时 |
+|---|---|---|---|
+| 1 | `app_status` 状态自检 | 版本、数据目录、app 开没开、能不能实时操作（`live.state`）、app 当前打开的场次（`live.open_session`）和页、各种上限。AI 第一个调它 | 能用 |
+| 2 | `cull_list_sessions` 列出已分析的场次 | 侧栏「最近场次」里的场次（最多 15 场）：照片文件夹、张数、在不在线、是不是在受保护位置、是不是 app 当前打开的那一场 | 能用 |
+| 3 | `collage_list_templates` 拼图模板与成套 | 内置模板（分类、照片格数、要几张横图竖图）、一键成套、样式、色调、画布能填的值 | 能用 |
+| 4 | `cull_session_overview` 场次概览 | 精选 / 可用 / 废片各多少张、废片理由、阈值、章节、场和近似重复、还没处理的场、多机身对时 | `app_not_running` |
+| 5 | `cull_list_photos` 列照片 | 按条件列照片，每张一行（判决、理由、时间、场、锐度、人脸和闭眼……），分页 | `app_not_running` |
+| 6 | `cull_get_photos` 照片详情 | 1–20 张的完整分析：EXIF、每张脸的位置和睁闭眼、复审结果、人工改判和客户选中 | `app_not_running` |
+| 7 | `cull_list_groups` 分组 | 章节、场（一串连拍，带名次和推荐的那张）、近似重复组的成员 | `app_not_running` |
+| 8 | `cull_preview_photos` 看照片 | 1–4 张缩小预览（内联图片）；`crop=face` 从原图按主脸裁一块放大，看眼睛和对焦，和连拍挑选里的放大同一个算法 | `app_not_running` |
+| 9 | `collage_get_state` 看 app 里的拼图 | 拼图工程的状态（模式、页、模板、样式、文字、每个格子、撤销深度、`digest`）和 app 当前画面的预览 | `app_not_running` |
+| 10 | `app_open_session` 在 app 里打开场次 | = 侧栏「最近场次」里点它。只能开列表里的；会清掉 app 里这一场的撤销记录，撤销栈不空时先回 `confirm_required` 让 AI 问你 | `app_not_running` |
+| 11 | `cull_set_verdicts` 改判 | = 网格里按 1/2/3/0（精选 / 可用 / 废片 / 恢复自动），一次调用一步撤销 | `app_not_running` |
+| 12 | `cull_show_photos` 在 app 里定位照片 | 在网格里选中这些照片、把焦点移过去给你看，默认把 app 切到批量页（不拉到前台）；不改判决、不进撤销、不改你的筛选 | `app_not_running` |
+| 13 | `collage_apply_template` 套模板 | = 检视器里点模板；模板全名、分类名、名字里的几个字都认 | `app_not_running` |
+| 14 | `collage_run_kit` 在 app 里一键成套 | 出一期 / 按卷出印样 / 整本婚礼相册，替换当前拼图，一步撤销（最长约 50 秒） | `app_not_running` |
+| 15 | `collage_next_cover` 换封面 | 「出一期」换下一张封面，内页不动 | `app_not_running` |
+| 16 | `collage_set_text` 改标题/刊头/期号/文字 | 标题、副标题、刊头、期号，或者某个格子里某块字的第一行；几个字段一起改也是一步撤销 | `app_not_running` |
+| 17 | `collage_set_style` 换样式/色调 | 样式预设、统一色调和强度 | `app_not_running` |
+| 18 | `app_undo` 撤销 AI 刚做的一步 | 只撤 AI 自己的那一步（`target` 分 `verdicts` / `collage`）；你之后又改过就不撤（`undo_not_ours`），请你自己 ⌘Z | `app_not_running` |
+
+改判和拼图写的结果里有 `live.notice`（和窗口里那一页状态栏上同一句话）、这一步怎么撤，拼图写还带 app 当前画面的预览图。设了 `LABELGUI_MCP_LIVE=0` 时只注册前 3 个。
+
+### 安全承诺
+
+- **不启动 app，不开任何窗口**：`--mcp` 进程不建应用对象、不起任何子进程，找 app 只是连本机的一个 Unix socket（连不上就是没开）；没有 `open`、Apple Events、URL scheme。它跑着的时候程序坞上不会多出图标。唯一可能冒出来的框不是它开的：它自己万一崩了，系统会弹「"选片工具"意外退出」，别点「重新打开」（见排错）。
+- **不读照片**：`--mcp` 自己不打开任何照片和预览图。AI 看到的图都是 app 出的（在主线程以外解码、裁切、压成 JPEG），经本机通道发过来。`--mcp` 在数据目录里只读 `sessions.json` 和锁文件 `.live.lock`。
+- **不写数据目录和设置**：`--mcp` 不往数据目录、照片文件夹、任何设置里写一个字节；在从没开过 app 的机器上也不会建出数据目录。它唯一会写的是预览输出目录（默认 `~/Pictures/xuanpian-mcp`，`LABELGUI_MCP_OUT` 可以换）：根上一个 `.xuanpian-mcp` 标记文件，加上 `previews/` 里给 AI 看过的图，按内容各存一份（文字结果里给路径，图太大被客户端截掉时 AI 还能按路径读），7 天以前的、或者总量超过 1 GB 时最旧的自动删，只删它自己起名的文件；第一次存图时才建这个目录。
+- **改动全是 app 自己做的**：和你点按钮调的是同一个方法，进 app 自己的撤销记录，AI 的一次调用就是一步 ⌘Z，存盘也照常由 app 做。app 不会被拉到前台、不抢键盘焦点、不弹窗。读工具不改判决和拼图；和界面一样会顺带写盘的只有两处：`collage_get_state` 会像你切到拼图页那样把这一场的拼图工程接上（可能存一次拼图工程），`collage_set_style` 和在检视器里点样式预设一样，会改「下次新建拼图沿用的默认样式」。
+- **受系统隐私保护的位置不碰**：照片在桌面、文稿、下载、`~/Library`（含 iCloud 云盘、各家网盘）、外置盘和存储卡（`/Volumes`）、网络卷（`/Network`、`/net`）、照片图库（`.photoslibrary`）里的场次，`--mcp` 只按路径字符串认出来，连「文件夹在不在」都不查。AI 不能把 app 切到这些场次（回 `protected_location`），要你自己在侧栏「最近场次」里点开；点开以后读和改照常，只是看照片只用 1024 的预览、不读原图（`crop=face` 也是在预览上裁，细节有限，结果里会写明）。为的是 AI 的操作不会让系统以终端或 app 的名义弹出隐私授权框。
+- **桥只对本机同一个用户开放**：app 和 `--mcp` 之间是本用户临时目录里的一个 Unix socket（目录 0700、socket 0600），不开任何网络端口；连进来的不是同一个用户的进程就拒绝。
+- **AI 看到的东西会发给 AI 的服务商**：上面说的都是 app 和 `--mcp` 之间这一段。AI 看过的预览图、脸部裁块，以及文件名和路径、EXIF、人脸位置、判决这些文字结果，会由你的 AI 客户端（Claude Code、Antigravity……）和对话一起发给它背后的模型服务（Anthropic、Google 等），和你在对话里发照片一样。照片不能离开这台 Mac 的话，就别接云端的 AI。
+
+### 在 app 里看得到什么
+
+**标题栏**：窗口标题「选片工具」后面的副标题，四个 tab 都在，不压任何内容。不用 AI 时什么都不显示，窗口和以前一模一样。
+
+| 什么时候 | 标题栏上 |
+|---|---|
+| 没有 AI 来过，或者菜单里关了 | 什么都不显示 |
+| 2 分钟内有 AI 来过 | 「Claude Code 已连接」（客户端报的名字是 claude-ai 时写「Claude 已连接」，别的写「AI 已连接」），到点自己淡掉 |
+| AI 的一步正在执行 | 「AI 正在操作：套模板…」（一键成套、换封面在等 app 算路人信息的时候就已经显示） |
+| 刚做完（10 秒） | 和那一页状态栏上同一句话，比如「AI：改了标题 · 在拼图页 ⌘Z 撤销」 |
+| 另一个选片工具占着同一个数据目录 | 「另一个选片工具正在用这个数据目录：AI 只连那一个」 |
+| 数据目录的锁被别的程序拿走了 | 「数据目录的锁被别的程序拿走了：AI 实时操作已停，重开 app 恢复」（一直留着；AI 收到 `app_unreachable`，锁刚被放掉的那一秒里也可能看到 `not_running` / `old_app`） |
+| 实时连接开不起来 | 「AI 实时操作的连接开不起来（原因）：已暂停，每 10 秒自动再试」，开好了自己消失；再试也没用的几种写「…：已停，重开 app 再试」 |
+
+**菜单开关**：「选片工具」菜单里带勾的「允许 AI 实时操作（MCP）」，默认开，只记在这台 Mac 的 app 设置里。关掉以后 AI 的读和改都回 `bridge_off`（AI 会告诉你是在菜单里关的），标题栏不再显示 AI，app 照常用；状态自检、列场次、列模板照常。关之前已经开始的那一步（比如正在算的一键成套）照样做完，⌘Z 能撤；排在后面的都不做。再勾上就恢复。
+
+**你在操作时 AI 等你（`user_busy`）**：
+- 你正按着鼠标、拖动、在输入框里打字（含输入法拼字）、开着菜单、在拼图里拖缝拖字时，AI 的改动最多等 2 秒，你一停手就执行；2 秒后还在忙就不执行，回 `user_busy`（`transient:true`），AI 过几秒再试。
+- 开着对话框或面板（确认框、导出、对时、导入客户选择……）、在连拍挑选里、在拼图里裁切、拼图正在导出时不等，立刻回 `user_busy`（`transient:false`），AI 会请你先关掉；审片模式开着时只挡切场次和定位照片，改判照常（画面上那张的判决当场变）。照片检视器开着时改判挡不挡，要在真 app 上确认。
+- 读不等，随时能读。
+
+### 配置
+
+前提：app 已经装在「应用程序」里，而且正常打开过一次。从 Release 下载的 app 带隔离属性，没打开过就让 AI 客户端直接起里面的程序，系统可能拦下来（按 Gatekeeper 的机制推断，没验证过）：先照「安装」第 2 步打开一次，或者 `xattr -dr com.apple.quarantine /Applications/选片工具.app`。
+
+**Claude Code**（在终端里执行一次，之后每个项目都能用）：
+
+```bash
+claude mcp add --scope user --env LABELGUI_NO_GUI=1 --transport stdio xuanpian -- "/Applications/选片工具.app/Contents/MacOS/LabelGUI" --mcp
+# 或者给单个项目用：在项目根目录的 .mcp.json 里加 "timeout":120000（毫秒）
+# 想让模型能按路径打开成品：启动时加 --add-dir ~/Pictures/xuanpian-mcp，或者在设置里放行 Read(//Users/<你>/Pictures/xuanpian-mcp/**)
+```
+
+`--env` 和服务器名 `xuanpian` 中间必须隔一个别的选项（这里是 `--transport stdio`）：紧跟在 `--env` 后面的名字会被当成另一个 `KEY=value`。`command` 指向 app 里的程序最稳；指向自己构建的 `.build/release/LabelGUI` 也能连同一个 app，只是 `app_status` 里多一条 `build_mismatch` 警告。app 升级以后先重开 app，再在 Claude Code 里用 `/mcp` 重连。
+
+**Antigravity**：配置文件是 `~/.gemini/config/mcp_config.json`（官方 MCP 页的写法；早期教程写的是 `~/.gemini/antigravity/mcp_config.json`，哪个对还没验证），只给某个工作区用就写 `<工作区>/.agents/mcp_config.json`。**不要**写 `type` 字段，`command` 用绝对路径；文件里已经有别的服务器的话，把 `xuanpian` 这一项加进已有的 `mcpServers`，别整个覆盖：
+
+```json
+{"mcpServers":{"xuanpian":{"command":"/Applications/选片工具.app/Contents/MacOS/LabelGUI","args":["--mcp"],"env":{"LABELGUI_NO_GUI":"1"},"timeoutSeconds":120}}}
+```
+
+CLI ≥1.1.16 也可以用 `agy mcp add`。Codex 要把 `tool_timeout_sec` 设到 ≥60；Cursor 要写 `"type":"stdio"`。
+
+**路径里的中文**（「选片工具」）在 Antigravity、Codex 上能不能正常启动还没验证。起不来就改用一个 ASCII 路径的包装脚本（`chmod +x` 以后，把配置里的 `command` 换成它的绝对路径 `/Users/<你>/bin/xuanpian-mcp`（JSON 配置里不认 `~`），`args` 里的 `--mcp` 去掉：脚本已经带了）：
+
+```sh
+#!/bin/sh
+# ~/bin/xuanpian-mcp
+exec "/Applications/选片工具.app/Contents/MacOS/LabelGUI" --mcp "$@"
+```
+
+用包装脚本，不用软链接：通过软链接启动时，程序认不认得出自己在 app 里没验证过。
+
+### 审批
+
+Claude Code 交互模式下，每个工具第一次调用都会问你。建议 9 个读工具（第 1–9 个）和 8 个写工具（第 11–18 个）选「以后不再问」：写的改动当场出现在你眼前、一步 ⌘Z 能撤。**`app_open_session` 保持每次问**：切场次会清掉 app 里这一场的判决和拼图撤销记录。想一次配好，在 Claude Code 的设置（`~/.claude/settings.json`，或者项目里的 `.claude/settings.json`）里放行这 17 个（合并进文件里已有的 `permissions.allow`，别整个文件覆盖）：
+
+```json
+{"permissions":{"allow":[
+  "mcp__xuanpian__app_status", "mcp__xuanpian__cull_list_sessions", "mcp__xuanpian__collage_list_templates",
+  "mcp__xuanpian__cull_session_overview", "mcp__xuanpian__cull_list_photos", "mcp__xuanpian__cull_get_photos",
+  "mcp__xuanpian__cull_list_groups", "mcp__xuanpian__cull_preview_photos", "mcp__xuanpian__collage_get_state",
+  "mcp__xuanpian__cull_set_verdicts", "mcp__xuanpian__cull_show_photos", "mcp__xuanpian__collage_apply_template",
+  "mcp__xuanpian__collage_run_kit", "mcp__xuanpian__collage_next_cover", "mcp__xuanpian__collage_set_text",
+  "mcp__xuanpian__collage_set_style", "mcp__xuanpian__app_undo"
+]}}
+```
+
+`--allowedTools "mcp__xuanpian__*"`（或 `mcp__xuanpian`）会连 `app_open_session` 一起放行，只建议在验收脚本里用。Antigravity 默认每次都问；写 `mcp(xuanpian/*)` 同样会把 `app_open_session` 一起放行，由你自己决定。审批框停多久都不要紧：AI 的这一步从你点允许那一刻才开始计时；停着的时候你改过拼图的话，带 `if_digest` 的拼图改动会被挡下来（`stale_digest`），不会盖掉你的改动。
+
+### 环境变量
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `LABELGUI_DATA_DIR` | 不设（`~/Library/Application Support/选片工具`） | 换数据目录，测试用。**MCP 配置里别设**：设了以后 MCP 找的是那个目录的锁和连接，和你开着的 app 对不上，app 明明开着却是 `not_running` |
+| `LABELGUI_MCP_OUT` | `~/Pictures/xuanpian-mcp` | 预览存在哪（绝对路径），只用里面的 `previews/`。空目录、或者带 `.xuanpian-mcp` 标记的目录才用（不空又没标记的不用，免得清理删到你的文件）；不能在受保护位置、数据目录、照片文件夹里。不能用时图照常内联、带一条警告（`inline:false` 时回 `output_dir_unusable`） |
+| `LABELGUI_MCP_DEADLINE_SEC` | 50 | `deadline_seconds` 的上限（秒，5–600）。只有看照片（默认 30）、一键成套和换封面（默认 50）三个工具有这个参数；只管 AI 传了的 `deadline_seconds`，没传时照用 30 / 50 秒；其余读写都是 10 秒 |
+| `LABELGUI_MCP_INLINE_KB` | 600 | 一次调用里内联图片的合计上限（KB，最大 20000）；超了的那几张不给图，标 `truncated:true` |
+| `LABELGUI_MCP_TEXT_MAX` | 20000 | 文字结果的长度上限（字符，1000–1000000；小于 1000 按默认）；超了就少给几条、标 `truncated:true`（列照片、分组带 `next_cursor` 接着翻） |
+| `LABELGUI_MCP_LIVE` | 不设（开） | `0` = 只注册 app 没开也能用的 3 个工具，从不连 app：保证 AI 碰不到开着的 app |
+| `LABELGUI_NO_GUI` | 不设 | `1` = 这个进程绝不开界面，命令行里没有无头参数就直接退出。上面的配置都带着它 |
+| `LABELGUI_ALLOW_GUI` | 不设 | `1` = 父进程不是 launchd、stdin 又不是终端时也允许开界面（从 Xcode、IDE、脚本里开 app 时用，见排错） |
+
+`LABELGUI_LIVE_SOCK_ROOT`、`LABELGUI_LIVE_TEST_*` 只给测试宿主 `--live-host` 用，不要写进 MCP 配置。
+
+### 排错
+
+- **先看 `app_status`**：`live.state` 说明 app 那边是什么情况，`warnings` 里每条都带 `hint`。`--mcp` 的日志写在 stderr，在客户端的 MCP 日志里看。
+
+  | `live.state` | 意思 | 怎么办 |
+  |---|---|---|
+  | `live` | 能实时操作 | — |
+  | `not_running` | app 没开（或者这台机器上还没开过 app、数据目录不存在） | 自己打开 app；MCP 不会替你开 |
+  | `bridge_off` | 菜单里关了「允许 AI 实时操作（MCP）」 | 勾上 |
+  | `unreachable` | app 开着，连不上它的实时桥（socket 被系统清掉还没自愈、锁被别的程序拿走、桥开不起来） | 看标题栏上那句；一般 10 秒内自己恢复，不行就重开 app |
+  | `unresponsive` | app 开着，1 秒内没回应（卡住了） | 看一下 app，过一会儿再试 |
+  | `proto_mismatch` | app 和 MCP 的实时桥版本对不上 | 重开 app；还不行就是两边差太多，更新 app |
+  | `old_app` | 开着的是还没有实时桥的旧版 | 更新 app；标题栏写着「数据目录的锁被别的程序拿走了…」的话，重开 app 就行 |
+  | `not_ready` | app 正在启动或者正在退出 | 过几秒再试 |
+  | `data_dir_mismatch` | 连上的 app 用的不是同一个数据目录 | 重开 app；MCP 配置里别设 `LABELGUI_DATA_DIR` |
+  | `peer_rejected` | 桥的另一头不是你这个用户的进程 | 看看是不是别的账户开着选片工具 |
+  | `disabled` | 设了 `LABELGUI_MCP_LIVE=0` | 去掉它，重连 MCP |
+
+- **app 明明开着却是 `not_running`**：多半是 MCP 配置的 `env` 里设了 `LABELGUI_DATA_DIR`（比如照抄了「从源码构建」里的调试写法）。`app_status` 里 `data_dir_override` 是 `true` 就是这个原因，去掉它再重连。另一种：标题栏写着「数据目录的锁被别的程序拿走了…」，退出并重开 app。再一种：`warnings` 里是 `data_dir_missing`、可数据目录其实在，是宿主的沙箱连目录都不让看（见下面「宿主的沙箱」）。
+- **改动「没出现」**：看结果里的 `live.window_state`：`hidden`（⌘H 隐藏了）、`minimized`（最小化了）、`occluded`（被挡住了或者在别的桌面上）、`no_window`（app 开着但没有窗口）。这时改动已经生效并存盘，切过去就能看到；AI 不会替你把窗口拉出来。
+- **一直 `user_busy`**：`transient:false` 是开着对话框、面板、连拍挑选、裁切或者正在导出，关掉就好；`transient:true` 是你正在拖动或打字，停手几秒。
+- **`protected_location`**：那一场的照片在受保护位置（见安全承诺），这一版没有放行开关：自己在侧栏「最近场次」里点开它，之后 AI 照常读和改。
+- **超时**：最长的一步（一键成套）在 50 秒以内，客户端的超时要比它长：Claude Code 项目级 `.mcp.json` 的 `"timeout":120000`、Antigravity 的 `timeoutSeconds:120`、Codex 的 `tool_timeout_sec`（≥60）。app 主线程正忙、读超时回 `deadline_exceeded`，过一会儿再调；写到一半超时或者断了回 `app_outcome_unknown`，AI 用结果里的 `op_id` 原样再调同一个工具，不会做两遍。
+- **图片和 `MAX_MCP_OUTPUT_TOKENS`**：Claude Code 默认把一次工具结果限制在 25000 token（`MAX_MCP_OUTPUT_TOKENS`）。在 Claude Code 2.1.312 上实测，内联图片不算进这个上限：1 张 1024、4 张 768、1 张 1568、2 张 1568（一次 523 KB，base64 约 70 万字符）、4 张脸部裁块、一张 768 的拼图预览都完整送到了模型，所以默认内联、一次合计 600 KB。这只是这一版 Claude Code 上测出来的，换了版本或客户端要是图被截掉、报结果太大：让 AI 用 `inline:false`（只给 `previews/` 里的文件路径，再按路径读），或者把 `LABELGUI_MCP_INLINE_KB` 调小；文字被截时启动 Claude Code 前设 `MAX_MCP_OUTPUT_TOKENS=50000`，或者把 `LABELGUI_MCP_TEXT_MAX` 调小让列表分页。
+- **按路径读预览**：Claude Code 默认只读工作目录里的文件。要让模型按 `file` 路径读预览，启动时加 `--add-dir ~/Pictures/xuanpian-mcp`，或者在设置里放行 `Read(//Users/<你>/Pictures/xuanpian-mcp/**)`。
+- **宿主的沙箱**：宿主（比如 Antigravity 的终端沙箱）不让读 `~/Library/Application Support` 或者本用户临时目录里的 socket 时，app 开着，`app_status` 却报 `data_dir_unreadable`、`unreachable`；沙箱连目录在不在都不让看时，报的是 `data_dir_exists:false`、`data_dir_missing` 和 `not_running`，看着像 app 没开。都是在宿主里放行。
+- **弹出「"选片工具"意外退出」**：app 窗口还在、或者 app 本来就没开的话，崩了（或者被强行结束）的是 AI 客户端起的 `--mcp` 进程（它是 app 里的程序，系统按 app 报）。这时点「忽略」，**不要点「重新打开」**：那会把 app 打开。然后在客户端里重连 MCP（Claude Code 用 `/mcp`）。
+- **从 Xcode / IDE 里开 app 直接退出**：父进程不是 launchd（访达、程序坞、启动台、`open` 打开的都是）、stdin 又不是终端时（Xcode 的 Run、IDE、调试器、某些脚本和启动器里常常是这样），app 会当成是被 MCP 客户端起的，不开界面、退出码 2，stderr 写「像是被 MCP 客户端启动的…」。真要开界面就设 `LABELGUI_ALLOW_GUI=1`（Xcode：Edit Scheme › Run › Arguments › Environment Variables）。访达、程序坞、启动台、`open` 打开的，终端里直接跑的都不受影响。
+
 ## 关键技术决策记录
 
 - **锐度量纲**：Tenengrad（RMS Sobel 梯度）值域与拉普拉斯方差完全不同，清晰照片实测约 65-95，预设按此标定
@@ -226,3 +396,5 @@ swift build -c release
 - **曝光看主体**：裁切和欠曝 / 过曝都看人不看背景 —— 裁切数「脸扩到头 + 上半身（2 倍脸宽、往下 3 个脸高）」里的像素（这块不到画面 2% 时——远景里的小人——照旧数整张，碰巧认出一张小脸不该把大片死白天空排除在外），亮度看脸的中位数；欠曝还要求整张最亮的 1% 也不亮（p99 < 100），只看脸会冤枉深肤色和背光。线性光压暗实测：-2EV 脸 86–88、p99 116–120 不判，-3EV 脸 61–62、p99 83–86 判
 - **VLM 提示词纪律**：不在提示词里列举示例物体（小模型会复读式幻觉"找到"它们）；远景路人明确不算抢镜；模型对场景的判断只能提示、不能否决
 - **质量分**：连拍组内相对比较（低于组内最高 0.15 才嫌疑），单张按景别补偿（脸越小阈值越宽）
+- **MCP 自己写，不用官方 Swift SDK**：SDK 的 stdio 传输在两个以上的大结果（>约 120 KB）同时回时帧会写乱（压测 66 个请求一个完整的都没有），而 Claude Code 正好会并行调只读工具、预览图又都比这大；手写版同样压测 0 损坏。仓库没有外部包，手写版二进制只多 72 KB，SDK 版多约 5 MB、还会把 CI 的 Swift 下限钉在 6.1。SDK 修好这些以后只换协议那一层（`MCP/MCPStdio.swift`）
+- **app 开着时由 app 执行，MCP 只转发**：app 每次整份重写自己的文件、从不回读，外面直接改盘会被 app 下一次保存悄悄盖掉，也进不了撤销记录；所以 app 是唯一写者，AI 的改动走 app 自己的方法、压 app 自己的撤销栈（一次调用一步 ⌘Z）。通道是本用户的 Unix socket，每次调用连一次：不开网络端口（localhost TCP 会弹防火墙框、拿不到对端是谁，浏览器也能打进来），connect 拉不起任何进程；不用 XPC（具名服务要 launchd 管，按需启动就是把 app 拉起来）和 Apple Events（会弹自动化授权框，还会把没开的 app 启动起来）
