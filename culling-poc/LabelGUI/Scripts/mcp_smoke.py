@@ -485,39 +485,44 @@ def bundle_gate_selfcheck():
     root = os.path.join(WORK, "fake-bundle")
     marker = os.path.join(root, "ran")
     os.makedirs(root)
-    stub = os.path.join(root, "stub.sh")
-    open(stub, "w").write("#!/bin/sh\ntouch '" + marker.replace("'", "") + "'\nexit 0\n")
-    os.chmod(stub, 0o755)
-    inside = os.path.join(root, "X.app", "Contents", "MacOS", "LabelGUI")
-    os.makedirs(os.path.dirname(inside))
-    os.symlink(stub, inside)                       # 原样的路径在 .app 里，解析以后不在
-    upper = os.path.join(root, "Y.APP", "Contents", "MacOS", "LabelGUI")
-    os.makedirs(os.path.dirname(upper))
-    shutil.copy(stub, upper)
-    outside = os.path.join(root, "link-into-bundle")
-    os.symlink(upper, outside)                     # 原样的路径不在 .app 里，解析以后在
-    env = {k: v for k, v in os.environ.items() if k != "GITHUB_ACTIONS" and not k.startswith("LABELGUI_")}
-    me = os.path.abspath(__file__)
-    rcs = []
-    for path in (inside, upper, outside):
-        for extra in (["--ci"], ["--ci", "--protocol-only"]):
-            r = subprocess.run([sys.executable, "-I", me, path, *extra], env=env, capture_output=True, timeout=60, cwd=WORK)
-            rcs.append(r.returncode)
-    plan = subprocess.run([sys.executable, "-I", me, inside, "--ci", "--protocol-only", "--plan"],
-                          env=dict(env, GITHUB_ACTIONS="true"), capture_output=True, text=True, timeout=60, cwd=WORK).stdout.strip()
-    # 这一次跑的二进制本身：裸的 → 计划里有全部组；app 里的（只可能在 CI 上）→ 去掉 GITHUB_ACTIONS 就 exit 2
-    rb = subprocess.run([sys.executable, "-I", me, BIN, "--ci", "--plan"], env=env, capture_output=True, text=True,
-                        timeout=60, cwd=WORK)
-    bare = rb.stdout.strip() if not BUNDLE else ("exit 2" if rb.returncode == 2 else f"exit {rb.returncode}")
-    check(rcs == [2] * 6 and not os.path.exists(marker),
-          f"第 4 道闸：假 .app 路径（符号链接在 .app 里 / .APP 大写 / 外面的链接指进 .app）× (--ci、--protocol-only) 都在起进程之前 "
-          f"exit 2 {rcs}，假二进制一次都没被启动")
-    check(plan == "plan bundle=1 no_kill=1 sandbox_group=0"
-          and bare == ("exit 2" if BUNDLE else "plan bundle=0 no_kill=0 sandbox_group=1"),
-          f"CI 上收 app 里的二进制时不跑 sandbox 那一组（{plan!r}；裸二进制 {bare!r}）")
+    # 自检一完就删掉这棵假 .app 树（--keep 也删）：工作目录里不留任何 X.app / Y.APP
+    try:
+        stub = os.path.join(root, "stub.sh")
+        open(stub, "w").write("#!/bin/sh\ntouch '" + marker.replace("'", "") + "'\nexit 0\n")
+        os.chmod(stub, 0o755)
+        inside = os.path.join(root, "X.app", "Contents", "MacOS", "LabelGUI")
+        os.makedirs(os.path.dirname(inside))
+        os.symlink(stub, inside)                       # 原样的路径在 .app 里，解析以后不在
+        upper = os.path.join(root, "Y.APP", "Contents", "MacOS", "LabelGUI")
+        os.makedirs(os.path.dirname(upper))
+        shutil.copy(stub, upper)
+        outside = os.path.join(root, "link-into-bundle")
+        os.symlink(upper, outside)                     # 原样的路径不在 .app 里，解析以后在
+        env = {k: v for k, v in os.environ.items() if k != "GITHUB_ACTIONS" and not k.startswith("LABELGUI_")}
+        me = os.path.abspath(__file__)
+        rcs = []
+        for path in (inside, upper, outside):
+            for extra in (["--ci"], ["--ci", "--protocol-only"]):
+                r = subprocess.run([sys.executable, "-I", me, path, *extra], env=env, capture_output=True, timeout=60, cwd=WORK)
+                rcs.append(r.returncode)
+        plan = subprocess.run([sys.executable, "-I", me, inside, "--ci", "--protocol-only", "--plan"],
+                              env=dict(env, GITHUB_ACTIONS="true"), capture_output=True, text=True, timeout=60, cwd=WORK).stdout.strip()
+        # 这一次跑的二进制本身：裸的 → 计划里有全部组；app 里的（只可能在 CI 上）→ 去掉 GITHUB_ACTIONS 就 exit 2
+        rb = subprocess.run([sys.executable, "-I", me, BIN, "--ci", "--plan"], env=env, capture_output=True, text=True,
+                            timeout=60, cwd=WORK)
+        bare = rb.stdout.strip() if not BUNDLE else ("exit 2" if rb.returncode == 2 else f"exit {rb.returncode}")
+        check(rcs == [2] * 6 and not os.path.exists(marker),
+              f"第 4 道闸：假 .app 路径（符号链接在 .app 里 / .APP 大写 / 外面的链接指进 .app）× (--ci、--protocol-only) 都在起进程之前 "
+              f"exit 2 {rcs}，假二进制一次都没被启动")
+        check(plan == "plan bundle=1 no_kill=1 sandbox_group=0"
+              and bare == ("exit 2" if BUNDLE else "plan bundle=0 no_kill=0 sandbox_group=1"),
+              f"CI 上收 app 里的二进制时不跑 sandbox 那一组（{plan!r}；裸二进制 {bare!r}）")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 bundle_gate_selfcheck()
+check(not os.path.lexists(os.path.join(WORK, "fake-bundle")), "第 4 道闸自检完：假 .app 那棵树已经删掉（--keep 也不留）")
 
 print("0. 受保护位置一次都没碰（sandbox-exec，碰一下就 SIGKILL；所有模式都先跑这一组，app 里的二进制除外）")
 gate_start = len(failures)

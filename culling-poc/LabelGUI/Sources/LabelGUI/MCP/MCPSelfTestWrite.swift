@@ -6,13 +6,95 @@ import Foundation
 /// 17. app_undo 的判定（LiveAILog.check）：AI 写了能撤；用户之后又改过 → undo_not_ours；用户自己撤过 → already_undone_by_user；
 ///     换过场次 → session_switched；没改出东西的写不挡后面的撤销；AI 连撤两步只在中间没插用户的改动时成立。
 /// 18. 忙信号挡哪些写（LiveInteraction.blocks，§9.6b 的表照字面写一遍）。
-/// 19. 标题栏指示（LiveIndicator，§9.6a 的表）：显示什么、谁盖过谁、认不认得客户端的名字、关掉以后忘掉来过谁。
+/// 19. 标题栏指示（LiveIndicator，§9.6a 的表）：显示什么、谁盖过谁、认不认得客户端的名字、关掉以后忘掉来过谁；
+///     桥停了的两条（锁丢了、开桥失败，§9.2.4）排在哪、菜单关了照样不显示、开好了以后「已连接」接着显示。
+/// 20. 桥停了（§9.2.4）：每种桥的状态在已经连上的连接上回什么（LiveServer.bridgeDownReply：bridge_off 只给菜单开关，
+///     别的是 app_unreachable 带真正的原因）、标题栏是哪一句（indicatorProblem）、`--mcp` 从锁文件那一行看到这些原因时
+///     给模型的 hint 里有没有标题栏上的同一句话（LiveClient.explain）；--mcp 自己算出来的原因（no_temp_dir）不提标题栏；
+///     锁空着时的 not_running / old_app 在 §10.2 那句后面补标题栏那一句（锁刚被放掉、app 还没拿回来分不出来）。
 extension MCPSelfTest {
     static func writeChecks(_ check: Check) {
         writeArgChecks(check)
         undoChecks(check)
         busyChecks(check)
         indicatorChecks(check)
+        bridgeDownChecks(check)
+    }
+
+    private static func bridgeDownChecks(_ check: Check) {
+        typealias B = LiveServer.Bridge
+        let lost = LiveBridgeNotice.lockLost
+        check(lost == "数据目录的锁被别的程序拿走了：AI 实时操作已停，重开 app 恢复", "锁丢了那一句是 §9.2.4 的原话：\(lost)")
+        let unsafe = "AI 实时操作的连接开不起来（放连接的临时目录权限不对）：已暂停，每 10 秒自动再试"
+        let tooLong = "AI 实时操作的连接开不起来（连接文件的路径太长）：已停，重开 app 再试"
+        // 锁文件重新 open 不了（数据目录被挪走……）：不是「被别的程序拿走了」，自检接着试
+        let reopen = "AI 实时操作的连接开不起来（数据目录的锁文件不见了或打不开）：已暂停，每 10 秒自动再试"
+        // (桥, 期望的错误码 / nil = 照常执行, hint 里要有的字, 标题栏)
+        let rows: [(B, String?, String, LiveBridgeProblem?)] = [
+            (.on, nil, "", nil),
+            (.off("disabled_in_settings"), "bridge_off", "菜单", nil),
+            (.unavailable("lock_lost"), "app_unreachable", lost, .lockLost),
+            (.unavailable("sock_dir_unsafe"), "app_unreachable", unsafe, .failed(unsafe)),
+            (.unavailable("bind_failed"), "app_unreachable", "连接建不起来", .failed("AI 实时操作的连接开不起来（连接建不起来）：已暂停，每 10 秒自动再试")),
+            (.unavailable("socket_path_occupied"), "app_unreachable", "被别的文件占着", .failed("AI 实时操作的连接开不起来（连接文件的位置被别的文件占着）：已暂停，每 10 秒自动再试")),
+            (.unavailable("socket_path_too_long"), "app_unreachable", tooLong, .failed(tooLong)),
+            (.unavailable("lock_failed"), "app_unreachable", "锁文件打不开", .failed("AI 实时操作的连接开不起来（数据目录的锁文件打不开）：已停，重开 app 再试")),
+            (.unavailable("lock_reopen_failed"), "app_unreachable", reopen, .failed(reopen)),
+            (.unavailable("another_instance"), "app_unreachable", "过几秒再调", nil),
+            (.unavailable("waiting_for_lock"), "app_unreachable", "过几秒再调", nil),
+            (.unavailable("starting"), "app_unreachable", "过几秒再调", nil),
+        ]
+        for (bridge, want, hintPart, problem) in rows {
+            let reply = LiveServer.bridgeDownReply(bridge)
+            var code: String?
+            var message = ""
+            var data: [String: Any] = [:]
+            if case .failure(let c, let m, let d)? = reply {
+                code = c
+                message = m
+                data = d ?? [:]
+            }
+            let hint = data["hint"] as? String ?? ""
+            let menu = message.contains("菜单") || hint.contains("菜单")
+            let reasonOK = bridge == .on || code == "bridge_off" || data["reason"] as? String == bridge.reason
+            check(code == want && (want == nil || (hint.contains(hintPart) && data["executed"] as? Bool == false)) && reasonOK
+                  && menu == (code == "bridge_off"),
+                  "桥 \(bridge) → \(code ?? "照常执行")（应该 \(want ?? "照常执行")），hint「\(hint)」；只有菜单关了才说菜单")
+            check(LiveServer.indicatorProblem(bridge) == problem, "桥 \(bridge) → 标题栏 \(String(describing: LiveServer.indicatorProblem(bridge)))")
+        }
+        // --mcp：锁文件那一行（或者锁被不认识的程序占着）→ unreachable；hint 里是标题栏上的同一句话
+        let probes: [(String, String)] = [
+            ("lock_lost", lost), ("lock_role_unknown", lost), ("sock_dir_unsafe", unsafe), ("socket_path_too_long", tooLong),
+            ("lock_reopen_failed", reopen),
+        ]
+        for (reason, sentence) in probes {
+            let p = LiveClient.Probe(state: .unreachable, reason: reason)
+            let (message, hint) = LiveClient.explain(p)
+            check(hint.contains("「\(sentence)」") && !message.contains("10 秒内会自愈") && !hint.contains("10 秒内会自愈")
+                  && LiveClient.errorCode(p.state) == "app_unreachable",
+                  "--mcp 看到 unreachable（\(reason)）：hint 带标题栏那一句「\(sentence)」：\(hint)")
+        }
+        let plain = LiveClient.explain(LiveClient.Probe(state: .unreachable, reason: "connect:2"))
+        check(plain.hint == "10 秒内会自愈；不行就请用户重开选片工具", "socket 一时不在（connect:2）：还是原来那句自愈的说明")
+        // --mcp 自己拿不到临时目录（no_temp_dir）、数据目录解析不了：app 没写过锁文件那一行，不能说成 app 标题栏上的事
+        for reason in ["no_temp_dir", "data_dir", "lock_failed"] {
+            let (message, hint) = LiveClient.explain(LiveClient.Probe(state: .unreachable, reason: reason))
+            check(!LiveBridgeNotice.onLockLine.contains(reason) && !hint.contains("标题栏") && !message.contains("开不起来"),
+                  "--mcp 看到 unreachable（\(reason)）：不是 app 写在锁文件里的原因，不提标题栏：\(message) / \(hint)")
+        }
+        let lockLine: Set<String> = ["bind_failed", "sock_dir_unsafe", "socket_path_occupied", "lock_reopen_failed",
+                                     "lock_lost", "socket_path_too_long"]
+        check(LiveBridgeNotice.onLockLine == lockLine, "app 会写进锁文件那一行的原因：\(LiveBridgeNotice.onLockLine.sorted())")
+        // 锁被别的程序放掉、app 还没拿回来（1 s 内）：锁是空的，--mcp 判成 not_running / old_app。§10.2 那句原样在前面，
+        // 后面补一句标题栏上的那一句
+        let notRunning = LiveClient.explain(LiveClient.Probe(state: .notRunning))
+        let oldApp = LiveClient.explain(LiveClient.Probe(state: .oldApp))
+        let spec102 = "请用户自己打开选片工具，并在 app 里打开要处理的场次，再调一次；MCP 不会启动它。"
+        let notRunningOK: Bool = notRunning.message == "选片工具没开。" && notRunning.hint.hasPrefix(spec102)
+        let notRunningAside: Bool = notRunning.hint.contains("「\(lost)」") && LiveClient.errorCode(.notRunning) == "app_not_running"
+        check(notRunningOK && notRunningAside, "not_running：§10.2 的 hint 原样在前，后面带标题栏那一句：\(notRunning.hint)")
+        let oldAppOK: Bool = oldApp.hint.hasPrefix("请用户更新 app，或者先退出它") && oldApp.hint.contains("「\(lost)」")
+        check(oldAppOK, "old_app：hint 带标题栏那一句：\(oldApp.hint)")
     }
 
     private static func indicatorChecks(_ check: Check) {
@@ -55,6 +137,27 @@ extension MCPSelfTest {
             i.setAnotherInstance(false)
             i.setBridgeEnabled(true)
             check(i.text == "" && i.bridgeEnabled, "再打开：不拿关之前的 hello、关着时做完的那句说事（\(i.text)）")
+            // 桥停了（§9.2.4）：锁丢了 / 开桥失败排在另一个实例下面、在途的写上面；菜单关了照样不显示
+            i.sawHello(client: "claude-code 2.1.303")
+            i.setBridgeProblem(.lockLost)
+            check(i.text == LiveBridgeNotice.lockLost && i.stateName == "lock_lost", "锁被别的程序拿走了：§9.2.4 那一句：\(i.text)")
+            i.began("套模板")
+            check(i.stateName == "lock_lost", "锁丢了盖过「正在操作」（关桥之前已经开始的写照样落地，但桥已经停了）")
+            i.finished(notice: done)
+            check(i.stateName == "lock_lost", "锁丢了盖过「刚做完」")
+            i.setAnotherInstance(true)
+            check(i.stateName == "another_instance", "另一个实例那一句排在锁丢了上面")
+            i.setAnotherInstance(false)
+            i.setBridgeEnabled(false)
+            check(i.text == "", "菜单关了：锁丢了也不显示（那一项没打勾就是状态）")
+            i.setBridgeEnabled(true)
+            check(i.stateName == "lock_lost", "再打开菜单：锁丢了那一句又回来（重开 app 才恢复）")
+            let failed = "AI 实时操作的连接开不起来（连接建不起来）：已暂停，每 10 秒自动再试"
+            i.setBridgeProblem(.failed(failed))
+            check(i.text == failed && i.stateName == "bridge_failed", "开桥 / 重新 bind 失败：带原因的那一句：\(i.text)")
+            i.sawHello(client: "claude-code 2.1.303")
+            i.setBridgeProblem(nil)
+            check(i.text == "Claude Code 已连接", "桥开好了：那一句清掉，「已连接」接着显示（来过谁不忘）：\(i.text)")
             i.configure(connectedMs: 0, justDidMs: 0)
             i.sawHello(client: "claude-code 2.1.303")
             check(i.text == "", "超过「已连接」的时长（这里设成 0）→ 淡掉：\(i.text)")

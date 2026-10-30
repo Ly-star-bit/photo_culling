@@ -392,10 +392,22 @@ enum LiveClient {
         case .live:
             return ("选片工具开着，可以实时操作。", "")
         case .notRunning:
-            return ("选片工具没开。", "请用户自己打开选片工具，并在 app 里打开要处理的场次，再调一次；MCP 不会启动它。")
+            // §10.2 那句后面补一句：锁被别的程序拿走、又放掉以后，app 下一次自检（1 s 内）拿回来之前锁是空的，这里分不出
+            // 「没开」和「开着、标题栏写着锁被拿走了」（§9.2.4）
+            return ("选片工具没开。", "请用户自己打开选片工具，并在 app 里打开要处理的场次，再调一次；MCP 不会启动它。" + Self.lockLostAside)
         case .bridgeOff:
             return ("选片工具开着，但用户在菜单里关了「允许 AI 实时操作」。", "请用户在选片工具菜单里打开它；MCP 不会替用户打开。")
+        case .unreachable where p.reason == "lock_role_unknown":
+            // 锁被占着、锁文件里却没有选片工具写的那一行：多半是锁被别的程序拿走了（app 开着时被拿走：自检关桥、标题栏说那一句，
+            // §9.2.4；app 启动时就被占着：app 先不开桥、每秒再拿）；也可能是选片工具第一次启动、还没来得及写那一行。
+            // 哪一种 --mcp 分不出来，所以 hint 只说「标题栏上要是写着那一句」
+            return ("数据目录的锁被一个不认识的程序占着（锁文件里没有选片工具写的那一行）：选片工具要是开着，它的 AI 实时操作停着；"
+                    + "也可能是选片工具刚启动、还没写那一行。",
+                    "选片工具的标题栏上要是写着「\(LiveBridgeNotice.lockLost)」，请用户退出并重新打开选片工具；它刚启动的话过几秒再调")
         case .unreachable:
+            // 锁文件那一行写着桥为什么停了（锁丢过、开桥 / 重新 bind 失败）：说法和 app 标题栏上的同一句话对得上。
+            // 只认 app 会写进那一行的原因：--mcp 自己算出来的 no_temp_dir 和 app 的标题栏无关
+            if let r = p.reason, LiveBridgeNotice.onLockLine.contains(r), let known = LiveBridgeNotice.explain(r) { return known }
             let why = p.reason.map { "（\($0)）" } ?? ""
             return ("选片工具开着（数据目录的锁被它占着），但连不上它的实时桥\(why)：socket 不在、被系统清掉还没自愈，或者两边算出的临时目录不一样。",
                     "10 秒内会自愈；不行就请用户重开选片工具")
@@ -404,7 +416,8 @@ enum LiveClient {
         case .protoMismatch:
             return ("选片工具的实时桥协议版本和这个 MCP 对不上（app 或 MCP 有一边更新过）。", "请用户退出并重新打开选片工具；还不行就是两边版本差太多，更新 app")
         case .oldApp:
-            return ("开着的是还没有实时桥的旧版选片工具。", "请用户更新 app，或者先退出它")
+            // 锁空着、默认数据目录、又有选片工具在跑：也可能是锁刚被别的程序放掉、app 还没拿回来（同上）
+            return ("开着的是还没有实时桥的旧版选片工具。", "请用户更新 app，或者先退出它。" + Self.lockLostAside)
         case .notReady:
             return ("选片工具正在启动或者正在退出。", "过几秒再调")
         case .dataDirMismatch:
@@ -417,6 +430,9 @@ enum LiveClient {
             return ("这个服务器设了 LABELGUI_MCP_LIVE=0：不连正在运行的 app。", "只能看状态、列场次和模板；要实时操作，去掉这个环境变量再重连 MCP 服务器")
         }
     }
+
+    /// not_running / old_app 的 hint 后面那一句（锁是空的时候 --mcp 分不出是不是锁刚被别的程序放掉，§9.2.4）。
+    static let lockLostAside = "选片工具其实开着、标题栏上写着「\(LiveBridgeNotice.lockLost)」的话：请用户退出并重新打开它。"
 
     /// 要 app 的工具在这个状态下回的错误码（§9.1 表后那一段 + §10.2）。
     static func errorCode(_ s: LiveState) -> String {

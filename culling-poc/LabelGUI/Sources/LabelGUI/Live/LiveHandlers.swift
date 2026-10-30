@@ -439,10 +439,8 @@ extension LiveHandlers {
 
     /// 第 5 步；`waited` = 等过用户以后的那一遍（6a），场次变了另外说明。
     static func precheck(_ req: Request, _ gate: Gate, live: LiveServer, model: AppModel, waited: Bool) -> Reply? {
-        guard live.bridgeState == .on else {
-            return .failure("bridge_off", "用户在选片工具菜单里关了「允许 AI 实时操作」：这次操作没有执行",
-                            notExecuted("请用户在选片工具菜单里打开它；MCP 不会替用户打开"))
-        }
+        // 菜单关了 → bridge_off；锁丢了、开桥 / 重新 bind 失败 → app_unreachable 带真正的原因（不是用户关的）
+        if let down = LiveServer.bridgeDownReply(live.bridgeState) { return down }
         let batch = model.batch
         if gate.session {
             let key = currentKey(batch)

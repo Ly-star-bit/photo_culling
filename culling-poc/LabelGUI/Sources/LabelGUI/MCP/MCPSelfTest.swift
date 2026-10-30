@@ -14,6 +14,7 @@ import Foundation
 /// 9–11. 实时桥的判定表、状态 → 错误码、路由、线上格式（STEP 2，MCPSelfTestLive.swift）。
 /// 12–15. 读工具的参数、cursor、输出目录、图片字节（STEP 3a，MCPSelfTestRead.swift）。
 /// 16–18. 写工具的参数、app_undo 的判定（LiveAILog）、忙信号挡哪些写（STEP 3b，MCPSelfTestWrite.swift）。
+/// 19–20. 标题栏指示、桥停了（锁丢了、开桥失败）回什么和标题栏说什么（STEP 3b，MCPSelfTestWrite.swift）。
 enum MCPSelfTest {
     private struct Variant {
         let label: String

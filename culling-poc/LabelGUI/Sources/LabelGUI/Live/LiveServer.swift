@@ -88,6 +88,32 @@ final class LiveServer: @unchecked Sendable {
         }
     }
 
+    /// 桥不是 on 时，已经连上的连接上来的读写回什么（第 5 步，读在 execute 里）。bridge_off 只给菜单开关（.off）：
+    /// 别的（锁丢了、开桥 / 重新 bind 失败）不是用户关的，回 app_unreachable（和 `--mcp` 新探测时从锁文件那一行判出来的
+    /// 同一个码，§10.2），message / hint 说真正的原因和标题栏上那一句（LiveBridgeNotice）。纯函数，--mcp-selftest 逐行测。
+    static func bridgeDownReply(_ b: Bridge) -> Reply? {
+        switch b {
+        case .on:
+            return nil
+        case .off:
+            return .failure("bridge_off", "用户在选片工具菜单里关了「允许 AI 实时操作」：这次没有执行",
+                            ["executed": false, "hint": "请用户在选片工具菜单里打开它；MCP 不会替用户打开"])
+        case .unavailable(let r):
+            let why = LiveBridgeNotice.explain(r)
+                ?? ("选片工具的实时桥现在没开（\(r)）。", "过几秒再调；一直这样就请用户重开选片工具")
+            var data: [String: Any] = ["executed": false, "reason": r]
+            data["hint"] = why.hint
+            return .failure("app_unreachable", why.message + "这次没有执行。", data)
+        }
+    }
+
+    /// 标题栏上「桥停了」的那一条（§9.2.4）：锁丢了 → 那一句；开桥 / 重新 bind 失败 → 带原因的那一句；别的没有。
+    static func indicatorProblem(_ b: Bridge) -> LiveBridgeProblem? {
+        guard case .unavailable(let r) = b else { return nil }
+        if r == "lock_lost" { return .lockLost }
+        return LiveBridgeNotice.failed(r).map { LiveBridgeProblem.failed($0) }
+    }
+
     enum MethodKind {
         case read, write
     }
@@ -169,6 +195,10 @@ final class LiveServer: @unchecked Sendable {
     private let state = NSLock()
     private var lock: LiveLock?
     private var bridge: Bridge
+    /// 锁出过事（自检里，§9.2.4）：「lock_lost」被别的程序拿走过（一直留着，重开 app 才恢复）；「lock_reopen_failed」
+    /// 锁文件重新 open 不了（拿回来就清掉）。和桥的状态分开记：菜单关着时桥是 .off（--mcp 回 bridge_off，菜单说了算），
+    /// 再打开菜单时 openBridge 看到它就不开桥、桥回到 .unavailable(这个原因)。
+    private var lockTrouble: String?
     private var listenFd: Int32 = -1
     private var boundIno: UInt64 = 0
     /// 换下来的监听 fd：drain = 重新 bind 以后旧 fd 上已经排队的连接照常 accept 完再关；否则直接关（桥关掉了）。
@@ -320,6 +350,8 @@ final class LiveServer: @unchecked Sendable {
         } else if waiting {
             startLockRetry()
         }
+        // 开桥失败（SockDir 不安全、bind 失败、锁文件打不开……）的那一句：这里已经在主线程上，当场设好
+        syncIndicator()
     }
 
     /// GUI：UserDefaults 里的 live.bridgeEnabled，没有这个键 = 开（§9.6a）。这里只读；写它的只有 main.swift 里的菜单开关。
@@ -338,30 +370,36 @@ final class LiveServer: @unchecked Sendable {
 
     /// 「允许 AI 实时操作（MCP）」开关（§9.6a；GUI 的菜单和测试宿主的 test.set_bridge 都经 AppModel.setLiveBridge 到这里）。
     /// 关：关监听 fd、删自己的 socket、锁文件写 bridge:"off"，锁继续持有（§9.2.1 末尾）；`--mcp` 读写都回 bridge_off，
-    /// app 照常开着。开：重做 §9.2.1 第 4、5 步。没拿到锁（另一个实例占着、启动时还在等锁）或者锁丢了时只记下开关：
+    /// app 照常开着。开：重做 §9.2.1 第 4、5 步。没拿到锁（另一个实例占着、启动时还在等锁）时只记下开关：
     /// 拿到锁时 enableBridgeIfAllowed 照它开不开。GUI 的设置（UserDefaults）由菜单先写好，这里不碰。
     /// 关的那一刻已经过了第 6a 步的写（还在算的一键成套 / 换封面）照常落地、照常记 aiLog：和用户自己点的一样一步 ⌘Z 撤得掉；
     /// 排在后面的、正在等用户停手的写，轮到时在第 5 / 6a 步回 bridge_off（§9.6a、§10.8 第 8 条只说关了以后来的调用）。
+    /// 锁丢了以后（§9.2.4）菜单照样说了算：关 → 桥变成 .off，锁文件那一行写 bridge:"off"，--mcp 回 bridge_off（标题栏这时
+    /// 什么都不显示，不能让模型说「标题栏上写着锁被拿走了」）；再开 → openBridge 看到 lockTrouble 不开桥，桥回到
+    /// .unavailable("lock_lost")，那一句回到标题栏。整段在 bridgeOps 里：和自检发现锁丢了的那一下不交错。
     @MainActor
     func setBridgeEnabled(_ on: Bool) {
         if case .testHost = mode { testBridgeAllowed = on }
         model?.indicator.setBridgeEnabled(on)
+        bridgeOps.lock()
+        defer { bridgeOps.unlock() }
         guard withState({ lock != nil && !shuttingDown }) else { return }
         switch bridgeState {
         case .off:
             if on { openBridge() }
         case .on:
             if !on { closeBridge("disabled_in_settings") }
-        case .unavailable(let r) where Self.retryable.contains(r):
-            // 开桥失败、自检在重试的那几种：关掉就别再重试了；开着就让自检接着试
+        case .unavailable(let r) where Self.retryable.contains(r) || r == "lock_lost":
+            // 开桥失败、自检在重试的那几种，还有锁丢了：关掉就是 .off（别再重试，--mcp 回 bridge_off）；开着就让自检接着试
             if !on { closeBridge("disabled_in_settings") }
         case .unavailable:
             break
         }
     }
 
-    /// 开桥失败以后自检接着重试的原因（路径太长、另一个实例、锁丢了这些不试）。
-    static let retryable: Set<String> = ["bind_failed", "sock_dir_unsafe", "socket_path_occupied"]
+    /// 开桥失败以后自检接着重试的原因（路径太长、另一个实例、锁丢了这些不试）。lock_reopen_failed：锁文件重新 open 不了，
+    /// 自检每轮再 open 一次，拿回来了再开桥。
+    static let retryable: Set<String> = ["bind_failed", "sock_dir_unsafe", "socket_path_occupied", "lock_reopen_failed"]
 
     /// 拿着锁就开自检定时器，不管桥开没开成：开桥失败（SockDir 不安全、bind 失败）靠它下一轮再试，
     /// 桥关着时锁文件被删也靠它重建（§9.2.4）。只在 openBridge 成功时才开的话，这两种都永远不会被发现。
@@ -407,6 +445,14 @@ final class LiveServer: @unchecked Sendable {
         bridgeOps.lock()
         defer { bridgeOps.unlock() }
         guard let paths, withState({ lock != nil && !shuttingDown }) else { return false }
+        // 开成了 → 清掉「开不起来」那一句；没开成 → 标题栏提示（§9.2.4「任何一步失败：不开桥，标题栏提示」）
+        defer { publishBridge() }
+        // 锁出过事（锁丢了 / 锁文件重新 open 不了）：菜单再打开也不开桥，桥回到那个原因（标题栏那一句跟着回来）
+        if let trouble = withState({ lockTrouble }) {
+            setLocked { bridge = .unavailable(trouble) }
+            writeLockInfo()
+            return false
+        }
         if paths.socketTooLong {
             Self.log("socket 路径 \(paths.socketPath.utf8.count) 字节，超过 sun_path 的 \(LiveSockAddr.maxPathBytes) 字节：不开桥")
             setLocked { bridge = .unavailable("socket_path_too_long") }
@@ -450,19 +496,36 @@ final class LiveServer: @unchecked Sendable {
         return true
     }
 
-    /// 关桥（设置关掉 / test.set_bridge）：关监听 fd、删自己那个 socket、锁文件写 bridge:"off"，锁继续持有（§9.2.1 末尾）。
-    func closeBridge(_ reason: String) {
+    /// 关桥（设置关掉 / test.set_bridge；自检发现锁丢了 / 锁文件重新 open 不了也走这里）：关监听 fd、删自己那个 socket、
+    /// 锁文件写 bridge:"off"，锁继续持有（§9.2.1 末尾）。
+    /// `final`：关完以后桥的样子，默认 .off（菜单）；锁出了事是 .unavailable("lock_lost" / "lock_reopen_failed")。在同一次加锁里设好：
+    /// 中间没有一段「.off」让第 5 步回成 bridge_off「用户在菜单里关了」。
+    func closeBridge(_ reason: String, final: Bridge? = nil) {
         bridgeOps.lock()
         defer { bridgeOps.unlock() }
         setLocked {
             if listenFd >= 0 { retired.append((listenFd, false)) }
             listenFd = -1
-            bridge = .off(reason)
+            bridge = final ?? .off(reason)
             snap.ready = false
         }
         unlinkOwnSocket()
         writeLockInfo()
         wakeAcceptThread()
+        publishBridge()
+    }
+
+    /// 桥的状态 → 标题栏（§9.2.4 的两句）。开桥 / 关桥 / 自检在自检队列上、也在主线程上（菜单、启动），一律转到主线程
+    /// 再算：到主线程那一刻读桥的状态，先后颠倒的两次转发也落在最新的那个上。只改文字，不碰窗口。
+    private func publishBridge() {
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.syncIndicator() }
+        }
+    }
+
+    @MainActor
+    private func syncIndicator() {
+        model?.indicator.setBridgeProblem(Self.indicatorProblem(bridgeState))
     }
 
     /// 退出（GUI 的 willTerminate、测试宿主的 SIGTERM / test.quit）：ready=false、关监听 fd、socket 的 inode 还是自己那个才删；
@@ -568,10 +631,12 @@ final class LiveServer: @unchecked Sendable {
     }
 
     /// 每 10 s 一次（测试宿主可以改，§9.2.4）：
-    /// - 锁：inode 对不上 / 锁文件不在了 → 重新建、重新拿；拿不到就关桥；
+    /// - 锁：inode 对不上 / 锁文件不在了 → 重新建、重新拿；别人拿着就关桥，标题栏说「数据目录的锁被别的程序拿走了…」
+    ///   （§9.2.4）。之后桥不再开（别人放掉以后锁照样拿回来，拿回来之前 1 s 查一次），重开 app 才恢复；
+    ///   重新 open 不了（数据目录被挪走、锁路径成了符号链接……）不是别人拿走：关桥、标题栏带原因说一句，每轮再试，拿回来就开桥；
     /// - socket 还在、inode 没变 → utimes(S) 和 utimes(SockDir)（防 dirhelper 按「3 天没访问」清，connect 不刷新 atime）；
     ///   不在了 / 被换了 → 整段重做开桥那一步（SockDir 也可能被整个清掉，照样重建、照样检查）；
-    /// - 开桥失败过的（bind、SockDir）这里再试一次。
+    /// - 开桥失败过的（bind、SockDir）这里再试一次。重新 bind 失败时标题栏带原因说一句，开好了就消失（openBridge 里转主线程）。
     private func startSelfCheck() {
         let already = withState { selfCheckTimer != nil }
         guard !already else { return }
@@ -582,24 +647,60 @@ final class LiveServer: @unchecked Sendable {
         timer.resume()
     }
 
+    /// 换自检的节奏（锁丢了、还没拿回来时最多 1 s 一次；拿回来改回 selfCheckMs）。定时器不用重建，换个 schedule 就行。
+    private func rescheduleSelfCheck(_ ms: Int) {
+        let timer = withState { selfCheckTimer }
+        timer?.schedule(deadline: .now() + .milliseconds(ms), repeating: .milliseconds(ms))
+    }
+
     private func selfCheck() {
         bridgeOps.lock()
         defer { bridgeOps.unlock() }
         guard let paths else { return }
-        let (l, b, stopping) = withState { (lock, bridge, shuttingDown) }
+        let (l, b, stopping, trouble) = withState { (lock, bridge, shuttingDown, lockTrouble) }
         guard let l, !stopping else { return }
         bump("selfchecks")
         switch l.selfCheck(info: lockInfo(b)) {
         case .ok:
-            break
+            // 数据目录挪回来了（还是原来那个锁文件）：清掉，下面按 lock_reopen_failed 那一条重新开桥
+            if trouble == "lock_reopen_failed" {
+                setLocked { lockTrouble = nil }
+                Self.log("锁文件又在原来的位置了：重新开桥")
+            }
         case .reacquired:
             bump("lock_reacquired")
+            if trouble == "lock_lost" {
+                // 锁丢过的：别人放掉以后照样拿回来（app 还开着，还是唯一写者；锁文件那一行写着 lock_lost，菜单关着时写 off，
+                // --mcp 由此说清原因），但桥不再开：那段时间里别人可能改过盘，app 内存里的可能已经旧了，重开 app 才恢复
+                // （标题栏那一句一直留着）。自检回到原来的间隔
+                Self.log("锁丢过、现在又拿回来了：桥照样停着，重开 app 才恢复")
+                rescheduleSelfCheck(selfCheckMs)
+                return
+            }
+            setLocked { lockTrouble = nil }
             Self.log("锁文件被删 / 换过：重新建好、重新拿到了")
         case .lost(let why):
+            // 已经停了（锁还在别人手里）：不再关一次、不再记一笔
+            guard trouble != "lock_lost" else { return }
             bump("lock_lost")
             Self.log("锁丢了（\(why)）：AI 实时操作停了，重开 app 恢复")
-            closeBridge("lock_lost")
-            setLocked { bridge = .unavailable("lock_lost") }
+            setLocked { lockTrouble = "lock_lost" }
+            // 别人放掉锁到这里拿回来之间，--mcp 只看到一个空锁（判成 not_running / old_app）：拿回来之前 1 s 查一次
+            rescheduleSelfCheck(min(selfCheckMs, 1_000))
+            // 菜单关着：桥本来就是 .off，照旧（--mcp 回 bridge_off，菜单说了算）；再打开时 openBridge 看到 lockTrouble 不开桥
+            if case .off = b { return }
+            closeBridge("lock_lost", final: .unavailable("lock_lost"))
+            return
+        case .reopenFailed(let why):
+            // 锁文件重新 open 不了：没有别的程序拿着锁（旧 fd 上的 flock 还在），不说「被别的程序拿走了」。锁文件已经不在 L 上，
+            // 「锁是唯一判据」不成立：照样关桥，标题栏带原因说一句（lock_reopen_failed），每轮再 open，拿回来了上面那两条开桥。
+            // 锁丢过的不改口
+            guard trouble == nil else { return }
+            bump("lock_reopen_failed")
+            Self.log("锁文件重新 open 不了（\(why)）：先停桥，每轮自检再试")
+            setLocked { lockTrouble = "lock_reopen_failed" }
+            if case .off = b { return }
+            closeBridge("lock_reopen_failed", final: .unavailable("lock_reopen_failed"))
             return
         }
         switch b {
@@ -816,11 +917,9 @@ final class LiveServer: @unchecked Sendable {
         guard method.kind == .write else {
             if let e = expired(req) { return e }
             if let g = clientGone(req) { return g }
-            // 菜单里刚关掉桥：已经连上的连接上排着的读也不做（写由 LiveHandlers 第 5、6a 步挡）。test.* 不挡
-            if case .off = bridgeState, !req.method.hasPrefix("test.") {
-                return .failure("bridge_off", "用户在选片工具菜单里关了「允许 AI 实时操作」：这次没有执行",
-                                ["executed": false, "hint": "请用户在选片工具菜单里打开它；MCP 不会替用户打开"])
-            }
+            // 桥关了 / 停了（菜单、锁丢了、重新 bind 失败）：已经连上的连接上排着的读也不做（写由 LiveHandlers 第 5、6a 步挡）。
+            // test.* 不挡：测试脚本的连接跨过这些照样能看状态
+            if !req.method.hasPrefix("test."), let down = Self.bridgeDownReply(bridgeState) { return down }
             return await method.run(req)
         }
         guard let op = req.opID, !op.isEmpty, op.utf8.count <= 128 else {

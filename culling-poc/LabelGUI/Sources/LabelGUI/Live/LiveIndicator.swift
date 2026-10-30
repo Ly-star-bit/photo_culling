@@ -7,6 +7,8 @@ import SwiftUI
 /// |---|---|
 /// | 菜单里关了 | 不显示（那一项没打勾就是状态；关着的时候 socket 不在，app 也不知道有没有人来连过） |
 /// | 本实例没拿到锁，另一个选片工具占着这个数据目录 | 「另一个选片工具正在用这个数据目录：AI 只连那一个」 |
+/// | 锁被别的程序拿走了（§9.2.4 自检，桥已经关了） | 「数据目录的锁被别的程序拿走了：AI 实时操作已停，重开 app 恢复」（一直留着） |
+/// | 开桥 / 重新 bind 失败（§9.2.4「任何一步失败：不开桥，标题栏提示」），锁文件重新 open 不了（数据目录被挪走……） | 「AI 实时操作的连接开不起来（原因）：已暂停，每 10 秒自动再试」，开好了就消失 |
 /// | 有在途的写（§9.4.3 第 8 步：等过用户停手、核对过以后才算；成套 / 换封面从等路人信息起算） | 「AI 正在操作：套模板…」（短词见 LiveHandlers.workingLabel） |
 /// | 刚做完（10 s） | 和受影响那一页的提示同一句话（「AI：套了模板「…」· 在拼图页 ⌘Z 撤销」），四个 tab 都看得到 |
 /// | 120 s 内有过 MCP 的 hello | 「Claude Code 已连接」（名字取自 hello 的 mcp_client；不认识就写「AI 已连接」） |
@@ -15,11 +17,14 @@ import SwiftUI
 /// 每次 MCP 调用都是新连接（R6），所以「已连接」的意思是「最近 120 s 内来过」，到点自己淡掉。
 /// 只认 `--mcp` 的 hello（client.name = xuanpian-mcp）：另一个实例启动时的探测、测试脚本直接连 socket 的都不算。
 /// 这里只改文字，不激活 app、不碰任何窗口、不弹任何东西；读请求不改它（第 8 步只在写的流水线里）。
+/// 桥停了的那两条由 LiveServer 从自检队列 / 开桥那里转到主线程来设（setBridgeProblem），文字在 LiveBridgeNotice。
 @MainActor
 final class LiveIndicator: ObservableObject {
     enum State: Equatable {
         case none
         case anotherInstance
+        case lockLost
+        case bridgeFailed(String)
         case working(String)
         case justDid(String)
         case connected(String)
@@ -37,6 +42,7 @@ final class LiveIndicator: ObservableObject {
     private(set) var justDidMs = 10_000.0
 
     private var anotherInstance = false
+    private var problem: LiveBridgeProblem?
     private var lastHello: (ms: Double, name: String)?
     private var working: String?
     private var justDid: (text: String, until: Double)?
@@ -89,6 +95,14 @@ final class LiveIndicator: ObservableObject {
         refresh()
     }
 
+    /// 桥停了（LiveServer.indicatorProblem 从桥的状态算出来，经主线程转过来）：锁丢了一直留着（重开 app 才恢复）；
+    /// 开桥失败的那条在桥开好时清掉（nil）。「来过谁、刚做了什么」不忘：桥重新开好以后「已连接」照常接着显示。
+    func setBridgeProblem(_ p: LiveBridgeProblem?) {
+        guard problem != p else { return }
+        problem = p
+        refresh()
+    }
+
     /// mcp_client 的第一个词是 MCP 客户端在 initialize 里报的名字；认识的写成产品名，别的一律「AI」（不把原样的名字
     /// 放到用户的标题栏上）。
     static func displayName(_ client: String?) -> String {
@@ -101,6 +115,8 @@ final class LiveIndicator: ObservableObject {
         switch state {
         case .none: return ""
         case .anotherInstance: return "另一个选片工具正在用这个数据目录：AI 只连那一个"
+        case .lockLost: return LiveBridgeNotice.lockLost
+        case .bridgeFailed(let notice): return notice
         case .working(let title): return "AI 正在操作：\(title)…"
         case .justDid(let notice): return notice
         case .connected(let name): return "\(name) 已连接"
@@ -112,6 +128,8 @@ final class LiveIndicator: ObservableObject {
         switch state {
         case .none: return "none"
         case .anotherInstance: return "another_instance"
+        case .lockLost: return "lock_lost"
+        case .bridgeFailed: return "bridge_failed"
         case .working: return "working"
         case .justDid: return "just_did"
         case .connected: return "connected"
@@ -127,6 +145,10 @@ final class LiveIndicator: ObservableObject {
             next = .none
         } else if anotherInstance {
             next = .anotherInstance
+        } else if problem == .lockLost {
+            next = .lockLost
+        } else if case .failed(let notice) = problem {
+            next = .bridgeFailed(notice)
         } else if let w = working {
             next = .working(w)
         } else if let j = justDid {
@@ -156,6 +178,56 @@ final class LiveIndicator: ObservableObject {
             guard !Task.isCancelled else { return }
             self?.refresh()
         }
+    }
+}
+
+/// 桥停了的两种（§9.2.4）：锁被别的程序拿走（一直停着，重开 app 恢复）；开桥 / 重新 bind 失败（带标题栏那一句，
+/// 自检接着试的那几种开好了就清掉）。由 LiveServer.indicatorProblem 从桥的状态算出来。
+enum LiveBridgeProblem: Equatable, Sendable {
+    case lockLost
+    case failed(String)
+}
+
+/// 桥停了时标题栏上的那一句（§9.2.4）。`--mcp` 给模型的说明（LiveClient.explain）引用同一份字：模型转述给用户的，
+/// 和用户在标题栏上看到的是同一句话。
+enum LiveBridgeNotice {
+    /// §9.2.4 原话。
+    static let lockLost = "数据目录的锁被别的程序拿走了：AI 实时操作已停，重开 app 恢复"
+
+    /// 开不了桥的原因 → 标题栏那一句；nil = 这个原因不在标题栏说（另一个实例有自己的那一句；等锁、启动中是一时的；
+    /// 锁丢了是上面那句）。原因的代号不上标题栏，换成一句短话；自检接着试的（LiveServer.retryable）说会自己再试。
+    static func failed(_ reason: String) -> String? {
+        let causes: [String: String] = [
+            "sock_dir_unsafe": "放连接的临时目录权限不对", "socket_path_occupied": "连接文件的位置被别的文件占着",
+            "bind_failed": "连接建不起来", "socket_path_too_long": "连接文件的路径太长",
+            "lock_failed": "数据目录的锁文件打不开", "data_dir": "数据目录解析不了", "no_temp_dir": "拿不到本机的临时目录",
+            "lock_reopen_failed": "数据目录的锁文件不见了或打不开",
+        ]
+        guard let cause = causes[reason] else { return nil }
+        if LiveServer.retryable.contains(reason) {
+            return "AI 实时操作的连接开不起来（\(cause)）：已暂停，每 10 秒自动再试"
+        }
+        return "AI 实时操作的连接开不起来（\(cause)）：已停，重开 app 再试"
+    }
+
+    /// app 拿着锁时会写进锁文件那一行的原因。`--mcp` 只对这些按标题栏那一句说：data_dir、no_temp_dir、lock_failed 时 app
+    /// 没拿到锁、写不了那一行，`--mcp` 自己算出来的 no_temp_dir 说的是它自己，不是 app 的标题栏。
+    static let onLockLine: Set<String> = LiveServer.retryable.union(["lock_lost", "socket_path_too_long"])
+
+    /// 桥停着时给模型的说明（app 在已经连上的连接上回的错误、`--mcp` 从锁文件那一行看到的 unreachable 都用它）：
+    /// message 说是什么，hint 带上标题栏上的那一句和怎么恢复（模型转述给用户时，和用户眼前看到的对得上）。
+    /// nil = 这个原因没有专门的说法。
+    static func explain(_ reason: String) -> (message: String, hint: String)? {
+        if reason == "lock_lost" {
+            return ("选片工具的 AI 实时操作已停：数据目录的锁被别的程序拿走了，app 关了实时桥。",
+                    "选片工具标题栏上写着「\(lockLost)」：请用户退出并重新打开选片工具；MCP 不会替用户重开")
+        }
+        guard let notice = failed(reason) else { return nil }
+        let message = "选片工具开着，但实时桥开不起来（\(reason)）。"
+        if LiveServer.retryable.contains(reason) {
+            return (message, "选片工具标题栏上写着「\(notice)」：过一会儿再调；一直这样就请用户重开选片工具")
+        }
+        return (message, "选片工具标题栏上写着「\(notice)」：请用户重开选片工具")
     }
 }
 

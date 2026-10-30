@@ -19,7 +19,9 @@
       op_id 重放、忙信号、切场次、受保护位置、一键成套 / 换封面、找模板、取消、kill -9 → app_outcome_unknown）
     H 标题栏指示和菜单开关（§9.6a、§9.8.2 第 21 条、§10.8 第 1、2、8 条）：没有 AI 不显示 → 「Claude Code 已连接」→
       等用户停手时不变 →「AI 正在操作…」→ 那一页的提示 → 淡掉；带标题栏的宿主（--titled）里 AppKit 窗口的副标题跟着走；
-      菜单开关关掉 → 读写都 bridge_off、进程内的照常、不写 UserDefaults，打开 → 恢复；另一个实例的那一句
+      菜单开关关掉 → 读写都 bridge_off、进程内的照常、不写 UserDefaults，打开 → 恢复；另一个实例的那一句；
+      桥停了（§9.2.4）：真的抢锁 → 关桥、「数据目录的锁被别的程序拿走了…」一直留着、读写 app_unreachable（不说菜单）；
+      重新 bind 失败 / 一启动就开不了桥 → 带原因的那一句，开好了消失
 每个 --mcp 都带自己的 LABELGUI_MCP_OUT（工作目录里），绝不写 ~/Pictures/xuanpian-mcp。
 
 不碰用户（§9.8.2 的四道闸，一条不改；第 4 道 2026-10-29 收紧）：
@@ -757,36 +759,40 @@ def bundle_gate_selfcheck():
     root = os.path.join(WORK, "fake-bundle")
     marker = os.path.join(root, "ran")
     os.makedirs(root)
-    stub = os.path.join(root, "stub.sh")
-    open(stub, "w").write("#!/bin/sh\ntouch '" + marker.replace("'", "") + "'\nexit 0\n")
-    os.chmod(stub, 0o755)
-    inside = os.path.join(root, "X.app", "Contents", "MacOS", "LabelGUI")
-    os.makedirs(os.path.dirname(inside))
-    os.symlink(stub, inside)                       # 原样的路径在 .app 里，解析以后不在
-    upper = os.path.join(root, "Y.APP", "Contents", "MacOS", "LabelGUI")
-    os.makedirs(os.path.dirname(upper))
-    shutil.copy(stub, upper)
-    outside = os.path.join(root, "link-into-bundle")
-    os.symlink(upper, outside)                     # 原样的路径不在 .app 里，解析以后在
-    env = {k: v for k, v in os.environ.items() if k != "GITHUB_ACTIONS" and not k.startswith("LABELGUI_")}
-    me = os.path.abspath(__file__)
-    rcs = []
-    for path in (inside, upper, outside):
-        for extra in (["--ci"], ["--photos", PHOTO_DIR, "--data", DATA_TEMPLATE]):
-            r = subprocess.run([sys.executable, "-I", me, path, *extra], env=env, capture_output=True, timeout=60, cwd=WORK)
-            rcs.append(r.returncode)
-    plan = subprocess.run([sys.executable, "-I", me, inside, "--ci", "--plan"], env=dict(env, GITHUB_ACTIONS="true"),
-                          capture_output=True, text=True, timeout=60, cwd=WORK).stdout.strip()
-    # 这一次跑的二进制本身：裸的 → 计划里有全部组；app 里的（只可能在 CI 上）→ 去掉 GITHUB_ACTIONS 就 exit 2
-    rb = subprocess.run([sys.executable, "-I", me, BIN, "--ci", "--plan"], env=env, capture_output=True, text=True,
-                        timeout=60, cwd=WORK)
-    bare = rb.stdout.strip() if not BUNDLE else ("exit 2" if rb.returncode == 2 else f"exit {rb.returncode}")
-    check(rcs == [2] * 6 and not os.path.exists(marker),
-          f"第 4 道闸：假 .app 路径（符号链接在 .app 里 / .APP 大写 / 外面的链接指进 .app）× (--ci、本地) 都在起进程之前 exit 2 "
-          f"{rcs}，假二进制一次都没被启动")
-    check(plan == "plan bundle=1 no_kill=1 groups=ABEFGH"
-          and (bare == "exit 2" if BUNDLE else bare.startswith("plan bundle=0 no_kill=0 groups=ABCDEFGH")),
-          f"CI 上收 app 里的二进制时不跑杀进程 / sandbox 的组（{plan!r}；裸二进制 {bare!r}）")
+    # 自检一完就删掉这棵假 .app 树（--keep 也删）：工作目录里不留任何 X.app / Y.APP
+    try:
+        stub = os.path.join(root, "stub.sh")
+        open(stub, "w").write("#!/bin/sh\ntouch '" + marker.replace("'", "") + "'\nexit 0\n")
+        os.chmod(stub, 0o755)
+        inside = os.path.join(root, "X.app", "Contents", "MacOS", "LabelGUI")
+        os.makedirs(os.path.dirname(inside))
+        os.symlink(stub, inside)                       # 原样的路径在 .app 里，解析以后不在
+        upper = os.path.join(root, "Y.APP", "Contents", "MacOS", "LabelGUI")
+        os.makedirs(os.path.dirname(upper))
+        shutil.copy(stub, upper)
+        outside = os.path.join(root, "link-into-bundle")
+        os.symlink(upper, outside)                     # 原样的路径不在 .app 里，解析以后在
+        env = {k: v for k, v in os.environ.items() if k != "GITHUB_ACTIONS" and not k.startswith("LABELGUI_")}
+        me = os.path.abspath(__file__)
+        rcs = []
+        for path in (inside, upper, outside):
+            for extra in (["--ci"], ["--photos", PHOTO_DIR, "--data", DATA_TEMPLATE]):
+                r = subprocess.run([sys.executable, "-I", me, path, *extra], env=env, capture_output=True, timeout=60, cwd=WORK)
+                rcs.append(r.returncode)
+        plan = subprocess.run([sys.executable, "-I", me, inside, "--ci", "--plan"], env=dict(env, GITHUB_ACTIONS="true"),
+                              capture_output=True, text=True, timeout=60, cwd=WORK).stdout.strip()
+        # 这一次跑的二进制本身：裸的 → 计划里有全部组；app 里的（只可能在 CI 上）→ 去掉 GITHUB_ACTIONS 就 exit 2
+        rb = subprocess.run([sys.executable, "-I", me, BIN, "--ci", "--plan"], env=env, capture_output=True, text=True,
+                            timeout=60, cwd=WORK)
+        bare = rb.stdout.strip() if not BUNDLE else ("exit 2" if rb.returncode == 2 else f"exit {rb.returncode}")
+        check(rcs == [2] * 6 and not os.path.exists(marker),
+              f"第 4 道闸：假 .app 路径（符号链接在 .app 里 / .APP 大写 / 外面的链接指进 .app）× (--ci、本地) 都在起进程之前 exit 2 "
+              f"{rcs}，假二进制一次都没被启动")
+        check(plan == "plan bundle=1 no_kill=1 groups=ABEFGH"
+              and (bare == "exit 2" if BUNDLE else bare.startswith("plan bundle=0 no_kill=0 groups=ABCDEFGH")),
+              f"CI 上收 app 里的二进制时不跑杀进程 / sandbox 的组（{plan!r}；裸二进制 {bare!r}）")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 # ---------------------------------------------------------------- 进程的 fd（CLOEXEC 从外面看）
@@ -835,6 +841,7 @@ print(f"真实 SockDir（只 ls）：{REAL_SOCK} → {real_sock_before}")
 try:
     print("0. 第 4 道闸（.app 里的二进制）")
     bundle_gate_selfcheck()
+    check(not os.path.lexists(os.path.join(WORK, "fake-bundle")), "第 4 道闸自检完：假 .app 那棵树已经删掉（--keep 也不留）")
 
     # ============================================================ A. 没有宿主
     if "A" in ONLY:
@@ -2833,6 +2840,301 @@ __attribute__((constructor)) static void init(void) {
               f"另一个实例占着这个数据目录：第二个不开桥（{h2.reason}），副标题「另一个选片工具正在用这个数据目录：AI 只连那一个」")
         h2.term()
         hh.term()
+
+        # ---------- 桥停了（§9.2.4）：锁被别的程序拿走 → 关桥、标题栏那一句（一直留着，重开 app 才恢复）；开桥 / 重新 bind
+        # 失败 → 带原因的那一句，开好了就消失。已经连上的连接上来的读写回 app_unreachable 带真正的原因（不是 bridge_off「菜单」），
+        # --mcp 看到的状态的 hint 里是标题栏上的同一句话
+        LOST = "数据目录的锁被别的程序拿走了：AI 实时操作已停，重开 app 恢复"
+
+        def hint_of(body):
+            return ((body or {}).get("error") or {}).get("hint") or ""
+
+        def warn_hints(st_):
+            return " ".join(w.get("hint") or "" for w in (st_ or {}).get("warnings") or [])
+
+        def keep_chrome(raw_, name):
+            r_ = raw_.call("test.chrome", {"name": name, "wait_ms": 300}).get("result") or {}
+            return open(r_["file"], "rb").read() if r_.get("file") else None, r_
+
+        def keep_wait(raw_, cond, timeout=5):
+            deadline = time.monotonic() + timeout * SLACK
+            s_ = raw_.call("test.state").get("result") or {}
+            while not cond(s_) and time.monotonic() < deadline:
+                time.sleep(0.05)
+                s_ = raw_.call("test.state").get("result") or {}
+            return s_
+
+        hl = Host("H-lost", args=("--titled",))
+        env_l = hl.env()
+        # 关桥以后 socket 就没了：test.state / test.chrome 只能走关之前连上的这一条（test.* 不挡）
+        keep = Raw(hl)
+        c_l0, _ = keep_chrome(keep, "h-lost-chrome-none")
+        lock_p = os.path.join(hl.data, ".live.lock")
+        listen_fd = ((keep.call("test.state").get("result") or {}).get("fds") or {}).get("listen", {}).get("fd")
+
+        def listen_closed(timeout=2):
+            """从进程外面看（proc_pidinfo）：开着桥时的那个监听 fd 号上已经没有 socket 了（accept 线程真的关了它）。"""
+            deadline = time.monotonic() + timeout * SLACK
+            while True:
+                left = [f for f, kind, _, _ in proc_fds(hl.pid) if f == listen_fd and kind == PROX_FDTYPE_SOCKET]
+                if not left or time.monotonic() > deadline:
+                    return listen_fd is not None and not left
+                time.sleep(0.05)
+
+        just_after_selfcheck(hl)
+        # 真的抢锁：删掉锁文件、马上建一个新的拿 LOCK_EX（app 的 fd 还指着旧的 inode）。下一轮自检 fstat / lstat 的 inode
+        # 对不上 → 重新 open + flock → 拿不到 → 锁丢了
+        os.unlink(lock_p)
+        thief = os.open(lock_p, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(thief, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            s_l = keep_wait(keep, lambda x: x.get("indicator_state") == "lock_lost" and x.get("window_subtitle") == LOST)
+            check(s_l.get("indicator") == LOST and s_l.get("indicator_state") == "lock_lost" and s_l.get("window_subtitle") == LOST
+                  and s_l.get("bridge") == "unavailable" and s_l.get("bridge_reason") == "lock_lost"
+                  and (s_l.get("counters") or {}).get("lock_lost") == 1 and "listen" not in (s_l.get("fds") or {})
+                  and listen_closed() and not os.path.exists(hl.sock) and hl.alive(),
+                  f"9.2.4 锁被别的程序拿走（删掉锁文件、另建一个拿 LOCK_EX）：自检关桥（socket 删了；监听 fd {listen_fd} 从进程外面看也关了），"
+                  f"副标题「{s_l.get('indicator')}」（AppKit 窗口「{s_l.get('window_subtitle')}」），bridge {s_l.get('bridge')}"
+                  f"（{s_l.get('bridge_reason')}），宿主照常活着")
+            rr = keep.call("cull.read", {"session": KEY, "kind": "overview", "args": {}})
+            rw = keep.call("collage.set_text", {"session": KEY, "title": "锁丢了"}, op_id=str(uuid.uuid4()))
+            errs = [(x.get("error") or {}) for x in (rr, rw)]
+            check(all(e.get("code") == "app_unreachable" and (e.get("data") or {}).get("reason") == "lock_lost"
+                      and (e.get("data") or {}).get("executed") is False and LOST in (e.get("data") or {}).get("hint", "")
+                      and "菜单" not in e.get("message", "") + (e.get("data") or {}).get("hint", "") for e in errs),
+                  f"锁丢了以后，之前连上的连接上来的读、写：app_unreachable（reason lock_lost，hint 带标题栏那一句），不说「菜单里关了」"
+                  f"{[e.get('code') for e in errs]}")
+            st_l, _ = status(env_l)
+            _, rd_l, _ = mcp_call(env_l, "cull_session_overview", {"session": KEY})
+            _, wr_l, _ = mcp_call(env_l, "collage_set_text", {"session": KEY, "title": "锁丢了"})
+            live_l = st_l.get("live") or {}
+            check(live_l.get("state") == "unreachable" and live_l.get("reason") == "lock_role_unknown" and LOST in warn_hints(st_l)
+                  and [err_code(x) for x in (rd_l, wr_l)] == ["app_unreachable"] * 2 and LOST in hint_of(rd_l) and LOST in hint_of(wr_l),
+                  f"这时 --mcp（锁在不认识的程序手里，锁文件是空的）：{live_l.get('state')}（{live_l.get('reason')}），读写都 "
+                  f"{[err_code(x) for x in (rd_l, wr_l)]}，hint 带标题栏那一句")
+            c_l1, cr_l1 = keep_chrome(keep, "h-lost-chrome-1")
+            c_l2, _ = keep_chrome(keep, "h-lost-chrome-2")
+            check(c_l1 is not None and c_l1 == c_l2 and c_l1 != c_l0 and cr_l1.get("subtitle") == LOST,
+                  f"锁丢了的标题栏：拍两次逐字节相同（{len(c_l1 or b'')} 字节），和没有 AI 时不一样，副标题「{cr_l1.get('subtitle')}」")
+            time.sleep(1.2)
+            s_l2 = keep.call("test.state").get("result") or {}
+            check((s_l2.get("counters") or {}).get("lock_lost") == 1 and s_l2.get("indicator_state") == "lock_lost"
+                  and (s_l2.get("counters") or {}).get("selfchecks", 0) > (s_l.get("counters") or {}).get("selfchecks", 0) + 1,
+                  f"锁一直在别人手里：之后的自检不再关一次、不再记一笔（lock_lost {(s_l2.get('counters') or {}).get('lock_lost')}），那一句还在")
+        finally:
+            fcntl.flock(thief, fcntl.LOCK_UN)
+            os.close(thief)
+        # 别人放掉锁：app 拿回来（还是唯一写者），锁文件那一行写 bridge:unavailable、reason lock_lost；桥照样停着
+        s_l3 = keep_wait(keep, lambda x: (x.get("counters") or {}).get("lock_reacquired", 0) >= 1)
+        line_l = json.loads(open(lock_p).read().splitlines()[0])
+        st_l3, _ = status(env_l)
+        _, wr_l3, _ = mcp_call(env_l, "cull_set_verdicts", {"session": KEY, "ids": ["DSCF7208"], "verdict": "pick"})
+        live_l3 = st_l3.get("live") or {}
+        check((s_l3.get("counters") or {}).get("lock_reacquired", 0) >= 1 and line_l.get("pid") == hl.pid
+              and line_l.get("bridge") == "unavailable" and line_l.get("reason") == "lock_lost"
+              and s_l3.get("indicator") == LOST and s_l3.get("bridge_reason") == "lock_lost" and not os.path.exists(hl.sock)
+              and live_l3.get("state") == "unreachable" and live_l3.get("reason") == "lock_lost" and LOST in warn_hints(st_l3)
+              and err_code(wr_l3) == "app_unreachable" and LOST in hint_of(wr_l3),
+              f"别人放掉锁：app 拿回来、锁文件写 {line_l.get('bridge')}（{line_l.get('reason')}），桥照样停着、那一句还在；--mcp："
+              f"{live_l3.get('state')}（{live_l3.get('reason')}），写 {err_code(wr_l3)}，hint 带标题栏那一句")
+        # 锁丢了以后菜单照样说了算：关 → 桥 .off、锁文件那一行写 off，--mcp 和之前连上的连接都回 bridge_off（标题栏这时什么都
+        # 不显示，不能让模型说「标题栏上写着锁被拿走了」）；再开 → 不开桥，那一句回来，--mcp 又是 unreachable（lock_lost）
+        OFF_MS = int(3000 * SLACK)
+        r_m = keep.call("test.set_bridge", {"enabled": False, "for_ms": OFF_MS}).get("result") or {}
+        t_off = time.monotonic()
+        line_off = json.loads(open(lock_p).read().splitlines()[0])
+        st_off, _ = status(env_l)
+        _, wr_off, _ = mcp_call(env_l, "collage_set_text", {"session": KEY, "title": "菜单关着"})
+        rr_off = keep.call("cull.read", {"session": KEY, "kind": "overview", "args": {}})
+        s_off = keep.call("test.state").get("result") or {}
+        in_off = time.monotonic() - t_off < OFF_MS / 1000
+        e_off = rr_off.get("error") or {}
+        check(in_off and r_m.get("indicator") == "" and s_off.get("bridge") == "off" and s_off.get("indicator") == ""
+              and line_off.get("bridge") == "off" and (st_off.get("live") or {}).get("state") == "bridge_off"
+              and err_code(wr_off) == "bridge_off" and LOST not in hint_of(wr_off) + warn_hints(st_off)
+              and e_off.get("code") == "bridge_off" and LOST not in json.dumps(e_off, ensure_ascii=False),
+              f"锁丢了以后菜单关：桥 {s_off.get('bridge')}，标题栏「{s_off.get('indicator')}」，锁文件那一行 {line_off.get('bridge')}；"
+              f"--mcp {(st_off.get('live') or {}).get('state')}、写 {err_code(wr_off)}，之前连上的连接上的读 {e_off.get('code')}："
+              f"菜单说了算，不提标题栏上没有的那一句")
+        s_l4 = keep_wait(keep, lambda x: x.get("bridge_enabled") is True and x.get("indicator") == LOST, timeout=OFF_MS / 1000 + 5)
+        line_on = json.loads(open(lock_p).read().splitlines()[0])
+        st_on, _ = status(env_l)
+        live_on = st_on.get("live") or {}
+        check(s_l4.get("indicator") == LOST and s_l4.get("bridge") == "unavailable" and s_l4.get("bridge_reason") == "lock_lost"
+              and line_on.get("bridge") == "unavailable" and line_on.get("reason") == "lock_lost" and not os.path.exists(hl.sock)
+              and live_on.get("state") == "unreachable" and live_on.get("reason") == "lock_lost" and LOST in warn_hints(st_on),
+              f"再开 → 那一句回来、桥不重开（{s_l4.get('bridge')}，{s_l4.get('bridge_reason')}），锁文件那一行 {line_on.get('bridge')}；"
+              f"--mcp 又是 {live_on.get('state')}（{live_on.get('reason')}）：重开 app 才恢复")
+        keep.close()
+        hl.term()
+
+        # 反过来：菜单先关、锁再丢 → 桥照样是 .off（不改成 lock_lost），app 拿回锁以后锁文件那一行写 off，--mcp 回 bridge_off；
+        # 菜单再开 → 那一句、不开桥、--mcp unreachable（lock_lost）
+        ho = Host("H-lost-off", args=("--no-view",))
+        env_o = ho.env()
+        keep_o = Raw(ho)
+        lock_o = os.path.join(ho.data, ".live.lock")
+        OFF_MS2 = int(3000 * SLACK)
+        keep_o.call("test.set_bridge", {"enabled": False, "for_ms": OFF_MS2})
+        t_off2 = time.monotonic()
+        os.unlink(lock_o)
+        thief = os.open(lock_o, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(thief, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            s_o = keep_wait(keep_o, lambda x: (x.get("counters") or {}).get("lock_lost") == 1)
+        finally:
+            fcntl.flock(thief, fcntl.LOCK_UN)
+            os.close(thief)
+        s_o2 = keep_wait(keep_o, lambda x: (x.get("counters") or {}).get("lock_reacquired", 0) >= 1)
+        line_o = json.loads(open(lock_o).read().splitlines()[0])
+        st_o, _ = status(env_o)
+        in_off2 = time.monotonic() - t_off2 < OFF_MS2 / 1000
+        check(in_off2 and (s_o.get("counters") or {}).get("lock_lost") == 1 and s_o.get("bridge") == "off"
+              and s_o.get("bridge_reason") == "disabled_in_settings" and s_o.get("indicator") == ""
+              and (s_o2.get("counters") or {}).get("lock_reacquired", 0) >= 1 and line_o.get("pid") == ho.pid
+              and line_o.get("bridge") == "off" and (st_o.get("live") or {}).get("state") == "bridge_off",
+              f"菜单关着时锁丢了：桥还是 {s_o.get('bridge')}（{s_o.get('bridge_reason')}），标题栏「{s_o.get('indicator')}」；拿回锁以后"
+              f"锁文件那一行 {line_o.get('bridge')}，--mcp {(st_o.get('live') or {}).get('state')}")
+        s_o3 = keep_wait(keep_o, lambda x: x.get("bridge_enabled") is True and x.get("indicator") == LOST, timeout=OFF_MS2 / 1000 + 5)
+        st_o3, _ = status(env_o)
+        live_o3 = st_o3.get("live") or {}
+        check(s_o3.get("indicator_state") == "lock_lost" and s_o3.get("bridge") == "unavailable" and s_o3.get("bridge_reason") == "lock_lost"
+              and not os.path.exists(ho.sock) and live_o3.get("state") == "unreachable" and live_o3.get("reason") == "lock_lost"
+              and LOST in warn_hints(st_o3),
+              f"菜单再开：那一句（{s_o3.get('indicator_state')}），桥不开（{s_o3.get('bridge')}，{s_o3.get('bridge_reason')}），"
+              f"--mcp {live_o3.get('state')}（{live_o3.get('reason')}），hint 带那一句")
+        keep_o.close()
+        ho.term()
+
+        # 别人放掉锁到 app 拿回来之间，--mcp 只看到空锁（not_running / old_app）：锁丢了以后自检改成 1 s 一次，这段最多 1 s。
+        # 自检本来 4 s 一次的宿主：放掉以后 3 s 内拿回来（不改节奏要等到下一个 4 s）
+        hf = Host("H-fast", args=("--no-view",), env_extra={"LABELGUI_LIVE_TEST_SELFCHECK_MS": "4000"})
+        keep_f = Raw(hf)
+        lock_f = os.path.join(hf.data, ".live.lock")
+        os.unlink(lock_f)
+        thief = os.open(lock_f, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(thief, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            s_f = keep_wait(keep_f, lambda x: (x.get("counters") or {}).get("lock_lost") == 1, timeout=12)
+        finally:
+            fcntl.flock(thief, fcntl.LOCK_UN)
+            os.close(thief)
+            t_rel = time.monotonic()
+        s_f2 = keep_wait(keep_f, lambda x: (x.get("counters") or {}).get("lock_reacquired", 0) >= 1, timeout=12)
+        took = time.monotonic() - t_rel
+        st_f, _ = status(hf.env())
+        check((s_f.get("counters") or {}).get("lock_lost") == 1 and (s_f2.get("counters") or {}).get("lock_reacquired", 0) >= 1
+              and took < 3.0 and (st_f.get("live") or {}).get("reason") == "lock_lost" and LOST in warn_hints(st_f),
+              f"锁丢了以后 1 s 查一次：别人放掉 {took:.1f} s 后拿回来（自检本来 4 s 一次），--mcp "
+              f"{(st_f.get('live') or {}).get('state')}（{(st_f.get('live') or {}).get('reason')}）")
+        keep_f.close()
+        hf.term()
+
+        # 锁文件重新 open 不了（整个数据目录被挪走，没有别的程序拿锁）：不说「被别的程序拿走了」—— 标题栏带原因的那一句，
+        # bridge unavailable（lock_reopen_failed），lock_lost 不记；挪回来 → 下一轮自检开好、那一句消失、--mcp 又是 live
+        REOPEN = "AI 实时操作的连接开不起来（数据目录的锁文件不见了或打不开）：已暂停，每 10 秒自动再试"
+        hm = Host("H-moved", args=("--no-view",))
+        keep_m = Raw(hm)
+        moved = hm.data + ".moved"
+        just_after_selfcheck(hm)
+        os.rename(hm.data, moved)
+        try:
+            s_m = keep_wait(keep_m, lambda x: x.get("bridge_reason") == "lock_reopen_failed" and x.get("indicator") == REOPEN)
+            rr_m = keep_m.call("cull.read", {"session": KEY, "kind": "overview", "args": {}})
+            time.sleep(1.2)
+            s_m1 = keep_m.call("test.state").get("result") or {}
+        finally:
+            os.rename(moved, hm.data)
+        e_m = rr_m.get("error") or {}
+        cnt_m = s_m1.get("counters") or {}
+        check(s_m.get("indicator_state") == "bridge_failed" and s_m.get("bridge") == "unavailable" and not os.path.exists(hm.sock)
+              and not cnt_m.get("lock_lost") and cnt_m.get("lock_reopen_failed") == 1
+              and e_m.get("code") == "app_unreachable" and (e_m.get("data") or {}).get("reason") == "lock_reopen_failed"
+              and REOPEN in (e_m.get("data") or {}).get("hint", "") and "拿走" not in json.dumps(e_m, ensure_ascii=False)
+              and "菜单" not in e_m.get("message", ""),
+              f"数据目录被挪走（锁文件重新 open 不了）：副标题「{s_m.get('indicator')}」，桥 {s_m.get('bridge')}（{s_m.get('bridge_reason')}），"
+              f"lock_lost {cnt_m.get('lock_lost')}、lock_reopen_failed {cnt_m.get('lock_reopen_failed')}（之后的自检不再记）；之前连上的连接上的读 "
+              f"{e_m.get('code')}（{(e_m.get('data') or {}).get('reason')}），不说「拿走」")
+        s_m2 = keep_wait(keep_m, lambda x: x.get("bridge") == "on" and x.get("indicator_state") == "none")
+        st_m, _ = status(hm.env())
+        check(s_m2.get("bridge") == "on" and s_m2.get("indicator") == "" and os.path.exists(hm.sock)
+              and (st_m.get("live") or {}).get("state") == "live",
+              f"挪回来：下一轮自检开好（{s_m2.get('bridge')}），那一句消失（「{s_m2.get('indicator')}」），--mcp {(st_m.get('live') or {}).get('state')}")
+        keep_m.close()
+        hm.term()
+
+        # 重新 bind 失败（真的）：socket 被删、同一个位置放了一个普通文件 → 自检重新 bind 时不碰它、不开桥（socket_path_occupied）
+        # → 标题栏带原因的那一句；文件拿走 → 下一轮自检开好 → 那一句消失，标题栏和没有 AI 时逐字节相同
+        OCC = "AI 实时操作的连接开不起来（连接文件的位置被别的文件占着）：已暂停，每 10 秒自动再试"
+        hr = Host("H-rebind", args=("--titled",))
+        env_r = hr.env()
+        keep_r = Raw(hr)
+        c_r0, _ = keep_chrome(keep_r, "h-rebind-chrome-none")
+        just_after_selfcheck(hr)
+        os.unlink(hr.sock)
+        open(hr.sock, "w").write("不是 socket\n")
+        s_r = keep_wait(keep_r, lambda x: x.get("indicator_state") == "bridge_failed" and x.get("window_subtitle") == OCC)
+        rr_r = keep_r.call("cull.read", {"session": KEY, "kind": "overview", "args": {}})
+        e_r = rr_r.get("error") or {}
+        st_r, _ = status(env_r)
+        live_r = st_r.get("live") or {}
+        c_r1, cr_r1 = keep_chrome(keep_r, "h-rebind-chrome-1")
+        c_r2, _ = keep_chrome(keep_r, "h-rebind-chrome-2")
+        check(s_r.get("indicator") == OCC and s_r.get("window_subtitle") == OCC and s_r.get("bridge_reason") == "socket_path_occupied"
+              and e_r.get("code") == "app_unreachable" and (e_r.get("data") or {}).get("reason") == "socket_path_occupied"
+              and OCC in (e_r.get("data") or {}).get("hint", "") and "菜单" not in e_r.get("message", "")
+              and live_r.get("state") == "unreachable" and live_r.get("reason") == "socket_path_occupied" and OCC in warn_hints(st_r),
+              f"9.2.4 重新 bind 失败（socket 的位置被普通文件占着）：副标题「{s_r.get('indicator')}」；之前连上的连接上的读 "
+              f"{e_r.get('code')}（{(e_r.get('data') or {}).get('reason')}）；--mcp {live_r.get('state')}（{live_r.get('reason')}），hint 带那一句")
+        check(c_r1 is not None and c_r1 == c_r2 and c_r1 not in (c_r0, c_l1) and cr_r1.get("subtitle") == OCC,
+              f"开桥失败的标题栏：拍两次逐字节相同（{len(c_r1 or b'')} 字节），和没有 AI、锁丢了时都不一样")
+        os.unlink(hr.sock)
+        s_r2 = keep_wait(keep_r, lambda x: x.get("bridge") == "on" and x.get("indicator_state") == "none", timeout=5)
+        c_r3, _ = keep_chrome(keep_r, "h-rebind-chrome-healed")  # 在 --mcp 的 hello 之前拍：之后就是「AI 已连接」了
+        st_r2, _ = status(env_r)
+        s_r3 = keep_wait(keep_r, lambda x: x.get("indicator_state") == "connected")
+        check(s_r2.get("bridge") == "on" and s_r2.get("indicator") == "" and s_r2.get("window_subtitle") == "" and c_r3 == c_r0
+              and (st_r2.get("live") or {}).get("state") == "live" and s_r3.get("indicator") == "AI 已连接",
+              f"文件拿走：下一轮自检开好（{s_r2.get('bridge')}），那一句消失（「{s_r2.get('indicator')}」），标题栏和没有 AI 时逐字节相同；"
+              f"--mcp {(st_r2.get('live') or {}).get('state')}，之后照常「{s_r3.get('indicator')}」")
+        keep_r.close()
+        hr.term()
+
+        # 一启动就开不了桥：SockDir 0775（自检接着试）→ 宿主就绪时副标题已经是那一句（ready 行之前在主线程上当场设好）；
+        # 改回 0700 → 自检开好、那一句消失。socket 路径太长（不试）→「已停，重开 app 再试」
+        UNSAFE = "AI 实时操作的连接开不起来（放连接的临时目录权限不对）：已暂停，每 10 秒自动再试"
+        root_hu = sock_root("H-unsafe")
+        real_hu = os.path.join(SOCKS, os.path.basename(root_hu))
+        os.chmod(real_hu, 0o775)
+        hu = Host("H-unsafe", root=root_hu, args=("--no-view",))
+        st_hu, _ = status(hu.env())
+        log_hu = hu.log()
+        os.chmod(real_hu, 0o700)
+        deadline = time.monotonic() + 3 * SLACK
+        while time.monotonic() < deadline and not os.path.exists(hu.sock):
+            time.sleep(0.05)
+        s_hu = {}
+        if os.path.exists(hu.sock):
+            raw_hu = Raw(hu)
+            s_hu = keep_wait(raw_hu, lambda x: x.get("indicator_state") == "none", timeout=3)
+            raw_hu.close()
+        ready_ind = re.search(r"标题栏指示：「(.*?)」", log_hu)
+        check(hu.bridge == "unavailable" and hu.reason == "sock_dir_unsafe" and ready_ind and ready_ind.group(1) == UNSAFE
+              and (st_hu.get("live") or {}).get("reason") == "sock_dir_unsafe" and UNSAFE in warn_hints(st_hu)
+              and s_hu.get("bridge") == "on" and s_hu.get("indicator") == "",
+              f"一启动 SockDir 就不安全：就绪时副标题「{ready_ind.group(1) if ready_ind else '?'}」，--mcp hint 带那一句；"
+              f"改回 0700 → 开好（{s_hu.get('bridge')}），那一句消失（「{s_hu.get('indicator')}」）")
+        hu.term()
+        long_hl = os.path.join(WORK, "x" * 40, "很长的-socket-根目录-H-" + "y" * 40)
+        os.makedirs(long_hl, mode=0o700)
+        TOO_LONG = "AI 实时操作的连接开不起来（连接文件的路径太长）：已停，重开 app 再试"
+        hlong = Host("H-long", root=long_hl, args=("--no-view",))
+        st_long, _ = status(hlong.env())
+        ready_long = re.search(r"标题栏指示：「(.*?)」", hlong.log())
+        check(hlong.reason == "socket_path_too_long" and ready_long and ready_long.group(1) == TOO_LONG
+              and TOO_LONG in warn_hints(st_long),
+              f"socket 路径太长（自检不试）：就绪时副标题「{ready_long.group(1) if ready_long else '?'}」，--mcp hint 带它")
+        hlong.term()
 
     # ============================================================ grep：Live/ 的禁用词（§5 第 7 层、§9.5.6）
     print("grep")

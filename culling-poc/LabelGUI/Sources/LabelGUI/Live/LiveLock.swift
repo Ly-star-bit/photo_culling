@@ -52,12 +52,15 @@ final class LiveLock {
         case ok
         /// 锁文件被删了 / 换了（用户清理过数据目录）：重新建好、重新拿到了，那一行也写回去了。
         case reacquired
-        /// 重新建了，但锁被别的进程趁空当拿走：桥要关掉（§9.2.4 第二轮补）。
+        /// 重新建了，但锁被别的进程趁空当拿走（flock 回 EWOULDBLOCK）：桥要关掉（§9.2.4 第二轮补）。
         case lost(String)
+        /// 重新 open 不了（数据目录被挪走 / 删掉 → ENOENT，锁路径被换成符号链接 → ELOOP，没权限……）：没有别的进程拿着锁，
+        /// 旧 fd 上的 flock 也还在；不能说成「被别的程序拿走了」（§9.2.4 那一句只给上面那种）。带原因。
+        case reopenFailed(String)
     }
 
     /// 10 s 自检里的锁那一半：fstat(fd).st_ino 和 lstat(L).st_ino 不同、或者 L 不在了 → 重新 open + flock，
-    /// 成功就写回那一行、关掉旧 fd；拿不到就是锁丢了。代价是一次 fstat 加一次 lstat。
+    /// 成功就写回那一行、关掉旧 fd；别人拿着就是锁丢了；open 不了是另一回事（reopenFailed）。代价是一次 fstat 加一次 lstat。
     func selfCheck(info: [String: Any]) -> Check {
         var a = stat(), b = stat()
         let held = fstat(fd, &a) == 0
@@ -74,7 +77,7 @@ final class LiveLock {
         case .busy:
             return .lost("锁文件被换过，新的锁被别的进程拿走了")
         case .failed(let why):
-            return .lost(why)
+            return .reopenFailed(why)
         }
     }
 
