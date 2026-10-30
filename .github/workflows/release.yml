@@ -51,6 +51,26 @@ jobs:
       - name: 判决回归 (--verdicts)
         run: culling-poc/LabelGUI/Scripts/verdict_regression.sh culling-poc/LabelGUI/.build/release/LabelGUI
 
+      # MCP 冒烟（v1）：协议 + 没有 app + 不建目录 + 无界面；不需要照片，不起宿主。
+      # mcp_smoke 只在 CI 上跑的「不设 LABELGUI_DATA_DIR 也不建目录」那一条要求 runner 上还没有默认数据目录
+      # ~/Library/Application Support/选片工具：哪一步先建出它，这一条就只能 skip。所以放得靠前（前面的构建、判决回归都不建它），
+      # 往它前面加会起 LabelGUI 的步骤时记着这一条。
+      # 第二行是 build_app.sh 装好的 app 里的二进制（仓库根目录下的 选片工具.app）：脚本只在 --ci 且 GITHUB_ACTIONS=true 时收它，
+      # 不跑 sandbox 那一组（规则抓到就 SIGKILL）。
+      - name: MCP 冒烟 (--mcp)
+        timeout-minutes: 10
+        run: |
+          python3 -I culling-poc/LabelGUI/Scripts/mcp_smoke.py culling-poc/LabelGUI/.build/release/LabelGUI --ci
+          python3 -I culling-poc/LabelGUI/Scripts/mcp_smoke.py "选片工具.app/Contents/MacOS/LabelGUI" --ci --protocol-only
+
+      # 实时桥（v1）：起 --live-host（.prohibited，窗口从不显示；不行就 --no-view），经 --mcp 驱动；临时数据目录 + 测试 socket 根目录。
+      # 带不带视图由脚本开跑前探一次自己定（--view auto）：日志里那一行「CI 用带视图的 --live-host」/「CI 用 --no-view：…」，
+      # 也是摘要页上的一条 notice / warning。第一次跑出来以后在下面那行末尾钉住：带视图 → 加 --view require（以后探不过就红，
+      # 不会悄悄少测一截）；不行 → 加 --view no-view。
+      - name: 实时桥冒烟 (--live-host)
+        timeout-minutes: 25
+        run: python3 -I culling-poc/LabelGUI/Scripts/live_smoke.py culling-poc/LabelGUI/.build/release/LabelGUI --ci
+
       # 存储卡导入回归：随机字节造一张假卡跑 --ingest 的各种情况 —— 卡上文件前后逐字节不变、目标里
       # 绝不覆盖（同名不同内容整组改名）、复制后校验、取消不留半截、再插只导新的。
       - name: 存储卡导入回归 (--ingest)

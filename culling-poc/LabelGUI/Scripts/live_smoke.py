@@ -3,6 +3,7 @@
 窗口从不显示），经脚本自己起的 --mcp 驱动；test.* 直接连宿主的 socket。
 
 用法: python3 -I Scripts/live_smoke.py <LabelGUI> --ci [--work <目录>] [--keep] [--only A,B,…] [--plan]
+                                        [--view auto|require|no-view] [--force-no-view]
       python3 -I Scripts/live_smoke.py <LabelGUI> --photos <照片目录> --data <已分析的数据目录> [--collage-data <目录>]
                                         [--work …] [--keep] [--only …]
   --ci      Fixtures 场次（照片文件夹不存在，和 verdict_regression.sh 同一个约定）+ sips 合成图
@@ -10,6 +11,19 @@
   --collage-data     （本地）有拼图工程的同一场的数据目录（STEP 0 的 data-seeded）：collage_get_state 的预览用它
   --work    工作目录（不存在、空的、或者本脚本上次建的才用；socket 也放在这下面，经 /tmp 下一个短的符号链接接过去）
   --plan    只打印这次会跑哪几组（app 里的二进制会跳过哪些）就退出，不起任何进程（自检用）
+  --view    （只配 --ci）带不带视图：auto（默认，见下）；require = 必须带，探针探不过记一条 FAIL（照样改 --no-view 跑完其余的）；
+            no-view = 不探，全程 --no-view
+  --force-no-view  （只配 --ci，自检用）让开跑前的视图探针真的失败一次（探针宿主的快照目录给一个不存在的），
+                   走一遍 CI 上的 --no-view 退路（配 --view require 时走 FAIL 那一条）。只有选了要起宿主的组（B–H）才探，
+                   --only A 时它不起作用
+
+带视图还是 --no-view（§9.8.1、§10.6 STEP 4：CI 上能不能建离屏窗口、cacheDisplay，第一次推才知道）：--ci 开跑前起一个
+带标题栏的探针宿主（--titled，离屏窗口的超集），拍一张快照、同一个状态拍两条标题栏（要逐字节相同），再经 --mcp-call 让副标题变成
+「AI 已连接」拍第三条（要不一样）—— H 组靠的就是这几样。都过 → 全程照常带视图；起不来、拍不出、卡住、标题栏不跟着变 →
+全程 --no-view，日志里打一行「CI 用 --no-view：<原因>」（GitHub Actions 上同时是一条 warning），要窗口的那几条（快照、标题栏、
+AppKit 窗口的副标题、批量页消费选中、E 组的 --app-ui）记 skip，其余照跑。所以第一次推不用改 yaml；第一次跑出来以后用 --view 钉住
+（带视图 → require：以后哪次探不过就红，不会悄悄少测一截）。--view auto 只在 GitHub Actions 上会退到 --no-view：本机一定建得了
+离屏窗口，探不过就是回归，和 require 一样记 FAIL（只有 --force-no-view 自检时例外）。本地 photot 模式不探，总是带视图。
 
 组：A 没有宿主  B 起宿主（R6 T1–T4、T10、T11、T13、T17，hello、积压、连接上限、桥关、自愈、窗口、取消、截止时间……）
     C 杀掉 / 重起 / 抢锁（R6 T5–T9、T12、T14、T16、T18，CLOEXEC）  D SIGPIPE 矩阵（R6 §4.3 五行）  E --app-ui 不开桥
@@ -57,6 +71,10 @@ def opt(name):
 ONLY = set((opt("--only") or "ABCDEFGH").upper().replace(",", ""))
 PHOTOS_SRC, DATA_SRC = opt("--photos"), opt("--data")
 COLLAGE_SRC = opt("--collage-data")
+# 自检用：让 --ci 的视图探针真的失败一次（probe_view），证明 CI 上的 --no-view 退路走得通
+FORCE_NO_VIEW = "--force-no-view" in ARGS
+# 带不带视图（§10.6 STEP 4）：auto 由探针定（GitHub 上探不过退到 --no-view），require 探不过就 FAIL，no-view 不探
+VIEW_MODE = opt("--view") or "auto"
 
 
 def in_app_bundle(path):
@@ -81,6 +99,12 @@ if "--plan" in ARGS:
 if not CI and not (PHOTOS_SRC and DATA_SRC):
     print("要么 --ci，要么 --photos <照片目录> --data <已分析的数据目录>")
     sys.exit(2)
+if FORCE_NO_VIEW and not CI:
+    print("--force-no-view 只配 --ci（本地 photot 模式不探，总是带视图）")
+    sys.exit(2)
+if VIEW_MODE not in ("auto", "require", "no-view") or ("--view" in ARGS and not CI):
+    print("--view 只配 --ci，取值 auto、require、no-view（本地 photot 模式不探，总是带视图）")
+    sys.exit(2)
 if not os.access(BIN, os.X_OK):
     print(f"不是可执行文件：{BIN}")
     sys.exit(2)
@@ -104,6 +128,10 @@ if opt("--work"):
     shutil.rmtree(WORK, ignore_errors=True)
     os.makedirs(WORK)
     open(mark, "w").close()
+elif ON_GITHUB:
+    # GitHub 上放 /tmp 下（解析成 /private/tmp/…，和本地给 --work 时同一种写法）：第 22 条（/tmp ↔ /private/tmp 两种写法）
+    # 要工作目录在 /private/tmp 下，默认的 $TMPDIR（/var/folders/…）下面那一条只能 skip
+    WORK = os.path.realpath(tempfile.mkdtemp(prefix="live_smoke.", dir="/tmp"))
 else:
     WORK = tempfile.mkdtemp(prefix="live_smoke.")
 SOCKS = os.path.join(WORK, "socks")
@@ -121,6 +149,8 @@ os.makedirs(SNAPS)
 failures = []
 counts = {"ok": 0, "skip": 0}
 PROCS = []
+# 宿主带不带视图（离屏窗口）：--ci 开跑前由 probe_view() 定，本地 photot 模式总是带（§9.8.1、§10.6 STEP 4）
+VIEW = True
 
 
 def pid_alive(pid):
@@ -143,6 +173,26 @@ def check(cond, msg):
 def skip(msg):
     counts["skip"] += 1
     print("  skip " + msg, flush=True)
+
+
+def view_check(cond, msg):
+    """要窗口才测得出来的（快照、标题栏、AppKit 窗口的副标题、批量页消费选中）：CI 用 --no-view 时记 skip，不算通过。"""
+    if VIEW:
+        return check(cond, msg)
+    skip(f"{msg}（CI 用 --no-view：宿主没有窗口，这一条看本地）")
+    return True
+
+
+def W(subtitle):
+    """AppKit 窗口副标题的期望值：CI 用 --no-view 时宿主没有窗口，test.state 里 window_subtitle 是 null。"""
+    return subtitle if VIEW else None
+
+
+def host_args(args):
+    """CI 定了用 --no-view（VIEW 为假）：--titled 去掉、补上 --no-view —— 每个宿主都不建窗口。"""
+    if VIEW:
+        return tuple(args)
+    return tuple(a for a in args if a not in ("--titled", "--no-view")) + ("--no-view",)
 
 
 def same_dir(a, b):
@@ -270,6 +320,7 @@ class Host:
                        LABELGUI_LIVE_TEST_SELFCHECK_MS="500", **extra)
         env.update(env_extra or {})
         self.t0 = time.monotonic()
+        args = host_args(args)
         self.proc = subprocess.Popen([*wrap, BIN, "--live-host", photos or PHOTO_DIR, *args], env=env, stdin=subprocess.DEVNULL,
                                      stdout=subprocess.PIPE, stderr=open(self.err_path, "w"), cwd=WORK)
         PROCS.append(self)
@@ -795,6 +846,73 @@ def bundle_gate_selfcheck():
         shutil.rmtree(root, ignore_errors=True)
 
 
+# ---------------------------------------------------------------- 带视图还是 --no-view（§9.8.1、§10.6 STEP 4）：--ci 开跑前探一次
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def probe_view():
+    """起一个带标题栏的探针宿主（--titled：NSHostingView 放进带标题栏的离屏窗口，test.snapshot 和 test.chrome 都有），探 H 组要的
+    那几样：页面拍得出来（PNG，>10 KB，和 E 组 --app-ui 同一个下限）；同一个状态拍两条标题栏逐字节相同；一次 app_status
+    （--mcp-call，没有 initialize →「AI 已连接」）以后 AppKit 窗口的副标题换上、标题栏拍出来和之前不一样。都过回 None；
+    宿主起不来 / 中途没了、方法回错、卡住、标题栏不跟着变，回一句原因。等的时间都跟着 SLACK 放宽：runner 慢、但拍得出来时
+    不能被误判成「建不了窗口」（那样整个 CI 会悄悄少测一截）。H 组自己的 wait_ms 不放宽：它有「刚做完」1.5 s 这类窗口要赶。
+    --force-no-view：探针宿主的快照目录给一个不存在的（宿主只查是不是绝对路径），test.snapshot 真的写不出 → 走同一条退路。"""
+    extra = {"LABELGUI_LIVE_TEST_OUT": os.path.join(WORK, "no-such-dir", "snaps")} if FORCE_NO_VIEW else None
+    h = None
+
+    def take(method, params):
+        """拍一张，回 (PNG 字节, 结果)；拍不出来回 (None, 原因)。"""
+        raw_ = Raw(h, timeout=10 * SLACK)
+        try:
+            r = raw_.call(method, params, deadline=int(10_000 * SLACK))
+        finally:
+            raw_.close()
+        res, err = r.get("result") or {}, r.get("error") or {}
+        if err or not res.get("file"):
+            return None, f"{method} 拍不出来（{err.get('code')}：{err.get('message')}）"
+        data = open(res["file"], "rb").read()
+        if not data.startswith(PNG_MAGIC) or (method == "test.snapshot" and len(data) <= 10_000):
+            return None, f"{method} 拍出来的不像一张页面（{len(data)} 字节）"
+        return data, res
+
+    try:
+        h = Host("view-probe", args=("--titled",), wait=False, env_extra=extra)
+        if not h.wait_ready(timeout=15):
+            rc = h.proc.poll()
+            last = (h.log().strip().splitlines() or ["stderr 是空的"])[-1][:160]
+            return (f"带视图的宿主退出了（退出码 {rc}）" if rc is not None else f"带视图的宿主 {15 * SLACK:.0f} s 没就绪") + f"：{last}"
+        page, why = take("test.snapshot", {"name": "view-probe", "tab": "批量处理", "wait_ms": int(800 * SLACK)})
+        if page is None:
+            return why
+        c1, why = take("test.chrome", {"name": "view-probe-chrome-1", "wait_ms": int(300 * SLACK)})
+        if c1 is None:
+            return why
+        c2, why = take("test.chrome", {"name": "view-probe-chrome-2", "wait_ms": int(300 * SLACK)})
+        if c2 is None:
+            return why
+        if c1 != c2:
+            return f"同一个状态拍两条标题栏不一样（{len(c1)}、{len(c2)} 字节）：H 组的逐字节比对在这台机器上做不了"
+        mcp_call(h.env(), "app_status")
+        deadline = time.monotonic() + 5 * SLACK
+        sub = state(h).get("window_subtitle")
+        while sub != "AI 已连接" and time.monotonic() < deadline:
+            time.sleep(0.05)
+            sub = state(h).get("window_subtitle")
+        c3, res3 = take("test.chrome", {"name": "view-probe-chrome-3", "wait_ms": int(300 * SLACK)})
+        if c3 is None:
+            return res3
+        if sub != "AI 已连接" or res3.get("subtitle") != "AI 已连接" or c3 == c1:
+            return (f"副标题换成「{res3.get('subtitle')}」（test.state 里「{sub}」）以后标题栏"
+                    f"{'和之前逐字节相同' if c3 == c1 else '拍出来了'}：标题栏不跟着副标题变")
+        return None if h.alive() else f"探针宿主拍完就没了（退出码 {h.proc.poll()}）"
+    except Exception as e:      # 连不上、读到一半断了（宿主在 cacheDisplay 里崩了）、socket 超时
+        return f"带视图的宿主拍快照时出错：{e!r}"[:200]
+    finally:
+        if h is not None:
+            h.term()
+
+
 # ---------------------------------------------------------------- 进程的 fd（CLOEXEC 从外面看）
 
 LIBPROC = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
@@ -842,6 +960,26 @@ try:
     print("0. 第 4 道闸（.app 里的二进制）")
     bundle_gate_selfcheck()
     check(not os.path.lexists(os.path.join(WORK, "fake-bundle")), "第 4 道闸自检完：假 .app 那棵树已经删掉（--keep 也不留）")
+
+    # ============================================================ CI 用带视图的宿主还是 --no-view（§9.8.1、§10.6 STEP 4）
+    # 第一次推 CI 就由这一行定下来，不用改 yaml：探得过就全程带视图，探不过就全程 --no-view、要窗口的那几条记 skip。
+    # 定下来以后 yaml 里用 --view 钉住：钉了 require，以后哪次探不过（窗口、快照、标题栏的回归）就是一条 FAIL，不会悄悄变成
+    # 「绿、少测 15 条」。本机（不在 GitHub 上）一定建得了离屏窗口：auto 也按 require 算，只有 --force-no-view 自检退路时不算
+    if CI and ONLY & set("BCDEFGH"):
+        require = VIEW_MODE == "require" or (VIEW_MODE == "auto" and not ON_GITHUB and not FORCE_NO_VIEW)
+        why = "--view no-view 钉住了，不探" if VIEW_MODE == "no-view" else probe_view()
+        VIEW = why is None
+        line = ("CI 用带视图的 --live-host：探针宿主（--titled）拍出了页面快照和标题栏，标题栏跟着副标题变" if VIEW else
+                f"CI 用 --no-view：{why}。所有宿主改成 --no-view，要窗口的那几条（快照、标题栏、AppKit 窗口的副标题、"
+                f"批量页消费选中、E 组的 --app-ui）记 skip，其余照跑")
+        # GitHub Actions 上同一行带 ::notice::（探不过退到 --no-view 是 ::warning::：少测了一截），在这次运行的摘要页上就看得到
+        # （% 要转义，§workflow commands）
+        if ON_GITHUB:
+            line = ("::warning::" if not VIEW and VIEW_MODE != "no-view" else "::notice::") + line.replace("%", "%25")
+        print(line, flush=True)
+        if require and not VIEW:
+            # 只在探不过时记一条（探得过不记）：CI 上 auto 和 require 探得过时条数一样
+            check(False, f"要求带视图（{'--view require' if VIEW_MODE == 'require' else '本机的 --ci'}），探针宿主探不过：{why}")
 
     # ============================================================ A. 没有宿主
     if "A" in ONLY:
@@ -1710,7 +1848,10 @@ __attribute__((constructor)) static void init(void) {
             check(got[mode] == want[mode], f"{mode:15s} accept 之前就走了：{a:14s} 写到一半关掉：{b}（R6：{want[mode]}）")
 
     # ============================================================ E. --app-ui 不开桥（§9.8.2 第 30 条）
-    if "E" in ONLY:
+    if "E" in ONLY and not VIEW:
+        print("E. --app-ui 不开桥")
+        skip("--app-ui 要建离屏窗口拍快照（和视图探针同一种窗口）：CI 用 --no-view，这一组看本地")
+    elif "E" in ONLY:
         print("E. --app-ui 不开桥")
         data = fresh_data("E")
         root = sock_root("E")
@@ -2407,14 +2548,18 @@ __attribute__((constructor)) static void init(void) {
               "29 窗口最小化：写照常成功，live.window_visible:false、window_state minimized，warning 说用户现在看不到")
 
         # ---------- cull_show_photos：选中、焦点；用户停在别的页时 pending，回到批量页时补上
+        # CI 用 --no-view 时没有批量页来消费：每次都是 pending:true、请求留在 store 里（等于用户一直没切过来），消费的那一半看本地
         s0 = st()
         _, b, _ = w("cull_show_photos", {"session": KEY, "ids": ids2 + ["NOPE-1"]})
         s1 = st()
-        check(b.get("applied") is True and b.get("selected") == ids2 and b.get("focus") == ids2[0] and b.get("hidden_by_filter") == []
-              and b.get("missing_ids") == ["NOPE-1"] and b.get("live", {}).get("tab") == "batch" and steps(s0, s1) == (0, 0)
-              and s1.get("view_request") is None,
-              f"cull_show_photos：批量页消费掉了（applied、selected、focus），不存在的进 missing_ids，不进撤销 "
-              f"{ {k: b.get(k) for k in ('applied', 'pending', 'selected', 'focus', 'hidden_by_filter')} }")
+        consumed = (b.get("applied") is True and b.get("selected") == ids2 and b.get("focus") == ids2[0]
+                    and b.get("hidden_by_filter") == [] and s1.get("view_request") is None)
+        waiting = (b.get("applied") is False and b.get("pending") is True and b.get("focus") == ids2[0]
+                   and s1.get("view_request") == {"ids": ids2, "select": True})
+        check((consumed if VIEW else waiting)
+              and b.get("missing_ids") == ["NOPE-1"] and b.get("live", {}).get("tab") == "batch" and steps(s0, s1) == (0, 0),
+              f"cull_show_photos：{'批量页消费掉了（applied、selected、focus）' if VIEW else '没有批量页（--no-view）：pending:true、请求留着'}，"
+              f"不存在的进 missing_ids，不进撤销 { {k: b.get(k) for k in ('applied', 'pending', 'selected', 'focus', 'hidden_by_filter')} }")
         w("collage_set_text", {"session": KEY, "title": "切到拼图页", "reveal": True})
         _, b, _ = w("cull_show_photos", {"session": KEY, "ids": [ids2[1]], "mode": "focus", "reveal": False})
         s2 = st()
@@ -2424,11 +2569,11 @@ __attribute__((constructor)) static void init(void) {
         # 切回批量页时 onAppear 补上。两种都对，最后都要落到那一张上
         now_ok = b.get("applied") is True and s2.get("view_request") is None
         later_ok = b.get("applied") is False and b.get("pending") is True and s2.get("view_request") == {"ids": [ids2[1]], "select": False}
-        check((now_ok or later_ok) and b.get("live", {}).get("tab") == "collage" and b.get("mode") == "focus"
-              and s3.get("view_request") is None and (s3.get("view_applied") or {}).get("focus") == ids2[1]
-              and (s3.get("view_applied") or {}).get("selected") == [],
-              f"reveal:false 而用户停在拼图页：不切 tab；{'当场消费了（TabView 留着批量页）' if now_ok else 'pending:true，切回批量页时补上'}，"
-              f"mode=focus 只移焦点不改选中")
+        check(((now_ok or later_ok) if VIEW else later_ok) and b.get("live", {}).get("tab") == "collage" and b.get("mode") == "focus",
+              f"reveal:false 而用户停在拼图页：不切 tab；{'当场消费了（TabView 留着批量页）' if now_ok else 'pending:true，请求留着'}")
+        view_check(s3.get("view_request") is None and (s3.get("view_applied") or {}).get("focus") == ids2[1]
+                   and (s3.get("view_applied") or {}).get("selected") == [],
+                   "切回批量页以后落到那一张上：mode=focus 只移焦点不改选中")
 
         # ---------- 第 25 条 等用户停手的时候用户切了场次 → session_not_open（没执行）；成套途中切场次 / 改版式 → superseded
         sv0 = st()
@@ -2650,6 +2795,7 @@ __attribute__((constructor)) static void init(void) {
         print("H. 标题栏指示、菜单开关")
         # 带标题栏的宿主（--titled，照样从不显示）：NSHostingView 管窗口的标题和副标题，test.state 的 window_subtitle 是 AppKit
         # 窗口上真的那个。「已连接」「刚做完」缩短成 6 s、1.5 s（§9.8.2 第 21 条：宿主认测试变量，不用干等 120 s）
+        # CI 用 --no-view 时：没有窗口，window_subtitle 是 null（W()），标题栏 / 页面截图的那几条记 skip，指示的文字和状态照比
         CONN_MS, DID_MS = 6000, 1500
         hh = Host("H", args=("--titled",), LABELGUI_LIVE_TEST_CONNECTED_MS=str(CONN_MS), LABELGUI_LIVE_TEST_JUSTDID_MS=str(DID_MS))
         env = hh.env()
@@ -2661,7 +2807,7 @@ __attribute__((constructor)) static void init(void) {
             while True:
                 s_ = state(hh)
                 got = (s_.get("indicator"), s_.get("indicator_state"), s_.get("window_subtitle"))
-                if got[0] == got[2] or time.monotonic() > deadline:
+                if got[0] == got[2] or not VIEW or time.monotonic() > deadline:
                     return got
                 time.sleep(0.05)
 
@@ -2684,15 +2830,15 @@ __attribute__((constructor)) static void init(void) {
         # ---------- 没有 AI：副标题是空的（§10.8 第 1 条），菜单那一项打着勾；测试脚本自己连 socket 的 hello 不算
         s0 = state(hh)
         check(s0.get("indicator") == "" and s0.get("indicator_state") == "none" and s0.get("bridge_enabled") is True
-              and s0.get("window_subtitle") == "" and "标题栏指示：「」" in hh.log(),
+              and s0.get("window_subtitle") == W("") and "标题栏指示：「」" in hh.log(),
               f"21 没有 AI：副标题空（指示「{s0.get('indicator')}」、AppKit 窗口「{s0.get('window_subtitle')}」），菜单那一项打着勾；"
               f"test.* 的裸连接不算 AI")
         c_none1, _ = chrome("h-chrome-none-1")
         c_none2, cr = chrome("h-chrome-none-2")
         b_none1, b_none2 = shot("h-batch-none-1", "批量处理"), shot("h-batch-none-2", "批量处理")
         k_none = shot("h-collage-none", "拼图")
-        check(c_none1 is not None and c_none1 == c_none2 and b_none1 is not None and b_none1 == b_none2,
-              f"复现性：同一个状态拍两次，标题栏（{len(c_none1 or b'')} 字节）和批量页（{len(b_none1 or b'')} 字节）都逐字节相同")
+        view_check(c_none1 is not None and c_none1 == c_none2 and b_none1 is not None and b_none1 == b_none2,
+                   f"复现性：同一个状态拍两次，标题栏（{len(c_none1 or b'')} 字节）和批量页（{len(b_none1 or b'')} 字节）都逐字节相同")
         # ---------- Claude Code 连上来（initialize 报 claude-code）：「Claude Code 已连接」；读不改它
         m = Mcp(env)
         m.initialize("claude-code", "2.1.303")
@@ -2701,10 +2847,10 @@ __attribute__((constructor)) static void init(void) {
         m.tool("h2", "cull_session_overview", {"session": KEY})
         t1r = ind()
         c_conn, cr_conn = chrome("h-chrome-connected")
-        check((st1.get("live") or {}).get("state") == "live" and t1 == ("Claude Code 已连接", "connected", "Claude Code 已连接")
-              and t1r[1] == "connected" and c_conn is not None and c_conn != c_none1,
-              f"21 一次 app_status 以后：「{t1[0]}」，AppKit 窗口的副标题「{t1[2]}」；读（overview）不变成「正在操作」（{t1r[1]}）；"
-              f"标题栏的样子变了")
+        check((st1.get("live") or {}).get("state") == "live" and t1 == ("Claude Code 已连接", "connected", W("Claude Code 已连接"))
+              and t1r[1] == "connected",
+              f"21 一次 app_status 以后：「{t1[0]}」，AppKit 窗口的副标题「{t1[2]}」；读（overview）不变成「正在操作」（{t1r[1]}）")
+        view_check(c_conn is not None and c_conn != c_none1, "21「Claude Code 已连接」的标题栏和没有 AI 时不一样")
         # ---------- 等用户停手的时候还不算「正在操作」（第 8 步在等待之后），做成了 → 那一页的提示（§9.4.3 第 11 步）
         test_call(hh, "test.set_busy", {"reasons": ["pointer"], "ms": 1200})
         res = {}
@@ -2718,12 +2864,12 @@ __attribute__((constructor)) static void init(void) {
         s3 = state(hh)
         note3 = (b3.get("live") or {}).get("notice")
         check(t_wait[1] == "connected" and b3.get("changed") is True and note3 and note3.startswith("AI：")
-              and t3 == (note3, "just_did", note3) and (s3.get("collage") or {}).get("notice") == note3,
+              and t3 == (note3, "just_did", W(note3)) and (s3.get("collage") or {}).get("notice") == note3,
               f"等用户停手的 1.2 s 里还是「{t_wait[0]}」；改了标题以后副标题 = 拼图页状态栏的那句 = live.notice「{note3}」")
         c_did, _ = chrome("h-chrome-justdid")
         k_did = shot("h-collage-notice", "拼图")
-        check(c_did is not None and c_did not in (c_none1, c_conn) and k_did is not None and k_did != k_none,
-              "「刚做完」的标题栏、拼图页状态栏（有那句提示）和之前的样子不一样")
+        view_check(c_did is not None and c_did not in (c_none1, c_conn) and k_did is not None and k_did != k_none,
+                   "「刚做完」的标题栏、拼图页状态栏（有那句提示）和之前的样子不一样")
         # ---------- 「AI 正在操作：一键成套…」（短词，不是工具 title）：一键成套落地之前拖住（test.delay_next），窗口副标题跟着
         test_call(hh, "test.delay_next", {"ms": 2000})
         res = {}
@@ -2735,10 +2881,11 @@ __attribute__((constructor)) static void init(void) {
         b4 = res.get("v") or {}
         t4b = ind()
         note4 = (b4.get("live") or {}).get("notice")
-        check(t4 == ("AI 正在操作：一键成套…", "working", "AI 正在操作：一键成套…") and c_work not in (None, c_conn, c_did),
-              f"21 在途的写：「{t4[0]}」（AppKit 窗口「{t4[2]}」），标题栏的样子和「已连接」「刚做完」都不一样")
+        check(t4 == ("AI 正在操作：一键成套…", "working", W("AI 正在操作：一键成套…")),
+              f"21 在途的写：「{t4[0]}」（AppKit 窗口「{t4[2]}」）")
+        view_check(c_work not in (None, c_conn, c_did), "21 在途的写：标题栏的样子和「已连接」「刚做完」都不一样")
         if b4.get("landing") == "landed":
-            check(note4 and t4b == (note4, "just_did", note4), f"成套落地以后：副标题 = live.notice「{note4}」")
+            check(note4 and t4b == (note4, "just_did", W(note4)), f"成套落地以后：副标题 = live.notice「{note4}」")
         else:
             check(t4b[1] == "connected", f"成套没落地（{b4.get('landing') or err_code(b4)}）：副标题直接回「{t4b[0]}」")
         # ---------- 没改出东西的写：直接回「已连接」，不留提示
@@ -2754,18 +2901,19 @@ __attribute__((constructor)) static void init(void) {
         s6 = state(hh)
         b_did = shot("h-batch-notice-1", "批量处理")
         b_did2 = shot("h-batch-notice-2", "批量处理")
-        check(note6 and t6 == (note6, "just_did", note6) and s6.get("external_notice") == note6 and "批量页" in note6,
+        check(note6 and t6 == (note6, "just_did", W(note6)) and s6.get("external_notice") == note6 and "批量页" in note6,
               f"改判：副标题 = 批量页状态栏的那句「{note6}」")
-        check(b_did is not None and b_did == b_did2 and b_did != b_none1,
-              "批量页状态栏有那句提示：拍两次逐字节相同，和没有 AI 时不一样")
+        view_check(b_did is not None and b_did == b_did2 and b_did != b_none1,
+                   "批量页状态栏有那句提示：拍两次逐字节相同，和没有 AI 时不一样")
         vd_did = s6.get("verdict_digest")
         time.sleep(max(0, t_ret + DID_MS / 1000 + 0.4 - time.monotonic()))
         t7 = ind()
         time.sleep(max(0, t_ret + CONN_MS / 1000 + 0.5 - time.monotonic()))
         t8 = ind()
         c_gone, _ = chrome("h-chrome-faded")
-        check(t7 == ("Claude Code 已连接", "connected", "Claude Code 已连接") and t8 == ("", "none", "") and c_gone == c_none1,
-              f"21 「刚做完」{DID_MS} ms 后回「{t7[0]}」，最后一次 hello {CONN_MS} ms 后淡掉（「{t8[0]}」）；标题栏和没有 AI 时逐字节相同")
+        check(t7 == ("Claude Code 已连接", "connected", W("Claude Code 已连接")) and t8 == ("", "none", W("")),
+              f"21 「刚做完」{DID_MS} ms 后回「{t7[0]}」，最后一次 hello {CONN_MS} ms 后淡掉（「{t8[0]}」）")
+        view_check(c_gone == c_none1, "21 淡掉以后的标题栏和没有 AI 时逐字节相同")
         # ---------- --mcp-call 没有 initialize（不知道是谁）：「AI 已连接」
         mcp_call(env, "app_status")
         t9 = wait_state("connected", 3)
@@ -2774,8 +2922,8 @@ __attribute__((constructor)) static void init(void) {
         test_call(hh, "test.chrome", {"name": "h-chrome-labeling", "tab": "标注校准", "wait_ms": 500})
         s10 = state(hh)
         test_call(hh, "test.chrome", {"name": "h-chrome-batch", "tab": "批量处理", "wait_ms": 300})
-        check(s10.get("window_subtitle") == "AI 已连接" and s10.get("tab") == "labeling",
-              f"37 标注校准 tab（自带 navigationTitle「{s10.get('window_title')}」）：AppKit 窗口的副标题还是「{s10.get('window_subtitle')}」")
+        view_check(s10.get("window_subtitle") == "AI 已连接" and s10.get("tab") == "labeling",
+                   f"37 标注校准 tab（自带 navigationTitle「{s10.get('window_title')}」）：AppKit 窗口的副标题还是「{s10.get('window_subtitle')}」")
         # ---------- 菜单开关（§10.8 第 8 条）：关 → 读写都 bridge_off、进程内的照常、副标题不显示；不写 UserDefaults；开 → 恢复
         raw = Raw(hh)  # 关之前就连上的连接：关了以后在它上面发的读写也不做
         r_off = test_call(hh, "test.set_bridge", {"enabled": False, "for_ms": 4000}).get("result") or {}
@@ -2821,16 +2969,19 @@ __attribute__((constructor)) static void init(void) {
               f"带标题栏的宿主也从不变成前台、窗口从不显示：{ns}")
         # ---------- 批量页状态栏那句提示真的画出来了：上面「和没有 AI 时不一样」被同一次改判（格子、顶栏计数）盖住，没有
         # 这一行的旧二进制也过。提示 10 s 后自己清掉（batchNotice 写死的，DID_MS 管不到；这时离改判已经过了 10 s 多），
-        # 判决还是那时的（中间只有拼图写）：同一个判决状态，有那句提示和没有，批量页必须不一样
-        deadline = time.monotonic() + 15 * SLACK
-        s_late = state(hh)
-        while s_late.get("external_notice") is not None and time.monotonic() < deadline:
-            time.sleep(0.2)
+        # 判决还是那时的（中间只有拼图写）：同一个判决状态，有那句提示和没有，批量页必须不一样。CI 用 --no-view 时整段不等不拍
+        if VIEW:
+            deadline = time.monotonic() + 15 * SLACK
             s_late = state(hh)
-        b_late1, b_late2 = shot("h-batch-notice-gone-1", "批量处理"), shot("h-batch-notice-gone-2", "批量处理")
-        check(s_late.get("external_notice") is None and vd_did and s_late.get("verdict_digest") == vd_did
-              and b_late1 is not None and b_late1 == b_late2 and b_late1 != b_did,
-              f"那句提示清掉以后（判决没变：{s_late.get('verdict_digest') == vd_did}）批量页拍两次相同，和有提示时不一样：状态栏那一行真的画了")
+            while s_late.get("external_notice") is not None and time.monotonic() < deadline:
+                time.sleep(0.2)
+                s_late = state(hh)
+            b_late1, b_late2 = shot("h-batch-notice-gone-1", "批量处理"), shot("h-batch-notice-gone-2", "批量处理")
+            check(s_late.get("external_notice") is None and vd_did and s_late.get("verdict_digest") == vd_did
+                  and b_late1 is not None and b_late1 == b_late2 and b_late1 != b_did,
+                  f"那句提示清掉以后（判决没变：{s_late.get('verdict_digest') == vd_did}）批量页拍两次相同，和有提示时不一样：状态栏那一行真的画了")
+        else:
+            skip("那句提示清掉以后批量页和有提示时不一样（要拍批量页）：CI 用 --no-view：宿主没有窗口，这一条看本地")
         m.close()
         # ---------- 同一个数据目录的第二个实例：不开桥，副标题说一句（只能从它的日志看：它没有 socket）
         h2 = Host("H2", data=hh.data, root=hh.root, args=("--no-view",))
@@ -2888,8 +3039,8 @@ __attribute__((constructor)) static void init(void) {
         thief = os.open(lock_p, os.O_RDWR | os.O_CREAT, 0o600)
         fcntl.flock(thief, fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
-            s_l = keep_wait(keep, lambda x: x.get("indicator_state") == "lock_lost" and x.get("window_subtitle") == LOST)
-            check(s_l.get("indicator") == LOST and s_l.get("indicator_state") == "lock_lost" and s_l.get("window_subtitle") == LOST
+            s_l = keep_wait(keep, lambda x: x.get("indicator_state") == "lock_lost" and x.get("window_subtitle") == W(LOST))
+            check(s_l.get("indicator") == LOST and s_l.get("indicator_state") == "lock_lost" and s_l.get("window_subtitle") == W(LOST)
                   and s_l.get("bridge") == "unavailable" and s_l.get("bridge_reason") == "lock_lost"
                   and (s_l.get("counters") or {}).get("lock_lost") == 1 and "listen" not in (s_l.get("fds") or {})
                   and listen_closed() and not os.path.exists(hl.sock) and hl.alive(),
@@ -2914,8 +3065,8 @@ __attribute__((constructor)) static void init(void) {
                   f"{[err_code(x) for x in (rd_l, wr_l)]}，hint 带标题栏那一句")
             c_l1, cr_l1 = keep_chrome(keep, "h-lost-chrome-1")
             c_l2, _ = keep_chrome(keep, "h-lost-chrome-2")
-            check(c_l1 is not None and c_l1 == c_l2 and c_l1 != c_l0 and cr_l1.get("subtitle") == LOST,
-                  f"锁丢了的标题栏：拍两次逐字节相同（{len(c_l1 or b'')} 字节），和没有 AI 时不一样，副标题「{cr_l1.get('subtitle')}」")
+            view_check(c_l1 is not None and c_l1 == c_l2 and c_l1 != c_l0 and cr_l1.get("subtitle") == LOST,
+                       f"锁丢了的标题栏：拍两次逐字节相同（{len(c_l1 or b'')} 字节），和没有 AI 时不一样，副标题「{cr_l1.get('subtitle')}」")
             time.sleep(1.2)
             s_l2 = keep.call("test.state").get("result") or {}
             check((s_l2.get("counters") or {}).get("lock_lost") == 1 and s_l2.get("indicator_state") == "lock_lost"
@@ -3073,30 +3224,31 @@ __attribute__((constructor)) static void init(void) {
         just_after_selfcheck(hr)
         os.unlink(hr.sock)
         open(hr.sock, "w").write("不是 socket\n")
-        s_r = keep_wait(keep_r, lambda x: x.get("indicator_state") == "bridge_failed" and x.get("window_subtitle") == OCC)
+        s_r = keep_wait(keep_r, lambda x: x.get("indicator_state") == "bridge_failed" and x.get("window_subtitle") == W(OCC))
         rr_r = keep_r.call("cull.read", {"session": KEY, "kind": "overview", "args": {}})
         e_r = rr_r.get("error") or {}
         st_r, _ = status(env_r)
         live_r = st_r.get("live") or {}
         c_r1, cr_r1 = keep_chrome(keep_r, "h-rebind-chrome-1")
         c_r2, _ = keep_chrome(keep_r, "h-rebind-chrome-2")
-        check(s_r.get("indicator") == OCC and s_r.get("window_subtitle") == OCC and s_r.get("bridge_reason") == "socket_path_occupied"
+        check(s_r.get("indicator") == OCC and s_r.get("window_subtitle") == W(OCC) and s_r.get("bridge_reason") == "socket_path_occupied"
               and e_r.get("code") == "app_unreachable" and (e_r.get("data") or {}).get("reason") == "socket_path_occupied"
               and OCC in (e_r.get("data") or {}).get("hint", "") and "菜单" not in e_r.get("message", "")
               and live_r.get("state") == "unreachable" and live_r.get("reason") == "socket_path_occupied" and OCC in warn_hints(st_r),
               f"9.2.4 重新 bind 失败（socket 的位置被普通文件占着）：副标题「{s_r.get('indicator')}」；之前连上的连接上的读 "
               f"{e_r.get('code')}（{(e_r.get('data') or {}).get('reason')}）；--mcp {live_r.get('state')}（{live_r.get('reason')}），hint 带那一句")
-        check(c_r1 is not None and c_r1 == c_r2 and c_r1 not in (c_r0, c_l1) and cr_r1.get("subtitle") == OCC,
-              f"开桥失败的标题栏：拍两次逐字节相同（{len(c_r1 or b'')} 字节），和没有 AI、锁丢了时都不一样")
+        view_check(c_r1 is not None and c_r1 == c_r2 and c_r1 not in (c_r0, c_l1) and cr_r1.get("subtitle") == OCC,
+                   f"开桥失败的标题栏：拍两次逐字节相同（{len(c_r1 or b'')} 字节），和没有 AI、锁丢了时都不一样")
         os.unlink(hr.sock)
         s_r2 = keep_wait(keep_r, lambda x: x.get("bridge") == "on" and x.get("indicator_state") == "none", timeout=5)
         c_r3, _ = keep_chrome(keep_r, "h-rebind-chrome-healed")  # 在 --mcp 的 hello 之前拍：之后就是「AI 已连接」了
         st_r2, _ = status(env_r)
         s_r3 = keep_wait(keep_r, lambda x: x.get("indicator_state") == "connected")
-        check(s_r2.get("bridge") == "on" and s_r2.get("indicator") == "" and s_r2.get("window_subtitle") == "" and c_r3 == c_r0
+        check(s_r2.get("bridge") == "on" and s_r2.get("indicator") == "" and s_r2.get("window_subtitle") == W("")
               and (st_r2.get("live") or {}).get("state") == "live" and s_r3.get("indicator") == "AI 已连接",
-              f"文件拿走：下一轮自检开好（{s_r2.get('bridge')}），那一句消失（「{s_r2.get('indicator')}」），标题栏和没有 AI 时逐字节相同；"
+              f"文件拿走：下一轮自检开好（{s_r2.get('bridge')}），那一句消失（「{s_r2.get('indicator')}」）；"
               f"--mcp {(st_r2.get('live') or {}).get('state')}，之后照常「{s_r3.get('indicator')}」")
+        view_check(c_r3 == c_r0, "文件拿走以后的标题栏和没有 AI 时逐字节相同")
         keep_r.close()
         hr.term()
 
@@ -3145,10 +3297,13 @@ __attribute__((constructor)) static void init(void) {
                    "/usr/bin/open", "revealInFinder", "startVLMServer", "CardImportCenter", r"export\(", "posix_spawn",
                    r"\bfork\(", r"\bsystem\(", r"\bpopen\(", r"setIsVisible\("]
     hits = []
-    for f in sorted(os.listdir(LIVE_DIR)) if os.path.isdir(LIVE_DIR) else []:
-        if f.endswith(".swift"):
-            for n, line in enumerate(open(os.path.join(LIVE_DIR, f), encoding="utf-8"), 1):
-                hits += [f"{f}:{n} {p}" for p in LIVE_BANNED if re.search(p, line)]
+    # 整棵 Live/ 都看（STEP 4：以后加了子目录也逃不掉；和 mcp_smoke.py 一样 os.walk）
+    for dp, _, fs in os.walk(LIVE_DIR):
+        for f in sorted(fs):
+            if f.endswith(".swift"):
+                rel = os.path.relpath(os.path.join(dp, f), LIVE_DIR)
+                for n, line in enumerate(open(os.path.join(dp, f), encoding="utf-8"), 1):
+                    hits += [f"{rel}:{n} {p}" for p in LIVE_BANNED if re.search(p, line)]
     check(os.path.isdir(LIVE_DIR) and not hits, f"Live/ 里没有会激活 app、拉出窗口、起子进程的调用 {hits[:5]}")
     lc = os.path.join(SRC, "MCP", "LiveClient.swift")
     body = open(lc, encoding="utf-8").read()
