@@ -560,9 +560,10 @@ enum MCPCursor {
     }
 }
 
-/// 6 个读工具的参数校验（§3.0、§10.1 的 schema）：`--mcp`（MCPLiveTools）先查一遍、早点给错，app（LiveHandlers）再按同一份查
-/// （§9.2.3：参数用和 MCP 工具同一份校验代码）。schema 里没写的属性一律不收；uniqueItems 只当提示，这里去重不报错（§3.0）。
-/// session 只看类型，和 app 当前那一场的比对在 MCPLiveTools.checkSession / app 那一侧。
+/// 要 app 的 15 个工具的参数校验（§3.0、§10.1 的 schema）：`--mcp`（MCPLiveTools）先查一遍、早点给错，app（LiveHandlers）
+/// 再按同一份查（§9.2.3：参数用和 MCP 工具同一份校验代码）。schema 里没写的属性一律不收；uniqueItems 只当提示，这里去重
+/// 不报错（§3.0）。session 只看类型，和 app 当前那一场的比对在 MCPLiveTools.checkSession / app 那一侧。
+/// 写工具另有几条 schema 写不出来的规矩（至少给一个字段、cell_text 要带 if_digest），见 rules。
 enum MCPArgs {
     struct Problem: Error {
         let message: String
@@ -577,6 +578,14 @@ enum MCPArgs {
         case strings(count: ClosedRange<Int>, maxLength: Int, oneOf: [String]?)
         /// deadline_seconds：5 到 LABELGUI_MCP_DEADLINE_SEC（app 这一侧不查上限，`--mcp` 已经按它截过）。
         case deadline
+        /// 可以是空字符串的文字（标题、刊头……：空 = 清掉 / 按标题生成）。
+        case text(maxLength: Int)
+        /// 数（整数也算，true / false 不算）。
+        case number(ClosedRange<Double>)
+        /// op_id：8–64 个字。
+        case opID
+        /// collage_set_text 的 cell_text：{path: 0–8 位数字, index: ≥0 的整数, text: 字符串}，别的键不收。
+        case cellText
     }
 
     struct ToolSpec {
@@ -621,11 +630,98 @@ enum MCPArgs {
         return ToolSpec(props: p, required: [])
     }()
 
+    // 写工具（§9.3）：reveal / op_id / if_digest / inline 是几个工具共用的
+    static let digest: Spec = .text(maxLength: 64)
+    static let openSpec = ToolSpec(props: ["session": session, "confirm": .bool, "reveal": .bool, "op_id": .opID], required: [])
+    static let verdictsSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "reveal": .bool, "op_id": .opID]
+        p["ids"] = .strings(count: 1...500, maxLength: 128, oneOf: nil)
+        p["verdict"] = .oneOf(["pick", "usable", "reject", "auto"])
+        return ToolSpec(props: p, required: ["ids", "verdict"])
+    }()
+    static let showSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "reveal": .bool, "mode": .oneOf(["select", "focus"])]
+        p["ids"] = .strings(count: 1...200, maxLength: 128, oneOf: nil)
+        return ToolSpec(props: p, required: ["ids"])
+    }()
+    static let templateSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "if_digest": digest, "reveal": .bool, "op_id": .opID, "inline": .bool]
+        p["template"] = .string(maxLength: 80)
+        return ToolSpec(props: p, required: ["template"])
+    }()
+    static let kitSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "if_digest": digest, "reveal": .bool, "op_id": .opID, "inline": .bool]
+        p["kit"] = .oneOf(MCPToolDefs.kitIDs)
+        p["deadline_seconds"] = .deadline
+        return ToolSpec(props: p, required: ["kit"])
+    }()
+    static let coverSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "if_digest": digest, "reveal": .bool, "op_id": .opID, "inline": .bool]
+        p["steps"] = .int(1...20)
+        p["deadline_seconds"] = .deadline
+        return ToolSpec(props: p, required: [])
+    }()
+    static let textSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "if_digest": digest, "reveal": .bool, "op_id": .opID, "inline": .bool]
+        p["title"] = .text(maxLength: 60)
+        p["subtitle"] = .text(maxLength: 120)
+        p["masthead"] = .text(maxLength: 40)
+        p["issue"] = .text(maxLength: 20)
+        p["cell_text"] = .cellText
+        return ToolSpec(props: p, required: [])
+    }()
+    static let styleSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "if_digest": digest, "reveal": .bool, "op_id": .opID, "inline": .bool]
+        p["style"] = .oneOf(MCPToolDefs.styleKeys)
+        p["look"] = .oneOf(MCPToolDefs.lookKeys)
+        p["look_strength"] = .number(0...1)
+        return ToolSpec(props: p, required: [])
+    }()
+    static let undoSpec: ToolSpec = {
+        let p: [String: Spec] = ["session": session, "op_id": .opID, "target": .oneOf(["verdicts", "collage"])]
+        return ToolSpec(props: p, required: ["target"])
+    }()
+
     /// 每个工具认的参数和必填的（session 不在必填里：它的规矩在路由表，§10.2）。
-    static let specs: [String: ToolSpec] = [
-        "cull_session_overview": overviewSpec, "cull_list_photos": photosSpec, "cull_get_photos": getSpec,
-        "cull_list_groups": groupsSpec, "cull_preview_photos": previewSpec, "collage_get_state": collageStateSpec,
-    ]
+    static let specs: [String: ToolSpec] = {
+        var s: [String: ToolSpec] = [
+            "cull_session_overview": overviewSpec, "cull_list_photos": photosSpec, "cull_get_photos": getSpec,
+            "cull_list_groups": groupsSpec, "cull_preview_photos": previewSpec, "collage_get_state": collageStateSpec,
+        ]
+        s["app_open_session"] = openSpec
+        s["cull_set_verdicts"] = verdictsSpec
+        s["cull_show_photos"] = showSpec
+        s["collage_apply_template"] = templateSpec
+        s["collage_run_kit"] = kitSpec
+        s["collage_next_cover"] = coverSpec
+        s["collage_set_text"] = textSpec
+        s["collage_set_style"] = styleSpec
+        s["app_undo"] = undoSpec
+        return s
+    }()
+
+    /// schema 写不出来的几条（§9.3）：改字、换样式至少给一个字段；cell_text 必须同时带 if_digest（格子下标在用户改过版式
+    /// 以后会指错地方）。
+    static func rules(_ tool: String, _ args: [String: Any]) -> Problem? {
+        func given(_ k: String) -> Bool { args[k] != nil && !(args[k] is NSNull) }
+        switch tool {
+        case "collage_set_text":
+            guard ["title", "subtitle", "masthead", "issue", "cell_text"].contains(where: given) else {
+                return Problem(message: "collage_set_text 至少要给一个字段：title、subtitle、masthead、issue、cell_text。", hint: "")
+            }
+            if given("cell_text") && !given("if_digest") {
+                return Problem(message: "cell_text 必须同时带 if_digest。",
+                               hint: "先 collage_get_state 拿 digest 和 cells[].path，再带着 if_digest 调（用户改过版式以后格子下标会指错地方）")
+            }
+        case "collage_set_style":
+            guard ["style", "look", "look_strength"].contains(where: given) else {
+                return Problem(message: "collage_set_style 至少要给一个字段：style、look、look_strength。", hint: "取值见 collage_list_templates")
+            }
+        default:
+            break
+        }
+        return nil
+    }
 
     /// JSON 里的整数（true / false、带小数的都不算）。
     static func integer(_ raw: Any) -> Int? {
@@ -652,7 +748,7 @@ enum MCPArgs {
             guard let s = spec.props[name], let value = args[name], !(value is NSNull) else { continue }
             if let problem = checkValue(name, value, s, deadlineCap: deadlineCap) { return problem }
         }
-        return nil
+        return rules(tool, args)
     }
 
     static func checkValue(_ name: String, _ value: Any, _ spec: Spec, deadlineCap: Int?) -> Problem? {
@@ -694,7 +790,40 @@ enum MCPArgs {
             guard let n = integer(value), (5...max(5, cap)).contains(n) else {
                 return Problem(message: "\(name) 要是 5–\(max(5, cap)) 的整数（秒）。", hint: "上限是 LABELGUI_MCP_DEADLINE_SEC")
             }
+        case .text(let maxLength):
+            guard let s = value as? String, s.count <= maxLength else {
+                return Problem(message: "\(name) 要是最多 \(maxLength) 个字的字符串。", hint: "")
+            }
+        case .number(let range):
+            guard let x = number(value), range.contains(x) else {
+                return Problem(message: "\(name) 要是 \(range.lowerBound)–\(range.upperBound) 之间的数。", hint: "")
+            }
+        case .opID:
+            guard let s = value as? String, (8...64).contains(s.count) else {
+                return Problem(message: "\(name) 要是 8–64 个字的字符串。", hint: "原样传回上一次结果里的 op_id")
+            }
+        case .cellText:
+            return checkCellText(name, value)
         }
+        return nil
+    }
+
+    /// JSON 里的数（整数、小数都算；true / false、非有限数不算）。
+    static func number(_ raw: Any) -> Double? {
+        guard let n = raw as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID() else { return nil }
+        let x = n.doubleValue
+        return x.isFinite ? x : nil
+    }
+
+    static func checkCellText(_ name: String, _ value: Any) -> Problem? {
+        let shape = Problem(message: "\(name) 要写成 {\"path\":\"00\",\"index\":0,\"text\":\"…\"}：path 是 0–8 位数字的格子路径，"
+                            + "index 是这一格里第几个字块（从 0 开始），text 是新的第一行（最多 120 个字）。",
+                            hint: "path 取 collage_get_state 的 cells[].path")
+        // text 和 subtitle 同一个上限：只靠 1 MiB 的请求上限的话，一行上兆的字会写进用户的工程、每次重画都排一遍
+        guard let obj = value as? [String: Any], Set(obj.keys) == ["path", "index", "text"],
+              let path = obj["path"] as? String, path.utf8.count <= 8, path.utf8.allSatisfy({ (48...57).contains($0) }),
+              let index = obj["index"].flatMap(integer), index >= 0,
+              let text = obj["text"] as? String, text.count <= 120 else { return shape }
         return nil
     }
 }

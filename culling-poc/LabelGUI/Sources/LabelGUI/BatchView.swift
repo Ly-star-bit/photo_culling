@@ -216,6 +216,8 @@ struct BatchView: View {
             pickRequest = nil
             expandedTakes = []
         }
+        // 实时桥（§9.6b）：这几样开着时 AI 的改判 / 切场次 / 定位照片要等或者不做。只往 store 上记，界面不变
+        .onChange(of: liveFlags, initial: true) { store.liveUI = liveFlags }
         // 重新分析会原地覆盖预览图 —— 不清缓存的话数值更新了、图还是旧的。
         // 只有分析真的重写了预览才清；切场次/VLM/废纸篓也发同一通知，
         // 以前跟着一起清空，切回来整个网格重新解码一遍。
@@ -281,6 +283,34 @@ struct BatchView: View {
 
     private func openFinishedImportIfIdle() {
         store.openFinishedImportIfReady(userBusy: busyWithPhotos)
+    }
+
+    /// busyWithPhotos 拆成三样给实时桥（§9.6b 第二轮改）：sheet 和确认框（另加对时面板）、连拍挑选、审片 / 检视器。
+    private var liveFlags: BatchStore.LiveUIFlags {
+        let exports = showJPEGSheet || showISOSheet || showHighlightsSheet || showClientImport || showBodyClock
+        let confirms = showTrashConfirm || showAcceptAllConfirm || showClearRecentsConfirm
+        let sheet: Bool = modalPanelOpen || exports || confirms
+        return BatchStore.LiveUIFlags(sheet: sheet, pick: pickRequest != nil, viewing: reviewMode || inspectedID != nil)
+    }
+
+    /// AI 的「在 app 里定位照片」（cull_show_photos，§9.3）：选中这些（或者只移焦点）、滚过去。只改视图状态：不改判决、
+    /// 不改筛选、不开检视器；被当前筛选藏起来的不选，报回去（hidden_by_filter）。场次换了的请求不认。
+    private func applyViewRequest(_ proxy: ScrollViewProxy) {
+        guard let request = store.viewRequest else { return }
+        store.viewRequest = nil
+        guard store.photoDir != nil, request.session == store.sessionDir.lastPathComponent else { return }
+        let ids = request.ids.filter { store.item(withID: $0) != nil }
+        let visible = Set(visibleItems.map(\.id))
+        let shown = ids.filter { visible.contains($0) }
+        // 要的一张都看不见（被筛选藏起来、折在连拍里）：用户原来的选中不动，只报回去
+        if request.select && !shown.isEmpty { selectedIDs = Set(shown) }
+        if let first = shown.first {
+            focusedID = first
+            lastVisitedTake = store.item(withID: first)?.take
+            DispatchQueue.main.async { proxy.scrollTo(first, anchor: .center) }
+        }
+        store.viewApplied = BatchStore.ViewApplied(token: request.token, selected: request.select ? shown : [],
+                                                   focus: shown.first, hidden: ids.filter { !visible.contains($0) })
     }
 
     @ViewBuilder
@@ -856,10 +886,13 @@ struct BatchView: View {
             })
             // 从审片/连拍挑选回来，网格是重新建的，滚动位置归零 —— 滚回焦点那张。
             // 异步一拍：嵌套的 Lazy 网格要先铺出来 scrollTo 才找得到。
+            // AI 在别的 tab 时要定位的照片（cull_show_photos 的 pending）也在这里补上。
             .onAppear {
+                applyViewRequest(proxy)
                 guard let id = focusedID else { return }
                 DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) }
             }
+            .onChange(of: store.viewRequest) { applyViewRequest(proxy) }
             .focusable()
             .focusEffectDisabled()
             .onKeyPress(.leftArrow) { moveFocus(-1, proxy: proxy); return .handled }

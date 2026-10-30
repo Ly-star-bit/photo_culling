@@ -28,6 +28,10 @@ final class AppModel: ObservableObject {
     @Published var tab: AppTab = .batch
     /// 实时桥（bridge: .none 时是 nil）。
     private(set) var live: LiveServer?
+    /// 用户此刻是不是正在 app 里操作（§9.6b）：桥在执行写之前问它。GUI 开桥时才去看 AppKit，别的时候只看 store。
+    let interaction = LiveInteraction()
+    /// AI 经桥做过的写（app_undo 只撤 AI 自己那一步，§9.3）。
+    var aiLog = LiveAILog()
 
     /// 批量页切场次 → 拼图工程跟着换。
     private var photoDirWatch: AnyCancellable?

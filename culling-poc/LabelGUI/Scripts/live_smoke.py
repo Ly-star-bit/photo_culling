@@ -1,27 +1,33 @@
 #!/usr/bin/env python3
-"""实时桥冒烟（DESIGN §9.8.2、§10.7；STEP 2：桥本身，STEP 3a：读和图片）：起 --live-host（.prohibited，窗口从不显示），
-经脚本自己起的 --mcp 驱动；test.* 直接连宿主的 socket。
+"""实时桥冒烟（DESIGN §9.8.2、§10.7；STEP 2：桥本身，STEP 3a：读和图片，STEP 3b：写）：起 --live-host（.prohibited，
+窗口从不显示），经脚本自己起的 --mcp 驱动；test.* 直接连宿主的 socket。
 
-用法: python3 -I Scripts/live_smoke.py <LabelGUI> --ci [--work <目录>] [--keep] [--only A,B,…]
+用法: python3 -I Scripts/live_smoke.py <LabelGUI> --ci [--work <目录>] [--keep] [--only A,B,…] [--plan]
       python3 -I Scripts/live_smoke.py <LabelGUI> --photos <照片目录> --data <已分析的数据目录> [--collage-data <目录>]
                                         [--work …] [--keep] [--only …]
-  --ci      Fixtures 场次（照片文件夹不存在，和 verdict_regression.sh 同一个约定）+ sips 合成图；app 里的二进制只在 --ci 下收
+  --ci      Fixtures 场次（照片文件夹不存在，和 verdict_regression.sh 同一个约定）+ sips 合成图
   --photos / --data  本地 photot 模式：数据目录每个宿主拷一份新的
   --collage-data     （本地）有拼图工程的同一场的数据目录（STEP 0 的 data-seeded）：collage_get_state 的预览用它
   --work    工作目录（不存在、空的、或者本脚本上次建的才用；socket 也放在这下面，经 /tmp 下一个短的符号链接接过去）
+  --plan    只打印这次会跑哪几组（app 里的二进制会跳过哪些）就退出，不起任何进程（自检用）
 
 组：A 没有宿主  B 起宿主（R6 T1–T4、T10、T11、T13、T17，hello、积压、连接上限、桥关、自愈、窗口、取消、截止时间……）
     C 杀掉 / 重起 / 抢锁（R6 T5–T9、T12、T14、T16、T18，CLOEXEC）  D SIGPIPE 矩阵（R6 §4.3 五行）  E --app-ui 不开桥
     F 读和图片（§10.7 第 31–36、38 条：fixture 读和 --verdicts 对账、cursor、预览、受保护位置不读原图、并发、取消、NaN、
       输出目录）
+    G 写（§9.8.2 第 3–12、25–27、29 条，§10.7 第 8、9、13、16、33、35–37 条：一个请求恰好一步撤销、app_undo 回到原样、
+      op_id 重放、忙信号、切场次、受保护位置、一键成套 / 换封面、找模板、取消、kill -9 → app_outcome_unknown）
 每个 --mcp 都带自己的 LABELGUI_MCP_OUT（工作目录里），绝不写 ~/Pictures/xuanpian-mcp。
 
-不碰用户（§9.8.2 的四道闸，一条不改）：
+不碰用户（§9.8.2 的四道闸，一条不改；第 4 道 2026-10-29 收紧）：
 1. 每个宿主、每个 --mcp 都带临时的 LABELGUI_DATA_DIR（realpath 或 dev:ino 等于真实数据目录就 exit 2）和 LABELGUI_NO_GUI=1；
 2. socket 根目录是工作目录下自己建的 0700 目录（经 /tmp/xpls.* 这个短链接接过去：sun_path 只有 104 字节），
    等于真实的 $(getconf DARWIN_USER_TEMP_DIR)xuanpian-live 就 exit 2；那个真实目录只 ls、跑前跑后比，绝不进去建东西；
 3. 连上以后先看 hello 的 app.pid，必须是脚本自己起的宿主，否则立刻断开、exit 2；
-4. 本地只收裸二进制（路径在 *.app/Contents/MacOS/ 下面就 exit 2）。
+4. 路径（原样的或者解析了符号链接的）在 *.app/Contents/MacOS/ 下面的二进制，只有 --ci 而且 GITHUB_ACTIONS=true 才收，
+   否则起任何进程之前就 exit 2。原因：.app 里的二进制崩了 / 被杀了，系统会在用户屏幕上弹「选片工具 意外退出」，
+   框上的「重新打开」会以用户的真实数据开出一个 app（2026-10-29 真出过）；它的设置域也就是用户真 app 的
+   local.culling.labelgui。CI 上收了，也不跑故意杀进程 / sandbox 对照的那几组（C、D 整组，A、F、G 里的 sandbox、kill -9）。
 只给脚本自己起的进程发信号（按 Popen 拿到的 pid），从不 pkill。跑前跑后 defaults export LabelGUI / local.culling.labelgui 不变。
 原型：R6 的 tests.py（T1–T18）、sigpipe_matrix.py。
 """
@@ -43,18 +49,35 @@ def opt(name):
     return ARGS[ARGS.index(name) + 1] if name in ARGS and ARGS.index(name) + 1 < len(ARGS) else None
 
 
-ONLY = set((opt("--only") or "ABCDEF").upper().replace(",", ""))
+ONLY = set((opt("--only") or "ABCDEFG").upper().replace(",", ""))
 PHOTOS_SRC, DATA_SRC = opt("--photos"), opt("--data")
 COLLAGE_SRC = opt("--collage-data")
+
+
+def in_app_bundle(path):
+    """路径在某个 .app 的 Contents/MacOS/ 下面（不分大小写：APFS 默认不分，LaunchServices 也不分）。"""
+    return re.search(r"\.app/Contents/MacOS/", path, re.I) is not None
+
+
+# 闸 4（2026-10-29 收紧）：原样的路径和解析了符号链接的路径，只要有一个在 .app 里，就只在 CI（--ci 且 GITHUB_ACTIONS=true）
+# 上收。放在一切之前：不建工作目录、不起任何进程（连 --session-key 都不跑）
+BUNDLE = in_app_bundle(os.path.abspath(ARGS[0])) or in_app_bundle(os.path.realpath(ARGS[0]))
+if BUNDLE and not (CI and ON_GITHUB):
+    print(f"{ARGS[0]} 在 .app 里面（原样或解析符号链接以后）：只有 CI（--ci 且 GITHUB_ACTIONS=true）才收 app 里的二进制，"
+          f"本机一律用裸二进制（.build/release/LabelGUI 这类）。不跑，什么都没起")
+    sys.exit(2)
+# app 里的二进制（只可能是 CI）：故意杀进程、sandbox 对照（会被 SIGKILL）的整组不跑，其余组里的那几段也跳过
+NO_KILL = BUNDLE
+if NO_KILL:
+    ONLY -= {"C", "D"}
+if "--plan" in ARGS:
+    print(f"plan bundle={int(BUNDLE)} no_kill={int(NO_KILL)} groups={''.join(sorted(ONLY))}")
+    sys.exit(0)
 if not CI and not (PHOTOS_SRC and DATA_SRC):
     print("要么 --ci，要么 --photos <照片目录> --data <已分析的数据目录>")
     sys.exit(2)
 if not os.access(BIN, os.X_OK):
     print(f"不是可执行文件：{BIN}")
-    sys.exit(2)
-# 闸 4：.app 里的二进制的设置域就是用户真 app 的 local.culling.labelgui，本地只收裸二进制
-if not CI and re.search(r"\.app/Contents/MacOS/", os.path.realpath(BIN)):
-    print(f"本地模式只收裸二进制（.build/release/LabelGUI 这类），{BIN} 在 .app 里面：不跑")
     sys.exit(2)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -82,6 +105,11 @@ SOCKS = os.path.join(WORK, "socks")
 os.makedirs(SOCKS, mode=0o700)
 LINK = tempfile.mktemp(prefix="xpls.", dir="/tmp")  # 短链接：/tmp/xpls.xxxxxxxx → <工作目录>/socks
 os.symlink(SOCKS, LINK)
+# G 组 bookmark 那条用：照片文件夹的路径不能以 /private 开头（BatchStore.sessionKey 走 standardizedFileURL，/private/tmp/…
+# 存在时算成 /tmp/…、挪走以后又算回 /private/tmp/…，key 一变 app 就找不到 bookmark，测不出跟不跟它）。用完删掉
+BM_LINK = tempfile.mktemp(prefix="xpbm.", dir="/tmp")
+os.makedirs(os.path.join(WORK, "bm"))
+os.symlink(os.path.join(WORK, "bm"), BM_LINK)
 SNAPS = os.path.join(WORK, "snaps")
 os.makedirs(SNAPS)
 
@@ -416,17 +444,31 @@ def err_code(body):
 APP_TOOLS = ["cull_session_overview", "cull_list_photos", "cull_get_photos", "cull_list_groups", "cull_preview_photos",
              "collage_get_state", "app_open_session", "cull_set_verdicts", "cull_show_photos", "collage_apply_template",
              "collage_run_kit", "collage_next_cover", "collage_set_text", "collage_set_style", "app_undo"]
+# hello 里的 capabilities（§10.4 的 12 个，按名字排）
+ALL_CAPS = sorted(["cull.read", "cull.preview", "collage.state", "session.open", "cull.set_verdicts", "cull.show",
+                   "collage.apply_template", "collage.run_kit", "collage.next_cover", "collage.set_text", "collage.set_style",
+                   "undo"])
 
 
 def minimal_args(tool, session):
-    """够过参数校验和 session 核对的最小参数（STEP 3a 起读工具在 live 时先查参数；写工具在 STEP 3b）。"""
+    """够过参数校验和 session 核对的最小参数（读写都在 live 时先查参数）。写工具只在 app 没开 / 连不上时这样调（不会真执行）。"""
     a = {"session": session}
     if tool == "app_undo":
         a = {"target": "collage"}
-    if tool in ("cull_get_photos", "cull_preview_photos"):
+    if tool in ("cull_get_photos", "cull_preview_photos", "cull_set_verdicts", "cull_show_photos"):
         a["ids"] = ["DSCF7208"]
+    if tool == "cull_set_verdicts":
+        a["verdict"] = "pick"
     if tool == "cull_list_groups":
         a["kind"] = "scene"
+    if tool == "collage_apply_template":
+        a["template"] = "时尚刊"
+    if tool == "collage_run_kit":
+        a["kit"] = "fashionIssue"
+    if tool == "collage_set_text":
+        a["title"] = "x"
+    if tool == "collage_set_style":
+        a["look_strength"] = 0.5
     return a
 
 
@@ -672,6 +714,78 @@ def synth_session(label, photos_dir=None):
 syn_keys = {}
 
 
+# ---------------------------------------------------------------- STEP 3b：写（G 组用）
+
+def session_key_of(path):
+    """二进制自己算的 session key（Python 算不准 /private/tmp ↔ /tmp 这类）。"""
+    r = subprocess.run([BIN, "--session-key", path], env=base_env(os.path.join(WORK, "session-key-data"), LINK),
+                       capture_output=True, text=True, timeout=30, cwd=WORK, stdin=subprocess.DEVNULL)
+    key = r.stdout.strip().splitlines()[-1] if r.returncode == 0 and r.stdout.strip() else ""
+    if not re.match(r"^[0-9a-f]{16}$", key):
+        print(f"--session-key 算不出 {path} 的 key：{r.stdout!r}")
+        sys.exit(2)
+    return key
+
+
+def register_sessions(data, folders):
+    """往数据目录的 sessions.json 后面追加几场（只登记，不分析）：app_open_session 只能打开「最近场次」里的（§10.4）。"""
+    path = os.path.join(data, "sessions.json")
+    rows = json.load(open(path)) if os.path.exists(path) else []
+    for f in folders:
+        rows.append({"key": session_key_of(f), "path": f, "name": os.path.basename(f), "lastAnalyzed": "2026-10-29T10:00:00Z",
+                     "photoCount": 0})
+    json.dump(rows, open(path, "w"), ensure_ascii=False)
+
+
+def warn_codes(body):
+    return [w.get("code") for w in (body or {}).get("warnings") or []]
+
+
+def edata(body):
+    return ((body or {}).get("error") or {}).get("data") or {}
+
+
+# ---------------------------------------------------------------- 第 4 道闸自己的自检：假的 .app 路径，脚本必须在起任何进程之前 exit 2
+
+def bundle_gate_selfcheck():
+    """拿一个假的「二进制」（两行 sh：真被启动就留下标记文件）放在 X.app/Contents/MacOS/ 下面，用三种写法（路径本身在 .app 里、
+    外面的符号链接指进 .app、.APP 大写）调本脚本自己：没有 GITHUB_ACTIONS 时都必须 exit 2、标记文件不出现；
+    --plan 加上 GITHUB_ACTIONS=true（CI 上收 app 里的二进制）时只打印计划：杀进程 / sandbox 的组不在里面。绝不起真的 LabelGUI。"""
+    root = os.path.join(WORK, "fake-bundle")
+    marker = os.path.join(root, "ran")
+    os.makedirs(root)
+    stub = os.path.join(root, "stub.sh")
+    open(stub, "w").write("#!/bin/sh\ntouch '" + marker.replace("'", "") + "'\nexit 0\n")
+    os.chmod(stub, 0o755)
+    inside = os.path.join(root, "X.app", "Contents", "MacOS", "LabelGUI")
+    os.makedirs(os.path.dirname(inside))
+    os.symlink(stub, inside)                       # 原样的路径在 .app 里，解析以后不在
+    upper = os.path.join(root, "Y.APP", "Contents", "MacOS", "LabelGUI")
+    os.makedirs(os.path.dirname(upper))
+    shutil.copy(stub, upper)
+    outside = os.path.join(root, "link-into-bundle")
+    os.symlink(upper, outside)                     # 原样的路径不在 .app 里，解析以后在
+    env = {k: v for k, v in os.environ.items() if k != "GITHUB_ACTIONS" and not k.startswith("LABELGUI_")}
+    me = os.path.abspath(__file__)
+    rcs = []
+    for path in (inside, upper, outside):
+        for extra in (["--ci"], ["--photos", PHOTO_DIR, "--data", DATA_TEMPLATE]):
+            r = subprocess.run([sys.executable, "-I", me, path, *extra], env=env, capture_output=True, timeout=60, cwd=WORK)
+            rcs.append(r.returncode)
+    plan = subprocess.run([sys.executable, "-I", me, inside, "--ci", "--plan"], env=dict(env, GITHUB_ACTIONS="true"),
+                          capture_output=True, text=True, timeout=60, cwd=WORK).stdout.strip()
+    # 这一次跑的二进制本身：裸的 → 计划里有全部组；app 里的（只可能在 CI 上）→ 去掉 GITHUB_ACTIONS 就 exit 2
+    rb = subprocess.run([sys.executable, "-I", me, BIN, "--ci", "--plan"], env=env, capture_output=True, text=True,
+                        timeout=60, cwd=WORK)
+    bare = rb.stdout.strip() if not BUNDLE else ("exit 2" if rb.returncode == 2 else f"exit {rb.returncode}")
+    check(rcs == [2] * 6 and not os.path.exists(marker),
+          f"第 4 道闸：假 .app 路径（符号链接在 .app 里 / .APP 大写 / 外面的链接指进 .app）× (--ci、本地) 都在起进程之前 exit 2 "
+          f"{rcs}，假二进制一次都没被启动")
+    check(plan == "plan bundle=1 no_kill=1 groups=ABEFG"
+          and (bare == "exit 2" if BUNDLE else bare.startswith("plan bundle=0 no_kill=0 groups=ABCDEFG")),
+          f"CI 上收 app 里的二进制时不跑杀进程 / sandbox 的组（{plan!r}；裸二进制 {bare!r}）")
+
+
 # ---------------------------------------------------------------- 进程的 fd（CLOEXEC 从外面看）
 
 LIBPROC = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
@@ -716,6 +830,9 @@ real_sock_before = real_sock_state()
 print(f"真实 SockDir（只 ls）：{REAL_SOCK} → {real_sock_before}")
 
 try:
+    print("0. 第 4 道闸（.app 里的二进制）")
+    bundle_gate_selfcheck()
+
     # ============================================================ A. 没有宿主
     if "A" in ONLY:
         print("A. 没有宿主")
@@ -783,7 +900,9 @@ try:
         # 拿它当 socket 根目录的宿主一建目录就被杀（证明规则抓得到宿主开桥用的那几个系统调用）。规则比的是内核解析完的路径，
         # /private/var/… 和 firmlink 的 /System/Volumes/Data/… 两种写法都禁（S2 实测）。只禁写：判断时 realpath 要读它。
         sandbox = "/usr/bin/sandbox-exec"
-        if not os.access(sandbox, os.X_OK):
+        if NO_KILL:
+            skip("app 里的二进制不跑 sandbox（规则抓到就 SIGKILL）：--live-host 拒绝真实 SockDir 这一条看裸二进制那一遍")
+        elif not os.access(sandbox, os.X_OK):
             skip("找不到 sandbox-exec：--live-host 拒绝真实 SockDir 这一条只有 --mcp-selftest 的纯函数证据")
         else:
             real_rp = os.path.join(os.path.realpath(TEMP), "xuanpian-live")
@@ -827,7 +946,7 @@ try:
               and st.get("next") == "cull_session_overview", f"app_status：live（{ms:.0f} ms）")
         check(live.get("socket") == h.sock, f"ready 行的 S 和 app_status.live.socket 逐字节相同（{h.sock}）")
         check(live.get("exact_build_match") is True and live.get("proto") == 1 and live.get("bridge") == "on"
-              and live.get("capabilities") == ["collage.state", "cull.preview", "cull.read"] and live.get("window_state") == "visible"
+              and live.get("capabilities") == ALL_CAPS and live.get("window_state") == "visible"
               and live.get("windows") == 1 and live.get("tab") == "batch" and live.get("analysis") == {"running": False, "progress_text": ""},
               f"live 对象的字段：{ {k: live.get(k) for k in ('exact_build_match', 'proto', 'capabilities', 'window_state', 'tab', 'analysis')} }")
         check(open_.get("session") == KEY and open_.get("folder") == PHOTO_DIR and open_.get("photo_count") == 21,
@@ -843,7 +962,7 @@ try:
               and hr.get("proto_max") == 1 and isinstance(hr.get("main_beat_ms"), int)
               and {"name", "version", "build", "uuid", "pid", "exe"} <= set(hr.get("app", {})),
               f"hello 字段齐：data_dir_id、peer（uid {os.getuid()}、pid 是脚本）、ready、proto 区间、app、main_beat_ms")
-        # 路由：collage_get_state 转给 app；session 填 key / 路径 / 别的；6 个读工具转给 app，9 个写 → app_version_mismatch（app_too_old）
+        # 路由：collage_get_state 转给 app；session 填 key / 路径 / 别的；6 个读工具转给 app（9 个写在 G 组）
         _, cs, ms = mcp_call(env, "collage_get_state")
         check((cs or {}).get("source") == "app" and cs.get("session") == KEY and cs.get("window_visible") is True
               and cs.get("pending_writes") == 0 and "undo" in cs and "busy" in cs,
@@ -853,16 +972,11 @@ try:
         _, cs3, _ = mcp_call(env, "collage_get_state", {"session": "0123456789abcdef"})
         check(err_code(cs3) == "session_not_open" and (cs3["error"].get("data") or {}).get("open_session", {}).get("session") == KEY,
               f"别的场次 → session_not_open，data.open_session 对（{err_code(cs3)}）")
-        codes = all_tools(env, KEY)
-        reads = {t: codes.pop(t) for t in APP_TOOLS[:6]}
-        bad = {t: c for t, c in codes.items() if c != "app_version_mismatch"}
-        check(not bad, f"9 个写工具：app 的 capabilities 里还没有它们的方法（STEP 3b）→ app_version_mismatch {bad}")
+        reads = {t: err_code(mcp_call(env, t, minimal_args(t, KEY))[1]) for t in APP_TOOLS[:6]}
         # --ci 的 fixture 没有分析预览、照片文件夹也不存在：预览回 preview_missing（正是 §10.3 那一条），其余照常
         want_prev = "preview_missing" if CI else None
         check(reads.pop("cull_preview_photos") == want_prev and set(reads.values()) == {None},
               f"6 个读工具带最小参数都照常回（--ci 的预览是 preview_missing）{reads}")
-        _, body, _ = mcp_call(env, "cull_set_verdicts", {"session": KEY, "ids": ["x"], "verdict": "pick"})
-        check(((body or {}).get("error") or {}).get("data", {}).get("reason") == "app_too_old", "data.reason = app_too_old（§10.2）")
         _, ls, _ = mcp_call(env, "cull_list_sessions")
         rows = (ls or {}).get("sessions") or []
         check(rows and all("open_in_app" in x for x in rows) and [x["open_in_app"] for x in rows if x["session"] == KEY] == [True],
@@ -1118,11 +1232,13 @@ try:
         st_off, _ = status(env)
         _, cs_off, _ = mcp_call(env, "collage_get_state")
         _, rd_off, _ = mcp_call(env, "cull_list_groups", {"session": KEY, "kind": "scene"})
+        _, wr_off, _ = mcp_call(env, "collage_set_text", {"session": KEY, "title": "桥关着"})
         lock_line = json.loads(open(os.path.join(h.data, ".live.lock")).read().splitlines()[0])
         sock_gone = not os.path.exists(h.sock)
         time.sleep(3.5)
         st_on, _ = status(env)
         check((st_off.get("live") or {}).get("state") == "bridge_off" and err_code(cs_off) == "bridge_off" and err_code(rd_off) == "bridge_off"
+              and err_code(wr_off) == "bridge_off"
               and lock_line.get("bridge") == "off" and sock_gone and (st_on.get("live") or {}).get("state") == "live",
               "桥关着：bridge_off（读写都是），socket 删了、锁文件写 bridge:off；3 s 后自己开回来 → live")
         # socket 被删（R6 T15）：立刻 unreachable；自检（500 ms）以后恢复
@@ -1132,10 +1248,12 @@ try:
         st_u, _ = status(env)
         _, cs_u, _ = mcp_call(env, "collage_get_state")
         _, rd_u, _ = mcp_call(env, "cull_session_overview", {"session": KEY})
+        _, wr_u, _ = mcp_call(env, "cull_set_verdicts", {"session": KEY, "ids": ["DSCF7208"], "verdict": "pick"})
         probe_ms = (time.monotonic() - t_un) * 1000
         time.sleep(1.2)
         st_h, _ = status(env)
         check((st_u.get("live") or {}).get("state") == "unreachable" and err_code(cs_u) == "app_unreachable" and err_code(rd_u) == "app_unreachable"
+              and err_code(wr_u) == "app_unreachable"
               and (st_h.get("live") or {}).get("state") == "live" and "重新 bind 好了" in h.log(),
               f"T15 socket 被删：立刻 unreachable（锁还在，不当成没开；两次探测共 {probe_ms:.0f} ms，在下一次自检之前），1.2 s 内自愈 → live")
         # socket 目录整个被删：自愈时按 0700 重建
@@ -1258,10 +1376,13 @@ try:
         tl = m.wait_id("tl")
         st0 = m.tool("s0", "app_status")
         m.tool("s1", "cull_list_sessions")
+        m.call("s2", "cull_set_verdicts", {"session": KEY, "ids": ["DSCF7208"], "verdict": "pick"})
+        w0 = m.wait_id("s2")
         m.close()
         n1 = state(h)["hello_count"] - 1   # 减去刚才这次 state 自己的 hello
-        check(len(tl["result"]["tools"]) == 3 and (st0 or {}).get("live", {}).get("state") == "disabled" and n1 == n0,
-              f"LABELGUI_MCP_LIVE=0：tools/list 3 个、live.state=disabled、宿主的 hello_count 没变（{n0} → {n1}）")
+        w0_err = (w0 or {}).get("error") or ((w0 or {}).get("result") or {}).get("isError")
+        check(len(tl["result"]["tools"]) == 3 and (st0 or {}).get("live", {}).get("state") == "disabled" and n1 == n0 and w0_err,
+              f"LABELGUI_MCP_LIVE=0：tools/list 3 个、live.state=disabled、写工具没注册（调了回错误），宿主的 hello_count 没变（{n0} → {n1}）")
         # 不进程序坞（§10.7 第 6、39 条）；宿主从不变成前台 / key
         m = Mcp(env)
         m.initialize()
@@ -1369,11 +1490,12 @@ try:
         st, ms = status(env)
         _, cs, cs_ms = mcp_call(env, "collage_get_state")
         _, rd9, _ = mcp_call(env, "cull_preview_photos", {"session": KEY, "ids": ["DSCF7208"]})
+        _, wr9, _ = mcp_call(env, "collage_set_text", {"session": KEY, "title": "停住的时候"})
         h.signal(signal.SIGCONT)
         time.sleep(0.3)
         st2, _ = status(env)
         check((st.get("live") or {}).get("state") == "unresponsive" and 950 < ms < 2500 * SLACK and err_code(cs) == "app_unresponsive"
-              and err_code(rd9) == "app_unresponsive"
+              and err_code(rd9) == "app_unresponsive" and err_code(wr9) == "app_unresponsive"
               and (st2.get("live") or {}).get("state") == "live" and st.get("gui_running") is True,
               f"T9 SIGSTOP：app_status {ms:.0f} ms 后 unresponsive，collage_get_state → app_unresponsive；SIGCONT 后 live")
         # T16 无头写者占着锁：headless_writer；要 app 的工具等 2 s 重探；app 起来时等锁
@@ -1389,10 +1511,11 @@ try:
         t = time.monotonic()
         _, busy, busy_ms = mcp_call(env16, "collage_get_state")
         _, busy_r, _ = mcp_call(env16, "cull_get_photos", {"session": KEY, "ids": ["DSCF7208"]})
+        _, busy_w, _ = mcp_call(env16, "cull_set_verdicts", {"session": KEY, "ids": ["DSCF7208"], "verdict": "pick"})
         check((st.get("live") or {}).get("state") == "headless_writer" and st.get("gui_running") is False
               and "headless_writer" in [w.get("code") for w in (ls16 or {}).get("warnings", [])],
               "T16 无头写者占着锁：app_status headless_writer；cull_list_sessions 照常列、带 warning")
-        check(err_code(busy) == "busy" and err_code(busy_r) == "busy"
+        check(err_code(busy) == "busy" and err_code(busy_r) == "busy" and err_code(busy_w) == "busy"
               and ((busy or {}).get("error") or {}).get("data", {}).get("reason") == "headless_writer"
               and busy_ms > 1900, f"要 app 的工具等 2 s 重探，还是这样 → busy（headless_writer，{busy_ms:.0f} ms）")
         threading.Timer(1.0, lambda: (fcntl.flock(lf, fcntl.LOCK_UN), os.close(lf))).start()
@@ -1421,8 +1544,9 @@ try:
         st, _ = status(env)
         _, cs, _ = mcp_call(env, "collage_get_state")
         _, rd12, _ = mcp_call(env, "cull_list_photos", {"session": KEY})
+        _, wr12, _ = mcp_call(env, "collage_set_text", {"session": KEY, "title": "版本不对"})
         check((st.get("live") or {}).get("state") == "proto_mismatch" and err_code(cs) == "app_version_mismatch"
-              and err_code(rd12) == "app_version_mismatch"
+              and err_code(rd12) == "app_version_mismatch" and err_code(wr12) == "app_version_mismatch"
               and ((cs or {}).get("error") or {}).get("data", {}).get("reason") == "proto_mismatch",
               "T12 协议版本不符：proto_mismatch；读也回 app_version_mismatch（reason proto_mismatch）")
         h.term()
@@ -1438,7 +1562,8 @@ try:
         st, _ = status(env)
         _, cs, _ = mcp_call(env, "collage_get_state")
         _, ov12, _ = mcp_call(env, "cull_session_overview", {"session": KEY})
-        check((st.get("live") or {}).get("state") == "live" and (st.get("live") or {}).get("capabilities") == ["cull.preview", "cull.read"]
+        check((st.get("live") or {}).get("state") == "live"
+              and (st.get("live") or {}).get("capabilities") == [c for c in ALL_CAPS if c != "collage.state"]
               and err_code(cs) == "app_version_mismatch" and cs["error"].get("data", {}).get("reason") == "app_too_old"
               and (ov12 or {}).get("photo_count") == 21,
               "旧版 app 少了 collage.state：照样 live，collage_get_state → app_version_mismatch（app_too_old），概览照常")
@@ -1911,9 +2036,10 @@ __attribute__((constructor)) static void init(void) {
               f"app_status.preview_cache_bytes 数的是服务器起名的文件：{st_c.get('preview_cache_bytes')}")
 
         # ---------- 33 受保护位置不读原图：sandbox-exec 里起宿主，读原图（文件内容）就 SIGKILL
-        sandbox = "/usr/bin/sandbox-exec"
+        # （app 里的二进制不进 sandbox：规则抓到就 SIGKILL，系统会弹「意外退出」；只看原图打开记录）
+        sandbox = "/usr/bin/sandbox-exec" if not NO_KILL else "/nonexistent/sandbox-exec"
         if not os.access(sandbox, os.X_OK):
-            skip("找不到 sandbox-exec：第 33 条只有 test.state 的原图打开记录作证")
+            skip("没有 sandbox-exec（或者是 app 里的二进制）：第 33 条只有 test.state 的原图打开记录作证")
         sbq = lambda p_: '"' + p_.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
         def deny_originals(d):
@@ -1961,7 +2087,7 @@ __attribute__((constructor)) static void init(void) {
             hc.term()
             check(up and rc_c == -signal.SIGKILL,
                   f"（对照）同一条 sandbox 规则、不当受保护：宿主起得来（{up}），crop=face 去读原图 → 宿主被杀（{rc_c}）")
-        skip("33 的 app_open_session 那一半（切到受保护前缀下的场次 → protected_location）在 STEP 3b")
+        # 33 的 app_open_session 那一半（切到受保护前缀下的场次 → protected_location）在 G 组
 
         # ---------- collage_get_state：带预览（本地 photot 用 STEP 0 有拼图工程的那份数据；CI 没有，只看没有预览时的 warning）
         seeded = COLLAGE_SRC
@@ -1996,6 +2122,519 @@ __attribute__((constructor)) static void init(void) {
                   "collage_get_state 没有拼图：pages 0、warning no_preview、有 digest、top_is_ai false")
             hc.term()
 
+    # ============================================================ G. 写（STEP 3b）
+    if "G" in ONLY:
+        print("G. 写")
+        gdata = fresh_data("G")
+        prot_root = os.path.join(WORK, "受保护")
+        prot_dir = os.path.join(prot_root, "某一场")
+        unlisted = os.path.join(WORK, "没登记的文件夹")
+        for d_ in (prot_dir, unlisted):
+            os.makedirs(d_)
+        # 第 8 条要切过去的那一场、第 33 条的受保护的那一场都得先登记在「最近场次」里（§10.4：v1 只能打开那里面的）。
+        # 再加一场有分析结果的合成图场次（bookmark 那条：打开一次 app 才给它建 bookmark，之后把文件夹挪进受保护前缀）
+        bm_dir = os.path.join(BM_LINK, "书签那一场")
+        bm = synth_session("G-bm", photos_dir=bm_dir)
+        shutil.copytree(os.path.join(bm["data"], "sessions", bm["key"]), os.path.join(gdata, "sessions", bm["key"]))
+        register_sessions(gdata, [EMPTY_PHOTOS, prot_dir, bm_dir])
+        EMPTY_KEY, PROT_KEY, BM_KEY = session_key_of(EMPTY_PHOTOS), session_key_of(prot_dir), bm["key"]
+        h = Host("G", data=gdata, LABELGUI_LIVE_TEST_PROTECTED_PREFIX=prot_root)
+        env = h.env()
+
+        def st():
+            return state(h)
+
+        def steps(a, b):
+            """两次 test.state 之间（判决栈, 拼图栈）各压了几步：只增不减的 push 计数（§9.5.1）。"""
+            return (b["verdict_undo"]["pushes"] - a["verdict_undo"]["pushes"],
+                    b["collage_undo"]["pushes"] - a["collage_undo"]["pushes"])
+
+        def settled(timeout=60):
+            """等路人信息算完（整工程指纹只在这之后比，§9.8.3）。"""
+            deadline = time.monotonic() + timeout * SLACK
+            s_ = st()
+            while s_.get("hints_pending") and time.monotonic() < deadline:
+                time.sleep(0.2)
+                s_ = st()
+            return s_
+
+        def w(tool, args, timeout=60):
+            out_, body_, ms_ = mcp_full(env, tool, args, timeout)
+            return out_, body_ or {}, ms_
+
+        def one_jpeg(out_):
+            blk = image_blocks(out_)
+            return len(blk) == 1 and blk[0][:2] == b"\xff\xd8"
+
+        def mtime(p_):
+            return os.stat(p_).st_mtime_ns if os.path.exists(p_) else None
+
+        _, rows, _ = mcp_call(env, "cull_list_photos", {"session": KEY, "sort": "id", "limit": 100})
+        rows = (rows or {}).get("rows") or []
+        vid = next(r["id"] for r in rows if r["verdict"] != "pick" and not r.get("manual"))
+        ids2 = [rows[0]["id"], rows[1]["id"]]
+
+        # ---------- 第 3 条 改判：一步判决撤销、overrides.json 回复到达时已经写好、再发一次不动；app_undo 逐字节回去
+        s0 = settled()
+        ov_path = os.path.join(gdata, "sessions", KEY, "overrides.json")
+        m0 = mtime(ov_path)
+        _, b, ms = w("cull_set_verdicts", {"session": KEY, "ids": [vid, "NOPE-9"], "verdict": "pick"})
+        m1 = mtime(ov_path)
+        s1 = st()
+        disk = json.load(open(ov_path)) if os.path.exists(ov_path) else {}
+        check(b.get("changed") == [vid] and b.get("missing_ids") == ["NOPE-9"] and b.get("undo", {}).get("target") == "verdicts"
+              and b["undo"].get("steps_added") == 1 and b["undo"].get("depth") == s0["verdict_undo"]["depth"] + 1
+              and steps(s0, s1) == (1, 0) and s1["overrides"].get(vid) == "pick" and vid in s1["manual"]
+              and m1 is not None and m1 != m0 and disk.get(vid) == "精选" and b.get("collage_tray_refreshed") is True
+              and re.match(r"^[0-9a-f-]{36}$", b.get("live", {}).get("op_id") or "") and b["live"].get("replayed") is False
+              and b["live"].get("tab") == "batch" and (s1.get("external_notice") or "").startswith("AI："),
+              f"3 改判 {vid} → pick：判决栈 +1、拼图栈不动，overrides.json 回复到达时已写好，live.op_id 是这一次的（{ms:.0f} ms）")
+        _, b2, _ = w("cull_set_verdicts", {"session": KEY, "ids": [vid], "verdict": "pick"})
+        s2 = st()
+        check(b2.get("changed") == [] and b2.get("unchanged") == [vid] and b2.get("undo", {}).get("steps_added") == 0
+              and steps(s1, s2) == (0, 0), "同一个改判再发一次（新 op_id）：changed []、steps_added 0，两条栈都没动")
+        _, u, _ = w("app_undo", {"target": "verdicts"})
+        s3 = st()
+        check(u.get("ids") == [vid] and s3["verdict_digest"] == s0["verdict_digest"] and s3["overrides"] == s0["overrides"]
+              and s3["verdict_undo"]["depth"] == s0["verdict_undo"]["depth"] and steps(s2, s3) == (0, 0),
+              "app_undo target=verdicts：判决逐字节回到改判之前（verdict_digest），撤销不压栈")
+        _, u2, _ = w("app_undo", {"target": "verdicts"})
+        check(err_code(u2) == "nothing_to_undo" and edata(u2).get("reason") == "already_undone", f"再撤 → nothing_to_undo（{edata(u2)}）")
+
+        # ---------- 第 4、37 条 套模板：一步拼图撤销、collage.json 回复到达时已写好、带预览；三种写法找到的模板对
+        _, lt, _ = mcp_call(env, "collage_list_templates", {"include": ["templates"]})
+        tpls = (lt or {}).get("templates") or []
+        cats = []
+        for t_ in tpls:
+            if t_["category"] not in cats:
+                cats.append(t_["category"])
+        names = [t_["name"] for t_ in tpls]
+        full, full2 = names[2], names[5]
+        cat = cats[1]
+        want_cat = next(t_["name"] for t_ in tpls if t_["category"] == cat)
+        frag = next(n_[1:3] for n_ in names[7:] if len(n_) >= 3 and n_[1:3] not in names and n_[1:3] not in cats)
+        want_frag = next(n_ for n_ in names if frag in n_)
+        cj = os.path.join(gdata, "sessions", KEY, "collage.json")
+        s0 = settled()
+        c0 = mtime(cj)
+        out, b, ms = w("collage_apply_template", {"session": KEY, "template": full})
+        c1 = mtime(cj)
+        s1 = st()
+        pv = b.get("preview") or {}
+        check(b.get("template") == full and b.get("changed") is True and b.get("digest_before") == s0["edit_digest"]
+              and b.get("digest_after") == s1["edit_digest"] != s0["edit_digest"] and steps(s0, s1) == (0, 1)
+              and b.get("undo", {}).get("steps_added") == 1 and b["undo"].get("depth") == s0["collage_undo"]["depth"] + 1
+              and c1 is not None and c1 != c0 and s1["disk_edit_digest"] == s1["edit_digest"]
+              and one_jpeg(out) and (pv.get("file") or "").endswith("-collage.jpg") and max(pv.get("width", 0), pv.get("height", 0)) <= 768
+              and (s1["collage"].get("notice") or "").startswith("AI：已套用"),
+              f"4 套模板「{full}」：拼图栈 +1、判决栈不动，collage.json 回复到达时已写好（盘上的编辑指纹 = 内存的），"
+              f"带一张 ≤768 的预览，状态栏「AI：已套用…」（{ms:.0f} ms）")
+        out_u, u, _ = w("app_undo", {"target": "collage"})
+        s2 = settled()
+        # 撤回去的工程一页都没有（CI 的 fixture、没排过的场次）就没有预览
+        pv_ok = one_jpeg(out_u) if s0["collage"]["pages"] > 0 else (not image_blocks(out_u) and "no_preview" in warn_codes(u))
+        check(u.get("digest_after") == s0["edit_digest"] and s2["edit_digest"] == s0["edit_digest"]
+              and s2["full_digest"] == s0["full_digest"] and s2["disk_edit_digest"] == s0["edit_digest"]
+              and s2["collage_undo"]["depth"] == s0["collage_undo"]["depth"] and s2["collage_undo"]["can_redo"] is True
+              and steps(s1, s2) == (0, 0) and pv_ok,
+              f"app_undo target=collage：编辑指纹、整工程指纹、盘上的 collage.json 都回到套模板之前，重做栈里有它"
+              f"（{s0['collage']['pages']} 页的工程{'，回复带预览' if s0['collage']['pages'] else '，没有预览、warning no_preview'}）"
+              f" {[u.get('digest_after') == s0['edit_digest'], s2['edit_digest'] == s0['edit_digest'], s2['full_digest'] == s0['full_digest'], s2['disk_edit_digest'] == s0['edit_digest'], s2['collage_undo'], s0['collage_undo'], pv_ok]}")
+        got37 = []
+        for label, spelling, want in (("分类名", cat, want_cat), ("全名", full2, full2), ("名字片段", frag, want_frag)):
+            _, b, _ = w("collage_apply_template", {"session": KEY, "template": spelling})
+            got37.append((label, spelling, b.get("template"), want))
+            w("app_undo", {"target": "collage"})
+        _, bad, _ = w("collage_apply_template", {"session": KEY, "template": "没有这个模板-xyz"})
+        check(all(g_ == w_ for _, _, g_, w_ in got37) and err_code(bad) == "invalid_argument",
+              f"37 找模板：分类名套这个分类的第一个、全名、名字片段，和 collage_list_templates 的顺序推出来的一样；找不到 → "
+              f"invalid_argument {got37}")
+
+        # ---------- 第 5、6 条 不合并、撤销按 tab；没改出东西的写不挡后面的 app_undo
+        s0 = st()
+        _, a1, _ = w("collage_set_text", {"session": KEY, "title": "标题 A"})
+        time.sleep(0.2)
+        _, a2, _ = w("collage_set_text", {"session": KEY, "masthead": "刊头 B"})
+        s1 = st()
+        check(steps(s0, s1) == (0, 2) and s1["collage"]["title"] == "标题 A" and s1["collage"]["masthead"] == "刊头 B"
+              and a2.get("live", {}).get("tab") == "batch" and "拼图页" in a2.get("undo", {}).get("how", ""),
+              "5 改标题、200 ms 后改刊头：两步（不并成一步）；6 用户停在批量页，undo.how 点名拼图页")
+        _, u, _ = w("app_undo", {"target": "collage"})
+        s2 = st()
+        check(s2["collage"]["title"] == "标题 A" and s2["collage"]["masthead"] == s0["collage"]["masthead"],
+              "app_undo 只撤掉刊头，标题还在（6：用户停在批量页也照样撤拼图）")
+        _, a3, _ = w("collage_set_text", {"session": KEY, "title": "标题 C", "masthead": "刊头 D"})
+        _, a4, _ = w("collage_set_text", {"session": KEY, "title": "标题 C", "masthead": "刊头 D"})
+        s3 = st()
+        _, u, _ = w("app_undo", {"target": "collage"})
+        s4 = st()
+        check(steps(s2, s3) == (0, 2) and s3["collage_undo"]["depth"] == s2["collage_undo"]["depth"] + 1
+              and a4.get("changed") is False and a4.get("undo", {}).get("steps_added") == 0 and "error" not in u
+              and s4["collage"]["title"] == "标题 A",
+              "同一个请求改标题和刊头：一步；原样再发一次 changed:false（空步撤掉了，计数 +1），紧接着的 app_undo 照样撤的是 AI 那一步")
+
+        # ---------- 换样式：样式、色调、强度一次给齐也是一步；app_undo 编辑指纹回去
+        _, sty, _ = mcp_call(env, "collage_list_templates", {"include": ["styles", "looks"]})
+        style_key = ((sty or {}).get("styles") or [{}, {}])[1].get("key")
+        look_key = ((sty or {}).get("looks") or [{}])[-1].get("key")
+        s0 = settled()
+        out, b, _ = w("collage_set_style", {"session": KEY, "style": style_key, "look": look_key, "look_strength": 0.35})
+        s1 = st()
+        _, u, _ = w("app_undo", {"target": "collage"})
+        s2 = settled()
+        check(b.get("changed") is True and b.get("style") == style_key and b.get("look") == look_key and b.get("look_strength") == 0.35
+              and steps(s0, s1) == (0, 1) and s1["collage"]["look"] == look_key and s1["disk_edit_digest"] == s1["edit_digest"]
+              and "error" not in u and s2["edit_digest"] == s0["edit_digest"] and s2["full_digest"] == s0["full_digest"]
+              and s2["disk_edit_digest"] == s0["edit_digest"],
+              f"换样式「{style_key}」+ 色调「{look_key}」+ 强度 0.35：一步；app_undo 以后编辑指纹、整工程指纹、collage.json 都回去")
+
+        # ---------- 第 7 条 不是 AI 的那一步不撤；用户自己撤过 → already_undone_by_user；top_is_ai
+        _, t1, _ = w("collage_apply_template", {"session": KEY, "template": full})
+        _, cs1, _ = mcp_call(env, "collage_get_state", {"include_preview": False})
+        test_call(h, "test.user_edit", {"op": "setTitle", "text": "用户自己的标题"})
+        _, cs2, _ = mcp_call(env, "collage_get_state", {"include_preview": False})
+        sa = st()
+        _, u, _ = w("app_undo", {"target": "collage"})
+        sb = st()
+        check(cs1.get("undo", {}).get("top_is_ai") is True and cs2.get("undo", {}).get("top_is_ai") is False
+              and err_code(u) == "undo_not_ours" and sb["collage_undo"]["depth"] == sa["collage_undo"]["depth"]
+              and sb["edit_digest"] == sa["edit_digest"],
+              "7 AI 套模板 → 用户改标题 → app_undo：undo_not_ours，深度没变（top_is_ai 先 true 后 false）")
+        w("collage_apply_template", {"session": KEY, "template": full2})
+        test_call(h, "test.user_edit", {"op": "undo"})
+        _, u, _ = w("app_undo", {"target": "collage"})
+        check(err_code(u) == "nothing_to_undo" and edata(u).get("reason") == "already_undone_by_user",
+              f"用户自己 ⌘Z 撤过 AI 那一步 → nothing_to_undo（{edata(u).get('reason')}）")
+
+        # ---------- 第 12 条 op_id 重放：第二次 replayed、只做一次，缓存的结果不带预览
+        op = "g12-" + uuid.uuid4().hex[:12]
+        s0 = st()
+        out1, r1, _ = w("collage_set_text", {"session": KEY, "subtitle": "副标题 X", "op_id": op})
+        out2, r2, _ = w("collage_set_text", {"session": KEY, "subtitle": "副标题 X", "op_id": op})
+        s1 = st()
+        check(r1.get("live", {}).get("op_id") == op and r1.get("changed") is True and r2.get("replayed") is True
+              and r2.get("live", {}).get("replayed") is True and r2.get("changed") is True and steps(s0, s1) == (0, 1)
+              and one_jpeg(out1) and not image_blocks(out2) and "preview_omitted" in warn_codes(r2)
+              and r2.get("digest_after") == r1.get("digest_after"),
+              "12 同一个 op_id 发两次：第二次 replayed:true（live 里也是）、拼图栈只 +1；缓存的结果不带预览、有 preview_omitted")
+
+        # ---------- 第 11 条 过期：主线程卡着，300 ms 截止的写回 expired、没执行
+        r = Raw(h)
+        r.req("test.block_main", {"ms": 1500})
+        time.sleep(0.1)
+        r2_ = Raw(h)
+        m_ = r2_.call("collage.set_text", {"session": KEY, "title": "过期的"}, deadline=300, op_id="g11-" + uuid.uuid4().hex[:12])
+        r.recv()
+        r.close()
+        r2_.close()
+        check(err_code(m_) == "expired" and (m_["error"].get("data") or {}).get("executed") is False
+              and st()["collage"]["title"] != "过期的", "11 主线程卡 1.5 s、300 ms 截止的写：expired，没执行")
+
+        # ---------- 第 10、26 条 忙信号：一时的等（等不到 → user_busy transient），一直的立刻回；读不受影响
+        test_call(h, "test.set_busy", {"reasons": ["pointer"], "ms": 5000})
+        _, rd, rd_ms = mcp_call(env, "collage_get_state", {"include_preview": False})
+        s0 = st()
+        _, b, ms = w("collage_set_text", {"session": KEY, "title": "按着鼠标的时候"})
+        s1 = st()
+        test_call(h, "test.set_busy", {"reasons": ["pointer"], "ms": 0})
+        d_ = edata(b)
+        check(err_code(b) == "user_busy" and d_.get("transient") is True and d_.get("executed") is False
+              and d_.get("reasons") == ["pointer"] and 1800 <= d_.get("waited_ms", 0) <= 2600 and s1["edit_digest"] == s0["edit_digest"]
+              and steps(s0, s1) == (0, 0) and "error" not in rd and rd_ms < 1500,
+              f"10 按着鼠标 5 s：写等了 {d_.get('waited_ms')} ms 回 user_busy（transient、executed:false），指纹没变；读照常（{rd_ms:.0f} ms）")
+        for reason, ms_busy in (("dragging", 800), ("typing", 600), ("menu", 500), ("continuous_edit", 700)):
+            test_call(h, "test.set_busy", {"reasons": [reason], "ms": ms_busy})
+            t0 = time.monotonic()
+            _, b, _ = w("collage_set_text", {"session": KEY, "title": f"等 {reason} 停了以后"})
+            took = (time.monotonic() - t0) * 1000
+            check(b.get("changed") is True and took >= ms_busy * 0.8 and st()["collage"]["title"] == f"等 {reason} 停了以后",
+                  f"{reason} {ms_busy} ms：写等它停了再执行（{took:.0f} ms）")
+        test_call(h, "test.set_busy", {"reasons": ["continuous_edit"], "ms": 5000})
+        t0 = time.monotonic()
+        _, bv, _ = w("cull_set_verdicts", {"session": KEY, "ids": [vid], "verdict": "reject"})
+        v_ms = (time.monotonic() - t0) * 1000
+        rr = Raw(h)
+        busy_raw = rr.call("collage.set_text", {"session": KEY, "title": "x", "busy_wait_ms": 300}, op_id="g10-" + uuid.uuid4().hex[:12])
+        rr.close()
+        test_call(h, "test.set_busy", {"reasons": ["continuous_edit"], "ms": 0})
+        check(bv.get("changed") == [vid] and v_ms < 1500 and err_code(busy_raw) == "user_busy"
+              and (busy_raw["error"].get("data") or {}).get("waited_ms", 0) >= 250,
+              f"连续编辑只挡拼图写：改判照常（{v_ms:.0f} ms）；拼图写按请求的 busy_wait_ms=300 等完回 user_busy")
+        persistent = [("modal", "collage_set_text", {"title": "对话框"}, True),
+                      ("batch_viewing", "cull_set_verdicts", {"ids": [vid], "verdict": "usable"}, False),
+                      ("batch_viewing", "cull_show_photos", {"ids": [vid]}, True),
+                      ("pick_session", "cull_set_verdicts", {"ids": [vid], "verdict": "pick"}, True),
+                      ("pick_session", "app_undo", {"target": "verdicts"}, True),
+                      ("pick_session", "collage_set_text", {"title": "挑连拍的时候改拼图"}, False),
+                      ("batch_sheet", "app_open_session", {"session": EMPTY_KEY, "confirm": True}, True),
+                      ("crop_editing", "collage_set_style", {"look_strength": 0.4}, True),
+                      ("exporting", "collage_run_kit", {"kit": "contactRoll"}, True)]
+        got26 = []
+        for reason, tool, args, blocked in persistent:
+            test_call(h, "test.set_busy", {"reasons": [reason], "ms": 5000})
+            a_ = dict(args)
+            if tool not in ("app_undo", "app_open_session"):
+                a_["session"] = KEY
+            t0 = time.monotonic()
+            _, b, _ = w(tool, a_)
+            took = (time.monotonic() - t0) * 1000
+            test_call(h, "test.set_busy", {"reasons": [reason], "ms": 0})
+            d_ = edata(b)
+            ok_ = (err_code(b) == "user_busy" and d_.get("transient") is False and d_.get("waited_ms") == 0 and took < 1000
+                   and reason in d_.get("reasons", [])) if blocked else ("error" not in b or err_code(b) != "user_busy")
+            got26.append((reason, tool, ok_, err_code(b), round(took)))
+        check(all(x[2] for x in got26),
+              f"26 一直的原因不等：对话框挡全部写，审片 / 检视器不挡改判、挡定位照片，连拍挑选挡判决和撤判决、不挡拼图，"
+              f"批量页 sheet 挡切场次，裁切、导出挡拼图（都 <1 s、transient:false、waited_ms 0）{got26}")
+        w("app_undo", {"target": "collage"})      # 「挑连拍的时候改拼图」那一步
+
+        # ---------- 第 29 条 窗口看不见：照常成功，window_visible:false + warning
+        test_call(h, "test.set_window_state", {"state": "minimized"})
+        _, b, _ = w("collage_set_text", {"session": KEY, "issue": "No.7"})
+        test_call(h, "test.set_window_state", {"state": "visible"})
+        check(b.get("changed") is True and b.get("live", {}).get("window_visible") is False
+              and b["live"].get("window_state") == "minimized" and "window_not_visible" in warn_codes(b),
+              "29 窗口最小化：写照常成功，live.window_visible:false、window_state minimized，warning 说用户现在看不到")
+
+        # ---------- cull_show_photos：选中、焦点；用户停在别的页时 pending，回到批量页时补上
+        s0 = st()
+        _, b, _ = w("cull_show_photos", {"session": KEY, "ids": ids2 + ["NOPE-1"]})
+        s1 = st()
+        check(b.get("applied") is True and b.get("selected") == ids2 and b.get("focus") == ids2[0] and b.get("hidden_by_filter") == []
+              and b.get("missing_ids") == ["NOPE-1"] and b.get("live", {}).get("tab") == "batch" and steps(s0, s1) == (0, 0)
+              and s1.get("view_request") is None,
+              f"cull_show_photos：批量页消费掉了（applied、selected、focus），不存在的进 missing_ids，不进撤销 "
+              f"{ {k: b.get(k) for k in ('applied', 'pending', 'selected', 'focus', 'hidden_by_filter')} }")
+        w("collage_set_text", {"session": KEY, "title": "切到拼图页", "reveal": True})
+        _, b, _ = w("cull_show_photos", {"session": KEY, "ids": [ids2[1]], "mode": "focus", "reveal": False})
+        s2 = st()
+        test_call(h, "test.snapshot", {"tab": "批量处理", "name": "g-show-back", "wait_ms": 500})
+        s3 = st()
+        # 停在拼图页时 TabView 不一定把批量页拿掉：消费掉了就是 applied（等用户切回来看到的就是选好的），没消费就是 pending，
+        # 切回批量页时 onAppear 补上。两种都对，最后都要落到那一张上
+        now_ok = b.get("applied") is True and s2.get("view_request") is None
+        later_ok = b.get("applied") is False and b.get("pending") is True and s2.get("view_request") == {"ids": [ids2[1]], "select": False}
+        check((now_ok or later_ok) and b.get("live", {}).get("tab") == "collage" and b.get("mode") == "focus"
+              and s3.get("view_request") is None and (s3.get("view_applied") or {}).get("focus") == ids2[1]
+              and (s3.get("view_applied") or {}).get("selected") == [],
+              f"reveal:false 而用户停在拼图页：不切 tab；{'当场消费了（TabView 留着批量页）' if now_ok else 'pending:true，切回批量页时补上'}，"
+              f"mode=focus 只移焦点不改选中")
+
+        # ---------- 第 25 条 等用户停手的时候用户切了场次 → session_not_open（没执行）；成套途中切场次 / 改版式 → superseded
+        sv0 = st()
+        test_call(h, "test.set_busy", {"reasons": ["pointer"], "ms": 1500})
+        res = {}
+        th = threading.Thread(target=lambda: res.update(v=w("cull_set_verdicts", {"session": KEY, "ids": [vid], "verdict": "pick"})))
+        th.start()
+        time.sleep(0.5)
+        test_call(h, "test.switch_session", {"photo_dir": EMPTY_PHOTOS})
+        th.join(30)
+        se = st()
+        test_call(h, "test.set_busy", {"reasons": ["pointer"], "ms": 0})
+        test_call(h, "test.switch_session", {"photo_dir": PHOTO_DIR})
+        sb = st()
+        b = res.get("v", (None, {}, 0))[1]
+        check(err_code(b) == "session_not_open" and edata(b).get("reason") == "session_switched_while_waiting"
+              and edata(b).get("executed") is False and se["overrides"] == {} and sb["overrides"] == sv0["overrides"],
+              f"25 等用户停手的 2 s 里用户切了场次：session_not_open（{edata(b).get('reason')}），两场的判决都没动 "
+              f"{[b, se['overrides'], sb['overrides'] == sv0['overrides']]}")
+        for who, act in (("session_switched", lambda: test_call(h, "test.switch_session", {"photo_dir": EMPTY_PHOTOS})),
+                         ("user_edit", lambda: test_call(h, "test.user_edit", {"op": "applyTemplate", "template": full}))):
+            s0 = st()
+            test_call(h, "test.delay_next", {"ms": 1500})
+            res = {}
+            th = threading.Thread(target=lambda: res.update(v=w("collage_run_kit", {"session": KEY, "kit": "fashionIssue"}, 120)))
+            th.start()
+            time.sleep(0.8)
+            act()
+            th.join(120)
+            b = res.get("v", (None, {}, 0))[1]
+            s1 = st()
+            _, u, _ = w("app_undo", {"target": "collage"})
+            s2 = st()
+            if who == "session_switched":
+                test_call(h, "test.switch_session", {"photo_dir": PHOTO_DIR})
+            # 作废的成套不记 AI 的一步（ai_log 没多），之后 app_undo → nothing_to_undo(session_switched)：前面切过场次，AI 之前的
+            # 记录都不算了（§9.5.1）。切场次的那一次停在新场次上、两条栈都是空的；改版式的那一次栈顶是用户套模板那一步，没被撤
+            if who == "session_switched":
+                where = (s1["session"] == EMPTY_KEY and s1["verdict_undo"]["depth"] == 0 and s1["collage_undo"]["depth"] == 0
+                         and steps(s0, s1) == (0, 0))
+            else:
+                where = s1["session"] == s0["session"] and steps(s0, s1) == (0, 1)
+            ok_ = (err_code(b) == "superseded" and edata(b).get("reason") == who and edata(b).get("executed") is False
+                   and err_code(u) == "nothing_to_undo" and edata(u).get("reason") == "session_switched"
+                   and s2["collage_undo"] == s1["collage_undo"] and where
+                   and len(s1["ai_log"]["collage"]) == len(s0["ai_log"]["collage"]))
+            check(ok_, f"25 成套落地之前（test.delay_next 拖住）{'用户切了场次' if who == 'session_switched' else '用户套了别的模板'}："
+                       f"superseded（{edata(b).get('reason')}），没落地、不记 AI 的一步，之后 app_undo → {err_code(u)}"
+                       f"（{edata(u).get('reason')}），栈没动")
+
+        # ---------- 第 36 条 用户切到别的场次以后：带旧场次的写都 session_not_open，app_undo → nothing_to_undo
+        test_call(h, "test.switch_session", {"photo_dir": EMPTY_PHOTOS})
+        codes36 = [err_code(w(t_, dict(a_, session=KEY))[1]) for t_, a_ in (
+            ("cull_set_verdicts", {"ids": [vid], "verdict": "pick"}), ("cull_show_photos", {"ids": [vid]}),
+            ("collage_apply_template", {"template": full}), ("collage_run_kit", {"kit": "fashionIssue"}),
+            ("collage_next_cover", {}), ("collage_set_text", {"title": "x"}), ("collage_set_style", {"look_strength": 0.3}))]
+        _, u1, _ = w("app_undo", {"target": "collage"})
+        _, u2, _ = w("app_undo", {"target": "verdicts"})
+        test_call(h, "test.switch_session", {"photo_dir": PHOTO_DIR})
+        check(set(codes36) == {"session_not_open"} and err_code(u1) == "nothing_to_undo" and err_code(u2) == "nothing_to_undo",
+              f"36 用户切走以后：7 个带旧场次的写都 session_not_open，app_undo 两边都 nothing_to_undo {codes36}")
+
+        # ---------- 第 8、33 条 app_open_session：撤销栈不空先 confirm_required；带 confirm 才切；受保护的那一场拒绝，不去碰它
+        w("collage_set_text", {"session": KEY, "title": "切场次之前"})
+        w("cull_set_verdicts", {"session": KEY, "ids": [vid], "verdict": "reject"})
+        s0 = st()
+        _, c, _ = w("app_open_session", {"session": EMPTY_KEY})
+        s1 = st()
+        check(err_code(c) == "confirm_required" and edata(c).get("verdict_undo_steps") == s0["verdict_undo"]["depth"] > 0
+              and edata(c).get("collage_undo_steps") == s0["collage_undo"]["depth"] > 0 and s1["session"] == KEY,
+              f"8 撤销栈不空：confirm_required（判决 {edata(c).get('verdict_undo_steps')} 步、拼图 {edata(c).get('collage_undo_steps')} 步），没切")
+        _, o, _ = w("app_open_session", {"session": EMPTY_PHOTOS, "confirm": True})
+        s2 = st()
+        _, u1, _ = w("app_undo", {"target": "collage"})
+        _, u2, _ = w("app_undo", {"target": "verdicts"})
+        check(o.get("opened") is True and o.get("session") == EMPTY_KEY and o.get("verdict_undo_cleared") == s0["verdict_undo"]["depth"]
+              and o.get("collage_undo_cleared") == s0["collage_undo"]["depth"] and s2["session"] == EMPTY_KEY
+              and s2["verdict_undo"]["depth"] == 0 and s2["collage_undo"]["depth"] == 0 and EMPTY_PHOTOS in s2["ai_log"]["opened"]
+              and edata(u1).get("reason") == "session_switched" and edata(u2).get("reason") == "session_switched",
+              "带 confirm:true（路径写法）：切过去，清掉的步数对得上；之后 app_undo 两边都 nothing_to_undo（session_switched）")
+        _, ao, _ = w("app_open_session", {"session": EMPTY_KEY})
+        _, nf, _ = w("app_open_session", {"session": unlisted})
+        sp0 = st()
+        _, pk, _ = w("app_open_session", {"session": PROT_KEY, "confirm": True})
+        _, pp, _ = w("app_open_session", {"session": prot_dir, "confirm": True})
+        sp1 = st()
+        check(ao.get("opened") is False and ao.get("already_open") is True and err_code(nf) == "session_not_found",
+              "已经是当前这一场 → already_open；不在「最近场次」里 → session_not_found")
+        check(err_code(pk) == "protected_location" and err_code(pp) == "protected_location" and sp1["session"] == sp0["session"]
+              and prot_dir not in sp1["ai_log"]["opened"] and sp1["verdict_undo"] == sp0["verdict_undo"]
+              and sp1["collage_undo"] == sp0["collage_undo"],
+              "33 受保护前缀下的那一场（key / 路径两种写法）→ protected_location：只按字符串判断，没走到 switchSession，场次和两条栈都没动")
+        # --mcp 自己先按字符串挡（§10.4 第 4 条）：真实家目录下的桌面路径，只是字符串 —— 这个文件夹不存在，脚本也不去
+        # stat 它（那会以终端的名义碰桌面）。它不在「最近场次」里，app 那边只会回 session_not_found，所以回 protected_location
+        # 的只能是 --mcp 的预检；宿主的场次、桥切过的场次都没变
+        desk = os.path.join(HOME, "Desktop", "xuanpian-live-smoke-never-" + uuid.uuid4().hex[:8])
+        _, pd, _ = w("app_open_session", {"session": desk, "confirm": True})
+        sp2 = st()
+        check(err_code(pd) == "protected_location" and edata(pd).get("folder") == desk and sp2["session"] == sp1["session"]
+              and sp2["ai_log"]["opened"] == sp1["ai_log"]["opened"],
+              "--mcp 的预检：~/Desktop 下的路径（只是字符串）→ protected_location（data.folder 是它），没转给 app 去切")
+        # bookmark 不能把 app 带进受保护位置：AI 打开过一次的场次（这时 app 给它建了 bookmark），文件夹之后被挪进受保护前缀，
+        # AI 再打开它 —— app 只认登记的那个路径（字符串检查过的），不跟 bookmark 走；挪走了就是「照片文件夹已不存在」（app_says）
+        _, o1, _ = w("app_open_session", {"session": BM_KEY, "confirm": True})
+        _, o2, _ = w("app_open_session", {"session": EMPTY_KEY, "confirm": True})
+        moved_to = os.path.join(prot_root, os.path.basename(bm_dir))
+        os.rename(os.path.realpath(bm_dir), moved_to)
+        _, o3, _ = w("app_open_session", {"session": BM_KEY, "confirm": True})
+        _, ast, _ = mcp_call(env, "app_status")
+        open_now = ((ast or {}).get("live") or {}).get("open_session") or {}
+        check(o1.get("opened") is True and o2.get("opened") is True and o3.get("opened") is True
+              and o3.get("folder") == bm_dir and open_now.get("folder") == bm_dir and open_now.get("session") == BM_KEY
+              and "app_says" in warn_codes(o3) and not os.path.exists(bm_dir),
+              f"33 打开过一次（建了 bookmark）、之后挪进受保护前缀的场次：AI 再打开，app 停在登记的路径上（{open_now.get('folder')}），"
+              f"不跟 bookmark 进 {moved_to}；回复带 app_says（文件夹已不存在）")
+        _, back, _ = w("app_open_session", {"session": KEY})
+        check(back.get("opened") is True and st()["session"] == KEY, "空场次的撤销栈是空的：不用 confirm 直接切回来")
+
+        # ---------- 第 9、27 条 一键成套、换封面（本地 photot：要真照片；CI 的 fixture 只跑得到 invalid_state 那一半）
+        _, nc, _ = w("collage_next_cover", {"session": KEY})
+        check(err_code(nc) == "invalid_state", f"9 不是出一期的工程上换封面 → invalid_state（{err_code(nc)}）")
+        if not CI:
+            s0 = settled()
+            out, k, ms = w("collage_run_kit", {"session": KEY, "kit": "fashionIssue"}, 180)
+            s1 = st()
+            cover1 = k.get("cover_id")
+            check(k.get("landing") == "landed" and k.get("pages") == 4 and cover1 and k.get("hints_settled") is True
+                  and steps(s0, s1) == (0, 1) and one_jpeg(out) and s1["disk_edit_digest"] == s1["edit_digest"]
+                  and s1["collage"]["cover_id"] == cover1,
+                  f"9 collage_run_kit fashionIssue：4 页、封面 {cover1}、拼图栈 +1、带预览、collage.json 已写好（{ms:.0f} ms）")
+            hk2 = Host("G-kit2", data=fresh_data("G-kit2"), args=("--no-view",))
+            _, k2, _ = mcp_full(hk2.env(), "collage_run_kit", {"session": KEY, "kit": "fashionIssue"}, 180)
+            hk2.term()
+            check((k2 or {}).get("cover_id") == cover1, f"封面是确定的：另起一个宿主同样成套，封面也是 {(k2 or {}).get('cover_id')}（等路人信息算完才挑）")
+            s1 = settled()
+            out, n, _ = w("collage_next_cover", {"session": KEY}, 180)
+            s2 = st()
+            check(n.get("landing") == "landed" and n.get("cover_before") == cover1 and n.get("cover_id") not in (None, cover1)
+                  and steps(s1, s2) == (0, 1) and one_jpeg(out),
+                  f"collage_next_cover：封面 {cover1} → {n.get('cover_id')}，拼图栈 +1")
+            w("app_undo", {"target": "collage"})
+            s3 = settled()
+            check(s3["collage"]["cover_id"] == cover1 and s3["edit_digest"] == s1["edit_digest"], "app_undo：封面换回来，编辑指纹回到换封面之前")
+            # 27 编辑指纹：路人信息算完、改判刷新托盘都不让 if_digest 失效
+            _, g, _ = mcp_call(env, "collage_get_state", {"include_preview": False})
+            d0 = (g or {}).get("digest")
+            cell = next((c_ for c_ in (g or {}).get("cells") or [] if c_.get("overlays", 0) > 0), None)
+            s4 = settled()
+            w("cull_set_verdicts", {"session": KEY, "ids": [cover1], "verdict": "usable"})
+            s5 = st()
+            _, ct, _ = w("collage_set_text", {"session": KEY, "if_digest": d0,
+                                              "cell_text": {"path": (cell or {}).get("path", ""), "index": 0, "text": "AI 写的刊头"}})
+            _, stale, _ = w("collage_set_text", {"session": KEY, "if_digest": d0, "title": "过时的 digest"})
+            check(cell is not None and s4["edit_digest"] == d0 and s5["edit_digest"] == d0 and ct.get("changed") is True
+                  and err_code(stale) == "stale_digest" and edata(stale).get("digest") == ct.get("digest_after"),
+                  "27 编辑指纹：路人信息算完、改判刷新托盘以后不变；带原来的 if_digest 改格子里的字成功；之后再用旧的 → stale_digest")
+        else:
+            skip("9 成套 / 换封面、27 编辑指纹：只在本地 photot 跑（CI 的 fixture 没有照片）")
+
+        # ---------- 第 35 条 取消一个真的写：主线程卡着时取消 → 这个 id 没有任何消息，恢复以后没执行
+        s0 = st()
+        m = Mcp(env)
+        m.initialize()
+        r = Raw(h)
+        r.req("test.block_main", {"ms": 3000})
+        time.sleep(0.1)
+        m.call("cw", "cull_set_verdicts", {"session": KEY, "ids": [vid], "verdict": "pick"})
+        time.sleep(0.3)
+        m.send({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": "cw", "reason": "test"}})
+        late = m.wait_id("cw", timeout=4)
+        r.recv()
+        r.close()
+        time.sleep(0.3)
+        s1 = st()
+        m.close()
+        skipped = s1["counters"].get("skipped_client_gone", 0) - s0["counters"].get("skipped_client_gone", 0)
+        check(late is None and s1["verdict_digest"] == s0["verdict_digest"] and steps(s0, s1) == (0, 0) and skipped >= 1,
+              f"35 主线程卡着时取消一个改判：4 s 内这个 id 没有任何消息，恢复以后没执行（skipped_client_gone +{skipped}）")
+
+        ns = st()["nsapp"]
+        check(ns == {"active": False, "key_window": False, "main_window": False, "activation_policy": 2,
+                     "visible_windows": 0, "host_window_visible": False, "host_window_key": False},
+              f"这么多写以后，宿主仍然从不变成前台、没有 key / main 窗口：{ns}")
+        h.term()
+
+        # ---------- 第 16 条 旧版 app 少一个写方法：只有那个工具回 app_version_mismatch
+        hd = Host("G-drop", LABELGUI_LIVE_TEST_DROP_CAP="collage.run_kit", args=("--no-view",))
+        _, k, _ = mcp_full(hd.env(), "collage_run_kit", {"session": KEY, "kit": "fashionIssue"})
+        _, t2, _ = mcp_full(hd.env(), "collage_set_text", {"session": KEY, "title": "旧版 app"})
+        hd.term()
+        check(err_code(k) == "app_version_mismatch" and edata(k).get("reason") == "app_too_old" and (t2 or {}).get("changed") is True,
+              "16 旧版 app 少了 collage.run_kit：只有 collage_run_kit 回 app_version_mismatch（app_too_old），改字照常")
+
+        # ---------- 第 13 条 写到一半 kill -9：app_outcome_unknown（带 op_id），之后读写都 app_not_running
+        if NO_KILL:
+            skip("13 kill -9：app 里的二进制不故意杀（看裸二进制那一遍）")
+        else:
+            hk = Host("G-kill", args=("--no-view",))
+            test_call(hk, "test.delay_next", {"ms": 3000})
+            res = {}
+            th = threading.Thread(target=lambda: res.update(v=mcp_full(hk.env(), "collage_run_kit",
+                                                                        {"session": KEY, "kit": "fashionIssue"}, 120)))
+            th.start()
+            time.sleep(1.0)
+            hk.kill9()
+            th.join(120)
+            b = (res.get("v") or (None, None, 0))[1]
+            st_k, _ = status(hk.env())
+            _, w2, _ = mcp_call(hk.env(), "collage_set_text", {"session": KEY, "title": "x"})
+            _, r2, _ = mcp_call(hk.env(), "collage_get_state", {})
+            check(err_code(b) == "app_outcome_unknown" and re.match(r"^[0-9a-f-]{36}$", edata(b).get("op_id") or "")
+                  and (st_k.get("live") or {}).get("state") == "not_running" and err_code(w2) == "app_not_running"
+                  and err_code(r2) == "app_not_running",
+                  f"13 一键成套落地之前 kill -9 宿主：app_outcome_unknown（data.op_id {edata(b).get('op_id')}），没改走别处；"
+                  f"之后 not_running、读写都 app_not_running")
+
     # ============================================================ grep：Live/ 的禁用词（§5 第 7 层、§9.5.6）
     print("grep")
     LIVE_DIR = os.path.join(SRC, "Live")
@@ -2024,10 +2663,11 @@ finally:
             p.term()
         except Exception:
             pass
-    try:
-        os.unlink(LINK)      # 中途出错也不留 /tmp/xpls.* 这个链接
-    except OSError:
-        pass
+    for link in (LINK, BM_LINK):
+        try:
+            os.unlink(link)  # 中途出错也不留 /tmp/xpls.*、/tmp/xpbm.* 这两个链接
+        except OSError:
+            pass
 
 
 print("收尾")

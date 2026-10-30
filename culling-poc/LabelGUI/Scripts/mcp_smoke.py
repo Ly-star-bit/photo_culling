@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """MCP 冒烟（v1，DESIGN §10.7 的 1–7 组）：没有 app、不起宿主，只测 `LabelGUI --mcp` 自己。
 
-用法: python3 -I Scripts/mcp_smoke.py <LabelGUI 可执行文件> --ci [--protocol-only] [--work <目录>] [--keep]
+用法: python3 -I Scripts/mcp_smoke.py <LabelGUI 可执行文件> --ci [--protocol-only] [--work <目录>] [--keep] [--plan]
   --ci             必须带：只用临时数据目录和合成的 fixture（v1 的 mcp_smoke 没有本地照片模式）
   --protocol-only  给 build_app.sh 打出来的 app 里的二进制用：不跑第 2 组（fixture 场次、工具语义）和第 7 组（RSS），
                    其余照跑 —— sync、设置域、Bundle 这几条只有 app 里的二进制才走得到
+  --plan           只打印这次会不会跑 sandbox 那一组（第 0 组）就退出，不起任何进程（自检用）
+app 里的二进制（路径原样或解析符号链接以后在 *.app/Contents/MacOS/ 下面）只在 CI 上收（--ci 且 GITHUB_ACTIONS=true），
+本机一律起进程之前就 exit 2：.app 里的二进制崩了 / 被杀了，系统会在用户屏幕上弹「选片工具 意外退出」，框上的「重新打开」
+会以用户的真实数据开出一个 app（2026-10-29 真出过）。CI 上收了也不跑第 0 组（sandbox 规则抓到就 SIGKILL）。
 1 协议（握手、tools/list 和 schema、错误码、stdout 纯净、并发、busy、取消、压力、客户端 fd 的怪样子、退出） 2 没有 app
 （S2：fixture 场次的各个字段、最多 15 场、sessions.json 坏了 / 缺字段 / 没有；受保护位置（含换个写法的：ſ、ﬆ、K、
 /.nofollow/…）拿 sandbox-exec 证明一次都没碰；
@@ -30,6 +34,24 @@ PROTOCOL_ONLY = "--protocol-only" in ARGS
 KEEP = "--keep" in ARGS
 ON_GITHUB = os.environ.get("GITHUB_ACTIONS") == "true"
 SLACK = 4.0 if ON_GITHUB else 1.0          # macos runner 是虚拟机：时间阈值放宽 4 倍（§6.1）
+
+
+def in_app_bundle(path):
+    """路径在某个 .app 的 Contents/MacOS/ 下面（不分大小写：APFS 默认不分，LaunchServices 也不分）。"""
+    return re.search(r"\.app/Contents/MacOS/", path, re.I) is not None
+
+
+# app 里的二进制：原样的路径和解析了符号链接的路径，只要有一个在 .app 里，就只在 CI 上收。放在一切之前：不建工作目录、不起任何进程
+BUNDLE = in_app_bundle(os.path.abspath(ARGS[0])) or in_app_bundle(os.path.realpath(ARGS[0]))
+if BUNDLE and not (CI and ON_GITHUB):
+    print(f"{ARGS[0]} 在 .app 里面（原样或解析符号链接以后）：只有 CI（--ci 且 GITHUB_ACTIONS=true）才收 app 里的二进制，"
+          f"本机一律用裸二进制（.build/release/LabelGUI 这类）。不跑，什么都没起")
+    sys.exit(2)
+# 故意让进程被杀的（第 0 组 sandbox 的对照、规则抓到就 SIGKILL）不对 app 里的二进制跑
+NO_KILL = BUNDLE
+if "--plan" in ARGS:
+    print(f"plan bundle={int(BUNDLE)} no_kill={int(NO_KILL)} sandbox_group={int(not NO_KILL)}")
+    sys.exit(0)
 if not CI:
     print("mcp_smoke.py 只有 --ci 模式（临时数据目录 + 合成 fixture），请带 --ci")
     sys.exit(2)
@@ -453,7 +475,51 @@ def check_session_rows(res, ls, label):
 # 对照：同一条 deny 里还放了一个不受保护、只是被规则禁掉的 CTL_GHOST；只有那一场的数据目录上，同一个二进制被杀，
 # 证明这条规则确实生效、而且抓得到 folderOnline 真正用的那个系统调用。所以 FIXTURE 上没被杀 = 从没碰过桌面、文稿、
 # 下载、/Volumes、/Network、/net 下的任何路径（包括指进桌面的那个符号链接的目标）。
-print("0. 受保护位置一次都没碰（sandbox-exec，碰一下就 SIGKILL；所有模式都先跑这一组）")
+print("0a. 第 4 道闸（.app 里的二进制）")
+
+
+def bundle_gate_selfcheck():
+    """拿一个假的「二进制」（两行 sh：真被启动就留下标记文件）放在 X.app/Contents/MacOS/ 下面，用三种写法（路径本身在 .app 里、
+    外面的符号链接指进 .app、.APP 大写）调本脚本自己：没有 GITHUB_ACTIONS 时都必须 exit 2、标记文件不出现；
+    --plan 加上 GITHUB_ACTIONS=true（CI 上收 app 里的二进制）时只打印计划：sandbox 那一组不跑。绝不起真的 LabelGUI。"""
+    root = os.path.join(WORK, "fake-bundle")
+    marker = os.path.join(root, "ran")
+    os.makedirs(root)
+    stub = os.path.join(root, "stub.sh")
+    open(stub, "w").write("#!/bin/sh\ntouch '" + marker.replace("'", "") + "'\nexit 0\n")
+    os.chmod(stub, 0o755)
+    inside = os.path.join(root, "X.app", "Contents", "MacOS", "LabelGUI")
+    os.makedirs(os.path.dirname(inside))
+    os.symlink(stub, inside)                       # 原样的路径在 .app 里，解析以后不在
+    upper = os.path.join(root, "Y.APP", "Contents", "MacOS", "LabelGUI")
+    os.makedirs(os.path.dirname(upper))
+    shutil.copy(stub, upper)
+    outside = os.path.join(root, "link-into-bundle")
+    os.symlink(upper, outside)                     # 原样的路径不在 .app 里，解析以后在
+    env = {k: v for k, v in os.environ.items() if k != "GITHUB_ACTIONS" and not k.startswith("LABELGUI_")}
+    me = os.path.abspath(__file__)
+    rcs = []
+    for path in (inside, upper, outside):
+        for extra in (["--ci"], ["--ci", "--protocol-only"]):
+            r = subprocess.run([sys.executable, "-I", me, path, *extra], env=env, capture_output=True, timeout=60, cwd=WORK)
+            rcs.append(r.returncode)
+    plan = subprocess.run([sys.executable, "-I", me, inside, "--ci", "--protocol-only", "--plan"],
+                          env=dict(env, GITHUB_ACTIONS="true"), capture_output=True, text=True, timeout=60, cwd=WORK).stdout.strip()
+    # 这一次跑的二进制本身：裸的 → 计划里有全部组；app 里的（只可能在 CI 上）→ 去掉 GITHUB_ACTIONS 就 exit 2
+    rb = subprocess.run([sys.executable, "-I", me, BIN, "--ci", "--plan"], env=env, capture_output=True, text=True,
+                        timeout=60, cwd=WORK)
+    bare = rb.stdout.strip() if not BUNDLE else ("exit 2" if rb.returncode == 2 else f"exit {rb.returncode}")
+    check(rcs == [2] * 6 and not os.path.exists(marker),
+          f"第 4 道闸：假 .app 路径（符号链接在 .app 里 / .APP 大写 / 外面的链接指进 .app）× (--ci、--protocol-only) 都在起进程之前 "
+          f"exit 2 {rcs}，假二进制一次都没被启动")
+    check(plan == "plan bundle=1 no_kill=1 sandbox_group=0"
+          and bare == ("exit 2" if BUNDLE else "plan bundle=0 no_kill=0 sandbox_group=1"),
+          f"CI 上收 app 里的二进制时不跑 sandbox 那一组（{plan!r}；裸二进制 {bare!r}）")
+
+
+bundle_gate_selfcheck()
+
+print("0. 受保护位置一次都没碰（sandbox-exec，碰一下就 SIGKILL；所有模式都先跑这一组，app 里的二进制除外）")
 gate_start = len(failures)
 SANDBOX = "/usr/bin/sandbox-exec"
 sb_str = lambda p_: '"' + p_.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -470,7 +536,9 @@ DENY += ["/System/Volumes/Data" + d for d in DENY]
 PROFILE = ("(version 1)(allow default)(deny file-read* file-write* file-test-existence "
            + " ".join(f"(subpath {sb_str(d)})" for d in DENY) + " (with send-signal SIGKILL))")
 SB = (SANDBOX, "-p", PROFILE)
-if not os.access(SANDBOX, os.X_OK):
+if NO_KILL:
+    print("  skip app 里的二进制不进 sandbox（规则抓到就 SIGKILL，会弹「意外退出」）：这一组看裸二进制那一遍（同一份代码）")
+elif not os.access(SANDBOX, os.X_OK):
     check(False, f"找不到 {SANDBOX}：「受保护位置一次都没碰」这一条证明不了")
 else:
     r = run_cli(["--mcp-call", "cull_list_sessions", "{}"], CTL, wrap=SB)

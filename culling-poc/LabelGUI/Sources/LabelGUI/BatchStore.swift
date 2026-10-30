@@ -208,6 +208,43 @@ final class BatchStore: ObservableObject {
     /// 网格多选的「拼图」：把这几张的 id 交给拼图 tab（ContentView 收到后切过去、清空）。
     /// 网格选中状态是 BatchView 私有的，只能这样递过去。
     @Published var collageRequest: [String]?
+    /// AI 的「在 app 里定位照片」（cull_show_photos，DESIGN §9.3）：反过来的那一条 —— 网格选中是 BatchView 私有的，
+    /// 桥只能把要选的 id 递过去。BatchView 消费（选中、焦点、滚过去）以后置回 nil；用户停在别的 tab 时，等批量页
+    /// 下次出现再消费。只改视图状态：不进撤销、不改筛选、不开检视器，也不会把 app 拉到前台。
+    @Published var viewRequest: ViewRequest?
+    /// BatchView 消费 viewRequest 以后回报的结果（桥读：选中了哪些、哪些被筛选藏起来了）。不发布。
+    var viewApplied: ViewApplied?
+    /// AI 改判以后批量页顶栏的一句提示（§9.4.3 第 11 步，桥写；顶栏怎么显示在下一部分做）。
+    @Published var externalNotice: String?
+    /// 批量页此刻开着哪些「一直忙」的东西（BatchView 写，桥读，§9.6b）。不发布：界面不跟着它重画。
+    var liveUI = LiveUIFlags()
+
+    struct ViewRequest: Equatable {
+        let token: UUID
+        /// 发请求时的场次 key：消费时场次换了就不认。
+        let session: String
+        let ids: [String]
+        /// true = 选中这些（焦点落到第一张）；false = 只把焦点移到第一张。
+        let select: Bool
+    }
+
+    struct ViewApplied {
+        let token: UUID
+        let selected: [String]
+        let focus: String?
+        /// 被当前筛选（只看废片、只看某章、客户选中……）藏起来的。
+        let hidden: [String]
+    }
+
+    /// busyWithPhotos 拆成三样（§9.6b 第二轮改）：审片 / 检视器开着不挡改判，只挡切场次和定位照片。
+    struct LiveUIFlags: Equatable {
+        /// 确认框、导出框、选文件夹、对时面板、导入客户选择这类 sheet。
+        var sheet = false
+        /// 连拍挑选开着（它有自己的撤销记录）。
+        var pick = false
+        /// 审片模式或检视器开着。
+        var viewing = false
+    }
     /// Show only photos within ±15% of an active threshold — the ones on the
     /// knife's edge, worth eyeballing after a slider change. Runtime hedge for
     /// thresholds that were never calibrated against real bad photos.
@@ -864,10 +901,12 @@ final class BatchStore: ObservableObject {
     /// the stored bookmark when there is one. Returns the resolved URL (tracks
     /// a folder that was renamed/moved since last time); falls back to the
     /// given URL when no bookmark exists or resolution fails.
-    private func restoreAccess(to folder: URL) -> URL {
+    /// `followBookmark: false`（实时桥的 app_open_session）：不解析 bookmark，原样用给的路径 —— 文件夹被挪进
+    /// 桌面 / 外置盘以后，bookmark 会把 app 带到那里去读，绕过 AI 那一侧只按字符串做的受保护位置检查（§10.4）。
+    private func restoreAccess(to folder: URL, followBookmark: Bool = true) -> URL {
         accessedFolder?.stopAccessingSecurityScopedResource()
         accessedFolder = nil
-        guard let bookmark = recentSessions
+        guard followBookmark, let bookmark = recentSessions
             .first(where: { $0.key == Self.sessionKey(for: folder) })?.bookmark else { return folder }
         var stale = false
         let resolved = (try? URL(resolvingBookmarkData: bookmark, options: .withSecurityScope,
@@ -882,7 +921,8 @@ final class BatchStore: ObservableObject {
 
     /// Point the store at the session for this folder: existing results load
     /// instantly (no re-analysis); a new folder starts empty until 开始分析.
-    func switchSession(to folder: URL) {
+    /// `followBookmark` 只有实时桥传 false（见 restoreAccess）：挪走了的文件夹就照常提示「照片文件夹已不存在」。
+    func switchSession(to folder: URL, followBookmark: Bool = true) {
         // 处理中切换会把 A 的流式结果灌进 B 的网格（同名文件还会顶掉 B 的行），
         // 而 isRunning 永远停在 true —— 之后 runAnalysis 的 guard 让“重新分析”
         // 静默失效，用户点了毫无反应。先取消，再切。
@@ -890,7 +930,7 @@ final class BatchStore: ObservableObject {
             lastError = "正在处理中，先点“取消”再切换文件夹"
             return
         }
-        let resolved = restoreAccess(to: folder)
+        let resolved = restoreAccess(to: folder, followBookmark: followBookmark)
         photoDir = resolved
         // Session key from the URL the caller had (the recents entry's path):
         // keeps existing results reachable even if the bookmark resolved the
@@ -1290,6 +1330,12 @@ final class BatchStore: ObservableObject {
     /// mis-keyed digit in tag-and-advance review mode costs one keystroke, not
     /// a hunt back through the filmstrip.
     @Published private var overrideUndoStack: [UndoStep] = []
+    /// 真压进判决撤销栈的次数（改判、客户选中、对时都算）：只增不减，栈满丢掉最旧的也不回退。实时桥的 app_undo
+    /// 拿它判断 AI 那一步之后用户又动过没有 —— 在 pushUndoStep 里数而不是 pushUndo(ids)：对时也压这条栈，
+    /// 只数改判的话，用户对完时 AI 会把用户的对时当成自己那一步撤掉（§9.5.1 第二轮补）。
+    private(set) var overrideUndoPushes = 0
+    /// 判决撤销栈有几步（栈本身是私有的）。
+    var overrideUndoDepth: Int { overrideUndoStack.count }
 
     var canUndoOverride: Bool { !overrideUndoStack.isEmpty }
     /// 上一步是对时（对时面板里的「撤销」只撤它，不去撤网格里的改判）。
@@ -1304,6 +1350,7 @@ final class BatchStore: ObservableObject {
     }
 
     private func pushUndoStep(_ step: UndoStep) {
+        overrideUndoPushes += 1
         overrideUndoStack.append(step)
         if overrideUndoStack.count > 100 { overrideUndoStack.removeFirst() }
     }

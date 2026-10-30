@@ -1,7 +1,8 @@
 import Foundation
 
 /// --mcp-selftest 的 STEP 3a 部分（MCPSelfTest.run 调），全是纯函数，不连 socket、不碰文件：
-/// 12. 6 个读工具的参数校验（MCPArgs）和 tools/list 里的 schema 对得上；一张手写的对 / 错表。
+/// 12. 要 app 的 15 个工具的参数校验（MCPArgs）和 tools/list 里的 schema 对得上；读工具一张手写的对 / 错表
+///     （写工具的那张在 MCPSelfTestWrite.swift）。
 /// 13. cursor（§10.4）：编码、解码、换了条件 / 场次 / 工具都不认；base64url 里没有 + / =。
 /// 14. 输出目录（§10.3）：服务器起的文件名都认得出、用户的文件名都不认；id 里的 / 和开头的 . 进不了文件名。
 /// 15. 图片字节的核对（FF D8、长度；全都不对回 internal）；text 截断时 next_cursor 跟着改、一条就超也给一条；
@@ -24,9 +25,9 @@ extension MCPSelfTest {
             let required = Set(schema["required"] as? [String] ?? []).subtracting(["session"])
             check(required == Set(spec.required), "\(tool)：必填 \(spec.required) 和 schema \(required.sorted()) 不一样")
         }
-        check(Set(MCPArgs.specs.keys) == Set(MCPLiveTools.routes.filter { !$0.value.write }.keys),
-              "MCPArgs 管的正好是 6 个读工具")
-        check(MCPLiveTools.wired == ["cull.read", "cull.preview", "collage.state"], "STEP 3a 接上的桥方法：\(MCPLiveTools.wired)")
+        check(Set(MCPArgs.specs.keys) == Set(MCPLiveTools.routes.keys), "MCPArgs 管的正好是要 app 的 15 个工具")
+        check(MCPLiveTools.wired == Set(MCPLiveTools.routes.values.map(\.method)) && MCPLiveTools.wired.count == 12,
+              "接上的桥方法是 §10.4 的 12 个：\(MCPLiveTools.wired.sorted())")
         check(Set(MCPLiveTools.readKinds.keys) == Set(MCPLiveTools.routes.filter { $0.value.method == "cull.read" }.keys),
               "cull.read 的四个工具都有 kind")
         let k = "0123456789abcdef"

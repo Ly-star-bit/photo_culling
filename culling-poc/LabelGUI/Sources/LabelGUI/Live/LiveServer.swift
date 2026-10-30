@@ -297,7 +297,11 @@ final class LiveServer: @unchecked Sendable {
         self.model = model
         LiveHandlers.register(self, model: model)
         observe(model)
-        if case .gui = mode { observeWindows() }
+        if case .gui = mode {
+            observeWindows()
+            // 忙信号里 AppKit 的那几样（按下在本 app 里、输入框、模态窗口）只有 GUI 看（§9.6b）
+            model.interaction.startWatchingAppKit()
+        }
         refreshSnapshot()
         startHeartbeat()
         let (held, waiting) = withState { (lock != nil, bridge == .unavailable("waiting_for_lock")) }
@@ -728,7 +732,7 @@ final class LiveServer: @unchecked Sendable {
     }
 
     /// hello 里的 capabilities（§10.4）：注册了的方法，去掉 test.*（不是给 MCP 的）和测试宿主假装没有的那一个。
-    /// ping 是协议本身的，不列。STEP 3a 是 cull.read、cull.preview、collage.state；写方法在 STEP 3b 注册。
+    /// ping 是协议本身的，不列。v1 是 12 个：3 个读（cull.read、cull.preview、collage.state）和 9 个写。
     func capabilities() -> [String] {
         withState { mainMethods.keys.filter { !$0.hasPrefix("test.") && $0 != dropCapability }.sorted() }
     }
@@ -805,8 +809,9 @@ final class LiveServer: @unchecked Sendable {
         return r
     }
 
+    /// 也给写方法在等用户不忙之后再查一次（§9.4.3 第 6a 步）。
     @MainActor
-    private func expired(_ req: Request) -> Reply? {
+    func expired(_ req: Request) -> Reply? {
         let queued = LiveWire.nowMs() - req.received
         guard queued > Double(req.deadlineMs) else { return nil }
         var data: [String: Any] = ["executed": false, "queued_ms": Int(queued)]
@@ -818,7 +823,7 @@ final class LiveServer: @unchecked Sendable {
     /// → 轮到主线程时**不执行**（还没开始的写不会生效，读也不白算）。回复写不出去，只记一笔给 test.state 看。
     /// 和 op_id 重发不冲突：连接断了而请求还没开始，app 就没做，重发时照常做。
     @MainActor
-    private func clientGone(_ req: Request) -> Reply? {
+    func clientGone(_ req: Request) -> Reply? {
         guard req.clientGone.isSet else { return nil }
         bump("skipped_client_gone")
         return .failure("client_gone", "客户端已经断开，没有执行", ["executed": false])
@@ -828,12 +833,23 @@ final class LiveServer: @unchecked Sendable {
     private func replayed(_ dict: [String: Any]) -> Reply {
         var r = dict
         r["replayed"] = true
+        if var live = r["live"] as? [String: Any] {
+            live["replayed"] = true
+            r["live"] = live
+        }
         return .result(r)
     }
 
+    /// 缓存的结果不带预览图（STEP 2 审查：256 个拼图写的结果各带一张几百 KB 的 base64，会在用户的 app 里常驻上百 MB）。
+    /// 重放时没有图，--mcp 那边加一句「要看现在的画面调 collage_get_state」。
     @MainActor
     private func remember(_ op: String, _ dict: [String: Any]) {
-        opCache[op] = dict
+        var slim = dict
+        if slim.removeValue(forKey: "preview_jpeg_b64") != nil {
+            for k in ["preview_width", "preview_height", "preview_bytes"] { slim[k] = nil }
+            slim["preview_omitted"] = true
+        }
+        opCache[op] = slim
         opOrder.append(op)
         if opOrder.count > 256 { opCache[opOrder.removeFirst()] = nil }
     }
@@ -896,6 +912,12 @@ final class LiveServer: @unchecked Sendable {
         return (shown.count, "visible")
     }
 
+    /// LiveHandlers 的订阅跟着桥活（attach 里先注册方法、再 observe，所以 observe 是往里加，不是换掉）。
+    @MainActor
+    func retain(_ subscription: AnyCancellable) {
+        observers.append(subscription)
+    }
+
     @MainActor
     private func observe(_ model: AppModel) {
         let batch = model.batch
@@ -907,7 +929,7 @@ final class LiveServer: @unchecked Sendable {
             batch.$progressText.map { _ in () }.eraseToAnyPublisher(),
         ]
         // receive(on:) 不能省：@Published 在赋值之前就发，回调里直接读拿到的还是旧值。
-        observers = changes.map { change in
+        observers += changes.map { change in
             change.receive(on: DispatchQueue.main).sink { [weak self] _ in
                 MainActor.assumeIsolated { self?.refreshSnapshot() }
             }

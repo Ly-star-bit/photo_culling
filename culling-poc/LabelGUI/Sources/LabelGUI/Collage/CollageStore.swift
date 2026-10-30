@@ -46,6 +46,11 @@ final class CollageStore: ObservableObject {
     }
     /// 双击进入的裁切模式：拖动平移、捏合/滑杆缩放。
     @Published var cropEditing = false
+    /// 正在连续编辑（拖缝、拖字、拖图层）：beginContinuousEdit +1、endContinuousEdit −1，最低 0。
+    /// 实时桥据此等用户松手再落 AI 的改动（§9.6b 的 continuous_edit）；以前「正在拖」没有任何可查的状态。
+    @Published private(set) var continuousEditDepth = 0
+    /// 画布上正在拖动 / 捏合（CollageCanvasView 写，实时桥读，§9.6b 的 dragging）。不发布：界面不跟着它重画。
+    var liveCanvasDragging = false
     @Published var showGuides = true
 
     // MARK: - 备选版式
@@ -63,6 +68,9 @@ final class CollageStore: ObservableObject {
     private var solveGeneration = 0
     /// 每次换场次换一个：后台任务（导入、编排、求解）回来时场次变了就丢弃结果。
     private var sessionToken = UUID()
+    /// 只有测试宿主（--live-host 的 test.delay_next）会设：下一次一键成套算完以后、落地之前多等几秒，
+    /// 好在这期间模拟用户切场次 / 改版式（§9.8.2 第 25 条）。GUI 和命令行永远是 0。
+    var testKitLandingDelay: Double = 0
     /// 进入裁切模式时不急着记撤销：第一次真的挪动/缩放才记，双击一下再 Esc 不留空步。
     private var cropUndoPending = false
 
@@ -117,7 +125,8 @@ final class CollageStore: ObservableObject {
     /// 几样改动合成一步撤销的期间（见 asOneUndoStep）：开头已经记过一步，这期间的 pushUndo 都不再记。
     private var undoGroupOpen = false
     /// 真记进撤销栈的次数（合并掉的、组里压住的不算）：不另记撤销的求解落下来时，看发起之后又记过几步。
-    private var undoPushes = 0
+    /// 只增不减（栈满丢掉最旧的也不回退）：实时桥的 app_undo 拿它判断 AI 那一步之后用户又改过没有（§9.3）。
+    private(set) var undoPushes = 0
     @Published private(set) var canUndo = false
     @Published private(set) var canRedo = false
     /// 撤销栈深度（命令行脚本核对「一次操作记一步」用）。
@@ -357,6 +366,8 @@ final class CollageStore: ObservableObject {
         undoStack.removeAll()
         redoStack.removeAll()
         updateUndoFlags()
+        // 换了工程：上一个工程里没收尾的拖动（手势被系统取消、没走到 endContinuousEdit）不再算「正在拖」
+        continuousEditDepth = 0
         selection = nil
         selectedItem = nil
         clearAlternatives()
@@ -1256,11 +1267,35 @@ final class CollageStore: ObservableObject {
     /// 还没做的（生成返回 nil）只提示，不动工程、不记撤销。`then`：落下来（或作废、没生成）之后（命令行等它）。
     /// coverStep：「换封面」（出一期）在主图候选里往后轮几张（0 = 照常出一套）。
     func applyKit(_ kit: CollageKitID, coverStep: Int = 0, then: (() -> Void)? = nil) {
+        let done: ((KitOutcome) -> Void)? = then.map { t in { (_: KitOutcome) in t() } }
+        applyKit(kit, coverStep: coverStep, outcome: done)
+    }
+
+    /// 一键成套的结局（实时桥要分清，DESIGN §10.6「STEP 1 不做了」第 1 条）：只看撤销计数分不出「被作废」和
+    /// 「没出来 / 没变化」（都是 +0）。
+    enum KitOutcome: Equatable {
+        /// 落下来了（一步撤销）。
+        case landed
+        /// 和现在的一样，工程没动。
+        case unchanged
+        /// 托盘（和这一场）里没有能用的照片，没出来。
+        case notGenerated
+        /// 算的时候被作废：用户做了会整页换掉的操作，或者换了场次。没落地、没记撤销。
+        case superseded(SupersededBy)
+    }
+
+    enum SupersededBy: Equatable {
+        case userEdit, sessionSwitched
+    }
+
+    /// 带结局的版本：`outcome` 在每种结局里恰好调一次（托盘空时直接调，其余在落地任务的 defer 里）。
+    /// 界面和命令行走上面 `then:` 那个，调的是同一份实现。
+    func applyKit(_ kit: CollageKitID, coverStep: Int = 0, outcome: ((KitOutcome) -> Void)?) {
         let items = batch?.items ?? []
         let facts = batch.map { CollageBridge.Facts(batch: $0) } ?? CollageBridge.Facts()
         guard !project.photos.isEmpty || !items.isEmpty else {
             setNotice("托盘是空的：先带照片进来")
-            then?()
+            outcome?(.notGenerated)
             return
         }
         cancelPendingSolve()
@@ -1270,14 +1305,21 @@ final class CollageStore: ObservableObject {
         let busy = "成套「\(kit.name)」…"
         busyText = busy
         let ticket = beginSolve()
+        // 测试宿主的 test.delay_next：这一次算完以后、落地之前多等一会儿（GUI 从不设，永远是 0）
+        let delay = testKitLandingDelay
+        testKitLandingDelay = 0
         Task { [weak self] in
             let result = await Task.detached(priority: .userInitiated) { kit.generate(context) }.value
-            defer { then?() }
+            if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+            var end = KitOutcome.superseded(.sessionSwitched)
+            defer { outcome?(end) }
             guard let self, self.sessionToken == ticket.session else { return }
             if self.busyText == busy { self.busyText = nil }
+            end = .superseded(.userEdit)
             guard ticket.generation == self.solveGeneration else { return }
             self.isSolving = false
             guard let generated = result, !generated.pages.isEmpty else {
+                end = .notGenerated
                 // 三套都做好了：没出来是因为没有能用的照片（整本婚礼相册只编托盘里的，不从这一场借）。
                 let why = kit == .weddingAlbum && self.project.photos.isEmpty
                     ? "按托盘里的照片编：托盘是空的，先带精选进来" : "托盘（和这一场）里没有能用的照片"
@@ -1286,9 +1328,11 @@ final class CollageStore: ObservableObject {
             }
             // 什么都没变（「换封面」没有别的主图候选、同一套又出一遍）：不记撤销，说一声。
             guard generated != self.project else {
+                end = .unchanged
                 self.setNotice(coverStep > 0 ? "「换封面」：没有别的主图候选，封面没换" : "「\(kit.name)」：和现在的一样，工程没动")
                 return
             }
+            end = .landed
             self.pushUndo()
             if generated.watermark != self.project.watermark { self.watermarkRevision += 1 }
             self.project = generated
@@ -1548,6 +1592,7 @@ final class CollageStore: ObservableObject {
     func beginContinuousEdit() {
         cancelSolveIfRunning()
         pushUndo(coalesce: false)
+        continuousEditDepth += 1
     }
 
     func setRatio(_ ratio: Double, at path: [Int]) {
@@ -1558,6 +1603,7 @@ final class CollageStore: ObservableObject {
     }
 
     func endContinuousEdit() {
+        continuousEditDepth = max(0, continuousEditDepth - 1)
         commitEdit()
     }
 
@@ -3576,6 +3622,119 @@ final class CollageStore: ObservableObject {
             try encoder.encode(state).write(to: statePath, options: .atomic)
         } catch {
             lastError = "拼图设置保存失败: \(error.localizedDescription)"
+        }
+    }
+}
+
+// MARK: - 实时桥（DESIGN §9.3、§9.5.1、§10.6「STEP 1 不做了」）：AI 经桥调的几样，界面和命令行都不走这里
+
+extension CollageStore {
+    /// 编辑指纹（§9.3 第二轮改）：工程的 JSON（键排序）取 SHA-1 前 12 位，但托盘照片只留按顺序的 id —— 判决、
+    /// 亮度、黑白这些后台自己会刷新的字段不算（改判后刷新托盘、路人信息算完都不让 if_digest 失效）。
+    /// collage_get_state 的 digest、写工具的 digest_before / digest_after、externalEdit 的 changed 都用它；
+    /// 命令行的 digest op（整个工程，CollageWatermarkCLI.digest）不变。
+    var editDigest: String { Self.editDigest(project) }
+
+    nonisolated static func editDigest(_ project: CollageProject) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(project),
+              var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return "?" }
+        object["photos"] = project.photos.map(\.id)
+        guard let reduced = MCPJSON.data(object) else { return "?" }
+        return Insecure.SHA1.hash(data: reduced).map { String(format: "%02x", $0) }.joined().prefix(12).description
+    }
+
+    /// 桥的一个请求 = 恰好一步撤销（§9.5.1）：不并进用户刚才那一下（0.6 s 内的连续调整），用户下一下也不并进来。
+    /// body 里同步发生的 pushUndo 只记开头那一步；什么都没变就把空步撤掉（undoPushes 照样 +1，不回退）。
+    /// 返回编辑指纹变没变。
+    @discardableResult
+    func externalEdit(_ body: () -> Void) -> Bool {
+        let before = editDigest
+        lastPushCoalesced = false
+        lastUndoPush = .distantPast
+        asOneUndoStep(body)
+        lastPushCoalesced = false
+        lastUndoPush = .distantPast
+        return editDigest != before
+    }
+
+    /// 成套的结局，连同落地那一刻的撤销计数、深度和提示：在 outcome 回调里当场取。回调恢复 continuation 以后，
+    /// 桥那边要等主线程的下一拍才接着跑，这中间用户按的键（改标题、⌘Z）会先落下来；那时再读，就会把用户那一步
+    /// 记成 AI 的，之后 app_undo 撤掉的是用户的那一步。
+    struct KitLanding {
+        let outcome: KitOutcome
+        let undoPushes: Int
+        let undoDepth: Int
+        let notice: String?
+    }
+
+    /// 一键成套 / 换封面的桥版本：异步的不包 asOneUndoStep（它们落地时自己记一步，§9.5.1），发起前、落地后各复位一次
+    /// 合并状态，等 outcome 回来。
+    func externalKit(_ kit: CollageKitID, coverStep: Int = 0) async -> KitLanding {
+        lastPushCoalesced = false
+        lastUndoPush = .distantPast
+        let landing = await withCheckedContinuation { (cont: CheckedContinuation<KitLanding, Never>) in
+            applyKit(kit, coverStep: coverStep, outcome: { [unowned self] o in
+                let now = KitLanding(outcome: o, undoPushes: undoPushes, undoDepth: undoDepth, notice: notice)
+                cont.resume(returning: now)
+            })
+        }
+        lastPushCoalesced = false
+        lastUndoPush = .distantPast
+        return landing
+    }
+
+    /// 路人信息算完没有（命令行同名的是 CollageOpsScript.run 里的局部函数，CollageCLI.swift 那份不动）：主线程上
+    /// 每 20 ms 看一次 hintsPending，算完回 true，到时间回 false。成套、换封面发起之前等它：不等的话挑封面用的是
+    /// 「算到第几张」的路人信息，结果跟着机器快慢变。
+    func hintsSettled(timeout: Double) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while hintsPending {
+            if Date() >= deadline { return false }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return true
+    }
+
+    /// 预览重渲完没有（结果里要带「用户此刻屏幕上的拼图」，§9.4.3 第 12 步）：等后台渲染任务跑完、没有新的脏标记。
+    func previewSettled(timeout: Double) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while renderTask != nil || renderDirty {
+            if Date() >= deadline { return false }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return true
+    }
+
+    /// 按名字找模板：先全名、再内置分类名（套这个分类的第一个）、再名字里含这几个字的。
+    /// 和 --collage-ops 的 applytpl 同一个规则，照抄 CollageCLI.swift 里 `case "applytpl"` 那三行（那边不动）。
+    func template(named name: String) -> CollageTemplate? {
+        allTemplates.first(where: { $0.name == name })
+            ?? allTemplates.first(where: { $0.builtin && $0.category == name })
+            ?? allTemplates.first(where: { $0.name.contains(name) })
+    }
+
+    /// 改某一格第 index 个字块的第一行（照 CollageCLI.swift 的 overlaytext op）。格子或字块不在 = false，什么都不动。
+    /// 调用方自己包 externalEdit（和标题、刊头一起算一步）。
+    @discardableResult
+    func setOverlayFirstLine(_ text: String, at path: [Int], index: Int) -> Bool {
+        guard let cell = root?.node(at: path)?.cell, cell.overlays.indices.contains(index) else { return false }
+        var t = cell.overlays[index].text
+        if !t.lines.isEmpty { t.lines[0].text = text }
+        updateText(t, target: .overlay(path, cell.photoID, page?.id, index))
+        return true
+    }
+
+    /// 换样式 / 色调 / 强度（照 CollageCLI.swift 的 style、look、strength 三个 op）：预设整套换（不合并），
+    /// 色调和强度在它上面再改。调用方自己包 externalEdit。
+    func setStyleParts(preset: String?, look: CollageLook?, strength: Double?) {
+        if let preset { setStyle(CollageStyles.preset(preset), coalesce: false) }
+        if look != nil || strength != nil {
+            var st = project.style
+            if let look { st.look = look }
+            if let strength { st.lookStrength = strength }
+            setStyle(st)
         }
     }
 }

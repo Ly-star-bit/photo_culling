@@ -307,6 +307,61 @@ enum LiveHost {
             model.batch.items[idx].captureSubsec = .nan
             return .result(["id": id, "fields": ["face_luma", "frame_luma", "frame_luma_p99", "capture_subsec"]])
         }
+        live.register("test.set_busy", kind: .read) { req in
+            // 模拟 §9.6b 的忙信号 ms 毫秒（ms 0 = 清掉）。dragging 走真的 store 字段（GUI 里 CollageCanvasView 写的就是它），
+            // 别的（按着鼠标、打字、对话框……要真窗口才有的）记在 LiveInteraction 里
+            let names = req.params["reasons"] as? [String] ?? []
+            let reasons = names.compactMap(LiveInteraction.Reason.init(rawValue:))
+            guard !names.isEmpty, reasons.count == names.count, let ms = LiveWire.int(req.params["ms"]), (0...60_000).contains(ms) else {
+                let all = LiveInteraction.Reason.allCases.map(\.rawValue).joined(separator: "|")
+                return .failure("invalid_argument", "test.set_busy 要 {reasons: [\(all)], ms: 0–60000}", nil)
+            }
+            if reasons.contains(.dragging) {
+                model.collage.liveCanvasDragging = ms > 0
+                if ms > 0 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { model.collage.liveCanvasDragging = false }
+                }
+            }
+            model.interaction.simulate(reasons.filter { $0 != .dragging }, ms: ms)
+            return .result(["reasons": names, "ms": ms])
+        }
+        live.register("test.user_edit", kind: .read) { req in
+            // 模拟用户在界面上的一次编辑（和界面同一条路），给 undo_not_ours / already_undone_by_user / superseded 用例用
+            let collage = model.collage
+            switch req.params["op"] as? String {
+            case "setTitle":
+                collage.setTitle(req.params["text"] as? String ?? "用户改的")
+            case "undo":
+                collage.undo()
+            case "redo":
+                collage.redo()
+            case "applyTemplate":
+                guard let name = req.params["template"] as? String, let t = collage.template(named: name) else {
+                    return .failure("invalid_argument", "applyTemplate 要 template（模板名）", nil)
+                }
+                collage.applyTemplate(t)
+            case "verdict":
+                let names: [String: Verdict?] = ["pick": .pick, "usable": .usable, "reject": .reject, "auto": nil]
+                guard let id = req.params["id"] as? String, model.batch.item(withID: id) != nil,
+                      let raw = req.params["verdict"] as? String, let v = names[raw] else {
+                    return .failure("invalid_argument", "verdict 要 {id, verdict: pick|usable|reject|auto}", nil)
+                }
+                model.batch.setOverride(id, v)
+            case "verdictUndo":
+                model.batch.undoLastOverride()
+            default:
+                return .failure("invalid_argument", "op 只认 setTitle|undo|redo|applyTemplate|verdict|verdictUndo", nil)
+            }
+            return .result(["op": req.params["op"] ?? NSNull()])
+        }
+        live.register("test.delay_next", kind: .read) { req in
+            // 下一次一键成套 / 换封面算完以后、落地之前多等 ms（给 kill -9、途中切场次 / 改版式的用例用）
+            guard let ms = LiveWire.int(req.params["ms"]), (0...30_000).contains(ms) else {
+                return .failure("invalid_argument", "test.delay_next 要 {ms: 0–30000}", nil)
+            }
+            model.collage.testKitLandingDelay = Double(ms) / 1_000
+            return .result(["ms": ms])
+        }
         live.register("test.quit", kind: .read) { _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(200)) {
                 live.shutdown()
@@ -341,9 +396,48 @@ enum LiveHost {
         let opens = LiveImages.originalOpens.snapshot
         out["original_opens"] = ["count": opens.count, "recent": opens.recent]
         // 拼图的两个指纹（§9.8.1 第二轮加）：编辑指纹和 collage_get_state 的 digest 是同一个函数；整工程的只给测试
-        out["edit_digest"] = LiveHandlers.editDigest(model.collage.project)
-        out["full_digest"] = CollageWatermarkCLI.digest(model.collage.project)
-        out["hints_pending"] = model.collage.hintsPending
+        let collage = model.collage
+        out["edit_digest"] = collage.editDigest
+        out["full_digest"] = CollageWatermarkCLI.digest(collage.project)
+        out["hints_pending"] = collage.hintsPending
+        // STEP 3b：两条撤销栈（深度、只增不减的 push 计数）、判决的样子、拼图的几样、提示、忙信号、AI 的操作记录
+        let batch = model.batch
+        out["verdict_undo"] = ["depth": batch.overrideUndoDepth, "pushes": batch.overrideUndoPushes]
+        var cu: [String: Any] = ["depth": collage.undoDepth, "pushes": collage.undoPushes]
+        cu["can_redo"] = collage.canRedo
+        out["collage_undo"] = cu
+        let overrides = batch.overrides.mapValues { MCPReadModel.verdictName($0) }
+        out["overrides"] = overrides
+        out["manual"] = batch.overrides.keys.filter { batch.isManual($0) }.sorted()
+        out["verdict_digest"] = verdictDigest(batch)
+        var c: [String: Any] = ["pages": collage.project.pages.count, "title": collage.project.title]
+        c["masthead"] = collage.project.masthead
+        c["issue"] = collage.project.issue
+        c["subtitle"] = collage.project.subtitle
+        c["tray"] = collage.project.photos.count
+        c["cover_id"] = CollageStyleFashion.coverPhotoID(collage.project) ?? NSNull()
+        c["look"] = collage.project.style.look.rawValue
+        c["style"] = LiveHandlers.styleKey(collage.project.style) ?? NSNull()
+        c["notice"] = collage.notice ?? NSNull()
+        c["continuous_edit_depth"] = collage.continuousEditDepth
+        c["canvas_dragging"] = collage.liveCanvasDragging
+        out["collage"] = c
+        // 盘上的 collage.json 解出来的编辑指纹：拼图写、app_undo 回复到达时应该已经和内存里的一样（flushSaves，§9.5.3）
+        let saved = batch.sessionDir.appendingPathComponent("collage.json", isDirectory: false)
+        if let data = try? Data(contentsOf: saved), let p = try? JSONDecoder().decode(CollageProject.self, from: data) {
+            out["disk_edit_digest"] = CollageStore.editDigest(p)
+        } else {
+            out["disk_edit_digest"] = NSNull()
+        }
+        out["external_notice"] = batch.externalNotice ?? NSNull()
+        out["view_request"] = batch.viewRequest.map { ["ids": $0.ids, "select": $0.select] as [String: Any] } ?? NSNull()
+        out["view_applied"] = batch.viewApplied.map { v -> [String: Any] in
+            ["selected": v.selected, "focus": v.focus ?? NSNull(), "hidden": v.hidden]
+        } ?? NSNull()
+        let ui = batch.liveUI
+        out["live_ui"] = ["sheet": ui.sheet, "pick": ui.pick, "viewing": ui.viewing]
+        out["busy_reasons"] = model.interaction.allReasons(model)
+        out["ai_log"] = aiLogState(model.aiLog)
         // 宿主从不变成前台 / key（§10.7 第 39 条之外的另一半证据）：只读 NSApp 的状态，不调任何会改它的方法
         var app: [String: Any] = ["active": NSApp.isActive, "key_window": NSApp.keyWindow != nil]
         app["main_window"] = NSApp.mainWindow != nil
@@ -352,6 +446,26 @@ enum LiveHost {
         app["host_window_visible"] = window?.isVisible ?? false
         app["host_window_key"] = window?.isKeyWindow ?? false
         out["nsapp"] = app
+        return out
+    }
+
+    /// 判决的样子（override 和「接受推荐」钉的，按 id 排好）取 SHA-1：撤销以后应该和改判之前逐字节相同。
+    @MainActor
+    private static func verdictDigest(_ batch: BatchStore) -> String {
+        let rows = batch.overrides.keys.sorted().map { id in
+            "\(id)=\(MCPReadModel.verdictName(batch.overrides[id] ?? .usable))\(batch.isManual(id) ? "" : "*")"
+        }
+        return Insecure.SHA1.hash(data: Data(rows.joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    @MainActor
+    private static func aiLogState(_ log: LiveAILog) -> [String: Any] {
+        var out: [String: Any] = ["session_epoch": log.sessionEpoch, "opened": log.opened]
+        for t in [LiveAILog.Target.verdicts, .collage] {
+            out[t.rawValue] = (log.entries[t] ?? []).map { e -> [String: Any] in
+                ["op_id": e.opID, "tool": e.tool, "undone": e.undone, "epoch": e.epoch, "depth_after": e.depthAfter]
+            }
+        }
         return out
     }
 

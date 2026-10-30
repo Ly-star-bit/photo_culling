@@ -3,10 +3,11 @@ import Foundation
 /// 要 app 的 15 个工具怎么路由（DESIGN §10.2，取代 §9.1 的三列表）：每次调用探一次（LiveClient.probe，不缓存），
 /// 只在 `live`、方法在 hello 的 capabilities 里、场次对得上时转给 app；其余情况一律回那个状态的错误码。服务器绝不启动 app。
 /// 顺序：探测 → 方法在不在 → 参数校验（和 app 同一份 MCPArgs；app 没开时不管参数，一律 app_not_running）→ 场次核对 → 转发。
-/// STEP 3a 接上 6 个读工具：cull.read（overview / photos / get / groups，结果就是 app 里 MCPReadModel 产出的 JSON，这里只补
+/// 6 个读工具（STEP 3a）：cull.read（overview / photos / get / groups，结果就是 app 里 MCPReadModel 产出的 JSON，这里只补
 /// warnings）、cull.preview、collage.state。图片字节在这里只核对（FF D8 开头、长度对得上）、存进输出目录（MCPOutput），
-/// 再原样作为 image 块转发 —— 这个进程不解码任何图片（§10.0 第 2 条）。9 个写工具在 STEP 3b 接上（app 这一步也不注册它们，
-/// 所以 live 时回 app_version_mismatch / app_too_old，正是 §10.2「方法不在 capabilities 里」那一行）。
+/// 再原样作为 image 块转发 —— 这个进程不解码任何图片（§10.0 第 2 条）。
+/// 9 个写工具（STEP 3b）：每次调用一个 op_id（模型给了就用它的），断线 / 超时同一个 op_id 自动重发一次（LiveClient.write），
+/// 还不行回 app_outcome_unknown（带 op_id）；拼图写的结果里带 app 当前画面的预览，和 collage_get_state 一样存一份、内联转发。
 enum MCPLiveTools {
     enum SessionRule {
         /// 必填，必须是 app 当前打开的那一场（读工具、改判、定位、5 个拼图写工具）。
@@ -43,8 +44,14 @@ enum MCPLiveTools {
         "app_undo": Route(method: "undo", write: true, session: .optional, deadlineMs: 10_000),
     ]
 
-    /// 这一步真的会转发的桥方法；写方法在 STEP 3b 接上（app 这一步也不会在 capabilities 里报它们）。
-    static let wired: Set<String> = ["cull.read", "cull.preview", "collage.state"]
+    /// 会转发的桥方法（§10.4 的 12 个；app 的 capabilities 里没有的回 app_version_mismatch / app_too_old）。
+    static let wired: Set<String> = ["cull.read", "cull.preview", "collage.state", "session.open", "cull.set_verdicts", "cull.show",
+                                     "collage.apply_template", "collage.run_kit", "collage.next_cover", "collage.set_text",
+                                     "collage.set_style", "undo"]
+
+    /// 结果里带拼图预览的写（和 collage_get_state 一样处理：存一份、内联）。
+    static let collageWrites: Set<String> = ["collage.apply_template", "collage.run_kit", "collage.next_cover", "collage.set_text",
+                                             "collage.set_style", "undo"]
 
     /// cull.read 的四个工具 → kind（§10.4）。
     static let readKinds: [String: String] = [
@@ -75,7 +82,7 @@ enum MCPLiveTools {
             return .error("app_version_mismatch", "开着的选片工具版本较旧，没有 \(name) 要的功能（\(route.method)）。",
                           hint: "请用户更新选片工具，或者退出再重新打开", data: ["reason": "app_too_old", "method": route.method])
         }
-        // 读工具的参数（和 app 同一份 MCPArgs，§9.2.3）：app 那一侧还会再查一遍
+        // 参数（和 app 同一份 MCPArgs，§9.2.3）：app 那一侧还会再查一遍
         if MCPArgs.specs[name] != nil, let p = MCPArgs.check(name, call.arguments, deadlineCap: MCPConfig.deadlineCap) {
             probe.closeConnection()
             return .error("invalid_argument", p.message, hint: p.hint.isEmpty ? "参数照 tools/list 里这个工具的 inputSchema 写" : p.hint)
@@ -93,6 +100,9 @@ enum MCPLiveTools {
         guard wired.contains(route.method) else {
             probe.closeConnection()
             return .error("internal", "\(name) 的实时部分还没接上。", hint: "这是服务器的 bug：MCP 和 app 应该是同一次构建")
+        }
+        if route.write {
+            return write(name, route, call, probe: probe, sessionKey: sessionKey)
         }
         var deadlineMs = route.deadlineMs
         switch route.method {
@@ -129,6 +139,84 @@ enum MCPLiveTools {
             return collageResult(result, inline: inline && include)
         default:
             return .json(result)
+        }
+    }
+
+    // MARK: - 写（§9.3、§10.2）
+
+    /// 写工具：参数原样转给 app（session 换成 app 认的 key；app_open_session 的 session 是要打开的那一场，原样给），
+    /// op_id / inline 不进 params（op_id 在帧上，inline 只有这一侧用）。
+    static func write(_ name: String, _ route: Route, _ call: MCPStdioServer.Call, probe: LiveClient.Probe,
+                      sessionKey: String?) -> MCPStdioServer.ToolResult {
+        var params = call.arguments
+        params["op_id"] = nil
+        params["inline"] = nil
+        params["deadline_seconds"] = nil
+        params["session"] = nil
+        if route.session == .target {
+            let raw = call.arguments["session"] as? String ?? ""
+            // 早点给错：受保护位置只按字符串判断（app 一侧是权威的那一遍，§10.4 第 4 条）；key 先在 sessions.json 里查路径。
+            // 已经是 app 当前那一场（用户自己从侧栏点开的）就不挡，交给 app 回 already_open（§9.3 先判它）
+            let open = probe.openSession
+            let openKey = open?["session"] as? String ?? ""
+            let openFolder = open?["folder"] as? String ?? ""
+            let alreadyOpen: Bool = open != nil && MCPPaths.parseSession(raw).map {
+                MCPPaths.session($0, matches: openKey, folder: openFolder, resolve: { _ in nil })
+            } == true
+            if !alreadyOpen, let folder = targetFolder(raw), ProtectedPaths.isProtected(folder) {
+                probe.closeConnection()
+                return .error("protected_location",
+                              "「\(folder)」在系统隐私保护的位置（桌面 / 文稿 / 下载 / iCloud 云盘 / 外置盘或网络卷）。让 app 为 AI 去读它可能弹出系统授权框，AI 不会替你点。",
+                              hint: "请用户自己在 app 侧栏「最近场次」里点开它", data: ["folder": folder])
+            }
+            params["session"] = raw
+        } else if let sessionKey {
+            params["session"] = sessionKey
+        }
+        var deadlineMs = route.deadlineMs
+        if let sec = call.arguments["deadline_seconds"].flatMap(MCPArgs.integer) { deadlineMs = sec * 1_000 }
+        let opID = call.arguments["op_id"] as? String ?? UUID().uuidString.lowercased()
+        let outcome: LiveClient.Outcome
+        switch LiveClient.write(probe, method: route.method, params: params, deadlineMs: deadlineMs, opID: opID, call: call) {
+        case .done(let o):
+            outcome = o
+        case .outcomeUnknown(let op):
+            // cull_show_photos 不收 op_id（§9.3：它只改选中和焦点，再调一次也一样），hint 不能叫模型带 op_id 重来
+            let takesOpID = MCPArgs.specs[name]?.props["op_id"] != nil
+            let hint = takesOpID ? "用同一个 op_id 原样再调一次同一个工具（不要换工具）；app 那边做过就会回 replayed:true"
+                                 : "这个工具只改 app 里的选中和焦点，再调一次结果一样：原样再调一次（它不收 op_id）"
+            return .error("app_outcome_unknown", "写请求发出去以后连接断了（或者超时了），不知道 app 做了没有。",
+                          hint: hint, data: ["op_id": op])
+        case .restarted(let op):
+            return .error("app_restarted", "重发时选片工具已经重启过（pid 变了），之前那一次做没做不知道。",
+                          hint: "先 collage_get_state / cull_list_photos 看现在的状态再决定", data: ["op_id": op])
+        }
+        var result: [String: Any]
+        switch unwrap(outcome, probe: probe, first: probe) {
+        case .failure(let error): return error.result
+        case .success(let r): result = r
+        }
+        if result["preview_omitted"] as? Bool == true {
+            var warnings = result["warnings"] as? [[String: Any]] ?? []
+            warnings.append(MCPStatus.warning("preview_omitted", "这是同一个 op_id 的重放（app 之前已经做过），结果里不带预览图。",
+                                              hint: "要看现在的画面调 collage_get_state"))
+            result["warnings"] = warnings
+            result["preview_omitted"] = nil
+        }
+        guard collageWrites.contains(route.method) else { return .json(result) }
+        return collageResult(result, inline: call.arguments["inline"] as? Bool ?? true)
+    }
+
+    /// app_open_session 的目标在哪个文件夹（只按字符串）：绝对路径就是它；key 在 sessions.json 里查（§10.0 第 2 条：
+    /// 数据目录里只读 sessions.json）。查不到 = nil（交给 app 判断）。
+    static func targetFolder(_ raw: String) -> String? {
+        switch MCPPaths.parseSession(raw) {
+        case .path(let p, _):
+            return p
+        case .key(let k):
+            return MCPPaths.readSessionsIndex().entries.first { $0.key == k }?.folder
+        case nil:
+            return nil
         }
     }
 
@@ -259,11 +347,15 @@ enum MCPLiveTools {
         init(_ result: MCPStdioServer.ToolResult) { self.result = result }
     }
 
-    static func sessionNotOpen(_ open: [String: Any]?) -> MCPStdioServer.ToolResult {
-        let message = open == nil ? "选片工具开着，但没有打开任何场次。" : "这一场不是选片工具当前打开的那一场。"
+    /// `app`：app 回的 data（写的时候等用户停手、用户切了场次：reason=session_switched_while_waiting、executed:false），原样带上。
+    static func sessionNotOpen(_ open: [String: Any]?, app: [String: Any]? = nil, message appMessage: String? = nil) -> MCPStdioServer.ToolResult {
+        let message = appMessage ?? (open == nil ? "选片工具开着，但没有打开任何场次。" : "这一场不是选片工具当前打开的那一场。")
+        var data = app ?? [:]
+        data["hint"] = nil
+        data["open_session"] = open ?? NSNull()
         return .error("session_not_open", message,
                       hint: "先 app_status 看 live.open_session；要换场次用 app_open_session（会清掉 app 里这一场的撤销记录，先问用户）",
-                      data: ["open_session": open ?? NSNull()])
+                      data: data)
     }
 
     /// 不是 live（或者重探以后不是 live）：回那个状态的错误码（§10.2；读写都一样）。
@@ -292,7 +384,9 @@ enum MCPLiveTools {
         case .failure(let code, let message, let data):
             switch code {
             case "session_not_open":
-                return .failure(ToolError(result: sessionNotOpen(data?["open_session"] as? [String: Any])))
+                let open = data?["open_session"] as? [String: Any]
+                let switched = data?["reason"] != nil
+                return .failure(ToolError(result: sessionNotOpen(open, app: data, message: switched ? message : nil)))
             case "unknown_method":
                 return .failure(ToolError(result: .error("app_version_mismatch", "开着的选片工具版本较旧，没有这个功能。",
                                                          hint: "请用户更新选片工具", data: ["reason": "app_too_old"])))

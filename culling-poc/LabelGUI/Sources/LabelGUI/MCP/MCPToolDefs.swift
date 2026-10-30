@@ -286,7 +286,7 @@ enum MCPToolDefs {
        "cell_text":{"type":"object","properties":{
          "path":{"type":"string","maxLength":8,"pattern":"^[0-9]{0,8}$","description":"格子路径，collage_get_state 的 cells[].path"},
          "index":{"type":"integer","minimum":0,"description":"这个格子里第几个字块（从 0 开始）"},
-         "text":{"type":"string","description":"新的第一行"}},
+         "text":{"type":"string","maxLength":120,"description":"新的第一行"}},
         "required":["path","index","text"],"additionalProperties":false},
        "if_digest":"$IF_DIGEST",
        "reveal":"$REVEAL",

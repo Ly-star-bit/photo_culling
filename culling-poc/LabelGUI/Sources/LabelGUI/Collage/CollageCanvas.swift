@@ -199,7 +199,14 @@ struct CollageCanvasView: View {
         .onKeyPress(characters: CharacterSet(charactersIn: "[]")) { press in
             keyRotate(press.characters)
         }
+        // 实时桥（§9.6b 的 dragging）：正在拖 / 捏合时 AI 的拼图写等用户松手。只往 store 上记，界面不变。
+        // DragMode 带关联值、不是 Equatable，只能看「有没有」
+        .onChange(of: gestureActive) { _, active in store.liveCanvasDragging = active }
+        .onDisappear { store.liveCanvasDragging = false }
     }
+
+    /// 画布上正在拖动或捏合（实时桥用）。
+    private var gestureActive: Bool { dragMode != nil || magnifyBase != nil }
 
     // MARK: - 画面
 
