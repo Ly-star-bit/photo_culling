@@ -154,6 +154,7 @@ struct CollageCanvasView: View {
     @FocusState private var focused: Bool
 
     var body: some View {
+        let _ = CollagePerf.body("画布")
         GeometryReader { geo in
             let layout = CollageCanvasLayout(canvas: store.project.canvas, in: geo.size)
             let geometry = store.geometry
@@ -569,6 +570,7 @@ struct CollageCanvasOverlay: View {
     let hoverGutter: CollageLayout.Gutter?
 
     var body: some View {
+        let _ = CollagePerf.body("叠加层")
         ZStack(alignment: .topLeading) {
             ForEach(geometry.frames, id: \.path) { frame in
                 badges(for: frame)
