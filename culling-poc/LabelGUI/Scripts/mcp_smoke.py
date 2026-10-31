@@ -87,12 +87,33 @@ failures = []
 counts = {"ok": 0}
 
 
+def gh_error(msg):
+    """GitHub Actions 上每条 FAIL 另打一行 ::error::：运行摘要页的 annotations 不登录也读得到（日志要登录才看得到）。
+    一步最多显示 10 条（GitHub 的上限），完整的列表还是在日志最后。"""
+    if ON_GITHUB:
+        esc = msg[:900].replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print(f"::error title=mcp_smoke::{esc}", flush=True)
+
+
+def gh_excepthook(kind, value, tb):
+    """脚本自己抛异常退出（不是 FAIL）时也打一行 ::error::，不然摘要页上只有一句 exit code 1。"""
+    import traceback
+    gh_error("脚本异常退出：" + "".join(traceback.format_exception_only(kind, value)).strip()
+             + " @ " + " ← ".join(f"{f.name}:{f.lineno}" for f in reversed(traceback.extract_tb(tb)[-3:])))
+    sys.__excepthook__(kind, value, tb)
+
+
+if ON_GITHUB:
+    sys.excepthook = gh_excepthook
+
+
 def check(cond, msg):
     print(("  ok   " if cond else "  FAIL ") + msg, flush=True)
     if cond:
         counts["ok"] += 1
     else:
         failures.append(msg)
+        gh_error(msg)
 
 
 def same_dir(a, b):
@@ -1574,7 +1595,11 @@ check(not extra, f"进程表里没有多出这个二进制的进程：{extra}")
 shutil.rmtree(SOCK_ROOT, ignore_errors=True)
 if not KEEP:
     shutil.rmtree(WORK, ignore_errors=True)
-print(f"\nMCP 冒烟：{counts['ok']} 条通过，{len(failures)} 条失败")
+SUMMARY = f"MCP 冒烟：{counts['ok']} 条通过，{len(failures)} 条失败"
+print("\n" + SUMMARY)
+# GitHub 上另打一行 ::notice::：::error:: 一步只显示 10 条，计数这一行走 notice 的额度，总在摘要页上
+if ON_GITHUB:
+    print("::notice title=mcp_smoke::" + SUMMARY.replace("%", "%25"), flush=True)
 if failures:
     for f in failures:
         print("  FAIL " + f)
