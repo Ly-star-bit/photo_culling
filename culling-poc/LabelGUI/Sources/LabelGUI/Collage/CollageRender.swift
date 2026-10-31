@@ -9,7 +9,9 @@ import ImageIO
 enum CollageImages {
     static let cache: NSCache<NSString, CGImage> = {
         let c = NSCache<NSString, CGImage>()
-        c.countLimit = 64
+        // 张数上限只防小图把条目塞满；真正管内存的是下面的字节上限。以前 64 张：模板库、跨页条、大图预览各要一份
+        // 不同大小的解码，三十个跨页的相册一刷新就互相挤掉，大图又得回去解原片。
+        c.countLimit = 256
         c.totalCostLimit = ThumbCache.budget(fraction: 0.04, cap: 500_000_000)
         return c
     }()

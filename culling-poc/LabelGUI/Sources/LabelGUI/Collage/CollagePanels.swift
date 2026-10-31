@@ -11,7 +11,15 @@ private func percentText(_ v: Double) -> String { String(format: "%.0f%%", v * 1
 /// 模板库：按分类分组的缩略图网格。托盘照片、样式、画布、模板变了就重渲缩略图（store 里按键去重）。
 struct CollageTemplateGallery: View {
     @ObservedObject var store: CollageStore
+    /// 缩略图在 store.thumbs 里：渲好一批刷新一次模板库，格子按 Equatable 只重画图变了的那几个。
+    @ObservedObject var thumbs: CollageThumbs
     let onDelete: (String) -> Void
+
+    init(store: CollageStore, onDelete: @escaping (String) -> Void) {
+        self.store = store
+        self.thumbs = store.thumbs
+        self.onDelete = onDelete
+    }
 
     /// 分组：内置按出场顺序，自己存的放最后。
     private var groups: [(String, [CollageTemplate])] {
@@ -69,22 +77,50 @@ struct CollageTemplateGallery: View {
             Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 86), spacing: 8)], spacing: 10) {
                 ForEach(templates, id: \.name) { t in
-                    CollageTemplateTile(store: store, template: t) { onDelete(t.name) }
+                    CollageTemplateTile(store: store, template: t, thumb: thumbs.templates[t.name],
+                                        aspect: aspect(of: t), trayEmpty: store.project.photos.isEmpty) {
+                        onDelete(t.name)
+                    }
+                    .equatable()
                 }
             }
         }
     }
-}
-
-struct CollageTemplateTile: View {
-    @ObservedObject var store: CollageStore
-    let template: CollageTemplate
-    let onDelete: () -> Void
 
     /// 相册里套模板不换画布：占位的比例也按相册跨页。
-    private var aspect: CGFloat {
+    private func aspect(of template: CollageTemplate) -> CGFloat {
         let c = (store.isAlbum ? nil : template.canvas) ?? store.project.canvas
         return CGFloat(c.width) / CGFloat(max(1, c.height))
+    }
+}
+
+/// 模板库的一格。不订阅 store（以前几十个格子每个都订阅：预览重渲一次、一张缩略图渲好，几十个格子全重算），
+/// Equatable：模板、缩略图、占位比例、托盘空不空没变就不重算。
+struct CollageTemplateTile: View, Equatable {
+    /// 只用来调方法（不订阅）。
+    let store: CollageStore
+    let template: CollageTemplate
+    let thumb: NSImage?
+    let aspect: CGFloat
+    let trayEmpty: Bool
+    let onDelete: () -> Void
+    /// 缩略图是不是同一张（== 只比这个：NSImage 不是 Sendable，nonisolated 的 == 里不碰它）。
+    private let thumbID: ObjectIdentifier?
+
+    init(store: CollageStore, template: CollageTemplate, thumb: NSImage?, aspect: CGFloat, trayEmpty: Bool,
+         onDelete: @escaping () -> Void) {
+        self.store = store
+        self.template = template
+        self.thumb = thumb
+        self.aspect = aspect
+        self.trayEmpty = trayEmpty
+        self.onDelete = onDelete
+        thumbID = thumb.map(ObjectIdentifier.init)
+    }
+
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.store === b.store && a.thumbID == b.thumbID && a.aspect == b.aspect && a.trayEmpty == b.trayEmpty
+            && a.template == b.template
     }
 
     var body: some View {
@@ -95,7 +131,7 @@ struct CollageTemplateTile: View {
             tile
         }
         .buttonStyle(.plain)
-        .disabled(store.project.photos.isEmpty)
+        .disabled(trayEmpty)
         .help(helpText)
         .contextMenu {
             if !template.builtin {
@@ -107,7 +143,7 @@ struct CollageTemplateTile: View {
     private var tile: some View {
         VStack(spacing: 3) {
             // 高度跟着比例走：相册里的缩略图是 2:1 的跨页，固定 104 高上下空出一大截。
-            thumb
+            thumbView
                 .frame(maxWidth: .infinity, maxHeight: 104)
             Text(template.name)
                 .font(.caption2)
@@ -120,13 +156,13 @@ struct CollageTemplateTile: View {
 
     private var helpText: String {
         let canvas = template.canvas.map { " · \($0.name)" } ?? ""
-        let empty = store.project.photos.isEmpty ? "（先带照片进托盘）" : ""
+        let empty = trayEmpty ? "（先带照片进托盘）" : ""
         return "\(template.name) · \(template.photoSlots) 张" + canvas + empty
     }
 
     @ViewBuilder
-    private var thumb: some View {
-        if let image = store.templateThumbs[template.name] {
+    private var thumbView: some View {
+        if let image = thumb {
             Image(nsImage: image)
                 .resizable()
                 .interpolation(.high)
@@ -144,6 +180,13 @@ struct CollageTemplateTile: View {
 
 struct CollageLookBox: View {
     @ObservedObject var store: CollageStore
+    /// 色调样张在 store.thumbs 里。
+    @ObservedObject var thumbs: CollageThumbs
+
+    init(store: CollageStore) {
+        self.store = store
+        self.thumbs = store.thumbs
+    }
 
     private func binding(_ keyPath: WritableKeyPath<CollageStyle, Double>) -> Binding<Double> {
         Binding(get: { store.project.style[keyPath: keyPath] },
@@ -298,7 +341,7 @@ struct CollageLookBox: View {
         } label: {
             VStack(spacing: 3) {
                 Group {
-                    if let image = store.lookThumbs[look] {
+                    if let image = thumbs.looks[look] {
                         Image(nsImage: image).resizable().interpolation(.high).aspectRatio(contentMode: .fill)
                     } else {
                         Rectangle().fill(Color.gray.opacity(0.2))

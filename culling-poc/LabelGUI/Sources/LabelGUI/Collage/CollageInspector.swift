@@ -497,6 +497,13 @@ struct CollageLayoutPanel: View {
 
 struct CollageStylePanel: View {
     @ObservedObject var store: CollageStore
+    /// 风格预设样张在 store.thumbs 里。
+    @ObservedObject var thumbs: CollageThumbs
+
+    init(store: CollageStore) {
+        self.store = store
+        self.thumbs = store.thumbs
+    }
 
     private let swatches: [(String, CollageColor)] = [
         ("纸白", .paper), ("纯白", .white), ("米色", .rice), ("浅灰", CollageColor(hex: 0xE6E4E0)),
@@ -552,7 +559,7 @@ struct CollageStylePanel: View {
         } label: {
             VStack(spacing: 3) {
                 Group {
-                    if let image = store.styleThumbs[preset.key] {
+                    if let image = thumbs.styles[preset.key] {
                         Image(nsImage: image).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
                     } else {
                         RoundedRectangle(cornerRadius: 2)
