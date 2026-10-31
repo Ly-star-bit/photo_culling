@@ -253,22 +253,41 @@ private struct CollageSessionWatch: View {
 
 struct CollageTray: View {
     @ObservedObject var store: CollageStore
+    /// 选中和筛选（store.tray）：只有托盘订阅。
+    @ObservedObject var tray: CollageTrayState
     let batchStore: BatchStore
     @State private var dropTargeted = false
 
+    /// 「用这几张重新排一版」最多几张（和顶栏自动排版的张数上限一样）。
+    static let relayoutLimit = 16
+
+    init(store: CollageStore, batchStore: BatchStore) {
+        self.store = store
+        self.tray = store.tray
+        self.batchStore = batchStore
+    }
+
     var body: some View {
         let _ = CollagePerf.body("托盘")
+        let usage = store.photoUsage
+        let visible = tray.visible(store.project.photos, usage: usage)
         VStack(spacing: 0) {
             CollageTrayHeader(store: store, batchStore: batchStore)
+            if !store.project.photos.isEmpty {
+                filterBar(usage: usage)
+                if !tray.selection.isEmpty { selectionBar }
+            }
             Divider()
             if store.project.photos.isEmpty {
                 emptyTray
+            } else if visible.isEmpty {
+                emptyFilter
             } else {
                 // 网格只拿自己要的值：拖缝、拖滑杆、预览重渲这些不改托盘的，整个网格（每格的悬停提示、右键菜单、
                 // 拖拽源）都跳过不重算。
                 let placeTarget = store.selection.flatMap { store.root?.node(at: $0)?.isLeaf == true ? $0 : nil }
-                CollageTrayGrid(store: store, photos: store.project.photos, used: store.usedPhotoIDs,
-                                dropped: store.albumDroppedIDs,
+                CollageTrayGrid(store: store, tray: tray, photos: visible, usage: usage,
+                                dropped: store.albumDroppedIDs, selection: tray.selection,
                                 fineArt: store.isAlbum && store.project.albumTheme == .fineArt,
                                 placeTarget: placeTarget, pagePhotoIDs: store.page?.photoIDs)
                     .equatable()
@@ -291,6 +310,51 @@ struct CollageTray: View {
             }
             return true
         }
+        // 换了筛选：看不见的不留在选中里（不然 ⌫ 会删掉看不见的照片）。
+        .onChange(of: tray.filter) { _, _ in
+            tray.prune(to: Set(tray.visible(store.project.photos, usage: store.photoUsage).map(\.id)))
+        }
+    }
+
+    /// 全部 / 未用 / 已用：先筛出没用上的再 ⌘A ⌫，就是批量清掉没用的。
+    private func filterBar(usage: [String: Int]) -> some View {
+        let used = store.project.photos.filter { usage[$0.id] != nil }.count
+        let unused = store.project.photos.count - used
+        return Picker("", selection: $tray.filter) {
+            ForEach(CollageTrayState.Filter.allCases, id: \.self) { f in
+                Text(f == .all ? f.label : f == .unused ? "\(f.label) \(unused)" : "\(f.label) \(used)").tag(f)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .controlSize(.small)
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
+        .help("只看还没上版的 / 已经上版的照片。点选：单击、⌘ 点加减、⇧ 点连选、⌘A 全选；⌫ 移除选中的")
+    }
+
+    private var selectionBar: some View {
+        let n = tray.selection.count
+        return HStack(spacing: 6) {
+            Text("已选 \(n) 张").font(.caption).foregroundStyle(.secondary).monospacedDigit()
+            Spacer()
+            Button("移除", role: .destructive) { removeSelected() }
+                .controlSize(.small)
+                .help("从托盘移除选中的 \(n) 张（⌫）：版式里用到的格子留空，⌘Z 一次撤回")
+            Button {
+                tray.clear()
+            } label: {
+                Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.plain)
+            .help("取消选择（Esc）")
+        }
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
+    }
+
+    private func removeSelected() {
+        store.removeFromTray(store.project.photos.map(\.id).filter(tray.selection.contains))
     }
 
     private var emptyTray: some View {
@@ -306,6 +370,14 @@ struct CollageTray: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
     }
+
+    private var emptyFilter: some View {
+        Text(tray.filter == .unused ? "托盘里的照片都上版了" : "还没有照片上版")
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding()
+    }
 }
 
 /// 托盘标题和「带照片」菜单：菜单里的精选、可用张数跟着批量页，只有这一行订阅 BatchStore。
@@ -314,6 +386,9 @@ private struct CollageTrayHeader: View {
     @ObservedObject var batchStore: BatchStore
 
     var body: some View {
+        let unused = store.unusedTrayIDs
+        let dropped = store.droppedTrayIDs
+        let fineArt = store.isAlbum && store.project.albumTheme == .fineArt
         HStack(spacing: 6) {
             Text("托盘").font(.headline)
             Text("\(store.project.photos.count)").foregroundStyle(.secondary).monospacedDigit()
@@ -332,6 +407,15 @@ private struct CollageTrayHeader: View {
                 Divider()
                 Button("添加文件…") { pickFiles() }
                 Divider()
+                // 拿出托盘，不碰版式（「清空托盘和版式」连版式一起清）。
+                Button("移除没用上的（\(unused.count) 张）") { store.removeFromTray(unused) }
+                    .disabled(unused.isEmpty)
+                if !store.albumDropped.isEmpty {
+                    Button(fineArt ? "移除编排拿掉的（\(dropped.count) 张）" : "移除相似拿掉的（\(dropped.count) 张）") {
+                        store.removeFromTray(dropped)
+                    }
+                    .disabled(dropped.isEmpty)
+                }
                 Button("清空托盘和版式", role: .destructive) { store.clearTray() }
                     .disabled(store.project.photos.isEmpty)
             } label: {
@@ -339,7 +423,7 @@ private struct CollageTrayHeader: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .help("从批量页带精选进来，或添加外部照片（也可以直接把文件拖到这里）")
+            .help("从批量页带精选进来，或添加外部照片（也可以直接把文件拖到这里）；也在这里移除没用上的")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -354,58 +438,112 @@ private struct CollageTrayHeader: View {
     }
 }
 
-/// 托盘的照片网格。Equatable：只有照片、用过没有、相似角标、右键菜单要用的两样变了才重算。
+/// 托盘的照片网格。Equatable：只有显示的照片、上了几次、相似角标、选中、右键菜单要用的两样变了才重算。
+/// 点选：单击只选这一张、⌘ 点加减、⇧ 点从上一次点的那张连到这张；点空白处取消；⌘A 全选显示的；⌫ 移除选中的；Esc 取消。
 private struct CollageTrayGrid: View, Equatable {
-    /// 只用来调方法（不订阅）。
+    /// 只用来调方法（不订阅；选中由外面的 CollageTray 订阅了传进来）。
     let store: CollageStore
+    let tray: CollageTrayState
+    /// 按筛选显示的照片（带进来的顺序）。
     let photos: [CollagePhotoRef]
-    let used: Set<String>
+    let usage: [String: Int]
     let dropped: Set<String>
+    let selection: Set<String>
     let fineArt: Bool
     /// 右键「放进选中的格子」：画布上选中的是一格时它的路径。
     let placeTarget: [Int]?
     /// 右键「加进当前版（重排）」：当前页的照片（没有页 = nil）。
     let pagePhotoIDs: [String]?
+    @FocusState private var focused: Bool
 
     private let columns = [GridItem(.adaptive(minimum: 64, maximum: 96), spacing: 6)]
 
     nonisolated static func == (a: Self, b: Self) -> Bool {
-        a.store === b.store && a.photos == b.photos && a.used == b.used && a.dropped == b.dropped
-            && a.fineArt == b.fineArt && a.placeTarget == b.placeTarget && a.pagePhotoIDs == b.pagePhotoIDs
+        a.store === b.store && a.tray === b.tray && a.photos == b.photos && a.usage == b.usage
+            && a.dropped == b.dropped && a.selection == b.selection && a.fineArt == b.fineArt
+            && a.placeTarget == b.placeTarget && a.pagePhotoIDs == b.pagePhotoIDs
     }
 
     var body: some View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 6) {
                 ForEach(photos) { photo in
-                    CollageTrayItem(photo: photo, used: used.contains(photo.id),
-                                    dropped: dropped.contains(photo.id), fineArt: fineArt)
+                    CollageTrayItem(photo: photo, uses: usage[photo.id] ?? 0, dropped: dropped.contains(photo.id),
+                                    selected: selection.contains(photo.id), fineArt: fineArt)
+                        .onTapGesture { click(photo.id) }
                         .onDrag { NSItemProvider(object: photo.id as NSString) }
                         .contextMenu { menu(for: photo) }
                 }
             }
             .padding(8)
         }
+        // 点在照片之间、下面的空白：取消选择（点在照片上由照片自己的手势先接）。
+        .contentShape(Rectangle())
+        .onTapGesture {
+            focused = true
+            tray.clear()
+        }
+        .focusable()
+        .focusEffectDisabled()
+        .focused($focused)
+        .onDeleteCommand { removeSelected() }
+        .onExitCommand { tray.clear() }
+        .onCommand(#selector(NSResponder.selectAll(_:))) { tray.selectAll(photos.map(\.id)) }
+    }
+
+    private func click(_ id: String) {
+        focused = true
+        let flags = NSEvent.modifierFlags
+        tray.click(id, command: flags.contains(.command), shift: flags.contains(.shift), order: photos.map(\.id))
+    }
+
+    /// 选中的（按显示顺序）。
+    private var selectedIDs: [String] { photos.map(\.id).filter(selection.contains) }
+
+    private func removeSelected() {
+        let ids = selectedIDs
+        if !ids.isEmpty { store.removeFromTray(ids) }
     }
 
     @ViewBuilder
     private func menu(for photo: CollagePhotoRef) -> some View {
-        if let path = placeTarget {
-            Button("放进选中的格子") { store.place(photoID: photo.id, at: path, edge: nil) }
+        // 右键点在多选里的一张：对整批；点在没选的那张上：只对它（和以前一样）。
+        if selection.count > 1, selection.contains(photo.id) {
+            let ids = selectedIDs
+            Button(ids.count > CollageTray.relayoutLimit ? "用这 \(ids.count) 张重新排一版（最多 \(CollageTray.relayoutLimit) 张）"
+                                                          : "用这 \(ids.count) 张重新排一版") {
+                store.relayout(photoIDs: ids)
+            }
+            .disabled(ids.count > CollageTray.relayoutLimit)
+            if let page = pagePhotoIDs {
+                let extra = ids.filter { !page.contains($0) }
+                if !extra.isEmpty {
+                    Button("加进当前版（重排，\(extra.count) 张）") { store.relayout(photoIDs: page + extra) }
+                        .disabled(page.count + extra.count > CollageTray.relayoutLimit)
+                }
+            }
+            Divider()
+            Button("从托盘移除这 \(ids.count) 张", role: .destructive) { store.removeFromTray(ids) }
+        } else {
+            if let path = placeTarget {
+                Button("放进选中的格子") { store.place(photoID: photo.id, at: path, edge: nil) }
+            }
+            Button("只用这张重新排一版") { store.relayout(photoIDs: [photo.id]) }
+            if let ids = pagePhotoIDs, !ids.contains(photo.id) {
+                Button("加进当前版（重排）") { store.relayout(photoIDs: ids + [photo.id]) }
+            }
+            Divider()
+            Button("从托盘移除", role: .destructive) { store.removeFromTray(photo.id) }
         }
-        Button("只用这张重新排一版") { store.relayout(photoIDs: [photo.id]) }
-        if let ids = pagePhotoIDs, !ids.contains(photo.id) {
-            Button("加进当前版（重排）") { store.relayout(photoIDs: ids + [photo.id]) }
-        }
-        Divider()
-        Button("从托盘移除", role: .destructive) { store.removeFromTray(photo.id) }
     }
 }
 
 struct CollageTrayItem: View {
     let photo: CollagePhotoRef
-    let used: Bool
+    /// 上了几次（所有页的格子和图层加起来）：1 次打勾，多次标次数。
+    let uses: Int
     let dropped: Bool
+    var selected = false
     /// 婚礼 fine-art 编排拿掉的不全是「相似」（同一场只留精选拿掉的更多）：角标写「拿掉」。
     var fineArt = false
 
@@ -416,8 +554,16 @@ struct CollageTrayItem: View {
                 .aspectRatio(1, contentMode: .fill)
                 .frame(minWidth: 60, minHeight: 60)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
-                .opacity(used ? 0.45 : 1)
-            if used {
+                .opacity(uses > 0 ? 0.45 : 1)
+            if uses > 1 {
+                Text("\(uses)")
+                    .font(.system(size: 10, weight: .bold))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+                    .frame(minWidth: 16, minHeight: 16)
+                    .background(Color.accentColor, in: Capsule())
+                    .padding(3)
+            } else if uses == 1 {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.white, Color.accentColor)
                     .padding(3)
@@ -440,7 +586,14 @@ struct CollageTrayItem: View {
                     .padding(3)
             }
         }
-        .help(photo.id + (photo.isPick ? " · 精选" : "") + (used ? " · 已用" : "") + (dropped ? (fineArt ? " · fine-art 编排没上（同一场只留精选 / 相似）" : " · 相册去重拿掉的") : ""))
+        .overlay {
+            if selected {
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(Color.accentColor, lineWidth: 3)
+            }
+        }
+        .help(photo.id + (photo.isPick ? " · 精选" : "") + (uses > 1 ? " · 用了 \(uses) 次" : uses == 1 ? " · 已用" : "")
+              + (dropped ? (fineArt ? " · fine-art 编排没上（同一场只留精选 / 相似）" : " · 相册去重拿掉的") : ""))
     }
 }
 
