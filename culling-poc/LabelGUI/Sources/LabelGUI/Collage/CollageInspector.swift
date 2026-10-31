@@ -17,6 +17,7 @@ struct CollageInspector: View {
     @Binding var tab: Tab
 
     var body: some View {
+        let _ = CollagePerf.body("检视器")
         VStack(spacing: 0) {
             Picker("", selection: $tab) {
                 ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
@@ -81,6 +82,7 @@ struct CollageLayoutPanel: View {
     @State private var templateToDelete: String?
 
     var body: some View {
+        let _ = CollagePerf.body("版式面板")
         canvasBox
         if let item = store.selectedItemValue {
             // 换了图层就换一个面板实例：输入框迟到的提交只会写回它自己那张（按 id 认）。

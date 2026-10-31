@@ -745,6 +745,8 @@ enum CollageCLI {
 /// LabelGUI --collage-ui <photo_dir> <out.png> [--album] [--tab 版式|样式|文字|水印|导出] [--select 路径如 10]
 /// [--crop] [--overlay-index N] [--size 1440x900] [--adopt photos|page[:水印页预设名]] [--inspector-width 300] [--notice 提示文字]
 /// [--contact-frames]（印样的「逐帧」一开始就展开）[--light]（浅色外观）[--ax-dump]
+/// [--perf place|gutter|slider|title|all]（截完图接着跑这个场景，打印每个视图 body 重算几次、store 发了几次
+/// objectWillChange、主线程最长卡多久：CollagePerf）
 /// 截图前先改工程（都可选）：--relayout [--count 6]（托盘重新自动排版，几张；工程里还没有版式时也排）、
 /// --layout grid|scatter、--template <模板名>、--title 标题、--subtitle 副标题、--look <色调>、
 /// --overlay <压字预设>（放在主图那一格并选中它）、--page N（相册第 N 个跨页，从 0 起；先换页再选格子）、
@@ -896,6 +898,7 @@ enum CollageUISnapshot {
                   + (shown && wm?.exportEnabled == false ? " · 「这个拼图导出时不带水印」说明行" : ""))
         }
         if args.contains("--ax-dump") { SnapshotAX.dump(host) }
+        if let scenario = option("--perf") { CollagePerf.run(scenario, store: store) { spin($0) } }
         print("界面快照 \(Int(host.frame.width))x\(Int(size.height)) · 托盘 \(store.project.photos.count) 张 · \(store.project.pages.count) 页 · 备选 \(store.alternatives.count) · \(out.path)")
         exit(0)
     }

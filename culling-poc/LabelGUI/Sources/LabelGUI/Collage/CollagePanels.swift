@@ -26,6 +26,7 @@ struct CollageTemplateGallery: View {
     }
 
     var body: some View {
+        let _ = CollagePerf.body("模板库")
         VStack(alignment: .leading, spacing: 8) {
             ForEach(groups, id: \.0) { group in
                 section(group.0, group.1)
@@ -87,6 +88,7 @@ struct CollageTemplateTile: View {
     }
 
     var body: some View {
+        let _ = CollagePerf.body("模板格")
         Button {
             store.applyTemplate(template)
         } label: {

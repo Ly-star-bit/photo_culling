@@ -21,6 +21,7 @@ struct CollageView: View {
     }
 
     var body: some View {
+        let _ = CollagePerf.body("拼图页")
         VStack(spacing: 0) {
             topBar
             Divider()
@@ -246,6 +247,7 @@ struct CollageTray: View {
     private let columns = [GridItem(.adaptive(minimum: 64, maximum: 96), spacing: 6)]
 
     var body: some View {
+        let _ = CollagePerf.body("托盘")
         VStack(spacing: 0) {
             header
             Divider()
@@ -361,6 +363,7 @@ struct CollageTrayItem: View {
     var fineArt = false
 
     var body: some View {
+        let _ = CollagePerf.body("托盘格")
         ZStack(alignment: .topTrailing) {
             ThumbnailView(path: photo.quickPath, maxPixel: 256)
                 .aspectRatio(1, contentMode: .fill)
@@ -400,6 +403,7 @@ struct CollageAlternativeStrip: View {
     @ObservedObject var store: CollageStore
 
     var body: some View {
+        let _ = CollagePerf.body("备选条")
         HStack(spacing: 8) {
             Text("备选").font(.caption).foregroundStyle(.secondary)
                 .frame(width: 32)
@@ -451,6 +455,7 @@ struct CollagePageStrip: View {
     private var unit: String { store.isAlbum ? "跨页" : "页" }
 
     var body: some View {
+        let _ = CollagePerf.body("页条")
         HStack(spacing: 8) {
             Text(unit).font(.caption).foregroundStyle(.secondary)
                 .frame(width: 32)
