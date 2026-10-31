@@ -1451,16 +1451,26 @@ try:
         # 晚 150 ms 才读；同时 6 个线程不停地连 + hello。以前在途计数在主线程上减，读线程退出时排进去的 maybeClose 可能抢在
         # 回复前面关 fd：回复写进关掉的 fd（write failed EBADF，丢了），或者写进复用了这个 fd 号的别人的连接（别的客户端
         # hello 读到的第一行不是 id 0）。20 轮：两条回复都要按顺序收到，宿主日志里没有新的 write failed，别人没收到串来的行。
+        # 连接满了（16 个）被拒不算串线：too_many_connections 是 accept 线程在新连上的 fd 上直接写的（id 为 null），
+        # 不可能是别人的回复。CI 只有 3 核，6 个线程不停开关、服务端关连接跟不上时会满（run 41202651243：211 行全算成了串线）。
         wf0 = h.log().count("write failed")
-        stray, stop_h = [], threading.Event()
+        full0 = state(h)["counters"].get("too_many_connections", 0)
+        stray, hellos, stop_h = [], {"ok": 0, "full": 0}, threading.Event()
 
         def hammer():
             while not stop_h.is_set():
                 try:
                     x = Raw(h, timeout=3, hello=False)
                     first = x.hello()
+                    if first.get("id") is None and (first.get("error") or {}).get("code") == "too_many_connections":
+                        hellos["full"] += 1
+                        x.close()
+                        time.sleep(0.01)
+                        continue
                     if first.get("id") != 0:
                         stray.append(first)
+                    else:
+                        hellos["ok"] += 1
                     x.close()
                 except (OSError, EOFError, ValueError):
                     pass
@@ -1491,9 +1501,12 @@ try:
         stop_h.set()
         [t.join(timeout=10) for t in ths]
         wf1 = h.log().count("write failed")
-        check(both == 20 and wf1 == wf0 and not stray,
+        full1 = state(h)["counters"].get("too_many_connections", 0)
+        sample = "；第一行：" + json.dumps(stray[0], ensure_ascii=False)[:300] if stray else ""
+        check(both == 20 and wf1 == wf0 and not stray and hellos["ok"] > 0,
               f"连发两条马上半关、慢慢读（旁边 6 个线程不停 hello）：20 轮里 {both} 轮两条回复都收到，新的 write failed {wf1 - wf0} 条，"
-              f"串到别的连接 {len(stray)} 行")
+              f"串到别的连接 {len(stray)} 行{sample}（旁边 hello 成功 {hellos['ok']} 次，连接满了被拒 {hellos['full']} 次，"
+              f"宿主计数 +{full1 - full0}）")
         # 开桥失败以后自检照样跑（审查发现：以前自检定时器只在第一次开桥成功时才起）。SockDir 对组可写 → 不开桥
         # （sock_dir_unsafe）；这时锁文件被删 → 下一轮自检重新建好；SockDir 改回 0700 → 下一轮自检开桥 → live
         root_u = sock_root("B-unsafe")
