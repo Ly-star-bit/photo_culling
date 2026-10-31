@@ -211,21 +211,8 @@ struct CollageCanvasView: View {
 
     // MARK: - 画面
 
-    @ViewBuilder
     private func canvasImage(_ layout: CollageCanvasLayout) -> some View {
-        if let image = store.preview {
-            Image(nsImage: image)
-                .resizable()
-                .interpolation(.high)
-                .frame(width: layout.rect.width, height: layout.rect.height)
-                .shadow(color: .black.opacity(0.35), radius: 10, y: 3)
-                .offset(x: layout.rect.minX, y: layout.rect.minY)
-        } else {
-            Rectangle()
-                .fill(Color(white: 0.22))
-                .frame(width: layout.rect.width, height: layout.rect.height)
-                .offset(x: layout.rect.minX, y: layout.rect.minY)
-        }
+        CollageCanvasImage(preview: store.previewState, rect: layout.rect)
     }
 
     private var emptyHint: some View {
@@ -560,6 +547,28 @@ struct CollageCanvasView: View {
     }
 }
 
+/// 预览大图：只有它订阅 store.previewState —— 预览重渲一次只重画这一张图，画布的手势、叠加层不跟着重算。
+private struct CollageCanvasImage: View {
+    @ObservedObject var preview: CollagePreviewState
+    let rect: CGRect
+
+    var body: some View {
+        if let image = preview.image {
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: rect.width, height: rect.height)
+                .shadow(color: .black.opacity(0.35), radius: 10, y: 3)
+                .offset(x: rect.minX, y: rect.minY)
+        } else {
+            Rectangle()
+                .fill(Color(white: 0.22))
+                .frame(width: rect.width, height: rect.height)
+                .offset(x: rect.minX, y: rect.minY)
+        }
+    }
+}
+
 /// 叠加层：选中框、缝的拖动提示、落点、切脸/路人/锁定角标、裁切模式的人脸框和三分线。
 /// 不接收点击（点击全在画布上统一命中测试）。
 struct CollageCanvasOverlay: View {
@@ -571,9 +580,12 @@ struct CollageCanvasOverlay: View {
 
     var body: some View {
         let _ = CollagePerf.body("叠加层")
+        let badges = store.canvasBadges()
         ZStack(alignment: .topLeading) {
             ForEach(geometry.frames, id: \.path) { frame in
-                badges(for: frame)
+                if let badge = badges[frame.path] {
+                    badgeRow(badge, frame: frame)
+                }
             }
             if let g = hoverGutter {
                 gutterHighlight(g)
@@ -687,25 +699,16 @@ struct CollageCanvasOverlay: View {
         }
     }
 
-    @ViewBuilder
-    private func badges(for frame: CollageLayout.Frame) -> some View {
+    /// 一格的角标（算哪些角标在 store.canvasBadges()：按工程、选中、路人信息和蒙版版本缓存）。
+    private func badgeRow(_ b: CollageCanvasBadge, frame: CollageLayout.Frame) -> some View {
         let r = viewRect(frame)
-        let window = store.window(for: frame, waitForMask: false)
-        let cut = window?.cutsFace ?? false
-        // 路人只在选中的那一格标（景区照片几乎格格有路人，以前满屏橙色角标）；切脸一直标。
-        let bystander = (window?.hitsBystander ?? false) && store.selection == frame.path
-        // 印刷画布：放大超过 120% 的格子一直标（印出来会软）。
-        let up = store.project.canvas.isPrint ? store.upscale(for: frame) : nil
-        let soft = (up ?? 0) > CollageStore.upscaleLimit
-        if cut || bystander || soft || frame.cell.locked {
-            HStack(spacing: 4) {
-                if frame.cell.locked { badge("lock.fill", nil, .white) }
-                if cut { badge("exclamationmark.triangle.fill", "切脸", .red) }
-                if bystander { badge("person.2.fill", "路人", .orange) }
-                if soft, let up { badge("plus.magnifyingglass", "放大\(Int((up * 100).rounded()))%", .orange) }
-            }
-            .offset(x: r.minX + 6, y: r.minY + 6)
+        return HStack(spacing: 4) {
+            if b.locked { badge("lock.fill", nil, .white) }
+            if b.cutsFace { badge("exclamationmark.triangle.fill", "切脸", .red) }
+            if b.bystander { badge("person.2.fill", "路人", .orange) }
+            if let up = b.upscale { badge("plus.magnifyingglass", "放大\(Int((up * 100).rounded()))%", .orange) }
         }
+        .offset(x: r.minX + 6, y: r.minY + 6)
     }
 
     private func badge(_ symbol: String, _ text: String?, _ color: Color) -> some View {

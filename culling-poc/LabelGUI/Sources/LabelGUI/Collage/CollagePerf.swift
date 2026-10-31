@@ -1,10 +1,11 @@
 import Foundation
-import AppKit
 import Combine
 
 /// 拼图页刷新计数（只给 `--collage-ui … --perf <场景>` 用）：一个操作下来，哪个视图的 body 重算了几次、
-/// store 发了几次 objectWillChange、主线程最长卡了多久。平常 enabled = false，body 里那一行只读一个 Bool。
+/// store 和预览、缩略图对象各发了几次 objectWillChange、出了几张预览。
+/// 平常 enabled = false，body 里那一行只读一个 Bool。
 /// 数的是离屏窗口里 SwiftUI 重算了几次 —— 证明「刷新得少了」，证明不了手感（手感要在真 app 上试）。
+/// 不量主线程卡顿：离屏、不激活的进程定时器被系统节流，量出来的间隔是节流不是卡（sample 看主线程 98% 在等）。
 @MainActor
 enum CollagePerf {
     static var enabled = false
@@ -25,27 +26,23 @@ enum CollagePerf {
         let names = scenario == "all" ? ["place", "gutter", "slider", "title"] : [scenario]
         for name in names {
             spin(1.5)
-            var publishes = 0
-            let sub = store.objectWillChange.sink { _ in publishes += 1 }
-            var maxGap = 0.0
-            var last = CACurrentMediaTime()
-            let timer = Timer(timeInterval: 0.005, repeats: true) { _ in
-                let now = CACurrentMediaTime()
-                maxGap = max(maxGap, now - last)
-                last = now
-            }
-            RunLoop.main.add(timer, forMode: .common)
+            var publishes = 0, previewPublishes = 0, thumbPublishes = 0
+            var scales: [Double] = []
+            let subs = [
+                store.objectWillChange.sink { _ in publishes += 1 },
+                store.previewState.objectWillChange.sink { _ in previewPublishes += 1 },
+                store.thumbs.objectWillChange.sink { _ in thumbPublishes += 1 },
+                store.previewState.$scale.dropFirst().sink { scales.append($0) },
+            ]
             bodies = [:]
             enabled = true
-            let start = CACurrentMediaTime()
             let note = step(name, store: store, spin: spin)
             spin(3)
             enabled = false
-            timer.invalidate()
-            sub.cancel()
+            subs.forEach { $0.cancel() }
             let counts = order.map { "\($0) \(bodies[$0] ?? 0)" }.joined(separator: " · ")
-            print(String(format: "perf %@：%@ · store 发 %d 次 · body %@ · 主线程最长卡 %.0f ms · 用时 %.1f s",
-                         name, note, publishes, counts, maxGap * 1000, CACurrentMediaTime() - start))
+            print("perf \(name)：\(note) · store 发 \(publishes) 次 · 预览对象 \(previewPublishes) · 缩略图对象 \(thumbPublishes)"
+                  + " · body \(counts) · 出了 \(scales.count) 张预览")
         }
     }
 

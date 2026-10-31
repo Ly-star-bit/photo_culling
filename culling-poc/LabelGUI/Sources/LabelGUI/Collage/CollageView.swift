@@ -5,7 +5,9 @@ import UniformTypeIdentifiers
 /// 拼图 tab：左托盘 · 中画布 · 右检视器，底部备选版式（相册模式多一条跨页条）。
 struct CollageView: View {
     @ObservedObject var store: CollageStore
-    @ObservedObject var batchStore: BatchStore
+    /// 不整份订阅批量页（分析进度、判决计数一变，整个拼图页都跟着重算）：换场次由 CollageSessionWatch 盯，
+    /// 托盘「带照片」菜单的计数由 CollageTrayHeader 自己订阅。
+    let batchStore: BatchStore
     /// 检视器「水印」页读水印页的签名、设置和预设；只在那一页里观察它（水印页预览一动，拼图页不跟着重算）。
     let watermarkStore: WatermarkStore
     @State private var inspectorTab: CollageInspector.Tab
@@ -43,7 +45,7 @@ struct CollageView: View {
             // 主体蒙版的模型第一次加载要 0.1–1 秒：一进拼图 tab 先在后台空跑一次。
             CollageMasks.warmUp()
         }
-        .onChange(of: batchStore.photoDir) { _, _ in attachSession() }
+        .background(CollageSessionWatch(batchStore: batchStore) { attachSession() })
     }
 
     private func attachSession() {
@@ -182,7 +184,7 @@ struct CollageView: View {
         VStack(spacing: 0) {
             // 相册的跨页条；单张拼图有好几页（一键成套的一期杂志、小红书轮播组图）时也显示（页条）。
             if store.isAlbum || store.project.pages.count > 1 {
-                CollagePageStrip(store: store)
+                CollagePageStrip(store: store, thumbs: store.thumbs)
                 Divider()
             }
             CollageAlternativeStrip(store: store)
@@ -239,33 +241,37 @@ struct CollageView: View {
 
 // MARK: - 托盘
 
+/// 只盯批量页换场次（photoDir），拼图页本身不整份订阅 BatchStore。
+private struct CollageSessionWatch: View {
+    @ObservedObject var batchStore: BatchStore
+    let onChange: () -> Void
+
+    var body: some View {
+        Color.clear.onChange(of: batchStore.photoDir) { _, _ in onChange() }
+    }
+}
+
 struct CollageTray: View {
     @ObservedObject var store: CollageStore
-    @ObservedObject var batchStore: BatchStore
+    let batchStore: BatchStore
     @State private var dropTargeted = false
-
-    private let columns = [GridItem(.adaptive(minimum: 64, maximum: 96), spacing: 6)]
 
     var body: some View {
         let _ = CollagePerf.body("托盘")
         VStack(spacing: 0) {
-            header
+            CollageTrayHeader(store: store, batchStore: batchStore)
             Divider()
             if store.project.photos.isEmpty {
                 emptyTray
             } else {
-                ScrollView {
-                    LazyVGrid(columns: columns, spacing: 6) {
-                        ForEach(store.project.photos) { photo in
-                            CollageTrayItem(photo: photo, used: store.usedPhotoIDs.contains(photo.id),
-                                            dropped: store.albumDropped.contains { $0.id == photo.id },
-                                            fineArt: store.isAlbum && store.project.albumTheme == .fineArt)
-                                .onDrag { NSItemProvider(object: photo.id as NSString) }
-                                .contextMenu { menu(for: photo) }
-                        }
-                    }
-                    .padding(8)
-                }
+                // 网格只拿自己要的值：拖缝、拖滑杆、预览重渲这些不改托盘的，整个网格（每格的悬停提示、右键菜单、
+                // 拖拽源）都跳过不重算。
+                let placeTarget = store.selection.flatMap { store.root?.node(at: $0)?.isLeaf == true ? $0 : nil }
+                CollageTrayGrid(store: store, photos: store.project.photos, used: store.usedPhotoIDs,
+                                dropped: store.albumDroppedIDs,
+                                fineArt: store.isAlbum && store.project.albumTheme == .fineArt,
+                                placeTarget: placeTarget, pagePhotoIDs: store.page?.photoIDs)
+                    .equatable()
             }
         }
         .overlay {
@@ -287,7 +293,27 @@ struct CollageTray: View {
         }
     }
 
-    private var header: some View {
+    private var emptyTray: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "photo.stack")
+                .font(.system(size: 30))
+                .foregroundStyle(.tertiary)
+            Text("点「带照片」拿精选进来\n或在批量页多选后点「拼图」\n也可以把文件拖到这里")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+}
+
+/// 托盘标题和「带照片」菜单：菜单里的精选、可用张数跟着批量页，只有这一行订阅 BatchStore。
+private struct CollageTrayHeader: View {
+    @ObservedObject var store: CollageStore
+    @ObservedObject var batchStore: BatchStore
+
+    var body: some View {
         HStack(spacing: 6) {
             Text("托盘").font(.headline)
             Text("\(store.project.photos.count)").foregroundStyle(.secondary).monospacedDigit()
@@ -319,39 +345,60 @@ struct CollageTray: View {
         .padding(.vertical, 7)
     }
 
-    private var emptyTray: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "photo.stack")
-                .font(.system(size: 30))
-                .foregroundStyle(.tertiary)
-            Text("点「带照片」拿精选进来\n或在批量页多选后点「拼图」\n也可以把文件拖到这里")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
-    }
-
-    @ViewBuilder
-    private func menu(for photo: CollagePhotoRef) -> some View {
-        if let path = store.selection, store.root?.node(at: path)?.isLeaf == true {
-            Button("放进选中的格子") { store.place(photoID: photo.id, at: path, edge: nil) }
-        }
-        Button("只用这张重新排一版") { store.relayout(photoIDs: [photo.id]) }
-        if let page = store.page, !page.photoIDs.contains(photo.id) {
-            Button("加进当前版（重排）") { store.relayout(photoIDs: page.photoIDs + [photo.id]) }
-        }
-        Divider()
-        Button("从托盘移除", role: .destructive) { store.removeFromTray(photo.id) }
-    }
-
     private func pickFiles() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true
         if panel.runModal() == .OK { store.addFiles(panel.urls) }
+    }
+}
+
+/// 托盘的照片网格。Equatable：只有照片、用过没有、相似角标、右键菜单要用的两样变了才重算。
+private struct CollageTrayGrid: View, Equatable {
+    /// 只用来调方法（不订阅）。
+    let store: CollageStore
+    let photos: [CollagePhotoRef]
+    let used: Set<String>
+    let dropped: Set<String>
+    let fineArt: Bool
+    /// 右键「放进选中的格子」：画布上选中的是一格时它的路径。
+    let placeTarget: [Int]?
+    /// 右键「加进当前版（重排）」：当前页的照片（没有页 = nil）。
+    let pagePhotoIDs: [String]?
+
+    private let columns = [GridItem(.adaptive(minimum: 64, maximum: 96), spacing: 6)]
+
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.store === b.store && a.photos == b.photos && a.used == b.used && a.dropped == b.dropped
+            && a.fineArt == b.fineArt && a.placeTarget == b.placeTarget && a.pagePhotoIDs == b.pagePhotoIDs
+    }
+
+    var body: some View {
+        ScrollView {
+            LazyVGrid(columns: columns, spacing: 6) {
+                ForEach(photos) { photo in
+                    CollageTrayItem(photo: photo, used: used.contains(photo.id),
+                                    dropped: dropped.contains(photo.id), fineArt: fineArt)
+                        .onDrag { NSItemProvider(object: photo.id as NSString) }
+                        .contextMenu { menu(for: photo) }
+                }
+            }
+            .padding(8)
+        }
+    }
+
+    @ViewBuilder
+    private func menu(for photo: CollagePhotoRef) -> some View {
+        if let path = placeTarget {
+            Button("放进选中的格子") { store.place(photoID: photo.id, at: path, edge: nil) }
+        }
+        Button("只用这张重新排一版") { store.relayout(photoIDs: [photo.id]) }
+        if let ids = pagePhotoIDs, !ids.contains(photo.id) {
+            Button("加进当前版（重排）") { store.relayout(photoIDs: ids + [photo.id]) }
+        }
+        Divider()
+        Button("从托盘移除", role: .destructive) { store.removeFromTray(photo.id) }
     }
 }
 
@@ -419,26 +466,8 @@ struct CollageAlternativeStrip: View {
                     .foregroundStyle(.tertiary)
                 Spacer()
             } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(Array(store.alternativeThumbs.enumerated()), id: \.offset) { item in
-                            Button {
-                                store.applyAlternative(item.offset)
-                            } label: {
-                                Image(nsImage: item.element)
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fit)
-                                    .frame(height: 64)
-                                    .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(
-                                        item.offset == store.alternativeIndex ? Color.accentColor : Color.clear,
-                                        lineWidth: 2.5))
-                            }
-                            .buttonStyle(.plain)
-                            .help("第 \(item.offset + 1) 版")
-                        }
-                    }
-                    .padding(.vertical, 6)
-                }
+                CollageAlternativeThumbs(store: store, thumbs: store.alternativeThumbs, selected: store.alternativeIndex)
+                    .equatable()
             }
         }
         .padding(.horizontal, 10)
@@ -446,10 +475,56 @@ struct CollageAlternativeStrip: View {
     }
 }
 
+/// 备选缩略图那一排（几十张）：只有缩略图换了、选中的换了才重算。
+private struct CollageAlternativeThumbs: View, Equatable {
+    /// 只用来调方法（不订阅）。
+    let store: CollageStore
+    let thumbs: [NSImage]
+    let selected: Int
+    /// 每张缩略图是不是同一张（== 只比这个：NSImage 不是 Sendable，nonisolated 的 == 里不碰它）。
+    private let thumbIDs: [ObjectIdentifier]
+
+    init(store: CollageStore, thumbs: [NSImage], selected: Int) {
+        self.store = store
+        self.thumbs = thumbs
+        self.selected = selected
+        thumbIDs = thumbs.map(ObjectIdentifier.init)
+    }
+
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.store === b.store && a.selected == b.selected && a.thumbIDs == b.thumbIDs
+    }
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(Array(thumbs.enumerated()), id: \.offset) { item in
+                    Button {
+                        store.applyAlternative(item.offset)
+                    } label: {
+                        Image(nsImage: item.element)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(height: 64)
+                            .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(
+                                item.offset == selected ? Color.accentColor : Color.clear,
+                                lineWidth: 2.5))
+                    }
+                    .buttonStyle(.plain)
+                    .help("第 \(item.offset + 1) 版")
+                }
+            }
+            .padding(.vertical, 6)
+        }
+    }
+}
+
 // MARK: - 相册跨页条
 
 struct CollagePageStrip: View {
     @ObservedObject var store: CollageStore
+    /// 跨页缩略图在 store.thumbs 里（渲好一批只刷新这一条，不是整个拼图页）。
+    @ObservedObject var thumbs: CollageThumbs
 
     /// 相册叫「跨页」，单张拼图的多页叫「页」。
     private var unit: String { store.isAlbum ? "跨页" : "页" }
@@ -488,7 +563,7 @@ struct CollagePageStrip: View {
         } label: {
             VStack(spacing: 2) {
                 Group {
-                    if let thumb = store.pageThumbs[page.id] {
+                    if let thumb = thumbs.pages[page.id] {
                         Image(nsImage: thumb).resizable().aspectRatio(contentMode: .fit)
                     } else {
                         Rectangle().fill(Color.gray.opacity(0.2))

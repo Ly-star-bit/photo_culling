@@ -11,7 +11,32 @@ final class CollageStore: ObservableObject {
 
     // MARK: - 文档
 
-    @Published private(set) var project = CollageProject()
+    /// 每改一次（包括 `project.pages[i].root = …` 这种原地改）都作废派生缓存（photoMap、用过的照片、几何、角标）。
+    @Published private(set) var project = CollageProject() {
+        didSet {
+            projectRevision &+= 1
+            derived = Derived()
+        }
+    }
+    /// 工程改了几次（只增）：派生缓存、画布角标按它认。
+    private(set) var projectRevision = 0
+    /// 按工程现算、现在缓存起来的（以前每问一次就现算一次：托盘每一格建一遍「用过的照片」集合，
+    /// 叠加层每一格重建一遍 photoMap、重算一遍整页几何）。工程一改就整个清掉。
+    private struct Derived {
+        var photoMap: [String: CollagePhotoRef]?
+        var used: Set<String>?
+        var usage: [String: Int]?
+        var geometry: (page: Int, value: CollageLayout.Geometry)?
+        var badges: (key: BadgeKey, value: [[Int]: CollageCanvasBadge])?
+    }
+    private var derived = Derived()
+    /// 角标缓存的键：工程、页、选中（路人只标选中的那一格）、路人信息和蒙版的版本。
+    private struct BadgeKey: Equatable {
+        var page: Int
+        var selection: [Int]?
+        var hintsVersion: Int
+        var masksVersion: Int
+    }
     @Published var pageIndex = 0 {
         didSet {
             guard pageIndex != oldValue else { return }
@@ -76,12 +101,17 @@ final class CollageStore: ObservableObject {
 
     // MARK: - 预览
 
-    @Published private(set) var preview: NSImage?
+    /// 预览大图、各种缩略图各自成对象（CollageThumbs.swift）：只有显示它们的那块界面订阅。
+    let previewState = CollagePreviewState()
+    let thumbs = CollageThumbs()
+    var preview: NSImage? { previewState.image }
     /// 相册跨页条的缩略图（按页 id）。
-    @Published private(set) var pageThumbs: [UUID: NSImage] = [:]
+    var pageThumbs: [UUID: NSImage] { thumbs.pages }
     private var thumbTask: Task<Void, Never>?
+    /// 每页缩略图渲的时候用的键：这一页、整个工程（除了别的页）、页码、路人信息和蒙版的版本。没变的页不重渲。
+    private var pageThumbKeys: [UUID: Int] = [:]
     /// 预览图对应的画布缩放（预览像素 / 成品像素）。
-    @Published private(set) var previewScale: Double = 0.5
+    var previewScale: Double { previewState.scale }
     private var viewportPixels = CGSize(width: 1200, height: 900)
     private var renderTask: Task<Void, Never>?
     private var renderDirty = false
@@ -94,10 +124,10 @@ final class CollageStore: ObservableObject {
     /// 主体蒙版预热完一批就 +1（检视器的「刊名被挡」读数跟着刷新）。渲染自己同步拿蒙版，不等它。
     @Published private(set) var masksVersion = 0
     /// 色调样张（这一页的主图套每个色调）。
-    @Published private(set) var lookThumbs: [CollageLook: NSImage] = [:]
+    var lookThumbs: [CollageLook: NSImage] { thumbs.looks }
     private var lookThumbKey = ""
     /// 风格预设样张（这一页套每个预设的样子；按预设 key）。
-    @Published private(set) var styleThumbs: [String: NSImage] = [:]
+    var styleThumbs: [String: NSImage] { thumbs.styles }
     private var styleThumbKey = ""
     private var styleThumbTask: Task<Void, Never>?
     private var hintTask: Task<Void, Never>?
@@ -111,7 +141,7 @@ final class CollageStore: ObservableObject {
     var hintsPending: Bool { hintRunsPending > 0 || maskRunsPending > 0 }
     @Published private(set) var userTemplates: [CollageTemplate] = []
     /// 模板库缩略图（按模板名；用托盘里的照片现套现渲）。
-    @Published private(set) var templateThumbs: [String: NSImage] = [:]
+    var templateThumbs: [String: NSImage] { thumbs.templates }
     private var templateThumbTask: Task<Void, Never>?
     /// 每个模板缩略图渲的时候用的键（照片、模板内容、用到的样式和画布）：键没变就不重渲。
     private var templateThumbKeys: [String: String] = [:]
@@ -167,7 +197,11 @@ final class CollageStore: ObservableObject {
     @Published private(set) var notice: String?
     @Published private(set) var busyText: String?
     /// 相册去重拿掉的照片（可以一键加回）。
-    @Published private(set) var albumDropped: [CollagePhotoRef] = []
+    @Published private(set) var albumDropped: [CollagePhotoRef] = [] {
+        didSet { albumDroppedIDs = Set(albumDropped.map(\.id)) }
+    }
+    /// 同上，只要 id（托盘每格标「相似」看它，以前每格把整个数组比一遍）。
+    private(set) var albumDroppedIDs: Set<String> = []
     private var exportCancelled = false
     private var noticeTask: Task<Void, Never>?
 
@@ -212,8 +246,10 @@ final class CollageStore: ObservableObject {
     var root: CollageNode? { page?.root }
 
     var photoMap: [String: CollagePhotoRef] {
+        if let cached = derived.photoMap { return cached }
         var map: [String: CollagePhotoRef] = [:]
         for p in project.photos where map[p.id] == nil { map[p.id] = p }
+        derived.photoMap = map
         return map
     }
 
@@ -223,8 +259,15 @@ final class CollageStore: ObservableObject {
 
     /// 成品像素坐标里的几何（画布叠加层、拖缝、落点都用它）。散落版、印样没有格子。
     var geometry: CollageLayout.Geometry {
-        guard let root, !isFreeform, !isContactSheet else { return CollageLayout.Geometry() }
-        return CollageLayout.pageGeometry(root, canvas: project.canvas, style: project.style)
+        if let cached = derived.geometry, cached.page == pageIndex { return cached.value }
+        let value: CollageLayout.Geometry
+        if let root, !isFreeform, !isContactSheet {
+            value = CollageLayout.pageGeometry(root, canvas: project.canvas, style: project.style)
+        } else {
+            value = CollageLayout.Geometry()
+        }
+        derived.geometry = (pageIndex, value)
+        return value
     }
 
     var selectedCell: CollageCell? {
@@ -242,7 +285,24 @@ final class CollageStore: ObservableObject {
         return page?.items.first { $0.id == id }
     }
 
-    var usedPhotoIDs: Set<String> { project.usedPhotoIDs }
+    var usedPhotoIDs: Set<String> {
+        if let cached = derived.used { return cached }
+        let used = project.usedPhotoIDs
+        derived.used = used
+        return used
+    }
+
+    /// 每张照片上了几次（所有页的格子和自由图层加起来；没上的不在里面）。
+    var photoUsage: [String: Int] {
+        if let cached = derived.usage { return cached }
+        var usage: [String: Int] = [:]
+        for page in project.pages {
+            for id in page.photoIDs { usage[id, default: 0] += 1 }
+        }
+        derived.usage = usage
+        return usage
+    }
+
     var isAlbum: Bool { project.mode == .album }
 
     /// 照片在这一格里实际画的区域（月洞门 = 正方形、相纸/胶片 = 框内），成品坐标。
@@ -373,14 +433,14 @@ final class CollageStore: ObservableObject {
         clearAlternatives()
         albumDropped = []
         lookThumbKey = ""
-        lookThumbs = [:]
+        thumbs.looks = [:]
         styleThumbTask?.cancel()
         styleThumbKey = ""
-        styleThumbs = [:]
+        thumbs.styles = [:]
         templateThumbKeys = [:]
         templateThumbTask?.cancel()
         templateThumbsBusy = false
-        templateThumbs = [:]
+        thumbs.templates = [:]
         // 换了工程：关掉时记下的水印层 / 文字是上一个拼图的，不能恢复到这里；还在等照片的交接也不再套水印。
         stashedMarkLayers = [:]
         stashedMarkTexts = [:]
@@ -2391,12 +2451,38 @@ final class CollageStore: ObservableObject {
     /// 超过这个倍数印出来会软（SmartAlbums 默认也是 120%；建议别过 150%、绝不过 200%）。
     nonisolated static let upscaleLimit = 1.2
 
-    /// 当前页这一格的放大倍数（和渲染器同一个取景、同一块画出来的区域，成品像素）。
-    func upscale(for frame: CollageLayout.Frame) -> Double? {
+    /// 当前页这一格的放大倍数（和渲染器同一个取景、同一块画出来的区域，成品像素）。waitForMask 同 window(for:)。
+    func upscale(for frame: CollageLayout.Frame, waitForMask: Bool = true) -> Double? {
         guard frame.cell.kind == .photo, let id = frame.cell.photoID, let photo = photoMap[id],
-              let window = window(for: frame) else { return nil }
+              let window = window(for: frame, waitForMask: waitForMask) else { return nil }
         let drawn = CollageCrop.drawnRect(window: window, photo: photo, cell: frame.cell, in: photoArea(for: frame))
         return CollageCrop.upscale(photo: photo, window: window, drawn: drawn)
+    }
+
+    /// 画布叠加层每一格的角标（没有角标的格子不在里面），按页、选中、路人信息和蒙版的版本缓存，工程一改就作废：
+    /// 悬停到缝上、拖照片经过画布时叠加层重算，不再每一格重新取景。
+    /// 放大倍数：GUI 里不在主线程等蒙版（没算好先按普通取景给，算好 masksVersion 一变就重算）；命令行照旧等，
+    /// 快照逐字节可比。
+    func canvasBadges() -> [[Int]: CollageCanvasBadge] {
+        let key = BadgeKey(page: pageIndex, selection: selection, hintsVersion: hintsVersion, masksVersion: masksVersion)
+        if let cached = derived.badges, cached.key == key { return cached.value }
+        var out: [[Int]: CollageCanvasBadge] = [:]
+        let isPrint = project.canvas.isPrint
+        for frame in geometry.frames {
+            let window = window(for: frame, waitForMask: false)
+            var badge = CollageCanvasBadge()
+            badge.locked = frame.cell.locked
+            badge.cutsFace = window?.cutsFace ?? false
+            // 路人只在选中的那一格标（景区照片几乎格格有路人，以前满屏橙色角标）；切脸一直标。
+            badge.bystander = (window?.hitsBystander ?? false) && selection == frame.path
+            // 印刷画布：放大超过 120% 的格子一直标（印出来会软）。
+            if isPrint, let up = upscale(for: frame, waitForMask: AppRuntime.headless), up > Self.upscaleLimit {
+                badge.upscale = up
+            }
+            if !badge.isEmpty { out[frame.path] = badge }
+        }
+        derived.badges = (key, out)
+        return out
     }
 
     /// 全部页里放大超过 limit 的照片（网格格子 + 散落相纸），倍数大的在前。
@@ -2880,7 +2966,7 @@ final class CollageStore: ObservableObject {
                 return out
             }.value
             guard let self, self.lookThumbKey == key else { return }
-            self.lookThumbs = thumbs
+            self.thumbs.looks = thumbs
         }
     }
 
@@ -2914,7 +3000,7 @@ final class CollageStore: ObservableObject {
         styleThumbKey = key
         styleThumbTask?.cancel()
         guard let page else {
-            styleThumbs = [:]
+            thumbs.styles = [:]
             return
         }
         var base = project
@@ -2939,7 +3025,7 @@ final class CollageStore: ObservableObject {
                 return out
             }.value
             guard let self, !Task.isCancelled, self.styleThumbKey == key else { return }
-            self.styleThumbs = thumbs
+            self.thumbs.styles = thumbs
         }
     }
 
@@ -2997,6 +3083,9 @@ final class CollageStore: ObservableObject {
         templateThumbTask = Task { [weak self] in
             defer { if !Task.isCancelled { self?.templateThumbsBusy = false } }
             try? await Task.sleep(for: .milliseconds(200))
+            // 渲好的先攒着，每 150 ms 一起交一次（以前渲好一张交一张：几十个模板 = 模板库重算几十次）。
+            var pending: [TemplateThumb] = []
+            var lastFlush = CACurrentMediaTime()
             for (template, key) in todo {
                 if Task.isCancelled { return }
                 let source = template.contactSheet != nil ? rollPhotos : photos
@@ -3005,12 +3094,33 @@ final class CollageStore: ObservableObject {
                                        pageLook: pageLook, lookSource: lookSource)
                 }.value
                 guard let self, self.sessionToken == token, !Task.isCancelled else { return }
-                if let thumb {
-                    self.templateThumbs[template.name] = thumb
-                    self.templateThumbKeys[template.name] = key
+                if let thumb { pending.append(TemplateThumb(name: template.name, image: thumb, key: key)) }
+                if CACurrentMediaTime() - lastFlush >= 0.15 {
+                    self.publishTemplateThumbs(&pending)
+                    lastFlush = CACurrentMediaTime()
                 }
             }
+            guard let self, self.sessionToken == token, !Task.isCancelled else { return }
+            self.publishTemplateThumbs(&pending)
         }
+    }
+
+    private struct TemplateThumb {
+        let name: String
+        let image: NSImage
+        let key: String
+    }
+
+    /// 攒着的模板缩略图一次交给模板库（键跟着图一起记：没交出去的下次照样重渲）。
+    private func publishTemplateThumbs(_ pending: inout [TemplateThumb]) {
+        guard !pending.isEmpty else { return }
+        var all = thumbs.templates
+        for t in pending {
+            all[t.name] = t.image
+            templateThumbKeys[t.name] = t.key
+        }
+        thumbs.templates = all
+        pending.removeAll()
     }
 
     nonisolated private static func templateThumb(_ template: CollageTemplate, base: CollageProject,
@@ -3138,23 +3248,48 @@ final class CollageStore: ObservableObject {
         schedulePageThumbs()
     }
 
-    /// 相册跨页条：编辑停下 0.25 秒后把每页渲一张小图（一页几毫秒）。
+    /// 相册跨页条：编辑停下 0.25 秒后给变了的页各渲一张小图（一页几毫秒）。以前每改一下就把所有页全渲一遍：
+    /// 30 个跨页就是 30 张整页渲染，和大图预览抢 CPU，还把解码缓存挤掉。
     func schedulePageThumbs() {
         // 单张拼图有好几页（一键成套出的一期杂志、轮播组图）也要页条。
         guard isAlbum || project.pages.count > 1 else {
-            if !pageThumbs.isEmpty { pageThumbs = [:] }
+            thumbTask?.cancel()
+            pageThumbKeys = [:]
+            if !pageThumbs.isEmpty { thumbs.pages = [:] }
             return
         }
+        // 一页的小图由这一页、工程里别的东西（画布、样式、标题、水印、托盘照片……；别的页不算）、页码、页数、
+        // 路人信息和蒙版的版本定（{no} 按页码，没有照片的页 {count}、主图按托盘）。
+        var rest = project
+        rest.pages = []
+        var shared = Hasher()
+        shared.combine(rest)
+        shared.combine(project.pages.count)
+        shared.combine(hintsVersion)
+        shared.combine(masksVersion)
+        let base = shared.finalize()
+        var todo: [(page: CollagePage, key: Int)] = []
+        for (i, page) in project.pages.enumerated() {
+            var h = Hasher()
+            h.combine(base)
+            h.combine(i)
+            h.combine(page)
+            let key = h.finalize()
+            if pageThumbKeys[page.id] != key || pageThumbs[page.id] == nil { todo.append((page, key)) }
+        }
+        let live = Set(project.pages.map(\.id))
         thumbTask?.cancel()
+        guard !todo.isEmpty || pageThumbs.keys.contains(where: { !live.contains($0) }) else { return }
         let snapshot = project
         let hints = self.hints
         thumbTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
-            let thumbs = await Task.detached(priority: .utility) { () -> [UUID: NSImage] in
+            let pages = todo.map(\.page)
+            let rendered = await Task.detached(priority: .utility) { () -> [UUID: NSImage] in
                 let scale = min(1, 260 / Double(max(snapshot.canvas.width, snapshot.canvas.height)))
                 var out: [UUID: NSImage] = [:]
-                for page in snapshot.pages {
+                for page in pages {
                     var opts = CollageRender.Options(scale: scale)
                     opts.includeBleed = false
                     opts.placeholders = true
@@ -3163,8 +3298,16 @@ final class CollageStore: ObservableObject {
                 }
                 return out
             }.value
-            guard !Task.isCancelled else { return }
-            self?.pageThumbs = thumbs
+            guard let self, !Task.isCancelled else { return }
+            var out = self.thumbs.pages.filter { live.contains($0.key) }
+            var keys = self.pageThumbKeys.filter { live.contains($0.key) }
+            for item in todo {
+                // 渲不出来的页照旧空着（灰块），下次再试。
+                out[item.page.id] = rendered[item.page.id]
+                keys[item.page.id] = rendered[item.page.id] == nil ? nil : item.key
+            }
+            self.pageThumbKeys = keys
+            self.thumbs.pages = out
         }
     }
 
@@ -3191,7 +3334,7 @@ final class CollageStore: ObservableObject {
                 guard let self, self.renderDirty else { break }
                 self.renderDirty = false
                 guard let page = self.page else {
-                    self.preview = nil
+                    self.previewState.image = nil
                     continue
                 }
                 let snapshot = self.project
@@ -3207,8 +3350,8 @@ final class CollageStore: ObservableObject {
                     CollageRender.render(page: page, project: snapshot, hints: hints, options: opts)
                 }.value
                 if let image {
-                    self.preview = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
-                    self.previewScale = scale
+                    self.previewState.image = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+                    self.previewState.scale = scale
                 }
             }
             self?.renderTask = nil
@@ -3511,7 +3654,7 @@ final class CollageStore: ObservableObject {
         projectSaveTask = Task {
             try? await Task.sleep(for: .seconds(1))
             guard !Task.isCancelled else { return }
-            self.saveProject()
+            self.saveProject(inBackground: true)
         }
     }
 
@@ -3521,21 +3664,41 @@ final class CollageStore: ObservableObject {
         flushStateSave()
     }
 
+    /// 还没到点的那一次现在写；已经交给后台在写的，等它写完再回来（换场次、退出、实时桥回复之前盘上要是最新的）。
     private func flushProjectSave() {
-        guard projectSaveTask != nil else { return }
+        guard projectSaveTask != nil else {
+            Self.saveQueue.sync {}
+            return
+        }
         projectSaveTask?.cancel()
         projectSaveTask = nil
-        saveProject()
+        saveProject(inBackground: false)
     }
 
-    private func saveProject() {
+    /// 编码、写盘都在一条串行队列上（大相册的 JSON 编码不再卡主线程）：先交的先写，立刻写的那一次排在后台
+    /// 还没写完的后面，盘上最后留下的总是最新的。
+    private static let saveQueue = DispatchQueue(label: "local.culling.labelgui.collage-save", qos: .utility)
+
+    private func saveProject(inBackground: Bool) {
         projectSaveTask = nil
         guard let url = projectURL else { return }
-        do {
-            let data = try JSONEncoder().encode(project)
-            try data.write(to: url, options: .atomic)
-        } catch {
-            lastError = "拼图项目保存失败: \(error.localizedDescription)"
+        let snapshot = project
+        let write: @Sendable () -> String? = {
+            do {
+                let data = try JSONEncoder().encode(snapshot)
+                try data.write(to: url, options: .atomic)
+                return nil
+            } catch {
+                return "拼图项目保存失败: \(error.localizedDescription)"
+            }
+        }
+        if inBackground {
+            Self.saveQueue.async { [weak self] in
+                guard let message = write() else { return }
+                Task { @MainActor in self?.lastError = message }
+            }
+        } else if let message = Self.saveQueue.sync(execute: write) {
+            lastError = message
         }
     }
 
