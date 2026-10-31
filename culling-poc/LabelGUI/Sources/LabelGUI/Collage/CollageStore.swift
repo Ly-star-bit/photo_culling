@@ -104,6 +104,8 @@ final class CollageStore: ObservableObject {
     /// 预览大图、各种缩略图各自成对象（CollageThumbs.swift）：只有显示它们的那块界面订阅。
     let previewState = CollagePreviewState()
     let thumbs = CollageThumbs()
+    /// 托盘的选中和筛选（CollageTrayState.swift）：只有托盘订阅。
+    let tray = CollageTrayState()
     var preview: NSImage? { previewState.image }
     /// 相册跨页条的缩略图（按页 id）。
     var pageThumbs: [UUID: NSImage] { thumbs.pages }
@@ -432,6 +434,7 @@ final class CollageStore: ObservableObject {
         selectedItem = nil
         clearAlternatives()
         albumDropped = []
+        tray.clear()
         lookThumbKey = ""
         thumbs.looks = [:]
         styleThumbTask?.cancel()
@@ -717,24 +720,50 @@ final class CollageStore: ObservableObject {
         setNotice("托盘加入 \(fresh.count) 张")
     }
 
-    /// 从托盘拿掉；用到它的格子变成空格（占位）。
+    /// 从托盘拿掉一张；用到它的格子变成空格（占位）。
     func removeFromTray(_ id: String) {
+        removeFromTray([id])
+    }
+
+    /// 从托盘拿掉几张（托盘多选、「移除没用上的」……），一步撤销；用到它们的格子变成空格（占位），
+    /// 不拦也不弹框（同 iPhoto：连格子一起清，靠 ⌘Z 兜底）。拿掉不止一张、或者有上了版的，状态栏说一句。
+    func removeFromTray(_ ids: [String]) {
+        let gone = Set(ids).intersection(project.photos.map(\.id))
+        guard !gone.isEmpty else { return }
+        let placed = gone.filter { photoUsage[$0] != nil }.count
         cancelSolveIfRunning()
         pushUndo()
-        project.photos.removeAll { $0.id == id }
+        project.photos.removeAll { gone.contains($0.id) }
         pruneMarkSkips()
         for i in project.pages.indices {
             var root = project.pages[i].root
-            for path in root.leafPaths() where root.node(at: path)?.cell?.photoID == id {
+            for path in root.leafPaths() where root.node(at: path)?.cell?.photoID.map(gone.contains) == true {
                 root.update(at: path) { $0.cell?.photoID = nil; $0.cell?.crop = nil }
             }
             project.pages[i].root = root
-            project.pages[i].contactSheet?.frames.removeAll { $0 == id }
-            project.pages[i].items.removeAll { $0.kind == .photo && $0.photoID == id }
+            project.pages[i].contactSheet?.frames.removeAll { gone.contains($0) }
+            project.pages[i].items.removeAll { $0.kind == .photo && $0.photoID.map(gone.contains) == true }
             // 贴在那张相纸上的胶带一起拿掉（以前留在原地悬空）。
             project.pages[i].items = CollageItems.pinAll(project.pages[i].items, canvas: project.canvas)
         }
+        tray.prune(to: Set(project.photos.map(\.id)))
         commitEdit()
+        if gone.count > 1 || placed > 0 {
+            setNotice("从托盘移除 \(gone.count) 张" + (placed > 0 ? "（其中 \(placed) 张原来在版式里，留了空格）" : "")
+                      + " · ⌘Z 撤销")
+        }
+    }
+
+    /// 托盘里没上任何一页的照片（「移除没用上的」）。
+    var unusedTrayIDs: [String] {
+        let usage = photoUsage
+        return project.photos.filter { usage[$0.id] == nil }.map(\.id)
+    }
+
+    /// 相册去重（fine-art：编排）拿掉、现在也还没上任何一页的照片（「移除相似拿掉的」）。
+    var droppedTrayIDs: [String] {
+        let usage = photoUsage
+        return project.photos.filter { albumDroppedIDs.contains($0.id) && usage[$0.id] == nil }.map(\.id)
     }
 
     func clearTray() {
@@ -746,6 +775,7 @@ final class CollageStore: ObservableObject {
         pageIndex = 0
         clearAlternatives()
         albumDropped = []
+        tray.clear()
         commitEdit()
     }
 

@@ -745,6 +745,7 @@ enum CollageCLI {
 /// LabelGUI --collage-ui <photo_dir> <out.png> [--album] [--tab 版式|样式|文字|水印|导出] [--select 路径如 10]
 /// [--crop] [--overlay-index N] [--size 1440x900] [--adopt photos|page[:水印页预设名]] [--inspector-width 300] [--notice 提示文字]
 /// [--contact-frames]（印样的「逐帧」一开始就展开）[--light]（浅色外观）[--ax-dump]
+/// [--tray-filter all|unused|used] [--tray-select ID,ID]（托盘的筛选、多选）
 /// [--perf place|gutter|slider|title|all]（截完图接着跑这个场景，打印每个视图 body 重算几次、
 /// store / 预览 / 缩略图各发了几次 objectWillChange、出了几张预览：CollagePerf）
 /// 截图前先改工程（都可选）：--relayout [--count 6]（托盘重新自动排版，几张；工程里还没有版式时也排）、
@@ -838,6 +839,9 @@ enum CollageUISnapshot {
         if let i = option("--select-item").flatMap(Int.init), store.items.indices.contains(i) {
             store.selectItem(store.items[i].id)
         }
+        // --tray-filter all|unused|used、--tray-select ID,ID：截托盘的筛选和多选（离屏点不了）。
+        if let f = option("--tray-filter").flatMap(CollageTrayState.Filter.init(rawValue:)) { store.tray.filter = f }
+        if let ids = option("--tray-select") { store.tray.selection = Set(ids.split(separator: ",").map(String.init)) }
         // 检视器「水印」页读水印页的签名和预设：和 app 一样从同一个数据目录读。
         let watermarkStore = WatermarkStore(dataDir: appDataDir)
         // --adopt photos|page[:预设名]：走检视器「用水印页的设置 / 预设 ▸」同一条路把水印页设置套进来。
@@ -981,6 +985,8 @@ private struct CollageSnapshotHost: View {
 ///     bg:solid|fromPhoto|blurPhoto|gradient[=底色 hex]、look:<色调>、strength:0.8（色调强度）、harmonize:0.6（统一色温）、
 ///     layout:grid|scatter、autolayout:N（托盘前 N 张重新自动排版）、relayout:ID;ID（这一页的照片再加这几张重排）；
 ///     layoutnowait / autolayoutnowait = 同上但不等排版落下，wait = 等排版落下。
+/// 托盘多选：untray:ID;ID;…（一次移除几张，一步撤销）、untrayunused（移除没用上的）、untraydropped（移除相似拿掉的）、
+///     trayfilter:all|unused|used、trayclick:ID[+cmd][+shift]、trayall（⌘A）、trayremove（⌫）、trayusage（每张上了几次）。
 /// 托盘 / 批量页：untray:ID、cleartray、waittray:N（等托盘有 N 张再等排版）、spintray:N（等到 N 张就走，不等排版）、
 ///     addfiles:/a.jpg;/b.jpg（托盘「添加文件…」）、batchverdict:ID=pick|usable|reject（批量页手动改判）、
 ///     reattach（同一场再 attach 一次 = 从批量页切回拼图 tab）、batchswitch（批量页重新载入这一场）。
@@ -1979,7 +1985,44 @@ enum CollageOpsScript {
                 store.relayout(photoIDs: (store.page?.photoIDs ?? []) + arg.split(separator: ";").map(String.init))
                 idle()
             case "untray":
-                store.removeFromTray(arg)
+                // untray:ID 或 untray:ID;ID;…（托盘多选一次移除，记一步撤销）
+                store.removeFromTray(arg.split(separator: ";").map(String.init))
+                print("  托盘 \(store.project.photos.count) 张 · 提示: " + (store.notice ?? "无"))
+            case "untrayunused":
+                // 「带照片」菜单的「移除没用上的」
+                store.removeFromTray(store.unusedTrayIDs)
+                print("  托盘 \(store.project.photos.count) 张 · 提示: " + (store.notice ?? "无"))
+            case "untraydropped":
+                // 「移除相似拿掉的」（相册去重 / fine-art 编排拿掉、现在也没上版的）
+                store.removeFromTray(store.droppedTrayIDs)
+                print("  托盘 \(store.project.photos.count) 张 · 提示: " + (store.notice ?? "无"))
+            case "trayfilter":
+                // trayfilter:all|unused|used（托盘顶上的筛选）
+                guard let f = CollageTrayState.Filter(rawValue: arg) else { ok = false; break }
+                store.tray.filter = f
+                let shown = store.tray.visible(store.project.photos, usage: store.photoUsage)
+                store.tray.prune(to: Set(shown.map(\.id)))
+                print("  托盘显示 \(shown.count) 张: " + shown.map(\.id).joined(separator: " "))
+            case "trayclick":
+                // trayclick:ID[+cmd][+shift]（托盘里点一张：单击 / ⌘ / ⇧，按现在显示的顺序）；打印选中的
+                let parts = arg.split(separator: "+").map(String.init)
+                guard let id = parts.first else { ok = false; break }
+                let shown = store.tray.visible(store.project.photos, usage: store.photoUsage).map(\.id)
+                store.tray.click(id, command: parts.contains("cmd"), shift: parts.contains("shift"), order: shown)
+                print("  托盘选中: " + shown.filter(store.tray.selection.contains).joined(separator: " "))
+            case "trayall":
+                // ⌘A：选中显示的全部
+                let shown = store.tray.visible(store.project.photos, usage: store.photoUsage).map(\.id)
+                store.tray.selectAll(shown)
+                print("  托盘选中 \(store.tray.selection.count) 张")
+            case "trayremove":
+                // ⌫：移除选中的（按托盘顺序）
+                store.removeFromTray(store.project.photos.map(\.id).filter(store.tray.selection.contains))
+                print("  托盘 \(store.project.photos.count) 张 · 选中 \(store.tray.selection.count) · 提示: " + (store.notice ?? "无"))
+            case "trayusage":
+                // 每张上了几次（托盘角标：1 次打勾，多次标次数）
+                let usage = store.photoUsage
+                print("  上版次数: " + store.project.photos.map { "\($0.id)=\(usage[$0.id] ?? 0)" }.joined(separator: " "))
             case "cleartray":
                 store.clearTray()
             case "waittray":
