@@ -271,11 +271,15 @@ struct CollageTray: View {
         let _ = CollagePerf.body("托盘")
         let usage = store.photoUsage
         let visible = tray.visible(store.project.photos, usage: usage)
+        let visibleIDs = visible.map(\.id)
+        // 看得见的才算选中：筛「未用」时一张刚上了版（拖进画布、重排）就从网格里消失，撤销拿掉了刚带进来的 ——
+        // 这些都不再算，「已选」的张数、「移除」按钮、⌫ 只管看得见的。
+        let selected = tray.selection.intersection(visibleIDs)
         VStack(spacing: 0) {
             CollageTrayHeader(store: store, batchStore: batchStore)
             if !store.project.photos.isEmpty {
                 filterBar(usage: usage)
-                if !tray.selection.isEmpty { selectionBar }
+                if !selected.isEmpty { selectionBar(selected, order: visibleIDs) }
             }
             Divider()
             if store.project.photos.isEmpty {
@@ -287,7 +291,7 @@ struct CollageTray: View {
                 // 拖拽源）都跳过不重算。
                 let placeTarget = store.selection.flatMap { store.root?.node(at: $0)?.isLeaf == true ? $0 : nil }
                 CollageTrayGrid(store: store, tray: tray, photos: visible, usage: usage,
-                                dropped: store.albumDroppedIDs, selection: tray.selection,
+                                dropped: store.albumDroppedIDs, selection: selected,
                                 fineArt: store.isAlbum && store.project.albumTheme == .fineArt,
                                 placeTarget: placeTarget, pagePhotoIDs: store.page?.photoIDs)
                     .equatable()
@@ -310,10 +314,8 @@ struct CollageTray: View {
             }
             return true
         }
-        // 换了筛选：看不见的不留在选中里（不然 ⌫ 会删掉看不见的照片）。
-        .onChange(of: tray.filter) { _, _ in
-            tray.prune(to: Set(tray.visible(store.project.photos, usage: store.photoUsage).map(\.id)))
-        }
+        // 显示的变了（换了筛选、上了版、移除、撤销）：看不见的从选中里去掉。
+        .onChange(of: visibleIDs) { _, ids in tray.prune(to: Set(ids)) }
     }
 
     /// 全部 / 未用 / 已用：先筛出没用上的再 ⌘A ⌫，就是批量清掉没用的。
@@ -333,12 +335,12 @@ struct CollageTray: View {
         .help("只看还没上版的 / 已经上版的照片。点选：单击、⌘ 点加减、⇧ 点连选、⌘A 全选；⌫ 移除选中的")
     }
 
-    private var selectionBar: some View {
-        let n = tray.selection.count
+    private func selectionBar(_ selected: Set<String>, order: [String]) -> some View {
+        let n = selected.count
         return HStack(spacing: 6) {
             Text("已选 \(n) 张").font(.caption).foregroundStyle(.secondary).monospacedDigit()
             Spacer()
-            Button("移除", role: .destructive) { removeSelected() }
+            Button("移除", role: .destructive) { store.removeFromTray(order.filter(selected.contains)) }
                 .controlSize(.small)
                 .help("从托盘移除选中的 \(n) 张（⌫）：版式里用到的格子留空，⌘Z 一次撤回")
             Button {
@@ -351,10 +353,6 @@ struct CollageTray: View {
         }
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
-    }
-
-    private func removeSelected() {
-        store.removeFromTray(store.project.photos.map(\.id).filter(tray.selection.contains))
     }
 
     private var emptyTray: some View {
@@ -469,7 +467,7 @@ private struct CollageTrayGrid: View, Equatable {
             LazyVGrid(columns: columns, spacing: 6) {
                 ForEach(photos) { photo in
                     CollageTrayItem(photo: photo, uses: usage[photo.id] ?? 0, dropped: dropped.contains(photo.id),
-                                    selected: selection.contains(photo.id), fineArt: fineArt)
+                                    selected: selection.contains(photo.id), active: focused, fineArt: fineArt)
                         .onTapGesture { click(photo.id) }
                         .onDrag { NSItemProvider(object: photo.id as NSString) }
                         .contextMenu { menu(for: photo) }
@@ -497,6 +495,13 @@ private struct CollageTrayGrid: View, Equatable {
         tray.click(id, command: flags.contains(.command), shift: flags.contains(.shift), order: photos.map(\.id))
     }
 
+    /// 右键里改画布的操作（放进格子、重排）：做完取消托盘的选中。键盘焦点还在托盘上，紧接着按 ⌫（多半是想清掉画布上
+    /// 那一格）就什么也不移除，不会把刚放进去的照片移出托盘。
+    private func toCanvas(_ action: () -> Void) {
+        action()
+        tray.clear()
+    }
+
     /// 选中的（按显示顺序）。
     private var selectedIDs: [String] { photos.map(\.id).filter(selection.contains) }
 
@@ -512,13 +517,13 @@ private struct CollageTrayGrid: View, Equatable {
             let ids = selectedIDs
             Button(ids.count > CollageTray.relayoutLimit ? "用这 \(ids.count) 张重新排一版（最多 \(CollageTray.relayoutLimit) 张）"
                                                           : "用这 \(ids.count) 张重新排一版") {
-                store.relayout(photoIDs: ids)
+                toCanvas { store.relayout(photoIDs: ids) }
             }
             .disabled(ids.count > CollageTray.relayoutLimit)
             if let page = pagePhotoIDs {
                 let extra = ids.filter { !page.contains($0) }
                 if !extra.isEmpty {
-                    Button("加进当前版（重排，\(extra.count) 张）") { store.relayout(photoIDs: page + extra) }
+                    Button("加进当前版（重排，\(extra.count) 张）") { toCanvas { store.relayout(photoIDs: page + extra) } }
                         .disabled(page.count + extra.count > CollageTray.relayoutLimit)
                 }
             }
@@ -526,11 +531,11 @@ private struct CollageTrayGrid: View, Equatable {
             Button("从托盘移除这 \(ids.count) 张", role: .destructive) { store.removeFromTray(ids) }
         } else {
             if let path = placeTarget {
-                Button("放进选中的格子") { store.place(photoID: photo.id, at: path, edge: nil) }
+                Button("放进选中的格子") { toCanvas { store.place(photoID: photo.id, at: path, edge: nil) } }
             }
-            Button("只用这张重新排一版") { store.relayout(photoIDs: [photo.id]) }
+            Button("只用这张重新排一版") { toCanvas { store.relayout(photoIDs: [photo.id]) } }
             if let ids = pagePhotoIDs, !ids.contains(photo.id) {
-                Button("加进当前版（重排）") { store.relayout(photoIDs: ids + [photo.id]) }
+                Button("加进当前版（重排）") { toCanvas { store.relayout(photoIDs: ids + [photo.id]) } }
             }
             Divider()
             Button("从托盘移除", role: .destructive) { store.removeFromTray(photo.id) }
@@ -544,6 +549,8 @@ struct CollageTrayItem: View {
     let uses: Int
     let dropped: Bool
     var selected = false
+    /// 托盘有键盘焦点（⌫、Esc、⌘A 归它）：选中框画成强调色；没有焦点画成灰的（和访达一样）。
+    var active = true
     /// 婚礼 fine-art 编排拿掉的不全是「相似」（同一场只留精选拿掉的更多）：角标写「拿掉」。
     var fineArt = false
 
@@ -589,7 +596,7 @@ struct CollageTrayItem: View {
         .overlay {
             if selected {
                 RoundedRectangle(cornerRadius: 4)
-                    .strokeBorder(Color.accentColor, lineWidth: 3)
+                    .strokeBorder(active ? Color.accentColor : Color.gray, lineWidth: 3)
             }
         }
         .help(photo.id + (photo.isPick ? " · 精选" : "") + (uses > 1 ? " · 用了 \(uses) 次" : uses == 1 ? " · 已用" : "")

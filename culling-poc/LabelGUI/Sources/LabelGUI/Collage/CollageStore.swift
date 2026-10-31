@@ -27,7 +27,8 @@ final class CollageStore: ObservableObject {
         var used: Set<String>?
         var usage: [String: Int]?
         var geometry: (page: Int, value: CollageLayout.Geometry)?
-        var badges: (key: BadgeKey, value: [[Int]: CollageCanvasBadge])?
+        /// waiting：这一份是按普通取景算的那几格的照片（封面取景、人物挡字，蒙版那时还没算好）。
+        var badges: (key: BadgeKey, value: [[Int]: CollageCanvasBadge], waiting: [CollagePhotoRef])?
     }
     private var derived = Derived()
     /// 角标缓存的键：工程、页、选中（路人只标选中的那一格）、路人信息和蒙版的版本。
@@ -434,7 +435,7 @@ final class CollageStore: ObservableObject {
         selectedItem = nil
         clearAlternatives()
         albumDropped = []
-        tray.clear()
+        tray.reset()
         lookThumbKey = ""
         thumbs.looks = [:]
         styleThumbTask?.cancel()
@@ -775,7 +776,7 @@ final class CollageStore: ObservableObject {
         pageIndex = 0
         clearAlternatives()
         albumDropped = []
-        tray.clear()
+        tray.reset()
         commitEdit()
     }
 
@@ -2495,10 +2496,19 @@ final class CollageStore: ObservableObject {
     /// 快照逐字节可比。
     func canvasBadges() -> [[Int]: CollageCanvasBadge] {
         let key = BadgeKey(page: pageIndex, selection: selection, hintsVersion: hintsVersion, masksVersion: masksVersion)
-        if let cached = derived.badges, cached.key == key { return cached.value }
+        // 蒙版不一定等预热那一批算完才有（预览渲染、检视器也会顺手算）：按普通取景算过的那几张有了蒙版就重算。
+        if let cached = derived.badges, cached.key == key, !cached.waiting.contains(where: CollageMasks.isSettled) {
+            return cached.value
+        }
         var out: [[Int]: CollageCanvasBadge] = [:]
+        var waiting: [CollagePhotoRef] = []
         let isPrint = project.canvas.isPrint
+        let map = photoMap
         for frame in geometry.frames {
+            if CollageCover.applies(to: frame.cell), let id = frame.cell.photoID, let photo = map[id],
+               !CollageMasks.isSettled(photo) {
+                waiting.append(photo)
+            }
             let window = window(for: frame, waitForMask: false)
             var badge = CollageCanvasBadge()
             badge.locked = frame.cell.locked
@@ -2511,7 +2521,7 @@ final class CollageStore: ObservableObject {
             }
             if !badge.isEmpty { out[frame.path] = badge }
         }
-        derived.badges = (key, out)
+        derived.badges = (key, out, waiting)
         return out
     }
 
@@ -3316,15 +3326,17 @@ final class CollageStore: ObservableObject {
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
             let pages = todo.map(\.page)
-            let rendered = await Task.detached(priority: .utility) { () -> [UUID: NSImage] in
+            let rendered = await Task.detached(priority: .utility) { () -> [UUID: (image: NSImage, complete: Bool)] in
                 let scale = min(1, 260 / Double(max(snapshot.canvas.width, snapshot.canvas.height)))
-                var out: [UUID: NSImage] = [:]
+                var out: [UUID: (image: NSImage, complete: Bool)] = [:]
                 for page in pages {
                     var opts = CollageRender.Options(scale: scale)
                     opts.includeBleed = false
                     opts.placeholders = true
+                    let report = CollageRender.RenderReport()
+                    opts.report = report
                     guard let cg = CollageRender.render(page: page, project: snapshot, hints: hints, options: opts) else { continue }
-                    out[page.id] = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+                    out[page.id] = (NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height)), report.missing.isEmpty)
                 }
                 return out
             }.value
@@ -3332,9 +3344,11 @@ final class CollageStore: ObservableObject {
             var out = self.thumbs.pages.filter { live.contains($0.key) }
             var keys = self.pageThumbKeys.filter { live.contains($0.key) }
             for item in todo {
-                // 渲不出来的页照旧空着（灰块），下次再试。
-                out[item.page.id] = rendered[item.page.id]
-                keys[item.page.id] = rendered[item.page.id] == nil ? nil : item.key
+                // 渲不出来的页照旧空着（灰块）；缺照片（移动硬盘没插）渲出来的照样显示，但不记键：下次照样重渲，
+                // 插上盘就回来了。
+                let r = rendered[item.page.id]
+                out[item.page.id] = r?.image
+                keys[item.page.id] = r?.complete == true ? item.key : nil
             }
             self.pageThumbKeys = keys
             self.thumbs.pages = out
@@ -3382,6 +3396,11 @@ final class CollageStore: ObservableObject {
                 if let image {
                     self.previewState.image = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
                     self.previewState.scale = scale
+                }
+                // 这一张渲染顺手算好了封面取景、人物挡字那几格的蒙版，而画布角标是按没蒙版的取景缓存的：叫画布重算一次
+                // （以前预览一出来整个拼图页都重算，角标跟着就对了；现在预览不经过 store）。
+                if self.derived.badges?.waiting.contains(where: CollageMasks.isSettled) == true {
+                    self.objectWillChange.send()
                 }
             }
             self?.renderTask = nil

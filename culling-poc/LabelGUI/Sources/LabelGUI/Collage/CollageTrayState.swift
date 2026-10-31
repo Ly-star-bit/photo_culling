@@ -60,6 +60,12 @@ final class CollageTrayState: ObservableObject {
         anchor = nil
     }
 
+    /// 换场次、清空托盘：选中清掉，筛选回到「全部」（留着「已用」，新带进来的托盘会显示「还没有照片上版」）。
+    func reset() {
+        clear()
+        if filter != .all { filter = .all }
+    }
+
     /// 只留还在 ids 里的（移除了、换了筛选看不见了的去掉）。
     func prune(to ids: Set<String>) {
         let kept = selection.intersection(ids)
