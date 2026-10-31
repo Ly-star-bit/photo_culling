@@ -2017,7 +2017,8 @@ enum CollageOpsScript {
                 print("  托盘选中 \(store.tray.selection.count) 张")
             case "trayremove":
                 // ⌫：移除选中的（按托盘顺序）
-                store.removeFromTray(store.project.photos.map(\.id).filter(store.tray.selection.contains))
+                let shown = store.tray.visible(store.project.photos, usage: store.photoUsage).map(\.id)
+                store.removeFromTray(shown.filter(store.tray.selection.contains))
                 print("  托盘 \(store.project.photos.count) 张 · 选中 \(store.tray.selection.count) · 提示: " + (store.notice ?? "无"))
             case "trayusage":
                 // 每张上了几次（托盘角标：1 次打勾，多次标次数）
