@@ -1,10 +1,11 @@
-# push 到 main → 只构建验证 (CI 先测试);推 v* tag → 构建并自动创建
-# Release 附上 DMG。发版流程:先推 main 等 CI 绿,再打 tag。
+# push 到 main 或 feature/** 分支 → 只构建验证 (CI 先测试);推 v* tag → 构建并自动创建
+# Release 附上 DMG。发版流程:先推 main 等 CI 绿,再打 tag。feature/ 分支推上去就跑同一套测试,
+# 不发 Release (release job 只认 tag),不用再去网页手动点 Run workflow。
 name: Release
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feature/**']
     tags: ['v*']
   workflow_dispatch: {}
 
