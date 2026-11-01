@@ -64,7 +64,7 @@ enum MCPServerMain {
         }
     }
 
-    /// 这一次 tools/list 里的工具和处理函数（顺序 = §10.1）。要 app 的 15 个按 §10.2 路由（MCPLiveTools）：每次调用探一次，
+    /// 这一次 tools/list 里的工具和处理函数（顺序 = §10.1）。要 app 的 18 个按 §10.2 路由（MCPLiveTools）：每次调用探一次，
     /// app 没开一律 app_not_running，服务器绝不启动 app。
     static func registry(live: Bool) -> [MCPStdioServer.Tool] {
         MCPToolDefs.tools(live: live).compactMap { def in

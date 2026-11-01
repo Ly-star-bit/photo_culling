@@ -29,6 +29,8 @@ final class CollageStore: ObservableObject {
         var geometry: (page: Int, value: CollageLayout.Geometry)?
         /// waiting：这一份是按普通取景算的那几格的照片（封面取景、人物挡字，蒙版那时还没算好）。
         var badges: (key: BadgeKey, value: [[Int]: CollageCanvasBadge], waiting: [CollagePhotoRef])?
+        /// 和现在一模一样的那几个方案的 id（nil = 还没算）。
+        var currentVariants: Set<String>?
     }
     private var derived = Derived()
     /// 角标缓存的键：工程、页、选中（路人只标选中的那一格）、路人信息和蒙版的版本。
@@ -113,6 +115,16 @@ final class CollageStore: ObservableObject {
     private var thumbTask: Task<Void, Never>?
     /// 每页缩略图渲的时候用的键：这一页、整个工程（除了别的页）、页码、路人信息和蒙版的版本。没变的页不重渲。
     private var pageThumbKeys: [UUID: Int] = [:]
+    /// 方案栏：最近一次存成 / 切到的那个方案（描边；现在的样子和它不一样了标「改过」）。不存盘，换场次清掉。
+    @Published private(set) var activeVariantID: String?
+    /// 方案缩略图按方案存的那一版认键（不跟路人信息的版本走：每算好一张照片的路人信息不该把三十个方案全重渲一遍）；
+    /// 渲的时候还有照片没算好路人信息的不记键，下次再渲。
+    private var variantThumbKeys: [String: Int] = [:]
+    /// 渲出来不完整（路人信息没算好、缺照片）的方案缩略图：当时的键和路人信息的版本。版本没变就不重渲。
+    private var variantThumbTried: [String: (key: Int, hints: Int)] = [:]
+    private var variantThumbTask: Task<Void, Never>?
+    /// 一场最多存几个方案：每个方案是一整份工程，相册几十个跨页，collage.json 和撤销栈都跟着涨。
+    nonisolated static let maxVariants = 30
     /// 预览图对应的画布缩放（预览像素 / 成品像素）。
     var previewScale: Double { previewState.scale }
     private var viewportPixels = CGSize(width: 1200, height: 900)
@@ -466,6 +478,11 @@ final class CollageStore: ObservableObject {
         templateThumbTask?.cancel()
         templateThumbsBusy = false
         thumbs.templates = [:]
+        activeVariantID = nil
+        variantThumbTask?.cancel()
+        variantThumbKeys = [:]
+        variantThumbTried = [:]
+        thumbs.variants = [:]
         // 换了工程：关掉时记下的水印层 / 文字是上一个拼图的，不能恢复到这里；还在等照片的交接也不再套水印。
         stashedMarkLayers = [:]
         stashedMarkTexts = [:]
@@ -1430,7 +1447,7 @@ final class CollageStore: ObservableObject {
             end = .superseded(.userEdit)
             guard ticket.generation == self.solveGeneration else { return }
             self.isSolving = false
-            guard let generated = result, !generated.pages.isEmpty else {
+            guard var generated = result, !generated.pages.isEmpty else {
                 end = .notGenerated
                 // 三套都做好了：没出来是因为没有能用的照片（整本婚礼相册只编托盘里的，不从这一场借）。
                 let why = kit == .weddingAlbum && self.project.photos.isEmpty
@@ -1438,6 +1455,8 @@ final class CollageStore: ObservableObject {
                 self.setNotice("「\(kit.name)」没出来：\(why)，工程没动")
                 return
             }
+            // 方案栏照现在的：算的这几秒里用户可能又存了一个（成套拿的是开始那一刻的工程）。
+            generated.variants = self.project.variants
             // 什么都没变（「换封面」没有别的主图候选、同一套又出一遍）：不记撤销，说一声。
             guard generated != self.project else {
                 end = .unchanged
@@ -3263,11 +3282,16 @@ final class CollageStore: ObservableObject {
         restore(next)
     }
 
-    private func restore(_ p: CollageProject) {
+    private func restore(_ snapshot: CollageProject) {
         cancelPendingSolve()
         let keepItem = selectedItem
+        // 方案栏不跟着撤销走（见方案那一段）：换的是这一版的样子，方案栏留现在的。
+        var p = snapshot
+        p.variants = project.variants
         if p.watermark != project.watermark { watermarkRevision += 1 }
         project = p
+        // 撤回去的那一版和哪个方案一样就标哪个（撤掉「切到方案」以后不再标那个方案「改过」）。
+        activeVariantID = currentVariantID
         pageIndex = min(pageIndex, max(0, project.pages.count - 1))
         selection = nil
         // 选中的图层撤销之后还在：接着选着（以前一律清掉，再按 → 就变成「下一版」，整页重排）。
@@ -3312,6 +3336,7 @@ final class CollageStore: ObservableObject {
     /// 相册跨页条：编辑停下 0.25 秒后给变了的页各渲一张小图（一页几毫秒）。以前每改一下就把所有页全渲一遍：
     /// 30 个跨页就是 30 张整页渲染，和大图预览抢 CPU，还把解码缓存挤掉。
     func schedulePageThumbs() {
+        scheduleVariantThumbs()
         // 单张拼图有好几页（一键成套出的一期杂志、轮播组图）也要页条。
         guard isAlbum || project.pages.count > 1 else {
             thumbTask?.cancel()
@@ -3323,6 +3348,7 @@ final class CollageStore: ObservableObject {
         // 路人信息和蒙版的版本定（{no} 按页码，没有照片的页 {count}、主图按托盘）。
         var rest = project
         rest.pages = []
+        rest.variants = []
         var shared = Hasher()
         shared.combine(rest)
         shared.combine(project.pages.count)
@@ -3445,19 +3471,47 @@ final class CollageStore: ObservableObject {
         return nil
     }
 
+    /// 一次导出的结局：导出按钮看 progressText / lastError，AI 的 collage_export 拿这个。
+    struct ExportOutcome {
+        /// 写进的目录（开始不了时可能是 nil）。
+        var folder: URL?
+        /// 写成了的文件名（按页的顺序，相册的 PDF 在最后；失败、取消时只有已经写出的）。
+        var files: [String] = []
+        var failure: String?
+        var cancelled = false
+        /// 成品里有退化的地方（exportWarning：缺照片、用了预览图、签名找不到……），导出本身不算失败。
+        var warning: String?
+        /// 实际用的倍数（exportScale）。
+        var scale = 1
+    }
+
     func export() {
-        guard exportBlockedReason == nil, let folder = outputFolder else { return }
-        let snapshot = project
+        guard exportBlockedReason == nil else { return }
+        startExport(project: project, options: exportOptions, name: exportName, reveal: true)
+    }
+
+    /// 导出按钮和 AI 的 collage_export 共用。project 是要导出的那一版（AI 可以直接导存着的方案）；options、name 只管
+    /// 这一次（AI 给的倍数、格式不改导出页上的设置）。reveal：做完在访达里选中（AI 调的不弹）。done 在主线程上、
+    /// 导出结束时恰好回调一次（开始不了也回，failure 写原因）。返回开始不了的原因，nil = 开始了。
+    @discardableResult
+    func startExport(project snapshot: CollageProject, options: ExportOptions, name: String, reveal: Bool,
+                     done: (@MainActor (ExportOutcome) -> Void)? = nil) -> String? {
+        func refuse(_ why: String, folder: URL? = nil) -> String {
+            done?(ExportOutcome(folder: folder, failure: why))
+            return why
+        }
+        if isExporting { return refuse("正在导出") }
+        if snapshot.pages.isEmpty { return refuse("还没有版式") }
+        guard let folder = outputFolder else { return refuse("先选择输出目录") }
         let hints = self.hints
-        let options = exportOptions
         // 直接写进输出目录（以前每次先建一个「标题_时间」子目录再往里写）。
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         } catch {
             lastError = "无法创建输出目录: \(error.localizedDescription)"
-            return
+            return refuse(lastError ?? "无法创建输出目录", folder: folder)
         }
-        let base = exportBase(in: folder, project: snapshot, options: options)
+        let base = exportBase(in: folder, project: snapshot, options: options, name: name)
         let plan = Self.exportPlan(base: base, project: snapshot, options: options)
         isExporting = true
         exportCancelled = false
@@ -3467,6 +3521,8 @@ final class CollageStore: ObservableObject {
         let wantPDF = snapshot.mode == .album && options.pdf
         let scale = Self.exportScale(canvas: snapshot.canvas, options: options)
         Task { [weak self] in
+            var outcome = ExportOutcome(folder: folder, scale: scale)
+            defer { done?(outcome) }
             // 只攒每页编码好的 JPEG（~5MB），不攒位图（30×30cm 跨页 ~100MB 一张）。
             var pdfPages: [Data] = []
             var failure: String?
@@ -3499,11 +3555,15 @@ final class CollageStore: ObservableObject {
                 }.value
                 if let data = result.pdfData { pdfPages.append(data) }
                 if let f = result.error, failure == nil { failure = f }
+                if result.error == nil { outcome.files += plan.pages[i] }
                 lowRes += result.lowRes
                 missing += result.missing
                 signatureLost = signatureLost || result.signatureLost
                 fillerBody = fillerBody || result.fillerBody
-                guard let self else { return }
+                guard let self else {
+                    outcome.failure = "导出中断（拼图页关了）"
+                    return
+                }
                 self.progressFraction = Double(i + 1) / Double(snapshot.pages.count)
                 self.progressText = "导出 \(i + 1)/\(snapshot.pages.count)…"
             }
@@ -3521,8 +3581,14 @@ final class CollageStore: ObservableObject {
                     }
                 }.value
                 if let pdfError, failure == nil { failure = pdfError }
+                if pdfError == nil { outcome.files.append(pdfName) }
             }
-            guard let self else { return }
+            outcome.failure = failure
+            guard let self else {
+                if outcome.failure == nil { outcome.failure = "导出中断（拼图页关了）" }
+                return
+            }
+            outcome.cancelled = self.exportCancelled
             self.isExporting = false
             self.progressFraction = nil
             if self.exportCancelled {
@@ -3535,13 +3601,15 @@ final class CollageStore: ObservableObject {
                 let main = plan.pdf ?? files.first ?? base
                 let clean = snapshot.watermark.map { !$0.exportEnabled && $0.anyLayerOn } == true ? "（不带水印）" : ""
                 self.progressText = "导出完成\(clean) → \(main)" + (files.count > 1 ? "（共 \(files.count) 个文件）" : "")
-                AppRuntime.revealInFinder(files.map { folder.appendingPathComponent($0) })
+                if reveal { AppRuntime.revealInFinder(files.map { folder.appendingPathComponent($0) }) }
             }
             if let warning = Self.exportWarning(missing: missing, lowRes: lowRes, signatureLost: signatureLost,
                                                 fillerBody: fillerBody) {
                 self.lastError = warning
+                outcome.warning = warning
             }
         }
+        return nil
     }
 
     /// 成品里有退化的地方：说清楚是哪几张、缺了什么（导出本身不算失败）。命令行 renderexport 也打印这一句。
@@ -3599,8 +3667,8 @@ final class CollageStore: ObservableObject {
     /// `wantPDF` 时返回这一页进 PDF 用的 JPEG 数据（JPEG 格式就是写盘的同一份）。
     /// 文件名：手动填的，或者导出那一刻的时间（精确到秒）。输出目录里已经有同名的就加 -2、-3……
     /// （按这次要写的每一个文件查，不覆盖以前导出的）。
-    private func exportBase(in folder: URL, project: CollageProject, options: ExportOptions) -> String {
-        let typed = Self.cleanFileName(exportName, ext: options.format.ext)
+    private func exportBase(in folder: URL, project: CollageProject, options: ExportOptions, name: String) -> String {
+        let typed = Self.cleanFileName(name, ext: options.format.ext)
         let root = typed.isEmpty ? Self.stampFormatter.string(from: Date()) : typed
         var candidate = root
         var n = 2
@@ -3862,6 +3930,235 @@ final class CollageStore: ObservableObject {
     }
 }
 
+// MARK: - 方案（拼图页底下的方案栏；MCP collage_save_variant / collage_open_variant）
+//
+// 方案栏不跟着 ⌘Z 走：存、覆盖、改名、删都直接生效、不进撤销（删和覆盖在界面上先确认）—— 方案是用来留住几版设计的，
+// 不能在往回翻设计的时候被撤掉（以前存方案也压一步撤销：⌘Z 往回翻会把存好的方案一个个撤掉，之后再改一下就永久丢了，
+// 存方案还会清掉重做记录）。restore() 换工程时保留现在的方案栏。只有「切到方案」是一步撤销（它改的是这一版的样子）。
+
+extension CollageStore {
+    var variants: [CollageVariant] { project.variants }
+
+    /// 和现在一模一样的那几个方案（托盘、方案栏不算，见 CollageProject.sameDesign）；按工程缓存。
+    var currentVariantIDs: Set<String> {
+        if let cached = derived.currentVariants { return cached }
+        let ids = Set(project.variants.filter { $0.project.sameDesign(as: project) }.map(\.id))
+        derived.currentVariants = ids
+        return ids
+    }
+
+    /// 和现在一模一样的第一个方案（按方案栏的顺序）。
+    var currentVariantID: String? {
+        let ids = currentVariantIDs
+        return ids.isEmpty ? nil : project.variants.first { ids.contains($0.id) }?.id
+    }
+
+    /// 最近存成 / 切到的那个方案还在，但现在的样子已经和它不一样了（方案栏上标「改过」）。
+    var activeVariantModified: Bool {
+        guard let id = activeVariantID, project.variants.contains(where: { $0.id == id }) else { return false }
+        return !currentVariantIDs.contains(id)
+    }
+
+    enum VariantSaveResult {
+        case saved(CollageVariant)
+        /// 现在这一版和已有的这个方案一模一样：没再存。
+        case same(CollageVariant)
+        /// 拼图里还没有任何一页。
+        case empty
+        /// 满了（maxVariants）。
+        case full
+        /// 还在排版（求解没落地）：存下来的会是落地之前那一版。
+        case solving
+    }
+
+    /// 把现在这一版存成一个方案（不进撤销）。name 空 = 「方案 N」；最多 40 个字。
+    @discardableResult
+    func saveVariant(name: String? = nil) -> VariantSaveResult {
+        guard !project.pages.isEmpty else {
+            setNotice("拼图里还没有任何一页：先排一版再存成方案")
+            return .empty
+        }
+        guard !isSolving else {
+            setNotice("还在排版：排好了再存成方案")
+            return .solving
+        }
+        if let id = currentVariantID, let same = project.variants.first(where: { $0.id == id }) {
+            activeVariantID = id
+            setNotice("现在这一版就是「\(same.name)」，没再存一份")
+            return .same(same)
+        }
+        guard project.variants.count < Self.maxVariants else {
+            setNotice("方案最多 \(Self.maxVariants) 个：先在方案栏里右键删掉几个不要的")
+            return .full
+        }
+        let typed = (name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let variant = CollageVariant(id: newVariantID(), name: typed.isEmpty ? nextVariantName() : String(typed.prefix(40)),
+                                     savedAt: Date(), project: project.variantSnapshot)
+        project.variants.append(variant)
+        activeVariantID = variant.id
+        scheduleProjectSave()
+        scheduleVariantThumbs()
+        setNotice("存成「\(variant.name)」 · 方案栏里点它随时切回来")
+        return .saved(variant)
+    }
+
+    /// 切到一个方案（一步撤销）：画布、样式、文字、所有页、水印换成它存的样子。托盘照旧是现在的（里面的照片用
+    /// 现在这一份），它用到、托盘里已经没有的照片补回去，再按批量页刷新判决、场这些。
+    /// 返回补回了几张；nil = 没有这个方案；已经是这一版 = 0、不记撤销。
+    @discardableResult
+    func openVariant(_ id: String) -> Int? {
+        guard let variant = project.variants.first(where: { $0.id == id }) else { return nil }
+        guard !variant.project.sameDesign(as: project) else {
+            activeVariantID = id
+            return 0
+        }
+        var next = variant.project
+        next.variants = project.variants
+        let have = Set(project.photos.map(\.id))
+        let missing = variant.project.photos.filter { !have.contains($0.id) }
+        next.photos = project.photos + missing
+        pushUndo()
+        restore(next)
+        activeVariantID = id
+        pageIndex = 0
+        albumDropped = []
+        if next.mode == .single, let first = next.pages.first {
+            let style: LayoutStyle = first.freeform ? .scatter : .grid
+            if style != layoutStyle {
+                layoutStyle = style
+                scheduleStateSave()
+            }
+        }
+        if !missing.isEmpty {
+            refreshFromBatch()
+            computeHints(for: missing)
+        }
+        let back = missing.isEmpty ? "" : " · 补回 \(missing.count) 张照片进托盘"
+        setNotice("切到「\(variant.name)」\(back) · ⌘Z 回到刚才那一版")
+        return missing.count
+    }
+
+    /// 用现在这一版覆盖一个方案（不进撤销；界面上先确认）。现在这一版已经存成别的方案了就不覆盖（不然两个方案一样）。
+    func updateVariant(_ id: String) {
+        guard !project.pages.isEmpty, !isSolving, currentVariantIDs.isEmpty,
+              let i = project.variants.firstIndex(where: { $0.id == id }) else { return }
+        project.variants[i].project = project.variantSnapshot
+        project.variants[i].savedAt = Date()
+        activeVariantID = id
+        scheduleProjectSave()
+        scheduleVariantThumbs()
+        setNotice("「\(project.variants[i].name)」换成了现在这一版")
+    }
+
+    /// 改名（不进撤销）；空的、和原来一样的不改。
+    func renameVariant(_ id: String, to name: String) {
+        let typed = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
+        guard !typed.isEmpty, let i = project.variants.firstIndex(where: { $0.id == id }),
+              project.variants[i].name != typed else { return }
+        project.variants[i].name = typed
+        scheduleProjectSave()
+    }
+
+    /// 删掉一个方案（不进撤销；界面上先确认）。
+    func deleteVariant(_ id: String) {
+        guard let i = project.variants.firstIndex(where: { $0.id == id }) else { return }
+        let name = project.variants[i].name
+        project.variants.remove(at: i)
+        if activeVariantID == id { activeVariantID = nil }
+        scheduleProjectSave()
+        scheduleVariantThumbs()
+        setNotice("删了「\(name)」")
+    }
+
+    /// 下一个默认名：方案 N（N 接着已有的「方案 k」往上数）。
+    private func nextVariantName() -> String {
+        let numbers = project.variants.compactMap { v -> Int? in
+            guard v.name.hasPrefix("方案 ") else { return nil }
+            return Int(v.name.dropFirst(3))
+        }
+        return "方案 \((numbers.max() ?? 0) + 1)"
+    }
+
+    /// 8 位小写十六进制，和这一场已有的不重。
+    private func newVariantID() -> String {
+        var id = ""
+        repeat {
+            id = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8)).lowercased()
+        } while project.variants.contains { $0.id == id }
+        return id
+    }
+
+    /// 方案栏的小图：每个方案第一页。键 = 方案 id + 存的时间（覆盖时才变）：每次编辑都会走到这里，不能每次把三十个
+    /// 方案的整份工程哈希一遍。托盘里还有照片没算好路人信息、或者缺照片（移动硬盘没插）渲出来的不记键，路人信息的
+    /// 版本变了再试（不是每次编辑都重渲）。按「现在的托盘 + 它存的照片」渲：没有照片的页（纯文字）的日期、主图看托盘。
+    func scheduleVariantThumbs() {
+        let variants = project.variants
+        let live = Set(variants.map(\.id))
+        var todo: [(variant: CollageVariant, key: Int)] = []
+        for v in variants {
+            var h = Hasher()
+            h.combine(v.id)
+            h.combine(v.savedAt)
+            let key = h.finalize()
+            guard variantThumbKeys[v.id] != key || thumbs.variants[v.id] == nil else { continue }
+            if let tried = variantThumbTried[v.id], tried.key == key, tried.hints == hintsVersion, thumbs.variants[v.id] != nil {
+                continue
+            }
+            todo.append((v, key))
+        }
+        guard !todo.isEmpty || thumbs.variants.keys.contains(where: { !live.contains($0) }) else { return }
+        variantThumbTask?.cancel()
+        let hints = self.hints
+        let hintsAt = hintsVersion
+        let tray = project.photos
+        let inTray = Set(tray.map(\.id))
+        variantThumbTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            let jobs = todo.map(\.variant)
+            let rendered = await Task.detached(priority: .utility) { () -> [String: (image: NSImage, complete: Bool)] in
+                var out: [String: (image: NSImage, complete: Bool)] = [:]
+                for v in jobs {
+                    guard let page = v.project.pages.first else { continue }
+                    var p = v.project
+                    let own = Set(p.photos.map(\.id))
+                    p.photos += tray.filter { !own.contains($0.id) }
+                    let scale = min(1, 200 / Double(max(p.canvas.width, p.canvas.height)))
+                    var opts = CollageRender.Options(scale: scale)
+                    opts.includeBleed = false
+                    opts.placeholders = true
+                    let report = CollageRender.RenderReport()
+                    opts.report = report
+                    guard let cg = CollageRender.render(page: page, project: p, hints: hints, options: opts) else { continue }
+                    let settled = v.project.usedPhotoIDs.filter(inTray.contains).allSatisfy { hints[$0] != nil }
+                    out[v.id] = (NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height)),
+                                 report.missing.isEmpty && settled)
+                }
+                return out
+            }.value
+            guard let self, !Task.isCancelled else { return }
+            let still = Set(self.project.variants.map(\.id))
+            var images = self.thumbs.variants.filter { still.contains($0.key) }
+            var keys = self.variantThumbKeys.filter { still.contains($0.key) }
+            var tried = self.variantThumbTried.filter { still.contains($0.key) }
+            for item in todo where still.contains(item.variant.id) {
+                let r = rendered[item.variant.id]
+                if let image = r?.image { images[item.variant.id] = image }
+                if r?.complete == true {
+                    keys[item.variant.id] = item.key
+                    tried[item.variant.id] = nil
+                } else {
+                    keys[item.variant.id] = nil
+                    tried[item.variant.id] = (item.key, hintsAt)
+                }
+            }
+            self.variantThumbKeys = keys
+            self.variantThumbTried = tried
+            self.thumbs.variants = images
+        }
+    }
+}
+
 // MARK: - 实时桥（DESIGN §9.3、§9.5.1、§10.6「STEP 1 不做了」）：AI 经桥调的几样，界面和命令行都不走这里
 
 extension CollageStore {
@@ -3871,12 +4168,17 @@ extension CollageStore {
     /// 命令行的 digest op（整个工程，CollageWatermarkCLI.digest）不变。
     var editDigest: String { Self.editDigest(project) }
 
-    nonisolated static func editDigest(_ project: CollageProject) -> String {
+    nonisolated static func editDigest(_ full: CollageProject) -> String {
+        // 存 / 删方案不改这一版的样子：不让 AI 手里的 if_digest 因此失效（切到别的方案会改页面，照样变）。编码之前就
+        // 拿掉：三十个相册方案每个都是一整份工程，AI 每调一次都要算好几遍指纹。
+        var project = full
+        project.variants = []
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         guard let data = try? encoder.encode(project),
               var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return "?" }
         object["photos"] = project.photos.map(\.id)
+        object.removeValue(forKey: "variants")
         guard let reduced = MCPJSON.data(object) else { return "?" }
         return Insecure.SHA1.hash(data: reduced).map { String(format: "%02x", $0) }.joined().prefix(12).description
     }

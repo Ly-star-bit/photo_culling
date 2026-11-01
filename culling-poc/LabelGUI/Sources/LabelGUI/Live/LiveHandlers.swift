@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import CryptoKit
+import ImageIO
 
 /// 桥上的方法表（DESIGN §9.4.2）：每个方法一个主线程上的 async 函数 `(请求) -> 回复`，GUI 和 --live-host 是同一份
 /// （LiveServer.attach 里注册；test.* 只有 LiveHost 注册）。三个读：cull.read、cull.preview、collage.state（STEP 3a）；
@@ -167,6 +168,7 @@ enum LiveHandlers {
         } else {
             out["cells"] = [[String: Any]]()
         }
+        out["variants"] = variantsList(collage)
         out["selection"] = collage.selection.map { path in path.map(String.init).joined() } ?? NSNull()
         var undo: [String: Any] = ["collage_depth": collage.undoDepth, "can_undo": collage.canUndo]
         undo["can_redo"] = collage.canRedo
@@ -392,6 +394,8 @@ extension LiveHandlers {
             ("session.open", openSession), ("cull.set_verdicts", setVerdicts), ("cull.show", showPhotos),
             ("collage.apply_template", applyTemplate), ("collage.run_kit", runKit), ("collage.next_cover", nextCover),
             ("collage.set_text", setText), ("collage.set_style", setStyle), ("undo", undo),
+            ("collage.save_variant", saveVariant), ("collage.open_variant", openVariant),
+            ("collage.export", exportCollage),
         ]
         for (name, run) in methods {
             live.register(name, kind: .write) { [weak live, weak model] req in
@@ -523,6 +527,7 @@ extension LiveHandlers {
             "session.open": "切场次", "cull.set_verdicts": "改判", "cull.show": "定位照片",
             "collage.apply_template": "套模板", "collage.run_kit": "一键成套", "collage.next_cover": "换封面",
             "collage.set_text": "改字", "collage.set_style": "换样式", "undo": "撤销",
+            "collage.save_variant": "存方案", "collage.open_variant": "切方案", "collage.export": "导出",
         ]
         return labels[method] ?? method
     }
@@ -986,6 +991,175 @@ extension LiveHandlers {
         let summary = "改了" + parts.joined(separator: "、")
         return await collageDone(req, live: live, model: model, tool: "collage_set_text", changed: changed,
                                  pushesBefore: pushes, digestBefore: before, summary: summary, body: [:])
+    }
+
+    // MARK: collage.save_variant / collage.open_variant（方案栏）
+
+    /// 方案栏（collage_get_state 的 variants、两个方案工具的结果里都有）：current = 和现在一模一样（托盘不算）。
+    static func variantsList(_ collage: CollageStore) -> [[String: Any]] {
+        let current = collage.currentVariantID
+        let iso = ISO8601DateFormatter()
+        return collage.variants.map { v in
+            var d: [String: Any] = ["id": v.id, "name": v.name, "mode": v.project.mode.rawValue]
+            d["pages"] = v.project.pages.count
+            d["current"] = v.id == current
+            d["saved_at"] = iso.string(from: v.savedAt)
+            return d
+        }
+    }
+
+    static func variantInfo(_ v: CollageVariant) -> [String: Any] {
+        ["id": v.id, "name": v.name, "mode": v.project.mode.rawValue, "pages": v.project.pages.count]
+    }
+
+    static func saveVariant(_ req: Request, live: LiveServer, model: AppModel) async -> Reply {
+        if let bad = checkArgs("collage_save_variant", req) { return bad }
+        if let stop = await begin(req, Gate(scope: .collage, digest: true), live: live, model: model) { return stop }
+        model.ensureCollageAttached()
+        let collage = model.collage
+        // 存不了的先挡下（store 里那几句提示是给点按钮的用户看的，不让 AI 的调用在状态栏上留话）
+        guard !collage.project.pages.isEmpty else {
+            return .failure("invalid_state", "拼图里还没有任何一页，没什么可存。",
+                            ["hint": "先 collage_apply_template 或 collage_run_kit 排一版"])
+        }
+        guard collage.currentVariantID != nil || collage.variants.count < CollageStore.maxVariants else {
+            return .failure("invalid_state", "这一场的方案已经满了（\(CollageStore.maxVariants) 个）。",
+                            ["hint": "请用户在拼图页的方案栏里右键删掉几个不要的"])
+        }
+        guard !collage.isSolving else {
+            return .failure("invalid_state", "app 还在排这一版（排版没落地），现在存下来的会是落地之前的样子。",
+                            ["hint": "过一两秒再调"])
+        }
+        let before = collage.editDigest
+        let pushes = collage.undoPushes
+        var body: [String: Any] = [:]
+        var notice: String?
+        // 方案栏不进撤销（见 CollageStore 方案那一段）：不走 externalEdit（它会压一步、这一步撤了什么都不变），
+        // 直接存；changed = 方案栏多了一个
+        if let id = collage.currentVariantID, let same = collage.variants.first(where: { $0.id == id }) {
+            // 和已有的一模一样：不再存、不动 app（返回那一个）
+            body["variant"] = variantInfo(same)
+            body["same_as_existing"] = true
+            body["changed"] = false
+        } else {
+            guard case .saved(let v) = collage.saveVariant(name: req.params["name"] as? String) else {
+                return .failure("invalid_state", "这一次没存成方案。", ["hint": "先 collage_get_state 看看现在的样子"])
+            }
+            collage.flushSaves()
+            let text = "AI：存成方案「\(v.name)」 · 方案栏里点它切回来"
+            collage.setNotice(text)
+            notice = text
+            body["variant"] = variantInfo(v)
+            body["changed"] = true
+        }
+        model.aiLog.recordNoop(.collage, before: pushes, after: collage.undoPushes)
+        if req.params["reveal"] as? Bool == true { model.tab = .collage }
+        body["variants"] = variantsList(collage)
+        let undo = undoInfo(.collage, added: 0, model: model)
+        return await collageReply(req, live: live, model: model, body: body, digestBefore: before, undo: undo,
+                                  notice: notice, warnings: [])
+    }
+
+    static func openVariant(_ req: Request, live: LiveServer, model: AppModel) async -> Reply {
+        if let bad = checkArgs("collage_open_variant", req) { return bad }
+        if let stop = await begin(req, Gate(scope: .collage, digest: true), live: live, model: model) { return stop }
+        model.ensureCollageAttached()
+        let collage = model.collage
+        let id = req.params["variant"] as? String ?? ""
+        guard let variant = collage.variants.first(where: { $0.id == id }) else {
+            return invalid("没有这个方案：「\(id)」。", hint: "先 collage_get_state 看 variants[].id")
+        }
+        let before = collage.editDigest
+        let pushes = collage.undoPushes
+        var restored = 0
+        let changed = collage.externalEdit { restored = collage.openVariant(id) ?? 0 }
+        var summary = "切到方案「\(variant.name)」"
+        if restored > 0 { summary += "，补回 \(restored) 张照片进托盘" }
+        var body: [String: Any] = ["variant": variantInfo(variant), "restored_photos": restored]
+        body["variants"] = variantsList(collage)
+        return await collageDone(req, live: live, model: model, tool: "collage_open_variant", changed: changed,
+                                 pushesBefore: pushes, digestBefore: before, summary: summary, body: body)
+    }
+
+    // MARK: collage.export（导出成图片，= 拼图页「导出」）
+
+    /// 和导出按钮同一条路（CollageStore.startExport）：同一个输出目录、同样的重名规则；倍数、格式、文件名只管这一次。
+    /// 不改拼图、不进撤销、不弹访达；等 app 写完再回。
+    static func exportCollage(_ req: Request, live: LiveServer, model: AppModel) async -> Reply {
+        if let bad = checkArgs("collage_export", req) { return bad }
+        if let stop = await begin(req, Gate(scope: .collage, digest: true), live: live, model: model) { return stop }
+        model.ensureCollageAttached()
+        let collage = model.collage
+        var project = collage.project
+        var body: [String: Any] = [:]
+        if let id = req.params["variant"] as? String {
+            guard let v = collage.variants.first(where: { $0.id == id }) else {
+                return invalid("没有这个方案：「\(id)」。", hint: "先 collage_get_state 看 variants[].id")
+            }
+            project = v.project
+            body["variant"] = variantInfo(v)
+        }
+        guard !project.pages.isEmpty else {
+            return .failure("invalid_state", "拼图里还没有任何一页，没什么可导出。",
+                            ["hint": "先 collage_apply_template 或 collage_run_kit 排一版", "executed": false])
+        }
+        guard collage.outputFolder != nil else {
+            return .failure("invalid_state", "没有输出目录：app 还没打开照片文件夹，导出页上也没选目录。",
+                            ["hint": "请用户在拼图页「导出」里选一个输出目录", "executed": false])
+        }
+        var options = collage.exportOptions
+        if let k = LiveWire.int(req.params["scale"]) { options.scale = k }
+        if let f = (req.params["format"] as? String).flatMap(CollageExport.Format.init(rawValue:)) { options.format = f }
+        let name = req.params["name"] as? String ?? ""
+        let started = Date()
+        let outcome = await withCheckedContinuation { (cont: CheckedContinuation<CollageStore.ExportOutcome, Never>) in
+            collage.startExport(project: project, options: options, name: name, reveal: false) { cont.resume(returning: $0) }
+        }
+        if let failure = outcome.failure, outcome.files.isEmpty {
+            return .failure("export_failed", "导出没成功：\(failure)。",
+                            ["hint": "看 app 拼图页底下的提示；输出目录写不进去的话请用户换一个", "executed": false])
+        }
+        var files: [[String: Any]] = []
+        if let folder = outcome.folder {
+            for file in outcome.files {
+                let url = folder.appendingPathComponent(file)
+                var f: [String: Any] = ["name": file, "path": url.path]
+                if let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int { f["bytes"] = size }
+                // 只读文件头（不解码），PDF 读不出尺寸就不给
+                if let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+                   let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
+                    f["width"] = props[kCGImagePropertyPixelWidth] ?? NSNull()
+                    f["height"] = props[kCGImagePropertyPixelHeight] ?? NSNull()
+                }
+                files.append(f)
+            }
+        }
+        body["folder"] = outcome.folder?.path ?? NSNull()
+        body["files"] = files
+        body["scale"] = outcome.scale
+        body["format"] = options.format.rawValue
+        body["seconds"] = MCPReadModel.r3(Date().timeIntervalSince(started))
+        var warnings: [[String: Any]] = []
+        if options.scale > outcome.scale {
+            warnings.append(MCPReadModel.warning("scale_capped", "这张画布最多放大到 \(outcome.scale) 倍（九宫格、轮播最多 2 倍，印刷画布不放大）。",
+                                                 hint: ""))
+        }
+        if let w = outcome.warning {
+            warnings.append(MCPReadModel.warning("export_degraded", w, hint: "多半是原图挪走了、移动硬盘没插：请用户看一下"))
+        }
+        if outcome.cancelled {
+            warnings.append(MCPReadModel.warning("export_cancelled", "用户中途取消了导出：只写出了前面几个文件。", hint: ""))
+        } else if let failure = outcome.failure {
+            warnings.append(MCPReadModel.warning("export_partial", "没导完：\(failure)。前面写出的文件留着。", hint: ""))
+        }
+        let where_ = outcome.folder?.lastPathComponent ?? ""
+        let notice = "AI：导出了 \(files.count) 个文件 → \(where_)"
+        collage.setNotice(notice)
+        if req.params["reveal"] as? Bool == true { model.tab = .collage }
+        let (info, notVisible) = liveInfo(req, live: live, model: model, notice: notice)
+        body["live"] = info
+        body["warnings"] = warnings + notVisible
+        return .result(body)
     }
 
     // MARK: collage.set_style（换样式 / 色调）

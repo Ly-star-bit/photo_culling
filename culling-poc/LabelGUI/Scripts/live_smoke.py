@@ -523,11 +523,12 @@ def err_code(body):
 
 APP_TOOLS = ["cull_session_overview", "cull_list_photos", "cull_get_photos", "cull_list_groups", "cull_preview_photos",
              "collage_get_state", "app_open_session", "cull_set_verdicts", "cull_show_photos", "collage_apply_template",
-             "collage_run_kit", "collage_next_cover", "collage_set_text", "collage_set_style", "app_undo"]
-# hello 里的 capabilities（§10.4 的 12 个，按名字排）
+             "collage_run_kit", "collage_next_cover", "collage_set_text", "collage_set_style", "app_undo",
+             "collage_save_variant", "collage_open_variant", "collage_export"]
+# hello 里的 capabilities（§10.4 的 12 个 + 方案栏的 2 个 + 导出，按名字排）
 ALL_CAPS = sorted(["cull.read", "cull.preview", "collage.state", "session.open", "cull.set_verdicts", "cull.show",
                    "collage.apply_template", "collage.run_kit", "collage.next_cover", "collage.set_text", "collage.set_style",
-                   "undo"])
+                   "undo", "collage.save_variant", "collage.open_variant", "collage.export"])
 
 
 def minimal_args(tool, session):
@@ -549,6 +550,8 @@ def minimal_args(tool, session):
         a["title"] = "x"
     if tool == "collage_set_style":
         a["look_strength"] = 0.5
+    if tool == "collage_open_variant":
+        a["variant"] = "00000000"
     return a
 
 
@@ -1020,7 +1023,7 @@ try:
         check((st.get("live") or {}) == {"state": "not_running"} and st.get("gui_running") is False
               and st.get("next") == "请用户自己打开选片工具", f"没有锁文件：live={st.get('live')}（{ms:.0f} ms）")
         codes = all_tools(env, KEY)
-        check(set(codes.values()) == {"app_not_running"}, f"15 个要 app 的工具都回 app_not_running：{set(codes.values())}")
+        check(set(codes.values()) == {"app_not_running"}, f"18 个要 app 的工具都回 app_not_running：{set(codes.values())}")
         check(not os.path.exists(os.path.join(data, ".live.lock")) and not os.listdir(os.path.join(SOCKS, os.path.basename(root))),
               "--mcp 跑完：数据目录里没有 .live.lock，socket 根目录里什么都没有（--mcp 不建锁、不建目录、不 bind）")
         # 锁文件在、但没人拿着（app 退了）
@@ -1662,7 +1665,7 @@ try:
         st, ms = status(env)
         codes = all_tools(env, KEY)
         check(stale and (st.get("live") or {}).get("state") == "not_running" and set(codes.values()) == {"app_not_running"},
-              f"T5b 残留的 socket 文件还在：not_running（{ms:.0f} ms），15 个工具都 app_not_running")
+              f"T5b 残留的 socket 文件还在：not_running（{ms:.0f} ms），18 个工具都 app_not_running")
         # T6 新宿主接手残留的 socket
         h2 = Host("C2", data=h.data, root=h.root)
         st, _ = status(env)
@@ -2493,6 +2496,90 @@ __attribute__((constructor)) static void init(void) {
               and "error" not in u and s2["edit_digest"] == s0["edit_digest"] and s2["full_digest"] == s0["full_digest"]
               and s2["disk_edit_digest"] == s0["edit_digest"],
               f"换样式「{style_key}」+ 色调「{look_key}」+ 强度 0.35：一步；app_undo 以后编辑指纹、整工程指纹、collage.json 都回去")
+
+        # ---------- 方案栏：存成方案不进撤销、切到方案一步撤销；一模一样的不再存；app_undo 回到切之前（方案栏不变）；
+        # 没有的 id、过期的 digest 不执行
+        _, cs0, _ = mcp_call(env, "collage_get_state", {"include_preview": False})
+        n0 = len((cs0 or {}).get("variants") or [])
+        w("collage_apply_template", {"session": KEY, "template": full})
+        s0 = settled()
+        _, v1, _ = w("collage_save_variant", {"session": KEY, "name": "冒烟 · 一"})
+        s1 = st()
+        _, v1b, _ = w("collage_save_variant", {"session": KEY, "name": "又一次"})
+        s1b = st()
+        w("collage_apply_template", {"session": KEY, "template": full2})
+        _, v2, _ = w("collage_save_variant", {"session": KEY})
+        _, cs1, _ = mcp_call(env, "collage_get_state", {"include_preview": False})
+        vs = (cs1 or {}).get("variants") or []
+        id1 = (v1.get("variant") or {}).get("id")
+        id2 = (v2.get("variant") or {}).get("id")
+        check(v1.get("changed") is True and steps(s0, s1) == (0, 0) and s1["edit_digest"] == s0["edit_digest"]
+              and v1.get("digest_after") == v1.get("digest_before") and v1.get("undo", {}).get("steps_added") == 0
+              and v1b.get("changed") is False and v1b.get("same_as_existing") is True
+              and (v1b.get("variant") or {}).get("id") == id1 and steps(s1, s1b) == (0, 0)
+              and len(vs) == n0 + 2 and [v.get("id") for v in vs][-2:] == [id1, id2]
+              and [v.get("current") for v in vs][-2:] == [False, True] and vs[-2].get("name") == "冒烟 · 一"
+              and (v2.get("variant") or {}).get("name", "").startswith("方案 ")
+              and ((s1.get("collage") or {}).get("notice") or "").startswith("AI：存成方案"),
+              "存成方案：不进撤销、编辑指纹不变；一模一样再存 changed:false、返回原来那个；collage_get_state 列出两个、current 是第二个、"
+              f"没起名的叫「方案 N」（v1 changed={v1.get('changed')} 步={steps(s0, s1)} 指纹 {s0['edit_digest']}→{s1['edit_digest']} "
+              f"before/after={v1.get('digest_before')}/{v1.get('digest_after')} undo={v1.get('undo')} "
+              f"v1b changed={v1b.get('changed')} same={v1b.get('same_as_existing')} 步={steps(s1, s1b)} "
+              f"方案={[(v.get('name'), v.get('current')) for v in vs]} n0={n0} v2={v2.get('variant')} 提示={(s1.get('collage') or {}).get('notice')} "
+              f"错误={err_code(v1)}/{err_code(v1b)}/{err_code(v2)}）")
+        cj_path = os.path.join(gdata, "sessions", KEY, "collage.json")
+        cj = json.load(open(cj_path)) if os.path.exists(cj_path) else {}
+        check([v.get("id") for v in cj.get("variants") or []][-2:] == [id1, id2], "方案跟着 collage.json 存盘（回复到达时已经写好）")
+        s2 = st()
+        _, o1, _ = w("collage_open_variant", {"session": KEY, "variant": id1})
+        s3 = st()
+        _, o1b, _ = w("collage_open_variant", {"session": KEY, "variant": id1})
+        _, u, _ = w("app_undo", {"target": "collage"})
+        s4 = st()
+        _, cs4, _ = mcp_call(env, "collage_get_state", {"include_preview": False})
+        check(o1.get("changed") is True and steps(s2, s3) == (0, 1) and s3["edit_digest"] == s1["edit_digest"]
+              and o1.get("restored_photos") == 0 and o1b.get("changed") is False and "error" not in u
+              and s4["edit_digest"] == s2["edit_digest"]
+              and [v.get("id") for v in (cs4 or {}).get("variants") or []][-2:] == [id1, id2],
+              "切到「冒烟 · 一」：一步撤销、编辑指纹回到存它时的样子；再切一次 changed:false；app_undo 回到切之前那一版、方案栏不变"
+              f"（o1 changed={o1.get('changed')} 步={steps(s2, s3)} 指纹 {s3['edit_digest']} vs {s1['edit_digest']} "
+              f"restored={o1.get('restored_photos')} o1b={o1b.get('changed')} undo={err_code(u)} {s4['edit_digest']} vs {s2['edit_digest']}）")
+        _, bad, _ = w("collage_open_variant", {"session": KEY, "variant": "nope0000"})
+        _, stale, _ = w("collage_open_variant", {"session": KEY, "variant": id1, "if_digest": "000000000000"})
+        s5 = st()
+        check(err_code(bad) == "invalid_argument" and err_code(stale) == "stale_digest" and steps(s4, s5) == (0, 0)
+              and s5["edit_digest"] == s4["edit_digest"],
+              "没有的方案 id → invalid_argument；if_digest 过期 → stale_digest；都没动")
+
+        # ---------- 导出（collage_export）：和导出按钮同一条路；倍数、文件名只管这一次（导出页设置不变）；同名加 -2；
+        # 能直接导存着的方案；不改拼图、不进撤销。输出目录先指到工作目录：默认的「照片文件夹/拼图导出」在 CI 是约定不存在的
+        # /tmp 那个，本地是用户真的照片文件夹，都不能往里写
+        exp_dir = os.path.join(WORK, "G-export")
+        test_call(h, "test.set_export_dir", {"path": exp_dir})
+        s0 = settled()
+        _, e1, _ = w("collage_export", {"session": KEY, "scale": 1, "name": "冒烟导出"}, timeout=120)
+        _, e2, _ = w("collage_export", {"session": KEY, "scale": 2, "name": "冒烟导出"}, timeout=120)
+        _, e3, _ = w("collage_export", {"session": KEY, "variant": id1, "name": "冒烟方案", "format": "png"}, timeout=120)
+        s1 = st()
+        f1, f2, f3 = (e1.get("files") or [{}]), (e2.get("files") or [{}]), (e3.get("files") or [{}])
+        on_disk = sorted(os.listdir(exp_dir)) if os.path.isdir(exp_dir) else []
+        k2 = e2.get("scale")
+        st_path = os.path.join(gdata, "collage", "state.json")
+        saved_scale = (json.load(open(st_path)).get("export") or {}).get("scale", 1) if os.path.exists(st_path) else 1
+        check("error" not in e1 and "error" not in e2 and "error" not in e3 and e1.get("folder") == exp_dir
+              and f1[0].get("name") == "冒烟导出.jpg" and f2[0].get("name") == "冒烟导出-2.jpg"
+              and f3[0].get("name") == "冒烟方案.png" and all(os.path.exists(x.get("path", "")) for x in f1 + f2 + f3)
+              and k2 in (1, 2) and f2[0].get("width") == f1[0].get("width", 0) * k2
+              and (k2 == 2 or "scale_capped" in warn_codes(e2))
+              and (e3.get("variant") or {}).get("id") == id1 and steps(s0, s1) == (0, 0)
+              and s1["edit_digest"] == s0["edit_digest"] and saved_scale == 1
+              and ((s1.get("collage") or {}).get("notice") or "").startswith("AI：导出了"),
+              f"导出：1 倍 {f1[0].get('width')} px、2 倍 {f2[0].get('width')} px（用了 {k2} 倍）、同名加 -2、方案直接导成 PNG；"
+              f"不进撤销、拼图没变、导出页的倍数还是 {saved_scale}（目录里 {on_disk}）")
+        _, e4, _ = w("collage_export", {"session": KEY, "variant": "nope0000"})
+        _, e5, _ = w("collage_export", {"session": KEY, "scale": 5})
+        check(err_code(e4) == "invalid_argument" and err_code(e5) == "invalid_argument" and sorted(os.listdir(exp_dir)) == on_disk,
+              "导出：没有的方案 id、scale 超范围 → invalid_argument，什么都没写")
 
         # ---------- 第 7 条 不是 AI 的那一步不撤；用户自己撤过 → already_undone_by_user；top_is_ai
         _, t1, _ = w("collage_apply_template", {"session": KEY, "template": full})

@@ -6,7 +6,7 @@ import Foundation
 ///    数据目录 stat 被拒（EACCES / EPERM）算「在、读不了」、探测报 unreachable，它和锁文件 open 被拒、connect 被拒都按宿主沙箱说，
 ///    data_dir_unreadable 那一句只说真的看不到的；
 ///    §6.3：设了 LABELGUI_DATA_DIR、not_running、app 却开着时 app_status 加的那一句（app 开没开用假的输入，不查进程表）。
-/// 10. 状态 → 错误码（§10.2）、15 个要 app 的工具 → 桥方法（§10.4）、session 核对（§10.2「session 怎么比」）、
+/// 10. 状态 → 错误码（§10.2）、18 个要 app 的工具 → 桥方法（§10.4）、session 核对（§10.2「session 怎么比」）、
 ///    截止时间（没给 deadline_seconds 时也不超过 LABELGUI_MCP_DEADLINE_SEC，和 tools/list 的 default 一样）。
 /// 11. 线上格式：锁文件那一行的解析、socket 路径上限、SHA-256 前 16 位、编码时 NaN 变 null；--live-host 认不认得出
 ///     真实的 SockDir（只 realpath 已经存在的上一级：用户临时目录）。
@@ -173,14 +173,17 @@ extension MCPSelfTest {
             "collage_apply_template": "collage.apply_template", "collage_run_kit": "collage.run_kit",
             "collage_next_cover": "collage.next_cover", "collage_set_text": "collage.set_text",
             "collage_set_style": "collage.set_style", "app_undo": "undo",
+            "collage_save_variant": "collage.save_variant", "collage_open_variant": "collage.open_variant",
+            "collage_export": "collage.export",
         ]
         let appTools = MCPToolDefs.tools(live: true).compactMap { $0["name"] as? String }.dropFirst(3)
         check(Set(appTools) == Set(methods.keys) && Set(MCPLiveTools.routes.keys) == Set(methods.keys),
-              "要 app 的 15 个工具和路由表对得上：\(appTools.sorted())")
+              "要 app 的 18 个工具和路由表对得上：\(appTools.sorted())")
         for (tool, method) in methods {
             check(MCPLiveTools.routes[tool]?.method == method, "\(tool) 应该转给 \(method)")
         }
-        let deadlines: [String: Int] = ["cull_preview_photos": 30_000, "collage_run_kit": 50_000, "collage_next_cover": 50_000]
+        let deadlines: [String: Int] = ["cull_preview_photos": 30_000, "collage_run_kit": 50_000, "collage_next_cover": 50_000,
+                                        "collage_export": 50_000]
         for (tool, route) in MCPLiveTools.routes {
             check(route.deadlineMs == (deadlines[tool] ?? 10_000), "\(tool) 的默认截止时间 \(route.deadlineMs) ms（§10.2）")
         }

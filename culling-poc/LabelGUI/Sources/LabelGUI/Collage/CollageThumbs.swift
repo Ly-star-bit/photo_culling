@@ -25,6 +25,8 @@ final class CollageThumbs: ObservableObject {
     @Published var styles: [String: NSImage] = [:]
     /// 色调样张。
     @Published var looks: [CollageLook: NSImage] = [:]
+    /// 方案栏（按方案 id）：每个方案第一页的小图。
+    @Published var variants: [String: NSImage] = [:]
 }
 
 /// 画布叠加层每一格的角标（锁、切脸、路人、印刷放大倍数）。store 按工程、选中、路人信息和蒙版的版本缓存：

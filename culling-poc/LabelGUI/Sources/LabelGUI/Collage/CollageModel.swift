@@ -1495,6 +1495,9 @@ struct CollageProject: Codable, Hashable {
     var albumTheme: CollageAlbumTheme = .classic
     /// fine-art 编排的「整章黑白」：一章里黑白照片占三分之一以上，整章都转黑白。
     var albumChapterMono = true
+    /// 存下来的几版（拼图页底下的「方案」栏，见 CollageVariant）。放在工程里跟着 collage.json 存；不跟着撤销走
+    /// （CollageStore.restore 换工程时留现在的方案栏）。编辑指纹、跨页小图的键都不算它。
+    var variants: [CollageVariant] = []
 
     init() {}
 
@@ -1505,6 +1508,43 @@ struct CollageProject: Codable, Hashable {
 
     /// 已经上了任何一页的照片 id（格子和自由图层）。
     var usedPhotoIDs: Set<String> { Set(pages.flatMap(\.photoIDs)) }
+
+    /// 存成方案的那一份：不带方案栏，托盘只留这一版用到的照片（切回来时托盘照旧是那时的，缺的补回去）。
+    var variantSnapshot: CollageProject {
+        var p = self
+        p.variants = []
+        let used = usedPhotoIDs
+        p.photos = photos.filter { used.contains($0.id) }
+        return p
+    }
+
+    /// 和另一份是不是同一版：托盘、方案栏不算（托盘里照片的判决、亮度会被后台刷新，不能让「当前方案」因此对不上），
+    /// 水印的「这张不加」也不算（拿掉托盘照片时跟着修剪，画面不变）。先比便宜的字段早早排除，最后整份比（以后工程加了
+    /// 字段也算进去）。
+    func sameDesign(as other: CollageProject) -> Bool {
+        guard mode == other.mode, pages.count == other.pages.count, canvas == other.canvas, style == other.style,
+              title == other.title, subtitle == other.subtitle, masthead == other.masthead, issue == other.issue,
+              albumTheme == other.albumTheme, albumChapterMono == other.albumChapterMono else { return false }
+        var a = self
+        var b = other
+        a.photos = []
+        a.variants = []
+        a.watermark?.skipPhotoIDs = []
+        b.photos = []
+        b.variants = []
+        b.watermark?.skipPhotoIDs = []
+        return a == b
+    }
+}
+
+/// 方案：存下来的一整版设计（画布、样式、文字、所有页、水印），拼图页底下的「方案」栏里点一下切回来，MCP 用
+/// collage_save_variant / collage_open_variant。像 Lightroom 的快照（有名字、点一下回到那一版），但缩略图并排、
+/// 一眼比得出来。project 是存的那一刻的工程（variantSnapshot：不带方案栏、托盘只留用到的照片）。
+struct CollageVariant: Codable, Hashable, Identifiable {
+    var id: String
+    var name: String
+    var savedAt: Date
+    var project: CollageProject
 }
 
 struct CollageTemplate: Codable, Hashable, Identifiable {
@@ -2012,6 +2052,8 @@ extension CollageProject {
         watermark = c.softOptional(.watermark)
         albumTheme = c.soft(.albumTheme, .classic)
         albumChapterMono = c.soft(.albumChapterMono, true)
+        // 旧工程没有这个键 = 没有方案；哪一个坏了只丢它自己。
+        variants = c.soft(.variants, [Failable<CollageVariant>]()).compactMap(\.value)
     }
 }
 

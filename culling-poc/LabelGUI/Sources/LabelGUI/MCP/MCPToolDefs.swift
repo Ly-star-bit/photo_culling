@@ -1,6 +1,6 @@
 import Foundation
 
-/// v1 的 18 个工具定义和两版 instructions（DESIGN §10.1；schema 规则见 §3.0）。
+/// 21 个工具定义（v1 的 18 个 + 方案栏的 2 个 + 导出）和两版 instructions（DESIGN §10.1；schema 规则见 §3.0）。
 /// - 全部写在下面一个原始 JSON 字符串里，启动时解析一次：大字典字面量会让 Xcode 16 / Swift 6.1 的类型检查超时（5277c01）。
 /// - 会随代码变的名单不写死：style / look / kit 的 enum、模板和分类的数目，启动时从 CollageStyles.all、CollageLook、
 ///   CollageKitID、CollageTemplates.builtin 算出来填进去。
@@ -33,8 +33,8 @@ enum MCPToolDefs {
     // MARK: - instructions（§10.1 定稿，原样）
 
     static let liveInstructions = """
-    xuanpian 是本机「选片工具」（photo culling + collage）的接口，这一版只做实时：用户开着 app 时，读 app 当前打开的那一场（判决 pick/usable/reject、废片理由、章节、场、近似重复、人脸/闭眼/锐度/EXIF、预览图），以及改判、在 app 里定位照片、切场次、套拼图模板、一键成套、换封面、改标题/刊头/期号、换样式色调、撤销，都由 app 自己执行，窗口里当场看得到，用户按 ⌘Z 能撤。app 没开时只能看状态、列场次、列模板，其余工具返回 app_not_running：MCP 绝不会启动 app，请用户自己打开。先调 app_status。
-    流程：app_status（live.state 是 live 才能用其余工具；live.open_session 是 app 当前打开的那一场，所有 session 参数都填它）→ cull_session_overview → cull_list_groups / cull_list_photos → cull_get_photos / cull_preview_photos（看眼睛、对焦用 crop=face）。要别的场次：cull_list_sessions 找到它，再 app_open_session（只能打开 app「最近场次」里的；会清掉 app 里这一场的撤销记录，先问用户）。改判用 cull_set_verdicts，给用户看用 cull_show_photos；拼图先 collage_get_state，再 collage_apply_template / collage_run_kit / collage_next_cover / collage_set_text / collage_set_style，结果里有 app 当前画面的预览；撤销 AI 自己刚做的一步用 app_undo。
+    xuanpian 是本机「选片工具」（photo culling + collage）的接口，这一版只做实时：用户开着 app 时，读 app 当前打开的那一场（判决 pick/usable/reject、废片理由、章节、场、近似重复、人脸/闭眼/锐度/EXIF、预览图），以及改判、在 app 里定位照片、切场次、套拼图模板、一键成套、换封面、改标题/刊头/期号、换样式色调、存成方案、切方案、导出图片、撤销，都由 app 自己执行，窗口里当场看得到，用户按 ⌘Z 能撤。app 没开时只能看状态、列场次、列模板，其余工具返回 app_not_running：MCP 绝不会启动 app，请用户自己打开。先调 app_status。
+    流程：app_status（live.state 是 live 才能用其余工具；live.open_session 是 app 当前打开的那一场，所有 session 参数都填它）→ cull_session_overview → cull_list_groups / cull_list_photos → cull_get_photos / cull_preview_photos（看眼睛、对焦用 crop=face）。要别的场次：cull_list_sessions 找到它，再 app_open_session（只能打开 app「最近场次」里的；会清掉 app 里这一场的撤销记录，先问用户）。改判用 cull_set_verdicts，给用户看用 cull_show_photos；拼图先 collage_get_state，再 collage_apply_template / collage_run_kit / collage_next_cover / collage_set_text / collage_set_style，结果里有 app 当前画面的预览；要给用户出几版设计挑，每排好一版就 collage_save_variant 存成方案（不会被下一版盖掉），collage_open_variant 切回某一版；导出成图片用 collage_export（清晰度 1–3 倍，写到导出页设的目录）；撤销 AI 自己刚做的一步用 app_undo。
     出错时：user_busy 的 data.transient 为 true 是用户正在拖动或打字，等几秒再调；为 false 是开着对话框、连拍挑选或裁切，请用户先关掉，不要重试。app_outcome_unknown：用结果里的 op_id 原样再调同一个工具，不要换工具。session_not_open：先 app_status 看 open_session。其他错误按 hint 改。读到的是 app 内存里的状态（含还没存盘的改动）。图片是缩小预览，文字结果里有预览文件的路径；不要直接读原图（几十 MB）。session 可以填照片文件夹的绝对路径，也可以填 16 位 session key。
     """
 
@@ -116,7 +116,7 @@ enum MCPToolDefs {
     }
     """#
 
-    // MARK: - 18 个工具（顺序 = §10.1 表的 1–18）
+    // MARK: - 21 个工具（顺序 = §10.1 表的 1–18，再接方案栏的 19、20 和导出 21）
 
     private static let definitionsJSON = #"""
     [
@@ -197,7 +197,7 @@ enum MCPToolDefs {
      "annotations":"$READ"},
 
     {"name":"collage_get_state","title":"看 app 里的拼图",
-     "description":"看 app 里当前拼图工程的状态（读的是 app 内存，含还没存盘的改动）：模式、页码和页数、模板、样式、色调、标题/副标题/刊头/期号、托盘张数、每个格子（path、照片 id、文字块数）、选中的格子、撤销深度（最上面那一步是不是 AI 做的）、是否还在算、digest（拼图写工具的 if_digest 就填它），后面跟一张 app 当前画面的预览图。session 不填就是 app 当前打开的那一场；填了别的场次回 session_not_open。和用户切到拼图页一样，会先把这一场的拼图工程接上（托盘里照片的判决等信息按批量页刷新），所以可能顺带存一次 collage.json。",
+     "description":"看 app 里当前拼图工程的状态（读的是 app 内存，含还没存盘的改动）：模式、页码和页数、模板、样式、色调、标题/副标题/刊头/期号、托盘张数、每个格子（path、照片 id、文字块数）、选中的格子、撤销深度（最上面那一步是不是 AI 做的）、存过的方案（variants：id、名字、current = 就是现在这一版）、是否还在算、digest（拼图写工具的 if_digest 就填它；存方案不改它），后面跟一张 app 当前画面的预览图。session 不填就是 app 当前打开的那一场；填了别的场次回 session_not_open。和用户切到拼图页一样，会先把这一场的拼图工程接上（托盘里照片的判决等信息按批量页刷新），所以可能顺带存一次 collage.json。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "include_preview":{"type":"boolean","default":true,"description":"要不要带 app 当前画面的预览图"},
@@ -316,6 +316,45 @@ enum MCPToolDefs {
        "session":"$SESSION",
        "op_id":"$OP_ID"},
       "required":["target"],"additionalProperties":false},
+     "annotations":"$WRITE"},
+
+    {"name":"collage_save_variant","title":"存成方案",
+     "description":"把 app 里当前的拼图（画布、样式、文字、所有页、水印）存成一个方案，放进拼图页底下的「方案」栏：用户点缩略图就能切回这一版，几版并排比着挑。要给用户出几版不同的设计时，每排好一版（套模板、改字、换样式之后）调一次，name 写这一版的特点（「报纸风」「九宫格 · 春日」）；接着排下一版不会盖掉存好的。和已有的某个方案一模一样时不再存，返回那一个（changed=false）。一场最多 30 个，满了、或者 app 还在排版时回 invalid_state。不进撤销（方案栏不跟着 ⌘Z 走，app_undo 也撤不掉），存错了请用户在方案栏里右键删掉。存好的方案列在 collage_get_state 的 variants 里，切过去用 collage_open_variant；删除、改名由用户在 app 里做。结果里有 app 当前画面的预览图。",
+     "inputSchema":{"type":"object","properties":{
+       "session":"$SESSION",
+       "name":{"type":"string","maxLength":40,"description":"方案名；不填 = 方案 N"},
+       "if_digest":"$IF_DIGEST",
+       "reveal":"$REVEAL",
+       "op_id":"$OP_ID",
+       "inline":"$INLINE"},
+      "required":["session"],"additionalProperties":false},
+     "annotations":"$WRITE"},
+
+    {"name":"collage_open_variant","title":"切到方案",
+     "description":"把 app 里当前的拼图换成之前存的某个方案（= 用户在方案栏里点它）：画布、样式、文字、所有页、水印都换成它存的样子；托盘照旧，它用到而托盘里已经没有的照片补回托盘（restored_photos）。variant 填 collage_get_state 或 collage_save_variant 返回的方案 id。一次调用是一步撤销（拼图页 ⌘Z，或 app_undo target=collage，回到切之前那一版）；已经是这一版时什么都不做（changed=false）。结果里有 app 当前画面的预览图。",
+     "inputSchema":{"type":"object","properties":{
+       "session":"$SESSION",
+       "variant":{"type":"string","minLength":1,"maxLength":16,"description":"方案 id（collage_get_state 的 variants[].id）"},
+       "if_digest":"$IF_DIGEST",
+       "reveal":"$REVEAL",
+       "op_id":"$OP_ID",
+       "inline":"$INLINE"},
+      "required":["session","variant"],"additionalProperties":false},
+     "annotations":"$WRITE_IDEMPOTENT"},
+
+    {"name":"collage_export","title":"导出拼图",
+     "description":"让 app 把拼图导出成图片（= 拼图页的「导出」按钮）：写进导出页设的输出目录，没设过就是照片文件夹里的「拼图导出」，同名的自动加 -2，不覆盖。单张模式每页一个文件（九宫格、轮播另外切好），相册每个跨页一个文件、导出页开着印刷 PDF 的话另出一份。scale 是清晰度：1 = 画布的平台尺寸，2、3 = 版式不变、像素按倍数放大（九宫格、轮播最多 2 倍，A4、相册这些印刷画布永远 1 倍）。scale、format、name 不填就按导出页上的设置；variant 填方案 id 就导那个存着的方案，不用先切过去。这些参数只管这一次，不改导出页上的设置。不改拼图、不进撤销、不弹访达窗口；要等 app 写完（大相册可能几十秒）。用户正在导出时回 user_busy。结果里有目录、实际用的倍数和每个文件的路径、像素尺寸、大小。",
+     "inputSchema":{"type":"object","properties":{
+       "session":"$SESSION",
+       "scale":{"type":"integer","minimum":1,"maximum":3,"description":"清晰度倍数；不填 = 导出页上选的"},
+       "format":{"type":"string","enum":["jpeg","png","tiff"],"description":"不填 = 导出页上选的"},
+       "name":{"type":"string","maxLength":100,"description":"文件名（不带扩展名）；不填 = 导出那一刻的时间"},
+       "variant":{"type":"string","minLength":1,"maxLength":16,"description":"方案 id（collage_get_state 的 variants[].id）；不填 = 现在这一版"},
+       "if_digest":"$IF_DIGEST",
+       "deadline_seconds":"$DEADLINE_50",
+       "reveal":"$REVEAL",
+       "op_id":"$OP_ID"},
+      "required":["session"],"additionalProperties":false},
      "annotations":"$WRITE"}
     ]
     """#

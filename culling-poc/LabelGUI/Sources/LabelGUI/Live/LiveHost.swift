@@ -377,6 +377,15 @@ enum LiveHost {
             model.collage.testKitLandingDelay = Double(ms) / 1_000
             return .result(["ms": ms])
         }
+        live.register("test.set_export_dir", kind: .read) { req in
+            // 拼图导出写到哪（= 导出页「选择…」）：冒烟测 collage_export 用。不设的话默认是照片文件夹里的「拼图导出」，
+            // 测试用的照片文件夹是 /tmp 下约定不存在的那个、或者用户真的照片文件夹，都不能往里写。
+            guard let path = req.params["path"] as? String, path.hasPrefix("/") else {
+                return .failure("invalid_argument", "test.set_export_dir 要 {path: 绝对路径}", nil)
+            }
+            model.collage.exportOptions.outputPath = path
+            return .result(["path": path])
+        }
         live.register("test.quit", kind: .read) { _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(200)) {
                 live.shutdown()

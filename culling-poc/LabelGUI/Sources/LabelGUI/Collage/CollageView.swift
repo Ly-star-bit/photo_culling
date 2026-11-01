@@ -86,6 +86,11 @@ struct CollageView: View {
             }
             .toggleStyle(.button)
             .help("参考线：安全区、中缝、九宫格/轮播切线（不会导出）")
+            // 只放图标：顶栏在最窄的窗口（960）里已经挤满了。
+            Button { store.saveVariant() } label: { Image(systemName: "plus.square.on.square") }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(store.project.pages.isEmpty || store.isSolving)
+                .help("把现在这一版存成方案（⇧⌘S）：底下的方案栏里点缩略图随时切回来，可以存好几版比着挑")
 
             Spacer()
             if store.isExporting {
@@ -182,6 +187,11 @@ struct CollageView: View {
 
     private var bottomStrips: some View {
         VStack(spacing: 0) {
+            // 存过方案才显示（入口是顶栏的「存成方案」）。
+            if !store.variants.isEmpty {
+                CollageVariantStrip(store: store, thumbs: store.thumbs)
+                Divider()
+            }
             // 相册的跨页条；单张拼图有好几页（一键成套的一期杂志、小红书轮播组图）时也显示（页条）。
             if store.isAlbum || store.project.pages.count > 1 {
                 CollagePageStrip(store: store, thumbs: store.thumbs)
@@ -680,6 +690,133 @@ private struct CollageAlternativeThumbs: View, Equatable {
 }
 
 // MARK: - 相册跨页条
+
+/// 方案栏：存下来的几版（CollageVariant）。点缩略图切过去（一步撤销），右键覆盖 / 改名 / 删除（这三样不进撤销：
+/// 覆盖、删除先问一句），最后一格「+」存现在这一版。和现在一模一样的描蓝边；最近存的 / 切到的那个之后又改过，
+/// 名字后面标「改过」（右键「用现在的样子覆盖它」）。
+struct CollageVariantStrip: View {
+    @ObservedObject var store: CollageStore
+    /// 方案缩略图在 store.thumbs 里。
+    @ObservedObject var thumbs: CollageThumbs
+
+    /// 右键菜单点了以后等确认的那一样（覆盖、删除先问；改名弹输入框）。
+    private enum Pending: Equatable {
+        case rename(String)
+        case overwrite(String)
+        case delete(String)
+    }
+    @State private var pending: Pending?
+    @State private var draft = ""
+
+    var body: some View {
+        let _ = CollagePerf.body("方案条")
+        let current = store.currentVariantIDs
+        let modifiedID = store.activeVariantModified ? store.activeVariantID : nil
+        HStack(spacing: 8) {
+            Text("方案").font(.caption).foregroundStyle(.secondary)
+                .frame(width: 32)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(store.variants) { v in
+                        card(v, current: current.contains(v.id), modified: v.id == modifiedID, anyCurrent: !current.isEmpty)
+                    }
+                    Button {
+                        store.saveVariant()
+                    } label: {
+                        Image(systemName: "plus")
+                            .frame(width: 40, height: 52)
+                            .background(Color.gray.opacity(0.15), in: RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!current.isEmpty || store.project.pages.isEmpty || store.isSolving)
+                    .help(!current.isEmpty ? "现在这一版已经存过了" : "把现在这一版存成方案（⇧⌘S）")
+                }
+                .padding(.vertical, 6)
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 86)
+        .alert("给方案改名", isPresented: flag(for: { if case .rename = $0 { return true } else { return false } })) {
+            TextField("方案名", text: $draft)
+            Button("好") {
+                if case .rename(let id) = pending { store.renameVariant(id, to: draft) }
+                pending = nil
+            }
+            Button("取消", role: .cancel) { pending = nil }
+        }
+        .alert(confirmTitle, isPresented: flag(for: { if case .rename = $0 { return false } else { return true } })) {
+            Button(confirmButton, role: .destructive) {
+                switch pending {
+                case .overwrite(let id): store.updateVariant(id)
+                case .delete(let id): store.deleteVariant(id)
+                default: break
+                }
+                pending = nil
+            }
+            Button("取消", role: .cancel) { pending = nil }
+        } message: {
+            Text("这一步不能撤销。")
+        }
+    }
+
+    private func name(_ id: String) -> String {
+        store.variants.first { $0.id == id }?.name ?? ""
+    }
+
+    private var confirmTitle: String {
+        switch pending {
+        case .overwrite(let id): return "用现在这一版覆盖「\(name(id))」？"
+        case .delete(let id): return "删除「\(name(id))」？"
+        default: return ""
+        }
+    }
+
+    private var confirmButton: String {
+        if case .overwrite = pending { return "覆盖" }
+        return "删除"
+    }
+
+    private func flag(for match: @escaping (Pending) -> Bool) -> Binding<Bool> {
+        Binding(get: { pending.map(match) ?? false }, set: { if !$0 { pending = nil } })
+    }
+
+    private func card(_ v: CollageVariant, current: Bool, modified: Bool, anyCurrent: Bool) -> some View {
+        Button {
+            store.openVariant(v.id)
+        } label: {
+            VStack(spacing: 2) {
+                Group {
+                    if let image = thumbs.variants[v.id] {
+                        Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
+                    } else {
+                        Rectangle().fill(Color.gray.opacity(0.2)).frame(width: 40)
+                    }
+                }
+                .frame(height: 52)
+                .overlay(RoundedRectangle(cornerRadius: 2)
+                    .strokeBorder(current ? Color.accentColor : Color.clear, lineWidth: 2.5))
+                (Text(v.name) + Text(modified ? " · 改过" : "").foregroundColor(.orange))
+                    .font(.caption2).foregroundStyle(current ? .primary : .secondary)
+                    .lineLimit(1)
+                    .frame(maxWidth: 96)
+            }
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("切到这一版") { store.openVariant(v.id) }.disabled(current)
+            // 现在这一版已经存成某个方案了就不让覆盖（不然两个方案一模一样）
+            Button("用现在的样子覆盖它…") { pending = .overwrite(v.id) }
+                .disabled(anyCurrent || store.project.pages.isEmpty || store.isSolving)
+            Button("改名…") {
+                draft = v.name
+                pending = .rename(v.id)
+            }
+            Divider()
+            Button("删除…", role: .destructive) { pending = .delete(v.id) }
+        }
+        .help("\(v.name) · \(v.project.pages.count) 页 · 点一下切到这一版（⌘Z 回来）；右键覆盖、改名、删除")
+    }
+}
 
 struct CollagePageStrip: View {
     @ObservedObject var store: CollageStore

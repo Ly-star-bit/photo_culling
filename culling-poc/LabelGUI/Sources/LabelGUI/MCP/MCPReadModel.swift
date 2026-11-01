@@ -560,7 +560,7 @@ enum MCPCursor {
     }
 }
 
-/// 要 app 的 15 个工具的参数校验（§3.0、§10.1 的 schema）：`--mcp`（MCPLiveTools）先查一遍、早点给错，app（LiveHandlers）
+/// 要 app 的 18 个工具的参数校验（§3.0、§10.1 的 schema）：`--mcp`（MCPLiveTools）先查一遍、早点给错，app（LiveHandlers）
 /// 再按同一份查（§9.2.3：参数用和 MCP 工具同一份校验代码）。schema 里没写的属性一律不收；uniqueItems 只当提示，这里去重
 /// 不报错（§3.0）。session 只看类型，和 app 当前那一场的比对在 MCPLiveTools.checkSession / app 那一侧。
 /// 写工具另有几条 schema 写不出来的规矩（至少给一个字段、cell_text 要带 if_digest），见 rules。
@@ -677,6 +677,25 @@ enum MCPArgs {
         p["look_strength"] = .number(0...1)
         return ToolSpec(props: p, required: [])
     }()
+    static let saveVariantSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "if_digest": digest, "reveal": .bool, "op_id": .opID, "inline": .bool]
+        p["name"] = .text(maxLength: 40)
+        return ToolSpec(props: p, required: [])
+    }()
+    static let openVariantSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "if_digest": digest, "reveal": .bool, "op_id": .opID, "inline": .bool]
+        p["variant"] = .string(maxLength: 16)
+        return ToolSpec(props: p, required: ["variant"])
+    }()
+    static let exportSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "if_digest": digest, "reveal": .bool, "op_id": .opID]
+        p["scale"] = .int(1...3)
+        p["format"] = .oneOf(CollageExport.Format.allCases.map(\.rawValue))
+        p["name"] = .text(maxLength: 100)
+        p["variant"] = .string(maxLength: 16)
+        p["deadline_seconds"] = .deadline
+        return ToolSpec(props: p, required: [])
+    }()
     static let undoSpec: ToolSpec = {
         let p: [String: Spec] = ["session": session, "op_id": .opID, "target": .oneOf(["verdicts", "collage"])]
         return ToolSpec(props: p, required: ["target"])
@@ -697,6 +716,9 @@ enum MCPArgs {
         s["collage_set_text"] = textSpec
         s["collage_set_style"] = styleSpec
         s["app_undo"] = undoSpec
+        s["collage_save_variant"] = saveVariantSpec
+        s["collage_open_variant"] = openVariantSpec
+        s["collage_export"] = exportSpec
         return s
     }()
 

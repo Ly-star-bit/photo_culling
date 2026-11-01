@@ -997,6 +997,8 @@ private struct CollageSnapshotHost: View {
 ///     crossfold（打印压中缝的跨页）。
 /// 核对：notice（打印状态栏提示）、digest（整个工程的指纹，核对撤销）、tplthumbs[:前缀]（模板缩略图，给了前缀就存 PNG）、
 ///     altthumb:序号=文件名（存第几个备选的缩略图）、render:<文件名>（半尺寸 + 调试框）。
+/// 方案栏：variantsave[:名字]、variantopen:N、variantupdate:N、variantrename:N=名字、variantdel:N（N = 方案栏里的序号，
+///     从 0 起；只有 variantopen 是一步撤销，别的不进撤销）、variants（列出方案、哪个是当前的、编辑指纹）。
 /// export:<目录> = 走导出全流程（无头模式不弹访达；会真的写出文件，测试脚本用 renderexport）；exportname:<名字>（导出文件名）；
 ///     exportscale:1|2|3（导出清晰度；renderexport 和 export 都按 CollageStore.exportScale 算这张画布实际几倍）。
 enum CollageOpsScript {
@@ -2322,6 +2324,42 @@ enum CollageOpsScript {
             case "tonext":
                 store.selection = path(arg)
                 store.moveSelectedPhoto(toPage: store.pageIndex + 1)
+            case "variantsave":
+                switch store.saveVariant(name: arg.isEmpty ? nil : arg) {
+                case .saved(let v): print("  存成方案 \(v.name)（\(v.id)）")
+                case .same(let v): print("  和方案 \(v.name) 一样，没再存")
+                case .empty: print("  没有页，没存")
+                case .full: print("  方案满了（\(CollageStore.maxVariants)），没存")
+                case .solving: print("  还在排版，没存")
+                }
+            case "variantopen", "variantupdate", "variantdel":
+                guard let i = Int(arg), store.variants.indices.contains(i) else { ok = false; break }
+                let id = store.variants[i].id
+                if name == "variantopen" {
+                    let back = store.openVariant(id)
+                    print("  切到方案 \(i)：补回 \(back.map(String.init) ?? "?") 张")
+                } else if name == "variantupdate" {
+                    store.updateVariant(id)
+                } else {
+                    store.deleteVariant(id)
+                }
+            case "variantrename":
+                if let (a, b) = pair(arg, "="), let i = Int(a), store.variants.indices.contains(i) {
+                    store.renameVariant(store.variants[i].id, to: b)
+                } else {
+                    ok = false
+                }
+            case "variants":
+                // 方案栏：序号、名字、页数、模式、和现在一样的（当前）、最近存 / 切到的又改过了（改过）。
+                let current = store.currentVariantID
+                for (i, v) in store.variants.enumerated() {
+                    var tags: [String] = []
+                    if v.id == current { tags.append("当前") }
+                    if v.id == store.activeVariantID { tags.append(store.activeVariantModified ? "最近·改过" : "最近") }
+                    let tag = tags.isEmpty ? "" : " [" + tags.joined(separator: " ") + "]"
+                    print("  方案 \(i) \(v.name) · \(v.project.mode.rawValue) · \(v.project.pages.count) 页 · 照片 \(v.project.photos.count)\(tag)")
+                }
+                print("  共 \(store.variants.count) 个方案 · 托盘 \(store.project.photos.count) 张 · 编辑指纹 \(store.editDigest)")
             case "exportname":
                 store.exportName = arg
             case "exportscale":

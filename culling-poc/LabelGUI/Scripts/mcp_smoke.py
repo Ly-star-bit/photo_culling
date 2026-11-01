@@ -312,12 +312,13 @@ def labelgui_processes():
 
 # ---------------------------------------------------------------- 准备
 
-TOOLS_18 = ["app_status", "cull_list_sessions", "collage_list_templates", "cull_session_overview", "cull_list_photos",
+TOOLS_ALL = ["app_status", "cull_list_sessions", "collage_list_templates", "cull_session_overview", "cull_list_photos",
             "cull_get_photos", "cull_list_groups", "cull_preview_photos", "collage_get_state", "app_open_session",
             "cull_set_verdicts", "cull_show_photos", "collage_apply_template", "collage_run_kit", "collage_next_cover",
-            "collage_set_text", "collage_set_style", "app_undo"]
-ALWAYS = TOOLS_18[:3]
-APP_TOOLS = TOOLS_18[3:]
+            "collage_set_text", "collage_set_style", "app_undo", "collage_save_variant", "collage_open_variant",
+            "collage_export"]
+ALWAYS = TOOLS_ALL[:3]
+APP_TOOLS = TOOLS_ALL[3:]
 # 描述里出现的 app_* / cull_* / collage_* 名字里，这些是错误码不是工具。
 ERROR_CODES = {"app_not_running", "app_unreachable", "app_unresponsive", "app_version_mismatch", "app_outcome_unknown",
                "app_restarted", "app_too_old"}
@@ -673,7 +674,7 @@ s.request("tl", "tools/list")
 tl = s.reply("tl")
 tools = (tl or {}).get("result", {}).get("tools", [])
 names = [t.get("name") for t in tools]
-check(names == TOOLS_18, f"tools/list 恰好 18 个、顺序同 §10.1：{names}")
+check(names == TOOLS_ALL, f"tools/list 恰好 21 个、顺序同 §10.1（再接方案栏的 2 个和导出）：{names}")
 TL_LIVE = tools
 
 
@@ -771,10 +772,10 @@ def check_tool_list(tools, instructions, expect, label):
           f"{label}：instructions {len(instructions)} 字、第一段 {len(first)} 字、提到的工具都在列表里 {sorted(stray)}")
 
 
-check_tool_list(TL_LIVE, INSTRUCTIONS, TOOLS_18, "LIVE")
+check_tool_list(TL_LIVE, INSTRUCTIONS, TOOLS_ALL, "LIVE")
 by_name = {t["name"]: t for t in TL_LIVE}
 ro = {n for n, t in by_name.items() if t["annotations"]["readOnlyHint"]}
-check(ro == set(TOOLS_18[:9]), f"只读的是第 1–9 个：{sorted(ro)}")
+check(ro == set(TOOLS_ALL[:9]), f"只读的是第 1–9 个：{sorted(ro)}")
 check([n for n, t in by_name.items() if t["annotations"]["destructiveHint"]] == ["app_open_session"], "只有 app_open_session 是 destructive")
 
 # 错误码（§1.2）
@@ -867,7 +868,7 @@ while len(got) < 22 and time.time() < end:
 fills = [got.get(f"fill{i}") for i in range(10)]
 oks = [i for i in range(12) if got.get(f"b{i}") and not got[f"b{i}"]["result"].get("isError")]
 busy = [i for i in range(12) if got.get(f"b{i}") and "\"busy\"" in got[f"b{i}"]["result"]["content"][0]["text"]]
-check(all(f and len(f["result"]["tools"]) == 18 for f in fills), "管道塞满时 10 个 tools/list 最后都完整收到")
+check(all(f and len(f["result"]["tools"]) == len(TOOLS_ALL) for f in fills), "管道塞满时 10 个 tools/list 最后都完整收到")
 check(len(oks) == 8 and len(busy) == 4 and oks == list(range(8)), f"同时在途最多 8 个：成功 {oks}，busy {busy}")
 check(len(set(map(lambda k: len(s.raw[k]), s.raw))) == 1, "每个 id 恰好一帧")
 rc, dt = s.close()
@@ -1033,7 +1034,7 @@ check(rc == 0 and not junk and ids == [1] + [f"nb{i}" for i in range(10)],
 r = run_cli(["--mcp-tools"], FIXTURE)
 lines = r.stdout.decode().splitlines()
 mt = json.loads(lines[0]) if len(lines) == 1 else {}
-check(r.returncode == 0 and len(lines) == 1 and [t["name"] for t in mt.get("tools", [])] == TOOLS_18
+check(r.returncode == 0 and len(lines) == 1 and [t["name"] for t in mt.get("tools", [])] == TOOLS_ALL
       and mt.get("tools") == TL_LIVE and mt.get("instructions") == INSTRUCTIONS,
       "--mcp-tools：一行 JSON，和 tools/list、instructions 一样")
 r = run_cli(["--mcp-call", "app_status", "{}"], FIXTURE)
@@ -1241,7 +1242,7 @@ if not PROTOCOL_ONLY:
           "参数不对 → invalid_argument（limit:0、limit:true、app_status 带参数）")
     res, lt, lt_text = s.tool("a6", "collage_list_templates")
     check_templates(s, lt, lt_text)
-    # 15 个要 app 的工具：带合理参数、也带空参数，一律 app_not_running + hint（§10.2）
+    # 18 个要 app 的工具：带合理参数、也带空参数，一律 app_not_running + hint（§10.2）
     sample = {"session": KEY, "ids": ["DSCF7208"], "kind": "scene", "verdict": "pick", "template": "时尚刊",
               "kit": "fashionIssue", "target": "collage"}
     wrong = []
@@ -1252,7 +1253,7 @@ if not PROTOCOL_ONLY:
             if not (res.get("isError") and (b or {}).get("error", {}).get("code") == "app_not_running"
                     and (b or {}).get("error", {}).get("hint")):
                 wrong.append(n)
-    check(not wrong, f"15 个要 app 的工具都回 app_not_running、带 hint {sorted(set(wrong))}")
+    check(not wrong, f"18 个要 app 的工具都回 app_not_running、带 hint {sorted(set(wrong))}")
     rc, dt = s.close()
     socks = [os.path.join(dp, f) for dp, _, fs in os.walk(SOCK_ROOT) for f in fs]
     check(not socks, f"socket 根目录里什么都没有：{socks}")

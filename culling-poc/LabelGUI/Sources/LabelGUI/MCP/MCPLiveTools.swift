@@ -1,6 +1,6 @@
 import Foundation
 
-/// 要 app 的 15 个工具怎么路由（DESIGN §10.2，取代 §9.1 的三列表）：每次调用探一次（LiveClient.probe，不缓存），
+/// 要 app 的 18 个工具怎么路由（DESIGN §10.2，取代 §9.1 的三列表）：每次调用探一次（LiveClient.probe，不缓存），
 /// 只在 `live`、方法在 hello 的 capabilities 里、场次对得上时转给 app；其余情况一律回那个状态的错误码。服务器绝不启动 app。
 /// 顺序：探测 → 方法在不在 → 参数校验（和 app 同一份 MCPArgs；app 没开时不管参数，一律 app_not_running）→ 场次核对 → 转发。
 /// 6 个读工具（STEP 3a）：cull.read（overview / photos / get / groups，结果就是 app 里 MCPReadModel 产出的 JSON，这里只补
@@ -42,16 +42,21 @@ enum MCPLiveTools {
         "collage_set_text": Route(method: "collage.set_text", write: true, session: .required, deadlineMs: 10_000),
         "collage_set_style": Route(method: "collage.set_style", write: true, session: .required, deadlineMs: 10_000),
         "app_undo": Route(method: "undo", write: true, session: .optional, deadlineMs: 10_000),
+        "collage_save_variant": Route(method: "collage.save_variant", write: true, session: .required, deadlineMs: 10_000),
+        "collage_open_variant": Route(method: "collage.open_variant", write: true, session: .required, deadlineMs: 10_000),
+        "collage_export": Route(method: "collage.export", write: true, session: .required, deadlineMs: 50_000),
     ]
 
-    /// 会转发的桥方法（§10.4 的 12 个；app 的 capabilities 里没有的回 app_version_mismatch / app_too_old）。
+    /// 会转发的桥方法（§10.4 的 12 个 + 方案栏的 2 个 + 导出；app 的 capabilities 里没有的回 app_version_mismatch /
+    /// app_too_old：旧版 app 没有方案栏和导出）。
     static let wired: Set<String> = ["cull.read", "cull.preview", "collage.state", "session.open", "cull.set_verdicts", "cull.show",
                                      "collage.apply_template", "collage.run_kit", "collage.next_cover", "collage.set_text",
-                                     "collage.set_style", "undo"]
+                                     "collage.set_style", "undo", "collage.save_variant", "collage.open_variant",
+                                     "collage.export"]
 
     /// 结果里带拼图预览的写（和 collage_get_state 一样处理：存一份、内联）。
     static let collageWrites: Set<String> = ["collage.apply_template", "collage.run_kit", "collage.next_cover", "collage.set_text",
-                                             "collage.set_style", "undo"]
+                                             "collage.set_style", "undo", "collage.save_variant", "collage.open_variant"]
 
     /// cull.read 的四个工具 → kind（§10.4）。
     static let readKinds: [String: String] = [
