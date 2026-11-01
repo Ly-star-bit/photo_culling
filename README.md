@@ -238,7 +238,7 @@ swift build -c release
 
 ## 给 AI 用（MCP）
 
-app 里的程序本身就是一个 MCP 服务器（`LabelGUI --mcp`，stdio），Claude Code、Antigravity 这类 AI agent 接上以后能看你的选片结果、替你改判、排拼图。**这一版只做实时**：你开着 app 时，AI 读的是 app 当前打开的那一场（app 内存里的状态，含还没存盘的改动），改判、套模板、一键成套、换封面、改字、换样式、存成方案和切方案、导出图片、撤销都交给 app 自己执行，你在窗口里当场看到，⌘Z 照样能撤；app 没开时只能看状态、列场次、列模板，其余工具一律回 `app_not_running`，请你自己打开 app —— **MCP 绝不会替你启动 app**。app 没开时读场次、出拼图成品图，以及让 AI 分析新文件夹，这一版都没有（app 开着时可以让 app 导出：`collage_export`）。
+app 里的程序本身就是一个 MCP 服务器（`LabelGUI --mcp`，stdio），Claude Code、Antigravity 这类 AI agent 接上以后能看你的选片结果、替你改判、排拼图。**这一版只做实时**：你开着 app 时，AI 读的是 app 当前打开的那一场（app 内存里的状态，含还没存盘的改动），改判、套模板、一键成套、换封面、改字、换样式、存成方案和切方案、导出图片、撤销都交给 app 自己执行，你在窗口里当场看到，改判和改拼图 ⌘Z 照样能撤（存方案、导出不改拼图，不进撤销）；app 没开时只能看状态、列场次、列模板，其余工具一律回 `app_not_running`，请你自己打开 app —— **MCP 绝不会替你启动 app**。app 没开时读场次、出拼图成品图，以及让 AI 分析新文件夹，这一版都没有（app 开着时可以让 app 导出：`collage_export`）。
 
 ### 21 个工具
 
@@ -335,7 +335,7 @@ exec "/Applications/选片工具.app/Contents/MacOS/LabelGUI" --mcp "$@"
 
 ### 审批
 
-Claude Code 交互模式下，每个工具第一次调用都会问你。建议 9 个读工具（第 1–9 个）和 11 个写工具（第 11–21 个）选「以后不再问」：写的改动当场出现在你眼前、一步 ⌘Z 能撤。**`app_open_session` 保持每次问**：切场次会清掉 app 里这一场的判决和拼图撤销记录。想一次配好，在 Claude Code 的设置（`~/.claude/settings.json`，或者项目里的 `.claude/settings.json`）里放行这 20 个（合并进文件里已有的 `permissions.allow`，别整个文件覆盖）：
+Claude Code 交互模式下，每个工具第一次调用都会问你。建议 9 个读工具（第 1–9 个）和 11 个写工具（第 11–21 个）选「以后不再问」：写的改动当场出现在你眼前，改判和改拼图一步 ⌘Z 能撤（存方案、导出不改拼图，不进撤销；存错的方案在方案栏里右键删掉）。**`app_open_session` 保持每次问**：切场次会清掉 app 里这一场的判决和拼图撤销记录。想一次配好，在 Claude Code 的设置（`~/.claude/settings.json`，或者项目里的 `.claude/settings.json`）里放行这 20 个（合并进文件里已有的 `permissions.allow`，别整个文件覆盖）：
 
 ```json
 {"permissions":{"allow":[

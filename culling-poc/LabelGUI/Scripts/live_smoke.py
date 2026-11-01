@@ -2555,7 +2555,10 @@ __attribute__((constructor)) static void init(void) {
         # 能直接导存着的方案；不改拼图、不进撤销。输出目录先指到工作目录：默认的「照片文件夹/拼图导出」在 CI 是约定不存在的
         # /tmp 那个，本地是用户真的照片文件夹，都不能往里写
         exp_dir = os.path.join(WORK, "G-export")
-        test_call(h, "test.set_export_dir", {"path": exp_dir})
+        set_dir = (test_call(h, "test.set_export_dir", {"path": exp_dir}) or {}).get("result") or {}
+        if set_dir.get("path") != exp_dir:
+            # 改不了输出目录就不测导出：默认的输出目录不能写（CI 上会建出约定不存在的 /tmp 照片目录）
+            raise RuntimeError(f"test.set_export_dir 没设上：{set_dir}")
         s0 = settled()
         _, e1, _ = w("collage_export", {"session": KEY, "scale": 1, "name": "冒烟导出"}, timeout=120)
         _, e2, _ = w("collage_export", {"session": KEY, "scale": 2, "name": "冒烟导出"}, timeout=120)
@@ -2565,17 +2568,27 @@ __attribute__((constructor)) static void init(void) {
         on_disk = sorted(os.listdir(exp_dir)) if os.path.isdir(exp_dir) else []
         k2 = e2.get("scale")
         st_path = os.path.join(gdata, "collage", "state.json")
-        saved_scale = (json.load(open(st_path)).get("export") or {}).get("scale", 1) if os.path.exists(st_path) else 1
+        st_exists = os.path.exists(st_path)
+        saved_scale = (json.load(open(st_path)).get("export") or {}).get("scale", 1) if st_exists else None
         check("error" not in e1 and "error" not in e2 and "error" not in e3 and e1.get("folder") == exp_dir
               and f1[0].get("name") == "冒烟导出.jpg" and f2[0].get("name") == "冒烟导出-2.jpg"
               and f3[0].get("name") == "冒烟方案.png" and all(os.path.exists(x.get("path", "")) for x in f1 + f2 + f3)
               and k2 in (1, 2) and f2[0].get("width") == f1[0].get("width", 0) * k2
               and (k2 == 2 or "scale_capped" in warn_codes(e2))
               and (e3.get("variant") or {}).get("id") == id1 and steps(s0, s1) == (0, 0)
-              and s1["edit_digest"] == s0["edit_digest"] and saved_scale == 1
+              and s1["edit_digest"] == s0["edit_digest"] and st_exists and saved_scale == 1
               and ((s1.get("collage") or {}).get("notice") or "").startswith("AI：导出了"),
               f"导出：1 倍 {f1[0].get('width')} px、2 倍 {f2[0].get('width')} px（用了 {k2} 倍）、同名加 -2、方案直接导成 PNG；"
               f"不进撤销、拼图没变、导出页的倍数还是 {saved_scale}（目录里 {on_disk}）")
+        op = "exp-" + uuid.uuid4().hex[:12]
+        _, r1, _ = w("collage_export", {"session": KEY, "name": "重放", "op_id": op}, timeout=120)
+        listed1 = sorted(os.listdir(exp_dir))
+        _, r2, _ = w("collage_export", {"session": KEY, "name": "重放", "op_id": op}, timeout=120)
+        listed2 = sorted(os.listdir(exp_dir))
+        check("error" not in r1 and r2.get("replayed") is True and listed2 == listed1
+              and [x.get("name") for x in r2.get("files") or []] == [x.get("name") for x in r1.get("files") or []],
+              f"导出：同一个 op_id 发两次，第二次 replayed:true、没有再导一份（目录 {len(listed1)} → {len(listed2)} 个文件）")
+        on_disk = listed2
         _, e4, _ = w("collage_export", {"session": KEY, "variant": "nope0000"})
         _, e5, _ = w("collage_export", {"session": KEY, "scale": 5})
         check(err_code(e4) == "invalid_argument" and err_code(e5) == "invalid_argument" and sorted(os.listdir(exp_dir)) == on_disk,

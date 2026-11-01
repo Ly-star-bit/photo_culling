@@ -1009,7 +1009,8 @@ extension LiveHandlers {
     }
 
     static func variantInfo(_ v: CollageVariant) -> [String: Any] {
-        ["id": v.id, "name": v.name, "mode": v.project.mode.rawValue, "pages": v.project.pages.count]
+        ["id": v.id, "name": v.name, "mode": v.project.mode.rawValue, "pages": v.project.pages.count,
+         "saved_at": ISO8601DateFormatter().string(from: v.savedAt)]
     }
 
     static func saveVariant(_ req: Request, live: LiveServer, model: AppModel) async -> Reply {
@@ -1087,36 +1088,61 @@ extension LiveHandlers {
     /// 不改拼图、不进撤销、不弹访达；等 app 写完再回。
     static func exportCollage(_ req: Request, live: LiveServer, model: AppModel) async -> Reply {
         if let bad = checkArgs("collage_export", req) { return bad }
-        if let stop = await begin(req, Gate(scope: .collage, digest: true), live: live, model: model) { return stop }
-        model.ensureCollageAttached()
         let collage = model.collage
-        var project = collage.project
-        var body: [String: Any] = [:]
-        if let id = req.params["variant"] as? String {
+        let gate = Gate(scope: .collage, digest: true)
+        // 顺序同成套（kitWrite）：先第 5 步，再看一直的忙（对话框、导出……），再等路人信息，最后 settle —— 等的时候
+        // 用户点了导出，settle 会回 user_busy（不是 startExport 的「正在导出」）
+        if let stop = precheck(req, gate, live: live, model: model, waited: false) { return stop }
+        let now = model.interaction.reasons(model, scope: .collage)
+        if now.contains(where: { !$0.transient }) { return userBusy(now, waited: 0) }
+        model.indicator.began(workingLabel(req.method))
+        model.ensureCollageAttached()
+        let variantID = req.params["variant"] as? String
+        if let id = variantID {
             guard let v = collage.variants.first(where: { $0.id == id }) else {
                 return invalid("没有这个方案：「\(id)」。", hint: "先 collage_get_state 看 variants[].id")
             }
-            project = v.project
+            // 它用到、托盘里已经拿掉的照片：补算路人信息（不然那几格没有按人脸的取景）
+            let have = Set(collage.project.photos.map(\.id))
+            collage.prepareHints(for: v.project.photos.filter { !have.contains($0.id) })
+        }
+        let budget = min(remainingMs(req) - 5_000, 20_000) / 1_000
+        let settled = await collage.hintsSettled(timeout: max(0, budget))
+        if let stop = await settle(req, gate, live: live, model: model) { return stop }
+        // 等的时候用户可能删了、覆盖了这个方案，或者改了版：落地前再取一次
+        var project = collage.project
+        var body: [String: Any] = [:]
+        if let id = variantID {
+            guard let v = collage.variants.first(where: { $0.id == id }) else {
+                return invalid("方案「\(id)」刚被删掉了。", hint: "先 collage_get_state 看 variants[].id")
+            }
+            project = collage.variantProject(v)
             body["variant"] = variantInfo(v)
         }
         guard !project.pages.isEmpty else {
             return .failure("invalid_state", "拼图里还没有任何一页，没什么可导出。",
                             ["hint": "先 collage_apply_template 或 collage_run_kit 排一版", "executed": false])
         }
+        guard !collage.isSolving else {
+            return .failure("invalid_state", "app 还在排这一版（排版没落地），现在导出的会是落地之前的样子。",
+                            ["hint": "过一两秒再调", "executed": false])
+        }
         guard collage.outputFolder != nil else {
             return .failure("invalid_state", "没有输出目录：app 还没打开照片文件夹，导出页上也没选目录。",
                             ["hint": "请用户在拼图页「导出」里选一个输出目录", "executed": false])
         }
         var options = collage.exportOptions
-        if let k = LiveWire.int(req.params["scale"]) { options.scale = k }
+        let askedScale = LiveWire.int(req.params["scale"])
+        if let k = askedScale { options.scale = k }
         if let f = (req.params["format"] as? String).flatMap(CollageExport.Format.init(rawValue:)) { options.format = f }
         let name = req.params["name"] as? String ?? ""
         let started = Date()
         let outcome = await withCheckedContinuation { (cont: CheckedContinuation<CollageStore.ExportOutcome, Never>) in
             collage.startExport(project: project, options: options, name: name, reveal: false) { cont.resume(returning: $0) }
         }
-        if let failure = outcome.failure, outcome.files.isEmpty {
-            return .failure("export_failed", "导出没成功：\(failure)。",
+        if outcome.files.isEmpty {
+            let why = outcome.cancelled ? "用户取消了导出" : (outcome.failure ?? "一个文件都没写出来")
+            return .failure("export_failed", "导出没成功：\(why)。",
                             ["hint": "看 app 拼图页底下的提示；输出目录写不进去的话请用户换一个", "executed": false])
         }
         var files: [[String: Any]] = []
@@ -1125,8 +1151,8 @@ extension LiveHandlers {
                 let url = folder.appendingPathComponent(file)
                 var f: [String: Any] = ["name": file, "path": url.path]
                 if let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int { f["bytes"] = size }
-                // 只读文件头（不解码），PDF 读不出尺寸就不给
-                if let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+                // 只读文件头（不解码）；PDF 不给尺寸（ImageIO 会报 72 dpi 的点数，不是像素）
+                if url.pathExtension.lowercased() != "pdf", let src = CGImageSourceCreateWithURL(url as CFURL, nil),
                    let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
                     f["width"] = props[kCGImagePropertyPixelWidth] ?? NSNull()
                     f["height"] = props[kCGImagePropertyPixelHeight] ?? NSNull()
@@ -1139,10 +1165,15 @@ extension LiveHandlers {
         body["scale"] = outcome.scale
         body["format"] = options.format.rawValue
         body["seconds"] = MCPReadModel.r3(Date().timeIntervalSince(started))
+        body["hints_settled"] = settled
         var warnings: [[String: Any]] = []
-        if options.scale > outcome.scale {
-            warnings.append(MCPReadModel.warning("scale_capped", "这张画布最多放大到 \(outcome.scale) 倍（九宫格、轮播最多 2 倍，印刷画布不放大）。",
+        if let k = askedScale, k > outcome.scale {
+            warnings.append(MCPReadModel.warning("scale_capped", "这张画布最多放大到 \(outcome.scale) 倍（整张不超过 5000 万像素；印刷画布不放大）。",
                                                  hint: ""))
+        }
+        if !settled {
+            warnings.append(MCPReadModel.warning("hints_pending", "路人信息还没算完：这次导出的裁切可能和算完以后不一样。",
+                                                 hint: "想要稳定的结果，过一会儿再导一次"))
         }
         if let w = outcome.warning {
             warnings.append(MCPReadModel.warning("export_degraded", w, hint: "多半是原图挪走了、移动硬盘没插：请用户看一下"))

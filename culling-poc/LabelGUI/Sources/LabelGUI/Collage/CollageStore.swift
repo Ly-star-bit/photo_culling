@@ -3555,7 +3555,10 @@ final class CollageStore: ObservableObject {
                 }.value
                 if let data = result.pdfData { pdfPages.append(data) }
                 if let f = result.error, failure == nil { failure = f }
-                if result.error == nil { outcome.files += plan.pages[i] }
+                // 这一页出错时也照实报已经写出的（九宫格 / 轮播先写整张、再写切片，切片写失败时整张已经在盘上了；
+                // 文件名是这次新起的，盘上有就是这次写的）
+                outcome.files += result.error == nil ? plan.pages[i]
+                    : plan.pages[i].filter { FileManager.default.fileExists(atPath: folder.appendingPathComponent($0).path) }
                 lowRes += result.lowRes
                 missing += result.missing
                 signatureLost = signatureLost || result.signatureLost
@@ -4068,6 +4071,21 @@ extension CollageStore {
         scheduleProjectSave()
         scheduleVariantThumbs()
         setNotice("删了「\(name)」")
+    }
+
+    /// 给托盘里没有的照片补算路人信息（AI 直接导出存着的方案时：它用到、托盘里已经拿掉的那几张），hintsSettled 等它。
+    func prepareHints(for photos: [CollagePhotoRef]) {
+        computeHints(for: photos)
+    }
+
+    /// 要导出 / 渲染一个方案时用的工程：它存的那一版 + 现在的托盘（和切过去以后一样：托盘里有的照片用现在这一份，
+    /// 它用到、托盘里没有的接在后面）。没有照片的页（纯文字）的日期、主图看托盘。
+    func variantProject(_ variant: CollageVariant) -> CollageProject {
+        var p = variant.project
+        let tray = project.photos
+        let have = Set(tray.map(\.id))
+        p.photos = tray + variant.project.photos.filter { !have.contains($0.id) }
+        return p
     }
 
     /// 下一个默认名：方案 N（N 接着已有的「方案 k」往上数）。
