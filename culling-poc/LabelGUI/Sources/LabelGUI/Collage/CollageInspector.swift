@@ -1295,6 +1295,7 @@ struct CollageExportPanel: View {
                     CollageSlider(label: "质量", value: $store.exportOptions.quality, range: 0.7...1,
                                   display: "\(Int(store.exportOptions.quality * 100))")
                 }
+                scalePicker
                 watermarkToggle
                 Text(summary).font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1349,6 +1350,29 @@ struct CollageExportPanel: View {
         }
     }
 
+    /// 清晰度：标准 = 画布的平台尺寸；2 / 3 倍 = 版式不变、像素按倍数放大。只列这张画布放得下的倍数
+    /// （九宫格、轮播最多 2 倍）；印刷画布本来就是 300 dpi 成品尺寸，不显示。选的倍数记在导出设置里，换到放不下的
+    /// 画布时显示实际用的那一档，换回来还是原来选的。
+    @ViewBuilder
+    private var scalePicker: some View {
+        let most = CollageStore.maxExportScale(store.project.canvas)
+        if most > 1 {
+            Picker("清晰度", selection: scaleBinding) {
+                ForEach(1...most, id: \.self) { k in
+                    Text(k == 1 ? "标准" : "\(k) 倍").tag(k)
+                }
+            }
+            .pickerStyle(.segmented)
+            .help("标准 = 社交平台的尺寸（平台上传时还会再压缩）；2 倍、3 倍版式不变、像素按倍数放大，适合留底、发给客户、打印。"
+                  + "原图不够大的照片会被放大：不比标准的更糊，只是不会更清楚。")
+        }
+    }
+
+    private var scaleBinding: Binding<Int> {
+        Binding(get: { CollageStore.exportScale(canvas: store.project.canvas, options: store.exportOptions) },
+                set: { store.exportOptions.scale = $0 })
+    }
+
     /// 导出页显示「导出带水印」开关：至少开着一层水印（--collage-ui --tab 导出 按同一个判断打印「导出面板」行）。
     static func showsWatermarkToggle(_ wm: CollageWatermark?) -> Bool { wm?.anyLayerOn == true }
 
@@ -1371,10 +1395,15 @@ struct CollageExportPanel: View {
         let pages = store.project.pages.count
         let base = pages > 1 ? "\(name)_01…_\(String(format: "%02d", pages))" : name
         let perPage = pages > 1 ? "（\(pages) 页，每页一份）" : ""
+        // 按清晰度乘过的成品像素（拆成单独的 Int：整串插值太长 CI 的 Xcode 16 会类型检查超时）。
+        let k = CollageStore.exportScale(canvas: c, options: store.exportOptions)
+        let w: Int = c.width * k
+        let h: Int = c.height * k
+        let slideW: Int = w / max(1, c.slides)
         switch c.seams {
-        case .grid9: return "\(base).\(ext) + \(base)_九宫格_1…9\(example)\(perPage)：整张 \(c.width)×\(c.height)px + 九宫格 9 张（每张 \(c.width / 3)×\(c.height / 3)）；sRGB"
-        case .carousel: return "\(base).\(ext) + \(base)_轮播_1…\(c.slides)\(example)\(perPage)：每张 \(c.width / max(1, c.slides))×\(c.height)px；sRGB"
-        default: return "\(base).\(ext)\(example)\(perPage)：\(c.width)×\(c.height)px；sRGB"
+        case .grid9: return "\(base).\(ext) + \(base)_九宫格_1…9\(example)\(perPage)：整张 \(w)×\(h)px + 九宫格 9 张（每张 \(w / 3)×\(h / 3)）；sRGB"
+        case .carousel: return "\(base).\(ext) + \(base)_轮播_1…\(c.slides)\(example)\(perPage)：每张 \(slideW)×\(h)px；sRGB"
+        default: return "\(base).\(ext)\(example)\(perPage)：\(w)×\(h)px；sRGB"
         }
     }
 

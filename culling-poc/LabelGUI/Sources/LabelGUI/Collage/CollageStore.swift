@@ -173,6 +173,8 @@ final class CollageStore: ObservableObject {
         var pdf = true
         var cropMarks = true
         var outputPath: String?
+        /// 清晰度：1 = 标准（画布的平台尺寸）、2 / 3 倍 = 版式不变、像素按倍数放大。这张画布上实际用几倍见 exportScale。
+        var scale = 1
         // 「导出带水印」不在这里：它跟着拼图存（CollageWatermark.exportEnabled）。全局的一关，之后每个拼图
         // 都是预览有水印、导出没有。以前存过的 state.json 里那个 watermark 键读的时候直接忽略。
 
@@ -187,7 +189,26 @@ final class CollageStore: ObservableObject {
             pdf = (try? c.decodeIfPresent(Bool.self, forKey: .pdf)) ?? nil ?? d.pdf
             cropMarks = (try? c.decodeIfPresent(Bool.self, forKey: .cropMarks)) ?? nil ?? d.cropMarks
             outputPath = (try? c.decodeIfPresent(String.self, forKey: .outputPath)) ?? nil
+            scale = min(3, max(1, (try? c.decodeIfPresent(Int.self, forKey: .scale)) ?? nil ?? d.scale))
         }
+    }
+
+    /// 社交尺寸放大以后整张最多这么多像素：3 倍的九宫格 9720² ≈ 94MP，一张 RGBA 位图就 380MB，渲染时还有
+    /// 调色的中间图；5000 万像素以内是 200MB 上下。九宫格、轮播因此最多 2 倍，其余社交画布都能到 3 倍。
+    nonisolated static let exportScaleMaxPixels = 50_000_000
+
+    /// 这张画布最多能放大几倍（1…3）。印刷画布（≥150 dpi：A4、相册跨页）本来就按 300 dpi 出成品尺寸，永远 1 倍。
+    nonisolated static func maxExportScale(_ canvas: CollageCanvas) -> Int {
+        guard !canvas.isPrint else { return 1 }
+        let full = Double(max(1, canvas.width + canvas.bleed * 2)) * Double(max(1, canvas.height + canvas.bleed * 2))
+        let fit = Int((Double(exportScaleMaxPixels) / full).squareRoot())
+        return min(3, max(1, fit))
+    }
+
+    /// 这次导出实际用几倍：选的倍数，超过这张画布放得下的就降下来。导出按钮、面板上的尺寸说明、
+    /// 命令行 renderexport 都走这一个。原图不够大的照片会被放大（不比标准的更糊，只是不会更清楚）。
+    nonisolated static func exportScale(canvas: CollageCanvas, options: ExportOptions) -> Int {
+        min(max(1, options.scale), maxExportScale(canvas))
     }
 
     @Published var exportOptions = ExportOptions() { didSet { scheduleStateSave() } }
@@ -3444,6 +3465,7 @@ final class CollageStore: ObservableObject {
         progressFraction = 0
         progressText = "导出 0/\(snapshot.pages.count)…"
         let wantPDF = snapshot.mode == .album && options.pdf
+        let scale = Self.exportScale(canvas: snapshot.canvas, options: options)
         Task { [weak self] in
             // 只攒每页编码好的 JPEG（~5MB），不攒位图（30×30cm 跨页 ~100MB 一张）。
             var pdfPages: [Data] = []
@@ -3455,7 +3477,7 @@ final class CollageStore: ObservableObject {
             for (i, page) in snapshot.pages.enumerated() {
                 if self?.exportCancelled ?? true { break }
                 let result = await Task.detached(priority: .userInitiated) { () -> PageResult in
-                    var opts = CollageRender.Options(scale: 1)
+                    var opts = CollageRender.Options(scale: Double(scale))
                     opts.export = true
                     opts.includeBleed = true
                     // 「导出带水印」跟着这个拼图存。
@@ -3467,7 +3489,7 @@ final class CollageStore: ObservableObject {
                     }
                     do {
                         let data = try Self.writePage(image, files: plan.pages[i], project: snapshot,
-                                                      options: options, dir: folder, wantPDF: wantPDF)
+                                                      options: options, scale: scale, dir: folder, wantPDF: wantPDF)
                         return PageResult(pdfData: data, error: nil, lowRes: report.lowRes, missing: report.missing,
                                           signatureLost: Self.signatureLost(report),
                                           fillerBody: Self.fillerBody(report, canvas: snapshot.canvas))
@@ -3640,8 +3662,10 @@ final class CollageStore: ObservableObject {
     }
 
     /// `files`：这一页的文件名（exportPlan 给的：第一个是整张，后面是九宫格 / 轮播切片）。
+    /// `scale`：image 是按几倍渲的（exportScale）；出血跟着乘。dpi 照画布写：放大的只有社交尺寸，那里的 72 只是个标记。
     nonisolated private static func writePage(_ image: CGImage, files: [String], project: CollageProject,
-                                              options base: ExportOptions, dir: URL, wantPDF: Bool) throws -> Data? {
+                                              options base: ExportOptions, scale: Int, dir: URL,
+                                              wantPDF: Bool) throws -> Data? {
         let canvas = project.canvas
         guard let mainName = files.first else { return nil }
         // 加了网的照片：JPEG 质量低于 0.9 网点边上会起振铃（一圈脏点），压到 0.9 以上。
@@ -3661,7 +3685,7 @@ final class CollageStore: ObservableObject {
             try CollageExport.write(image, to: url, format: options.format, quality: options.quality, dpi: canvas.dpi)
             return wantPDF ? CollageExport.encode(image, format: .jpeg, quality: 0.93, dpi: canvas.dpi) : nil
         }
-        let trimmed = CollageExport.trimmed(image, bleed: canvas.bleed) ?? image
+        let trimmed = CollageExport.trimmed(image, bleed: canvas.bleed * scale) ?? image
         try CollageExport.write(image, to: dir.appendingPathComponent(mainName), format: options.format,
                                 quality: options.quality, dpi: canvas.dpi)
         let tileNames = Array(files.dropFirst())

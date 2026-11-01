@@ -997,7 +997,8 @@ private struct CollageSnapshotHost: View {
 ///     crossfold（打印压中缝的跨页）。
 /// 核对：notice（打印状态栏提示）、digest（整个工程的指纹，核对撤销）、tplthumbs[:前缀]（模板缩略图，给了前缀就存 PNG）、
 ///     altthumb:序号=文件名（存第几个备选的缩略图）、render:<文件名>（半尺寸 + 调试框）。
-/// export:<目录> = 走导出全流程（无头模式不弹访达；会真的写出文件，测试脚本用 renderexport）；exportname:<名字>（导出文件名）。
+/// export:<目录> = 走导出全流程（无头模式不弹访达；会真的写出文件，测试脚本用 renderexport）；exportname:<名字>（导出文件名）；
+///     exportscale:1|2|3（导出清晰度；renderexport 和 export 都按 CollageStore.exportScale 算这张画布实际几倍）。
 enum CollageOpsScript {
     @MainActor
     static func run(flagIndex: Int) -> Never {
@@ -2323,6 +2324,15 @@ enum CollageOpsScript {
                 store.moveSelectedPhoto(toPage: store.pageIndex + 1)
             case "exportname":
                 store.exportName = arg
+            case "exportscale":
+                if let k = Int(arg), (1...3).contains(k) {
+                    store.exportOptions.scale = k
+                    let c = store.project.canvas
+                    let used = CollageStore.exportScale(canvas: c, options: store.exportOptions)
+                    print("  清晰度 \(k) 倍 → 这张画布用 \(used) 倍（最多 \(CollageStore.maxExportScale(c))）：\(c.width * used)×\(c.height * used)")
+                } else {
+                    ok = false
+                }
             case "export":
                 // 走导出全流程（无头模式下不会在访达里弹窗口）。
                 store.exportOptions.outputPath = arg
@@ -2340,7 +2350,9 @@ enum CollageOpsScript {
                 let sep = name == "renderclean" ? arg.lastIndex(of: "@") : nil
                 let previewScale = sep.flatMap { Double(arg[arg.index(after: $0)...]) }
                 let file = previewScale == nil ? arg : String(arg[..<(sep ?? arg.endIndex)])
-                var opts = CollageRender.Options(scale: name == "renderexport" ? 1 : previewScale ?? 0.5)
+                // renderexport 和导出按钮同一个倍数（exportscale 没设过 = 1，门禁不变）。
+                let exportScale = CollageStore.exportScale(canvas: store.project.canvas, options: store.exportOptions)
+                var opts = CollageRender.Options(scale: name == "renderexport" ? Double(exportScale) : previewScale ?? 0.5)
                 opts.includeBleed = name == "renderexport"
                 opts.debug = name == "render"
                 opts.placeholders = name == "renderclean"
