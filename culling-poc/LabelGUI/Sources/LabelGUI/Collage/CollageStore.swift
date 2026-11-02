@@ -4263,41 +4263,49 @@ extension CollageStore {
         return true
     }
 
-    /// AI 设计的版式放进当前页（CollageLayoutSpec；= 套模板，只是版式不从模板库来）：页上的自由图层（贴纸、手写字）、
-    /// 这一页的色调留着；散落版、印样换成普通的切分树页。画布多页共用，只有单页能跟着换。newPhotos 里还不在托盘的接到
-    /// 托盘后面，和换版式是同一步撤销。fit：先按照片原比例重算比例（AI 没看照片比例时用）。
+    /// AI 设计的版式放进当前页（CollageLayoutSpec；= 套模板，只是版式不从模板库来）：页上的贴纸、手写字、这一页的色调留着；
+    /// 散落版、印样换成普通的切分树页。画布多页共用，只有单页能跟着换。newPhotos 里还不在托盘的接到托盘后面，和换版式是
+    /// 同一步撤销。fit：先按照片原比例重算比例（AI 没看照片比例时用）。sizesAreShares：比例是 parse 出来的份数，要按真实的缝
+    /// 换算（引擎排出来的已经是真实比例，传 false）。
     /// 返回版面动了没有；和现在一模一样（snap 之后）时什么都不碰：选中、备选、页面状态都不变。
     @discardableResult
     func applyDesignedLayout(_ designed: CollageNode, canvas: CollageCanvas? = nil, fit: Bool = false, aspectsFixed: Bool? = nil,
-                             newPhotos: [CollagePhotoRef] = []) -> Bool {
+                             sizesAreShares: Bool = true, newPhotos: [CollagePhotoRef] = []) -> Bool {
         let shared = isAlbum || project.pages.count > 1
         let oldCanvas = project.canvas
         let nextCanvas = shared ? oldCanvas : (canvas ?? oldCanvas)
+        // 婚礼 fine-art：边距跟着册子尺寸重算（同 setCanvas），别的样式原样
+        let adapted = nextCanvas == oldCanvas ? nil : CollageStyleFineArt.adapted(project.style, from: oldCanvas, to: nextCanvas)
+        let style = adapted ?? project.style
         let have = Set(project.photos.map(\.id))
         let fresh = newPhotos.filter { !have.contains($0.id) }
         var photos = photoMap
         for p in fresh where photos[p.id] == nil { photos[p.id] = p }
-        let ctx = CollageLayout.Context(canvas: nextCanvas, style: project.style, photos: photos, hints: hints, heroID: nil)
-        let root = CollageLayoutSpec.snap(fit ? CollageLayout.refit(designed, context: ctx) : designed, onto: page?.root)
-        if let page, !page.freeform, page.contactSheet == nil, page.root == root, nextCanvas == oldCanvas, fresh.isEmpty {
-            return false
-        }
+        let onGrid = page.map { !$0.freeform && $0.contactSheet == nil } ?? false
+        let exact = sizesAreShares
+            ? CollageLayoutSpec.applyGutters(designed, canvas: nextCanvas, style: style, current: onGrid && nextCanvas == oldCanvas ? page?.root : nil)
+            : designed
+        let ctx = CollageLayout.Context(canvas: nextCanvas, style: style, photos: photos, hints: hints, heroID: nil)
+        let root = CollageLayoutSpec.snap(fit ? CollageLayout.refit(exact, context: ctx) : exact, onto: page?.root)
+        if onGrid, page?.root == root, nextCanvas == oldCanvas, fresh.isEmpty { return false }
         cancelPendingSolve()
         pushUndo()
         if !fresh.isEmpty { project.photos.append(contentsOf: fresh) }
         project.canvas = nextCanvas
+        if adapted != nil { project.style = style }
         var next = page ?? CollagePage(root: root)
-        if next.freeform || next.contactSheet != nil { next.items = [] }
+        // 散落、印样 → 切分树：贴纸、手写字带过去（同切回网格），自动撒的相纸、胶带不要
+        if next.freeform || next.contactSheet != nil {
+            next.items = decorationsForGrid(from: next, consumed: consumedSourceItems(next))
+        }
         next.root = root
         next.freeform = false
         next.scatter = nil
         next.gridRoot = nil
         next.contactSheet = nil
         next.fixedAspects = aspectsFixed ?? !fit
-        if abs(oldCanvas.aspect - nextCanvas.aspect) > 0.001 {
-            next.items = CollageItems.refit(next.items, from: oldCanvas, to: nextCanvas)
-        }
         setPage(next)
+        if adapted != nil { project.pages = CollageStyleFineArt.readable(project.pages, on: nextCanvas) }
         if !isAlbum {
             layoutStyle = .grid
             scheduleStateSave()
@@ -4312,15 +4320,18 @@ extension CollageStore {
 
     /// 引擎排一版（「换一批」的那个求解，桥用）：算出来的切分树，文字格、压字按这一页现在的带过去；不碰工程，落地走
     /// applyDesignedLayout（和进托盘的照片算同一步撤销）。photoIDs 给了就用这几张；否则 count 给了、或这一页没照片：
-    /// 从托盘挑（相册里别的跨页用了的不挑）；否则用这一页现在的照片。nil = 没有能用的照片或者没解出来。
+    /// 从托盘挑（相册里别的跨页用了的不挑）；否则用这一页现在的照片，有锁定的格子就只重排没锁的区域。
+    /// nil = 没有能用的照片或者没解出来。
     func engineLayout(photoIDs: [String]?, count: Int?, newPhotos: [CollagePhotoRef]) async -> CollageNode? {
         var map = photoMap
         for p in newPhotos where map[p.id] == nil { map[p.id] = p }
+        let startPage = page
+        let current = Self.unique(startPage?.photoIDs ?? []).compactMap { map[$0] }
+        let samePhotos = photoIDs == nil && count == nil && !current.isEmpty
         var photos: [CollagePhotoRef]
-        let current = Self.unique(page?.photoIDs ?? []).compactMap { map[$0] }
         if let photoIDs {
             photos = Self.unique(photoIDs).compactMap { map[$0] }
-        } else if count == nil, !current.isEmpty {
+        } else if samePhotos {
             photos = current
         } else {
             let elsewhere = Set(usedOnOtherSpreads(project.photos.map(\.id)))
@@ -4331,23 +4342,30 @@ extension CollageStore {
         guard !photos.isEmpty else { return nil }
         solveSeed &+= 1
         let seed = solveSeed
-        let texts = page.map { textCellsForGrid(from: $0) } ?? []
+        let texts = startPage.map { textCellsForGrid(from: $0) } ?? []
         let avoid = root.map { noteShape($0) } ?? []
         let ctx = CollageLayout.Context(canvas: project.canvas, style: project.style, photos: map, hints: hints, heroID: nil)
         let chosen = photos
-        let results = await Task.detached(priority: .userInitiated) {
-            CollageLayout.solve(CollageLayout.Request(photos: chosen, textCells: texts, context: ctx, tries: 16000, keep: 18, seed: seed))
+        var locked: CollageNode?
+        if samePhotos, let page = startPage, !page.freeform, page.root.leaves.contains(where: { $0.locked }) { locked = page.root }
+        let results = await Task.detached(priority: .userInitiated) { () -> [CollageLayout.Scored] in
+            if let locked {
+                return CollageLayout.solveKeepingLocks(current: locked, context: ctx, tries: 6000, keep: 16, seed: seed)
+            }
+            return CollageLayout.solve(CollageLayout.Request(photos: chosen, textCells: texts, context: ctx, tries: 16000, keep: 18, seed: seed))
         }.value
         let best = CollageLayout.preferringNewShape(results, avoiding: avoid).first
-        return best.map { pageFor($0, replacing: page).root }
+        return best.map { pageFor($0, replacing: startPage).root }
     }
 
-    /// 这几张里已经排在相册别的跨页上的（同一张不能出现在两个跨页上）；单张拼图不管。
+    /// 这几张里已经排在相册别的跨页上、这一页上还没有的（同一张不能出现在两个跨页上；这一页本来就有的不挡，界面拖出来的
+    /// 重复读出来要能发回去）；单张拼图不管。
     func usedOnOtherSpreads(_ ids: [String]) -> [String] {
         guard isAlbum else { return [] }
+        let here = Set(page?.photoIDs ?? [])
         var elsewhere = Set<String>()
         for (i, p) in project.pages.enumerated() where i != pageIndex { elsewhere.formUnion(p.photoIDs) }
-        return ids.filter { elsewhere.contains($0) }
+        return ids.filter { elsewhere.contains($0) && !here.contains($0) }
     }
 
     /// 按名字找模板：先全名、再内置分类名（套这个分类的第一个）、再名字里含这几个字的。

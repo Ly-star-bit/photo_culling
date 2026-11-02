@@ -857,7 +857,7 @@ enum MCPArgs {
         case .cellText:
             return checkCellText(name, value)
         case .layout:
-            if case .failure(let p) = CollageLayoutSpec.parse(value, isKnownPhoto: { _ in true }) {
+            if case .failure(let p) = CollageLayoutSpec.parse(value, maxCells: CollageLayoutSpec.wireCells, isKnownPhoto: { _ in true }) {
                 return Problem(message: "版式写错了：\(p.text)", hint: "语法见 collage_list_templates 的 layout_grammar")
             }
         case .color:

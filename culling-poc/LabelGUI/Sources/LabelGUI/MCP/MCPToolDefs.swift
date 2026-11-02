@@ -197,7 +197,7 @@ enum MCPToolDefs {
      "annotations":"$READ"},
 
     {"name":"collage_get_state","title":"看 app 里的拼图",
-     "description":"看 app 里当前拼图工程的状态（读的是 app 内存，含还没存盘的改动）：模式、页码和页数、模板、样式、色调、标题/副标题/刊头/期号、托盘张数、每个格子（path、照片 id、文字块数）、选中的格子、撤销深度（最上面那一步是不是 AI 做的）、存过的方案（variants：id、名字、current = 就是现在这一版）、是否还在算、digest（拼图写工具的 if_digest 就填它；存方案不改它），后面跟一张 app 当前画面的预览图。session 不填就是 app 当前打开的那一场；填了别的场次回 session_not_open。和用户切到拼图页一样，会先把这一场的拼图工程接上（托盘里照片的判决等信息按批量页刷新），所以可能顺带存一次 collage.json。",
+     "description":"看 app 里当前拼图工程的状态（读的是 app 内存，含还没存盘的改动）：模式、页码和页数、画布尺寸 canvas、模板、样式、单独调过的样式项 style_fields、色调、标题/副标题/刊头/期号、托盘张数和每张照片的 id、像素尺寸 tray_photos、每个格子（path、照片 id、文字块数、在画布上的位置 rect）、这一页版式的语法 layout（可以改了发给 collage_set_layout）、选中的格子、撤销深度（最上面那一步是不是 AI 做的）、存过的方案（variants：id、名字、current = 就是现在这一版）、是否还在算、digest（拼图写工具的 if_digest 就填它；存方案不改它），后面跟一张 app 当前画面的预览图。session 不填就是 app 当前打开的那一场；填了别的场次回 session_not_open。和用户切到拼图页一样，会先把这一场的拼图工程接上（托盘里照片的判决等信息按批量页刷新），所以可能顺带存一次 collage.json。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "include_preview":{"type":"boolean","default":true,"description":"要不要带 app 当前画面的预览图"},
@@ -296,7 +296,7 @@ enum MCPToolDefs {
      "annotations":"$WRITE_IDEMPOTENT"},
 
     {"name":"collage_set_style","title":"换样式/色调",
-     "description":"换 app 里当前拼图的样式和色调（= 检视器样式页）：style 是整套「纸、缝、边、框」的预设，look 是整组照片统一的色调，look_strength 是色调强度 0–1；margin 外边距、gutter 缝宽、corner 圆角、background 底色、shape 默认的格子形状单独调（给了 style 就在预设上面改）。至少给一个；一次调用是一步撤销。和界面一样，换样式也会改「下次新建拼图沿用的默认样式」。取值见 collage_list_templates。结果里有 app 当前画面的预览图。",
+     "description":"换 app 里当前拼图的样式和色调（= 检视器样式页）：style 是整套「纸、缝、边、框」的预设，look 是整组照片统一的色调，look_strength 是色调强度 0–1；margin 外边距（四边一样，会盖掉四边不一样的边距）、gutter 缝宽、corner 圆角、background 底色（设了就是纯色底）、shape 默认的格子形状单独调（给了 style 就在预设上面改）。至少给一个；一次调用是一步撤销。和界面一样，换样式也会改「下次新建拼图沿用的默认样式」。取值见 collage_list_templates。结果里有 app 当前画面的预览图。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "style":{"type":"string","enum":"$STYLES"},
@@ -363,7 +363,7 @@ enum MCPToolDefs {
      "annotations":"$WRITE"},
 
     {"name":"collage_set_layout","title":"设计版式",
-     "description":"把你自己设计的版式放进 app 当前这一页（不用模板）：怎么切分、哪张照片放哪一格、取景、形状、完整显示、压字、文字格、留白都由 layout 定，语法和例子见 collage_list_templates（include 里写 layout_grammar）。设计之前先 collage_get_state 看 canvas（画布尺寸）、tray_photos（照片 id 和像素尺寸）和 layout（现在的版式）。照片要是托盘里或这一场的：不在托盘的会自动进托盘，要等 app 算完人脸信息。fit=true 让 app 按照片比例重算各块比例（结构不变）；默认按你写的 sizes。canvas 换画布（取值见 collage_list_templates 的 canvases），只有一页的拼图才能换。写错了回 invalid_argument 并指出错在哪（如 layout.items[1].photo），什么都不改。把读到的 layout 原样发回来不会改任何东西（changed:false），可以放心在它上面改几处再发。只换当前页；页上的贴纸、手写字留着；散落版、印样页会变成普通版式。一次调用是一步撤销（含进托盘的照片）。结果里有 layout、cells（每格的位置）和 app 当前画面的预览图，看预览再调。",
+     "description":"把你自己设计的版式放进 app 当前这一页（不用模板）：怎么切分、哪张照片放哪一格、取景、形状、完整显示、压字、文字格、留白都由 layout 定，语法和例子见 collage_list_templates（include 里写 layout_grammar）。设计之前先 collage_get_state 看 canvas（画布尺寸）、tray_photos（照片 id 和像素尺寸）和 layout（现在的版式）。照片要是托盘里或这一场的：不在托盘的会自动进托盘，要等 app 算完人脸信息。fit=true 让 app 按照片比例重算各块比例（结构不变）；默认按你写的 sizes。canvas 换画布（取值见 collage_list_templates 的 canvases），只有一页的拼图才能换。写错了回 invalid_argument 并指出错在哪（如 layout.items[1].photo），什么都不改。把读到的 layout 原样发回来不会改任何东西（changed:false），可以放心在它上面改几处再发：没改的格子里语法写不出来的设置（花字、细线、人物挡字）留着。只换当前页，等的时候用户翻了页回 superseded；页上的贴纸、手写字留着；散落版、印样页会变成普通版式。一次调用是一步撤销（含进托盘的照片）。结果里有 layout、cells（每格的位置）和 app 当前画面的预览图，看预览再调。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "layout":{"type":"string","minLength":2,"maxLength":200000,"description":"版式树的 JSON 文本，语法见 collage_list_templates（include 里写 layout_grammar）；collage_get_state 读到的 layout 写成文本就能发回来"},
@@ -378,7 +378,7 @@ enum MCPToolDefs {
      "annotations":"$WRITE_IDEMPOTENT"},
 
     {"name":"collage_auto_layout","title":"引擎排一版",
-     "description":"让 app 的排版引擎给当前这一页排一版（= 拼图页「换一批」，每调一次换一种）：引擎按照片比例切格子、按人脸裁切。photos 指定用哪几张（托盘里或这一场的，不在托盘的自动进托盘）；count 让 app 从托盘挑几张；都不给就用这一页现在的照片（页上没照片就从托盘挑，最多 12 张）。文字格、压字尽量留着。结果里的 layout 就是这一版的语法：想改就在它上面改几处，再 collage_set_layout 发回来。婚礼 fine-art 相册的跨页按编排出版式，这里回 invalid_state。排的时候用户动了拼图回 superseded，什么都不改。一次调用是一步撤销。结果里有 app 当前画面的预览图。",
+     "description":"让 app 的排版引擎给当前这一页排一版（和拼图页「换一批」同一个引擎，每调一次换一种）：引擎按照片比例切格子、按人脸裁切。photos 指定用哪几张（托盘里或这一场的，不在托盘的自动进托盘）；count 让 app 从托盘挑几张；都不给就用这一页现在的照片（有锁定的格子就只重排没锁的；页上没照片就从托盘挑，最多 12 张）。文字格、压字尽量留着。结果里的 layout 就是这一版的语法：想改就在它上面改几处，再 collage_set_layout 发回来。这一页是散落版的话会换成普通版式。婚礼 fine-art 相册的跨页、不给照片的印样页回 invalid_state。排的时候用户动了拼图、翻了页回 superseded，什么都不改。一次调用是一步撤销。结果里有 app 当前画面的预览图。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "photos":{"type":"array","items":{"type":"string","minLength":1,"maxLength":256},"minItems":1,"maxItems":36,"uniqueItems":true,"description":"用这几张；和 count 只能给一个"},

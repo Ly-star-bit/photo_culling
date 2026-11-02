@@ -2281,7 +2281,8 @@ enum CollageOpsScript {
                       let json = try? JSONSerialization.jsonObject(with: data) else { ok = false; break }
                 let wrapper = (json as? [String: Any]).flatMap { $0["layout"] != nil ? $0 : nil }
                 let tray = Set(store.project.photos.map(\.id))
-                switch CollageLayoutSpec.parse(wrapper?["layout"] ?? json, isKnownPhoto: { tray.contains($0) }) {
+                let cells = max(CollageLayoutSpec.maxLeaves, store.page?.root.leaves.count ?? 0)
+                switch CollageLayoutSpec.parse(wrapper?["layout"] ?? json, maxCells: cells, isKnownPhoto: { tray.contains($0) }) {
                 case .failure(let problem):
                     print("  版式错误: \(problem.text)")
                     ok = false
@@ -2294,7 +2295,10 @@ enum CollageOpsScript {
             case "dumplayout":
                 // dumplayout 或 dumplayout:<json>：当前页的版式写成语法（打印或写文件），外加编辑指纹。
                 guard let page = store.page, !page.freeform, page.contactSheet == nil,
-                      let text = MCPJSON.data(CollageLayoutSpec.describe(page.root)) else { ok = false; break }
+                      let text = MCPJSON.data(CollageLayoutSpec.describe(page.root, canvas: store.project.canvas, style: store.project.style)) else {
+                    ok = false
+                    break
+                }
                 if arg.isEmpty {
                     print("  版式 " + String(decoding: text, as: UTF8.self))
                 } else {

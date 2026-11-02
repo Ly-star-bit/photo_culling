@@ -3628,6 +3628,29 @@ __attribute__((constructor)) static void init(void) {
     _, oa = lw("collage_open_variant", {"variant": (va.get("variant") or {}).get("id")})
     check(oa.get("changed") is True and lget().get("layout") == lay_a, "设计一版存成方案，再设计一版，切回去 layout 一模一样")
 
+    # ---------- 格子上限只管新设计的（这一页本来就更多的，原样发回来不挡）；印样页：引擎不排，给了照片才换
+    def empties(n):
+        node = {"empty": True}
+        for _ in range(n - 1):
+            node = {"split": "row", "items": [{"empty": True}, node]}
+        return node
+    _, r37 = lw("collage_set_layout", {"layout": empties(37)})
+    check(err_code(r37) == "invalid_argument" and "36" in ((r37.get("error") or {}).get("message") or ""),
+          f"37 格：invalid_argument（一页最多 36 格）（{err_code(r37)}）")
+    _, lt_l, _ = mcp_call(envl, "collage_list_templates", {"include": ["templates"]})
+    sheets = [t["name"] for t in (lt_l or {}).get("templates") or [] if t.get("contact_sheet")]
+    if sheets:
+        lw("collage_apply_template", {"template": sheets[0]})
+        g_sheet = lget()
+        _, rs0 = lw("collage_auto_layout", {})
+        _, rs1 = lw("collage_set_layout", {"layout": {"split": "row", "items": [{"photo": a_}, {"photo": b_}]}})
+        g_sheet2 = lget()
+        check(g_sheet.get("page_kind") == "contact_sheet" and g_sheet.get("layout") is None and err_code(rs0) == "invalid_state"
+              and rs1.get("changed") is True and g_sheet2.get("page_kind") == "grid" and (g_sheet2.get("layout") or {}).get("split") == "row",
+              f"印样页：layout 是 null，不给照片的引擎排版 → invalid_state；collage_set_layout 换成普通版式（{g_sheet.get('page_kind')} → {g_sheet2.get('page_kind')}，{err_code(rs0)}）")
+    else:
+        skip("模板库里没有印样：印样页那一条跳过")
+
     # ---------- 成套有好几页：画布不能只换一页；不给画布就只换当前这一页
     _, kit = lw("collage_run_kit", {"kit": "fashionIssue"}, timeout=120)
     gk = lget()
@@ -3640,6 +3663,28 @@ __attribute__((constructor)) static void init(void) {
               f"{gk.get('pages')} 页的一套：给 canvas → invalid_state、什么都没改；不给 → 只换当前这一页，页数不变（{err_code(rc)} {err_code(rd)}）")
     else:
         skip(f"成套没出多页（{err_code(kit)}，{gk.get('pages')} 页）：画布共用那一条跳过")
+    # 相册：别的跨页上的照片不能拿来用；这一页上本来有的读出来发回去照样行；fine-art 的跨页引擎不排
+    _, kit2 = lw("collage_run_kit", {"kit": "weddingAlbum"}, timeout=120)
+    ga = lget()
+    if ga.get("mode") == "album" and (ga.get("pages") or 0) > 1 and ga.get("layout"):
+        here = {c.get("photo_id") for c in ga.get("cells") or []}
+        others = [i for i in syn_l["ids"] if i not in here]
+        sa0 = lst()
+        _, ra0 = lw("collage_set_layout", {"layout": ga.get("layout")})
+        _, ra2 = lw("collage_auto_layout", {})
+        check(ra0.get("changed") is False and err_code(ra2) == "invalid_state" and lst()["edit_digest"] == sa0["edit_digest"],
+              f"相册：这一跨页读出来发回去 changed:false；fine-art 跨页引擎不排 → invalid_state（{ra0.get('changed')} {err_code(ra0)} {err_code(ra2)}）")
+        cj_a = json.load(open(os.path.join(syn_l["data"], "sessions", kl, "collage.json")))
+        on_pages = {cell_id for pg in cj_a.get("pages") or [] for cell_id in re.findall(r'"photoID"\s*:\s*"([^"]+)"', json.dumps(pg))}
+        bad_a = [i for i in others if i in on_pages]
+        if bad_a:
+            _, ra3 = lw("collage_set_layout", {"layout": {"split": "row", "items": [{"photo": bad_a[0]}, {"empty": True}]}})
+            check(err_code(ra3) == "invalid_argument" and "别的跨页" in ((ra3.get("error") or {}).get("message") or ""),
+                  f"相册：排在别的跨页上的照片 → invalid_argument（{err_code(ra3)}）")
+        else:
+            skip("这本相册别的跨页上没有这一页以外的照片：同一张不能上两个跨页那一条跳过")
+    else:
+        skip(f"成套没出多跨页的相册（{err_code(kit2)}，{ga.get('mode')}，{ga.get('pages')} 页）：相册那两条跳过")
     hl.term()
 
     # ============================================================ grep：Live/ 的禁用词（§5 第 7 层、§9.5.6）

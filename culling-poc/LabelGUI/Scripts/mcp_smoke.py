@@ -1180,7 +1180,7 @@ def check_templates(s, lt, text):
     check("layout_grammar" not in lt, "collage_list_templates 默认不带 layout_grammar")
     res, fg, _ = s.tool("tg", "collage_list_templates", {"include": ["layout_grammar"]})
     lg = (fg or {}).get("layout_grammar") or {}
-    check(lg.get("grammar") and lg.get("fonts") and lg.get("weights") and lg.get("framings") == ["auto", "close", "full", "half"]
+    check(lg.get("grammar") and lg.get("fonts") and lg.get("weights") and lg.get("framings") == ["auto", "close", "cover", "full", "half"]
           and sorted(lg.get("shapes") or []) == props("collage_set_style")["shape"]["enum"]
           and lg.get("fits") == ["fill", "contain", "contain_blur"] and "top_left" in (lg.get("anchors") or [])
           and (lg.get("limits") or {}).get("cells", 0) >= 24
