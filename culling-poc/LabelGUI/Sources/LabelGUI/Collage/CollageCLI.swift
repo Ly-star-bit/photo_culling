@@ -997,6 +997,8 @@ private struct CollageSnapshotHost: View {
 ///     crossfold（打印压中缝的跨页）。
 /// 核对：notice（打印状态栏提示）、digest（整个工程的指纹，核对撤销）、tplthumbs[:前缀]（模板缩略图，给了前缀就存 PNG）、
 ///     altthumb:序号=文件名（存第几个备选的缩略图）、render:<文件名>（半尺寸 + 调试框）。
+/// 设计版式：layoutfile:<json>（把版式放进当前页，语法见 CollageLayoutSpec；文件是版式本身，或 {"layout":…,"fit":bool,"canvas":别名}）、
+///     dumplayout[:<json>]（当前页的版式写成语法，打印或写文件，外加编辑指纹）。
 /// 方案栏：variantsave[:名字]、variantopen:N、variantupdate:N、variantrename:N=名字、variantdel:N（N = 方案栏里的序号，
 ///     从 0 起；只有 variantopen 是一步撤销，别的不进撤销）、variants（列出方案、哪个是当前的、编辑指纹）。
 /// export:<目录> = 走导出全流程（无头模式不弹访达；会真的写出文件，测试脚本用 renderexport）；exportname:<名字>（导出文件名）；
@@ -2272,6 +2274,33 @@ enum CollageOpsScript {
                     store.applyTemplate(t)
                     if t.name != arg { print("  套用「\(t.name)」（\(t.builtin ? t.category : "我的模板")）") }
                 } else { ok = false }
+            case "layoutfile":
+                // layoutfile:<json>：AI 设计的版式（语法见 CollageLayoutSpec）。文件是版式本身，或 {"layout": …, "fit": bool,
+                // "canvas": 别名}。错的打印出错的位置、工程不动。
+                guard let data = try? Data(contentsOf: URL(fileURLWithPath: arg)),
+                      let json = try? JSONSerialization.jsonObject(with: data) else { ok = false; break }
+                let wrapper = (json as? [String: Any]).flatMap { $0["layout"] != nil ? $0 : nil }
+                let tray = Set(store.project.photos.map(\.id))
+                switch CollageLayoutSpec.parse(wrapper?["layout"] ?? json, isKnownPhoto: { tray.contains($0) }) {
+                case .failure(let problem):
+                    print("  版式错误: \(problem.text)")
+                    ok = false
+                case .success(let parsed):
+                    let canvas = (wrapper?["canvas"] as? String).map(CollageCLI.canvas)
+                    let changed = store.applyDesignedLayout(parsed.root, canvas: canvas, fit: wrapper?["fit"] as? Bool == true)
+                    print("  版式 \(parsed.photoIDs.count) 张 · \(changed ? "换了" : "没变")"
+                          + (parsed.duplicates.isEmpty ? "" : " · 重复 \(parsed.duplicates.count) 张"))
+                }
+            case "dumplayout":
+                // dumplayout 或 dumplayout:<json>：当前页的版式写成语法（打印或写文件），外加编辑指纹。
+                guard let page = store.page, !page.freeform, page.contactSheet == nil,
+                      let text = MCPJSON.data(CollageLayoutSpec.describe(page.root)) else { ok = false; break }
+                if arg.isEmpty {
+                    print("  版式 " + String(decoding: text, as: UTF8.self))
+                } else {
+                    try? text.write(to: URL(fileURLWithPath: arg))
+                }
+                print("  指纹 \(store.editDigest)")
             case "exporttpl":
                 store.exportTemplates(to: URL(fileURLWithPath: arg))
             case "importtpl":

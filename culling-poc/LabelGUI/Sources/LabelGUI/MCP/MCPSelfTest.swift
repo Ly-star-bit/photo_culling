@@ -9,7 +9,7 @@ import Foundation
 ///    --json 时每一行判断打一行 JSON（mcp_smoke.py 用自己的一份规则再核一遍）。
 /// 2. MCPJSON：NaN / inf → null、不转义斜杠、键排序、编不了不抛异常、超长截断。
 /// 3. MCPServerMain.mode：只认整个参数相等的 --mcp / --mcp-tools / --mcp-call。
-/// 4. 工具定义：21 个 / 3 个、顺序、schema 规则（§3.0）、enum 和代码里的名单一致、没有漏填的占位；
+/// 4. 工具定义：23 个 / 3 个、顺序、schema 规则（§3.0）、enum 和代码里的名单一致、没有漏填的占位；
 ///    collage_get_state 的描述说了会顺带存一次 collage.json。
 /// 5–8. 受保护位置、session 参数、逐段解析、拼图静态表（S2，MCPSelfTestPaths.swift）。--json 时第 5 组每条也打一行。
 /// 9–11. 实时桥的判定表（含数据目录 stat 被拒、§6.3 设了 LABELGUI_DATA_DIR 的那一句）、状态 → 错误码、路由（含截止时间）、
@@ -17,6 +17,7 @@ import Foundation
 /// 12–15. 读工具的参数、cursor、输出目录、图片字节（STEP 3a，MCPSelfTestRead.swift）。
 /// 16–18. 写工具的参数、app_undo 的判定（LiveAILog）、忙信号挡哪些写（STEP 3b，MCPSelfTestWrite.swift）。
 /// 19–20. 标题栏指示、桥停了（锁丢了、开桥失败）回什么和标题栏说什么、菜单关了说菜单那一项的全名（STEP 3b，MCPSelfTestWrite.swift）。
+/// 21–23. 设计版式的语法：解析、错误表、读出来再发回去不改东西、改了一处留下什么（MCPSelfTestLayout.swift）。
 enum MCPSelfTest {
     private struct Variant {
         let label: String
@@ -135,8 +136,8 @@ enum MCPSelfTest {
                            "collage_get_state", "app_open_session", "cull_set_verdicts", "cull_show_photos",
                            "collage_apply_template", "collage_run_kit", "collage_next_cover", "collage_set_text",
                            "collage_set_style", "app_undo", "collage_save_variant", "collage_open_variant",
-                           "collage_export"]
-        check(liveNames == expectNames, "21 个工具的名字或顺序不对：\(liveNames)")
+                           "collage_export", "collage_set_layout", "collage_auto_layout"]
+        check(liveNames == expectNames, "23 个工具的名字或顺序不对：\(liveNames)")
         let disabledNames = MCPToolDefs.tools(live: false).compactMap { $0["name"] as? String }
         check(disabledNames == MCPToolDefs.alwaysAvailable, "LABELGUI_MCP_LIVE=0 时应该只有 3 个：\(disabledNames)")
         for live in [true, false] {
@@ -185,6 +186,8 @@ enum MCPSelfTest {
         readChecks(check)
         // 16–18. 写工具的参数、app_undo 的判定、忙信号（STEP 3b，MCPSelfTestWrite.swift）
         writeChecks(check)
+        // 21–23. 设计版式的语法（MCPSelfTestLayout.swift）
+        layoutChecks(check)
 
         for f in failures { print("FAIL " + f) }
         if failures.isEmpty {

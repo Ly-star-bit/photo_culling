@@ -238,9 +238,9 @@ swift build -c release
 
 ## 给 AI 用（MCP）
 
-app 里的程序本身就是一个 MCP 服务器（`LabelGUI --mcp`，stdio），Claude Code、Antigravity 这类 AI agent 接上以后能看你的选片结果、替你改判、排拼图。**这一版只做实时**：你开着 app 时，AI 读的是 app 当前打开的那一场（app 内存里的状态，含还没存盘的改动），改判、套模板、一键成套、换封面、改字、换样式、存成方案和切方案、导出图片、撤销都交给 app 自己执行，你在窗口里当场看到，改判和改拼图 ⌘Z 照样能撤（存方案、导出不改拼图，不进撤销）；app 没开时只能看状态、列场次、列模板，其余工具一律回 `app_not_running`，请你自己打开 app —— **MCP 绝不会替你启动 app**。app 没开时读场次、出拼图成品图，以及让 AI 分析新文件夹，这一版都没有（app 开着时可以让 app 导出：`collage_export`）。
+app 里的程序本身就是一个 MCP 服务器（`LabelGUI --mcp`，stdio），Claude Code、Antigravity 这类 AI agent 接上以后能看你的选片结果、替你改判、排拼图。**这一版只做实时**：你开着 app 时，AI 读的是 app 当前打开的那一场（app 内存里的状态，含还没存盘的改动），改判、套模板、自己设计版式、一键成套、换封面、改字、换样式、存成方案和切方案、导出图片、撤销都交给 app 自己执行，你在窗口里当场看到，改判和改拼图 ⌘Z 照样能撤（存方案、导出不改拼图，不进撤销）；app 没开时只能看状态、列场次、列模板，其余工具一律回 `app_not_running`，请你自己打开 app —— **MCP 绝不会替你启动 app**。app 没开时读场次、出拼图成品图，以及让 AI 分析新文件夹，这一版都没有（app 开着时可以让 app 导出：`collage_export`）。
 
-### 21 个工具
+### 23 个工具
 
 app 没开时也能用的只有前 3 个；其余 18 个要 app 开着、而且 `session` 是 app 当前打开的那一场（不是就回 `session_not_open`，要换场次用 `app_open_session`）。
 
@@ -248,13 +248,13 @@ app 没开时也能用的只有前 3 个；其余 18 个要 app 开着、而且 
 |---|---|---|---|
 | 1 | `app_status` 状态自检 | 版本、数据目录、app 开没开、能不能实时操作（`live.state`）、app 当前打开的场次（`live.open_session`）和页、各种上限。AI 第一个调它 | 能用 |
 | 2 | `cull_list_sessions` 列出已分析的场次 | 侧栏「最近场次」里的场次（最多 15 场）：照片文件夹、张数、在不在线、是不是在受保护位置、是不是 app 当前打开的那一场 | 能用 |
-| 3 | `collage_list_templates` 拼图模板与成套 | 内置模板（分类、照片格数、要几张横图竖图）、一键成套、样式、色调、画布能填的值 | 能用 |
+| 3 | `collage_list_templates` 拼图模板与成套 | 内置模板（分类、照片格数、要几张横图竖图）、一键成套、样式、色调、画布能填的值；`include` 里写 `layout_grammar` 拿设计版式的语法 | 能用 |
 | 4 | `cull_session_overview` 场次概览 | 精选 / 可用 / 废片各多少张、废片理由、阈值、章节、场和近似重复、还没处理的场、多机身对时 | `app_not_running` |
 | 5 | `cull_list_photos` 列照片 | 按条件列照片，每张一行（判决、理由、时间、场、锐度、人脸和闭眼……），分页 | `app_not_running` |
 | 6 | `cull_get_photos` 照片详情 | 1–20 张的完整分析：EXIF、每张脸的位置和睁闭眼、复审结果、人工改判和客户选中 | `app_not_running` |
 | 7 | `cull_list_groups` 分组 | 章节、场（一串连拍，带名次和推荐的那张）、近似重复组的成员 | `app_not_running` |
 | 8 | `cull_preview_photos` 看照片 | 1–4 张缩小预览（内联图片）；`crop=face` 从原图按主脸裁一块放大，看眼睛和对焦，和连拍挑选里的放大同一个算法 | `app_not_running` |
-| 9 | `collage_get_state` 看 app 里的拼图 | 拼图工程的状态（模式、页、模板、样式、文字、每个格子、存过的方案、撤销深度、`digest`）和 app 当前画面的预览 | `app_not_running` |
+| 9 | `collage_get_state` 看 app 里的拼图 | 拼图工程的状态（模式、页、画布尺寸、模板、样式、文字、托盘里每张照片的比例、每个格子和它的位置、这一页版式的语法 `layout`、存过的方案、撤销深度、`digest`）和 app 当前画面的预览 | `app_not_running` |
 | 10 | `app_open_session` 在 app 里打开场次 | = 侧栏「最近场次」里点它。只能开列表里的；会清掉 app 里这一场的撤销记录，撤销栈不空时先回 `confirm_required` 让 AI 问你 | `app_not_running` |
 | 11 | `cull_set_verdicts` 改判 | = 网格里按 1/2/3/0（精选 / 可用 / 废片 / 恢复自动），一次调用一步撤销 | `app_not_running` |
 | 12 | `cull_show_photos` 在 app 里定位照片 | 在网格里选中这些照片、把焦点移过去给你看，默认把 app 切到批量页（不拉到前台）；不改判决、不进撤销、不改你的筛选 | `app_not_running` |
@@ -262,11 +262,13 @@ app 没开时也能用的只有前 3 个；其余 18 个要 app 开着、而且 
 | 14 | `collage_run_kit` 在 app 里一键成套 | 出一期 / 按卷出印样 / 整本婚礼相册，替换当前拼图，一步撤销（最长约 50 秒） | `app_not_running` |
 | 15 | `collage_next_cover` 换封面 | 「出一期」换下一张封面，内页不动 | `app_not_running` |
 | 16 | `collage_set_text` 改标题/刊头/期号/文字 | 标题、副标题、刊头、期号，或者某个格子里某块字的第一行；几个字段一起改也是一步撤销 | `app_not_running` |
-| 17 | `collage_set_style` 换样式/色调 | 样式预设、统一色调和强度 | `app_not_running` |
+| 17 | `collage_set_style` 换样式/色调 | 样式预设、统一色调和强度；外边距、缝宽、圆角、底色、默认格子形状可以单独调 | `app_not_running` |
 | 18 | `app_undo` 撤销 AI 刚做的一步 | 只撤 AI 自己的那一步（`target` 分 `verdicts` / `collage`）；你之后又改过就不撤（`undo_not_ours`），请你自己 ⌘Z | `app_not_running` |
 | 19 | `collage_save_variant` 存成方案 | 把现在这一版（画布、样式、文字、所有页、水印）存进拼图页底下的「方案」栏；让 AI 出几版设计时，每版排好就存一个，下一版不会盖掉它。一模一样的不再存，一场最多 30 个；不进撤销 | `app_not_running` |
 | 20 | `collage_open_variant` 切到方案 | = 方案栏里点它：整版换成那个方案，托盘照旧（它用到、托盘里没有的照片补回去）；一步撤销 | `app_not_running` |
 | 21 | `collage_export` 导出拼图 | = 拼图页的「导出」按钮：写进导出页设的输出目录（没设过 = 照片文件夹里的「拼图导出」），同名加 -2 不覆盖；清晰度 1–3 倍（九宫格、轮播最多 2 倍，印刷画布不放大）、格式、文件名可以只为这一次指定，不改导出页的设置；能直接导存着的方案。不改拼图、不进撤销、不弹访达，返回每个文件的路径和像素尺寸 | `app_not_running` |
+| 22 | `collage_set_layout` 设计版式 | AI 自己定这一页的版式，不用模板：怎么切分、哪张照片放哪一格、取景、形状、完整显示、裁切、压字、文字格、留白（语法见第 3 个工具的 `layout_grammar`）。不在托盘的照片自动进托盘，可以顺便换画布（只有一页时）；写错了指出错在哪、什么都不改；读到的 `layout` 原样发回来不改任何东西；一步撤销 | `app_not_running` |
+| 23 | `collage_auto_layout` 引擎排一版 | = 「换一批」：按照片比例切格子，每调一次换一种；可以指定用哪几张或从托盘挑几张。结果里的 `layout` 可以改几处再用第 22 个发回来；一步撤销 | `app_not_running` |
 
 改判和拼图写的结果里有 `live.notice`（和窗口里那一页状态栏上同一句话）、这一步怎么撤，拼图写还带 app 当前画面的预览图。设了 `LABELGUI_MCP_LIVE=0` 时只注册前 3 个。
 
@@ -335,7 +337,7 @@ exec "/Applications/选片工具.app/Contents/MacOS/LabelGUI" --mcp "$@"
 
 ### 审批
 
-Claude Code 交互模式下，每个工具第一次调用都会问你。建议 9 个读工具（第 1–9 个）和 11 个写工具（第 11–21 个）选「以后不再问」：写的改动当场出现在你眼前，改判和改拼图一步 ⌘Z 能撤（存方案、导出不改拼图，不进撤销；存错的方案在方案栏里右键删掉）。**`app_open_session` 保持每次问**：切场次会清掉 app 里这一场的判决和拼图撤销记录。想一次配好，在 Claude Code 的设置（`~/.claude/settings.json`，或者项目里的 `.claude/settings.json`）里放行这 20 个（合并进文件里已有的 `permissions.allow`，别整个文件覆盖）：
+Claude Code 交互模式下，每个工具第一次调用都会问你。建议 9 个读工具（第 1–9 个）和 13 个写工具（第 11–23 个）选「以后不再问」：写的改动当场出现在你眼前，改判和改拼图一步 ⌘Z 能撤（存方案、导出不改拼图，不进撤销；存错的方案在方案栏里右键删掉）。**`app_open_session` 保持每次问**：切场次会清掉 app 里这一场的判决和拼图撤销记录。想一次配好，在 Claude Code 的设置（`~/.claude/settings.json`，或者项目里的 `.claude/settings.json`）里放行这 22 个（合并进文件里已有的 `permissions.allow`，别整个文件覆盖）：
 
 ```json
 {"permissions":{"allow":[
@@ -345,7 +347,8 @@ Claude Code 交互模式下，每个工具第一次调用都会问你。建议 9
   "mcp__xuanpian__cull_set_verdicts", "mcp__xuanpian__cull_show_photos", "mcp__xuanpian__collage_apply_template",
   "mcp__xuanpian__collage_run_kit", "mcp__xuanpian__collage_next_cover", "mcp__xuanpian__collage_set_text",
   "mcp__xuanpian__collage_set_style", "mcp__xuanpian__app_undo", "mcp__xuanpian__collage_save_variant",
-  "mcp__xuanpian__collage_open_variant", "mcp__xuanpian__collage_export"
+  "mcp__xuanpian__collage_open_variant", "mcp__xuanpian__collage_export", "mcp__xuanpian__collage_set_layout",
+  "mcp__xuanpian__collage_auto_layout"
 ]}}
 ```
 

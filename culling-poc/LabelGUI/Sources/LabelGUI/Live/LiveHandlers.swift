@@ -161,12 +161,20 @@ enum LiveHandlers {
         out["masthead"] = project.masthead
         out["issue"] = project.issue
         out["tray"] = project.photos.count
+        out["canvas"] = canvasInfo(project.canvas)
+        out["style_fields"] = styleFields(project.style)
+        let (rows, cut) = trayRows(collage)
+        out["tray_photos"] = rows
+        if cut { out["tray_photos_truncated"] = true }
         if let page = collage.page {
-            out["cells"] = cells(page)
+            out["cells"] = cells(page, project: project)
             out["page_kind"] = page.contactSheet != nil ? "contact_sheet" : (page.freeform ? "freeform" : "grid")
             out["items"] = page.items.count
+            // 这一页的版式（collage_set_layout 的语法）；散落版、印样没有切分树可写
+            out["layout"] = page.freeform || page.contactSheet != nil ? NSNull() : CollageLayoutSpec.describe(page.root)
         } else {
             out["cells"] = [[String: Any]]()
+            out["layout"] = NSNull()
         }
         out["variants"] = variantsList(collage)
         out["selection"] = collage.selection.map { path in path.map(String.init).joined() } ?? NSNull()
@@ -211,15 +219,54 @@ enum LiveHandlers {
         return .result(out)
     }
 
-    /// 当前页的格子（切分树的叶子，按阅读顺序）：path 是孩子下标连起来（"01"），overlays 是压在照片上的字块数。
-    static func cells(_ page: CollagePage) -> [[String: Any]] {
-        page.root.leafPaths().compactMap { path -> [String: Any]? in
+    /// 当前页的格子（切分树的叶子，按阅读顺序）：path 是孩子下标连起来（"01"），overlays 是压在照片上的字块数，
+    /// rect 是这一格在画布上的位置（[x, y, 宽, 高]，相对画布宽高；散落版、印样没有）。
+    static func cells(_ page: CollagePage, project: CollageProject) -> [[String: Any]] {
+        let canvas = project.canvas
+        var rects: [[Int]: [Double]] = [:]
+        if !page.freeform, page.contactSheet == nil {
+            let w = Double(max(1, canvas.width))
+            let h = Double(max(1, canvas.height))
+            for f in CollageLayout.pageGeometry(page.root, canvas: canvas, style: project.style).frames {
+                let r = f.rect.cgRect
+                rects[f.path] = [Double(r.minX) / w, Double(r.minY) / h, Double(r.width) / w, Double(r.height) / h].map(MCPReadModel.r3)
+            }
+        }
+        return page.root.leafPaths().compactMap { path -> [String: Any]? in
             guard let cell = page.root.node(at: path)?.cell else { return nil }
             var row: [String: Any] = ["path": path.map(String.init).joined(), "kind": cell.kind.rawValue]
             row["photo_id"] = cell.photoID ?? NSNull()
             row["overlays"] = cell.overlays.count
+            if let rect = rects[path] { row["rect"] = rect }
             return row
         }
+    }
+
+    static func canvasInfo(_ canvas: CollageCanvas) -> [String: Any] {
+        ["name": canvas.name, "width": canvas.width, "height": canvas.height, "fold": canvas.seams == .fold]
+    }
+
+    /// 样式里能单独调的几项（collage_set_style 的同名参数）。
+    static func styleFields(_ style: CollageStyle) -> [String: Any] {
+        var out: [String: Any] = ["margin": MCPReadModel.r3(style.margin), "gutter": MCPReadModel.r3(style.gutter)]
+        out["corner"] = MCPReadModel.r3(style.corner)
+        out["background"] = CollageLayoutSpec.hex(style.background)
+        out["shape"] = CollageLayoutSpec.shapes.first { $0.value == style.shape }?.key ?? NSNull()
+        return out
+    }
+
+    /// 托盘里的照片（设计版式要看比例）：最多 trayRowLimit 行（大场次的托盘可能上千张）。
+    static let trayRowLimit = 200
+
+    static func trayRows(_ collage: CollageStore) -> (rows: [[String: Any]], truncated: Bool) {
+        let usage = collage.photoUsage
+        let rows = collage.project.photos.prefix(trayRowLimit).map { p -> [String: Any] in
+            var row: [String: Any] = ["id": p.id, "width": p.width, "height": p.height, "faces": p.faces.count]
+            row["pick"] = p.isPick
+            row["used"] = usage[p.id] ?? 0
+            return row
+        }
+        return (Array(rows), collage.project.photos.count > trayRowLimit)
     }
 
     /// 工程的样式是哪个预设（色调、强度另算，§9.3 的 style / look 分开报）；改过任何一项就不是任何预设 = nil。
@@ -395,7 +442,7 @@ extension LiveHandlers {
             ("collage.apply_template", applyTemplate), ("collage.run_kit", runKit), ("collage.next_cover", nextCover),
             ("collage.set_text", setText), ("collage.set_style", setStyle), ("undo", undo),
             ("collage.save_variant", saveVariant), ("collage.open_variant", openVariant),
-            ("collage.export", exportCollage),
+            ("collage.export", exportCollage), ("collage.set_layout", setLayout), ("collage.auto_layout", autoLayout),
         ]
         for (name, run) in methods {
             live.register(name, kind: .write) { [weak live, weak model] req in
@@ -528,6 +575,7 @@ extension LiveHandlers {
             "collage.apply_template": "套模板", "collage.run_kit": "一键成套", "collage.next_cover": "换封面",
             "collage.set_text": "改字", "collage.set_style": "换样式", "undo": "撤销",
             "collage.save_variant": "存方案", "collage.open_variant": "切方案", "collage.export": "导出",
+            "collage.set_layout": "设计版式", "collage.auto_layout": "排版",
         ]
         return labels[method] ?? method
     }
@@ -1203,20 +1251,206 @@ extension LiveHandlers {
         let preset = req.params["style"] as? String
         let look = (req.params["look"] as? String).flatMap(CollageLook.init(rawValue:))
         let strength = req.params["look_strength"].flatMap(MCPArgs.number)
+        var fields = CollageStore.StyleFields()
+        fields.margin = req.params["margin"].flatMap(MCPArgs.number)
+        fields.gutter = req.params["gutter"].flatMap(MCPArgs.number)
+        fields.corner = req.params["corner"].flatMap(MCPArgs.number)
+        fields.background = req.params["background"].flatMap { try? CollageLayoutSpec.color($0, path: "background") }
+        fields.shape = (req.params["shape"] as? String).flatMap { CollageLayoutSpec.shapes[$0] }
         var parts: [String] = []
         if let preset { parts.append("样式「\(CollageStyles.all.first { $0.key == preset }?.name ?? preset)」") }
         if let look { parts.append("色调「\(look.label)」") }
         if let strength { parts.append(String(format: "色调强度 %.2f", strength)) }
+        if fields.margin != nil { parts.append("外边距") }
+        if fields.gutter != nil { parts.append("缝宽") }
+        if fields.corner != nil { parts.append("圆角") }
+        if fields.background != nil { parts.append("底色") }
+        if fields.shape != nil { parts.append("格子形状") }
         let before = collage.editDigest
         let pushes = collage.undoPushes
         // = 样式页点预设（不合并），色调、强度在同一步里再改（和界面一样，也会改「下次新建拼图沿用的默认样式」）
-        let changed = collage.externalEdit { collage.setStyleParts(preset: preset, look: look, strength: strength) }
+        let changed = collage.externalEdit { collage.setStyleParts(preset: preset, look: look, strength: strength, fields: fields) }
         let summary = "换了" + parts.joined(separator: "、")
         var body: [String: Any] = ["look": collage.project.style.look.rawValue]
         body["style"] = styleKey(collage.project.style) ?? NSNull()
         body["look_strength"] = MCPReadModel.r3(collage.project.style.lookStrength)
+        body["style_fields"] = styleFields(collage.project.style)
         return await collageDone(req, live: live, model: model, tool: "collage_set_style", changed: changed,
                                  pushesBefore: pushes, digestBefore: before, summary: summary, body: body)
+    }
+
+    // MARK: collage.set_layout / collage.auto_layout（AI 设计版式、引擎排一版）
+
+    /// 照片 id 认不认得：托盘里的、这一页已经在用的、这一场批量页里的。
+    static func photoKnown(_ id: String, model: AppModel) -> Bool {
+        let collage = model.collage
+        return collage.photoMap[id] != nil || collage.page?.photoIDs.contains(id) == true || model.batch.item(withID: id) != nil
+    }
+
+    /// 这几张里托盘没有、这一页也没有的（批量页里的）：离开主线程读尺寸建 ref。读不了的（文件挪走了）放进 unreadable。
+    static func newPhotoRefs(_ ids: [String], model: AppModel) async -> (refs: [CollagePhotoRef], unreadable: [String]) {
+        let collage = model.collage
+        let onPage = Set(collage.page?.photoIDs ?? [])
+        let wanted = ids.filter { collage.photoMap[$0] == nil && !onPage.contains($0) }
+        guard !wanted.isEmpty else { return ([], []) }
+        let items = wanted.compactMap { model.batch.item(withID: $0) }
+        let facts = CollageBridge.Facts(batch: model.batch)
+        let refs = await Task.detached(priority: .userInitiated) {
+            items.compactMap { CollageBridge.ref(from: $0, facts: facts) }
+        }.value
+        let got = Set(refs.map(\.id))
+        return (refs, wanted.filter { !got.contains($0) })
+    }
+
+    /// 相册里已经排在别的跨页上的照片不能再用（同一张不能出现在两个跨页上）。
+    static func usedElsewhere(_ ids: [String], collage: CollageStore) -> Reply? {
+        let used = collage.usedOnOtherSpreads(ids)
+        guard let first = used.first else { return nil }
+        return invalid("「\(first)」已经排在相册别的跨页上了（一共 \(used.count) 张）：同一张不能出现在两个跨页上。", hint: "换别的照片")
+    }
+
+    /// 两个工具落地以后的回复：版式的语法、每格的位置、提醒。
+    static func layoutDone(_ req: Request, live: LiveServer, model: AppModel, tool: String, changed: Bool, pushes: Int, before: String,
+                           summary: String, trayAdded: Int, settled: Bool, duplicates: [String]) async -> Reply {
+        let collage = model.collage
+        var body: [String: Any] = ["tray_added": trayAdded, "hints_settled": settled, "canvas": canvasInfo(collage.project.canvas)]
+        if let page = collage.page {
+            body["layout"] = CollageLayoutSpec.describe(page.root)
+            body["cells"] = cells(page, project: collage.project)
+        }
+        var warnings: [[String: Any]] = []
+        if let first = duplicates.first {
+            warnings.append(MCPReadModel.warning("duplicate_photo", "「\(first)」等 \(duplicates.count) 张照片在这一页上出现了不止一次。", hint: "不是故意的话改一下再发"))
+        }
+        if !settled {
+            warnings.append(MCPReadModel.warning("hints_pending", "新进托盘的照片人脸信息还没算完：这些格子的自动取景待会儿可能还会变。",
+                                                 hint: "过一会儿调 collage_get_state 看预览"))
+        }
+        if collage.crossFoldPages().contains(collage.pageIndex) {
+            warnings.append(MCPReadModel.warning("crosses_fold", "有照片压在跨页的中缝上：装订以后中间那一条会被吃掉。",
+                                                 hint: "想避开就把顶层切成左右两半（row，两块等分）"))
+        }
+        return await collageDone(req, live: live, model: model, tool: tool, changed: changed, pushesBefore: pushes,
+                                 digestBefore: before, summary: summary, body: body, warnings: warnings)
+    }
+
+    static func setLayout(_ req: Request, live: LiveServer, model: AppModel) async -> Reply {
+        if let bad = checkArgs("collage_set_layout", req) { return bad }
+        let collage = model.collage
+        let gate = Gate(scope: .collage, digest: true)
+        // 顺序同成套（kitWrite）：先第 5 步，再看一直的忙，再等路人信息，最后 settle
+        if let stop = precheck(req, gate, live: live, model: model, waited: false) { return stop }
+        let now = model.interaction.reasons(model, scope: .collage)
+        if now.contains(where: { !$0.transient }) { return userBusy(now, waited: 0) }
+        model.indicator.began(workingLabel(req.method))
+        model.ensureCollageAttached()
+        func canvasShared() -> Reply? {
+            guard req.params["canvas"] is String, collage.isAlbum || collage.project.pages.count > 1 else { return nil }
+            return .failure("invalid_state", "这一套有好几页，画布是各页共用的：不能只给这一页换画布，这一次什么都没改。",
+                            ["hint": "去掉 canvas 再调，或者请用户在 app 里换画布", "executed": false])
+        }
+        func problem(_ p: CollageLayoutSpec.Problem) -> Reply {
+            invalid("版式写错了：\(p.text)", hint: "语法见 collage_list_templates 的 layout_grammar；照片 id 见 collage_get_state 的 tray_photos 或 cull_list_photos")
+        }
+        if let stop = canvasShared() { return stop }
+        let first = CollageLayoutSpec.parse(req.params["layout"]) { photoKnown($0, model: model) }
+        guard case .success(let draft) = first else {
+            if case .failure(let p) = first { return problem(p) }
+            return invalid("版式写错了")
+        }
+        if let stop = usedElsewhere(draft.photoIDs, collage: collage) { return stop }
+        let (refs, unreadable) = await newPhotoRefs(draft.photoIDs, model: model)
+        if let bad = unreadable.first {
+            return invalid("读不了这张照片：「\(bad)」（原图可能挪走了）。这一次什么都没改。", hint: "换一张，或者请用户把移动硬盘接上")
+        }
+        collage.prepareHints(for: refs)
+        let budget = min(remainingMs(req) - 5_000, 20_000) / 1_000
+        let settled = await collage.hintsSettled(timeout: max(0, budget))
+        if let stop = await settle(req, gate, live: live, model: model) { return stop }
+        // 等的时候用户可能动过（拿掉照片、翻页、加页）：落地前再核对一遍
+        if let stop = canvasShared() { return stop }
+        let readable = Set(refs.map(\.id))
+        let onPage = Set(collage.page?.photoIDs ?? [])
+        let again = CollageLayoutSpec.parse(req.params["layout"]) {
+            collage.photoMap[$0] != nil || onPage.contains($0) || readable.contains($0)
+        }
+        guard case .success(let parsed) = again else {
+            if case .failure(let p) = again { return problem(p) }
+            return invalid("版式写错了")
+        }
+        if let stop = usedElsewhere(parsed.photoIDs, collage: collage) { return stop }
+        let before = collage.editDigest
+        let pushes = collage.undoPushes
+        let canvas = (req.params["canvas"] as? String).map(CollageCLI.canvas)
+        let fit = req.params["fit"] as? Bool ?? false
+        let added = refs.filter { collage.photoMap[$0.id] == nil }.count
+        let changed = collage.externalEdit {
+            collage.applyDesignedLayout(parsed.root, canvas: canvas, fit: fit, newPhotos: refs)
+        }
+        let tail = added > 0 ? "，\(added) 张新照片进托盘" : ""
+        return await layoutDone(req, live: live, model: model, tool: "collage_set_layout", changed: changed, pushes: pushes, before: before,
+                                summary: "设计了一版（\(parsed.photoIDs.count) 张照片\(tail)）", trayAdded: changed ? added : 0,
+                                settled: settled, duplicates: parsed.duplicates)
+    }
+
+    static func autoLayout(_ req: Request, live: LiveServer, model: AppModel) async -> Reply {
+        if let bad = checkArgs("collage_auto_layout", req) { return bad }
+        let collage = model.collage
+        let gate = Gate(scope: .collage, digest: true)
+        if let stop = precheck(req, gate, live: live, model: model, waited: false) { return stop }
+        let now = model.interaction.reasons(model, scope: .collage)
+        if now.contains(where: { !$0.transient }) { return userBusy(now, waited: 0) }
+        model.indicator.began(workingLabel(req.method))
+        model.ensureCollageAttached()
+        func fineArt() -> Reply? {
+            guard collage.isAlbum, collage.project.albumTheme == .fineArt else { return nil }
+            return .failure("invalid_state", "婚礼 fine-art 的跨页按编排出版式，引擎排不了，这一次什么都没改。",
+                            ["hint": "自己设计就用 collage_set_layout", "executed": false])
+        }
+        if let stop = fineArt() { return stop }
+        let wanted: [String]? = req.params["photos"] != nil ? MCPArgs.uniqueStrings(req.params["photos"]) : nil
+        let count = LiveWire.int(req.params["count"])
+        var refs: [CollagePhotoRef] = []
+        if let wanted {
+            if let bad = wanted.first(where: { !photoKnown($0, model: model) }) {
+                return invalid("没有这张照片「\(bad)」（要是托盘里或这一场里的）。", hint: "照片 id 见 collage_get_state 的 tray_photos 或 cull_list_photos")
+            }
+            if let stop = usedElsewhere(wanted, collage: collage) { return stop }
+            let built = await newPhotoRefs(wanted, model: model)
+            if let bad = built.unreadable.first {
+                return invalid("读不了这张照片：「\(bad)」（原图可能挪走了）。这一次什么都没改。", hint: "换一张，或者请用户把移动硬盘接上")
+            }
+            refs = built.refs
+            collage.prepareHints(for: refs)
+        }
+        let budget = min(remainingMs(req) - 5_000, 20_000) / 1_000
+        let settled = await collage.hintsSettled(timeout: max(0, budget))
+        if let stop = await settle(req, gate, live: live, model: model) { return stop }
+        if let stop = fineArt() { return stop }
+        if let wanted, let stop = usedElsewhere(wanted, collage: collage) { return stop }
+        let before = collage.editDigest
+        let pushes = collage.undoPushes
+        let epoch = model.aiLog.sessionEpoch
+        let plan = await collage.engineLayout(photoIDs: wanted, count: count, newPhotos: refs)
+        // 引擎在后台算的时候用户动了拼图、切了场次：这一版作废（同成套），不盖掉用户刚做的
+        guard model.aiLog.sessionEpoch == epoch else {
+            var data = notExecuted("用户切了场次：先 app_status 看 open_session")
+            data["reason"] = "session_switched"
+            return .failure("superseded", "引擎还在排的时候用户切了场次，这一次作废了：没有落地，没有压撤销", data)
+        }
+        guard collage.editDigest == before else {
+            var data = notExecuted("用户在拼图里做了新的操作：先 collage_get_state 看现在的样子，再决定要不要重来")
+            data["reason"] = "user_edit"
+            return .failure("superseded", "引擎还在排的时候用户在拼图里做了新的操作，这一次作废了：没有落地，没有压撤销", data)
+        }
+        guard let plan else {
+            return .failure("nothing_to_render", "引擎没排出来：没有能用的照片，或者照片太多、比例差太远，工程没动",
+                            ["hint": "先往托盘里带几张照片，或者给 photos 少一点、换个画布比例", "executed": false])
+        }
+        let added = refs.filter { collage.photoMap[$0.id] == nil }.count
+        let changed = collage.externalEdit { collage.applyDesignedLayout(plan, aspectsFixed: false, newPhotos: refs) }
+        return await layoutDone(req, live: live, model: model, tool: "collage_auto_layout", changed: changed, pushes: pushes, before: before,
+                                summary: "排了一版（\(plan.photoIDs.count) 张照片）", trayAdded: changed ? added : 0, settled: settled, duplicates: [])
     }
 
     // MARK: undo（app_undo：只撤 AI 自己刚做的一步）

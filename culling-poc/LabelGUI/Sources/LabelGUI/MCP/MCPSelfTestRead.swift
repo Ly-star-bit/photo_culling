@@ -25,9 +25,9 @@ extension MCPSelfTest {
             let required = Set(schema["required"] as? [String] ?? []).subtracting(["session"])
             check(required == Set(spec.required), "\(tool)：必填 \(spec.required) 和 schema \(required.sorted()) 不一样")
         }
-        check(Set(MCPArgs.specs.keys) == Set(MCPLiveTools.routes.keys), "MCPArgs 管的正好是要 app 的 18 个工具")
-        check(MCPLiveTools.wired == Set(MCPLiveTools.routes.values.map(\.method)) && MCPLiveTools.wired.count == 15,
-              "接上的桥方法是 §10.4 的 12 个 + 方案栏的 2 个 + 导出：\(MCPLiveTools.wired.sorted())")
+        check(Set(MCPArgs.specs.keys) == Set(MCPLiveTools.routes.keys), "MCPArgs 管的正好是要 app 的工具")
+        check(MCPLiveTools.wired == Set(MCPLiveTools.routes.values.map(\.method)) && MCPLiveTools.wired.count == 17,
+              "接上的桥方法是 §10.4 的 12 个 + 方案栏的 2 个 + 导出 + 设计版式的 2 个：\(MCPLiveTools.wired.sorted())")
         check(Set(MCPLiveTools.readKinds.keys) == Set(MCPLiveTools.routes.filter { $0.value.method == "cull.read" }.keys),
               "cull.read 的四个工具都有 kind")
         let k = "0123456789abcdef"

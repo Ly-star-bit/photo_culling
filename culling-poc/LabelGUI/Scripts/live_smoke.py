@@ -524,11 +524,12 @@ def err_code(body):
 APP_TOOLS = ["cull_session_overview", "cull_list_photos", "cull_get_photos", "cull_list_groups", "cull_preview_photos",
              "collage_get_state", "app_open_session", "cull_set_verdicts", "cull_show_photos", "collage_apply_template",
              "collage_run_kit", "collage_next_cover", "collage_set_text", "collage_set_style", "app_undo",
-             "collage_save_variant", "collage_open_variant", "collage_export"]
-# hello 里的 capabilities（§10.4 的 12 个 + 方案栏的 2 个 + 导出，按名字排）
+             "collage_save_variant", "collage_open_variant", "collage_export", "collage_set_layout", "collage_auto_layout"]
+# hello 里的 capabilities（§10.4 的 12 个 + 方案栏的 2 个 + 导出 + 设计版式的 2 个，按名字排）
 ALL_CAPS = sorted(["cull.read", "cull.preview", "collage.state", "session.open", "cull.set_verdicts", "cull.show",
                    "collage.apply_template", "collage.run_kit", "collage.next_cover", "collage.set_text", "collage.set_style",
-                   "undo", "collage.save_variant", "collage.open_variant", "collage.export"])
+                   "undo", "collage.save_variant", "collage.open_variant", "collage.export", "collage.set_layout",
+                   "collage.auto_layout"])
 
 
 def minimal_args(tool, session):
@@ -552,6 +553,8 @@ def minimal_args(tool, session):
         a["look_strength"] = 0.5
     if tool == "collage_open_variant":
         a["variant"] = "00000000"
+    if tool == "collage_set_layout":
+        a["layout"] = {"photo": "DSCF7208"}
     return a
 
 
@@ -3446,6 +3449,198 @@ __attribute__((constructor)) static void init(void) {
               and TOO_LONG in warn_hints(st_long),
               f"socket 路径太长（自检不试）：就绪时副标题「{ready_long.group(1) if ready_long else '?'}」，--mcp hint 带它")
         hlong.term()
+
+    # ============================================================ 设计版式：AI 自己定切分和每一格（collage_set_layout）、
+    # 引擎排一版（collage_auto_layout）、单独调样式。用合成图场次：托盘一开始是空的，版式用到的照片是真的、读得到
+    print("L 设计版式")
+    syn_l = synth_session("L")
+    hl = Host("L", data=syn_l["data"], photos=syn_l["dir"])
+    envl = hl.env()
+    kl = syn_l["key"]
+    a_, b_, c_, d_, e_, f_ = syn_l["ids"][:6]
+
+    def lst():
+        return state(hl)
+
+    def lsteps(x, y):
+        return y["collage_undo"]["pushes"] - x["collage_undo"]["pushes"]
+
+    def lw(tool, args, timeout=60):
+        out_, body_, _ = mcp_full(envl, tool, {"session": kl, **args}, timeout)
+        return out_, body_ or {}
+
+    def lget():
+        return mcp_call(envl, "collage_get_state", {"session": kl, "include_preview": False})[1] or {}
+
+    def lsettled(timeout=60):
+        deadline = time.monotonic() + timeout * SLACK
+        s_ = lst()
+        while s_.get("hints_pending") and time.monotonic() < deadline:
+            time.sleep(0.2)
+            s_ = lst()
+        return s_
+
+    # ---------- 空工程：读得到画布、托盘是空的、还没有版式
+    g0 = lget()
+    s0 = lsettled()
+    check(g0.get("layout") is None and "layout" in g0 and g0.get("tray_photos") == [] and g0.get("cells") == []
+          and (g0.get("canvas") or {}).get("width", 0) > 0 and (g0.get("style_fields") or {}).get("gutter", -1) >= 0,
+          f"设计版式：collage_get_state 有 canvas、style_fields、tray_photos，空工程 layout 是 null（{g0.get('canvas')}）")
+
+    # ---------- 第一版：托盘里还没有的照片自动进托盘，和换版式是同一步撤销；回复里有语法、每格位置、预览
+    design = {"split": "column", "sizes": [1, 5], "items": [
+        {"text": {"lines": [{"text": "冒烟 · 春日", "font": "didot", "size": 0.05, "color": "#112233"}], "align": "center", "valign": "middle"}},
+        {"split": "row", "sizes": [3, 2, 1], "items": [
+            {"photo": a_, "hero": True, "overlays": [{"lines": ["压字"], "anchor": "top_left", "tone": "light"}]},
+            {"photo": b_, "shape": "arch", "framing": "close"},
+            {"photo": c_, "fit": "contain_blur"}]}]}
+    out, r1 = lw("collage_set_layout", {"layout": design})
+    s1 = lsettled()
+    g1 = lget()
+    ids1 = [p.get("id") for p in g1.get("tray_photos") or []]
+    cells1 = r1.get("cells") or []
+    rects = [c.get("rect") for c in cells1]
+    blocks1 = image_blocks(out)
+    check(r1.get("changed") is True and r1.get("tray_added") == 3 and lsteps(s0, s1) == 1 and r1.get("undo", {}).get("steps_added") == 1
+          and sorted(ids1) == sorted([a_, b_, c_]) and len(blocks1) == 1 and blocks1[0][:2] == b"\xff\xd8" and len(cells1) == 4
+          and all(isinstance(x, list) and len(x) == 4 for x in rects) and rects[0][2] > 0.8 and rects[1][2] > rects[2][2] > rects[3][2]
+          and s1["disk_edit_digest"] == s1["edit_digest"] and ((s1.get("collage") or {}).get("notice") or "").startswith("AI：设计了一版"),
+          "第一版：3 张批量页的照片进托盘 + 换版式 = 一步撤销，回复带预览、cells 带位置（3:2:1 的宽度依次变小），"
+          f"collage.json 已写好（changed={r1.get('changed')} added={r1.get('tray_added')} 步={lsteps(s0, s1)} 托盘={ids1} rect={rects} "
+          f"错误={err_code(r1)} {(r1.get('error') or {}).get('message')}）")
+    # 语法读回来：结构、设置都还在
+    lay = g1.get("layout") or {}
+    row = (lay.get("items") or [{}, {}])[1]
+    cell_a = (row.get("items") or [{}])[0]
+    check(lay.get("split") == "column" and row.get("split") == "row" and [round(x, 3) for x in row.get("sizes") or []] == [0.5, 0.333, 0.167]
+          and cell_a.get("hero") is True and (cell_a.get("overlays") or [{}])[0].get("anchor") == "top_left"
+          and (row["items"][1].get("shape"), row["items"][1].get("framing")) == ("arch", "close")
+          and row["items"][2].get("fit") == "contain_blur" and lay == r1.get("layout"),
+          f"读回来的 layout 是多叉的（一行三块 0.5 / 0.333 / 0.167）、设置都在，和写的回复里那份一样（{row.get('sizes')}）")
+
+    # ---------- 读到的原样发回去：什么都不变（不压撤销、指纹不动）；重放 op_id 不再做一次
+    _, r2 = lw("collage_set_layout", {"layout": g1.get("layout")})
+    s2 = lst()
+    # 没变的写也会让 pushes +1（externalEdit 把空步撤掉、计数不退，§9.5.1）：这里看撤销栈的深度
+    check(r2.get("changed") is False and s2["collage_undo"]["depth"] == s1["collage_undo"]["depth"] and s2["edit_digest"] == s1["edit_digest"]
+          and r2.get("undo", {}).get("steps_added") == 0
+          and r2.get("tray_added") == 0,
+          f"读到的 layout 原样发回去：changed:false、不压撤销、编辑指纹不变（{r2.get('changed')} {err_code(r2)}）")
+    # app_undo：托盘和版式一起回去
+    u1 = mcp_full(envl, "app_undo", {"target": "collage"})[1] or {}
+    s3 = lst()
+    g3 = lget()
+    check("error" not in u1 and g3.get("layout") is None and g3.get("tray_photos") == [] and s3["edit_digest"] == s0["edit_digest"]
+          and s3["full_digest"] == s0["full_digest"],
+          "app_undo：进托盘的照片和版式一起撤回去，整工程指纹回到一开始")
+    _, r1b = lw("collage_set_layout", {"layout": design})
+    s1b = lsettled()
+
+    # schema 里 layout 是 JSON 文本：写成文本和写成对象一样（同一版，不变）
+    _, r2t = lw("collage_set_layout", {"layout": json.dumps(design, ensure_ascii=False)})
+    check(r2t.get("changed") is False and lst()["edit_digest"] == s1b["edit_digest"],
+          f"layout 写成 JSON 文本也认：和刚才同一版，changed:false（{r2t.get('changed')} {err_code(r2t)}）")
+    _, rj = lw("collage_set_layout", {"layout": "{不是 JSON"})
+    check(err_code(rj) == "invalid_argument" and lst()["edit_digest"] == s1b["edit_digest"], "layout 不是合法的 JSON → invalid_argument，没动")
+
+    # ---------- 写错的：错在哪写得清楚，什么都不动
+    bads = [({"photo": "没有这张"}, "layout.photo", "invalid_argument"),
+            ({"split": "row", "items": [{"photo": a_}, {"photo": b_, "shape": "star"}]}, "layout.items[1].shape", "invalid_argument"),
+            ({"split": "row", "items": [{"photo": a_}]}, "layout.items", "invalid_argument"),
+            ({"photo": a_, "zoom": 2}, "layout.zoom", "invalid_argument"),
+            ({"text": {"lines": [{"text": "x", "font": "comic"}]}}, "layout.text.lines[0].font", "invalid_argument")]
+    rows_bad = []
+    for lay_bad, path_, code_ in bads:
+        _, rb = lw("collage_set_layout", {"layout": lay_bad})
+        rows_bad.append((err_code(rb), path_ in ((rb.get("error") or {}).get("message") or "")))
+    s4 = lst()
+    check(all(c == "invalid_argument" and hit for c, hit in rows_bad) and s4["collage_undo"]["depth"] == s1b["collage_undo"]["depth"]
+          and s4["edit_digest"] == s1b["edit_digest"],
+          f"写错的版式（照片不存在、形状、块数、多了键、字体）：invalid_argument，错误里有路径，工程没动 {rows_bad}")
+    _, stale = lw("collage_set_layout", {"layout": design, "if_digest": "000000000000"})
+    check(err_code(stale) == "stale_digest" and lst()["edit_digest"] == s1b["edit_digest"], "if_digest 过期 → stale_digest，没动")
+    # 原图读不了的（文件挪走了）：不进托盘
+    src_f = os.path.join(syn_l["dir"], f_ + ".jpg")
+    os.rename(src_f, src_f + ".moved")
+    _, unread = lw("collage_set_layout", {"layout": {"split": "row", "items": [{"photo": a_}, {"photo": f_}]}})
+    os.rename(src_f + ".moved", src_f)
+    check(err_code(unread) == "invalid_argument" and f_ in ((unread.get("error") or {}).get("message") or "")
+          and lst()["edit_digest"] == s1b["edit_digest"], "原图读不了的照片 → invalid_argument、点名是哪张，工程没动")
+
+    # ---------- 改一处：没动的格子留着语法里没有的设置；同一张放两格有提醒
+    edited = json.loads(json.dumps(g1.get("layout")))
+    edited["items"][1]["sizes"] = [1, 1, 1]
+    s5 = lst()
+    _, r5 = lw("collage_set_layout", {"layout": edited})
+    s6 = lst()
+    check(r5.get("changed") is True and lsteps(s5, s6) == 1 and [round(x, 2) for x in r5["layout"]["items"][1]["sizes"]] == [0.33, 0.33, 0.33]
+          and r5["layout"]["items"][0] == edited["items"][0] and r5["layout"]["items"][1]["items"] == edited["items"][1]["items"],
+          f"改比例：听新的，别的都没变，一步撤销（{r5.get('layout', {}).get('items', [{}, {}])[1].get('sizes')}）")
+    _, r6 = lw("collage_set_layout", {"layout": {"split": "row", "items": [{"photo": a_}, {"photo": a_}]}})
+    check(r6.get("changed") is True and "duplicate_photo" in warn_codes(r6), "同一张放两格：放得下，有 duplicate_photo 提醒")
+
+    # ---------- 换画布、fit；单页才能换
+    s7 = lst()
+    _, r7 = lw("collage_set_layout", {"layout": design, "canvas": "1:1", "fit": True})
+    s8 = lst()
+    cv = r7.get("canvas") or {}
+    check(r7.get("changed") is True and lsteps(s7, s8) == 1 and cv.get("width") == cv.get("height") and (lget().get("canvas") or {}).get("width") == cv.get("width"),
+          f"canvas=1:1 + fit：画布换了、一步撤销（{cv}，{err_code(r7)}）")
+    mcp_full(envl, "app_undo", {"target": "collage"})
+    check((lget().get("canvas") or {}).get("width") == (g0.get("canvas") or {}).get("width"), "app_undo：画布回去")
+
+    # ---------- 引擎排一版：一步撤销，结果里的 layout 能原样发回来；每调一次换一种
+    s9 = lst()
+    _, r9 = lw("collage_auto_layout", {"photos": [a_, b_, c_, d_]})
+    s10 = lsettled()
+    lay9 = r9.get("layout") or {}
+    check(r9.get("changed") is True and lsteps(s9, s10) == 1 and r9.get("undo", {}).get("steps_added") == 1 and d_ in json.dumps(lay9)
+          and r9.get("tray_added") == 1 and isinstance(lay9, dict),
+          f"引擎排一版：用给的 4 张（1 张新进托盘）、一步撤销（changed={r9.get('changed')} 步={lsteps(s9, s10)} {err_code(r9)} {(r9.get('error') or {}).get('message')}）")
+    _, r10 = lw("collage_set_layout", {"layout": lay9})
+    check(r10.get("changed") is False and lst()["edit_digest"] == s10["edit_digest"], "引擎排的版读出来发回去：changed:false，指纹不变（AI 可以在它上面改）")
+    _, r11 = lw("collage_auto_layout", {})
+    _, r12 = lw("collage_auto_layout", {"count": 2})
+    _, r13 = lw("collage_auto_layout", {"photos": [a_], "count": 2})
+    _, r14 = lw("collage_auto_layout", {"photos": ["没有这张"]})
+    pages12 = sum(1 for c in r12.get("cells") or [] if c.get("kind") == "photo")
+    check("error" not in r11 and "error" not in r12 and pages12 == 2 and err_code(r13) == "invalid_argument" and err_code(r14) == "invalid_argument",
+          f"不给照片 = 这一页现在的；count=2 = 从托盘挑 2 张（{pages12} 格）；photos、count 同时给 / 没有这张 → invalid_argument（{err_code(r11)}/{err_code(r12)}/{err_code(r13)}/{err_code(r14)}）")
+
+    # ---------- 单独调样式：外边距、缝、圆角、底色、形状；一步撤销；写错不动
+    s11 = lst()
+    _, r15 = lw("collage_set_style", {"margin": 0, "gutter": 0.02, "corner": 0.05, "background": "#102030", "shape": "rounded"})
+    s12 = lst()
+    sf = r15.get("style_fields") or {}
+    check(r15.get("changed") is True and lsteps(s11, s12) == 1 and sf.get("margin") == 0 and sf.get("gutter") == 0.02 and sf.get("background") == "#102030"
+          and sf.get("shape") == "rounded" and (lget().get("style_fields") or {}).get("corner") == 0.05,
+          f"单独调样式：margin、gutter、corner、background、shape 一步撤销，读得回来（{sf}）")
+    _, r16 = lw("collage_set_style", {"background": "#12"})
+    _, r17 = lw("collage_set_style", {"margin": 0.9})
+    check(err_code(r16) == "invalid_argument" and err_code(r17) == "invalid_argument" and lst()["edit_digest"] == s12["edit_digest"],
+          "底色写错、外边距超范围 → invalid_argument，没动")
+
+    # ---------- 和方案栏一起用：设计一版存成方案，再设计一版，切回去版式一模一样
+    _, _r = lw("collage_set_layout", {"layout": design})
+    lay_a = lget().get("layout")
+    _, va = lw("collage_save_variant", {"name": "设计 A"})
+    _, _r = lw("collage_set_layout", {"layout": {"split": "column", "items": [{"photo": c_}, {"photo": b_}]}})
+    _, oa = lw("collage_open_variant", {"variant": (va.get("variant") or {}).get("id")})
+    check(oa.get("changed") is True and lget().get("layout") == lay_a, "设计一版存成方案，再设计一版，切回去 layout 一模一样")
+
+    # ---------- 成套有好几页：画布不能只换一页；不给画布就只换当前这一页
+    _, kit = lw("collage_run_kit", {"kit": "fashionIssue"}, timeout=120)
+    gk = lget()
+    if (gk.get("pages") or 0) > 1:
+        sk0 = lst()
+        _, rc = lw("collage_set_layout", {"layout": design, "canvas": "1:1"})
+        _, rd = lw("collage_set_layout", {"layout": design})
+        sk1 = lst()
+        check(err_code(rc) == "invalid_state" and rd.get("changed") is True and rd.get("pages") == gk.get("pages") and lsteps(sk0, sk1) == 1,
+              f"{gk.get('pages')} 页的一套：给 canvas → invalid_state、什么都没改；不给 → 只换当前这一页，页数不变（{err_code(rc)} {err_code(rd)}）")
+    else:
+        skip(f"成套没出多页（{err_code(kit)}，{gk.get('pages')} 页）：画布共用那一条跳过")
+    hl.term()
 
     # ============================================================ grep：Live/ 的禁用词（§5 第 7 层、§9.5.6）
     print("grep")

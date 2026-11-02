@@ -586,6 +586,10 @@ enum MCPArgs {
         case opID
         /// collage_set_text 的 cell_text：{path: 0–8 位数字, index: ≥0 的整数, text: 字符串}，别的键不收。
         case cellText
+        /// collage_set_layout 的 layout（CollageLayoutSpec 的语法；照片 id 认不认得只有 app 知道）。
+        case layout
+        /// 颜色："#RRGGBB" 或色名（CollageLayoutSpec.namedColors）。
+        case color
     }
 
     struct ToolSpec {
@@ -675,6 +679,26 @@ enum MCPArgs {
         p["style"] = .oneOf(MCPToolDefs.styleKeys)
         p["look"] = .oneOf(MCPToolDefs.lookKeys)
         p["look_strength"] = .number(0...1)
+        p["margin"] = .number(0...0.25)
+        p["gutter"] = .number(0...0.1)
+        p["corner"] = .number(0...0.25)
+        p["background"] = .color
+        p["shape"] = .oneOf(CollageLayoutSpec.shapes.keys.sorted())
+        return ToolSpec(props: p, required: [])
+    }()
+    static let setLayoutSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "if_digest": digest, "reveal": .bool, "op_id": .opID, "inline": .bool]
+        p["layout"] = .layout
+        p["canvas"] = .oneOf(MCPInProcessTools.canvasAliases)
+        p["fit"] = .bool
+        p["deadline_seconds"] = .deadline
+        return ToolSpec(props: p, required: ["layout"])
+    }()
+    static let autoLayoutSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "if_digest": digest, "reveal": .bool, "op_id": .opID, "inline": .bool]
+        p["photos"] = .strings(count: 1...CollageLayoutSpec.maxLeaves, maxLength: 256, oneOf: nil)
+        p["count"] = .int(1...CollageLayoutSpec.maxLeaves)
+        p["deadline_seconds"] = .deadline
         return ToolSpec(props: p, required: [])
     }()
     static let saveVariantSpec: ToolSpec = {
@@ -719,6 +743,8 @@ enum MCPArgs {
         s["collage_save_variant"] = saveVariantSpec
         s["collage_open_variant"] = openVariantSpec
         s["collage_export"] = exportSpec
+        s["collage_set_layout"] = setLayoutSpec
+        s["collage_auto_layout"] = autoLayoutSpec
         return s
     }()
 
@@ -736,8 +762,12 @@ enum MCPArgs {
                                hint: "先 collage_get_state 拿 digest 和 cells[].path，再带着 if_digest 调（用户改过版式以后格子下标会指错地方）")
             }
         case "collage_set_style":
-            guard ["style", "look", "look_strength"].contains(where: given) else {
-                return Problem(message: "collage_set_style 至少要给一个字段：style、look、look_strength。", hint: "取值见 collage_list_templates")
+            guard ["style", "look", "look_strength", "margin", "gutter", "corner", "background", "shape"].contains(where: given) else {
+                return Problem(message: "collage_set_style 至少要给一个字段：style、look、look_strength、margin、gutter、corner、background、shape。", hint: "取值见 collage_list_templates")
+            }
+        case "collage_auto_layout":
+            if given("photos") && given("count") {
+                return Problem(message: "photos 和 count 只能给一个：photos 指定用哪几张，count 让 app 从托盘挑几张。", hint: "")
             }
         default:
             break
@@ -826,6 +856,16 @@ enum MCPArgs {
             }
         case .cellText:
             return checkCellText(name, value)
+        case .layout:
+            if case .failure(let p) = CollageLayoutSpec.parse(value, isKnownPhoto: { _ in true }) {
+                return Problem(message: "版式写错了：\(p.text)", hint: "语法见 collage_list_templates 的 layout_grammar")
+            }
+        case .color:
+            do {
+                _ = try CollageLayoutSpec.color(value, path: name)
+            } catch {
+                return Problem(message: (error as? CollageLayoutSpec.Problem)?.text ?? "\(name) 不是颜色。", hint: "")
+            }
         }
         return nil
     }

@@ -4263,6 +4263,93 @@ extension CollageStore {
         return true
     }
 
+    /// AI 设计的版式放进当前页（CollageLayoutSpec；= 套模板，只是版式不从模板库来）：页上的自由图层（贴纸、手写字）、
+    /// 这一页的色调留着；散落版、印样换成普通的切分树页。画布多页共用，只有单页能跟着换。newPhotos 里还不在托盘的接到
+    /// 托盘后面，和换版式是同一步撤销。fit：先按照片原比例重算比例（AI 没看照片比例时用）。
+    /// 返回版面动了没有；和现在一模一样（snap 之后）时什么都不碰：选中、备选、页面状态都不变。
+    @discardableResult
+    func applyDesignedLayout(_ designed: CollageNode, canvas: CollageCanvas? = nil, fit: Bool = false, aspectsFixed: Bool? = nil,
+                             newPhotos: [CollagePhotoRef] = []) -> Bool {
+        let shared = isAlbum || project.pages.count > 1
+        let oldCanvas = project.canvas
+        let nextCanvas = shared ? oldCanvas : (canvas ?? oldCanvas)
+        let have = Set(project.photos.map(\.id))
+        let fresh = newPhotos.filter { !have.contains($0.id) }
+        var photos = photoMap
+        for p in fresh where photos[p.id] == nil { photos[p.id] = p }
+        let ctx = CollageLayout.Context(canvas: nextCanvas, style: project.style, photos: photos, hints: hints, heroID: nil)
+        let root = CollageLayoutSpec.snap(fit ? CollageLayout.refit(designed, context: ctx) : designed, onto: page?.root)
+        if let page, !page.freeform, page.contactSheet == nil, page.root == root, nextCanvas == oldCanvas, fresh.isEmpty {
+            return false
+        }
+        cancelPendingSolve()
+        pushUndo()
+        if !fresh.isEmpty { project.photos.append(contentsOf: fresh) }
+        project.canvas = nextCanvas
+        var next = page ?? CollagePage(root: root)
+        if next.freeform || next.contactSheet != nil { next.items = [] }
+        next.root = root
+        next.freeform = false
+        next.scatter = nil
+        next.gridRoot = nil
+        next.contactSheet = nil
+        next.fixedAspects = aspectsFixed ?? !fit
+        if abs(oldCanvas.aspect - nextCanvas.aspect) > 0.001 {
+            next.items = CollageItems.refit(next.items, from: oldCanvas, to: nextCanvas)
+        }
+        setPage(next)
+        if !isAlbum {
+            layoutStyle = .grid
+            scheduleStateSave()
+        }
+        clearAlternatives()
+        selection = nil
+        selectedItem = nil
+        commitEdit()
+        if !fresh.isEmpty { computeHints(for: fresh) }
+        return true
+    }
+
+    /// 引擎排一版（「换一批」的那个求解，桥用）：算出来的切分树，文字格、压字按这一页现在的带过去；不碰工程，落地走
+    /// applyDesignedLayout（和进托盘的照片算同一步撤销）。photoIDs 给了就用这几张；否则 count 给了、或这一页没照片：
+    /// 从托盘挑（相册里别的跨页用了的不挑）；否则用这一页现在的照片。nil = 没有能用的照片或者没解出来。
+    func engineLayout(photoIDs: [String]?, count: Int?, newPhotos: [CollagePhotoRef]) async -> CollageNode? {
+        var map = photoMap
+        for p in newPhotos where map[p.id] == nil { map[p.id] = p }
+        var photos: [CollagePhotoRef]
+        let current = Self.unique(page?.photoIDs ?? []).compactMap { map[$0] }
+        if let photoIDs {
+            photos = Self.unique(photoIDs).compactMap { map[$0] }
+        } else if count == nil, !current.isEmpty {
+            photos = current
+        } else {
+            let elsewhere = Set(usedOnOtherSpreads(project.photos.map(\.id)))
+            let pool = project.photos.filter { !elsewhere.contains($0.id) }
+            let n = min(count ?? min(pool.count, 12), pool.count)
+            photos = await Task.detached(priority: .userInitiated) { CollageSelect.pick(n, from: pool) }.value
+        }
+        guard !photos.isEmpty else { return nil }
+        solveSeed &+= 1
+        let seed = solveSeed
+        let texts = page.map { textCellsForGrid(from: $0) } ?? []
+        let avoid = root.map { noteShape($0) } ?? []
+        let ctx = CollageLayout.Context(canvas: project.canvas, style: project.style, photos: map, hints: hints, heroID: nil)
+        let chosen = photos
+        let results = await Task.detached(priority: .userInitiated) {
+            CollageLayout.solve(CollageLayout.Request(photos: chosen, textCells: texts, context: ctx, tries: 16000, keep: 18, seed: seed))
+        }.value
+        let best = CollageLayout.preferringNewShape(results, avoiding: avoid).first
+        return best.map { pageFor($0, replacing: page).root }
+    }
+
+    /// 这几张里已经排在相册别的跨页上的（同一张不能出现在两个跨页上）；单张拼图不管。
+    func usedOnOtherSpreads(_ ids: [String]) -> [String] {
+        guard isAlbum else { return [] }
+        var elsewhere = Set<String>()
+        for (i, p) in project.pages.enumerated() where i != pageIndex { elsewhere.formUnion(p.photoIDs) }
+        return ids.filter { elsewhere.contains($0) }
+    }
+
     /// 按名字找模板：先全名、再内置分类名（套这个分类的第一个）、再名字里含这几个字的。
     /// 和 --collage-ops 的 applytpl 同一个规则，照抄 CollageCLI.swift 里 `case "applytpl"` 那三行（那边不动）。
     func template(named name: String) -> CollageTemplate? {
@@ -4282,14 +4369,35 @@ extension CollageStore {
         return true
     }
 
+    /// 样式里单独调的几项（collage_set_style；nil = 不动）。
+    struct StyleFields {
+        var margin: Double?
+        var gutter: Double?
+        var corner: Double?
+        var background: CollageColor?
+        var shape: CollageShape?
+        var isEmpty: Bool { margin == nil && gutter == nil && corner == nil && background == nil && shape == nil }
+    }
+
     /// 换样式 / 色调 / 强度（照 CollageCLI.swift 的 style、look、strength 三个 op）：预设整套换（不合并），
-    /// 色调和强度在它上面再改。调用方自己包 externalEdit。
-    func setStyleParts(preset: String?, look: CollageLook?, strength: Double?) {
+    /// 色调、强度和单独调的几项在它上面再改。调用方自己包 externalEdit。
+    func setStyleParts(preset: String?, look: CollageLook?, strength: Double?, fields: StyleFields = StyleFields()) {
         if let preset { setStyle(CollageStyles.preset(preset), coalesce: false) }
-        if look != nil || strength != nil {
+        if look != nil || strength != nil || !fields.isEmpty {
             var st = project.style
             if let look { st.look = look }
             if let strength { st.lookStrength = strength }
+            if let margin = fields.margin {
+                st.margin = margin
+                st.insets = nil   // 四边不一样的边距优先于 margin：单独调外边距 = 四边一样
+            }
+            if let gutter = fields.gutter { st.gutter = gutter }
+            if let corner = fields.corner { st.corner = corner }
+            if let background = fields.background {
+                st.background = background
+                st.backgroundMode = .solid
+            }
+            if let shape = fields.shape { st.shape = shape }
             setStyle(st)
         }
     }

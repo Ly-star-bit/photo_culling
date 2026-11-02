@@ -174,16 +174,17 @@ extension MCPSelfTest {
             "collage_next_cover": "collage.next_cover", "collage_set_text": "collage.set_text",
             "collage_set_style": "collage.set_style", "app_undo": "undo",
             "collage_save_variant": "collage.save_variant", "collage_open_variant": "collage.open_variant",
-            "collage_export": "collage.export",
+            "collage_export": "collage.export", "collage_set_layout": "collage.set_layout",
+            "collage_auto_layout": "collage.auto_layout",
         ]
         let appTools = MCPToolDefs.tools(live: true).compactMap { $0["name"] as? String }.dropFirst(3)
         check(Set(appTools) == Set(methods.keys) && Set(MCPLiveTools.routes.keys) == Set(methods.keys),
-              "要 app 的 18 个工具和路由表对得上：\(appTools.sorted())")
+              "要 app 的工具和路由表对得上：\(appTools.sorted())")
         for (tool, method) in methods {
             check(MCPLiveTools.routes[tool]?.method == method, "\(tool) 应该转给 \(method)")
         }
         let deadlines: [String: Int] = ["cull_preview_photos": 30_000, "collage_run_kit": 50_000, "collage_next_cover": 50_000,
-                                        "collage_export": 50_000]
+                                        "collage_export": 50_000, "collage_set_layout": 50_000, "collage_auto_layout": 50_000]
         for (tool, route) in MCPLiveTools.routes {
             check(route.deadlineMs == (deadlines[tool] ?? 10_000), "\(tool) 的默认截止时间 \(route.deadlineMs) ms（§10.2）")
         }

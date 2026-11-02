@@ -79,13 +79,14 @@ enum MCPInProcessTools {
 
     // MARK: - collage_list_templates
 
-    static let templateParts = ["templates", "kits", "styles", "looks", "canvases"]
+    static let templateParts = ["templates", "kits", "styles", "looks", "canvases", "layout_grammar"]
 
     static func listTemplates(_ call: MCPStdioServer.Call) -> MCPStdioServer.ToolResult {
         if let extra = call.arguments.keys.sorted().first(where: { $0 != "category" && $0 != "include" }) {
             return .error("invalid_argument", "collage_list_templates 不认参数 \(extra)。", hint: "只有 category、include")
         }
-        var include = Set(templateParts)
+        // layout_grammar 要了才给：不设计版式的调用不用多读这一大段
+        var include = Set(templateParts).subtracting(["layout_grammar"])
         if let raw = call.arguments["include"] {
             guard let list = raw as? [String], !list.isEmpty, list.allSatisfy({ templateParts.contains($0) }) else {
                 return .error("invalid_argument", "include 要是这几个里挑（至少一个）：\(templateParts.joined(separator: "、"))。",
@@ -129,6 +130,7 @@ enum MCPInProcessTools {
                 return row
             }
         }
+        if include.contains("layout_grammar") { out["layout_grammar"] = CollageLayoutSpec.grammar }
         return MCPStdioServer.ToolResult(content: [["type": "text", "text": MCPJSON.fitting(out, list: "templates")]])
     }
 
@@ -138,8 +140,8 @@ enum MCPInProcessTools {
     }
 
     /// CLI --canvas 的别名，照 CollageCLI.canvas(_:) 的 switch 抄（名字、尺寸从它那里取；mcp_smoke 拿源码核对这张表，
-    /// --mcp-selftest 核对它正好盖住 CollageCanvas.social + .albums）。v1 没有改画布的工具，列出来是让模型知道
-    /// app 里有哪些画布，要换请用户自己在 app 里换。
+    /// --mcp-selftest 核对它正好盖住 CollageCanvas.social + .albums）。collage_set_layout 的 canvas 取这里的值；
+    /// 只有这些才能换，别的尺寸请用户自己在 app 里换。
     static let canvasAliases = ["3:4", "1:1", "grid9", "4:5", "9:16", "16:9", "carousel3", "a4",
                                 "album30", "album25", "album20", "album3020"]
 

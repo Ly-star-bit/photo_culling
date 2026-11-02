@@ -1,7 +1,7 @@
 import Foundation
 
 /// --mcp-selftest 的 STEP 3b 部分（MCPSelfTest.run 调），全是纯函数，不连 socket、不碰文件、不建任何 store：
-/// 16. 9 个写工具的参数校验（MCPArgs）：一张手写的对 / 错表，含 schema 写不出来的那几条（至少给一个字段、cell_text 要带
+/// 16. 写工具的参数校验（MCPArgs）：一张手写的对 / 错表，含 schema 写不出来的那几条（至少给一个字段、cell_text 要带
 ///     if_digest、op_id 8–64 个字、look_strength 0–1、文字可以是空字符串）。
 /// 17. app_undo 的判定（LiveAILog.check）：AI 写了能撤；用户之后又改过 → undo_not_ours；用户自己撤过 → already_undone_by_user；
 ///     换过场次 → session_switched；没改出东西的写不挡后面的撤销；AI 连撤两步只在中间没插用户的改动时成立。
@@ -243,6 +243,31 @@ extension MCPSelfTest {
             ("collage_export", ["session": k, "name": String(repeating: "名", count: 101)], false),
             ("collage_export", ["session": k, "variant": ""], false),
             ("collage_export", ["session": k, "inline": false], false),
+            ("collage_set_layout", ["session": k, "layout": ["photo": "a"]], true),
+            ("collage_set_layout", ["session": k, "layout": #"{"split":"row","items":[{"photo":"a"},{"empty":true}]}"#], true),
+            ("collage_set_layout", ["session": k, "layout": "{不是 JSON"], false),
+            ("collage_set_layout", ["session": k, "layout": ["empty": true], "canvas": "4:5", "fit": true, "deadline_seconds": 60,
+                                    "if_digest": "abc", "reveal": true, "op_id": op, "inline": false], true),
+            ("collage_set_layout", ["session": k], false),
+            ("collage_set_layout", ["session": k, "layout": "row"], false),
+            ("collage_set_layout", ["session": k, "layout": ["photo": "a", "shape": "star"]], false),
+            ("collage_set_layout", ["session": k, "layout": ["photo": "a"], "canvas": "7:9"], false),
+            ("collage_set_layout", ["session": k, "layout": ["photo": "a"], "fit": "yes"], false),
+            ("collage_auto_layout", ["session": k], true),
+            ("collage_auto_layout", ["session": k, "photos": ["a", "b"], "reveal": true, "op_id": op], true),
+            ("collage_auto_layout", ["session": k, "count": 5, "if_digest": "abc", "deadline_seconds": 60, "inline": false], true),
+            ("collage_auto_layout", ["session": k, "photos": ["a"], "count": 5], false),
+            ("collage_auto_layout", ["session": k, "photos": []], false),
+            ("collage_auto_layout", ["session": k, "photos": "a"], false),
+            ("collage_auto_layout", ["session": k, "count": 0], false),
+            ("collage_auto_layout", ["session": k, "count": 37], false),
+            ("collage_set_style", ["session": k, "margin": 0.02, "gutter": 0, "corner": 0.03, "background": "#102030", "shape": "rounded"], true),
+            ("collage_set_style", ["session": k, "background": "paper"], true),
+            ("collage_set_style", ["session": k, "margin": 0.5], false),
+            ("collage_set_style", ["session": k, "gutter": -0.1], false),
+            ("collage_set_style", ["session": k, "background": "#12"], false),
+            ("collage_set_style", ["session": k, "background": 3], false),
+            ("collage_set_style", ["session": k, "shape": "star"], false),
             ("app_undo", ["target": "collage"], true),
             ("app_undo", ["target": "verdicts", "session": k, "op_id": op], true),
             ("app_undo", [:], false),

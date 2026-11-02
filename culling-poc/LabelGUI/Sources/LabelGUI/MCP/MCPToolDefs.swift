@@ -1,6 +1,6 @@
 import Foundation
 
-/// 21 个工具定义（v1 的 18 个 + 方案栏的 2 个 + 导出）和两版 instructions（DESIGN §10.1；schema 规则见 §3.0）。
+/// 23 个工具定义（v1 的 18 个 + 方案栏的 2 个 + 导出 + 设计版式的 2 个）和两版 instructions（DESIGN §10.1；schema 规则见 §3.0）。
 /// - 全部写在下面一个原始 JSON 字符串里，启动时解析一次：大字典字面量会让 Xcode 16 / Swift 6.1 的类型检查超时（5277c01）。
 /// - 会随代码变的名单不写死：style / look / kit 的 enum、模板和分类的数目，启动时从 CollageStyles.all、CollageLook、
 ///   CollageKitID、CollageTemplates.builtin 算出来填进去。
@@ -34,7 +34,7 @@ enum MCPToolDefs {
 
     static let liveInstructions = """
     xuanpian 是本机「选片工具」（photo culling + collage）的接口，这一版只做实时：用户开着 app 时，读 app 当前打开的那一场（判决 pick/usable/reject、废片理由、章节、场、近似重复、人脸/闭眼/锐度/EXIF、预览图），以及改判、在 app 里定位照片、切场次、套拼图模板、一键成套、换封面、改标题/刊头/期号、换样式色调、存成方案、切方案、导出图片、撤销，都由 app 自己执行，窗口里当场看得到，用户按 ⌘Z 能撤。app 没开时只能看状态、列场次、列模板，其余工具返回 app_not_running：MCP 绝不会启动 app，请用户自己打开。先调 app_status。
-    流程：app_status（live.state 是 live 才能用其余工具；live.open_session 是 app 当前打开的那一场，所有 session 参数都填它）→ cull_session_overview → cull_list_groups / cull_list_photos → cull_get_photos / cull_preview_photos（看眼睛、对焦用 crop=face）。要别的场次：cull_list_sessions 找到它，再 app_open_session（只能打开 app「最近场次」里的；会清掉 app 里这一场的撤销记录，先问用户）。改判用 cull_set_verdicts，给用户看用 cull_show_photos；拼图先 collage_get_state，再 collage_apply_template / collage_run_kit / collage_next_cover / collage_set_text / collage_set_style，结果里有 app 当前画面的预览；要给用户出几版设计挑，每排好一版就 collage_save_variant 存成方案（不会被下一版盖掉），collage_open_variant 切回某一版；导出成图片用 collage_export（清晰度 1–3 倍，写到导出页设的目录）；撤销 AI 自己刚做的一步用 app_undo。
+    流程：app_status（live.state 是 live 才能用其余工具；live.open_session 是 app 当前打开的那一场，所有 session 参数都填它）→ cull_session_overview → cull_list_groups / cull_list_photos → cull_get_photos / cull_preview_photos（看眼睛、对焦用 crop=face）。要别的场次：cull_list_sessions 找到它，再 app_open_session（只能打开 app「最近场次」里的；会清掉 app 里这一场的撤销记录，先问用户）。改判用 cull_set_verdicts，给用户看用 cull_show_photos；拼图先 collage_get_state，再 collage_apply_template / collage_run_kit / collage_next_cover / collage_set_text / collage_set_style，结果里有 app 当前画面的预览；模板不合适就自己设计：collage_list_templates（include=["layout_grammar"]）看语法，collage_set_layout 把版式放进当前页（collage_auto_layout 让 app 的引擎先排一版，读回 layout 再改）；要给用户出几版设计挑，每排好一版就 collage_save_variant 存成方案（不会被下一版盖掉），collage_open_variant 切回某一版；导出成图片用 collage_export（清晰度 1–3 倍，写到导出页设的目录）；撤销 AI 自己刚做的一步用 app_undo。
     出错时：user_busy 的 data.transient 为 true 是用户正在拖动或打字，等几秒再调；为 false 是开着对话框、连拍挑选或裁切，请用户先关掉，不要重试。app_outcome_unknown：用结果里的 op_id 原样再调同一个工具，不要换工具。session_not_open：先 app_status 看 open_session。其他错误按 hint 改。读到的是 app 内存里的状态（含还没存盘的改动）。图片是缩小预览，文字结果里有预览文件的路径；不要直接读原图（几十 MB）。session 可以填照片文件夹的绝对路径，也可以填 16 位 session key。
     """
 
@@ -116,7 +116,7 @@ enum MCPToolDefs {
     }
     """#
 
-    // MARK: - 21 个工具（顺序 = §10.1 表的 1–18，再接方案栏的 19、20 和导出 21）
+    // MARK: - 23 个工具（顺序 = §10.1 表的 1–18，再接方案栏的 19、20、导出 21、设计版式的 22、23）
 
     private static let definitionsJSON = #"""
     [
@@ -135,11 +135,11 @@ enum MCPToolDefs {
      "annotations":"$READ","_meta":"$ALWAYS_LOAD"},
 
     {"name":"collage_list_templates","title":"拼图模板与成套",
-     "description":"列出拼图和相册能用的东西：内置模板（现在 {{template_count}} 个，{{category_count}} 个分类：{{categories}}），每个模板的分类、照片格数、需要几张横图和竖图（photo_cells；fit_aspects 为 true 的套用时还会按照片比例重排）；一键成套 kits（{{kits}}）；样式 style、色调 look、画布 canvas（这一版没有换画布的工具，要换请用户在 app 里换）。collage_apply_template 的 template、collage_run_kit 的 kit、collage_set_style 的 style/look 就取这里的值。",
-     "description_disabled":"列出拼图和相册能用的东西：内置模板（现在 {{template_count}} 个，{{category_count}} 个分类：{{categories}}），每个模板的分类、照片格数、需要几张横图和竖图（photo_cells；fit_aspects 为 true 的套用时还会按照片比例重排）；一键成套 kits（{{kits}}）；样式 style、色调 look、画布 canvas。这个服务器设了 LABELGUI_MCP_LIVE=0，不连 app，只能列出来看。",
+     "description":"列出拼图和相册能用的东西：内置模板（现在 {{template_count}} 个，{{category_count}} 个分类：{{categories}}），每个模板的分类、照片格数、需要几张横图和竖图（photo_cells；fit_aspects 为 true 的套用时还会按照片比例重排）；一键成套 kits（{{kits}}）；样式 style、色调 look、画布 canvas；要自己设计版式，include 里写 layout_grammar 拿语法（节点怎么写、字体、字重、取景、形状和例子，默认不列）。collage_apply_template 的 template、collage_run_kit 的 kit、collage_set_style 的 style/look、collage_set_layout 的 canvas 就取这里的值；列表里没有的画布请用户在 app 里换。",
+     "description_disabled":"列出拼图和相册能用的东西：内置模板（现在 {{template_count}} 个，{{category_count}} 个分类：{{categories}}），每个模板的分类、照片格数、需要几张横图和竖图（photo_cells；fit_aspects 为 true 的套用时还会按照片比例重排）；一键成套 kits（{{kits}}）；样式 style、色调 look、画布 canvas；自己设计版式用的语法（include 里写 layout_grammar）。这个服务器设了 LABELGUI_MCP_LIVE=0，不连 app，只能列出来看。",
      "inputSchema":{"type":"object","properties":{
        "category":{"type":"string","maxLength":40,"description":"只列这个分类（或名字里含这几个字）的模板"},
-       "include":{"type":"array","items":{"type":"string","enum":["templates","kits","styles","looks","canvases"]},"uniqueItems":true,"description":"只要这几部分，默认全部"}},
+       "include":{"type":"array","items":{"type":"string","enum":["templates","kits","styles","looks","canvases","layout_grammar"]},"uniqueItems":true,"description":"只要这几部分；默认是除了 layout_grammar 以外的全部"}},
       "additionalProperties":false},
      "annotations":"$READ"},
 
@@ -296,12 +296,17 @@ enum MCPToolDefs {
      "annotations":"$WRITE_IDEMPOTENT"},
 
     {"name":"collage_set_style","title":"换样式/色调",
-     "description":"换 app 里当前拼图的样式和色调（= 检视器样式页点预设）：style 是整套「纸、缝、边、框」的预设，look 是整组照片统一的色调，look_strength 是色调强度 0–1。至少给一个；一次调用是一步撤销。和界面一样，换样式也会改「下次新建拼图沿用的默认样式」。取值见 collage_list_templates。结果里有 app 当前画面的预览图。",
+     "description":"换 app 里当前拼图的样式和色调（= 检视器样式页）：style 是整套「纸、缝、边、框」的预设，look 是整组照片统一的色调，look_strength 是色调强度 0–1；margin 外边距、gutter 缝宽、corner 圆角、background 底色、shape 默认的格子形状单独调（给了 style 就在预设上面改）。至少给一个；一次调用是一步撤销。和界面一样，换样式也会改「下次新建拼图沿用的默认样式」。取值见 collage_list_templates。结果里有 app 当前画面的预览图。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "style":{"type":"string","enum":"$STYLES"},
        "look":{"type":"string","enum":"$LOOKS"},
        "look_strength":{"type":"number","minimum":0,"maximum":1},
+       "margin":{"type":"number","minimum":0,"maximum":0.25,"description":"外边距，相对画布短边；0 = 铺满"},
+       "gutter":{"type":"number","minimum":0,"maximum":0.1,"description":"格子之间的缝宽，相对画布短边；0 = 没有缝"},
+       "corner":{"type":"number","minimum":0,"maximum":0.25,"description":"圆角半径（格子形状是 rounded 时），相对画布短边"},
+       "background":{"type":"string","maxLength":32,"description":"底色：#RRGGBB 或色名（layout_grammar.named_colors）"},
+       "shape":{"type":"string","enum":["arch","circle","rect","rounded"],"description":"格子的默认形状；版式里单格写了 shape 的以单格为准"},
        "if_digest":"$IF_DIGEST",
        "reveal":"$REVEAL",
        "op_id":"$OP_ID",
@@ -354,6 +359,35 @@ enum MCPToolDefs {
        "deadline_seconds":"$DEADLINE_50",
        "reveal":"$REVEAL",
        "op_id":"$OP_ID"},
+      "required":["session"],"additionalProperties":false},
+     "annotations":"$WRITE"},
+
+    {"name":"collage_set_layout","title":"设计版式",
+     "description":"把你自己设计的版式放进 app 当前这一页（不用模板）：怎么切分、哪张照片放哪一格、取景、形状、完整显示、压字、文字格、留白都由 layout 定，语法和例子见 collage_list_templates（include 里写 layout_grammar）。设计之前先 collage_get_state 看 canvas（画布尺寸）、tray_photos（照片 id 和像素尺寸）和 layout（现在的版式）。照片要是托盘里或这一场的：不在托盘的会自动进托盘，要等 app 算完人脸信息。fit=true 让 app 按照片比例重算各块比例（结构不变）；默认按你写的 sizes。canvas 换画布（取值见 collage_list_templates 的 canvases），只有一页的拼图才能换。写错了回 invalid_argument 并指出错在哪（如 layout.items[1].photo），什么都不改。把读到的 layout 原样发回来不会改任何东西（changed:false），可以放心在它上面改几处再发。只换当前页；页上的贴纸、手写字留着；散落版、印样页会变成普通版式。一次调用是一步撤销（含进托盘的照片）。结果里有 layout、cells（每格的位置）和 app 当前画面的预览图，看预览再调。",
+     "inputSchema":{"type":"object","properties":{
+       "session":"$SESSION",
+       "layout":{"type":"string","minLength":2,"maxLength":200000,"description":"版式树的 JSON 文本，语法见 collage_list_templates（include 里写 layout_grammar）；collage_get_state 读到的 layout 写成文本就能发回来"},
+       "canvas":{"type":"string","enum":["3:4","1:1","grid9","4:5","9:16","16:9","carousel3","a4","album30","album25","album20","album3020"],"description":"顺便换画布；不填 = 不换"},
+       "fit":{"type":"boolean","default":false,"description":"true = 按照片比例重算各块比例（没看过照片比例时用）"},
+       "if_digest":"$IF_DIGEST",
+       "deadline_seconds":"$DEADLINE_50",
+       "reveal":"$REVEAL",
+       "op_id":"$OP_ID",
+       "inline":"$INLINE"},
+      "required":["session","layout"],"additionalProperties":false},
+     "annotations":"$WRITE_IDEMPOTENT"},
+
+    {"name":"collage_auto_layout","title":"引擎排一版",
+     "description":"让 app 的排版引擎给当前这一页排一版（= 拼图页「换一批」，每调一次换一种）：引擎按照片比例切格子、按人脸裁切。photos 指定用哪几张（托盘里或这一场的，不在托盘的自动进托盘）；count 让 app 从托盘挑几张；都不给就用这一页现在的照片（页上没照片就从托盘挑，最多 12 张）。文字格、压字尽量留着。结果里的 layout 就是这一版的语法：想改就在它上面改几处，再 collage_set_layout 发回来。婚礼 fine-art 相册的跨页按编排出版式，这里回 invalid_state。排的时候用户动了拼图回 superseded，什么都不改。一次调用是一步撤销。结果里有 app 当前画面的预览图。",
+     "inputSchema":{"type":"object","properties":{
+       "session":"$SESSION",
+       "photos":{"type":"array","items":{"type":"string","minLength":1,"maxLength":256},"minItems":1,"maxItems":36,"uniqueItems":true,"description":"用这几张；和 count 只能给一个"},
+       "count":{"type":"integer","minimum":1,"maximum":36,"description":"从托盘挑几张；和 photos 只能给一个"},
+       "if_digest":"$IF_DIGEST",
+       "deadline_seconds":"$DEADLINE_50",
+       "reveal":"$REVEAL",
+       "op_id":"$OP_ID",
+       "inline":"$INLINE"},
       "required":["session"],"additionalProperties":false},
      "annotations":"$WRITE"}
     ]

@@ -316,7 +316,7 @@ TOOLS_ALL = ["app_status", "cull_list_sessions", "collage_list_templates", "cull
             "cull_get_photos", "cull_list_groups", "cull_preview_photos", "collage_get_state", "app_open_session",
             "cull_set_verdicts", "cull_show_photos", "collage_apply_template", "collage_run_kit", "collage_next_cover",
             "collage_set_text", "collage_set_style", "app_undo", "collage_save_variant", "collage_open_variant",
-            "collage_export"]
+            "collage_export", "collage_set_layout", "collage_auto_layout"]
 ALWAYS = TOOLS_ALL[:3]
 APP_TOOLS = TOOLS_ALL[3:]
 # 描述里出现的 app_* / cull_* / collage_* 名字里，这些是错误码不是工具。
@@ -674,7 +674,7 @@ s.request("tl", "tools/list")
 tl = s.reply("tl")
 tools = (tl or {}).get("result", {}).get("tools", [])
 names = [t.get("name") for t in tools]
-check(names == TOOLS_ALL, f"tools/list 恰好 21 个、顺序同 §10.1（再接方案栏的 2 个和导出）：{names}")
+check(names == TOOLS_ALL, f"tools/list 恰好 23 个、顺序同 §10.1（再接方案栏的 2 个、导出和设计版式的 2 个）：{names}")
 TL_LIVE = tools
 
 
@@ -1176,6 +1176,16 @@ def check_templates(s, lt, text):
     check(tpls and not bad and len({t["name"] for t in tpls}) == len(tpls),
           f"每个模板字段齐、没有重名；网格模板的 photo_cells（横 / 竖 / 方）加起来等于 photo_slots，散落和印样是 null {bad[:4]}")
     check(len(text) <= 20000 and "\\/" not in text, f"collage_list_templates 的 text {len(text)} 字（≤ 20000）")
+    # 设计版式的语法：默认不列（省字），要了才给；取值和 schema、代码对得上
+    check("layout_grammar" not in lt, "collage_list_templates 默认不带 layout_grammar")
+    res, fg, _ = s.tool("tg", "collage_list_templates", {"include": ["layout_grammar"]})
+    lg = (fg or {}).get("layout_grammar") or {}
+    check(lg.get("grammar") and lg.get("fonts") and lg.get("weights") and lg.get("framings") == ["auto", "close", "full", "half"]
+          and sorted(lg.get("shapes") or []) == props("collage_set_style")["shape"]["enum"]
+          and lg.get("fits") == ["fill", "contain", "contain_blur"] and "top_left" in (lg.get("anchors") or [])
+          and (lg.get("limits") or {}).get("cells", 0) >= 24
+          and props("collage_set_layout")["canvas"]["enum"] == [field(c, "key") for c in lt.get("canvases", [])],
+          "include=[layout_grammar]：语法、字体、字重、取景、形状、位置都有，形状和 collage_set_style 的 enum、画布和 canvases 对得上")
     res, f1, _ = s.tool("tc1", "collage_list_templates", {"category": "时尚刊", "include": ["templates"]})
     n1 = by_cat.get("时尚刊", 0)
     check(f1 is not None and set(f1) == {"categories", "templates"} and n1 > 0 and len(f1["templates"]) == n1
