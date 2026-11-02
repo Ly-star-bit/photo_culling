@@ -1876,8 +1876,11 @@ __attribute__((constructor)) static void init(void) {
         want = {"none": ("DEAD(SIGPIPE)", "DEAD(SIGPIPE)"), "accepted_only": ("DEAD(SIGPIPE)", "alive"),
                 "listen_inherit": ("alive", "alive"), "msg_nosignal": ("alive", "alive"), "all": ("alive", "alive")}
 
-        def verdict(h):
-            time.sleep(0.5)
+        def verdict(h, patience=0.5):
+            """patience：最多等这么久。该死的一死就停（CI 的机器慢，别把「还没轮到写」算成没死）；该活的等够再看。"""
+            deadline = time.monotonic() + patience
+            while time.monotonic() < deadline and h.alive():
+                time.sleep(0.05)
             v = "alive" if h.alive() else f"DEAD({'SIGPIPE' if h.proc.returncode == -signal.SIGPIPE else h.proc.returncode})"
             h.term()
             return v
@@ -1894,19 +1897,36 @@ __attribute__((constructor)) static void init(void) {
             s_.close()
             h.signal(signal.SIGCONT)
             a = verdict(h)
-            # B：8 MB 回复写到一半客户端关掉（3 次）
+            # B：8 MB 回复写到一半客户端关掉。该活的 3 次都要活着；该死的（对照组）多试几次、多等一会儿：机器慢的时候
+            # 回复可能还没开始写（10 秒没回，以前把这个超时当成「宿主被杀了」、连接也没关，宿主就活着，对照组偶发变红）
             h = Host(f"D-{mode}-b", LABELGUI_LIVE_TEST_SIGPIPE=mode)
-            for _ in range(3):
+            dies = want[mode][1] != "alive"
+            notes = []
+            for _ in range(8 if dies else 3):
+                if not h.alive():
+                    break
                 try:
                     c = Raw(h)
+                except (OSError, EOFError) as e:
+                    notes.append(f"连不上 {type(e).__name__}")
+                    break           # 宿主多半已经被 SIGPIPE 杀了
+                try:
                     c.req("test.blob", {"bytes": 8_000_000})
-                    c.s.recv(10_000)
-                    c.close()
-                except (OSError, EOFError):
-                    break           # 宿主已经被 SIGPIPE 杀了
-            b = verdict(h)
+                    head = c.s.recv(10_000)
+                    notes.append(f"读到 {len(head)} 字节")
+                except socket.timeout:
+                    notes.append("10 秒没回")
+                except (OSError, EOFError) as e:
+                    notes.append(f"读不了 {type(e).__name__}")
+                c.close()
+                if dies:
+                    deadline = time.monotonic() + 1
+                    while time.monotonic() < deadline and h.alive():
+                        time.sleep(0.05)
+            b = verdict(h, 3 if dies else 0.5)
             got[mode] = (a, b)
-            check(got[mode] == want[mode], f"{mode:15s} accept 之前就走了：{a:14s} 写到一半关掉：{b}（R6：{want[mode]}）")
+            check(got[mode] == want[mode], f"{mode:15s} accept 之前就走了：{a:14s} 写到一半关掉：{b}（R6：{want[mode]}）"
+                  + ("" if got[mode] == want[mode] else f" {notes}"))
 
     # ============================================================ E. --app-ui 不开桥（§9.8.2 第 30 条）
     if "E" in ONLY and not VIEW:
