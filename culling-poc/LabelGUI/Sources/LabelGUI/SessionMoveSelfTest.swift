@@ -1,4 +1,6 @@
 import Foundation
+import CoreGraphics
+import ImageIO
 
 /// 挪了的文件夹认得回来（2026-11 全项目审查 S04 第一步）、存储卡当一场打开时不写卡（S07）：
 ///     LABELGUI_DATA_DIR=<临时目录> LabelGUI --session-move-selftest
@@ -44,6 +46,7 @@ enum SessionMoveSelfTest {
             if SessionLocation.identity(alias.path) == SessionLocation.identity(root.path) { root = alias }
         }
         pureRebase(root.appendingPathComponent("pure"))
+        relocationPure(root.appendingPathComponent("relocation-pure"))
         let model = AppModel.make(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir),
                                   bridge: .none)
         renamedThenPicked(root.appendingPathComponent("pick"), model: model)
@@ -432,7 +435,10 @@ enum SessionMoveSelfTest {
         let g = root.appendingPathComponent("移动硬盘上的")
         let h = root.appendingPathComponent("NAS 上的")
         let empty = root.appendingPathComponent("选错的空文件夹")
+        let sameNames = root.appendingPathComponent("同一台相机的另一场")
+        let ownShoot = root.appendingPathComponent("另开过一场的同名文件夹")
         FileSafetySelfTest.writeShoot(g, shoot(g))
+        stampLayer1(g)
         check(batch.switchSession(to: g) && batch.items.count == 3, "打开原来的文件夹")
         batch.setOverride("DSCF0001", .pick)
         try? fm.copyItem(at: g, to: h)
@@ -450,7 +456,34 @@ enum SessionMoveSelfTest {
         check(!batch.relocateSession(row, to: empty) && (batch.lastError ?? "").contains("找不到"),
               "指给一个没有这一场照片的文件夹：不换", batch.lastError ?? "")
         check(entry(batch, key(g))?.bookmark == row.bookmark, "选错了：书签没换")
-        check(batch.relocateSession(row, to: h), "指给拷过去的文件夹", batch.lastError ?? "")
+        // 同名、不是同一批照片（计数器重叠、两台同型号机身）：文件名、子文件夹全对得上，大小不一样 —— 不换，说清楚对上几张。
+        for (i, rel) in ["DSCF0001.JPG", "DSCF0002.JPG", "第二机位/IMG_0003.JPG"].enumerated() {
+            let url = sameNames.appendingPathComponent(rel)
+            try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Data(repeating: 0x42, count: 700 + i).write(to: url)
+        }
+        check(!batch.relocateSession(row, to: sameNames)
+              && (batch.lastError ?? "").contains("找到 3 张") && (batch.lastError ?? "").contains("只有 0 张")
+              && (batch.lastError ?? "").contains("3 张同名"),
+              "指给一个同名文件全对得上、大小不一样的文件夹：不换，说找到 3 张、0 张是同一个", batch.lastError ?? "")
+        check(entry(batch, key(g))?.bookmark == row.bookmark, "同名的另一场：书签没换")
+        // 另开过一场（自己有 manifest）的同名文件夹：照样按大小比，不换。
+        FileSafetySelfTest.writeShoot(ownShoot, [
+            Fake(id: "DSCF0001", raw: "DSCF0001.JPG", content: Data(repeating: 0x43, count: 900)),
+            Fake(id: "DSCF0002", raw: "DSCF0002.JPG", content: Data(repeating: 0x43, count: 901)),
+            Fake(id: "IMG_0003", raw: "第二机位/IMG_0003.JPG", content: Data(repeating: 0x43, count: 902)),
+        ])
+        check(!batch.relocateSession(row, to: ownShoot) && (batch.lastError ?? "").contains("只有 0 张")
+              && entry(batch, key(g))?.bookmark == row.bookmark,
+              "指给另开过一场、同名不同片的文件夹：不换、书签没动", batch.lastError ?? "")
+        // 一张对得上、两张同名不同片：没到八成，不换。
+        let mixed = root.appendingPathComponent("混着的")
+        try? fm.copyItem(at: h, to: mixed)
+        try? Data(repeating: 0x44, count: 333).write(to: mixed.appendingPathComponent("DSCF0002.JPG"))
+        try? Data(repeating: 0x44, count: 334).write(to: mixed.appendingPathComponent("第二机位/IMG_0003.JPG"))
+        check(!batch.relocateSession(row, to: mixed) && (batch.lastError ?? "").contains("只有 1 张"),
+              "3 张里只有 1 张是同一个文件：不换", batch.lastError ?? "")
+        check(batch.relocateSession(row, to: h), "指给拷过去的文件夹（大小都对得上）", batch.lastError ?? "")
         check(batch.sessionDir.lastPathComponent == key(g) && batch.items.count == 3 && batch.overrides["DSCF0001"] == .pick,
               "key 不变，3 张、人工改判都在")
         check(sameDir(batch.photoDir, h) && pathsUnder(batch, h) && manifestAt(key(g), h),
@@ -462,6 +495,84 @@ enum SessionMoveSelfTest {
         // 重新定位以后再直接选它：新位置自己那一场没分析过（没有 manifest），认回原来那一场。
         check(batch.switchSession(to: h) && batch.sessionDir.lastPathComponent == key(g),
               "重新定位以后直接选新位置：认回原来那一场")
+    }
+
+    /// writeShoot 写的 layer1 没有 src_size：按真文件补上（分析引擎就是这样记的，记的是解码用的那个文件）。
+    private static func stampLayer1(_ dir: URL) {
+        let session = appDataDir.appendingPathComponent("sessions/\(key(dir))")
+        let manifestURL = session.appendingPathComponent("manifest.json")
+        let layer1URL = session.appendingPathComponent("layer1_results.json")
+        func read(_ url: URL) -> [String: Any]? {
+            (try? Data(contentsOf: url)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        }
+        guard let photos = read(manifestURL)?["photos"] as? [[String: Any]], var layer1 = read(layer1URL),
+              var results = layer1["results"] as? [[String: Any]] else {
+            check(false, "给 layer1 补 src_size")
+            return
+        }
+        var sizes: [String: Int] = [:]
+        for photo in photos {
+            guard let id = photo["id"] as? String, let path = photo["decode_path"] as? String,
+                  let stamp = ImageLoader.FileStamp.of(URL(fileURLWithPath: path)) else { continue }
+            sizes[id] = stamp.size
+        }
+        for i in results.indices {
+            if let id = results[i]["id"] as? String, let size = sizes[id] { results[i]["src_size"] = size }
+        }
+        layer1["results"] = results
+        try? JSONSerialization.data(withJSONObject: layer1).write(to: layer1URL)
+    }
+
+    /// 重新定位防选错的判断（纯函数）+ 指纹比对的三层（大小、修改时间、EXIF 拍摄时间）。
+    private static func relocationPure(_ dir: URL) {
+        print("== 重新定位防选错：判断表 + 指纹比对")
+        typealias R = SessionLocation.RelocationCheck
+        check(!R(sampled: 50).accepted, "一张都没找到 → 不换")
+        check(R(sampled: 50, matched: 40, different: 10).accepted, "分得出的 50 张里 40 张是同一个（八成）→ 换")
+        check(!R(sampled: 50, matched: 39, different: 11).accepted, "不到八成 → 不换")
+        check(!R(sampled: 50, matched: 0, different: 3).accepted, "找到的同名文件全是别的照片 → 不换")
+        check(R(sampled: 50, matched: 3).accepted, "只找到 3 张、都是同一个（挪了一部分）→ 换：找不到的不算反对")
+        check(!R(sampled: 50, matched: 2, different: 1).accepted, "3 张里 2 张对上（不到八成）→ 不换")
+        check(R(sampled: 2, matched: 2).accepted, "整场只有 2 张、都对上 → 换（至少对上 min(3, 分得出的张数)）")
+        check(R(sampled: 50, unverified: 5).accepted, "很老的场次（什么都没记）：照旧按名字认")
+
+        let fm = FileManager.default
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let plain = dir.appendingPathComponent("没有 EXIF.JPG")
+        try? FileSafetySelfTest.tinyJPEG().write(to: plain)
+        let stamp = ImageLoader.FileStamp(size: 1000, mtime: 1_700_000_000)
+        check(SessionLocation.sameFile(stamp, at: plain, layer1: ["src_size": 1000], captureTime: nil) == true, "记了大小：一样 → 同一个")
+        check(SessionLocation.sameFile(stamp, at: plain, layer1: ["src_size": 1001, "src_mtime": 1_700_000_000.0],
+                                       captureTime: nil) == false, "记了大小：不一样 → 不是（时间对得上也不算）")
+        check(SessionLocation.sameFile(stamp, at: plain, layer1: ["src_mtime": 1_700_000_001.5], captureTime: nil) == true,
+              "没记大小：修改时间差 2 秒以内 → 同一个")
+        check(SessionLocation.sameFile(stamp, at: plain, layer1: ["src_mtime": 1_600_000_000.0], captureTime: nil) == false,
+              "没记大小：修改时间对不上、也没有 EXIF → 不是")
+        check(SessionLocation.sameFile(stamp, at: plain, layer1: nil, captureTime: "2026-03-21T10:00:00") == nil,
+              "什么都没记、文件里也没有拍摄时间 → 分不出")
+        let tagged = dir.appendingPathComponent("带 EXIF.JPG")
+        writeJPEG(tagged, dateTimeOriginal: "2026:03:21 10:00:00")
+        check(SessionLocation.exifCaptureTime(tagged) == "2026-03-21T10:00:00", "只读文件头拿 EXIF 拍摄时间，写成 capture_time 的写法",
+              SessionLocation.exifCaptureTime(tagged) ?? "nil")
+        check(SessionLocation.sameFile(stamp, at: tagged, layer1: nil, captureTime: "2026-03-21T10:00:00") == true,
+              "没记大小、时间：EXIF 拍摄时间一样 → 同一个")
+        check(SessionLocation.sameFile(stamp, at: tagged, layer1: ["src_mtime": 1_600_000_000.0],
+                                       captureTime: "2026-03-21T10:00:00") == true,
+              "修改时间变了（拷贝没保留）、拍摄时间一样 → 同一个")
+        check(SessionLocation.sameFile(stamp, at: tagged, layer1: nil, captureTime: "2026-03-22T09:00:00") == false,
+              "拍摄时间不一样 → 不是")
+    }
+
+    /// 一张带 EXIF DateTimeOriginal 的小 JPEG。
+    private static func writeJPEG(_ url: URL, dateTimeOriginal: String) {
+        guard let ctx = CGContext(data: nil, width: 16, height: 16, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+              let image = ctx.makeImage(),
+              let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) else { return }
+        let exif: [CFString: Any] = [kCGImagePropertyExifDateTimeOriginal: dateTimeOriginal]
+        let props: [CFString: Any] = [kCGImagePropertyExifDictionary: exif]
+        CGImageDestinationAddImage(dest, image, props as CFDictionary)
+        CGImageDestinationFinalize(dest)
     }
 
     // MARK: - 实时桥

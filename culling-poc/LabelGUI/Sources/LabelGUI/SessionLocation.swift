@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import ImageIO
 
 // MARK: - 挪了的文件夹认得回来（全项目审查 S04 第一步）
 //
@@ -98,7 +99,7 @@ enum SessionLocation {
         let new = folder.path
         guard old != new else { return (nil, false) }
         if let a = identity(old), let b = identity(new), a == b { return (nil, false) }
-        let relativizer = relativizer(forRoot: old)
+        let relativizer = Self.relativizer(forRoot: old)
         func moved(_ path: String) -> String? {
             let rel = relativizer.relative(path)
                 ?? resolvedThroughExistingParent(path).flatMap { relativizer.relative($0) }
@@ -149,21 +150,107 @@ enum SessionLocation {
         return (ManifestRebase(from: old, rows: rows, unmatched: unmatched), false)
     }
 
-    /// 「重新定位文件夹…」之前的检查：这一场的照片（按 photo_dir 下的相对位置；没有 photo_dir 的按文件名）在 `folder`
-    /// 里至少找得到一张。找到一张就停，最多看 `limit` 张。nil = manifest 读不出来（说不清）。
-    static func anyPhotoPresent(sessionDir: URL, under folder: URL, limit: Int = 300) -> Bool? {
+    /// 「重新定位文件夹…」之前的核对（防选错）：只看「有一张同名的」不够 —— 相机文件名是 DSC_0001…9999 循环编号，
+    /// 同一台机身的另一场、两台同型号机身都会有一堆同名文件，选错了就会把这一场的移废片、写 XMP 作用到那一场的原片上。
+    struct RelocationCheck: Equatable {
+        /// 抽查了几张（全场均匀抽，不只是前面几张）。
+        var sampled = 0
+        /// 按原来的子文件夹和文件名找到了，而且是同一个文件（大小一样；老场次没记大小的看修改时间、EXIF 拍摄时间）。
+        var matched = 0
+        /// 找到了同名文件，却不是同一个（大小 / 时间不一样）：多半是另一场拍摄里的同名照片。
+        var different = 0
+        /// 找到了，可这一场没记大小、时间（很老的场次），分不出是不是同一个。
+        var unverified = 0
+
+        var found: Int { matched + different + unverified }
+
+        /// 能换书签：至少找到一张；分得出的那些里八成以上是同一个文件，而且至少对上 min(3, 分得出的张数) 张。
+        /// 找不到的不算反对（挪了一部分、用户自己删过几张都正常）；全都分不出（很老的场次）的照旧按名字认。
+        var accepted: Bool {
+            guard found > 0 else { return false }
+            let checked = matched + different
+            guard checked > 0 else { return true }
+            let enoughShare = matched * 5 >= checked * 4
+            let enoughCount = matched >= min(3, checked)
+            return enoughShare && enoughCount
+        }
+    }
+
+    /// 按 photo_dir 下的相对位置（没有 photo_dir 的按文件名）在 `folder` 里找这一场的照片，全场均匀抽 `limit` 张，
+    /// 找到的和分析时记下的指纹比：layer1_results.json 的 src_size（按 id 对上 manifest 的行；记的是解码用的那个文件，
+    /// 所以找的是 decode_path）；没有 src_size 的看 src_mtime；都没有、或者时间对不上的再比 EXIF 拍摄时间和 manifest 的
+    /// capture_time。只 stat、读文件头（不解码）。nil = manifest 读不出来（说不清）。
+    static func relocationCheck(sessionDir: URL, under folder: URL, limit: Int = 50) -> RelocationCheck? {
         guard let data = try? Data(contentsOf: sessionDir.appendingPathComponent("manifest.json")),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let photos = json["photos"] as? [[String: Any]] else { return nil }
-        let old = json["photo_dir"] as? String
-        let fm = FileManager.default
-        for photo in photos.prefix(limit) {
-            guard let raw = photo["raw_path"] as? String else { continue }
-            let candidate = old.flatMap { rebased(raw, from: $0, to: folder.path) }
-                ?? folder.appendingPathComponent((raw as NSString).lastPathComponent).path
-            if fm.fileExists(atPath: candidate) { return true }
+        var layer1: [String: [String: Any]] = [:]
+        if let l1Data = try? Data(contentsOf: sessionDir.appendingPathComponent("layer1_results.json")),
+           let l1Json = try? JSONSerialization.jsonObject(with: l1Data) as? [String: Any],
+           let results = l1Json["results"] as? [[String: Any]] {
+            for row in results {
+                if let id = row["id"] as? String { layer1[id] = row }
+            }
         }
-        return false
+        let relativizer = (json["photo_dir"] as? String).map { Self.relativizer(forRoot: $0) }
+        var result = RelocationCheck()
+        let count = photos.count
+        let n = min(max(limit, 1), count)
+        for k in 0..<n {
+            let photo = photos[k * count / n]
+            guard let path = (photo["decode_path"] as? String) ?? (photo["raw_path"] as? String) else { continue }
+            result.sampled += 1
+            let rel = relativizer?.relative(path) ?? (path as NSString).lastPathComponent
+            let candidate = folder.appendingPathComponent(rel)
+            guard let stamp = ImageLoader.FileStamp.of(candidate) else { continue }
+            let row = (photo["id"] as? String).flatMap { layer1[$0] }
+            switch sameFile(stamp, at: candidate, layer1: row, captureTime: photo["capture_time"] as? String) {
+            case true?: result.matched += 1
+            case false?: result.different += 1
+            case nil: result.unverified += 1
+            }
+        }
+        return result
+    }
+
+    /// 新位置上同名的这个文件是不是分析过的那一个：记了大小的只看大小（拷贝不改大小，两张不同的照片几乎不会一字节不差）；
+    /// 没记大小的，修改时间（差 2 秒以内，exFAT 只记到 2 秒）或者 EXIF 拍摄时间有一样对得上就算。nil = 什么都没记，分不出。
+    static func sameFile(_ stamp: ImageLoader.FileStamp, at url: URL, layer1: [String: Any]?, captureTime: String?) -> Bool? {
+        if let size = (layer1?["src_size"] as? NSNumber)?.intValue { return size == stamp.size }
+        var evidence: [Bool] = []
+        if let mtime = (layer1?["src_mtime"] as? NSNumber)?.doubleValue {
+            let gap = abs(mtime - stamp.mtime)
+            evidence.append(gap < 2)
+        }
+        if let recorded = captureTime, recorded.count >= 19, let exif = exifCaptureTime(url) {
+            evidence.append(exif == String(recorded.prefix(19)))
+        }
+        guard !evidence.isEmpty else { return nil }
+        return evidence.contains(true)
+    }
+
+    /// 只读文件头拿拍摄时间（和分析时一样的先后：DateTimeOriginal、DateTimeDigitized、TIFF DateTime），写成 manifest 的
+    /// capture_time 那种写法（2026-03-21T10:00:00）。读不到 = nil。
+    static func exifCaptureTime(_ url: URL) -> String? {
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, options),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return nil }
+        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        let candidates: [String?] = [
+            exif?[kCGImagePropertyExifDateTimeOriginal] as? String,
+            exif?[kCGImagePropertyExifDateTimeDigitized] as? String,
+            tiff?[kCGImagePropertyTIFFDateTime] as? String,
+        ]
+        for case let raw? in candidates where raw.count >= 19 {
+            // EXIF 写的是「2026:03:21 10:00:00」。
+            var chars = Array(raw.prefix(19))
+            chars[4] = "-"
+            chars[7] = "-"
+            chars[10] = "T"
+            return String(chars)
+        }
+        return nil
     }
 }
 

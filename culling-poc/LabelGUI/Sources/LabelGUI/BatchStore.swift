@@ -1758,7 +1758,8 @@ final class BatchStore: ObservableObject {
     /// 「重新定位文件夹…」（审查 S04 第一步，像 Lightroom 的 Find Missing Folder）：菜单里标着「文件夹已不存在」的一场，
     /// 指给它照片现在在哪（挪到了别的盘、卷名变了）。只换书签，key 和 path 照旧钉着（现有的 pinned-key 那一套：restoreAccess
     /// 跟着书签走到新位置，switchSession 再把 manifest 里的照片路径改过去），然后打开它。判决、人工改判、客户选中、拼图都在
-    /// 场次目录里，一样不动。新位置里按原来的子文件夹和文件名一张这一场的照片都找不到的不换 —— 多半是选错了文件夹。
+    /// 场次目录里，一样不动。新位置里按原来的子文件夹和文件名找到的照片，大多数和分析时记的大小（老场次：修改时间、拍摄
+    /// 时间）对不上的不换 —— 多半是选错了文件夹（SessionLocation.relocationCheck）。
     /// 返回 false = 没换（原因在 lastError）；换了书签、却没切成（这一场还有改动没存上）的也是 false，书签留着新的。
     @discardableResult
     func relocateSession(_ entry: SessionEntry, to folder: URL) -> Bool {
@@ -1776,9 +1777,18 @@ final class BatchStore: ObservableObject {
             return false
         }
         let dir = dataDir.appendingPathComponent("sessions/\(entry.key)")
-        if SessionLocation.anyPhotoPresent(sessionDir: dir, under: folder) == false {
-            lastError = "「\(folder.lastPathComponent)」里找不到「\(entry.name)」的照片（按原来的子文件夹和文件名一张都没对上），" +
-                        "没有重新定位：看看是不是选错了文件夹"
+        // 防选错（审查）：不只看「有一张同名的」—— 同一台机身的另一场、两台同型号机身都有一堆同名文件。全场抽查、按大小
+        // （老场次按修改时间、拍摄时间）比，大多数对得上才换；对不上就不换，说清楚对上了几张。
+        if let check = SessionLocation.relocationCheck(sessionDir: dir, under: folder), !check.accepted {
+            if check.found == 0 {
+                lastError = "「\(folder.lastPathComponent)」里找不到「\(entry.name)」的照片（按原来的子文件夹和文件名一张都没对上），" +
+                            "没有重新定位：看看是不是选错了文件夹"
+            } else {
+                lastError = "「\(folder.lastPathComponent)」不像是「\(entry.name)」的照片：抽查了 \(check.sampled) 张，" +
+                            "按原来的子文件夹和文件名找到 \(check.found) 张，只有 \(check.matched) 张是同一个文件，" +
+                            "\(check.different) 张同名、大小或时间却不一样（多半是另一场拍摄，相机的文件名会重复），" +
+                            "没有重新定位：看看是不是选错了文件夹"
+            }
             return false
         }
         guard let bookmark = Self.makeBookmark(for: folder) else {
