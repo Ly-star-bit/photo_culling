@@ -99,6 +99,8 @@ final class CollageStore: ObservableObject {
     /// 只有测试宿主（--live-host 的 test.delay_next）会设：下一次一键成套算完以后、落地之前多等几秒，
     /// 好在这期间模拟用户切场次 / 改版式（§9.8.2 第 25 条）。GUI 和命令行永远是 0。
     var testKitLandingDelay: Double = 0
+    /// 自检（--collage-export-selftest）：导出时这几页（从 0 起）当成渲染失败，测缺页不出 PDF。GUI 和命令行永远是空的。
+    var testExportFailPages: Set<Int> = []
     /// 进入裁切模式时不急着记撤销：第一次真的挪动/缩放才记，双击一下再 Esc 不留空步。
     private var cropUndoPending = false
 
@@ -3520,12 +3522,15 @@ final class CollageStore: ObservableObject {
         progressText = "导出 0/\(snapshot.pages.count)…"
         let wantPDF = snapshot.mode == .album && options.pdf
         let scale = Self.exportScale(canvas: snapshot.canvas, options: options)
+        let faults = testExportFailPages
         Task { [weak self] in
             var outcome = ExportOutcome(folder: folder, scale: scale)
             defer { done?(outcome) }
             // 不攒位图（30×30cm 跨页 ~100MB 一张）：JPEG 格式记着写出的那一页（写 PDF 时从盘上逐页读），
             // PNG / TIFF 才攒进 PDF 用的那份 JPEG。
             var pdfPages: [CollageExport.PDFPage] = []
+            // 没进 PDF 的跨页（从 0 起）：渲染、写盘、编码失败的。有一个就不出 PDF。
+            var pdfMissing: [Int] = []
             var failure: String?
             var lowRes: [String] = []
             var missing: [String] = []
@@ -3541,7 +3546,8 @@ final class CollageStore: ObservableObject {
                     opts.watermark = snapshot.watermark?.exportEnabled ?? true
                     let report = CollageRender.RenderReport()
                     opts.report = report
-                    guard let image = CollageRender.render(page: page, project: snapshot, hints: hints, options: opts) else {
+                    guard !faults.contains(i),
+                          let image = CollageRender.render(page: page, project: snapshot, hints: hints, options: opts) else {
                         return PageResult(pdfData: nil, error: "第 \(i + 1) 页渲染失败", lowRes: [], missing: [])
                     }
                     do {
@@ -3554,7 +3560,7 @@ final class CollageStore: ObservableObject {
                         return PageResult(pdfData: nil, error: error.localizedDescription, lowRes: [], missing: [])
                     }
                 }.value
-                if let data = result.pdfData { pdfPages.append(data) }
+                if let data = result.pdfData { pdfPages.append(data) } else { pdfMissing.append(i) }
                 if let f = result.error, failure == nil { failure = f }
                 // 这一页出错时也照实报已经写出的（九宫格 / 轮播先写整张、再写切片，切片写失败时整张已经在盘上了；
                 // 文件名是这次新起的，盘上有就是这次写的）
@@ -3571,7 +3577,11 @@ final class CollageStore: ObservableObject {
                 self.progressFraction = Double(i + 1) / Double(snapshot.pages.count)
                 self.progressText = "导出 \(i + 1)/\(snapshot.pages.count)…"
             }
-            if wantPDF, let pdfName = plan.pdf, !pdfPages.isEmpty, !(self?.exportCancelled ?? true) {
+            // 缺页的 PDF 不能拿去印（页序整体前移、文件名照常，最容易直接发给印厂）：有跨页没写出来就不出 PDF。
+            if wantPDF, plan.pdf != nil, !pdfMissing.isEmpty, !(self?.exportCancelled ?? true) {
+                let note = Self.pdfSkippedNote(pdfMissing)
+                failure = failure.map { "\($0)；\(note)" } ?? note
+            } else if wantPDF, let pdfName = plan.pdf, !pdfPages.isEmpty, !(self?.exportCancelled ?? true) {
                 self?.progressText = "生成 PDF…"
                 let pdfURL = folder.appendingPathComponent(pdfName)
                 let pages = pdfPages
@@ -3609,11 +3619,23 @@ final class CollageStore: ObservableObject {
             }
             if let warning = Self.exportWarning(missing: missing, lowRes: lowRes, signatureLost: signatureLost,
                                                 fillerBody: fillerBody) {
-                self.lastError = warning
+                // 失败了的不让软警告盖掉「导出失败」（以前缺图、用了预览的提示一来，失败就看不见了）。
+                if let failure, !self.exportCancelled {
+                    self.lastError = "导出失败: \(failure)。另外：\(warning)"
+                } else {
+                    self.lastError = warning
+                }
                 outcome.warning = warning
             }
         }
         return nil
+    }
+
+    /// 相册有跨页没写出来、没生成 PDF 时 failure 里接的一句（pages 从 0 起）。
+    nonisolated static func pdfSkippedNote(_ pages: [Int]) -> String {
+        let listed = pages.prefix(8).map { "\($0 + 1)" }.joined(separator: "、")
+        let more = pages.count > 8 ? " 等 \(pages.count) 个" : ""
+        return "没生成 PDF：第 \(listed)\(more) 个跨页没写出来（缺页的 PDF 不能拿去印），处理好以后重新导出"
     }
 
     /// 成品里有退化的地方：说清楚是哪几张、缺了什么（导出本身不算失败）。命令行 renderexport 也打印这一句。
@@ -3756,7 +3778,11 @@ final class CollageStore: ObservableObject {
             }
             try CollageExport.write(image, to: url, format: options.format, quality: options.quality, dpi: canvas.dpi)
             guard wantPDF else { return nil }
-            return CollageExport.encode(image, format: .jpeg, quality: 0.93, dpi: canvas.dpi).map { .data($0) }
+            // PDF 用的那份编不出来要报错（以前返回 nil 不记失败，这一页悄悄从 PDF 里少掉）。
+            guard let jpeg = CollageExport.encode(image, format: .jpeg, quality: 0.93, dpi: canvas.dpi) else {
+                throw CollageExport.ExportError.pdfEncode(mainName)
+            }
+            return .data(jpeg)
         }
         let trimmed = CollageExport.trimmed(image, bleed: canvas.bleed * scale) ?? image
         try CollageExport.write(image, to: dir.appendingPathComponent(mainName), format: options.format,

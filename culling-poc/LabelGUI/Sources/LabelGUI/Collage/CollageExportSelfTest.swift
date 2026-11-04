@@ -9,6 +9,8 @@ import ImageIO
 ///    有文件（不覆盖）都抛错，盘上不留 PDF 也不留临时文件，已有的那个文件原样不动；verifyPDF 认得出空文件、截断、页数不对。
 /// 2. 相册导出全流程（CollageStore.startExport，导出按钮和 MCP 同一条路）：JPEG（PDF 从盘上的跨页文件读）、PNG（PDF 用
 ///    另编的 JPEG）都写出每个跨页 + 一份页数对的 PDF，PDF 列在 files 最后，目录里没有临时文件。
+/// 3. 相册有跨页没写出来（testExportFailPages 当成渲染失败）：不出 PDF（盘上没有、files 里没有、没有临时文件），failure 写明
+///    缺第几个跨页，写出来的跨页照实列出；同一次导出还有软警告（照片读不了）时「导出失败」不被它盖掉，警告接在后面。
 /// 全过退出 0，否则 1。
 enum CollageExportSelfTest {
 
@@ -26,6 +28,8 @@ enum CollageExportSelfTest {
         let store = CollageStore(dataDir: appDataDir)
         print("== 相册导出全流程")
         albumExport(store, root.appendingPathComponent("album"), check: check)
+        print("== 相册有跨页没写出来")
+        albumFailure(store, root.appendingPathComponent("fail"), check: check)
 
         try? FileManager.default.removeItem(at: root)
         if check.failures.isEmpty {
@@ -99,6 +103,12 @@ enum CollageExportSelfTest {
             CollagePage(root: .split(.row, 0.5, .leaf(CollageCell(kind: .empty)), .leaf(CollageCell(kind: .empty))))
         }
         return p
+    }
+
+    static func photoCell(_ id: String) -> CollageCell {
+        var cell = CollageCell(kind: .photo)
+        cell.photoID = id
+        return cell
     }
 
     /// 小号的相册跨页画布（300 dpi、带出血、中缝）：渲染、编码都快。
@@ -247,5 +257,73 @@ enum CollageExportSelfTest {
             check(store.lastError == nil && store.progressText.hasPrefix("导出完成"), "\(format.label)：界面显示导出完成",
                   "\(store.progressText) \(store.lastError ?? "")")
         }
+    }
+
+    // MARK: - 3. 相册有跨页没写出来
+
+    @MainActor
+    private static func albumFailure(_ store: CollageStore, _ dir: URL, check: Checks) {
+        let fm = FileManager.default
+        // a) 第 2 个跨页渲染失败（JPEG）
+        let a = dir.appendingPathComponent("a")
+        var options = CollageStore.ExportOptions()
+        options.outputPath = a.path
+        options.pdf = true
+        store.exportOptions = options
+        store.testExportFailPages = [1]
+        let o1 = runExport(store, project: albumProject(pages: 3), options: options, name: "缺页")
+        store.testExportFailPages = []
+        let failure1 = o1?.failure ?? ""
+        check(failure1.contains("第 2 个跨页没写出来") && failure1.contains("没生成 PDF"),
+              "第 2 个跨页失败：failure 写明没生成 PDF、缺第 2 个跨页", failure1)
+        check(o1?.files == ["缺页_跨页_01.jpg", "缺页_跨页_03.jpg"], "写出来的两个跨页照实列出，没有 PDF",
+              "\(o1?.files ?? [])")
+        check(!fm.fileExists(atPath: a.appendingPathComponent("缺页.pdf").path) && leftovers(a).isEmpty,
+              "盘上没有 PDF、没有临时文件", "\(((try? fm.contentsOfDirectory(atPath: a.path)) ?? []).sorted())")
+        check((store.lastError ?? "").hasPrefix("导出失败") && !store.progressText.hasPrefix("导出完成"),
+              "界面：导出失败，不说导出完成", "\(store.lastError ?? "") / \(store.progressText)")
+
+        // b) PNG + 第 1 个跨页上的照片读不了（软警告）+ 第 3 个跨页失败：「导出失败」不被软警告盖掉
+        let b = dir.appendingPathComponent("b")
+        options.outputPath = b.path
+        options.format = .png
+        store.exportOptions = options
+        var project = albumProject(pages: 3)
+        let ghost = CollagePhotoRef(id: "ghost", path: appDataDir.appendingPathComponent("没有这张.jpg").path,
+                                    width: 3000, height: 2000)
+        project.photos = [ghost]
+        project.pages[0].root = .split(.row, 0.5, .leaf(photoCell("ghost")), .leaf(CollageCell(kind: .empty)))
+        store.testExportFailPages = [2]
+        let o2 = runExport(store, project: project, options: options, name: "缺页")
+        store.testExportFailPages = []
+        let failure2 = o2?.failure ?? ""
+        let warning2 = o2?.warning ?? ""
+        let shown = store.lastError ?? ""
+        check(failure2.contains("第 3 个跨页没写出来") && o2?.files == ["缺页_跨页_01.png", "缺页_跨页_02.png"]
+              && !fm.fileExists(atPath: b.appendingPathComponent("缺页.pdf").path) && leftovers(b).isEmpty,
+              "PNG：第 3 个跨页失败，不出 PDF", "\(failure2) \(o2?.files ?? [])")
+        check(!warning2.isEmpty && shown.hasPrefix("导出失败") && shown.contains(failure2) && shown.contains(warning2),
+              "有软警告时「导出失败」不被盖掉，警告接在后面", shown)
+
+        // c) 没有失败、只有软警告：照旧出 PDF，界面显示那条警告（不算失败）
+        let c = dir.appendingPathComponent("c")
+        options.outputPath = c.path
+        options.format = .jpeg
+        store.exportOptions = options
+        let o3 = runExport(store, project: project, options: options, name: "软警告")
+        check(o3?.failure == nil && o3?.files.last == "软警告.pdf" && pageCount(c.appendingPathComponent("软警告.pdf")) == 3,
+              "只有软警告：PDF 照出（3 页）", "\(o3?.failure ?? "") \(o3?.files ?? [])")
+        check(store.lastError == o3?.warning && store.lastError != nil && store.progressText.hasPrefix("导出完成"),
+              "只有软警告：界面是那条警告 + 导出完成", "\(store.lastError ?? "") / \(store.progressText)")
+
+        // d) 单张模式不受影响（没有 PDF）
+        let d = dir.appendingPathComponent("d")
+        options.outputPath = d.path
+        store.exportOptions = options
+        var single = CollageProject()
+        single.canvas = CollageCanvas(name: "自检单张", width: 300, height: 400)
+        single.pages = [CollagePage(root: .leaf(CollageCell(kind: .empty)))]
+        let o4 = runExport(store, project: single, options: options, name: "单张")
+        check(o4?.failure == nil && o4?.files == ["单张.jpg"], "单张模式照旧", "\(o4?.files ?? [])")
     }
 }

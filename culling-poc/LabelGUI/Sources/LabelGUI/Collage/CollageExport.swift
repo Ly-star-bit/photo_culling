@@ -43,6 +43,8 @@ enum CollageExport {
         case pdfIncomplete(String)
         /// 正式名上已经有文件了（不覆盖）。
         case pdfExists(String)
+        /// 这个跨页（PNG / TIFF）另编进 PDF 的那份 JPEG 编不出来。
+        case pdfEncode(String)
 
         var errorDescription: String? {
             switch self {
@@ -51,6 +53,7 @@ enum CollageExport {
             case .pdfPage(let n): return "生成 PDF 失败：第 \(n) 页读不了"
             case .pdfIncomplete(let why): return "PDF 没写完整（\(why)），没留下 (检查输出目录的磁盘空间)"
             case .pdfExists(let name): return "「\(name)」已经有了，PDF 没覆盖它"
+            case .pdfEncode(let name): return "「\(name)」转不成 PDF 页 (内存不够？)"
             }
         }
     }
