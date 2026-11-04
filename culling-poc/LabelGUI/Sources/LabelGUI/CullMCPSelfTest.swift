@@ -42,6 +42,7 @@ enum CullMCPSelfTest {
         }
         xmpChecks(check, sessionDir: sessionDir)
         clientPickChecks(check, sessionDir: sessionDir)
+        deliveredNoteChecks(check)
         provenanceChecks(check, sessionDir: sessionDir)
         sceneChecks(check)
         for f in failures { print("FAIL " + f) }
@@ -231,6 +232,32 @@ enum CullMCPSelfTest {
         _ = store.undoLastOverride()
         check(store.clientPickCount == 0 && store.clientNotes.isEmpty && !fm.fileExists(atPath: notesFile.path),
               "再 ⌘Z：客户选中和备注一起回到导入之前，client_notes.json 删掉（\(store.clientNotes)）")
+    }
+
+    /// 纯数字交付名开头的那一行（审查：W 的 uniqueHead 不看 D 的交付名）：「{序号:3}」导出的 003.jpg、017.jpg 发给客户，
+    /// 客户回「003 去路人」「017瘦脸」—— 交付名认得出那张，后面的话也要当备注（以前「去路人」被当闲聊丢掉、「017瘦脸」整个
+    /// 没认出）；和「003.jpg 去路人」结果一样。确认表上第 3 张是另一张时说不准：不认、不切备注，照旧报「交付文件名还是编号？」。
+    static func deliveredNoteChecks(_ check: Check) {
+        let items = open().items
+        let others = items.filter { $0.id != "DSCF7208" && $0.id != "DSCF7209" }
+        guard let a = items.first(where: { $0.id == "DSCF7208" }), let b = items.first(where: { $0.id == "DSCF7209" }),
+              others.count >= 3 else {
+            check(false, "fixture 里找不到 DSCF7208 / DSCF7209")
+            return
+        }
+        let files = [DeliveryRecord.File(file: "003.jpg", id: a.id, original: a.rawPath),
+                     DeliveryRecord.File(file: "017.jpg", id: b.id, original: b.rawPath)]
+        let record = DeliveryRecord(kind: .jpeg, folder: URL(fileURLWithPath: "/tmp/labelgui-fixture-交付"), files: files)
+        let r = ClientReply.resolve("003 去路人\n017瘦脸", items: items, sheets: [], deliveries: [record])
+        let wanted: [String: String] = [a.id: "去路人", b.id: "瘦脸"]
+        check(r.ids == [a.id, b.id] && r.notes == wanted && r.unknown.isEmpty,
+              "纯数字交付名开头：003 / 017 认出那两张，后面的话是备注：ids \(r.ids)、notes \(r.notes)、没认出 \(r.unknown)")
+        let dotted = ClientReply.resolve("003.jpg 去路人", items: items, sheets: [], deliveries: [record])
+        check(dotted.ids == [a.id] && dotted.notes == [a.id: "去路人"], "带 .jpg 写也一样：\(dotted.notes)")
+        let sheet = ProofSheet(id: "20261104-120000", date: Date(), scope: "仅精选", ids: others.prefix(3).map(\.id))
+        let clash = ClientReply.resolve("003 去路人", items: items, sheets: [sheet], deliveries: [record])
+        check(clash.ids.isEmpty && clash.notes.isEmpty && clash.unknown == ["003（交付文件名还是编号？）"],
+              "确认表上第 3 张是另一张：说不准，不认也不切备注：ids \(clash.ids)、没认出 \(clash.unknown)")
     }
 
     /// 一个托盘里只有这一张（clientPick 先记成 false）的拼图工程：写进这一场的 collage.json，再挂到批量页这一场
