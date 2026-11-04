@@ -13,7 +13,7 @@ import Foundation
 ///   - 实时桥（followBookmark: false）不跟书签、不认回、不改路径。
 ///   - 存储卡：判断表（DCIM 在卷根 + 可移除 / 可推出才算；外置 SSD、系统盘、网络卷不算；读不出来按「可能是」），
 ///     真读一个系统盘上的 DCIM 文件夹不算卡；编的卷属性（CardImporter.volumeFactsOverride，不挂真的卡 —— hdiutil 挂的映像
-///     会弹「可移除的宗卷」授权框）打开卡上的 DCIM/100CANON：移废片、写 XMP、高 ISO 复制、导出到卡上、复制原片到卡上、拼图默认目录都挡住，
+///     会弹「可移除的宗卷」授权框）打开卡上的 DCIM/100CANON：移废片、写 XMP、高 ISO 复制、导出到卡上、复制原片到卡上、水印导出到卡上（含「导出到 水印导出/」）、拼图默认目录和「选择…」选到卡上都挡住，
 ///     卡上一个文件都没多、没少；导出到卡外照常；外置 SSD 上的工作文件夹照常。
 /// 只写数据目录；退出前删掉造出来的照片文件夹。
 @MainActor
@@ -413,7 +413,7 @@ extension SessionMoveSelfTest {
     }
 
     private static func cardSession(_ root: URL, model: AppModel) {
-        print("== 存储卡当一场打开：移废片、写 XMP、高 ISO、导出到卡上、拼图默认目录都不写卡（编的卷属性）")
+        print("== 存储卡当一场打开：移废片、写 XMP、高 ISO、导出到卡上、复制原片、水印导出、拼图默认目录和「选择…」都不写卡（编的卷属性）")
         let fm = FileManager.default
         let batch = model.batch
         let collage = model.collage
