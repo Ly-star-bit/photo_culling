@@ -20,8 +20,18 @@ final class CardImportCenter: ObservableObject {
         var includeImported = false
         /// 读卡时的进度话（要逐字节核对目标里已有的同名文件时可能读很久）。
         var planningNote: String?
+        /// 这次导到哪：默认按记住的导入位置；「这次导进已有的文件夹」「这次导到「图片」」只管这一张卡。
+        var choice: CardImporter.DestinationChoice = .saved
+        /// 导入位置说不通（外接盘没插上、文件夹没了、写不进去）：不出计划、不导，框里说清楚 ——
+        /// 绝不悄悄换回系统盘。
+        var targetIssue: String?
+        /// 这张卡「这次不备份」（备份盘没带、不想等）。
+        var skipBackup = false
+        /// 开着备份、备份位置说不通（备份盘没插上……）：同样不导，让用户插上、换位置或者「这次不备份」——
+        /// 开着备份的人以为会有两份，不能悄悄只导一份。
+        var backupIssue: String?
         var id: String { volume.id }
-        var planning: Bool { plan == nil && error == nil }
+        var planning: Bool { plan == nil && error == nil && targetIssue == nil && backupIssue == nil }
     }
 
     /// 点了「导入」、还没开始的（前面有导入或分析在跑）。
@@ -50,8 +60,15 @@ final class CardImportCenter: ObservableObject {
     /// 启动时插着的卡点过「不导入」就记一笔（卡 + 这批新照片），下次启动别再问；重新插卡照样问。
     private static let dismissedKey = "cardImport.dismissed"
 
+    /// 导到哪（导入根目录）：appDataDir/card_import_settings.json，确认框里「更改」改它。
+    @Published var settings: CardImporter.DestinationSettings
+    /// 确认框里正开着选文件夹的面板：BatchStore.openFinishedImportIfReady 这时先不切场次（同 BatchView 的
+    /// modalPanelOpen，那个是 BatchView 自己的状态，管不到这里的面板）。
+    static var pickingFolder = false
+
     init(store: BatchStore) {
         self.store = store
+        self.settings = CardImporter.DestinationSettings.load(from: appDataDir)
     }
 
     func start() {
@@ -107,18 +124,24 @@ final class CardImportCenter: ObservableObject {
     /// 启动时用：先在后台读完卡，有新照片、而且这批没被「不导入」过才弹。
     private func offerIfNew(_ volume: CardImporter.Volume) {
         let ledgerURL = appDataDir.appendingPathComponent(CardImporter.ledgerFileName)
-        let dest = CardImporter.defaultDestination()
+        let settings = self.settings
         let flag = AnalysisEngine.CancelFlag()
         launchScans[volume.root.path] = flag
         Task.detached(priority: .utility) {
-            let plan = try? CardImporter.plan(source: volume.root, destination: dest,
+            // 和确认框同一个目标（记住的导入位置、备份位置）。在后台找：网络盘卡住时别卡界面。
+            let target = CardImporter.target(settings: settings, choice: .saved)
+            let backup = CardImporter.backupTarget(settings: settings, primary: target)
+            let plan = try? CardImporter.plan(source: volume.root, destination: target.destination,
+                                              mustExist: target.mustExist, backup: backup?.issue == nil ? backup : nil,
                                               ledger: CardImporter.Ledger.load(from: ledgerURL),
                                               includeImported: false, cancel: flag)
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.launchScans[volume.root.path] = nil
                 guard let plan, !flag.isSet, !plan.copies.isEmpty, !Self.wasDismissed(volume, plan) else { return }
-                self.enqueue(volume, plan: plan)
+                // 导入位置 / 备份位置说不通（外接盘没插上）：照样问，框里重读一遍、把原因说清楚。
+                let clear = target.issue == nil && backup?.issue == nil
+                self.enqueue(volume, plan: clear ? plan : nil)
             }
         }
     }
@@ -157,12 +180,28 @@ final class CardImportCenter: ObservableObject {
         current.error = nil
         current.planningNote = nil
         current.includeImported = includeImported
+        current.targetIssue = nil
+        current.backupIssue = nil
         offer = current
+        let settings = self.settings
+        let choice = current.choice
+        let skipBackup = current.skipBackup
         let ledgerURL = appDataDir.appendingPathComponent(CardImporter.ledgerFileName)
-        let dest = CardImporter.defaultDestination()
         Task.detached(priority: .userInitiated) {
+            // 导到哪、备份到哪：在后台找（书签、卷、写权限 —— 网络盘卡住时别卡界面）。说不通就不出计划。
+            let target = CardImporter.target(settings: settings, choice: choice)
+            let backup = CardImporter.backupTarget(settings: settings, primary: target, skip: skipBackup)
+            if target.issue != nil || backup?.issue != nil {
+                await MainActor.run { [weak self] in
+                    guard let self, token == self.planToken, self.offer?.volume == volume, !flag.isSet else { return }
+                    self.offer?.targetIssue = target.issue
+                    self.offer?.backupIssue = target.issue == nil ? backup?.issue : nil
+                }
+                return
+            }
             let result: Result<CardImporter.Plan, Error> = Result {
-                try CardImporter.plan(source: volume.root, destination: dest,
+                try CardImporter.plan(source: volume.root, destination: target.destination, mustExist: target.mustExist,
+                                      backup: backup,
                                       ledger: CardImporter.Ledger.load(from: ledgerURL),
                                       includeImported: includeImported, cancel: flag) { note in
                     Task { @MainActor [weak self] in
@@ -179,6 +218,98 @@ final class CardImportCenter: ObservableObject {
                 }
             }
         }
+    }
+
+    // MARK: 导到哪
+
+    /// 「换个导入位置…」：选一个文件夹当导入根目录（记住，以后插卡都导到它里面按日期建的子文件夹）。
+    func chooseRoot() {
+        let start = settings.root.map { URL(fileURLWithPath: $0.path) }
+            ?? CardImporter.defaultDestination().deletingLastPathComponent()
+        guard let url = Self.pickFolder(prompt: "导入到这里",
+                                        message: "以后插卡都导到这个文件夹里，按导入那天建子文件夹（如 20261104）。可以选外接盘",
+                                        start: start) else { return }
+        settings.root = CardImporter.savedFolder(for: url)
+        settings.save(to: appDataDir)
+        replan(choice: .saved)
+    }
+
+    /// 「这次导进一个已有的文件夹…」：追加到已有场次（不建日期子文件夹、不记住）。
+    func chooseExistingFolder() {
+        let start = offer?.plan?.destination.deletingLastPathComponent()
+        guard let url = Self.pickFolder(prompt: "导进这个文件夹",
+                                        message: "这张卡的照片直接放进这个文件夹（比如追加到已有的场次），同名的不覆盖",
+                                        start: start) else { return }
+        replan(choice: .existing(url))
+    }
+
+    /// 记住的导入位置不在时：「这次导到「图片」」（用户自己点的，不是悄悄换的）。
+    func usePicturesOnce() { replan(choice: .pictures) }
+
+    /// 这张卡改回按记住的导入位置。
+    func useSaved() { replan(choice: .saved) }
+
+    /// 「以后导到「图片」」：不记导入根目录了。
+    func resetRoot() {
+        settings.root = nil
+        settings.save(to: appDataDir)
+        replan(choice: .saved)
+    }
+
+    /// 「同时备份一份到另一块盘」开关。打开时还没选过备份位置就先选（不选就还是关着）。
+    func setBackupEnabled(_ on: Bool) {
+        if on && settings.backup == nil {
+            // 开关的回调里别直接跑模态面板：下一拍再开。
+            DispatchQueue.main.async { [weak self] in self?.chooseBackupRoot() }
+            return
+        }
+        settings.backupEnabled = on
+        settings.save(to: appDataDir)
+        offer?.skipBackup = false
+        replan(includeImported: offer?.includeImported ?? false)
+    }
+
+    /// 「换个备份位置…」：选第二块盘上的文件夹（记住；在它里面建和导入位置同名的文件夹）。
+    func chooseBackupRoot() {
+        let start = settings.backup.map { URL(fileURLWithPath: $0.path) } ?? URL(fileURLWithPath: "/Volumes")
+        guard let url = Self.pickFolder(prompt: "备份到这里",
+                                        message: "每次导卡同时往这里写第二份（选另一块盘：一块坏了还有一份）。同样校验、绝不覆盖",
+                                        start: start) else { return }
+        settings.backup = CardImporter.savedFolder(for: url)
+        settings.backupEnabled = true
+        settings.save(to: appDataDir)
+        offer?.skipBackup = false
+        replan(includeImported: offer?.includeImported ?? false)
+    }
+
+    /// 「这次不备份」：只管这张卡（用户自己点的）。
+    func skipBackupOnce() {
+        guard offer != nil else { return }
+        offer?.skipBackup = true
+        replan(includeImported: offer?.includeImported ?? false)
+    }
+
+    private func replan(choice: CardImporter.DestinationChoice) {
+        guard offer != nil else { return }
+        offer?.choice = choice
+        replan(includeImported: offer?.includeImported ?? false)
+    }
+
+    /// 选文件夹的面板（只在界面里点「更改」时开；无头模式不开）。
+    private static func pickFolder(prompt: String, message: String, start: URL?) -> URL? {
+        guard !AppRuntime.headless else { return nil }
+        pickingFolder = true
+        defer { pickingFolder = false }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = prompt
+        panel.message = message
+        panel.directoryURL = start
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
     }
 
     /// 「不导入」/「好」。卡上有读不出来的地方就不记「不导入」：那次看到的不全，下次启动还要问。
@@ -311,8 +442,11 @@ struct CardImportSheet: View {
 
     private func headline(_ offer: CardImportCenter.Offer) -> String {
         if offer.error != nil { return "读卡出了问题" }
+        if offer.targetIssue != nil { return "导入位置找不到" }
+        if offer.backupIssue != nil { return "备份位置找不到" }
         guard let plan = offer.plan else { return "正在读取存储卡…" }
         if !plan.copies.isEmpty { return "要把照片导入到这台电脑吗？" }
+        if let backup = plan.backup, backup.fileCount > 0 { return "照片都导进来了，备份里还缺 \(backup.fileCount) 个文件" }
         if plan.cardFiles == 0 { return "卡上没有照片" }
         return plan.skippedImported > 0 ? "这张卡上的照片都导入过了" : "这些照片目标文件夹里都已经有了"
     }
@@ -323,6 +457,10 @@ struct CardImportSheet: View {
             Label(error, systemImage: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
+        } else if let issue = offer.targetIssue {
+            targetIssueView(issue)
+        } else if let issue = offer.backupIssue {
+            backupIssueView(issue)
         } else if let plan = offer.plan {
             VStack(alignment: .leading, spacing: 10) {
                 if !plan.copies.isEmpty {
@@ -330,15 +468,37 @@ struct CardImportSheet: View {
                         Text("\(plan.shotCount) 张新照片").font(.system(size: 22, weight: .semibold)).monospacedDigit()
                         Text(fileLine(plan)).font(.callout).foregroundStyle(.secondary).monospacedDigit()
                     }
-                    row("folder", "导入到 " + CardImporter.displayPath(plan.destination) +
-                        (plan.existingInDest > 0 ? "（已有 \(plan.existingInDest) 个文件，放在一起）" : ""))
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        row("folder", destinationText(offer, plan))
+                        Spacer(minLength: 4)
+                        destinationMenu(offer)
+                    }
+                }
+                if let backup = plan.backup, !plan.copies.isEmpty || backup.fileCount > 0 {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        row("externaldrive", backupText(backup))
+                        Spacer(minLength: 4)
+                        backupMenu()
+                    }
                 }
                 notes(plan)
-                if !plan.copies.isEmpty && !plan.enoughSpace {
-                    Label("空间不够：要 \(BatchStore.sizeText(plan.totalBytes))，这块盘只剩 \(BatchStore.sizeText(plan.freeBytes ?? 0))（还得留 1 GB 余量）",
-                          systemImage: "externaldrive.badge.exclamationmark")
+                if let backup = plan.backup, backup.conflicts > 0 {
+                    row("exclamationmark.triangle", "\(backup.conflicts) 张备份里同名的是别的文件，这几张没法备份（主目标里有）")
+                }
+                if !plan.backupEnoughSpace, let backup = plan.backup {
+                    Label(backupSpaceText(backup), systemImage: "externaldrive.badge.exclamationmark")
                         .foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+                if !plan.copies.isEmpty && !plan.primaryEnoughSpace {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Label(spaceText(plan), systemImage: "externaldrive.badge.exclamationmark")
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 4)
+                        // 内置盘放不下：换到外接盘（选完重新出计划）。
+                        Button("换个位置…") { center.chooseRoot() }.controlSize(.small)
+                    }
                 }
                 options(offer, plan: plan)
             }
@@ -353,6 +513,101 @@ struct CardImportSheet: View {
     }
 
     // 前面在忙什么、这张会怎么样。都单独成属性：三元 + 插值写在视图构建器里，Xcode 16 类型检查会超时。
+
+    /// 「导入到 图片 › 20261104（已有 12 个文件，放在一起）」/「导入到 ~/Shoots/婚礼（追加到这个文件夹……）」
+    private func destinationText(_ offer: CardImportCenter.Offer, _ plan: CardImporter.Plan) -> String {
+        let place = CardImporter.displayPath(plan.destination)
+        if case .existing = offer.choice {
+            return "导入到 " + place + "（追加到这个已有的文件夹，已有 \(plan.existingInDest) 个文件）"
+        }
+        if plan.existingInDest > 0 { return "导入到 " + place + "（已有 \(plan.existingInDest) 个文件，放在一起）" }
+        return "导入到 " + place
+    }
+
+    private func spaceText(_ plan: CardImporter.Plan) -> String {
+        let alsoBackup = plan.backup?.sameVolume == true
+        var bytes = plan.totalBytes
+        if alsoBackup, let backup = plan.backup { bytes += backup.totalBytes }
+        let need = BatchStore.sizeText(bytes)
+        let free = BatchStore.sizeText(plan.freeBytes ?? 0)
+        let what = alsoBackup ? "（连同同一块盘上的备份）" : ""
+        return "空间不够：要 \(need)\(what)，这块盘只剩 \(free)（还得留 1 GB 余量）"
+    }
+
+    /// 「另备份一份到 T7 › 备份 › 20261104（12 个文件，补备份 2 个）」
+    private func backupText(_ backup: CardImporter.Plan.Backup) -> String {
+        var text = "另备份一份到 " + CardImporter.displayPath(backup.destination)
+        var parts: [String] = []
+        if !backup.fromPrimary.isEmpty { parts.append("补备份以前导进来的 \(backup.fromPrimary.count) 个文件") }
+        if backup.sameVolume { parts.append("和导入位置在同一块盘上，盘坏了两份一起没") }
+        if !parts.isEmpty { text += "（" + parts.joined(separator: "；") + "）" }
+        return text
+    }
+
+    private func backupSpaceText(_ backup: CardImporter.Plan.Backup) -> String {
+        let need = BatchStore.sizeText(backup.totalBytes)
+        let free = BatchStore.sizeText(backup.freeBytes ?? 0)
+        return "备份盘空间不够：要 \(need)，只剩 \(free)（还得留 1 GB 余量）—— 换个备份位置，或者这次不备份"
+    }
+
+    /// 备份那一行的「更改」。
+    private func backupMenu() -> some View {
+        Menu("更改") {
+            Button("换个备份位置…") { center.chooseBackupRoot() }
+            Button("这次不备份") { center.skipBackupOnce() }
+            Divider()
+            Button("以后不备份") { center.setBackupEnabled(false) }
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .font(.callout)
+    }
+
+    /// 开着备份、备份盘不在：说清楚，插上、换位置或者这次不备份（不悄悄只导一份）。
+    private func backupIssueView(_ issue: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(issue, systemImage: "externaldrive.badge.xmark")
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Button("换个备份位置…") { center.chooseBackupRoot() }
+                Button("这次不备份") { center.skipBackupOnce() }
+                Button("以后不备份") { center.setBackupEnabled(false) }
+            }
+            .controlSize(.small)
+        }
+    }
+
+    /// 「更改」：换导入位置（记住）/ 这次导进已有的文件夹 / 改回去。
+    private func destinationMenu(_ offer: CardImportCenter.Offer) -> some View {
+        let oneOff = offer.choice != .saved
+        let customRoot = center.settings.root != nil
+        return Menu("更改") {
+            Button("换个导入位置…（以后都导到那里）") { center.chooseRoot() }
+            Button("这次导进一个已有的文件夹…") { center.chooseExistingFolder() }
+            if oneOff || customRoot { Divider() }
+            if oneOff { Button("这次也按平常的位置导") { center.useSaved() } }
+            if customRoot { Button("以后导到「图片」") { center.resetRoot() } }
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .font(.callout)
+    }
+
+    /// 记住的导入位置不在（外接盘没插上 / 文件夹没了 / 写不进去）：说清楚，让用户自己选，不悄悄换回系统盘。
+    private func targetIssueView(_ issue: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(issue, systemImage: "externaldrive.badge.xmark")
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Button("换个位置…") { center.chooseRoot() }
+                Button("这次导到「图片」") { center.usePicturesOnce() }
+                Button("这次导进一个已有的文件夹…") { center.chooseExistingFolder() }
+            }
+            .controlSize(.small)
+        }
+    }
 
     /// 前面有卡在导、或者有卡排着队：这张排在后面。
     private var queuesBehind: Bool { store.importing || !center.pending.isEmpty }
@@ -370,6 +625,8 @@ struct CardImportSheet: View {
 
     private func importTitle(_ plan: CardImporter.Plan?) -> String {
         let count = plan?.shotCount ?? 0
+        // 只是补备份（照片都在导入位置里了）。
+        if count == 0, let files = plan?.backup?.fileCount, files > 0 { return "补备份 \(files) 个文件" }
         if queuesBehind { return "排队导入 \(count) 张" }
         if stopsAnalysis { return "停下分析并导入 \(count) 张" }
         return "导入 \(count) 张"
@@ -402,9 +659,13 @@ struct CardImportSheet: View {
         if plan.skippedInDest > 0 {
             row("equal.circle", "\(plan.skippedInDest) 张目标文件夹里已经有一模一样的，不再复制")
         }
+        if plan.pairedShots > 0 {
+            row("link", "\(plan.pairedShots) 张和目标里同名的 RAW / JPG 是同一帧（拍摄时间、机身序列号都对得上），" +
+                "补到它旁边、用一样的名字，配成一对")
+        }
         if plan.renamedShots > 0 {
             // 别用 textformat.abc：中文系统下这个符号画成「甲乙丙」。
-            row("pencil", "\(plan.renamedShots) 张和目标里别的照片重名，整组改名（如 IMG_0001_2），RAW+JPG 还是一对")
+            row("pencil", renamedText(plan))
         }
         if plan.videoCount > 0 {
             row("video.slash", "卡上还有 \(plan.videoCount) 个视频，不导入（只导照片）")
@@ -414,11 +675,28 @@ struct CardImportSheet: View {
         }
     }
 
+    /// 「RAW+JPG 还是一对」只对卡上本来就成对、一起改名的那些成立；RAW、JPG 分卡存又认不准是不是同一帧的，
+    /// 改了名就和目标里那一半拆开了，要照实说。
+    private func renamedText(_ plan: CardImporter.Plan) -> String {
+        let example = plan.renamedExample ?? "IMG_0001_2"
+        var text = "\(plan.renamedShots) 张和目标里别的照片重名，改名导入（如 \(example)）"
+        if plan.renamedWithPair > 0 {
+            text += plan.renamedWithPair == plan.renamedShots ? "，RAW+JPG 一起改，还是一对" : "，同一张的 RAW+JPG 一起改，还是一对"
+        }
+        if plan.unconfirmedHalves > 0 {
+            text += "；其中 \(plan.unconfirmedHalves) 张目标里有同名的 RAW / JPG，但文件头读不全（拍摄时间或机身序列号），" +
+                "认不准是不是同一帧，没配成一对，会多出一张"
+        }
+        return text
+    }
+
     private func previousText(_ plan: CardImporter.Plan) -> String {
         guard let first = plan.previousFolders.first else { return "" }
         let more = plan.previousFolders.count > 1 ? " 等" : ""
         // 以前导到的文件夹已经删了 / 挪走了：「都导入过了」读着像没事，其实电脑上已经没有了。
-        let gone = plan.previousFolderGone ? "，那个文件夹已经不在了，要重新导就勾下面" : ""
+        // 在一块现在没插上的盘上：那是盘没插，不是删了（别催人重导一份到系统盘）。
+        let gone = plan.previousVolumeOffline.map { "，那块盘「\($0)」现在没插上" }
+            ?? (plan.previousFolderGone ? "，那个文件夹已经不在了，要重新导就勾下面" : "")
         return "（在 \(CardImporter.displayPath(URL(fileURLWithPath: first)))\(more)\(gone)）"
     }
 
@@ -437,6 +715,13 @@ struct CardImportSheet: View {
             if !plan.copies.isEmpty && plan.enoughSpace {
                 Toggle("导入完直接开始分析", isOn: $analyzeAfter)
             }
+            // 第二份备份（Photo Mechanic 的 Secondary、Lightroom 的「Make a Second Copy To」）。
+            if !plan.copies.isEmpty || plan.backup != nil {
+                Toggle("同时备份一份到另一块盘", isOn: Binding(
+                    get: { center.settings.backupOn && !offer.skipBackup },
+                    set: { center.setBackupEnabled($0) }))
+                    .help("主目标那份校验过以后再写一份到备份盘：同样校验、绝不覆盖。备份盘出问题不影响主目标，导完照实说")
+            }
             if plan.skippedImported > 0 || offer.includeImported {
                 Toggle("以前导入过的也再导一遍", isOn: Binding(
                     get: { offer.includeImported },
@@ -449,7 +734,7 @@ struct CardImportSheet: View {
 
     @ViewBuilder
     private func footer(_ offer: CardImportCenter.Offer) -> some View {
-        let canImport = offer.plan.map { !$0.copies.isEmpty && $0.enoughSpace } ?? false
+        let canImport = offer.plan.map { ($0.hasWork) && $0.enoughSpace } ?? false
         // 前面有卡在导 / 排着队：排在后面。在分析：「停下分析并导入」。别的任务（导出、VLM）：等它，或自己停。
         if canImport && (store.isRunning || !center.pending.isEmpty) {
             HStack(spacing: 8) {
@@ -490,6 +775,10 @@ struct CardImportSheet: View {
 ///   [--planning] [--free-bytes N] [--name 卷名]
 /// 用假卡读出真的计划，把确认框画成 PNG（界面不能开）。--running = 假装正在分析；--importing = 假装在导另一张卡；
 /// --planning = 还在读卡；--free-bytes = 假装目标盘只剩这么多。
+/// --dest 也可以换成 --dest-root <根目录>（记住的导入位置，按今天建 yyyyMMdd；不在 = 画「导入位置找不到」）
+/// 或 --into-existing <已有文件夹>（这次导进已有的文件夹）—— 只在内存里，不写设置文件。
+/// --backup <备份根目录>：开着第二份备份（--backup-free-bytes N 假装备份盘只剩这么多）。
+/// --via-replan：走确认框自己的 CardImportCenter.replan（后台找目标、出计划）再画。
 enum CardImportSnapshot {
     @MainActor
     static func run(flagIndex: Int) -> Never {
@@ -498,8 +787,9 @@ enum CardImportSnapshot {
             guard let i = args.firstIndex(of: name), args.count > i + 1 else { return nil }
             return args[i + 1]
         }
-        guard args.count > flagIndex + 2, let destPath = option("--dest") else {
-            print("用法: --card-ui <card_dir> <out.png> --dest <dir>")
+        guard args.count > flagIndex + 2,
+              option("--dest") != nil || option("--dest-root") != nil || option("--into-existing") != nil else {
+            print("用法: --card-ui <card_dir> <out.png> --dest <dir>（或 --dest-root <dir> / --into-existing <dir>）")
             exit(1)
         }
         CollageCLI.requireIsolatedDataDir("--card-ui")
@@ -510,9 +800,42 @@ enum CardImportSnapshot {
         let center = CardImportCenter(store: store)
         let volume = CardImporter.Volume(root: card, name: option("--name") ?? "EOS_DIGITAL", uuid: nil)
         var offer = CardImportCenter.Offer(volume: volume)
-        if !args.contains("--planning") {
+        // 导到哪：和界面一样算（设置只在内存里，不写数据目录）。
+        var settings = CardImporter.DestinationSettings()
+        if let root = option("--dest-root") { settings.root = CardImporter.savedFolder(for: URL(fileURLWithPath: root)) }
+        if let backupRoot = option("--backup") {
+            settings.backup = CardImporter.savedFolder(for: URL(fileURLWithPath: backupRoot))
+            settings.backupEnabled = true
+        }
+        center.settings = settings
+        let target: CardImporter.Target
+        if let destPath = option("--dest") {
+            target = CardImporter.Target(destination: URL(fileURLWithPath: destPath), mustExist: nil, appending: false, issue: nil)
+        } else if let existing = option("--into-existing") {
+            offer.choice = .existing(URL(fileURLWithPath: existing))
+            target = CardImporter.target(settings: settings, choice: offer.choice)
+        } else {
+            target = CardImporter.target(settings: settings, choice: .saved)
+        }
+        offer.targetIssue = target.issue
+        let backupTarget = CardImporter.backupTarget(settings: settings, primary: target)
+        offer.backupIssue = target.issue == nil ? backupTarget?.issue : nil
+        if args.contains("--via-replan") {
+            // 走确认框自己那条路（CardImportCenter.replan：后台找目标、出计划），而不是这里直接算 ——
+            // 验证界面上「更改」之后重读的结果。只能配 --dest-root / --into-existing（--dest 是测试专用的直给目标）。
+            var start = CardImportCenter.Offer(volume: volume)
+            start.choice = offer.choice
+            center.offer = start
+            center.replan(includeImported: args.contains("--reimport"))
+            let deadline = Date().addingTimeInterval(60)
+            while center.offer?.planning == true, Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            offer = center.offer ?? start
+        } else if !args.contains("--planning"), target.issue == nil, backupTarget?.issue == nil {
             do {
-                offer.plan = try CardImporter.plan(source: card, destination: URL(fileURLWithPath: destPath),
+                offer.plan = try CardImporter.plan(source: card, destination: target.destination, mustExist: target.mustExist,
+                                                   backup: backupTarget,
                                                    ledger: .load(from: appDataDir.appendingPathComponent(CardImporter.ledgerFileName)),
                                                    includeImported: args.contains("--reimport"))
                 offer.includeImported = args.contains("--reimport")
@@ -522,6 +845,11 @@ enum CardImportSnapshot {
         }
         // --free-bytes N：假装目标盘只剩 N 字节（看「空间不够」那一行）。
         if let free = option("--free-bytes").flatMap(Int64.init) { offer.plan?.freeBytes = free }
+        if let free = option("--backup-free-bytes").flatMap(Int64.init) {
+            // 测试机上备份和导入位置总在同一块盘：假装是两块，才看得到「备份盘空间不够」那一行。
+            offer.plan?.backup?.sameVolume = false
+            offer.plan?.backup?.freeBytes = free
+        }
         center.offer = offer
         if args.contains("--running") {
             store.isRunning = true
@@ -551,6 +879,8 @@ enum CardImportSnapshot {
             exit(1)
         }
         if let plan = offer.plan { print(CardImportCLI.describe(plan)) }
+        if let issue = offer.targetIssue { print("导入位置有问题：\(issue)") }
+        if let issue = offer.backupIssue { print("备份位置有问题：\(issue)") }
         print("确认框快照 \(Int(size.width))x\(Int(size.height)) · \(out.path)")
         exit(0)
     }

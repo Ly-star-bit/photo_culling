@@ -66,6 +66,9 @@ enum CardImporter {
         let source: URL
         let sourceName: String
         let destination: URL
+        /// 必须已经在的那一级（外接盘上的导入根目录 / 「导进已有的文件夹」）：导的时候不在了就停，
+        /// 不顺着建一串目录（盘没挂上时会建到系统盘上去）。nil = 「图片」那条老路。
+        let mustExist: URL?
         let copies: [Copy]
         /// 目标里已经有、整份逐字节一样的 —— 记进账本，不再复制。
         let alreadyThere: [(key: String, path: String)]
@@ -77,10 +80,21 @@ enum CardImporter {
         /// 以前导入到了哪些文件夹（给提示用），和最常见的那个还在不在。
         let previousFolders: [String]
         let previousFolderGone: Bool
+        /// 以前导到的文件夹在一块现在没插上的盘上（/Volumes/<名字>）：那不是「文件夹没了」，是盘没插。
+        let previousVolumeOffline: String?
         /// 目标里已经有、内容一模一样的（张）。
         let skippedInDest: Int
         /// 和目标里别的照片重名、整组改了名的（张）。
         let renamedShots: Int
+        /// 改了名的里面，RAW+JPG 一起改的（张）—— 只有这些才是「改了名还是一对」。
+        let renamedWithPair: Int
+        /// 改了名的头一个新主名（确认框举例：IMG_0001_2）。
+        let renamedExample: String?
+        /// 改了名的里面，目标里同主名的是另一类（RAW↔JPG）、但文件头读不全（拍摄时间 / SubSec / 型号 /
+        /// 机身序列号）、认不准是不是同一帧的（张）—— 这些没配成一对，会多出一张。
+        let unconfirmedHalves: Int
+        /// 目标里同主名只有另一类、文件头确认是同一帧（RAW、JPG 分卡存的另一张卡）：补在旁边、不改名（张）。
+        let pairedShots: Int
         let videoCount: Int
         /// 不是照片、不是视频、也不是相机配套小文件的（录音备注、不认识的格式）：个数和几个例子。
         let otherCount: Int
@@ -91,13 +105,50 @@ enum CardImporter {
         /// 目标文件夹里原来就有的文件数（同一天导第二张卡时提示「会放在一起」）。
         let existingInDest: Int
         var freeBytes: Int64?
+        /// 第二份备份（没开 = nil）。
+        var backup: Backup?
 
         var totalBytes: Int64 { copies.reduce(0) { $0 + $1.size } }
         var shotCount: Int { Set(copies.map(\.shot)).count }
         var rawCount: Int { copies.filter { CardImporter.rawLikeExtensions.contains($0.target.pathExtension.lowercased()) }.count }
-        var enoughSpace: Bool {
+        var enoughSpace: Bool { primaryEnoughSpace && backupEnoughSpace }
+        /// 有事可做：有新照片要导，或者（勾了重导时）只是要补备份。
+        var hasWork: Bool { !copies.isEmpty || (backup?.fileCount ?? 0) > 0 }
+        /// 导入位置那块盘够不够（备份在同一块盘上就连备份一起算）。
+        var primaryEnoughSpace: Bool {
             guard let free = freeBytes else { return true }
-            return free >= totalBytes + CardImporter.spaceMargin
+            var alsoBackup: Int64 = 0
+            if let backup, backup.sameVolume { alsoBackup = backup.totalBytes }
+            let need = totalBytes + alsoBackup
+            return free >= need + CardImporter.spaceMargin
+        }
+        var backupEnoughSpace: Bool {
+            guard let backup, !backup.sameVolume, let free = backup.freeBytes else { return true }
+            return free >= backup.totalBytes + CardImporter.spaceMargin
+        }
+
+        /// 第二份备份（Photo Mechanic 的 Secondary、Lightroom 的「Make a Second Copy To」）：主目标那份校验过
+        /// 以后，从主目标那份再走一遍 copyOne 写到备份盘 —— 同样 .part + SHA-256 校验、绝不覆盖。两边用同一个
+        /// 名字（选名字时两边都得空着）。账本照旧只记主目标。
+        struct Backup {
+            let destination: URL
+            /// 备份根目录（必须已经在：盘拔了就停备份，不顺着建目录）。
+            let mustExist: URL?
+            /// 主目标复制完、要再备份一份的文件（按主目标里的路径）。
+            let afterPrimary: Set<String>
+            /// 主目标里已经有、备份里还没有的：从主目标那份补过去（「补备份」：勾「以前导入过的也再导一遍」再插卡）。
+            let fromPrimary: [Copy]
+            /// 备份里已经有、内容一样的文件数。
+            let alreadyBackedUp: Int
+            /// 主目标里已经有、备份里同名的却是别的文件：名字改不了，这几张没法备份（张）。
+            let conflicts: Int
+            let existingInBackup: Int
+            /// 要往备份写的字节、文件数。
+            let totalBytes: Int64
+            let fileCount: Int
+            var freeBytes: Int64?
+            /// 和导入位置在同一块盘上（空间一起算；盘坏了两份一起没 —— 确认框提醒一句）。var：离屏快照假装两块盘。
+            var sameVolume: Bool
         }
     }
 
@@ -125,6 +176,19 @@ enum CardImporter {
         var aborted: String?
         /// 计划时卡上读不出来的地方（照搬 Plan.scanProblems，导完一起提醒）。
         var scanProblems: [String] = []
+        /// 导进来的里面和目标里别的照片重名、改了名的（张）和一个例子（新主名）—— 导完照实说一句：
+        /// 双读卡器同时插两张卡时，确认框里的改名数是前一张卡导到一半时算的，不准。
+        var renamedShots = 0
+        var renamedExample: String?
+        /// 第二份备份（没开 = nil）：写到哪、该写几个、写成了几个、哪些没写成。
+        var backupDestination: URL?
+        var backupPlannedFiles = 0
+        var backupCopiedFiles = 0
+        var backupFailed: [Failure] = []
+        /// 备份整个停了的原因（备份盘拔了、满了、空间不够、和导入位置重叠）—— 主目标照常导完。
+        var backupAborted: String?
+        /// 主目标里已经有、备份里同名的却是别的文件，没法备份（张）。
+        var backupConflicts = 0
         var elapsed: TimeInterval = 0
     }
 
@@ -324,7 +388,9 @@ enum CardImporter {
     }
 
     /// `progress`：要整份比对目标里的同名文件时说一声（重导进同一个文件夹时可能要读很久）。
-    static func plan(source: URL, destination: URL, ledger: Ledger, includeImported: Bool,
+    /// `backup`：第二份备份写到哪（Target 的 destination / mustExist；没开备份 = nil）。
+    static func plan(source: URL, destination: URL, mustExist: URL? = nil, backup: Target? = nil,
+                     ledger: Ledger, includeImported: Bool,
                      cancel: AnalysisEngine.CancelFlag? = nil,
                      progress: ((String) -> Void)? = nil) throws -> Plan {
         let fm = FileManager.default
@@ -392,10 +458,23 @@ enum CardImporter {
                 existingInDest += 1
             }
         }
+        // 备份那边现有的文件（同样分桶）：选名字时两边都得空着（或者已经是这张）。
+        var backupIndex: [String: [URL]]?
+        var existingInBackup = 0
+        if let backup {
+            var index: [String: [URL]] = [:]
+            if let contents = try? fm.contentsOfDirectory(at: backup.destination, includingPropertiesForKeys: [.fileSizeKey]) {
+                for url in contents where !url.lastPathComponent.hasPrefix(".") {
+                    index[firstDotKey(url.lastPathComponent), default: []].append(url)
+                    existingInBackup += 1
+                }
+            }
+            backupIndex = index
+        }
         /// 目标里属于这个名字的文件：IMG_0001.CR3 / IMG_0001.jpg / IMG_0001.xmp / IMG_0001.CR3.xmp。
-        func occupants(of stem: String) -> [URL] {
+        func occupants(of stem: String, in index: [String: [URL]]) -> [URL] {
             let lower = stem.lowercased() + "."
-            return (destIndex[firstDotKey(stem)] ?? []).filter { $0.lastPathComponent.lowercased().hasPrefix(lower) }
+            return (index[firstDotKey(stem)] ?? []).filter { $0.lastPathComponent.lowercased().hasPrefix(lower) }
         }
 
         // 同一文件夹里同名的算一张（RAW+JPG）—— 和 listPhotos 配对规则一样，区分大小写。
@@ -404,6 +483,13 @@ enum CardImporter {
         var copies: [Copy] = []
         var alreadyThere: [(key: String, path: String)] = []
         var skippedImported = 0, skippedInDest = 0, renamedShots = 0
+        var renamedWithPair = 0, unconfirmedHalves = 0, pairedShots = 0
+        var renamedExample: String?
+        var backupAfter: Set<String> = []
+        var backupFromPrimary: [Copy] = []
+        var backupAlready = 0, backupConflicts = 0
+        var backupBytes: Int64 = 0
+        var backupFiles = 0
         var previousFolders: [String: Int] = [:]
         var fingerprints: [URL: String] = [:]
         var digests: [URL: SHA256.Digest] = [:]
@@ -431,6 +517,63 @@ enum CardImporter {
             }
             guard let other = try? sha256(of: url, cancel: cancel) else { return false }
             return full == other
+        }
+        var identities: [URL: FrameIdentity?] = [:]
+        var frameChecks = 0
+        func identity(_ url: URL) -> FrameIdentity? {
+            if let cached = identities[url] { return cached }
+            let id = frameIdentity(of: url)
+            identities[url] = id
+            return id
+        }
+        /// 卡上这张的每个文件、目标里的另一半，文件头是不是同一帧：nil = 有一样读不到。
+        func sameFrame(_ members: [CardFile], _ halves: [URL]) -> Bool? {
+            frameChecks += 1
+            if frameChecks % 50 == 1 { progress?("核对目标里同名的 RAW / JPG 是不是同一帧（第 \(frameChecks) 张）…") }
+            var ids: [FrameIdentity] = []
+            for url in members.map(\.url) + halves {
+                guard let id = identity(url) else { return nil }
+                ids.append(id)
+            }
+            return ids.allSatisfy { $0 == ids[0] }
+        }
+        /// 占着某个名字的文件分一分：这张本身（内容整份一样）、同一帧的另一半候选、.xmp、不相干的。
+        func examine(_ stem: String, _ taken: [URL], _ members: [CardFile], kind: Bool?)
+            -> (identical: Set<String>, halves: [URL], foreign: Bool, sidecar: Bool) {
+            var identical: Set<String> = []     // 已经在的成员（原文件名）
+            var halves: [URL] = []              // 同主名（大小写也一样）的另一类：可能是同一帧的另一半
+            var foreign = false, sidecar = false
+            for url in taken {
+                let name = url.lastPathComponent.lowercased()
+                if let m = members.first(where: { (stem + "." + $0.ext).lowercased() == name }), sameContent(m, url) {
+                    identical.insert(m.name)
+                } else if url.pathExtension.lowercased() == "xmp" {
+                    sidecar = true
+                } else if let kind, url.deletingPathExtension().lastPathComponent == stem,
+                          pairKind(url.pathExtension) == !kind {
+                    halves.append(url)
+                } else {
+                    foreign = true
+                }
+            }
+            return (identical, halves, foreign, sidecar)
+        }
+        /// 备份里这个名字能不能用：空着、已经是这张、或者是文件头确认了的另一半。能用时返回备份里已经有的成员。
+        func backupFits(_ stem: String, _ members: [CardFile], kind: Bool?) -> Set<String>? {
+            guard let backupIndex else { return [] }
+            let taken = occupants(of: stem, in: backupIndex)
+            if taken.isEmpty { return [] }
+            let e = examine(stem, taken, members, kind: kind)
+            if e.foreign { return nil }
+            let missing = members.filter { !e.identical.contains($0.name) }
+            if missing.isEmpty { return e.identical }
+            var paired = false
+            if !e.halves.isEmpty {
+                guard sameFrame(members, e.halves) == true else { return nil }
+                paired = true
+            }
+            if e.sidecar && !paired { return nil }
+            return e.identical
         }
 
         for groupKey in groups.keys.sorted() {
@@ -461,39 +604,45 @@ enum CardImporter {
             //    · 占着这个名字的全是「这张本身、内容整份一样」→ 已经在了，缺哪个补哪个；
             //    · 有不相干的文件（别的照片、只剩 .xmp 的、坏掉的旧副本）→ 这个名字不能用，换下一个。
             let baseStem = members[0].url.deletingPathExtension().lastPathComponent
+            // 这张全是 RAW（true）或全是 JPG 这一类（false）时，目标里同主名的另一类可能是它的另一半。
+            let kinds = Set(members.map { pairKind($0.ext) })
+            var memberKind: Bool?
+            if kinds.count == 1, let only = kinds.first { memberKind = only }
             var n = 1
-            var chosen: (stem: String, missing: [CardFile])?
+            // backupDone：备份里已经有的成员；nil = 备份里这个名字被别的文件占着（主目标里已经有了、改不了名）。
+            var chosen: (stem: String, missing: [CardFile], paired: Bool, backupDone: Set<String>?)?
+            var baseUnconfirmed = false
             while chosen == nil, n < 10_000 {
                 if cancel?.isSet == true { throw ImportError.cancelled }
                 let stem = n == 1 ? baseStem : "\(baseStem)_\(n)"
                 n += 1
                 if planned.contains(stem.lowercased()) { continue }
-                let taken = occupants(of: stem)
-                if taken.isEmpty {
-                    chosen = (stem, members)
-                    break
-                }
-                var identical: Set<String> = []     // 已经在的成员（原文件名）
-                var foreign = false, sidecar = false
-                for url in taken {
-                    let name = url.lastPathComponent.lowercased()
-                    if let m = members.first(where: { (stem + "." + $0.ext).lowercased() == name }), sameContent(m, url) {
-                        identical.insert(m.name)
-                    } else if url.pathExtension.lowercased() == "xmp" {
-                        sidecar = true
-                    } else {
-                        foreign = true
+                let taken = occupants(of: stem, in: destIndex)
+                var missing = members
+                var paired = false
+                if !taken.isEmpty {
+                    let e = examine(stem, taken, members, kind: memberKind)
+                    if e.foreign { continue }
+                    missing = members.filter { !e.identical.contains($0.name) }
+                    if !missing.isEmpty {
+                        // RAW、JPG 分卡存：目标里同主名只有另一类。文件头说是同一帧才补在旁边、不改名；读不全（nil）
+                        // 或者对不上，都当成别的照片，换下一个名字（两台同号机身的 RAW、JPG 不能拼成一张）。
+                        if !e.halves.isEmpty {
+                            let same = sameFrame(members, e.halves)
+                            if same == nil, stem == baseStem { baseUnconfirmed = true }
+                            guard same == true else { continue }
+                            paired = true
+                        }
+                        // 补缺的文件不往一个已经有 .xmp 的名字上挂：那份 xmp 不一定是这张的。文件头确认了的另一半
+                        // 旁边的 .xmp 就是这一帧的（Lightroom 给 RAW 写的那份），放行。
+                        if e.sidecar && !paired { continue }
                     }
                 }
-                if foreign { continue }
-                let missing = members.filter { !identical.contains($0.name) }
-                if missing.isEmpty {
-                    chosen = (stem, [])
-                    break
-                }
-                // 补缺的文件不往一个已经有 .xmp 的名字上挂：那份 xmp 不一定是这张的。
-                if sidecar { continue }
-                chosen = (stem, missing)
+                // 备份：两边用同一个名字。要新复制的，名字在备份里也得能用，不然换一个两边都空着的；
+                // 主目标里已经都有了的，名字改不了 —— 备份里被占着就记成「没法备份」。
+                let fit = backupFits(stem, members, kind: memberKind)
+                if fit == nil && !missing.isEmpty { continue }
+                chosen = (stem, missing, paired, fit)
             }
             if cancel?.isSet == true { throw ImportError.cancelled }
             guard let chosen else { continue }
@@ -506,11 +655,40 @@ enum CardImporter {
                     alreadyThere.append((Ledger.key(name: m.name, size: m.size, fingerprint: fp), target.path))
                 }
             }
+            // 备份：这张的每个文件在备份里都该有一份（同一个名字）。新复制的等主目标校验过再备份；主目标里
+            // 早就有的从主目标那份补。
+            if let backup, backupIndex != nil {
+                if let done = chosen.backupDone {
+                    backupAlready += done.count
+                    for m in members where !done.contains(m.name) {
+                        let name = chosen.stem + "." + m.ext
+                        let primaryTarget = destination.appendingPathComponent(name)
+                        backupBytes += m.size
+                        backupFiles += 1
+                        if chosen.missing.contains(where: { $0.url == m.url }) {
+                            backupAfter.insert(primaryTarget.path)
+                        } else {
+                            backupFromPrimary.append(Copy(source: primaryTarget,
+                                                          target: backup.destination.appendingPathComponent(name),
+                                                          size: m.size, modified: m.modified, created: m.created,
+                                                          originalName: m.name, shot: groupKey))
+                        }
+                    }
+                } else {
+                    backupConflicts += 1
+                }
+            }
             if chosen.missing.isEmpty {
                 skippedInDest += 1
                 continue
             }
-            if chosen.stem != baseStem { renamedShots += 1 }
+            if chosen.stem != baseStem {
+                renamedShots += 1
+                if renamedExample == nil { renamedExample = chosen.stem }
+                if kinds.contains(true) && kinds.contains(false) { renamedWithPair += 1 }
+                if baseUnconfirmed { unconfirmedHalves += 1 }
+            }
+            if chosen.paired { pairedShots += 1 }
             for m in chosen.missing {
                 copies.append(Copy(source: m.url, target: destination.appendingPathComponent(chosen.stem + "." + m.ext),
                                    size: m.size, modified: m.modified, created: m.created,
@@ -519,25 +697,51 @@ enum CardImporter {
         }
 
         let folders = previousFolders.sorted { $0.value > $1.value }.map(\.key)
+        // 以前导到的那个文件夹不在：盘没插上（/Volumes/<名字> 没挂）和文件夹真没了，说法不一样。
+        let previousMissing = folders.first.map { !isDirectory(URL(fileURLWithPath: $0)) } ?? false
+        let previousOffline = previousMissing ? folders.first.flatMap(offlineVolumeName(for:)) : nil
         return Plan(source: source, sourceName: source.lastPathComponent, destination: destination,
+                    mustExist: mustExist,
                     copies: copies, alreadyThere: alreadyThere,
                     cardShots: groups.count, cardFiles: files.count,
                     skippedImported: skippedImported,
                     previousFolders: folders,
-                    previousFolderGone: folders.first.map { !isDirectory(URL(fileURLWithPath: $0)) } ?? false,
-                    skippedInDest: skippedInDest, renamedShots: renamedShots, videoCount: videos,
+                    previousFolderGone: previousMissing && previousOffline == nil,
+                    previousVolumeOffline: previousOffline,
+                    skippedInDest: skippedInDest, renamedShots: renamedShots,
+                    renamedWithPair: renamedWithPair, renamedExample: renamedExample,
+                    unconfirmedHalves: unconfirmedHalves, pairedShots: pairedShots, videoCount: videos,
                     otherCount: others.count, otherExamples: Array(others.prefix(3)),
                     scanProblems: problems,
                     includeImported: includeImported, existingInDest: existingInDest,
-                    freeBytes: freeBytes(near: destination))
+                    freeBytes: freeBytes(near: destination),
+                    backup: backup.map { b in
+                        Plan.Backup(destination: b.destination, mustExist: b.mustExist,
+                                    afterPrimary: backupAfter, fromPrimary: backupFromPrimary,
+                                    alreadyBackedUp: backupAlready, conflicts: backupConflicts,
+                                    existingInBackup: existingInBackup,
+                                    totalBytes: backupBytes, fileCount: backupFiles,
+                                    freeBytes: freeBytes(near: b.destination),
+                                    sameVolume: sameVolume(destination, b.destination))
+                    })
+    }
+
+    /// 两个位置在不在同一块盘上（还不存在的往上找存在的那一级）。
+    static func sameVolume(_ a: URL, _ b: URL) -> Bool {
+        var sa = stat(), sb = stat()
+        guard stat(existingAncestor(of: a).path, &sa) == 0, stat(existingAncestor(of: b).path, &sb) == 0 else { return false }
+        return sa.st_dev == sb.st_dev
     }
 
     // MARK: 执行
 
     /// 照计划复制。`progress(已完成文件数, 已复制字节)` 从后台线程来，最多每 `progressInterval` 秒一次。
     /// 按「张」走：一张照片的几个文件（RAW+JPG）先一起看目标名字还空不空，空着才开始复制。
+    /// 有第二份备份时，主目标的每个文件校验过就从主目标那份再写一份到备份盘；备份出问题只停备份、照实报。
+    /// `backupFault`：测试用（第 N 次备份当成这个错误），平常不传。
     static func execute(_ plan: Plan, ledgerURL: URL, cancel: AnalysisEngine.CancelFlag,
                         progressInterval: TimeInterval = 0.1,
+                        backupFault: ((Int) -> ImportError?)? = nil,
                         progress: @escaping (Int, Int64) -> Void) -> Outcome {
         let fm = FileManager.default
         let start = Date()
@@ -550,6 +754,11 @@ enum CardImporter {
             return done
         }
 
+        // 外接盘上的导入位置 / 选的已有文件夹，确认之后被拔掉、删掉了：不导（往上找存在的那一级会落到系统盘）。
+        if let must = plan.mustExist, !isDirectory(must) {
+            outcome.aborted = "导入位置 \(displayPath(must)) 不见了（盘拔掉了？），没导"
+            return finish()
+        }
         if let free = freeBytes(near: plan.destination), free < plan.totalBytes + spaceMargin {
             outcome.aborted = "空间不够：要 \(BatchStore.sizeText(plan.totalBytes))，只剩 \(BatchStore.sizeText(free))"
             return finish()
@@ -560,7 +769,12 @@ enum CardImporter {
             return finish()
         }
         do {
-            try fm.createDirectory(at: plan.destination, withIntermediateDirectories: true)
+            if plan.mustExist == nil {
+                try fm.createDirectory(at: plan.destination, withIntermediateDirectories: true)
+            } else if !isDirectory(plan.destination) {
+                // 只在已经在的那一级下面建一层（yyyyMMdd），不连上级一起建。
+                try fm.createDirectory(at: plan.destination, withIntermediateDirectories: false)
+            }
         } catch {
             outcome.aborted = "建不了目标文件夹 \(displayPath(plan.destination))：\(describe(error))"
             return finish()
@@ -585,6 +799,63 @@ enum CardImporter {
         var copiedShots: Set<String> = []
         var readFailures = 0, writeFailures = 0
         var lastLedgerSave = Date()
+
+        // 第二份备份：主目标那份校验过以后，从主目标再走一遍 copyOne（同样 .part + SHA-256、绝不覆盖）。
+        // 备份盘出问题（拔了、满了、写不进去）只停备份、照实报，主目标照常导完 —— 下面那些停法只盯卡和主目标。
+        var backupStop: String?
+        var backupWriteFailures = 0
+        var backupAttempts = 0
+        if let backup = plan.backup {
+            outcome.backupDestination = backup.destination
+            outcome.backupPlannedFiles = backup.fileCount
+            outcome.backupConflicts = backup.conflicts
+            backupStop = prepareBackup(backup, for: plan)
+        }
+        /// 备份一个文件。false = 用户取消了。
+        func backupOne(_ copy: Copy) -> Bool {
+            guard let backup = plan.backup, backupStop == nil else { return true }
+            if !isDirectory(backup.destination) {
+                backupStop = "备份盘找不到了，被拔掉了？"
+                return true
+            }
+            backupAttempts += 1
+            do {
+                if let fault = backupFault?(backupAttempts) { throw fault }
+                _ = try copyOne(copy, into: backup.destination, cancel: cancel) { delta in
+                    bytesDone += delta
+                    let now = Date()
+                    if now.timeIntervalSince(lastReport) >= progressInterval {
+                        lastReport = now
+                        progress(filesDone, bytesDone)
+                    }
+                }
+                outcome.backupCopiedFiles += 1
+                backupWriteFailures = 0
+            } catch ImportError.cancelled {
+                return false
+            } catch let error as ImportError {
+                // 原因里的「目标」说的是备份盘（「备份盘满了」「备份里已经有 X，没覆盖」）。
+                let reason = error.shortReason.replacingOccurrences(of: "目标", with: "备份")
+                outcome.backupFailed.append(Failure(name: copy.originalName, reason: reason))
+                switch error {
+                case .diskFull:
+                    backupStop = "备份盘满了"
+                case .unsafePath:
+                    backupStop = error.shortReason
+                case .writeFailed, .readFailed, .verifyFailed, .sizeMismatch:
+                    backupWriteFailures += 1
+                    if backupWriteFailures >= 3 {
+                        backupStop = "备份连续 \(backupWriteFailures) 个文件没写成（\(error.shortReason)），停了备份"
+                    }
+                case .targetExists, .unreadable, .cancelled:
+                    break
+                }
+            } catch {
+                outcome.backupFailed.append(Failure(name: copy.originalName, reason: describe(error)))
+            }
+            return true
+        }
+
         progress(0, 0)
         shotLoop: for members in shots {
             if cancel.isSet { outcome.cancelled = true; break }
@@ -595,7 +866,8 @@ enum CardImporter {
             }
             // 计划之后目标里冒出了同名文件（同一个文件夹刚导过另一张卡、别的程序写进来）：整张不导，
             // 也不覆盖 —— 只跳冲突的那一个会把 RAW 和 JPG 拆到两张不同的照片下（审查发现）。
-            if let clash = members.first(where: { fm.fileExists(atPath: $0.target.path) }) {
+            // 用 lstat 看（entryExists）：悬空的符号链接 fileExists 看不见，到改名那一步才撞上，就拆开了。
+            if let clash = members.first(where: { entryExists($0.target) }) {
                 let why = "目标里突然有了同名的 \(clash.target.lastPathComponent)，整张没导、没覆盖"
                 for m in members { outcome.failed.append(Failure(name: m.originalName, reason: why)) }
                 filesDone += members.count
@@ -619,6 +891,16 @@ enum CardImporter {
                     copiedShots.insert(copy.shot)
                     readFailures = 0
                     writeFailures = 0
+                    if let backup = plan.backup, backup.afterPrimary.contains(copy.target.path) {
+                        let second = Copy(source: copy.target,
+                                          target: backup.destination.appendingPathComponent(copy.target.lastPathComponent),
+                                          size: copy.size, modified: copy.modified, created: copy.created,
+                                          originalName: copy.originalName, shot: copy.shot)
+                        if !backupOne(second) {
+                            outcome.cancelled = true
+                            break shotLoop
+                        }
+                    }
                 } catch ImportError.cancelled {
                     outcome.cancelled = true
                     break shotLoop
@@ -660,13 +942,65 @@ enum CardImporter {
                 progress(filesDone, bytesDone)
             }
         }
+        // 主目标里早就有、备份里还没有的：从主目标那份补到备份（不读卡）。
+        if !outcome.cancelled, let backup = plan.backup {
+            for copy in backup.fromPrimary {
+                if backupStop != nil { break }
+                if cancel.isSet || !backupOne(copy) {
+                    outcome.cancelled = true
+                    break
+                }
+            }
+            let bfd = open(backup.destination.path, O_RDONLY)
+            if bfd >= 0 { _ = fcntl(bfd, F_FULLFSYNC); close(bfd) }
+        }
+        outcome.backupAborted = backupStop
         // 一次 F_FULLFSYNC 把盘的写缓存刷下去 —— 用户看到「导入完成」可能马上就去格式化存储卡。
         let fd = open(plan.destination.path, O_RDONLY)
         if fd >= 0 { _ = fcntl(fd, F_FULLFSYNC); close(fd) }
         try? ledger.save(to: ledgerURL)
         outcome.copiedShots = copiedShots.count
+        var renamed: [String: String] = [:]     // 张 → 新主名
+        for copy in plan.copies where copiedShots.contains(copy.shot) {
+            let newStem = copy.target.deletingPathExtension().lastPathComponent
+            if newStem != (copy.originalName as NSString).deletingPathExtension { renamed[copy.shot] = newStem }
+        }
+        outcome.renamedShots = renamed.count
+        outcome.renamedExample = renamed.values.sorted().first
         progress(filesDone, bytesDone)
         return finish()
+    }
+
+    /// 备份能不能开始：备份根目录在、不和卡 / 导入位置重叠、空间够，然后建备份文件夹。不行就返回原因（只停备份）。
+    private static func prepareBackup(_ backup: Plan.Backup, for plan: Plan) -> String? {
+        if let must = backup.mustExist, !isDirectory(must) {
+            return "备份位置 \(displayPath(must)) 不见了，盘没插上？这次没备份"
+        }
+        let probe = existingAncestor(of: backup.destination)
+        if isWithin(probe, plan.source) || isWithin(plan.source, backup.destination) {
+            return "备份位置和存储卡重叠了，没备份"
+        }
+        if isWithin(probe, plan.destination) || isWithin(plan.destination, backup.destination) {
+            return "备份位置和导入位置是同一个地方，没备份"
+        }
+        if let free = freeBytes(near: backup.destination) {
+            // 和导入位置在同一块盘上：主目标那份也要从这块盘里出。
+            let alsoPrimary: Int64 = backup.sameVolume ? plan.totalBytes : 0
+            let need = backup.totalBytes + alsoPrimary
+            if free < need + spaceMargin {
+                return "备份盘空间不够：要 \(BatchStore.sizeText(need))，只剩 \(BatchStore.sizeText(free))，没备份"
+            }
+        }
+        do {
+            if backup.mustExist == nil {
+                try FileManager.default.createDirectory(at: backup.destination, withIntermediateDirectories: true)
+            } else if !isDirectory(backup.destination) {
+                try FileManager.default.createDirectory(at: backup.destination, withIntermediateDirectories: false)
+            }
+        } catch {
+            return "建不了备份文件夹 \(displayPath(backup.destination))：\(describe(error))，没备份"
+        }
+        return nil
     }
 
     /// 复制一个文件：.part → 校验 → 不覆盖地改名。返回账本 key（复制成功但读不回指纹就是 nil：
@@ -751,10 +1085,32 @@ enum CardImporter {
         if !attrs.isEmpty { try? fm.setAttributes(attrs, ofItemAtPath: part.path) }
 
         // RENAME_EXCL：目标已存在就失败 —— 原子的「绝不覆盖」。
-        if renamex_np(part.path, final.path, UInt32(RENAME_EXCL)) != 0 {
-            let code = errno
-            if code == EEXIST { throw ImportError.targetExists(final.lastPathComponent) }
-            throw ImportError.writeFailed(name, String(cString: strerror(code)))
+        // 不是每种卷都支持它：SMB / NFS 共享、部分 exFAT 盘（macOS 14 的 exfat 内核扩展实测过；15 以后换成
+        // FSKit，没实测）回 ENOTSUP。只在 ENOTSUP 时退回：lstat 看正式名字在不在，不在再普通 rename ——
+        // 这两步之间不是原子的，所以在这些非 APFS 卷上「绝不覆盖」降成了尽力而为（整张开始前、copyOne 开头
+        // 都已经查过同名，剩下的是几微秒的窗口）。用 lstat 不用 fileExists：fileExists 跟着符号链接走，
+        // 悬空的符号链接会被当成「不存在」然后被 rename 盖掉。EINVAL 不算「不支持」：macOS 上那是 flags
+        // 不合法或路径本身有问题，照常报错。
+        var renameCode: Int32 = 0
+        if pretendNoExclusiveRename {
+            renameCode = ENOTSUP
+        } else if renamex_np(part.path, final.path, UInt32(RENAME_EXCL)) != 0 {
+            renameCode = errno
+        }
+        if renameCode == ENOTSUP {
+            var existing = stat()
+            if lstat(final.path, &existing) == 0 { throw ImportError.targetExists(final.lastPathComponent) }
+            let probe = errno
+            // 连「在不在」都说不清（没权限、I/O 错）：不冒险改名。
+            if probe != ENOENT { throw ImportError.writeFailed(name, describe(errnoError(probe))) }
+            if rename(part.path, final.path) != 0 {
+                let code = errno
+                if code == ENOSPC { throw ImportError.diskFull(name) }
+                throw ImportError.writeFailed(name, describe(errnoError(code)))
+            }
+        } else if renameCode != 0 {
+            if renameCode == EEXIST { throw ImportError.targetExists(final.lastPathComponent) }
+            throw ImportError.writeFailed(name, String(cString: strerror(renameCode)))
         }
         finished = true
         guard let fp = try? fingerprint(final, size: copy.size) else { return nil }
@@ -773,6 +1129,12 @@ enum CardImporter {
               parent.st_dev == root.st_dev, parent.st_ino == root.st_ino else {
             throw ImportError.unsafePath(url.path)
         }
+    }
+
+    /// 这个名字上有没有东西（lstat：符号链接本身也算，悬空的也算）。
+    static func entryExists(_ url: URL) -> Bool {
+        var st = stat()
+        return lstat(url.path, &st) == 0
     }
 
     /// a 在 b 里面（或就是 b）吗。两个都得存在。
@@ -811,6 +1173,18 @@ enum CardImporter {
         return hasher.finalize()
     }
 
+    /// 系统调用的 errno 包成错误，交给 describe 出中文原因。
+    static func errnoError(_ code: Int32) -> Error {
+        NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+    }
+
+    /// 测试用：LABELGUI_TEST_NO_RENAME_EXCL=1 假装目标卷不支持 RENAME_EXCL（走 copyOne 的 ENOTSUP 退路）。
+    /// 只在设了 LABELGUI_DATA_DIR（隔离的测试数据目录）时生效，正常使用碰不到。
+    static let pretendNoExclusiveRename: Bool = {
+        let env = ProcessInfo.processInfo.environment
+        return env["LABELGUI_TEST_NO_RENAME_EXCL"] == "1" && !(env["LABELGUI_DATA_DIR"] ?? "").isEmpty
+    }()
+
     /// 错误里的 POSIX 错误码（Foundation 包了一层的也挖出来）。
     static func posixCode(_ error: Error) -> Int32? {
         let ns = error as NSError
@@ -835,6 +1209,7 @@ enum CardImporter {
         case ENOENT?: return "文件不见了"
         case ENOSPC?: return "盘满了"
         case ENXIO?, ENODEV?: return "设备断开了"
+        case ENOTSUP?: return "这块盘 / 共享不支持这个操作"
         default: return (error as NSError).localizedDescription
         }
     }
@@ -849,10 +1224,20 @@ enum CardImporter {
     }
 
     /// 目标所在的盘还剩多少（目标还不存在就往上找存在的那一级）。
+    /// 「重要用途可用」只有 APFS 算得准：exFAT / FAT / SMB 这些外接盘上常是 nil（会当成够）或 0（会永远不够），
+    /// 那时退回普通的「可用」，再不行问 statfs。
     static func freeBytes(near url: URL) -> Int64? {
         let probe = existingAncestor(of: url)
-        guard let v = try? probe.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]) else { return nil }
-        return v.volumeAvailableCapacityForImportantUsage
+        let v = try? probe.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
+        if let important = v?.volumeAvailableCapacityForImportantUsage, important > 0 { return important }
+        if let plain = v?.volumeAvailableCapacity { return Int64(plain) }
+        var fs = statfs()
+        if statfs(probe.path, &fs) == 0 {
+            let blocks = Int64(fs.f_bavail)
+            let blockSize = Int64(fs.f_bsize)
+            return blocks * blockSize
+        }
+        return v?.volumeAvailableCapacityForImportantUsage
     }
 
     /// 自己或往上第一个存在的那一级。
@@ -893,6 +1278,28 @@ extension CardImporter.Outcome {
     /// 没导进来的文件数：计划的减去导进来的（中途停下时后面没试的也算）。
     var missingFiles: Int { max(plannedFiles - copiedFiles, failed.count) }
 
+    /// 该备份、没备份成的文件数（主目标那份没导进来的，备份里当然也没有）。
+    var backupMissingFiles: Int { max(backupPlannedFiles - backupCopiedFiles, backupFailed.count) }
+    /// 开了备份、备份没做全：「先别格式化」要两份都校验过才不说。
+    var backupIncomplete: Bool {
+        backupDestination != nil && (backupMissingFiles > 0 || backupAborted != nil || backupConflicts > 0)
+    }
+
+    /// 「备份没写全：3 个文件没备份到 T7 › 备份 › 20261104（备份盘满了）」
+    var backupProblemText: String? {
+        guard let dest = backupDestination, backupIncomplete else { return nil }
+        let place = CardImporter.displayPath(dest)
+        var lines: [String] = []
+        if backupMissingFiles > 0 || backupAborted != nil {
+            let why = backupAborted ?? backupFailed.first?.reason ?? "没写成"
+            lines.append("备份没写全：\(backupMissingFiles) 个文件没备份到 \(place)（\(why)）")
+        }
+        if backupConflicts > 0 {
+            lines.append("\(backupConflicts) 张备份里同名的是别的文件，没法备份（在 \(place)）")
+        }
+        return lines.joined(separator: "；")
+    }
+
     var summary: String {
         var text: String
         if cancelled {
@@ -904,7 +1311,22 @@ extension CardImporter.Outcome {
         }
         if !cancelled && missingFiles > 0 { text += " · \(missingFiles) 个文件没导进来" }
         if !scanProblems.isEmpty { text += " · 卡上有 \(scanProblems.count) 处读不出来" }
+        if let renamedText { text += " · " + renamedText }
+        if let dest = backupDestination, !cancelled {
+            if backupIncomplete {
+                text += " · 备份没做完" + (backupAborted.map { "（\($0)）" } ?? "（\(backupMissingFiles) 个文件没备份）")
+            } else {
+                text += " · 另备份 \(backupCopiedFiles) 个文件到 \(CardImporter.displayPath(dest))"
+            }
+        }
         return text
+    }
+
+    /// 「3 张和目标里别的照片重名，改名导入了（如 IMG_0001_2）」
+    var renamedText: String? {
+        guard renamedShots > 0 else { return nil }
+        let example = renamedExample.map { "（如 \($0)）" } ?? ""
+        return "\(renamedShots) 张和目标里别的照片重名，改名导入了\(example)"
     }
 
     /// 要用户记住的那句（BatchStore.importNotice）：有文件没导进来、卡上有读不出来的地方、中途停了。
@@ -921,8 +1343,21 @@ extension CardImporter.Outcome {
             parts.append("卡上有 \(scanProblems.count) 处读不出来（\(shown)），那里的照片没导")
         }
         if let aborted { parts.append(aborted) }
-        guard !parts.isEmpty else { return nil }
-        return "存储卡「\(card)」：" + parts.joined(separator: "；") + " —— 先别格式化存储卡，再插一次会只补没导的"
+        // 备份没做全：电脑上只有一份，同样先别格式化。补备份：再插卡勾「以前导入过的也再导一遍」——
+        // 主目标里内容一样的不会重复复制，只从主目标那份补到备份。
+        let backupHint = !cancelled ? backupProblemText : nil
+        if let backupHint { parts.append(backupHint) }
+        // 改了名不是「先别格式化」的理由（照片都好好导进来了），只照实说一句。
+        let info = [renamedText].compactMap { $0 }
+        if parts.isEmpty {
+            guard !info.isEmpty else { return nil }
+            return "存储卡「\(card)」：" + info.joined(separator: "；")
+        }
+        var tail = " —— 先别格式化存储卡，再插一次会只补没导的"
+        if backupHint != nil {
+            tail += "（补备份要勾「以前导入过的也再导一遍」，已经导进来的不会重复复制）"
+        }
+        return "存储卡「\(card)」：" + (parts + info).joined(separator: "；") + tail
     }
 
     static func durationText(_ t: TimeInterval) -> String {
@@ -962,6 +1397,11 @@ extension BatchStore {
             let fresh: CardImporter.Plan
             do {
                 fresh = try CardImporter.plan(source: plan.source, destination: plan.destination,
+                                              mustExist: plan.mustExist,
+                                              backup: plan.backup.map {
+                                                  CardImporter.Target(destination: $0.destination, mustExist: $0.mustExist,
+                                                                      appending: false, issue: nil)
+                                              },
                                               ledger: CardImporter.Ledger.load(from: ledgerURL),
                                               includeImported: plan.includeImported, cancel: flag)
             } catch {
@@ -982,7 +1422,8 @@ extension BatchStore {
                 }
                 return
             }
-            let total = max(fresh.totalBytes, 1)
+            // 有备份时字节连备份一起算（进度条走到头 = 两份都写完）。
+            let total = max(fresh.totalBytes + (fresh.backup?.totalBytes ?? 0), 1)
             let fileCount = fresh.copies.count
             let outcome = CardImporter.execute(fresh, ledgerURL: ledgerURL, cancel: flag) { files, bytes in
                 Task { @MainActor [weak self] in
@@ -1037,7 +1478,9 @@ extension BatchStore {
     /// 要分析就分析。还有卡排着队就先不开（开了也不能分析，分析的请求会丢 —— 审查发现）。用户在忙就
     /// 什么都不做，横幅留着等他点。
     func openFinishedImportIfReady(userBusy: Bool) {
-        guard finishedImport != nil, queuedCardImports == 0, !isRunning, !userBusy else { return }
+        // 确认框里正开着选文件夹的面板（换导入位置）：也算在忙，横幅留着（BatchView 的 modalPanelOpen 管不到那个面板）。
+        guard finishedImport != nil, queuedCardImports == 0, !isRunning, !userBusy,
+              !CardImportCenter.pickingFolder else { return }
         openFinishedImport()
     }
 
@@ -1045,6 +1488,12 @@ extension BatchStore {
     func openFinishedImport() {
         guard let done = finishedImport, !isRunning else { return }
         finishedImport = nil
+        // 导到外接盘上、还没打开盘就拔了：别打开一个空场次，说一声（照片在那块盘上，插回去用「选择文件夹…」打开）。
+        if !CardImporter.directoryExists(done.folder) {
+            addImportNotice("\(done.shots) 张导到了 \(CardImporter.displayPath(done.folder))，那里现在打不开（盘拔掉了？）—— " +
+                            "插回去以后用文件夹菜单「选择文件夹…」打开")
+            return
+        }
         // 没切成（这一场还有改动没存上）：横幅留着等存上以后再点，别对着原来那一场跑分析。
         guard switchSession(to: done.folder) else {
             finishedImport = done
@@ -1070,6 +1519,10 @@ private final class ImportLiveBox: @unchecked Sendable {
 
 /// LABELGUI_DATA_DIR=<临时> LabelGUI --ingest <card_dir> --dest <dir> [--reimport] [--plan-only] [--cancel-after N]
 ///   [--cancel-at-bytes B] [--via-store [--no-analyze]] [--ledger-cap N] [--plant-after-plan 文件名]
+///   [--plant-symlink-after-plan 文件名] [--plant-symlink-mid 文件名] [--rename-after-plan 路径]
+///   （--dest 也可以换成 --dest-root <根目录> / --into-existing <已有文件夹> / --use-saved-settings，
+///    配 --save-settings 把 --dest-root 记进数据目录 —— 走界面那套「导到哪」，见 CardImportDestinations.swift）
+///   [--backup <备份根目录>] [--backup-full-at N] [--unplug-backup-after N]（第二份备份；后两个是测试备份盘满、被拔）
 /// 账本在 LABELGUI_DATA_DIR 里；必须给 --dest —— 测试不往真的「图片」文件夹里写。
 /// --cancel-after N：复制完 N 个文件就取消；--cancel-at-bytes B：复制到第 B 字节（文件中间）就取消
 /// —— 验证 .part 清干净、账本只记了导完的。--plant-after-plan：计划做完、复制之前往目标里放一个同名文件
@@ -1083,17 +1536,49 @@ enum CardImportCLI {
             return args[i + 1]
         }
         CollageCLI.requireIsolatedDataDir("--ingest", "会写导入账本")
-        guard let destPath = option("--dest") else {
-            print("--ingest 必须给 --dest <目标文件夹>（测试不往真的「图片」里写）")
+        // 导到哪：--dest 直接给目标文件夹（老用法）；或者走界面那套 —— --dest-root 导入根目录（按今天建 yyyyMMdd）、
+        // --into-existing 导进已有的文件夹、--use-saved-settings 用数据目录里记住的根目录（--save-settings 先记下）。
+        // 哪个都没给（或记住的是「图片」）就拒绝：测试不往真的「图片」里写。
+        var settings = args.contains("--use-saved-settings") ? CardImporter.DestinationSettings.load(from: appDataDir)
+            : CardImporter.DestinationSettings()
+        if let root = option("--dest-root") {
+            settings.root = CardImporter.savedFolder(for: URL(fileURLWithPath: root))
+        }
+        // --backup <根目录>：同时写第二份备份（在它里面建和导入位置同名的文件夹）。
+        if let backupRoot = option("--backup") {
+            settings.backup = CardImporter.savedFolder(for: URL(fileURLWithPath: backupRoot))
+            settings.backupEnabled = true
+        }
+        if args.contains("--save-settings") { settings.save(to: appDataDir) }
+        let target: CardImporter.Target
+        if let destPath = option("--dest") {
+            target = CardImporter.Target(destination: URL(fileURLWithPath: destPath).standardizedFileURL,
+                                         mustExist: nil, appending: false, issue: nil)
+        } else if let existing = option("--into-existing") {
+            target = CardImporter.target(settings: settings, choice: .existing(URL(fileURLWithPath: existing)))
+        } else if settings.root != nil {
+            target = CardImporter.target(settings: settings, choice: .saved)
+        } else {
+            print("--ingest 必须给 --dest <目标文件夹>（或 --dest-root / --into-existing；测试不往真的「图片」里写）")
             exit(2)
         }
+        if let issue = target.issue {
+            print("导入位置有问题：\(issue)")
+            exit(3)
+        }
+        let backupTarget = CardImporter.backupTarget(settings: settings, primary: target)
+        if let issue = backupTarget?.issue {
+            print("备份位置有问题：\(issue)")
+            exit(3)
+        }
         let card = URL(fileURLWithPath: args[flagIndex + 1]).standardizedFileURL
-        let dest = URL(fileURLWithPath: destPath).standardizedFileURL
+        let dest = target.destination
         if let cap = option("--ledger-cap").flatMap(Int.init) { CardImporter.Ledger.cap = cap }
         let ledgerURL = appDataDir.appendingPathComponent(CardImporter.ledgerFileName)
         let plan: CardImporter.Plan
         do {
-            plan = try CardImporter.plan(source: card, destination: dest,
+            plan = try CardImporter.plan(source: card, destination: dest, mustExist: target.mustExist,
+                                         backup: backupTarget,
                                          ledger: CardImporter.Ledger.load(from: ledgerURL),
                                          includeImported: args.contains("--reimport"))
         } catch {
@@ -1110,6 +1595,26 @@ enum CardImportCLI {
             try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
             try? Data("planted by test".utf8).write(to: dest.appendingPathComponent(planted))
         }
+        // 悬空的符号链接（fileExists 看不见它）：--plant-symlink-after-plan 计划做完就放（验证整张跳过）；
+        // --plant-symlink-mid 第一个文件复制完才放（整张检查已经过了，只剩改名那道闸 —— 配
+        // LABELGUI_TEST_NO_RENAME_EXCL=1 验证 RENAME_EXCL 的退路用 lstat 查、不会把它盖掉）。
+        func plantSymlink(_ name: String) {
+            try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+            try? FileManager.default.createSymbolicLink(atPath: dest.appendingPathComponent(name).path,
+                                                        withDestinationPath: "nowhere-planted-by-test")
+        }
+        if let planted = option("--plant-symlink-after-plan") { plantSymlink(planted) }
+        var midSymlink = option("--plant-symlink-mid")
+        // --rename-after-plan 路径：计划做完、复制之前把它挪走（模拟确认之后外接盘被拔掉）—— 验证不导、
+        // 也不在原来的路径上重新建出文件夹（那会落到系统盘上）。
+        if let path = option("--rename-after-plan") {
+            try? FileManager.default.moveItem(atPath: path, toPath: path + ".moved")
+        }
+        // 备份盘的两种意外（测试用）：--backup-full-at N 第 N 次备份当成「盘满了」；--unplug-backup-after N
+        // 主目标导完 N 个文件后把备份根目录挪走（像被拔掉）。主目标都要照常导完。
+        let backupFullAt = option("--backup-full-at").flatMap(Int.init)
+        var unplugBackupAfter = option("--unplug-backup-after").flatMap(Int.init)
+        let backupRootPath = option("--backup")
 
         // --via-store：走界面同一条路 —— BatchStore.importFromCard（重做计划 → 复制）→ 像 BatchView 闲着时那样
         // 打开目标文件夹 → 自动开始分析，等全部跑完再打印。
@@ -1139,15 +1644,33 @@ enum CardImportCLI {
         let flag = AnalysisEngine.CancelFlag()
         let cancelAfter = option("--cancel-after").flatMap(Int.init)
         let cancelAtBytes = option("--cancel-at-bytes").flatMap(Int64.init)
-        let outcome = CardImporter.execute(plan, ledgerURL: ledgerURL, cancel: flag, progressInterval: 0) { files, bytes in
+        let fault: ((Int) -> CardImporter.ImportError?)? = backupFullAt.map { at in
+            { attempt in attempt == at ? CardImporter.ImportError.diskFull("备份测试") : nil }
+        }
+        let outcome = CardImporter.execute(plan, ledgerURL: ledgerURL, cancel: flag, progressInterval: 0,
+                                           backupFault: fault) { files, bytes in
             if let n = cancelAfter, files >= n { flag.set() }
             if let b = cancelAtBytes, bytes >= b { flag.set() }
+            if files >= 1, let name = midSymlink {
+                midSymlink = nil
+                plantSymlink(name)
+            }
+            if let n = unplugBackupAfter, files >= n, let root = backupRootPath {
+                unplugBackupAfter = nil
+                try? FileManager.default.moveItem(atPath: root, toPath: root + ".unplugged")
+            }
         }
         print(outcome.summary + "（\(outcome.copiedFiles) 个文件）")
         print(String(format: "elapsed=%.3f", outcome.elapsed))
         for f in outcome.failed { print("  失败 \(f.name)：\(f.reason)") }
+        if outcome.backupDestination != nil {
+            print("备份：写成 \(outcome.backupCopiedFiles)/\(outcome.backupPlannedFiles) 个文件" +
+                  (outcome.backupAborted.map { " · 停了：\($0)" } ?? ""))
+            for f in outcome.backupFailed { print("  备份失败 \(f.name)：\(f.reason)") }
+        }
         if let notice = outcome.notice(card: plan.sourceName) { print("导入提醒：\(notice)") }
         let clean = outcome.failed.isEmpty && outcome.aborted == nil && outcome.scanProblems.isEmpty
+            && !outcome.backupIncomplete
         exit(clean ? 0 : 1)
     }
 
@@ -1156,10 +1679,26 @@ enum CardImportCLI {
         lines.append(plan.copies.isEmpty ? "要导入：没有" : "要导入：\(plan.summaryLine)")
         lines.append("跳过：以前导入过 \(plan.skippedImported) 张 · 目标里已有 \(plan.skippedInDest) 张 · 改名 \(plan.renamedShots) 张" +
                      (plan.previousFolders.isEmpty ? "" : " · 以前导到 \(plan.previousFolders.map { URL(fileURLWithPath: $0).lastPathComponent }.joined(separator: "、"))") +
-                     (plan.previousFolderGone ? "（那个文件夹已经不在了）" : ""))
+                     (plan.previousFolderGone ? "（那个文件夹已经不在了）" : "") +
+                     (plan.previousVolumeOffline.map { "（那块盘「\($0)」没插上）" } ?? ""))
+        if plan.pairedShots > 0 || plan.unconfirmedHalves > 0 {
+            lines.append("RAW/JPG 配对：补成一对 \(plan.pairedShots) 张 · 认不准没配 \(plan.unconfirmedHalves) 张")
+        }
+        if plan.renamedShots > 0 {
+            lines.append("改名：\(plan.renamedShots) 张（如 \(plan.renamedExample ?? "-")）· 其中 RAW+JPG 一起改 \(plan.renamedWithPair) 张")
+        }
         if let other = plan.otherFilesText { lines.append("其他文件：\(other)") }
         if let problems = plan.scanProblemText { lines.append("读不出来：\(problems)") }
         lines.append("目标：\(CardImporter.displayPath(plan.destination))（原有 \(plan.existingInDest) 个文件）· 空间\(plan.enoughSpace ? "够" : "不够")")
+        if let must = plan.mustExist { lines.append("必须已经在：\(must.path)") }
+        if let backup = plan.backup {
+            let space = plan.backupEnoughSpace ? "够" : "不够"
+            let same = backup.sameVolume ? " · 和导入位置同一块盘" : ""
+            let place = "备份：\(CardImporter.displayPath(backup.destination))（原有 \(backup.existingInBackup) 个文件）"
+            let work = " · 要备份 \(backup.fileCount) 个文件（补备份 \(backup.fromPrimary.count) 个）"
+            let rest = " · 备份里已有 \(backup.alreadyBackedUp) 个 · 没法备份 \(backup.conflicts) 张 · 空间\(space)\(same)"
+            lines.append(place + work + rest)
+        }
         return lines.joined(separator: "\n")
     }
 }

@@ -316,6 +316,365 @@ else:
     print("    " + r.stdout.strip().replace("\n", "\n    "))
     check(r.returncode == 0 and "排队自检通过" in r.stdout, "两种情形都导全了，分析在最后跑完")
 
+def run_card_env(card, data, dest, env_extra, *extra):
+    env = dict(os.environ, LABELGUI_DATA_DIR=data, **env_extra)
+    r = subprocess.run([BIN, "--ingest", card, *(["--dest", dest] if dest else []), *extra], env=env,
+                       capture_output=True, text=True, timeout=300)
+    print("    " + r.stdout.strip().replace("\n", "\n    "))
+    if r.stderr.strip():
+        print("    [stderr] " + r.stderr.strip()[:400])
+    return r
+
+
+def hidden(dest):
+    return [f for f in os.listdir(dest) if f.startswith(".")] if os.path.isdir(dest) else []
+
+
+NO_EXCL = {"LABELGUI_TEST_NO_RENAME_EXCL": "1"}
+print("K1. 目标卷不支持 RENAME_EXCL（SMB / NFS / 部分 exFAT 回 ENOTSUP）：退回 lstat + 普通改名，照样全导进来")
+k1_files = {"DCIM/100CANON/IMG_0001.CR3": rand(1 << 20), "DCIM/100CANON/IMG_0001.JPG": rand(300_000),
+            "DCIM/100CANON/IMG_0002.CR3": rand(1 << 20), "DCIM/100CANON/IMG_0002.JPG": rand(300_000)}
+c = mkcard("card_k1", k1_files)
+d = os.path.join(WORK, "dest_k1")
+r = run_card_env(c, os.path.join(WORK, "data_k1"), d, NO_EXCL)
+check(r.returncode == 0 and listing(d) == sorted(os.path.basename(k) for k in k1_files), f"4 个文件都导了（{listing(d)}）")
+check(all(sha(os.path.join(d, os.path.basename(k))) == hashlib.sha256(v).hexdigest() for k, v in k1_files.items()),
+      "内容和卡上逐字节一致")
+check(hidden(d) == [], f"没有残留的 .part（{hidden(d)}）")
+
+print("K2. 退路下，整张检查之后才冒出来的悬空符号链接：lstat 看得见，没被改名盖掉")
+d = os.path.join(WORK, "dest_k2")
+r = run_card_env(c, os.path.join(WORK, "data_k2"), d, NO_EXCL, "--plant-symlink-mid", "IMG_0001.JPG")
+link = os.path.join(d, "IMG_0001.JPG")
+check(os.path.islink(link) and os.readlink(link) == "nowhere-planted-by-test", "符号链接还是原来那个，没被盖掉")
+check(r.returncode != 0 and "没覆盖" in r.stdout, "IMG_0001.JPG 报「已经有、没覆盖」，退出码非 0")
+check(hidden(d) == [], f"没有残留的 .part（{hidden(d)}）")
+
+print("K3. 计划之后冒出悬空的符号链接：整张跳过（RAW 也不导，不拆开），链接没动")
+d = os.path.join(WORK, "dest_k3")
+r = run_card_env(c, os.path.join(WORK, "data_k3"), d, {}, "--plant-symlink-after-plan", "IMG_0002.JPG")
+check(listing(d) == ["IMG_0001.CR3", "IMG_0001.JPG", "IMG_0002.JPG"], f"IMG_0002 整张没导（{listing(d)}）")
+check(os.path.islink(os.path.join(d, "IMG_0002.JPG")), "符号链接还在")
+
+# ---------- RAW、JPG 分卡存：文件头（拍摄时间、SubSec、型号、机身序列号）认同一帧 ----------
+import struct
+
+# 8x8 灰色基线 JPEG（sips 生成、去掉了 APP 段），塞一段 EXIF 进去 ImageIO 就读得出文件头。
+TINY_JPEG = bytes.fromhex(
+    "ffd8ffc00011080008000803012200021101031101ffc4001f0000010501010101010100000000000000000102030405060708090a0b"
+    "ffc400b5100002010303020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f024"
+    "33627282090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475767778"
+    "797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9"
+    "dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffc4001f0100030101010101010101010000000000000102030405060708090a0b"
+    "ffc400b51100020102040403040705040400010277000102031104052131061241510761711322328108144291a1b1c109233352f015"
+    "6272d10a162434e125f11718191a262728292a35363738393a434445464748494a535455565758595a636465666768696a7374757677"
+    "78797a82838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7"
+    "d8d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9faffdb0043000606060606060a06060a0e0a0a0a0e120e0e0e0e1217121212121217"
+    "1c1717171717171c1c1c1c1c1c1c1c22222222222227272727272c2c2c2c2c2c2c2c2c2cffdb0043010707070b0a0b130a0a132e1f1a"
+    "1f2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2effdd00"
+    "040001ffda000c03010002110311003f0028a28a00ffd9")
+
+
+def exif_tiff(model, when, subsec, serial):
+    """TIFF 块：IFD0（Make、Model、指向 EXIF）+ EXIF（DateTimeOriginal、SubSecTimeOriginal、BodySerialNumber）。"""
+    def asc(s):
+        return s.encode() + b"\0"
+    ifd0 = [(0x010F, asc("SONY")), (0x0110, asc(model))]
+    sub = [(tag, asc(v)) for tag, v in [(0x9003, when), (0x9291, subsec), (0xA431, serial)] if v is not None]
+    exif_off = 8 + 2 + 12 * (len(ifd0) + 1) + 4
+    data_off = exif_off + 2 + 12 * len(sub) + 4
+    blobs = bytearray()
+
+    def entry(tag, val):
+        if len(val) <= 4:
+            return struct.pack("<HHI", tag, 2, len(val)) + val.ljust(4, b"\0")
+        off = data_off + len(blobs)
+        blobs.extend(val + (b"\0" if len(val) % 2 else b""))
+        return struct.pack("<HHII", tag, 2, len(val), off)
+    head = struct.pack("<H", len(ifd0) + 1) + b"".join(entry(t, v) for t, v in ifd0)
+    head += struct.pack("<HHII", 0x8769, 4, 1, exif_off) + struct.pack("<I", 0)
+    body = struct.pack("<H", len(sub)) + b"".join(entry(t, v) for t, v in sub) + struct.pack("<I", 0)
+    return b"II" + struct.pack("<HI", 42, 8) + head + body + bytes(blobs)
+
+
+def fake_arw(model, when, subsec, serial, size=300_000):
+    t = exif_tiff(model, when, subsec, serial)
+    return t + os.urandom(size - len(t))
+
+
+def fake_jpg(model, when, subsec, serial, size=120_000):
+    app1 = b"Exif\0\0" + exif_tiff(model, when, subsec, serial)
+    head = TINY_JPEG[:2] + b"\xff\xe1" + struct.pack(">H", len(app1) + 2) + app1 + TINY_JPEG[2:]
+    return head + os.urandom(size - len(head))
+
+
+def describe_count(stdout, label):
+    m = re.search(label + r" (\d+) 张", stdout)
+    return int(m.group(1)) if m else 0
+
+
+T1, T2 = "2026:10:01 09:30:00", "2026:10:01 09:31:07"
+CAM1, CAM2 = "4012345", "4099999"
+print("M1. RAW、JPG 分卡存：卡 A 只有 RAW、卡 B 只有同名 JPG，文件头一致 → 补成一对、不改名；旁边 LR 的 .xmp 不挡")
+card_a = mkcard("card_m_a", {"DCIM/100MSDCF/DSC00001.ARW": fake_arw("ILCE-7M4", T1, "123", CAM1),
+                             "DCIM/100MSDCF/DSC00002.ARW": fake_arw("ILCE-7M4", T2, "045", CAM1)})
+card_b = mkcard("card_m_b", {"DCIM/100MSDCF/DSC00001.JPG": fake_jpg("ILCE-7M4", T1, "123", CAM1),
+                             "DCIM/100MSDCF/DSC00002.JPG": fake_jpg("ILCE-7M4", T2, "045", CAM1)})
+d = os.path.join(WORK, "dest_m1")
+data_m = os.path.join(WORK, "data_m1")
+r = run_card(card_a, data_m, d)
+check(r.returncode == 0 and listing(d) == ["DSC00001.ARW", "DSC00002.ARW"], f"卡 A 的 RAW 导进来了（{listing(d)}）")
+open(os.path.join(d, "DSC00002.xmp"), "w").write("<x:xmpmeta/>")          # Lightroom 给 RAW 写的
+r = run_card(card_b, data_m, d, "--plan-only")
+check(describe_count(r.stdout, "补成一对") == 2 and "改名 0 张" in r.stdout, "计划：补成一对 2 张、改名 0 张")
+r = run_card(card_b, data_m, d)
+check(r.returncode == 0 and listing(d) == ["DSC00001.ARW", "DSC00001.JPG", "DSC00002.ARW", "DSC00002.JPG", "DSC00002.xmp"],
+      f"JPG 用原名补在 RAW 旁边（{listing(d)}）")
+check(sha(os.path.join(d, "DSC00001.JPG")) == sha(os.path.join(card_b, "DCIM/100MSDCF/DSC00001.JPG")), "补进来的就是卡 B 的 JPG")
+check("改名导入了" not in r.stdout and "导入提醒" not in r.stdout, "导完的摘要、提醒里都没有改名")
+r = run_card(card_b, data_m, d, "--reimport")
+check("要导入：没有" in r.stdout and "目标里已有 2 张" in r.stdout, "再导一次卡 B（勾重导）：都认出来、不多出 _2")
+
+print("M2. 反例：同号不同时间 → 照旧改名；序列号读不到 → 照旧改名（认不准，确认框照实说）；摘要、提醒都说改了名")
+card_c = mkcard("card_m_c", {"DCIM/100MSDCF/DSC00001.JPG": fake_jpg("ILCE-7M4", "2026:10:02 18:00:00", "123", CAM1)})
+r = run_card(card_c, data_m, d)
+check("DSC00001_2.JPG" in listing(d) and sha(os.path.join(d, "DSC00001_2.JPG")) == sha(os.path.join(card_c, "DCIM/100MSDCF/DSC00001.JPG")),
+      f"时间不一样的那张改名 DSC00001_2.JPG（{listing(d)}）")
+check(sha(os.path.join(d, "DSC00001.JPG")) == sha(os.path.join(card_b, "DCIM/100MSDCF/DSC00001.JPG")), "原来那对没被动")
+check("改名导入了（如 DSC00001_2）" in r.stdout, "导完的摘要里说了改名")
+notice = [l for l in r.stdout.splitlines() if l.startswith("导入提醒：")]
+check(len(notice) == 1 and "改名导入了" in notice[0] and "先别格式化" not in notice[0], f"提醒里说了改名、没叫人先别格式化（{notice}）")
+d2 = os.path.join(WORK, "dest_m2")
+card_ns_a = mkcard("card_m_nsa", {"DCIM/100MSDCF/DSC00005.ARW": fake_arw("ILCE-7M4", T1, "123", None)})
+card_ns_b = mkcard("card_m_nsb", {"DCIM/100MSDCF/DSC00005.JPG": fake_jpg("ILCE-7M4", T1, "123", None)})
+run_card(card_ns_a, os.path.join(WORK, "data_m2"), d2)
+r = run_card(card_ns_b, os.path.join(WORK, "data_m2"), d2)
+check(listing(d2) == ["DSC00005.ARW", "DSC00005_2.JPG"], f"序列号读不到 → 改名、不硬配（{listing(d2)}）")
+check(describe_count(r.stdout, "认不准没配") == 1, "计划里数出 1 张认不准没配")
+
+print("M3. 两台同号机身（防的就是把它们拼成一张）：各自的 JPG 找到各自的 RAW")
+d3 = os.path.join(WORK, "dest_m3")
+data_m3 = os.path.join(WORK, "data_m3")
+cam1_raw = mkcard("card_m3_r1", {"DCIM/100MSDCF/DSC00009.ARW": fake_arw("ILCE-7M4", T1, "500", CAM1)})
+cam2_raw = mkcard("card_m3_r2", {"DCIM/100MSDCF/DSC00009.ARW": fake_arw("ILCE-7M4", T1, "500", CAM2)})
+cam1_jpg = mkcard("card_m3_j1", {"DCIM/100MSDCF/DSC00009.JPG": fake_jpg("ILCE-7M4", T1, "500", CAM1)})
+cam2_jpg = mkcard("card_m3_j2", {"DCIM/100MSDCF/DSC00009.JPG": fake_jpg("ILCE-7M4", T1, "500", CAM2)})
+for card in (cam1_raw, cam2_raw, cam2_jpg, cam1_jpg):
+    run_card(card, data_m3, d3)
+check(listing(d3) == ["DSC00009.ARW", "DSC00009.JPG", "DSC00009_2.ARW", "DSC00009_2.JPG"], f"两对各归各（{listing(d3)}）")
+pairs_m3 = {"DSC00009.ARW": cam1_raw, "DSC00009.JPG": cam1_jpg, "DSC00009_2.ARW": cam2_raw, "DSC00009_2.JPG": cam2_jpg}
+check(all(sha(os.path.join(d3, k)) == sha(os.path.join(v, "DCIM/100MSDCF/" + k.replace("_2", ""))) for k, v in pairs_m3.items()),
+      "机身 1 的 JPG 配机身 1 的 RAW、机身 2 的配机身 2 的（逐字节核对）")
+
+# ---------- 导到哪：导入根目录可以改（外接盘），盘不在时明说、绝不落回系统盘 ----------
+TODAY = time.strftime("%Y%m%d")
+rcard = mkcard("card_r", {"DCIM/100CANON/IMG_0001.CR3": rand(400_000), "DCIM/100CANON/IMG_0001.JPG": rand(100_000)})
+RFILES = ["IMG_0001.CR3", "IMG_0001.JPG"]
+
+
+def ingest_to(data, *extra):
+    return run_card_env(rcard, data, None, {}, *extra)
+
+
+print("R1. 记住的导入根目录：照旧在里面按今天建 yyyyMMdd")
+root1 = os.path.join(WORK, "root_r1")
+os.makedirs(root1)
+r = ingest_to(os.path.join(WORK, "data_r1"), "--dest-root", root1)
+check(r.returncode == 0 and listing(os.path.join(root1, TODAY)) == RFILES, f"导进了 root_r1/{TODAY}（{listing(os.path.join(root1, TODAY))}）")
+
+print("R2. 外接盘没插上 / 文件夹没了 / 没给目标：不导、明说，不往别处落")
+r = ingest_to(os.path.join(WORK, "data_r2"), "--dest-root", "/Volumes/NoSuchDisk_K/照片")
+check(r.returncode == 3 and "「NoSuchDisk_K」" in r.stdout and "没插上" in r.stdout, "盘没插上：说出盘名、退出码 3")
+check(not os.path.exists("/Volumes/NoSuchDisk_K"), "没在 /Volumes 下建出文件夹")
+gone = os.path.join(WORK, "root_gone")
+r = ingest_to(os.path.join(WORK, "data_r2"), "--dest-root", gone)
+check(r.returncode == 3 and "不在了" in r.stdout and not os.path.exists(gone), "文件夹没了：说「不在了」、没重新建出来")
+r = ingest_to(os.path.join(WORK, "data_r2"), "--use-saved-settings")
+check(r.returncode == 2, "没记导入位置（= 图片）又没给 --dest：拒绝跑，退出码 2")
+
+print("R3. 记住的位置跟着书签走：根目录改了名照样找得到")
+root3 = os.path.join(WORK, "root_r3")
+os.makedirs(root3)
+data_r3 = os.path.join(WORK, "data_r3")
+r = ingest_to(data_r3, "--dest-root", root3, "--save-settings", "--plan-only")
+saved = json.load(open(os.path.join(data_r3, "card_import_settings.json")))
+check(r.returncode == 0 and saved["root"]["path"].endswith("root_r3") and saved["root"].get("bookmark"), "设置里记了路径和书签")
+os.rename(root3, root3 + "_改名")
+r = ingest_to(data_r3, "--use-saved-settings")
+check(r.returncode == 0 and listing(os.path.join(root3 + "_改名", TODAY)) == RFILES, "导进了改名后的文件夹")
+check(not os.path.exists(root3), "没在旧路径上重新建出文件夹")
+
+print("R4. 路径上有文件夹、但不在记住的那块盘上（/Volumes/T7 没挂时系统盘上同名的空文件夹）：不算，不导")
+root4 = os.path.join(WORK, "root_r4")
+os.makedirs(root4)
+data_r4 = os.path.join(WORK, "data_r4")
+ingest_to(data_r4, "--dest-root", root4, "--save-settings", "--plan-only")
+settings_path = os.path.join(data_r4, "card_import_settings.json")
+saved = json.load(open(settings_path))
+saved["root"]["volumeUUID"] = "00000000-0000-0000-0000-00000000C0DE"
+saved["root"]["volumeName"] = "T7"
+json.dump(saved, open(settings_path, "w"))
+r = ingest_to(data_r4, "--use-saved-settings")
+check(r.returncode == 3 and "「T7」" in r.stdout and "没插上" in r.stdout, "说「T7」没插上、退出码 3")
+check(listing(root4) == [], f"那个文件夹里什么都没写（{listing(root4)}）")
+
+print("R5. 这次导进一个已有的文件夹（追加到已有场次）：不建日期子文件夹；文件夹不在就不导")
+exist5 = os.path.join(WORK, "已有场次_r5")
+os.makedirs(exist5)
+open(os.path.join(exist5, "DSC_0001.JPG"), "wb").write(rand(5000))
+r = ingest_to(os.path.join(WORK, "data_r5"), "--into-existing", exist5)
+check(r.returncode == 0 and listing(exist5) == sorted(RFILES + ["DSC_0001.JPG"]), f"直接放进已有文件夹（{listing(exist5)}）")
+r = ingest_to(os.path.join(WORK, "data_r5b"), "--into-existing", os.path.join(WORK, "没有这个"))
+check(r.returncode == 3 and not os.path.exists(os.path.join(WORK, "没有这个")), "不在的文件夹：不导、不建")
+
+print("R6. 确认之后导入根目录被拔掉（挪走）：停下、不在原路径上重建（不会落到系统盘）")
+root6 = os.path.join(WORK, "root_r6")
+os.makedirs(root6)
+r = ingest_to(os.path.join(WORK, "data_r6"), "--dest-root", root6, "--rename-after-plan", root6)
+check(r.returncode != 0 and "不见了" in r.stdout, "说导入位置不见了")
+check(not os.path.exists(root6) and listing(root6 + ".moved") == [], "原路径没重建，挪走的那个里也没写东西")
+
+print("R7. 以前导到的文件夹在一块现在没插上的盘上：说「盘没插上」，不说「文件夹不在了」")
+small = rand(50_000)
+c7 = mkcard("card_r7", {"DCIM/100CANON/IMG_0700.JPG": small})
+fp = hashlib.sha256(small).hexdigest()[:32]
+data_r7 = os.path.join(WORK, "data_r7")
+os.makedirs(data_r7)
+json.dump({"version": 1, "entries": {f"IMG_0700.JPG|{len(small)}|{fp}":
+          {"dest": "/Volumes/NoSuchDisk_K/照片/20261001/IMG_0700.JPG", "at": "2026-10-01T09:30:00Z"}}},
+          open(os.path.join(data_r7, "import_ledger.json"), "w"))
+r = run_card(c7, data_r7, os.path.join(WORK, "dest_r7"), "--plan-only")
+check("以前导入过 1 张" in r.stdout and "「NoSuchDisk_K」没插上" in r.stdout and "已经不在了" not in r.stdout,
+      "以前导入过 1 张、那块盘没插上")
+
+print("R8. 真的 exFAT 盘（只在 CI 里跑：CARD_REGRESSION_EXFAT=1；别在自己电脑上挂映像）")
+if os.environ.get("CARD_REGRESSION_EXFAT") != "1":
+    print("  (跳过：没设 CARD_REGRESSION_EXFAT=1)")
+else:
+    img = os.path.join(WORK, "exfat.dmg")
+    mnt = os.path.join(WORK, "exfat_mnt")
+    os.makedirs(mnt)
+    # 映像里不放 DCIM（插卡检测要根目录有 DCIM 才当成存储卡）；-nobrowse 不在访达里出现。
+    subprocess.run(["hdiutil", "create", "-size", "64m", "-fs", "ExFAT", "-volname", "KEXFAT", img],
+                   check=True, capture_output=True)
+    subprocess.run(["hdiutil", "attach", img, "-nobrowse", "-mountpoint", mnt], check=True, capture_output=True)
+    try:
+        r = ingest_to(os.path.join(WORK, "data_r8"), "--dest-root", mnt, "--plan-only")
+        check(r.returncode == 0 and "空间够" in r.stdout, "exFAT 上空间查得出来（不是 0、不是查不到）")
+        r = ingest_to(os.path.join(WORK, "data_r8"), "--dest-root", mnt)
+        got = os.path.join(mnt, TODAY)
+        check(r.returncode == 0 and listing(got) == RFILES, f"exFAT 上照样全导进来（{listing(got)}）")
+        check(all(sha(os.path.join(got, f)) == sha(os.path.join(rcard, "DCIM/100CANON", f)) for f in RFILES), "内容逐字节一致")
+        check(hidden(got) == [] or all(f.startswith("._") for f in hidden(got)), f"没有残留的 .part（{hidden(got)}）")
+    finally:
+        subprocess.run(["hdiutil", "detach", mnt, "-force"], capture_output=True)
+
+# ---------- 第二份备份：主目标校验过以后从主目标再写一份到备份盘；备份出问题只停备份、照实报 ----------
+bfiles = {"DCIM/100CANON/IMG_0001.CR3": rand(500_000), "DCIM/100CANON/IMG_0001.JPG": rand(120_000),
+          "DCIM/100CANON/IMG_0002.CR3": rand(500_000), "DCIM/100CANON/IMG_0002.JPG": rand(120_000)}
+bcard = mkcard("card_b", bfiles)
+BNAMES = sorted(os.path.basename(k) for k in bfiles)
+
+
+def same_as_card(folder, names=None):
+    return all(sha(os.path.join(folder, n)) == hashlib.sha256(bfiles["DCIM/100CANON/" + n]).hexdigest()
+               for n in (names or BNAMES))
+
+
+def ledger_dests(data):
+    path = os.path.join(data, "import_ledger.json")
+    return [v["dest"] for v in json.load(open(path))["entries"].values()] if os.path.exists(path) else []
+
+
+print("B1. 开着备份：两份都逐字节一致，账本照旧只记主目标，哪边都没有残留的 .part")
+d, broot = os.path.join(WORK, "dest_b1"), os.path.join(WORK, "backup_b1")
+os.makedirs(broot)
+data_b1 = os.path.join(WORK, "data_b1")
+r = run_card_env(bcard, data_b1, d, {}, "--backup", broot)
+bdest = os.path.join(broot, "dest_b1")
+check(r.returncode == 0 and listing(d) == BNAMES and listing(bdest) == BNAMES, f"主目标、备份都是 4 个（{listing(d)} / {listing(bdest)}）")
+check(same_as_card(d) and same_as_card(bdest), "两份内容都和卡上一样")
+check(hidden(d) == [] and hidden(bdest) == [], "没有残留的 .part")
+dests = ledger_dests(data_b1)
+check(len(dests) == 4 and all(x.startswith(os.path.realpath(d)) or x.startswith(d) for x in dests), f"账本只记主目标（{dests[:1]}…）")
+check("另备份 4 个文件" in r.stdout and "导入提醒" not in r.stdout, "摘要说另备份了 4 个，没有提醒")
+
+print("B1b. 走界面那条路（重做计划 → 复制 → 打开）：照样两份")
+d, broot = os.path.join(WORK, "dest_b1b"), os.path.join(WORK, "backup_b1b")
+os.makedirs(broot)
+r = run_card_env(bcard, os.path.join(WORK, "data_b1b"), d, {}, "--backup", broot, "--via-store", "--no-analyze")
+check(listing(d) == BNAMES and listing(os.path.join(broot, "dest_b1b")) == BNAMES and same_as_card(os.path.join(broot, "dest_b1b")),
+      "主目标、备份都齐了")
+check("另备份 4 个文件" in r.stdout and "导入提醒" not in r.stdout, "顶栏摘要说另备份了 4 个，没有提醒")
+
+print("B2. 备份里同名的是别的文件：两边一起换一个都空着的名字，备份里那个不动")
+d, broot = os.path.join(WORK, "dest_b2"), os.path.join(WORK, "backup_b2")
+os.makedirs(os.path.join(broot, "dest_b2"))
+planted_b2 = os.path.join(broot, "dest_b2", "IMG_0001.CR3")
+open(planted_b2, "wb").write(rand(7000))
+planted_sha = sha(planted_b2)
+r = run_card_env(bcard, os.path.join(WORK, "data_b2"), d, {}, "--backup", broot)
+want_b2 = ["IMG_0001_2.CR3", "IMG_0001_2.JPG", "IMG_0002.CR3", "IMG_0002.JPG"]
+check(r.returncode == 0 and listing(d) == want_b2, f"主目标里 IMG_0001 也改成了 _2，两边名字一样（{listing(d)}）")
+check(listing(os.path.join(broot, "dest_b2")) == sorted(want_b2 + ["IMG_0001.CR3"]) and sha(planted_b2) == planted_sha,
+      "备份里原来那个没动，新的用 _2")
+
+print("B3. 备份盘中途写满：主目标照样导完，备份停下、照实报，叫人先别格式化")
+d, broot = os.path.join(WORK, "dest_b3"), os.path.join(WORK, "backup_b3")
+os.makedirs(broot)
+data_b3 = os.path.join(WORK, "data_b3")
+r = run_card_env(bcard, data_b3, d, {}, "--backup", broot, "--backup-full-at", "2")
+check(listing(d) == BNAMES and same_as_card(d), "主目标 4 个都导进来了")
+check(len(listing(os.path.join(broot, "dest_b3"))) == 1 and hidden(os.path.join(broot, "dest_b3")) == [], "备份里只有满之前那 1 个，没有 .part")
+check(r.returncode != 0 and "备份没写全" in r.stdout and "先别格式化" in r.stdout and "备份盘满了" in r.stdout,
+      "退出码非 0，提醒说备份没写全（备份盘满了）、先别格式化")
+
+print("B4. 补备份：再插一次、勾重导 → 主目标里的不重复复制，只从主目标补到备份")
+r = run_card_env(bcard, data_b3, d, {}, "--backup", broot, "--reimport")
+check(r.returncode == 0 and "目标里已有 2 张" in r.stdout and "补备份 3 个" in r.stdout, "计划：目标里已有 2 张、补备份 3 个")
+check(listing(d) == BNAMES and listing(os.path.join(broot, "dest_b3")) == BNAMES and same_as_card(os.path.join(broot, "dest_b3")),
+      "主目标没多出 _2，备份补齐、逐字节一致")
+
+print("B5. 备份盘中途被拔：主目标照样导完，不在原路径上重建备份文件夹")
+d, broot = os.path.join(WORK, "dest_b5"), os.path.join(WORK, "backup_b5")
+os.makedirs(broot)
+r = run_card_env(bcard, os.path.join(WORK, "data_b5"), d, {}, "--backup", broot, "--unplug-backup-after", "1")
+check(listing(d) == BNAMES and same_as_card(d), "主目标 4 个都导进来了")
+check(not os.path.exists(broot) and r.returncode != 0 and "备份盘找不到了" in r.stdout, "说备份盘找不到了，原路径没重建")
+
+print("B6. 备份盘没插上 / 和导入位置是同一个地方：不导（开着备份的人以为有两份）")
+d = os.path.join(WORK, "dest_b6")
+r = run_card_env(bcard, os.path.join(WORK, "data_b6"), d, {}, "--backup", "/Volumes/NoSuchDisk_K/备份")
+check(r.returncode == 3 and "备份位置有问题" in r.stdout and "没插上" in r.stdout and not os.path.exists(d), "备份盘没插上：退出码 3、主目标也没写")
+root_b6 = os.path.join(WORK, "root_b6")
+os.makedirs(root_b6)
+r = run_card_env(bcard, os.path.join(WORK, "data_b6"), None, {}, "--dest-root", root_b6, "--backup", root_b6)
+check(r.returncode == 3 and "同一个地方" in r.stdout and listing(root_b6) == [], "备份位置就是导入位置：拒绝")
+
+print("B7. 确认框自己那条路（CardImportCenter.replan，后台找目标 / 备份位置再出计划）：说不通的不出计划")
+
+
+def card_ui(*extra):
+    env = dict(os.environ, LABELGUI_DATA_DIR=os.path.join(WORK, "data_b7"))
+    png = os.path.join(WORK, "card_ui_b7.png")
+    r = subprocess.run([BIN, "--card-ui", bcard, png, "--via-replan", *extra], env=env,
+                       capture_output=True, text=True, timeout=120)
+    print("    " + r.stdout.strip().replace("\n", "\n    "))
+    return r
+
+
+root_b7, broot_b7 = os.path.join(WORK, "root_b7"), os.path.join(WORK, "backup_b7")
+os.makedirs(root_b7)
+os.makedirs(broot_b7)
+r = card_ui("--dest-root", root_b7, "--backup", broot_b7)
+check(r.returncode == 0 and "要导入：2 张" in r.stdout and f"root_b7/{TODAY}" in r.stdout and "备份：" in r.stdout,
+      "导入位置、备份都在：出了计划（2 张，带备份）")
+r = card_ui("--dest-root", "/Volumes/NoSuchDisk_K/照片")
+check(r.returncode == 0 and "导入位置有问题" in r.stdout and "要导入" not in r.stdout, "导入位置的盘没插上：不出计划，说清楚")
+r = card_ui("--dest-root", root_b7, "--backup", "/Volumes/NoSuchDisk_K/备份")
+check(r.returncode == 0 and "备份位置有问题" in r.stdout and "要导入" not in r.stdout, "备份盘没插上：不出计划，说清楚")
+check(listing(root_b7) == [] and listing(broot_b7) == [], "确认框读卡不往任何地方写")
+
 print("F. 存储卡从头到尾没被动过")
 check(tree(CARD) == card_before, "卡上每个文件的大小 / 修改时间 / SHA-256 都和开始时一样")
 
