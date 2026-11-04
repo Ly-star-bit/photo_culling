@@ -36,6 +36,35 @@ enum ProofSheetSelfTest {
         watermarkChecks()
         multiPhotoLines()
         markerChecks()
+        leadingSignChecks()
+    }
+
+    // MARK: 备注开头客户自己写的 - ~ 留着（审查：「-1档」读回成「1档」）
+
+    private static func leadingSignChecks() {
+        let all = items()
+        let header = "\(ProofSheetPage.header) \(bigSheet.id)\n"
+        func expect(_ text: String, note: String, _ name: String) {
+            let r = ClientReply.resolve(text, items: all, sheets: [bigSheet])
+            check(r.ids == ["DSCF7207"] && r.notes == ["DSCF7207": note], name,
+                  "认出 \(r.ids) · 备注 \(r.notes) · 没认出 \(r.unknown)")
+        }
+        expect(header + "DSCF7207 \(ProofSheetPage.noteMarker)-1档曝光\n", note: "-1档曝光", "「备注：-1档曝光」的负号留着")
+        expect("DSCF7207备注：-1档", note: "-1档", "紧贴着写的「备注：」也只去掉记号自己")
+        expect("DSCF7207 备注 ~0.5EV", note: "~0.5EV", "「备注」后面没冒号：~ 留着")
+        expect("7207 -0.5EV", note: "-0.5EV", "微信写法「7207 -0.5EV」：负号留着")
+        expect("DSCF7207：-1档", note: "-1档", "「文件名：-1档」：冒号去掉、负号留着")
+        expect("DSCF7207 - 去路人", note: "去路人", "「DSCF7207 - 去路人」：两边带空格的 - 还是分隔")
+        expect("DSCF7207 —— 黑白", note: "黑白", "「——」后面跟空格也是分隔")
+
+        // 来回一趟：页面上写「-1档曝光」，复制出来再导入还是「-1档曝光」。
+        let html = page(quota: nil)
+        guard let ctx = context(html: html) else { return }
+        ctx.evaluateScript("__cells[0].onclick(); __click('nb1'); __byId['note-text'].value = '-1档曝光'; __byId['note-save'].onclick(); __byId['copy'].onclick();")
+        let copied = eval(ctx, "__byId['out'].value")
+        let r = ClientReply.resolve(copied, items: items(), sheets: [sheet(quota: nil)])
+        check(r.ids == [names[0]] && r.notes == [names[0]: "-1档曝光"], "页面写「-1档曝光」复制再导入：还是「-1档曝光」",
+              copied.debugDescription + " → \(r.notes)")
     }
 
     // MARK: 「备注：」记号：开头那张认不出也不拿备注去认照片（审查）

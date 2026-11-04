@@ -330,7 +330,8 @@ enum ClientReply {
         return pieces.contains { lookup.nameLike($0) || isRange(Substring($0)) }
     }
 
-    /// 备注前面去掉的：空白、逗号、冒号、顿号这些（括号、引号留着，是备注自己的）。
+    /// 看开头那张后面还有没有话、是不是「备注」打头时两头去掉的：空白、逗号、冒号、顿号、- ~ 这些。备注本身从哪儿开始
+    /// 另看 noteStart（客户写在最前面的 - ~ 留着）。
     private static let noteLead = CharacterSet.whitespaces.union(CharacterSet(charactersIn: ",，、;；:：|-—~～"))
 
     /// 一行开头是这一场的一张照片（文件名，或全场唯一的 ≥3 位文件号），后面跟着的是不是备注：是就返回开头那个词和备注原话。
@@ -352,11 +353,15 @@ enum ClientReply {
             let restText = String(String.UnicodeScalarView(scalars[cut...]))
             let rest = restText.trimmingCharacters(in: noteLead)
             guard !rest.isEmpty else { return nil }
-            let rawRest = String(String.UnicodeScalarView(raw[cut...]))
-            let spoken = rawRest.trimmingCharacters(in: .whitespaces)
-            var note = String(spoken.drop { $0.unicodeScalars.allSatisfy(noteLead.contains) })
+            // 备注从哪儿开始（在转过半角的这一行上数，原文同一个位置）：前面的分隔去掉，客户自己写的字一个不动。
+            var start = noteStart(scalars, from: cut)
             if rest.hasPrefix("备注") {
-                note = String(note.dropFirst(2).drop { $0.unicodeScalars.allSatisfy(noteLead.contains) })
+                // 只去掉记号自己：「备注」、后面至多一个冒号、空白（「备注：-1档」的 - 是客户写的）。
+                start = cut
+                while start < scalars.count, noteLead.contains(scalars[start]) { start += 1 }
+                start += 2
+                if start < scalars.count, scalars[start] == ":" || scalars[start] == "：" { start += 1 }
+                while start < scalars.count, CharacterSet.whitespaces.contains(scalars[start]) { start += 1 }
             } else {
                 // 「第 12 张」「35 号」明说是第几张的：照旧当要的照片（「DSCF7207 第12张 谢谢」）。
                 if restText.range(of: #"第\s*[0-9]+|[0-9]+\s*[张張号號]"#, options: .regularExpression) != nil { return nil }
@@ -365,11 +370,33 @@ enum ClientReply {
                 let numbers = words.filter { isDigits(Substring($0)) }.count
                 if numbers >= 2 || (!words.isEmpty && numbers == words.count) { return nil }
             }
+            let note = String(String.UnicodeScalarView(raw[min(start, raw.count)...]))
             let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmedNote.isEmpty ? nil : (head, trimmedNote)
         }
         return nil
     }
+
+    /// 备注前面跳过的分隔：空白、逗号、冒号、顿号这些；- ~ — 只在后面跟着空白（或到头）时才算分隔（「DSCF7207 - 去路人」），
+    /// 紧贴着字的是客户写的（「7207 -0.5EV」「DSCF7207：-1档」），以前一起剥掉，负号丢了意思正好反过来。
+    private static func noteStart(_ scalars: [Unicode.Scalar], from cut: Int) -> Int {
+        var i = cut
+        while i < scalars.count {
+            if noteSeparators.contains(scalars[i]) {
+                i += 1
+                continue
+            }
+            guard noteDashes.contains(scalars[i]) else { break }
+            var j = i
+            while j < scalars.count, noteDashes.contains(scalars[j]) { j += 1 }
+            guard j == scalars.count || CharacterSet.whitespaces.contains(scalars[j]) else { break }
+            i = j
+        }
+        return i
+    }
+
+    private static let noteSeparators = CharacterSet.whitespaces.union(CharacterSet(charactersIn: ",，、;；:：|"))
+    private static let noteDashes = CharacterSet(charactersIn: "-—–~～－")
 
     /// splitHeader 在没转半角的原文上切同一刀（halfwidth 一个字符换一个字符，位置对得上）：备注要客户的原话。
     /// 对不上（不该发生）就用转过半角的 `rest`。
