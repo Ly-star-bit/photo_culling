@@ -331,11 +331,15 @@ enum CollageCLI {
 
     /// --collage-ui / --collage-ops 会改拼图工程（清托盘、换模式、存全局设置）：只在 LABELGUI_DATA_DIR
     /// 指的临时目录里跑 —— 照 README 直接跑会把这个文件夹真实的拼图工程清掉。
-    static func requireIsolatedDataDir(_ flag: String) {
+    /// 所有会写数据目录的无头命令都过这一道（`what` 是这条命令会改什么，拼进提示里）：没设 → 退出码 2；
+    /// 设了但解析到真实数据目录（符号链接、大小写不同的写法）→ 也是退出码 2（AppUISnapshot.requireNotRealDataDir）。
+    static func requireIsolatedDataDir(_ flag: String, _ what: String = "会改写拼图工程和全局设置") {
         let dir = ProcessInfo.processInfo.environment["LABELGUI_DATA_DIR"] ?? ""
-        guard dir.isEmpty else { return }
-        print("\(flag) 会改写拼图工程和全局设置：先设 LABELGUI_DATA_DIR=<临时目录> 再跑（不能碰真实数据）")
-        exit(2)
+        if dir.isEmpty {
+            print("\(flag) \(what)：先设 LABELGUI_DATA_DIR=<临时目录> 再跑（不能碰真实数据）")
+            exit(2)
+        }
+        AppUISnapshot.requireNotRealDataDir(flag)
     }
 
     // MARK: - 相册

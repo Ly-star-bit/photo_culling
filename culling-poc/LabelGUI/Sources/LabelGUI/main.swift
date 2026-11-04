@@ -65,6 +65,18 @@ if let mcpMode = MCPServerMain.mode(CommandLine.arguments), let mcpFDs {
 if CommandLine.arguments.contains("--mcp-selftest") {
     MCPSelfTest.run()
 }
+// 无头入口一律钉住 batch.*（去重关 / 每章最少保留 0 / 按拍摄时间，只在内存里）：输出不跟着本机设置域漂，
+// 也不会有谁赋值以后经 didSet 写回去。BatchStore 的初值在构造时读，这里在任何分派之前，一处管全部入口；
+// --verdicts 自己再按 --dedupe 钉一次，--live-host 按 LABELGUI_LIVE_TEST_SETTINGS 钉（LiveHost.pinBatchSettings）。
+// --mcp 不钉（上面已经永不返回）：它报的是 app 的真实设置。
+if AppRuntime.headless && !CommandLine.arguments.contains("--live-host") {
+    AppRuntime.pinBatchSettings()
+}
+// GUI 启动门控的探锁、认人走一遍，只打印结论、不弹框（测试用，见 LaunchGate.swift）：
+// LABELGUI_DATA_DIR=<临时> LabelGUI --launch-gate-probe [--budget-ms N]。只读，不建目录。
+if CommandLine.arguments.contains("--launch-gate-probe") {
+    LaunchGate.runProbe()
+}
 
 // --app-ui、--live-host 是测试宿主：整套 store 都会写数据目录，所以 LABELGUI_DATA_DIR 没设、或者指到真实数据目录的，
 // 在建目录、注册字体之前就退出（它们自己的分派里还会再查一遍，那时已经晚了）。不跑 Python，不同步运行时（§9.7、§10.5）；
@@ -76,6 +88,14 @@ if let testHostFlag {
     AppUISnapshot.requireNotRealDataDir(testHostFlag)
 }
 ensureAppDataDir()
+// GUI 启动门控（见 LaunchGate.swift）：这个数据目录已经被另一个活着的选片工具拿着，就弹框「切换过去 / 退出」，
+// 在换掉共用的 runtime/culling-poc、建任何 store 之前退出。只对开界面这一条路：无头命令、测试宿主、带 `--` 参数的、
+// LABELGUI_NO_GUI=1 都不过这道门（测试宿主的 another_instance / waiting_for_lock 照旧）。
+if testHostFlag == nil,
+   LaunchGate.isGUILaunch(argv: CommandLine.arguments, env: ProcessInfo.processInfo.environment,
+                          ppid: getppid(), stdinIsTTY: isatty(STDIN_FILENO) != 0) {
+    MainActor.assumeIsolated { LaunchGate.enforce(dataDir: appDataDir) }
+}
 if testHostFlag == nil {
     syncEmbeddedPipeline(to: appDataDir)
 }
@@ -209,12 +229,19 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
     if let gi = CommandLine.arguments.firstIndex(of: "--gap"), CommandLine.arguments.count > gi + 1 {
         gapOverride = Double(CommandLine.arguments[gi + 1])
     }
+    // 会写的两个开关在建 store 之前就查（建 store 本身就会改 sessions.json）：没设临时数据目录 → 退出码 2，什么都不写。
+    if CommandLine.arguments.contains("--accept-all") {
+        CollageCLI.requireIsolatedDataDir("--verdicts --accept-all", "会改写这一场的 overrides.json / accepted.json")
+    }
+    if CommandLine.arguments.contains("--clear-recents") {
+        CollageCLI.requireIsolatedDataDir("--verdicts --clear-recents", "会删场次缓存")
+    }
+    // 去重按 --dedupe、每章最少保留固定 0（章节警告受它影响），钉进 argument domain 再建 store：CI 的期望输出不跟着
+    // UserDefaults 漂，也不给属性赋值（didSet 会写进设置域：从 .app 里跑就改了用户界面里的开关）。
+    AppRuntime.pinBatchSettings(rejectBurstDuplicates: dedupe, minKeepersPerChapter: 0)
     MainActor.assumeIsolated {
         let store = BatchStore(dataDir: appDataDir,
                                pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
-        store.rejectBurstDuplicates = dedupe
-        // 章节警告受这个设置影响；固定成 0，CI 的期望输出不跟着 UserDefaults 漂。
-        store.minKeepersPerChapter = 0
         store.switchSession(to: dir)
         if let gap = gapOverride { store.takeGapSec = gap }
         // --accept-all：跑一遍「全部只留精选」再打印（写进该数据目录的 overrides.json，
@@ -262,12 +289,8 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
             if multiBody { BodyClockCLI.printTimeline(store) }
         }
         // --clear-recents：打印完再点一次「全部清除」，数还剩哪些场次目录 —— 验证掉出菜单的旧场次
-        // 判决不被顺手删掉。会删数据目录里的场次：只在临时 LABELGUI_DATA_DIR 下跑。
+        // 判决不被顺手删掉。会删数据目录里的场次：只在临时 LABELGUI_DATA_DIR 下跑（闸在建 store 之前）。
         if CommandLine.arguments.contains("--clear-recents") {
-            guard !(ProcessInfo.processInfo.environment["LABELGUI_DATA_DIR"] ?? "").isEmpty else {
-                print("--clear-recents 会删场次缓存：先设 LABELGUI_DATA_DIR=<临时目录>")
-                exit(2)
-            }
             store.clearRecentSessions()
             let root = appDataDir.appendingPathComponent("sessions")
             let left = ((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
@@ -338,9 +361,14 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--compare"),
         guard let i = CommandLine.arguments.firstIndex(of: flag), CommandLine.arguments.count > i + 1 else { return nil }
         return CommandLine.arguments[i + 1]
     }
+    // 给了 --keys 就要临时数据目录：⏎、--auto 加数字键、undo 都会同步写 overrides.json / accepted.json，
+    // 只拦 enter 会漏掉后两种。不给 --keys 只打印这一组的草稿。
+    if CommandLine.arguments.contains("--keys") {
+        CollageCLI.requireIsolatedDataDir("--compare --keys", "按键（⏎、--auto 加数字键、undo）会改写这一场的 overrides.json / accepted.json")
+    }
     MainActor.assumeIsolated {
-        // 不碰 minKeepersPerChapter 这类设置：它们写的是全局 UserDefaults，LABELGUI_DATA_DIR
-        // 隔离不了 —— 跑一次测试会把 GUI 里的设置改掉。
+        // 不给 minKeepersPerChapter 这类设置赋值：它们写的是全局 UserDefaults，LABELGUI_DATA_DIR 隔离不了。
+        // 读到的是开头钉住的那一份（去重关 / 0 / 按拍摄时间），不跟着本机设置漂。
         let store = BatchStore(dataDir: appDataDir,
                                pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         store.switchSession(to: dir)
@@ -395,9 +423,11 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--compare"),
 }
 
 // Headless 拼图 / 相册：LabelGUI --collage <photo_dir> [选项]（选项见 CollageCLI.swift）。
-// 只读分析结果、只写 --out —— 界面不开也能逐像素看版式和裁切。
+// 只读分析结果、只写 --out —— 界面不开也能逐像素看版式和裁切。打开场次会改写 sessions.json（重排最近场次、
+// 可能挤掉第 15 场并清它的预览），所以也要临时数据目录。
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--collage"),
    CommandLine.arguments.count > flagIndex + 1 {
+    CollageCLI.requireIsolatedDataDir("--collage", "打开场次会改写 sessions.json（重排最近场次）")
     MainActor.assumeIsolated {
         CollageCLI.run(flagIndex: flagIndex)
     }
@@ -463,11 +493,8 @@ if CommandLine.arguments.contains("--ux-selftest") {
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--export-xmp"),
    CommandLine.arguments.count > flagIndex + 1 {
     MainActor.assumeIsolated {
-        guard !(ProcessInfo.processInfo.environment["LABELGUI_DATA_DIR"] ?? "").isEmpty else {
-            print("--export-xmp 会改这一场的 xmp_state.json，还会在照片旁边写 .xmp：先设 LABELGUI_DATA_DIR=<临时目录>，" +
-                  "并且只对拷出来的临时照片文件夹跑")
-            exit(2)
-        }
+        CollageCLI.requireIsolatedDataDir("--export-xmp",
+                                          "会改这一场的 xmp_state.json，还会在照片旁边写 .xmp（只对拷出来的临时照片文件夹跑）")
         let dir = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])
         let store = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         store.switchSession(to: dir)
@@ -602,6 +629,7 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--compare-crop"),
     let dir = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])
     let id = CommandLine.arguments[flagIndex + 2]
     let out = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 3])
+    CollageCLI.requireIsolatedDataDir("--compare-crop", "打开场次会改写 sessions.json（重排最近场次）")
     MainActor.assumeIsolated {
         let store = BatchStore(dataDir: appDataDir,
                                pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))

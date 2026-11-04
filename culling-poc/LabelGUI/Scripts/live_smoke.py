@@ -666,13 +666,9 @@ def parse_verdicts(text):
 
 
 def verdicts_cli():
-    """本地 photot：在同一份数据的另一个拷贝上跑 `--verdicts --per-photo`。它会给 batch.* 两个设置赋值（didSet 写裸二进制的
-    LabelGUI 域），所以只在那两个键已经是 0 时跑（verdict_regression.sh 每次都写同样的值）；收尾照样比 defaults export。"""
-    vals = [subprocess.run(["defaults", "read", "LabelGUI", k], capture_output=True, text=True).stdout.strip()
-            for k in ("batch.rejectBurstDuplicates", "batch.minKeepersPerChapter")]
-    if vals != ["0", "0"]:
-        skip(f"LabelGUI 域的 batch.* 不是 0 / 0（{vals}）：不跑 --verdicts，免得改用户的设置")
-        return None
+    """本地 photot：在同一份数据的另一个拷贝上跑 `--verdicts --per-photo`。它把 batch.* 钉进 argument domain（和宿主
+    不设 LABELGUI_LIVE_TEST_SETTINGS 时同一组值），不给属性赋值、无头也不写 UserDefaults，所以不用再看本机设置域；
+    收尾照样比 defaults export。"""
     d = fresh_data("F-verdicts")
     r = subprocess.run([BIN, "--verdicts", PHOTO_DIR, "--per-photo"], env=base_env(d, sock_root("F-verdicts")),
                        capture_output=True, timeout=120, cwd=WORK, stdin=subprocess.DEVNULL)

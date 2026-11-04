@@ -111,10 +111,7 @@ enum ClientPicksCLI {
     @MainActor
     static func run(flag: String, flagIndex: Int) -> Never {
         let args = CommandLine.arguments
-        guard !(ProcessInfo.processInfo.environment["LABELGUI_DATA_DIR"] ?? "").isEmpty else {
-            print("\(flag) 会改这一场的会话文件：先设 LABELGUI_DATA_DIR=<临时目录>")
-            exit(2)
-        }
+        CollageCLI.requireIsolatedDataDir(flag, "会改这一场的会话文件")
         let dir = URL(fileURLWithPath: args[flagIndex + 1])
         let store = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         store.switchSession(to: dir)

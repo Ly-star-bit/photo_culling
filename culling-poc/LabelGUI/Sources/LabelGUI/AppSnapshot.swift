@@ -98,22 +98,16 @@ enum AppUISnapshot {
         return (window, host)
     }
 
-    /// LABELGUI_DATA_DIR 解析到真实的默认数据目录（~/Library/Application Support/选片工具）就不跑：
-    /// requireIsolatedDataDir 只看设没设，设成真实目录照样能把用户的场次和拼图工程改掉。
-    /// 这里只算路径、不建目录。
+    /// LABELGUI_DATA_DIR 解析到真实的默认数据目录（~/Library/Application Support/选片工具）就不跑。
+    /// CollageCLI.requireIsolatedDataDir 先查设没设、最后调这里，所有会写数据目录的无头命令都经过它。
+    /// 这里只算路径、不建目录。判断本身是 DataDirGuard.isRealDataDir（纯函数，--mcp-selftest 测）。
     static func requireNotRealDataDir(_ flag: String) {
         let dir = ProcessInfo.processInfo.environment["LABELGUI_DATA_DIR"] ?? ""
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let real = base.appendingPathComponent("选片工具")
-        func resolved(_ path: String) -> String {
-            guard let p = realpath(path, nil) else { return URL(fileURLWithPath: path).standardizedFileURL.path }
-            defer { free(p) }
-            return String(cString: p)
-        }
-        // 解析完路径一样，或者 stat 出来是同一个目录（大小写不同的写法、/System/Volumes/Data 那条路）都算。
-        var a = stat(), b = stat()
-        let sameFile = stat(dir, &a) == 0 && stat(real.path, &b) == 0 && a.st_dev == b.st_dev && a.st_ino == b.st_ino
-        guard sameFile || resolved(dir) == resolved(real.path) else { return }
+        // 没设 = 用的就是真实目录；解析完路径一样，或者 stat 出来是同一个目录（大小写不同的写法、/System/Volumes/Data 那条路）都算。
+        guard dir.isEmpty
+              || DataDirGuard.isRealDataDir(DataDirGuard.resolve(dir), real: DataDirGuard.resolve(real.path)) else { return }
         print("\(flag) 的 LABELGUI_DATA_DIR 指到了真实数据目录 \(real.path)：换一个临时目录再跑（不能碰真实数据）")
         exit(2)
     }
