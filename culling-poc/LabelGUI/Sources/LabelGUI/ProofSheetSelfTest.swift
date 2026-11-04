@@ -712,6 +712,47 @@ enum ProofSheetSelfTest {
         ]), as: UTF8.self)
         let wantCSV = "\u{FEFF}文件名,备注\r\nDSCF7207.RAF,去路人，瘦脸\r\nDSCF7208.RAF,\"和\"\"7207\"\"一样, 黑白\"\r\n"
         check(csv == wantCSV, "精修要求.csv 的内容（BOM、表头、转义）", csv.debugDescription)
+        retouchFormulaChecks()
+    }
+
+    /// 精修要求.csv 防公式（审查：客户备注「=HYPERLINK(…)」「+1 档」「-1 档」「@张三」，修图师在 Excel 里双击打开会被当成公式算、
+    /// 显示成 #NAME? 或者一个能点的链接）：以 = + - @ 或 Tab 开头的格子前面加一个 '（OWASP CSV injection 的通行做法），
+    /// 文件名那一列同样（改过名的「-DSCF7299.JPG」）；中间带这些字的、表头不动；带逗号引号的先加 ' 再整格加引号。
+    /// 读回来（当客户回复导入）认出的照片、没认出的字和不加 ' 时一样。
+    private static func retouchFormulaChecks() {
+        let rows = [
+            OriginalsCopier.RetouchRow(file: "DSCF7201.JPG", note: "=HYPERLINK(\"http://x\",\"点我\")"),
+            OriginalsCopier.RetouchRow(file: "DSCF7202.JPG", note: "+1 档曝光"),
+            OriginalsCopier.RetouchRow(file: "DSCF7203.JPG", note: "-1 档，压暗"),
+            OriginalsCopier.RetouchRow(file: "DSCF7204.JPG", note: "@张三 看一下"),
+            OriginalsCopier.RetouchRow(file: "DSCF7205.JPG", note: "\t=1+1"),
+            OriginalsCopier.RetouchRow(file: "-DSCF7299.JPG", note: "去路人 = 背景干净, -1 档"),
+        ]
+        let csv = String(decoding: OriginalsCopier.retouchCSV(rows), as: UTF8.self)
+        let want = "\u{FEFF}文件名,备注\r\n"
+            + "DSCF7201.JPG,\"'=HYPERLINK(\"\"http://x\"\",\"\"点我\"\")\"\r\n"
+            + "DSCF7202.JPG,'+1 档曝光\r\n"
+            + "DSCF7203.JPG,'-1 档，压暗\r\n"
+            + "DSCF7204.JPG,'@张三 看一下\r\n"
+            + "DSCF7205.JPG,'\t=1+1\r\n"
+            + "'-DSCF7299.JPG,\"去路人 = 背景干净, -1 档\"\r\n"
+        check(csv == want, "精修要求.csv 防公式：= + - @ Tab 开头的备注、文件名前面加 '，中间带的不动，加 ' 以后再转义", csv.debugDescription)
+        let parsed = CSV.parseRows(csv).dropFirst()
+        let cellsOK = parsed.count == rows.count && zip(parsed, rows).allSatisfy { cells, row in
+            let note = row.note.hasPrefix("去路人") ? row.note : "'" + row.note
+            return cells.count == 2 && cells[1] == note
+        }
+        check(cellsOK, "防公式的 CSV 按 CSV 读回来：每格就是原话前面多一个 '（逗号、引号没读坏）", "\(Array(parsed))")
+        // 读回：当成客户回复导入，和不加 ' 的老写法认出的一样。
+        var plain = "\u{FEFF}" + CSV.writeRow(["文件名", "备注"]) + "\r\n"
+        for row in rows { plain += CSV.writeRow([row.file, row.note]) + "\r\n" }
+        let pool = items() + [item("-DSCF7299")]
+        let guarded = ClientReply.resolve(csv, items: pool, sheets: [])
+        let old = ClientReply.resolve(plain, items: pool, sheets: [])
+        let wantIDs = ["DSCF7201", "DSCF7202", "DSCF7203", "DSCF7204", "DSCF7205", "-DSCF7299"]
+        check(guarded.ids == wantIDs && guarded.ids == old.ids && guarded.unknown == old.unknown,
+              "防公式的精修要求.csv 当客户回复导入：认出的照片、没认出的字和以前一样",
+              "\(guarded.ids) \(guarded.unknown) vs \(old.ids) \(old.unknown)")
     }
 
     // MARK: 小工具

@@ -1228,9 +1228,16 @@ extension OriginalsCopier {
     }
 
     /// 精修要求.csv 的内容：表头「文件名,备注」、一张一行；UTF-8 带 BOM（Excel 直接双击打开中文不乱码）。
+    /// 以 = + - @ 或 Tab 开头的格子（客户备注「=HYPERLINK(…)」「-1 档」「@张三」，改过名的「-DSCF0001.RAF」）前面加一个 '：
+    /// 不然 Excel 双击打开当成公式算（OWASP CSV injection 的通行做法）；先加 ' 再转义，带逗号的 ' 在引号里面。
+    /// 导入客户选择时引号、' 两头都去掉（ClientReply.clean），读回来认出的照片不变。
     static func retouchCSV(_ rows: [RetouchRow]) -> Data {
+        func formulaSafe(_ cell: String) -> String {
+            guard let first = cell.first, "=+-@\t".contains(first) else { return cell }
+            return "'" + cell
+        }
         var text = "\u{FEFF}" + CSV.writeRow(["文件名", "备注"]) + "\r\n"
-        for row in rows { text += CSV.writeRow([row.file, row.note]) + "\r\n" }
+        for row in rows { text += CSV.writeRow([formulaSafe(row.file), formulaSafe(row.note)]) + "\r\n" }
         return Data(text.utf8)
     }
 
