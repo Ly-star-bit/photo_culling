@@ -179,7 +179,7 @@ final class WatermarkStore: ObservableObject {
     static let inputExtensions: Set<String> = ImageLoader.imageExtensions
 
     func addPhotos(_ urls: [URL]) {
-        var added = 0
+        var incoming: [URL] = []
         for url in urls {
             var isDir: ObjCBool = false
             guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
@@ -188,27 +188,32 @@ final class WatermarkStore: ObservableObject {
                 if let contents = try? FileManager.default.contentsOfDirectory(
                     at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
                     for file in contents.sorted(by: { $0.path < $1.path })
-                    where Self.inputExtensions.contains(file.pathExtension.lowercased())
-                        && !photos.contains(file) {
-                        photos.append(file)
-                        added += 1
+                    where Self.inputExtensions.contains(file.pathExtension.lowercased()) {
+                        incoming.append(file)
                     }
                 }
-            } else if Self.inputExtensions.contains(url.pathExtension.lowercased()), !photos.contains(url) {
-                photos.append(url)
-                added += 1
+            } else if Self.inputExtensions.contains(url.pathExtension.lowercased()) {
+                incoming.append(url)
+            }
+        }
+        // 同名 RAW+JPG 只留 JPG（列表里已有的也算），已经在列表里的不重复收（WatermarkImportPairing.swift）。
+        let merge = WatermarkImportPairing.merge(existing: photos, incoming: incoming)
+        if merge.photos != photos { photos = merge.photos }
+        for (old, new) in merge.replaced {
+            evictPreview(old)
+            if selectedPhoto == old {
+                selectedPhoto = new
+                previewStale = true
+                schedulePreview()
             }
         }
         if selectedPhoto == nil, let first = photos.first {
             selectedPhoto = first
             schedulePreview()
         }
-        if added > 0 {
-            lastError = nil
-            setNotice("已导入 \(added) 张")
-        } else if !urls.isEmpty {
-            // 一张都没进来时说清楚，别让按钮显示着数量、列表却纹丝不动。
-            setNotice("没有可导入的照片 (格式不支持，或已经在列表里)")
+        if merge.added > 0 || !merge.replaced.isEmpty { lastError = nil }
+        if let text = WatermarkImportPairing.notice(for: merge, requested: !urls.isEmpty) {
+            setNotice(text)
         }
     }
 
