@@ -28,10 +28,9 @@ enum FileSafetySelfTest {
     }
 
     static func run() -> Never {
-        guard !(ProcessInfo.processInfo.environment["LABELGUI_DATA_DIR"] ?? "").isEmpty else {
-            print("--files-selftest 会在数据目录里造假的拍摄、写 .xmp、复制文件：先设 LABELGUI_DATA_DIR=<临时目录>")
-            exit(2)
-        }
+        // 和别的写数据目录的入口同一道闸：没设、或者设了但指到真实数据目录（符号链接、大小写不同、结尾斜杠）都退出码 2 ——
+        // 下面会往数据目录的 sessions/ 里造 5 场假拍摄、改最近场次。
+        CollageCLI.requireIsolatedDataDir("--files-selftest", "会在数据目录里造假的拍摄、写 .xmp、复制文件")
         let root = appDataDir.appendingPathComponent("files-selftest-" + String(UUID().uuidString.prefix(8)))
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         xmpIncremental(root.appendingPathComponent("xmp"))
