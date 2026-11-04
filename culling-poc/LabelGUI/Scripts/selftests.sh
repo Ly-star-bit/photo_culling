@@ -6,6 +6,7 @@
 #   --minimal / --mask / --album / --fashion / --newspaper-selftest   不给照片文件夹时只验合成数据
 #   --delivery-selftest  交付环节的数据安全：XMP 归属 / 合并、同名另存 -2、截断 JPEG、同一个文件、两条去 GPS
 #                        （端到端的命令行出口在 Scripts/delivery_regression.py）
+#   --followup-selftest  跟进小修：写盘失败报给 MCP（persisted / save_failed）、水印页按客户选中导入、复制原片连续失败就停……
 #
 # 为什么每条都要临时数据目录：main.swift 在分派之前就建数据目录、往里写内置字体；ux / timeline / swiss 不查
 # LABELGUI_DATA_DIR，不设就会在 runner 上建出 ~/Library/Application Support/选片工具，MCP 冒烟里「不建目录」那一条就测不了
@@ -59,6 +60,7 @@ run album --album-selftest
 run fashion --fashion-selftest
 run newspaper --newspaper-selftest
 run delivery --delivery-selftest
+run followup --followup-selftest
 
 if [ $real_before -eq 0 ] && [ -e "$REAL_DATA" ]; then
     failed+=("真实数据目录")

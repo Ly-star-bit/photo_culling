@@ -1664,6 +1664,12 @@ final class BatchStore: ObservableObject {
         return persistFailures.isEmpty
     }
 
+    /// 实时桥写工具的回复要说「存上没有」（审查 S01b）：这几份里现在还没存上的 —— 写失败（盘满，红条 persistError）、
+    /// 原件读坏了这一场先不写（提醒在 dataNotice）。两样都空 = 盘上是最新的。
+    func unsavedFiles(_ files: [PersistFile]) -> (failed: [PersistFile], refused: [PersistFile]) {
+        (files.filter { persistFailures[$0] != nil }, files.filter { persistRefused.contains($0) })
+    }
+
     /// 离开这一场（切场次、移除当前这一场）之前：还有没存上的就再写一次，还写不上就拦住 —— 不然 switchSession 的
     /// loadOverrides 从盘上读，内存里没存上的改判当场就没了。
     private func persistBeforeLeaving(_ action: String) -> Bool {
