@@ -559,6 +559,8 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--album-selftest") {
 // 时尚刊自检（挑主图、出一期、换封面、文案商标、字块不重叠）：LabelGUI --fashion-selftest <photo_dir>（CollageStyleFashionSelfTest.swift）。
 if let i = CommandLine.arguments.firstIndex(of: "--fashion-selftest") { MainActor.assumeIsolated { CollageStyleFashionSelfTest.run(flagIndex: i) } }
 if let i = CommandLine.arguments.firstIndex(of: "--newspaper-selftest") { MainActor.assumeIsolated { CollageStyleNewspaperSelfTest.run(flagIndex: i) } }  // 报纸风自检（CollageStyleNewspaperSelfTest.swift）
+// 拼图导出自检（合成数据，见 CollageExportSelfTest.swift）：LABELGUI_DATA_DIR=<临时> LabelGUI --collage-export-selftest
+if CommandLine.arguments.contains("--collage-export-selftest") { MainActor.assumeIsolated { CollageExportSelfTest.run() } }
 
 // 拼图编辑操作脚本：LabelGUI --collage-ops <photo_dir> --ops "..."（见 CollageCLI.swift）。
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--collage-ops"),

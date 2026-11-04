@@ -3523,8 +3523,9 @@ final class CollageStore: ObservableObject {
         Task { [weak self] in
             var outcome = ExportOutcome(folder: folder, scale: scale)
             defer { done?(outcome) }
-            // 只攒每页编码好的 JPEG（~5MB），不攒位图（30×30cm 跨页 ~100MB 一张）。
-            var pdfPages: [Data] = []
+            // 不攒位图（30×30cm 跨页 ~100MB 一张）：JPEG 格式记着写出的那一页（写 PDF 时从盘上逐页读），
+            // PNG / TIFF 才攒进 PDF 用的那份 JPEG。
+            var pdfPages: [CollageExport.PDFPage] = []
             var failure: String?
             var lowRes: [String] = []
             var missing: [String] = []
@@ -3576,8 +3577,8 @@ final class CollageStore: ObservableObject {
                 let pages = pdfPages
                 let pdfError = await Task.detached(priority: .userInitiated) { () -> String? in
                     do {
-                        try CollageExport.writePDF(jpegPages: pages, canvas: snapshot.canvas, to: pdfURL,
-                                                   title: snapshot.title, cropMarks: options.cropMarks)
+                        try CollageExport.writePDF(pages: pages, canvas: snapshot.canvas, to: pdfURL,
+                                                   title: snapshot.title, cropMarks: options.cropMarks, overwrite: false)
                         return nil
                     } catch {
                         return error.localizedDescription
@@ -3658,7 +3659,7 @@ final class CollageStore: ObservableObject {
     }()
 
     private struct PageResult {
-        var pdfData: Data?
+        var pdfData: CollageExport.PDFPage?
         var error: String?
         var lowRes: [String]
         var missing: [String]
@@ -3667,7 +3668,7 @@ final class CollageStore: ObservableObject {
     }
 
     /// 一页落盘：单张按画布切缝写九宫格/轮播；相册每个跨页一张（带出血）。
-    /// `wantPDF` 时返回这一页进 PDF 用的 JPEG 数据（JPEG 格式就是写盘的同一份）。
+    /// `wantPDF` 时返回这一页进 PDF 用的 JPEG（JPEG 格式就是写在盘上的那个文件，PNG / TIFF 另编一份数据）。
     /// 文件名：手动填的，或者导出那一刻的时间（精确到秒）。输出目录里已经有同名的就加 -2、-3……
     /// （按这次要写的每一个文件查，不覆盖以前导出的）。
     private func exportBase(in folder: URL, project: CollageProject, options: ExportOptions, name: String) -> String {
@@ -3736,7 +3737,7 @@ final class CollageStore: ObservableObject {
     /// `scale`：image 是按几倍渲的（exportScale）；出血跟着乘。dpi 照画布写：放大的只有社交尺寸，那里的 72 只是个标记。
     nonisolated private static func writePage(_ image: CGImage, files: [String], project: CollageProject,
                                               options base: ExportOptions, scale: Int, dir: URL,
-                                              wantPDF: Bool) throws -> Data? {
+                                              wantPDF: Bool) throws -> CollageExport.PDFPage? {
         let canvas = project.canvas
         guard let mainName = files.first else { return nil }
         // 加了网的照片：JPEG 质量低于 0.9 网点边上会起振铃（一圈脏点），压到 0.9 以上。
@@ -3751,10 +3752,11 @@ final class CollageStore: ObservableObject {
                 do { try data.write(to: url, options: .atomic) } catch {
                     throw CollageExport.ExportError.encode(url.lastPathComponent)
                 }
-                return wantPDF ? data : nil
+                return wantPDF ? .file(url) : nil
             }
             try CollageExport.write(image, to: url, format: options.format, quality: options.quality, dpi: canvas.dpi)
-            return wantPDF ? CollageExport.encode(image, format: .jpeg, quality: 0.93, dpi: canvas.dpi) : nil
+            guard wantPDF else { return nil }
+            return CollageExport.encode(image, format: .jpeg, quality: 0.93, dpi: canvas.dpi).map { .data($0) }
         }
         let trimmed = CollageExport.trimmed(image, bleed: canvas.bleed * scale) ?? image
         try CollageExport.write(image, to: dir.appendingPathComponent(mainName), format: options.format,
