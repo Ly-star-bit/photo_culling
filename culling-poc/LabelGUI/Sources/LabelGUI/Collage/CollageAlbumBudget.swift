@@ -493,7 +493,8 @@ enum CollageBudgetChange {
             return .success(.set(nil))
         }
         let a = lo ?? 1
-        let b = hi ?? 6
+        // 只给了最少（比如 8）：最多跟着抬到最少（和检视器的步进器一样），不拿没给的默认 6 去报「最少比最多大」。
+        let b = hi ?? max(6, a)
         guard a <= b else { return .failure(Bad(message: "min_per_spread（\(a)）不能比 max_per_spread（\(b)）大")) }
         return .success(.set(CollageAlbumBudget(spreads: n, minPerSpread: a, maxPerSpread: b)))
     }

@@ -176,6 +176,10 @@ enum CollageAlbumPlanSelfTest {
             outcome(.weddingAlbum, nil, 2, nil) == "错",
             outcome(.weddingAlbum, 18, 4, 3) == "错",
             outcome(.weddingAlbum, 0, 1, nil) == "错",
+            // 只给最少、比默认的最多 6 大：最多跟着抬（不报没给的那个 6）；两个都给了照样查。
+            outcome(.weddingAlbum, 18, 8, nil) == "18@8-8",
+            outcome(.weddingAlbum, 18, 6, nil) == "18@6-6",
+            outcome(.weddingAlbum, 18, 8, 7) == "错",
         ]
         check(mcp.allSatisfy { $0 }, "MCP 成套的 spreads：不给沿用、0 改回自动、只对整本婚礼相册、写错回参数不对",
               mcp.map { $0 ? "✓" : "✗" }.joined())
