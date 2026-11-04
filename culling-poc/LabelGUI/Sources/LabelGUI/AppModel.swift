@@ -87,6 +87,8 @@ final class AppModel: ObservableObject {
             model.ensureCollageAttached()
             return (ids: model.collage.project.photoIDsInUseIncludingVariants, unknown: model.collage.projectLoadProblem)
         }
+        // 拼图原件读不出来、这次打开以后又改过：批量页切场次前和判决那边一起问（BatchStore.persistBeforeLeaving）。
+        batch.collageHasRefusedEdits = { [weak collage] in collage?.hasRefusedEdits == true }
         // 不 removeDuplicates：换到另一场空工程时 id 一样是空的，「没读进来」却变了；setCollageInUse 自己只在变了时才设。
         model.collageInUseWatch = collage.$project
             .debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)

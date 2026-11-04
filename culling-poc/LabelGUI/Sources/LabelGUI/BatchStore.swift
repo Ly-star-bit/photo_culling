@@ -2090,6 +2090,14 @@ final class BatchStore: ObservableObject {
 
     /// 原件读不出来、这次打开以后又改过、改动只在内存里的那几份（实时桥切场次前要先问用户）。
     var refusedUnsaved: [PersistFile] { PersistFile.allCases.filter(refusedDirty.contains) }
+    /// 拼图那边一样「原件读不出来、这次打开以后又改过」（AppModel 接 CollageStore.hasRefusedEdits；没接 = 没有）。
+    var collageHasRefusedEdits: (() -> Bool)?
+    /// 离开这一场前要问的「只在内存里」的几样：批量页这几份，加上拼图。
+    var refusedUnsavedLabels: [String] {
+        var labels = refusedUnsaved.map(\.label)
+        if collageHasRefusedEdits?() == true { labels.append("拼图") }
+        return labels
+    }
 
     /// 离开这一场之前，原件读不出来、只在内存里的改动要不要丢：(动作「切场次」, 说明) → true = 丢掉、照常离开。
     /// GUI 里弹框问（PersistLeaveAlert，无头不弹、直接放行）；自检换成假的；实时桥带了 confirm:true（AI 已经问过用户）时
@@ -2119,8 +2127,9 @@ final class BatchStore: ObservableObject {
                 return false
             }
         }
-        guard !refusedDirty.isEmpty else { return true }
-        let what = refusedUnsaved.map(\.label).joined(separator: "、")
+        let labels = refusedUnsavedLabels
+        guard !labels.isEmpty else { return true }
+        let what = labels.joined(separator: "、")
         let message = "\(sessionLabel)的\(what)原件读不出来，为免覆盖没有写盘：这次打开以后的这些改动只在内存里，" +
                       "现在\(action)就没了（盘上的原件不受影响）。要留着改动，先别\(action)，修好或移走原件（在 \(sessionDir.path)）以后再说"
         guard confirmDiscardRefused(action, message) else {

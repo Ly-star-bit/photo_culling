@@ -401,6 +401,21 @@ extension PersistSelfTestHarness {
             batch.refreshCollageInUse()
             check((batch.collageInUseUnknown ?? "").contains("读不出来") && batch.trashableRejects.isEmpty,
                   "collage.json 读不出来：同样默认一张都不移：\(batch.collageInUseUnknown ?? "nil")")
+            // 拼图原件读不出来、又改过：切场次和判决那边一样先问（拼图页每次存都再报一遍，可以前切场次不问）
+            var asked: [String] = []
+            batch.confirmDiscardRefused = { _, message in
+                asked.append(message)
+                return false
+            }
+            check(batch.switchSession(to: otherDir) && asked.isEmpty, "拼图没改过：切走不问")
+            model.ensureCollageAttached()
+            batch.switchSession(to: lockedDir)
+            model.ensureCollageAttached()
+            touchCollage(model.collage)
+            let stayed: Bool = !batch.switchSession(to: otherDir) && batch.sessionDir.lastPathComponent == BatchStore.sessionKey(for: lockedDir)
+            check(stayed && model.collage.hasRefusedEdits && asked.first?.contains("拼图") == true,
+                  "拼图原件读不出来又改过：切场次先问（说是拼图），选留下就不切：\(asked.first ?? "没问")")
+            batch.confirmDiscardRefused = { _, _ in true }
         } else {
             print("SKIP root 跑时 chmod 000 挡不住读，读不出来那一段测不了")
         }

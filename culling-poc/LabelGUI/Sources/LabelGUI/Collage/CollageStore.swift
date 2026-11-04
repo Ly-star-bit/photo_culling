@@ -256,6 +256,11 @@ final class CollageStore: ObservableObject {
     /// 这次 attach 时工程没读进来（读不出来、解不开 —— 原件还在原处或挪成了 .corrupt，内存里是空工程）：说不清哪些照片
     /// 用在拼图里，批量页「废片移到废纸篓」默认一张都不移（AppModel.collageInUseSource 带过去）。nil = 读进来了 / 新工程。
     private(set) var projectLoadProblem: String?
+    /// 拒存（projectSaveRefused）以后又改过、到了该存的时候没存：改动只在内存里。
+    private var projectRefusedEdits = false
+    /// 这一场的拼图原件读不出来、这次打开以后又改过（改动只在内存里，还没到点存的那一次也算）：批量页切场次前一起问
+    /// （AppModel 接到 BatchStore.collageHasRefusedEdits）。每次存盘都会再报一遍 lastError，可切场次以前不拦也不问。
+    var hasRefusedEdits: Bool { projectSaveRefused != nil && (projectRefusedEdits || projectSaveTask != nil) }
     /// 这次 attach 以后第一次保存前留过 <工程>.bak 没有（照 LabelStore 的 backedUpSinceLoad）。
     private var projectBackedUp = false
     /// 最近一次写 collage.json 的结果（实时桥的写工具回 persisted，审查 S01b）：存盘队列上写完当场记下。
@@ -508,6 +513,7 @@ final class CollageStore: ObservableObject {
         loaded.canvas = defaultCanvas
         loaded.style = defaultStyle
         projectSaveRefused = nil
+        projectRefusedEdits = false
         projectLoadProblem = nil
         projectBackedUp = false
         projectWriteResult.reset()
@@ -4048,6 +4054,7 @@ final class CollageStore: ObservableObject {
         guard let url = projectURL else { return }
         if let refused = projectSaveRefused {
             lastError = refused
+            projectRefusedEdits = true
             return
         }
         let snapshot = project

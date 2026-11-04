@@ -786,7 +786,7 @@ extension LiveHandlers {
         let collageRedo = model.collage.canRedo
         let history: Bool = verdictSteps > 0 || collageSteps > 0 || collageRedo
         // 这一场有原件读不出来、只在内存里的改动（审查 S02 跟进）：切过去就没了，一样先问用户。
-        let inMemory: [String] = batch.refusedUnsaved.map(\.label)
+        let inMemory: [String] = batch.refusedUnsavedLabels
         if (history || !inMemory.isEmpty) && req.params["confirm"] as? Bool != true {
             var data: [String: Any] = ["verdict_undo_steps": verdictSteps, "collage_undo_steps": collageSteps]
             data["collage_can_redo"] = collageRedo
