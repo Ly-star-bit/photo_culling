@@ -564,7 +564,7 @@ struct BatchView: View {
             // 上次写 XMP 之后又改了判决：Lightroom / C1 那边还是旧的，提醒一下、点一下就重写。
             if store.xmpStaleCount > 0 {
                 Button { store.exportXMP(.changed) } label: {
-                    Label("XMP 待更新 \(store.xmpStaleCount) 张 · 点这里重新写入", systemImage: "arrow.triangle.2.circlepath")
+                    Label(xmpStaleLabel, systemImage: "arrow.triangle.2.circlepath")
                         .font(.caption).foregroundStyle(.orange)
                 }
                 .buttonStyle(.plain)
@@ -1211,6 +1211,15 @@ struct BatchView: View {
     private var acceptTitle: String {
         let scope = acceptScope != nil ? "把本章 " : "把 "
         return scope + "\(acceptPreview.takes) 场按推荐定案？"
+    }
+
+    /// 状态栏「XMP 待更新」的字：同名共用一个 .xmp 写不了的单独说（点了也写不了，点开是点名的提示）。
+    private var xmpStaleLabel: String {
+        let n = store.xmpStaleCount
+        let shared = store.xmpSharedSidecarCount
+        if shared > 0 && shared >= n { return "XMP：\(shared) 张同名共用一个 .xmp，没写 · 点这里看是哪几张" }
+        if shared > 0 { return "XMP 待更新 \(n) 张（\(shared) 张同名冲突写不了）· 点这里重新写入" }
+        return "XMP 待更新 \(n) 张 · 点这里重新写入"
     }
 
     /// 状态栏「XMP 待更新」的说明。单独成属性：插值拼在视图构建器里，Xcode 16 类型检查会超时（同 acceptTitle）。

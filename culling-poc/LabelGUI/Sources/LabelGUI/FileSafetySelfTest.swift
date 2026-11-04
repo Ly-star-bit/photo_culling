@@ -4,6 +4,8 @@ import ImageIO
 /// 文件安全自检（2026-11 全项目审查 S08 / S09 / S10 / S17）：LABELGUI_DATA_DIR=<临时目录> LabelGUI --files-selftest
 /// 在数据目录里造几场假的拍摄（小文件 + 手写的 manifest / layer1，不用跑分析），逐条断言、打 PASS / FAIL：
 ///   - XMP：「XMP 待更新」只写改了的那几张，别的 sidecar 一个不换（LR 里改过的星级不被盖回去）；全部重写时内容没变的不重写。
+///   - 同名不同格式共用一个 .xmp：整组不写、单独点名、不记成已同步；移废片时共用的 .xmp 全移走才带走。
+///   - DNG / JPG 写完提醒 LR 不读旁边的 .xmp。
 /// 只写数据目录；退出前删掉造出来的照片文件夹。
 @MainActor
 enum FileSafetySelfTest {
@@ -27,6 +29,8 @@ enum FileSafetySelfTest {
         let root = appDataDir.appendingPathComponent("files-selftest-" + String(UUID().uuidString.prefix(8)))
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         xmpIncremental(root.appendingPathComponent("xmp"))
+        sharedSidecar(root.appendingPathComponent("shared"))
+        lightroomFormats(root.appendingPathComponent("lr"))
         try? FileManager.default.removeItem(at: root)
         print(failures == 0 ? "文件安全自检：全部通过" : "文件安全自检：\(failures) 条失败")
         exit(failures == 0 ? 0 : 1)
@@ -178,6 +182,68 @@ enum FileSafetySelfTest {
         check(own.allSatisfy { before2[$0] != nil && before2[$0] == after2[$0] }, "全部重写：自己的 3 个内容没变，没重写")
         check(rating(xmp(dir, "p3")) == "3", "全部重写：别人的 p3 按现在的判决合并回 3 星")
         check(store.progressText.contains("3 个本来就对"), "全部重写的提示说了几个没动", store.progressText)
+        check(!store.progressText.contains("Lightroom Classic"), "全是专有 RAW：不提醒 LR 读不了", store.progressText)
+    }
+
+    // MARK: - S09-a 同名共用一个 .xmp
+
+    private static func sharedSidecar(_ dir: URL) {
+        print("== 同名不同格式的照片共用一个 .xmp")
+        // s1.HEIC + s1.JPG 各自成片；C2.RAF 和 c2.dng 只差大小写（APFS 上 C2.xmp 和 c2.xmp 是同一个文件）。
+        let store = makeShoot(dir, [
+            Fake(id: "s1", raw: "s1.HEIC"), Fake(id: "s1_jpg", raw: "s1.JPG"), Fake(id: "t1", raw: "t1.ARW"),
+            Fake(id: "C2", raw: "C2.RAF"), Fake(id: "c2_dng", raw: "c2.dng"),
+        ])
+        store.setOverride("s1", .reject)
+        store.setOverride("s1_jpg", .pick)
+        store.setOverride("t1", .usable)
+        store.setOverride("C2", .pick)
+        store.setOverride("c2_dng", .usable)
+        store.exportXMP(.all)
+        wait(store)
+        let fm = FileManager.default
+        check(fm.fileExists(atPath: xmp(dir, "t1").path), "不共用的 t1 照常写了")
+        check(!fm.fileExists(atPath: xmp(dir, "s1").path), "s1.HEIC + s1.JPG 共用的 s1.xmp 没写")
+        check(!fm.fileExists(atPath: xmp(dir, "c2").path) && !fm.fileExists(atPath: xmp(dir, "C2").path),
+              "只差大小写的 C2.RAF + c2.dng 也算共用，没写")
+        let warning = store.lastError ?? ""
+        check(warning.contains("同名冲突 4 张") && warning.contains("s1.HEIC") && warning.contains("s1.JPG")
+              && warning.contains("C2.RAF") && warning.contains("c2.dng"), "单独一条「同名冲突」、点了名", warning)
+        check(store.xmpStaleCount == 4 && store.xmpSharedSidecarCount == 4,
+              "跳过的不记成已同步：还算待更新 4 张、其中同名冲突 4 张", "\(store.xmpStaleCount)/\(store.xmpSharedSidecarCount)")
+        store.exportXMP(.changed)
+        wait(store)
+        check(!fm.fileExists(atPath: xmp(dir, "s1").path) && (store.lastError ?? "").contains("同名冲突 4 张"),
+              "再点「XMP 待更新」：照样不写、照样点名", store.lastError ?? "-")
+
+        // 移废片：共用的 .xmp 只在用它的照片全都移走时才带走（由排在最后的那张、前面的移成了再带）。
+        let all = store.items.map { ($0.id, $0.rawPath) }
+        func photo(_ id: String) -> SidecarSharing.Photo { all.first { $0.0 == id }! }
+        let alone = SidecarSharing.trashSidecars(moving: [photo("s1")], all: all)
+        check(alone.carry.isEmpty && alone.kept.map(\.lastPathComponent) == ["s1.xmp"],
+              "只移 s1.HEIC：s1.JPG 还在用，s1.xmp 留着")
+        let both = SidecarSharing.trashSidecars(moving: [photo("s1"), photo("s1_jpg")], all: all)
+        check(both.carry["s1"] == nil && both.carry["s1_jpg"]?.after == ["s1"] && both.kept.isEmpty,
+              "两张都移：最后那张等前一张移成了再带走 s1.xmp")
+        let single = SidecarSharing.trashSidecars(moving: [photo("t1")], all: all)
+        check(single.carry["t1"]?.xmp.lastPathComponent == "t1.xmp" && single.carry["t1"]?.after == [],
+              "不共用的照常带走自己的 .xmp")
+    }
+
+    // MARK: - S09-b LR 不读 DNG / JPG 旁边的 .xmp
+
+    private static func lightroomFormats(_ dir: URL) {
+        print("== DNG / JPG 场次的 LR 提醒")
+        let store = makeShoot(dir, [
+            Fake(id: "d1", raw: "d1.DNG"), Fake(id: "d2", raw: "d2.dng"), Fake(id: "j1", raw: "j1.JPG"),
+            Fake(id: "r1", raw: "r1.ARW"),
+        ])
+        store.exportXMP(.all)
+        wait(store)
+        let text = store.progressText
+        check(text.contains("注意 3 张是 DNG/JPG") && text.contains("Lightroom Classic 不读") && text.contains("复制文件名"),
+              "点名 DNG/JPG、引导复制文件名去 LR 筛", text)
+        check(FileManager.default.fileExists(atPath: xmp(dir, "d1").path), "DNG 旁边照样写了 .xmp（C1 能读）")
     }
 }
 
