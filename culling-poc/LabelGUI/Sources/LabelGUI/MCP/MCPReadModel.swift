@@ -101,7 +101,7 @@ enum MCPReadModel {
         // 其中 AI 经实时桥改的（照样算人工改判；阈值建议不拿它们当样本）
         out["ai_override_count"] = s.aiOverrideCount
         out["client_pick_count"] = s.clientPickCount
-        // 「XMP 过期」（状态栏那一句）：LR / C1 看的是 XMP，AI 改完判决它就过期了；没写过 XMP 时 stale_count 一直是 0
+        // 「XMP 待更新」（状态栏那一句）：LR / C1 看的是 XMP，AI 改完判决它就过期了；没写过 XMP 时 stale_count 一直是 0
         let xmpStale = s.xmpStaleCount
         out["xmp"] = ["stale_count": xmpStale, "written": s.xmpEverWritten] as [String: Any]
 
@@ -154,8 +154,10 @@ enum MCPReadModel {
                                     hint: "请用户在 app 里点「重新分析」"))
         }
         if xmpStale > 0 {
+            // 按钮名照批量页状态栏上的字（BatchView.xmpStaleLabel）：同名冲突时括号里多一句，开头「XMP 待更新」不变
             warnings.append(warning("xmp_stale", "上次写 XMP 之后有 \(xmpStale) 张的判决、星级或客户选中变了：Lightroom / Capture One 里还是旧的。",
-                                    hint: "改完以后提醒用户在 app 里点状态栏「XMP 过期」重写（MCP 不写 XMP）"))
+                                    hint: "改完以后提醒用户在 app 里点批量页状态栏橙色的「XMP 待更新 \(xmpStale) 张 · 点这里重新写入」"
+                                        + "（或「导出 › 只更新改了的 \(xmpStale) 张 XMP」）重写（MCP 不写 XMP）"))
         }
         out["warnings"] = warnings
         return out

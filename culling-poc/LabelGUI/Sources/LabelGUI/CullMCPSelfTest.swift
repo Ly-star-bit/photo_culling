@@ -98,6 +98,12 @@ enum CullMCPSelfTest {
         // 21 张：2 张对得上，1 张是别人的，剩下 18 张（3 张对不上 + 15 张没写过）都算过期
         check(seeded.stale == n - 3 && seeded.written == true && seeded.warned && reopened.xmpStaleCount == n - 3,
               "写过 XMP 以后：xmp.stale_count = \(n - 3)、written true、带 xmp_stale：\(seeded)")
+        // hint 里的按钮名要和批量页状态栏上的字一样（BatchView.xmpStaleLabel「XMP 待更新 N 张 · 点这里重新写入」），
+        // 以前写的「XMP 过期」app 里找不到
+        let warnings = MCPReadModel.overview(reopened, session: reopened.sessionDir.lastPathComponent)["warnings"] as? [[String: Any]] ?? []
+        let hint = warnings.first { $0["code"] as? String == "xmp_stale" }?["hint"] as? String ?? ""
+        check(hint.contains("「XMP 待更新 \(n - 3) 张 · 点这里重新写入」") && !hint.contains("XMP 过期"),
+              "xmp_stale 的 hint 用状态栏上真的按钮名：\(hint)")
         try? FileManager.default.removeItem(at: path)
         let cleared = overviewXMP(open())
         check(cleared.stale == 0 && cleared.written == false && !cleared.warned, "删掉 xmp_state.json 以后回到没写过：\(cleared)")
