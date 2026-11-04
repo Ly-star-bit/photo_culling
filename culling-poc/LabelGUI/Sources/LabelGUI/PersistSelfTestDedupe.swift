@@ -19,12 +19,21 @@ extension PersistSelfTestHarness {
         freshIndex()
         let lastUsed = dataDir.appendingPathComponent("thresholds.json")
         try? fm.removeItem(at: lastUsed)
+        // 设置域本身（不是合并以后的值）里的全局开关：下面查「界面拨开关不写它」用；这一组里谁写了，跑完换回原来的（原来没有就删掉）
+        let defaultsKey = "batch.rejectBurstDuplicates"
+        let prefsDomain: String = Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName
+        func persistedGlobal() -> Any? { UserDefaults.standard.persistentDomain(forName: prefsDomain)?[defaultsKey] }
+        let rawGlobalBefore: Any? = persistedGlobal()
         // 升级前用户把全局开关开着
         AppRuntime.pinBatchSettings(rejectBurstDuplicates: true)
         AppRuntime.pinnedRejectBurstDuplicates = nil
         defer {
             AppRuntime.pinBatchSettings()
             AppRuntime.pinnedRejectBurstDuplicates = nil
+            let rawGlobalAfter: Any? = persistedGlobal()
+            if (rawGlobalAfter as? NSObject) != (rawGlobalBefore as? NSObject) {
+                UserDefaults.standard.set(rawGlobalBefore, forKey: defaultsKey)
+            }
         }
         let legacy = Data("{\"sharpness\":45,\"faceQuality\":0,\"exposure\":0.15}".utf8)
         let storedOff = Data("{\"sharpness\":45,\"faceQuality\":0,\"exposure\":0.15,\"rejectBurstDuplicates\":false}".utf8)
@@ -48,7 +57,10 @@ extension PersistSelfTestHarness {
         let noGap: Bool = migrated != nil && migrated?.takeGap == nil
         let migratedOn: Bool = storedDedupe(a.dir) == true
         check(migratedOn && sameSliders && sameFace && noGap, "回落的值写回这一场（其余阈值一个不动、不补 takeGap）")
-        check(!exists(lastUsed), "打开老场次不算「用过」：数据目录里「上次用的」没写")
+        // 先等过一次防抖（scheduleThresholdSave 0.5 s 以后才写）：写回要是另外走了防抖保存，紧接着查是看不出来的，
+        // 后面拨开关又会把那个保存取消掉、换成自己的
+        spin(1) { false }
+        check(!exists(lastUsed), "打开老场次不算「用过」：等过防抖，数据目录里「上次用的」也没写")
         let overview = MCPReadModel.overview(store, session: a.key)
         let settings = overview["settings"] as? [String: Any] ?? [:]
         let reportedOn: Bool = (settings["dedupe"] as? Bool) == true
@@ -57,17 +69,37 @@ extension PersistSelfTestHarness {
         check(reportedOn && dedupeScope == "session" && keepersScope == "all_sessions",
               "MCP 概览的 settings：dedupe 是这一场的、dedupe_scope=session、min_keepers_scope=all_sessions：\(settings)")
 
-        store.rejectBurstDuplicates = false
+        // 界面拨开关不写设置域：查设置域本身（BatchStore.globalRejectBurstDuplicates 读的是合并以后的值，argument domain
+        // 里钉着开，写进设置域也读不出来）。拨的那一下按非无头跑（以前那句写 UserDefaults 带着 !AppRuntime.headless），
+        // 只包住同步的那次赋值、不跨 spin；先拨开（a 本来就开着，判决不变，它的防抖保存马上被下一下取消）再拨关：
+        // 设置域里原来存的不管是开、关还是没有，总有一下和它不一样。
+        func toggleAsUI(_ on: Bool) {
+            let wasHeadless = AppRuntime.headless
+            AppRuntime.headless = false
+            defer { AppRuntime.headless = wasHeadless }
+            store.rejectBurstDuplicates = on
+        }
+        let globalBefore: Bool? = rawGlobalBefore as? Bool
+        toggleAsUI(true)
+        let globalAfterOn: Bool? = persistedGlobal() as? Bool
+        toggleAsUI(false)
         spin(5) { self.storedDedupe(a.dir) == false && self.storedDedupe(self.dataDir) == false }
         check(storedDedupe(a.dir) == false && (store.reasonCounts["连拍重复"] ?? 0) == 0,
               "在 a 里关掉：a 的 thresholds.json 记下关，连拍重复 0")
         check(storedDedupe(dataDir) == false, "数据目录里「上次用的」也记下关（新场次照它打底）")
-        check(BatchStore.globalRejectBurstDuplicates, "全局开关没跟着变（界面不再写 UserDefaults）")
+        let globalAfterOff: Bool? = persistedGlobal() as? Bool
+        let globalUntouched: Bool = globalAfterOn == globalBefore && globalAfterOff == globalBefore
+        let globalTrail = "原来 \(String(describing: globalBefore))、拨开以后 \(String(describing: globalAfterOn))、"
+            + "拨关以后 \(String(describing: globalAfterOff))"
+        check(globalUntouched, "全局开关没跟着变：按界面拨开、拨关，\(prefsDomain) 设置域里的 \(defaultsKey) 一次都没写（\(globalTrail)）")
 
         store.switchSession(to: b.folder)
         let dupB = store.reasonCounts["连拍重复"] ?? 0
         check(store.rejectBurstDuplicates && dupB == dupOn && storedDedupe(b.dir) == true,
               "还没打开过的老场次 b 照旧按升级前的全局值（开）判、写回开，不跟 a 刚拨的走")
+        spin(1) { false }
+        let lastUsedAfterB: Bool? = storedDedupe(dataDir)
+        check(lastUsedAfterB == false, "打开老场次 b（写回开）也不算「用过」：等过防抖，「上次用的」还是 a 拨的关")
         store.switchSession(to: c.folder)
         check(!store.rejectBurstDuplicates && read(c.dir.appendingPathComponent("thresholds.json")) == storedOff,
               "c 存着关：按自己的，不回落、不改写")
@@ -85,6 +117,9 @@ extension PersistSelfTestHarness {
         store.switchSession(to: d.folder)
         check(store.rejectBurstDuplicates && storedDedupe(d.dir) == true,
               "分析过却没有 thresholds.json 的老场次：去重不跟「上次用的」（关），按升级前的全局值（开）")
+        spin(1) { false }
+        let lastUsedAfterD: Bool? = storedDedupe(dataDir)
+        check(lastUsedAfterD == false, "打开全新场次、老场次 d 都不算「用过」：等过防抖，「上次用的」还是关")
 
         // 无头：读到的全局值是钉在内存里的，不写回
         freshIndex()
