@@ -3087,6 +3087,9 @@ __attribute__((constructor)) static void init(void) {
         def cn_disk():
             return json.load(open(cn_path)) if os.path.exists(cn_path) else None
 
+        # 窗口最小化着跑这一段（审查：dry_run 什么都没改，以前也带「改动已生效并已存盘…请告诉用户切过去看」）：
+        # 只有真改了的那几次带 window_not_visible，dry_run、再导不变的不带；live.window_state 照报
+        test_call(hm, "test.set_window_state", {"state": "minimized"})
         sn0 = mst()
         n_text = f"{mid} 去路人\n{mid2}：瘦脸"
         nd = mw("cull_import_client_picks", {"text": n_text})
@@ -3104,6 +3107,13 @@ __attribute__((constructor)) static void init(void) {
         sn2 = mst()
         nc = mw("cull_import_client_picks", {"text": f"{mid} 去路人，黑白", "dry_run": False})
         sn3 = mst()
+        test_call(hm, "test.set_window_state", {"state": "visible"})
+        check("window_not_visible" not in warn_codes(nd) and (nd.get("live") or {}).get("window_state") == "minimized"
+              and (nd.get("live") or {}).get("window_visible") is False and "window_not_visible" in warn_codes(na)
+              and "window_not_visible" in warn_codes(nb) and "window_not_visible" not in warn_codes(nc)
+              and (nc.get("live") or {}).get("window_state") == "minimized",
+              f"窗口最小化时：dry_run、再导不变的结果不带 window_not_visible（那句说「改动已生效」），真改了的照旧带"
+              f"（{warn_codes(nd)} / {warn_codes(na)} / {warn_codes(nb)} / {warn_codes(nc)}）")
         check(nb.get("changed") is True and nb.get("new_ids") == [] and nb.get("already_picked") == 1 and nb.get("new_notes") == [mid]
               and (cn_disk() or {}).get(mid) == "去路人，黑白" and (cn_disk() or {}).get(mid2) == "瘦脸"
               and nb.get("undo", {}).get("steps_added") == 1 and steps(sn1, sn2) == (1, 0)

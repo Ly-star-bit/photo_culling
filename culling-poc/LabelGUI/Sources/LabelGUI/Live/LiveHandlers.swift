@@ -605,15 +605,17 @@ extension LiveHandlers {
 
     /// 每个写结果都带的 live 对象（§9.3），窗口看不见时另加一条 warning（§9.5.6）。
     /// `persisted`：这一步的改动存上盘没有（审查 S01b，batchPersistReport / collagePersistReport）；没存上时那句话不说「已存盘」。
+    /// `applied`：这一步真的改了东西没有。没改（dry_run、要标的都已经标过）就不加这条 warning —— 它说「改动已生效…请告诉用户
+    /// 切过去看」，可那边什么都没变；live 里的 window_visible / window_state 照给。
     static func liveInfo(_ req: Request, live: LiveServer, model: AppModel, notice: String?,
-                         persisted: Bool = true) -> ([String: Any], [[String: Any]]) {
+                         persisted: Bool = true, applied: Bool = true) -> ([String: Any], [[String: Any]]) {
         let (windows, ws) = live.windowState()
         var info: [String: Any] = ["op_id": req.opID ?? NSNull(), "replayed": false, "app_pid": Int(getpid())]
         info["tab"] = LiveServer.tabName(model.tab)
         info["window_visible"] = ws == "visible"
         info["window_state"] = ws
         info["notice"] = notice ?? NSNull()
-        guard ws != "visible" else { return (info, []) }
+        guard ws != "visible", applied else { return (info, []) }
         let why: [String: String] = ["hidden": "app 被隐藏了（⌘H）", "minimized": "窗口最小化了",
                                      "occluded": "窗口被挡住了或者在别的桌面上", "no_window": "app 开着但没有窗口"]
         let message = windowNotVisibleText(why[ws] ?? ws, persisted: persisted)
@@ -970,7 +972,9 @@ extension LiveHandlers {
         // 存上盘没有（审查 S01b）：dry_run 什么都没写，不报
         let saved = dryRun ? PersistReport(persisted: true, warnings: []) : batchPersistReport(batch, [.clientPicks])
         if !dryRun { out["persisted"] = saved.persisted }
-        let (info, shown) = liveInfo(req, live: live, model: model, notice: notice, persisted: saved.persisted)
+        // dry_run、什么都没变：窗口看不见那句「改动已生效并已存盘…请告诉用户切过去看」不说（结果照 summary 在对话里讲）
+        let (info, shown) = liveInfo(req, live: live, model: model, notice: notice, persisted: saved.persisted,
+                                     applied: changed)
         out["live"] = info
         var warnings = saved.warnings + shown
         if resolution.ids.isEmpty {
