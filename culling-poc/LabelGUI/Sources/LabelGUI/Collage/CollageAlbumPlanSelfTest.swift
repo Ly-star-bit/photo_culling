@@ -103,6 +103,36 @@ enum CollageAlbumPlanSelfTest {
                                              budget: CollageAlbumBudget(spreads: n + 5))
         check(CollageStyleFineArtSelfTest.signature(roomy) == CollageStyleFineArtSelfTest.signature(natural),
               "目标比编出来的多：和不指定一样（不加页）", "\(n) 个")
+        // 目标没卡到（不比编出来的跨页数少）：和不指定一字不差。呼吸图张数以前按 min(照片数 / 1.8 估的跨页数, 目标) 定，
+        // 检视器勾「指定跨页数」默认就是现在的跨页数，估的比编出来的多时，目标 = 编出来的也会少一张呼吸图、整本跟着变。
+        // 一章 27 张（5 张没脸）：估 15 个跨页（呼吸图 3 张），编出来不到 15 个，正好踩在 3 → 2 张那条线上。
+        let oneChapter = oneChapterBook()
+        for (name, photos, sim) in [("四章合成婚礼", book.photos, book.similarity), ("一章 27 张", oneChapter.photos, oneChapter.similarity)] {
+            let free = CollageStyleFineArt.plan(photos, dedupe: true, chapterMono: true, similarity: sim)
+            let real = free.spreads.count
+            let placedCount = free.spreads.reduce(0) { $0 + $1.photos.count }
+            let estimate = Int((Double(placedCount) / CollageStyleFineArt.targetPerSpread).rounded(.up))
+            let freeSig = CollageStyleFineArtSelfTest.signature(free)
+            var differ: [Int] = []
+            for target in real...max(real, estimate) {
+                let p = CollageStyleFineArt.plan(photos, dedupe: true, chapterMono: true, similarity: sim,
+                                                 budget: CollageAlbumBudget(spreads: target))
+                if CollageStyleFineArtSelfTest.signature(p) != freeSig { differ.append(target) }
+            }
+            check(differ.isEmpty, "\(name)：目标 \(real)–\(max(real, estimate))（不比编出来的 \(real) 个少）和不指定一字不差",
+                  differ.isEmpty ? "估 \(estimate) 个" : "目标 " + differ.map(String.init).joined(separator: " ") + " 变了")
+            // 卡到了（目标比编出来的少）：按目标少放呼吸图重编；重编出来比目标还少就不用它（并到正好），一张不丢。
+            let freeIDs = Set(free.spreads.flatMap(\.photos).map(\.id))
+            var bad: [String] = []
+            for target in stride(from: real - 1, through: max(2, real - 8), by: -1) {
+                let p = CollageStyleFineArt.plan(photos, dedupe: true, chapterMono: true, similarity: sim,
+                                                 budget: CollageAlbumBudget(spreads: target))
+                let ids = p.spreads.flatMap(\.photos).map(\.id)
+                let whole: Bool = Set(ids) == freeIDs && ids.count == freeIDs.count
+                if !whole || p.spreads.count < target || p.spreads.count > real { bad.append("\(target)→\(p.spreads.count)") }
+            }
+            check(bad.isEmpty, "\(name)：目标比编出来的少时不少于目标、不多于不指定、一张不丢", bad.joined(separator: " "))
+        }
         for target in [n - 4, 20, 8] {
             let plan = CollageStyleFineArt.plan(book.photos, dedupe: true, chapterMono: true, similarity: book.similarity,
                                                 budget: CollageAlbumBudget(spreads: target))
@@ -141,6 +171,22 @@ enum CollageAlbumPlanSelfTest {
         check(overText.contains("最多 \(CollageStyleFineArt.maxPerSpread) 张") && !overText.contains("最多 2 张")
               && !underText.contains("至少"),
               "fine-art 的提示照实际规则说（最多 3 张，不提用户填的每跨页张数）", overText + " / " + underText)
+    }
+
+    /// 一章 27 张的合成册子（5 张没有人脸 = 呼吸图候选，3 张横图，2 张精选；没有场、连拍、黑白）。
+    static func oneChapterBook() -> CollageStyleFineArtSelfTest.Book {
+        typealias B = CollageStyleFineArtSelfTest.Book
+        var photos: [CollagePhotoRef] = []
+        for i in 0..<27 {
+            let faceless = [3, 8, 13, 18, 23].contains(i)
+            let landscape = [5, 15, 25].contains(i)
+            let score: Double = 1.3 + Double((i * 7) % 10) / 20
+            photos.append(B.ref(String(format: "S%02d", i + 1), 1, Double(i) * 3, portrait: !landscape,
+                                face: faceless ? 0 : 0.02, score: score, pick: i == 10 || i == 20,
+                                luma: 0.45 + Double(i % 3) / 20))
+        }
+        let sim = CollageStyleFineArt.Similarity(kept: photos, dropped: [], similar: [:])
+        return B(photos: photos, similarity: sim, monoChapters: [])
     }
 
     static func checkBudgetModel(check: (Bool, String, String) -> Void) {
