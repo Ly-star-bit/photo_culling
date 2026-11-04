@@ -238,12 +238,15 @@ enum ImageLoader {
                    let digits = Double("0." + sub.trimmingCharacters(in: .whitespaces)) {
                     captureSubsec = digits
                 }
-                shutterSec = exif[kCGImagePropertyExifExposureTime] as? Double
-                aperture = exif[kCGImagePropertyExifFNumber] as? Double
+                // 只收有限正数（ExifValues.swift）：0/1 的快门进了 manifest，显示参数时 1/0 会崩；
+                // 非有限值进 JSONSerialization 会抛 NSException。
+                shutterSec = Self.positiveFinite(exif[kCGImagePropertyExifExposureTime] as? Double)
+                aperture = Self.positiveFinite(exif[kCGImagePropertyExifFNumber] as? Double)
                 iso = (exif[kCGImagePropertyExifISOSpeedRatings] as? [Int])?.first
-                focal35 = exif[kCGImagePropertyExifFocalLenIn35mmFilm] as? Int
-                if focal35 == nil, let focal = exif[kCGImagePropertyExifFocalLength] as? Double {
-                    focal35 = Int(focal)  // fallback: raw focal length, close enough for the warning
+                focal35 = Self.positiveInt(exif[kCGImagePropertyExifFocalLenIn35mmFilm] as? Int)
+                if focal35 == nil {
+                    // fallback: raw focal length, close enough for the warning
+                    focal35 = Self.focalMillimeters(exif[kCGImagePropertyExifFocalLength] as? Double)
                 }
                 lensModel = exif[kCGImagePropertyExifLensModel] as? String
             }

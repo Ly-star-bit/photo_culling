@@ -454,6 +454,7 @@ if CommandLine.arguments.contains("--ux-selftest") {
             let want: String = ok ? "" : "（期望 \(expected ?? "不动")）"
             print(head + name + " → " + result + want)
         }
+        failed += GridExifImportSelfTest.run()  // EXIF 快门 0 不崩、网格多选规则、水印页 RAW+JPG 配对
         exit(failed == 0 ? 0 : 1)
     }
 }
