@@ -13,7 +13,7 @@ import Foundation
 ///   - 实时桥（followBookmark: false）不跟书签、不认回、不改路径。
 ///   - 存储卡：判断表（DCIM 在卷根 + 可移除 / 可推出才算；外置 SSD、系统盘、网络卷不算；读不出来按「可能是」），
 ///     真读一个系统盘上的 DCIM 文件夹不算卡；编的卷属性（CardImporter.volumeFactsOverride，不挂真的卡 —— hdiutil 挂的映像
-///     会弹「可移除的宗卷」授权框）打开卡上的 DCIM/100CANON：移废片、写 XMP、高 ISO 复制、导出到卡上、拼图默认目录都挡住，
+///     会弹「可移除的宗卷」授权框）打开卡上的 DCIM/100CANON：移废片、写 XMP、高 ISO 复制、导出到卡上、复制原片到卡上、拼图默认目录都挡住，
 ///     卡上一个文件都没多、没少；导出到卡外照常；外置 SSD 上的工作文件夹照常。
 /// 只写数据目录；退出前删掉造出来的照片文件夹。
 @MainActor
@@ -479,7 +479,34 @@ extension SessionMoveSelfTest {
         FileSafetySelfTest.wait(batch)
         check((batch.lastError ?? "").contains("导出目标") && !fm.fileExists(atPath: card.appendingPathComponent("精华").path),
               "精华导到卡上：不导", batch.lastError ?? "")
+        // 复制原片到…：面板以前从拍摄文件夹旁边（卡的 DCIM）开，卡上的目标照收（原片副本、精修要求.csv 都写在卡上）。
+        let pictures = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
+        let startFresh = batch.copyPanelStartFolder
+        check(batch.lastCopyDestination == nil && startFresh != nil && startFresh == pictures
+              && !(startFresh?.path ?? "").hasPrefix(cardPath),
+              "复制原片的面板：卡上的一场不从卡的 DCIM 开，从「图片」开", startFresh?.path ?? "nil")
+        for target in [card.appendingPathComponent("DCIM"), card.appendingPathComponent("DCIM/精修"),
+                       dcim.appendingPathComponent("精修")] {
+            batch.copyOriginals(["IMG_0001"], to: target)
+            FileSafetySelfTest.wait(batch)
+            let name = String(target.path.dropFirst(cardPath.count))
+            check((batch.lastError ?? "").contains("存储卡") && batch.lastCopyDestination == nil
+                  && !fm.fileExists(atPath: target.appendingPathComponent("IMG_0001.JPG").path),
+                  "复制原片到卡上的「\(name)」：不复制、不记成下次的目标", batch.lastError ?? "nil")
+        }
+        check(!(batch.lastError ?? "").contains("_精修"), "　…… 不叫人在旁边新建「_精修」（旁边也在卡上）", batch.lastError ?? "")
+        // 老版本记下的卡上目标：面板不从那儿开。
+        let record = batch.sessionDir.appendingPathComponent("copy_originals.json")
+        try? JSONEncoder().encode(["dest": card.appendingPathComponent("DCIM/精修").path]).write(to: record)
+        check(batch.lastCopyDestination != nil && batch.copyPanelStartFolder == pictures,
+              "上次记的复制目标在卡上：面板不从那儿开", batch.copyPanelStartFolder?.path ?? "nil")
         check(cardListing() == before, "卡上一个文件都没多、没少", "\(cardListing())")
+        let offCopy = off.appendingPathComponent("精修")
+        batch.copyOriginals(["IMG_0001"], to: offCopy)
+        FileSafetySelfTest.wait(batch)
+        check(fm.fileExists(atPath: offCopy.appendingPathComponent("IMG_0001.JPG").path)
+              && sameDir(batch.copyPanelStartFolder, offCopy),
+              "复制原片到卡外照常复制，下次面板从那儿开", "\(batch.lastError ?? "") \(batch.copyPanelStartFolder?.path ?? "nil")")
 
         let offExport = off.appendingPathComponent("导出JPG")
         batch.exportJPEGs(to: offExport, includeUsable: true, options: options)

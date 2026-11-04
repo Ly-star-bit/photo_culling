@@ -378,7 +378,7 @@ struct BatchView: View {
     }
 
     private var cardSessionText: String {
-        let head = "\(store.cardSession.subject)：可以看片、改判，但移废片、写 XMP、高 ISO 复制、导出到卡上都关了，卡上的东西一个不动。"
+        let head = "\(store.cardSession.subject)：可以看片、改判，但移废片、写 XMP、高 ISO 复制、导出和复制原片到卡上都关了，卡上的东西一个不动。"
         let tail = "要正式选片先导入这张卡（复制到电脑、逐个校验过再分析）—— 在卡上做的改判不会跟到导入后的那一场。"
         return head + tail
     }
@@ -2515,9 +2515,12 @@ struct BatchView: View {
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "复制到这里"
-        panel.message = "把 \(ids.count) 张的原片（RAW+JPG 和旁边的 .xmp 一起）复制过去：只复制、不移动，同名不覆盖。" +
-            "不能选拍摄文件夹里面（下次分析会当成新照片），可以在旁边新建一个精修文件夹"
-        panel.directoryURL = store.lastCopyDestination ?? store.photoDir?.deletingLastPathComponent()
+        let whereTo = store.isCardSession
+            ? "照片在存储卡上：请选一个不在卡上的文件夹（复制到卡上的不收，格式化卡就没了）"
+            : "不能选拍摄文件夹里面（下次分析会当成新照片），可以在旁边新建一个精修文件夹"
+        panel.message = "把 \(ids.count) 张的原片（RAW+JPG 和旁边的 .xmp 一起）复制过去：只复制、不移动，同名不覆盖。" + whereTo
+        // 卡上的一场不从拍摄文件夹旁边（卡的 DCIM）开（审查 S07）
+        panel.directoryURL = store.copyPanelStartFolder
         guard panel.runModal() == .OK, let url = panel.url else { return }
         store.copyOriginals(ids, to: url)
     }

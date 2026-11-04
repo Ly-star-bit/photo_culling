@@ -1072,6 +1072,15 @@ extension BatchStore {
             .map { URL(fileURLWithPath: $0) }
     }
 
+    /// 「复制原片到…」面板从哪儿开：上次选的，没有就从拍摄文件夹旁边。这一场开在存储卡上时（审查 S07）卡上的都不用 ——
+    /// 拍摄文件夹旁边就是卡的 DCIM，上次记的也可能在卡上（copyOriginals 不收卡上的目标）—— 从「图片」开。
+    var copyPanelStartFolder: URL? {
+        let last = lastCopyDestination
+        guard isCardSession else { return last ?? photoDir?.deletingLastPathComponent() }
+        if let last, !cardSession.contains(last, photoDir: photoDir) { return last }
+        return FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
+    }
+
     /// 「复制原片到…」：把这些照片的原片（RAW+JPG 一起、旁边的 .xmp 一起）复制（不是移动）到 dest。
     /// 目标里一模一样的跳过，同名不同内容的整张另存 -2；每个文件复制完校验大小和 SHA-256；原片只读。
     /// 后台跑、顶栏有进度和「取消」；完了不弹访达。
@@ -1087,6 +1096,12 @@ extension BatchStore {
         }
         if !FileManager.default.fileExists(atPath: photoDir.path) {
             lastError = "照片文件夹「\(photoDir.lastPathComponent)」不存在 (被删除、改名或硬盘未挂载)，没法复制原片"
+            return
+        }
+        // 这一场开在存储卡上、目标也在卡上（审查 S07）：不建目录、不记这个目标、不写精修要求.csv —— 以为复制到了电脑上，
+        // 格式化卡就全没了。在拍摄文件夹里面之前查：那句叫人在旁边新建「…_精修」，旁边也在卡上。
+        if let why = cardDestinationRefusal(dest) {
+            lastError = why
             return
         }
         if OriginalsCopier.insideAnalysis(dest, shoot: photoDir) {
