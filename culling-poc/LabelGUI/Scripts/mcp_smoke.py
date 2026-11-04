@@ -402,7 +402,8 @@ CTL = os.path.join(WORK, "data-ctl")
 os.makedirs(CTL)
 with open(os.path.join(CTL, "sessions.json"), "w") as f:
     json.dump([entry(CTL_GHOST, 1)], f)
-# 一条缺 name：app 的 JSONDecoder 整个解不出来（「最近场次」是空的），MCP 也只能列空的；数据目录在、没有 sessions.json
+# 一条缺 name：app 一条一条解（审查 S02c，以前一条坏了整份不认），「最近场次」里是另外那条好的，MCP 也列那一条、
+# 另加 warning 说有一条读不懂；数据目录在、没有 sessions.json
 NONAME = os.path.join(WORK, "data-noname")
 os.makedirs(NONAME)
 with open(os.path.join(NONAME, "sessions.json"), "w") as f:
@@ -1275,13 +1276,15 @@ if not PROTOCOL_ONLY:
     many_keys = [entry(os.path.join(WORK, "many", f"shoot{i:02d}"), i)["key"] for i in range(15)]
     check(b is not None and [r_["session"] for r_ in b["sessions"]] == many_keys and b["total"] == 15 and b["truncated"] is False
           and (st_many or {}).get("sessions") == 15, "sessions.json 有 17 条：和 app 一样只认前 15 条（列表、total、app_status.sessions）")
-    for d, what in ((BAD, "sessions.json 坏了"), (NONAME, "有一条缺 name（app 的 JSONDecoder 整个解不出来）")):
+    # 整份坏了：空列表；一条缺 name：和 app 一样只列好的那一条（审查 S02c 改了这一条的期望：以前也是空列表）
+    for d, what, want in ((BAD, "sessions.json 坏了：空列表", []),
+                          (NONAME, "有一条缺 name：只列好的那一条", [entry(ONLINE, 5)["key"]])):
         b = call_body(run_cli(["--mcp-call", "cull_list_sessions", "{}"], d))
         st_bad = call_body(run_cli(["--mcp-call", "app_status", "{}"], d))
-        check(b is not None and b["sessions"] == [] and b["total"] == 0
+        check(b is not None and [r_["session"] for r_ in b["sessions"]] == want and b["total"] == len(want)
               and [w["code"] for w in b["warnings"]] == ["sessions_index_unreadable"]
-              and (st_bad or {}).get("sessions") == 0 and "sessions_index_unreadable" in [w["code"] for w in st_bad["warnings"]],
-              f"{what}：空列表 + warning sessions_index_unreadable（cull_list_sessions 和 app_status）")
+              and (st_bad or {}).get("sessions") == len(want) and "sessions_index_unreadable" in [w["code"] for w in st_bad["warnings"]],
+              f"{what} + warning sessions_index_unreadable（cull_list_sessions 和 app_status）")
     b = call_body(run_cli(["--mcp-call", "cull_list_sessions", "{}"], NOINDEX))
     check(b is not None and b["sessions"] == [] and b["total"] == 0
           and [w["code"] for w in b["warnings"]] == ["sessions_index_missing"],

@@ -1045,7 +1045,11 @@ extension BatchStore {
     func openFinishedImport() {
         guard let done = finishedImport, !isRunning else { return }
         finishedImport = nil
-        switchSession(to: done.folder)
+        // 没切成（这一场还有改动没存上）：横幅留着等存上以后再点，别对着原来那一场跑分析。
+        guard switchSession(to: done.folder) else {
+            finishedImport = done
+            return
+        }
         if done.analyze { runAnalysis() }
     }
 

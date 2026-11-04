@@ -50,8 +50,8 @@ enum MCPPaths {
 
     /// `entries` 按 sessions.json 的顺序（最近打开的在前），最多 15 条；`problem` 是读不了 / 解析不了时的原因；
     /// `missing`：数据目录或 sessions.json 不存在（从没开过 app 的机器就是这样），当作空列表，cull_list_sessions 加 warning（§10.1 第 2 行）。
-    /// 解码和 app 一模一样（BatchStore.loadSessionsIndex：JSONDecoder 解 [SessionEntry]，一条坏了整个不认）：
-    /// app 解不出来时「最近场次」是空的，这里也只能是空的 —— 列出 app 自己都不认的场次，STEP 2 打开时只会 session_not_found。
+    /// 解码和 app 一模一样（BatchStore.loadSessionsIndex：SessionsIndexFile 一条一条解，读不懂的那几条不列、`problem`
+    /// 说有几条；整份解不开才是空的）：列出 app 自己都不认的场次，STEP 2 打开时只会 session_not_found。
     /// 数据目录读不了（data_dir_unreadable）时照样试着读：目录只有 x 没有 r 时 sessions.json 照样读得到。读被拒
     /// （没权限、宿主的沙箱）时 `denied`，problem 不填，由调用方的 data_dir_unreadable 说（再报一条「sessions.json
     /// 读不了、请用户打开一次场次」是错的主意：是宿主不让读，不是文件坏了）。
@@ -69,14 +69,17 @@ enum MCPPaths {
         } catch {
             return ([], "读不了 sessions.json：\(error.localizedDescription)", false, false)
         }
-        // bookmark 照样解成 Data（base64），不解析、不往外给
-        guard let list = try? JSONDecoder().decode([BatchStore.SessionEntry].self, from: data) else {
+        // bookmark 照样解成 Data（base64），不解析、不往外给。和 app 一样一条一条解（SessionsIndexFile，审查 S02c）：
+        // 读不懂的那几条 app 不列（原样留在文件里），这里也不列，其余照常。
+        guard let index = SessionsIndexFile.decode(data) else {
             return ([], "sessions.json 解析不了（选片工具自己也读不出「最近场次」）", false, false)
         }
-        let entries: [SessionEntry] = list.prefix(recentLimit).map { e in
+        let entries: [SessionEntry] = index.entries.prefix(recentLimit).map { e in
             SessionEntry(key: e.key, folder: e.path, name: e.name, photoCount: e.photoCount, lastAnalyzed: e.lastAnalyzed)
         }
-        return (entries, nil, false, false)
+        let problem: String? = index.unknown.isEmpty ? nil
+            : "sessions.json 里有 \(index.unknown.count) 条读不懂（选片工具的「最近场次」也不列它们），其余照常列出"
+        return (entries, problem, false, false)
     }
 
     /// 预览输出目录（§10.3）：LABELGUI_MCP_OUT，默认 ~/Pictures/xuanpian-mcp。这里只算路径（isDirectory 显式给，

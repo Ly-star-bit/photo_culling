@@ -8,7 +8,7 @@ enum AppRuntime {
         "--collage", "--collage-ui", "--collage-ops", "--mask-selftest", "--minimal-selftest", "--fashion-selftest", "--compare-crop", "--batch-ui", "--compare-ui", "--timeline-selftest", "--ux-selftest", "--export-xmp",
         "--watermark-ui", "--watermark-batch",
         "--ingest", "--card-ui", "--card-queue-selftest",
-        "--proof-sheet", "--client-import", "--copy-list", "--copy-originals",
+        "--proof-sheet", "--client-import", "--copy-list", "--copy-originals", "--persist-selftest",
         "--export-jpeg", "--body-offset",
         "--film-selftest",
         "--swiss-selftest",

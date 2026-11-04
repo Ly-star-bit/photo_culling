@@ -347,23 +347,52 @@ final class BatchStore: ObservableObject {
     /// 的默认值，全新的场次用「标准」。命令行 --analyze 不经过 BatchStore，分析前也先调它，和界面一致。
     @discardableResult
     nonisolated static func sessionThresholds(sessionDir: URL, dataDir: URL) -> ThresholdState {
-        if let own = readThresholds(sessionDir) { return own }
+        sessionThresholdsChecked(sessionDir: sessionDir, dataDir: dataDir).state
+    }
+
+    /// 同上，另外报一句这一场的 thresholds.json 出了什么事（nil = 没事）。以前解不开就悄悄换成「上次用的」并写回去，
+    /// 这一场的自动判决跟着变、原件也没了（审查 S02）：现在解不开的先挪成 thresholds.corrupt-<时间>.json，再照原来的
+    /// 回落顺序定一份；读不出来、挪不开的照样回落，但不写回去。
+    nonisolated static func sessionThresholdsChecked(sessionDir: URL, dataDir: URL) -> (state: ThresholdState, notice: String?) {
+        let ownURL = sessionDir.appendingPathComponent("thresholds.json")
+        var problem: String?
+        var writable = true
+        switch SessionFiles.read(ThresholdState.self, at: ownURL) {
+        case .ok(let own): return (own, nil)
+        case .missing: break
+        case .corrupt(let moved?):
+            problem = "阈值文件 thresholds.json 解不开（被手改过或写坏了），原件已挪成 \(moved.lastPathComponent)"
+        case .corrupt(nil):
+            problem = "阈值文件 thresholds.json 解不开、也挪不开（先不写回去）"
+            writable = false
+        case .unreadable(let why):
+            problem = "阈值文件 thresholds.json 读不出来（\(why)，先不写回去）"
+            writable = false
+        }
         let fm = FileManager.default
         let analyzed = ["layer1_results.json", "manifest.json"].contains {
             fm.fileExists(atPath: sessionDir.appendingPathComponent($0).path)
         }
-        let state = readThresholds(dataDir) ?? (analyzed ? legacyThresholds : freshThresholds)
-        if let data = try? JSONEncoder().encode(state) {
-            try? data.write(to: sessionDir.appendingPathComponent("thresholds.json"), options: .atomic)
+        let lastUsed = readThresholds(dataDir)
+        let state = lastUsed ?? (analyzed ? legacyThresholds : freshThresholds)
+        if writable, let data = try? JSONEncoder().encode(state) {
+            SessionFiles.writeLogged(data, to: ownURL)
         }
-        return state
+        guard let problem else { return (state, nil) }
+        let fallback = lastUsed != nil ? "上次用的阈值" : (analyzed ? "升级前的默认阈值" : "「标准」预设")
+        return (state, problem + "，这一场先按\(fallback)判：判决可能和上次不一样，看一眼右侧的滑杆")
     }
 
     private func loadThresholds() {
         // 没开文件夹（sessions/default）不落盘，和 scheduleThresholdSave 一样。
-        let state = photoDir != nil
-            ? Self.sessionThresholds(sessionDir: sessionDir, dataDir: dataDir)
-            : Self.readThresholds(dataDir) ?? Self.freshThresholds
+        let state: ThresholdState
+        if photoDir != nil {
+            let checked = Self.sessionThresholdsChecked(sessionDir: sessionDir, dataDir: dataDir)
+            state = checked.state
+            if let notice = checked.notice { addDataNotice(sessionLabel + notice) }
+        } else {
+            state = Self.readThresholds(dataDir) ?? Self.freshThresholds
+        }
         batchingThresholds = true
         sharpnessThreshold = state.sharpness
         exposureThreshold = state.exposure
@@ -382,7 +411,8 @@ final class BatchStore: ObservableObject {
         thresholdSaveTask = Task { [targets] in
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled, let data = try? JSONEncoder().encode(state) else { return }
-            for url in targets { try? data.write(to: url, options: .atomic) }
+            // 写不上只记日志：下次打开按「上次用的」打底，丢的只是这一次拖的滑杆（审查 S01）。
+            for url in targets { SessionFiles.writeLogged(data, to: url) }
         }
     }
 
@@ -863,6 +893,12 @@ final class BatchStore: ObservableObject {
         self.dataDir = dataDir
         self.pythonRoot = pythonRoot
         self.sessionDir = dataDir.appendingPathComponent("sessions/default")
+        // 退出时把没存上的判决、客户选中、对时再写一次（审查 S01）。拦住退出要 NSApplicationDelegateAdaptor，不在这里做。
+        persistTerminateObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { _ = self?.retryPersist() }
+        }
         loadSessionsIndex()
         // Reopen the most recent shoot so relaunching the app doesn't lose context.
         if let last = recentSessions.first {
@@ -923,14 +959,18 @@ final class BatchStore: ObservableObject {
     /// Point the store at the session for this folder: existing results load
     /// instantly (no re-analysis); a new folder starts empty until 开始分析.
     /// `followBookmark` 只有实时桥传 false（见 restoreAccess）：挪走了的文件夹就照常提示「照片文件夹已不存在」。
-    func switchSession(to folder: URL, followBookmark: Bool = true) {
+    /// 返回 false = 没切（正在处理中，或者这一场还有改动没存上）：调用方别接着「分析新文件夹」「报已打开」。
+    @discardableResult
+    func switchSession(to folder: URL, followBookmark: Bool = true) -> Bool {
         // 处理中切换会把 A 的流式结果灌进 B 的网格（同名文件还会顶掉 B 的行），
         // 而 isRunning 永远停在 true —— 之后 runAnalysis 的 guard 让“重新分析”
         // 静默失效，用户点了毫无反应。先取消，再切。
         guard !isRunning else {
             lastError = "正在处理中，先点“取消”再切换文件夹"
-            return
+            return false
         }
+        // 判决、客户选中、对时还有没存上的（盘满了）：再写一次，还不行就不切（审查 S01）。
+        guard persistBeforeLeaving("切场次") else { return false }
         let resolved = restoreAccess(to: folder, followBookmark: followBookmark)
         photoDir = resolved
         // Session key from the URL the caller had (the recents entry's path):
@@ -969,7 +1009,7 @@ final class BatchStore: ObservableObject {
             lastError = "「\(folder.lastPathComponent)」的照片文件夹已不存在 (被删除、改名或所在硬盘未挂载)。" +
                         "下面是上次分析的缓存结果，重新分析/导出/写 XMP 都会失败。"
         } else if previewsPruned {
-            lastError = "这一场掉出了最近 15 场，预览图已清理省空间 (判决和人工改判都还在)。" +
+            lastError = "这一场的预览图已清理省空间（掉出了最近 15 场，或者从「移除历史记录」里移除过），判决和人工改判都还在。" +
                         "点「重新分析」补回预览：没变的照片只重做预览，人工改判不会动"
         }
         // Register a session that HAS cached results as soon as it's opened, not
@@ -982,6 +1022,7 @@ final class BatchStore: ObservableObject {
         if !items.isEmpty { touchSessionIndex() }
         refreshSessionAvailability()
         postResultsChanged(previewsChanged: false)
+        return true
     }
 
     /// One notification for "results on disk changed". `previewsChanged` is
@@ -996,44 +1037,116 @@ final class BatchStore: ObservableObject {
     /// Register a session written outside the GUI (the `--analyze` CLI path) so
     /// pruneOrphanedSessions treats it as live instead of clearing its previews
     /// the next time the app analyzes anything.
+    /// 读的时候和 app 一样一条一条解（SessionsIndexFile，审查 S02c：以前 `?? []` 再整份覆盖，一条坏了全没）：
+    /// 读不懂的那几条原样留着；整份解不开的先挪成 sessions.corrupt-<时间>.json；读不出来的不写。
     nonisolated static func registerSession(dataDir: URL, folder: URL, photoCount: Int) {
         let indexPath = dataDir.appendingPathComponent("sessions.json")
         let key = sessionKey(for: folder)
-        var entries = (try? Data(contentsOf: indexPath))
-            .flatMap { try? JSONDecoder().decode([SessionEntry].self, from: $0) } ?? []
-        entries.removeAll { $0.key == key }
-        entries.insert(SessionEntry(
+        func say(_ text: String) { FileHandle.standardError.write(Data((text + "\n").utf8)) }
+        var index = SessionsIndexFile()
+        if FileManager.default.fileExists(atPath: indexPath.path) {
+            guard let data = try? Data(contentsOf: indexPath) else {
+                say("sessions.json 读不出来：这一场没登记进「最近场次」（没改写它）")
+                return
+            }
+            if let decoded = SessionsIndexFile.decode(data) {
+                index = decoded
+            } else if let moved = SessionFiles.moveAside(indexPath) {
+                say("sessions.json 解不开，原件已挪成 \(moved.lastPathComponent)，重新建一份")
+            } else {
+                say("sessions.json 解不开、也挪不开：这一场没登记进「最近场次」（没改写它）")
+                return
+            }
+        }
+        index.entries.removeAll { $0.key == key }
+        index.unknown.removeAll { $0.key == key }
+        index.entries.insert(SessionEntry(
             key: key, path: folder.standardizedFileURL.path, name: folder.lastPathComponent,
             lastAnalyzed: ISO8601DateFormatter().string(from: Date()),
             photoCount: photoCount,
             bookmark: makeBookmark(for: folder)
         ), at: 0)
-        if let data = try? JSONEncoder().encode(Array(entries.prefix(15))) {
-            try? data.write(to: indexPath, options: .atomic)
-        }
+        index.entries = Array(index.entries.prefix(15))
+        if let data = try? index.encoded() { SessionFiles.writeLogged(data, to: indexPath) }
     }
 
+    /// sessions.json 这次启动没读全（整份解不开、读不出来）：哪些场次还在菜单里不知道，pruneOrphanedSessions 这次
+    /// 启动不跑 —— 跑了就是把它们全当成掉出了菜单，删掉十几场的预览（审查 S02c，最要紧的一条）。
+    private var pruneDisabled = false
+    /// sessions.json 在、却读不出来（或者解不开又挪不开）：这次启动不改写它。
+    private var sessionsIndexReadOnly = false
+    /// sessions.json 里读不懂的那几条：原样写回去，不进菜单，它们的场次也不清预览。
+    private var sessionsIndexUnknown: [SessionsIndexFile.Unknown] = []
+
     private func loadSessionsIndex() {
-        guard let data = try? Data(contentsOf: sessionsIndexPath),
-              let entries = try? JSONDecoder().decode([SessionEntry].self, from: data) else { return }
+        guard FileManager.default.fileExists(atPath: sessionsIndexPath.path) else { return }
+        let stillThere = "这次「最近场次」是空的（判决、拼图都还在各场次里，从「选择文件夹…」打开那个文件夹就回来），" +
+                         "这次启动不清旧场次的预览"
+        guard let data = try? Data(contentsOf: sessionsIndexPath) else {
+            pruneDisabled = true
+            sessionsIndexReadOnly = true
+            addDataNotice("「最近场次」的索引 sessions.json 读不出来：" + stillThere + "，也不改写它（文件在 \(dataDir.path)）")
+            return
+        }
+        guard let index = SessionsIndexFile.decode(data) else {
+            pruneDisabled = true
+            if let moved = SessionFiles.moveAside(sessionsIndexPath) {
+                addDataNotice("「最近场次」的索引 sessions.json 解不开（被手改过或写坏了），原件已挪成 \(moved.lastPathComponent)：" +
+                              stillThere + "（文件在 \(dataDir.path)）")
+            } else {
+                sessionsIndexReadOnly = true
+                addDataNotice("「最近场次」的索引 sessions.json 解不开、也挪不开：" + stillThere + "，也不改写它（文件在 \(dataDir.path)）")
+            }
+            return
+        }
         // 同样封顶 15：写入端一直在截断，读取端不截断的话，一个手改过的
         // sessions.json 就能让菜单无限长下去。
-        recentSessions = Array(entries.prefix(15))
+        recentSessions = Array(index.entries.prefix(15))
+        sessionsIndexUnknown = index.unknown
+        let recoverable = index.unknown.filter { $0.key != nil }.count
+        if recoverable > 0 {
+            addDataNotice("「最近场次」的索引 sessions.json 里有 \(recoverable) 条读不懂（可能被手改过），原样留在文件里：" +
+                          "这几场不进菜单、预览也不清，从「选择文件夹…」重新打开那个文件夹就回来")
+        }
         refreshSessionAvailability()
     }
 
     private func saveSessionsIndex() {
-        if let data = try? JSONEncoder().encode(recentSessions) {
-            try? data.write(to: sessionsIndexPath, options: .atomic)
+        guard !sessionsIndexReadOnly else { return }
+        let index = SessionsIndexFile(entries: recentSessions, unknown: sessionsIndexUnknown)
+        // 写不上只记日志：丢的是菜单里的一条，判决都在场次目录里（审查 S01）。
+        if let data = try? index.encoded() { SessionFiles.writeLogged(data, to: sessionsIndexPath) }
+    }
+
+    /// 写之前重读一遍盘上的、按 key 合进来（审查 S02c）：GUI 开着时命令行 --analyze 登记的那一场，不被这次整份覆盖、
+    /// 紧接着清掉预览。只在 touchSessionIndex 里合并（命令行那边是 registerSession 自己重读）：放进 saveSessionsIndex
+    /// 的话，「移除」「全部清除」刚从内存里删掉的又会从盘上合并回来。
+    private func mergeSessionsIndexFromDisk() {
+        guard !sessionsIndexReadOnly, let data = try? Data(contentsOf: sessionsIndexPath),
+              let disk = SessionsIndexFile.decode(data) else { return }
+        for unknown in disk.unknown where !sessionsIndexUnknown.contains(unknown) {
+            sessionsIndexUnknown.append(unknown)
         }
+        let known = Set(recentSessions.map(\.key))
+        let extra = disk.entries.filter { !known.contains($0.key) }
+        guard !extra.isEmpty else { return }
+        // 按最近一次打开 / 分析的时间排（内存里本来就是这个顺序；ISO 8601 的 UTC 时间按字符串比就对），一样的保持原顺序。
+        let merged = (recentSessions + extra).enumerated().sorted { a, b in
+            if a.element.lastAnalyzed != b.element.lastAnalyzed { return a.element.lastAnalyzed > b.element.lastAnalyzed }
+            return a.offset < b.offset
+        }
+        recentSessions = merged.map(\.element)
     }
 
     private func touchSessionIndex() {
         guard let folder = photoDir, !currentSessionPath.isEmpty else { return }
+        mergeSessionsIndexFromDisk()
         // The PINNED key/path from switchSession, never recomputed from the
         // resolved folder — see the comment there. `name` does follow the
         // resolved folder so a renamed shoot shows its new name in the menu.
         let key = currentSessionKey
+        // 读不懂的那一条（如果是这一场的）被下面这条新的取代。
+        sessionsIndexUnknown.removeAll { $0.key == key }
         // Fresh bookmark while we demonstrably have access; keep the old one if
         // creation fails (shouldn't, but a stale bookmark beats none).
         let bookmark = Self.makeBookmark(for: folder)
@@ -1056,8 +1169,11 @@ final class BatchStore: ObservableObject {
     /// 拼图工程、VLM 结果全跟着没了，一点提示都没有（第 16 场一分析，最早那场的选片就丢了）。
     /// 现在这些 KB 级的东西一律留着：菜单只是「最近」，不是「保留期限」；重新打开那个文件夹，
     /// 判决原样回来，点「重新分析」补回预览（分析结果没变的照片只重做预览，几秒钟）。
-    private func pruneOrphanedSessions() {
-        let keep = Set(recentSessions.map(\.key))
+    /// `force`：「全部清除」（用户在确认框里点过，掉出菜单的只清预览写在确认框里），sessions.json 没读全也照样清。
+    private func pruneOrphanedSessions(force: Bool = false) {
+        guard force || !pruneDisabled else { return }
+        // sessions.json 里读不懂、原样留着的那几条也算「还在」（审查 S02c）。
+        let keep = Set(recentSessions.map(\.key)).union(sessionsIndexUnknown.compactMap(\.key))
         let root = dataDir.appendingPathComponent("sessions")
         let fm = FileManager.default
         guard let dirs = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
@@ -1065,16 +1181,26 @@ final class BatchStore: ObservableObject {
         where dir.hasDirectoryPath
             && dir.lastPathComponent != "default"
             && !keep.contains(dir.lastPathComponent) {
-            try? fm.removeItem(at: dir.appendingPathComponent("previews"))
-            // 拼图的主体蒙版（派生数据，进拼图 tab 会按需重算）跟着预览一起清。
-            try? fm.removeItem(at: dir.appendingPathComponent("collage_masks"))
-            // 什么都没剩（只打开过、从没分析过的空场次）才连目录一起删。打开时就写下的 thresholds.json 不算。
-            let left = (try? fm.contentsOfDirectory(atPath: dir.path))?.filter { $0 != "thresholds.json" }
-            if left?.isEmpty == true {
-                try? fm.removeItem(at: dir)
-            }
+            Self.clearSessionCache(dir)
         }
     }
+
+    /// 一场只清能重新生成的：预览图、拼图主体蒙版（进拼图 tab 会按需重算）。判决、客户选中、对时、拼图工程和方案
+    /// 这些 KB 级的文件一律留着。掉出最近 15 场（上面）和「移除历史记录」（removeSession）都走这里。
+    nonisolated private static func clearSessionCache(_ dir: URL) {
+        let fm = FileManager.default
+        for name in sessionCacheDirs {
+            try? fm.removeItem(at: dir.appendingPathComponent(name))
+        }
+        // 什么都没剩（只打开过、从没分析过的空场次）才连目录一起删。打开时就写下的 thresholds.json 不算。
+        let left = (try? fm.contentsOfDirectory(atPath: dir.path))?.filter { $0 != "thresholds.json" }
+        if left?.isEmpty == true {
+            try? fm.removeItem(at: dir)
+        }
+    }
+
+    /// 场次目录里能删、删了能重新生成的那几样（菜单上报的「能释放多少」只算它们）。
+    nonisolated static let sessionCacheDirs = ["previews", "collage_masks"]
 
     /// 这一场的预览图被上面清掉了（判决还在）：网格会是一片灰，得说清楚怎么补回来。
     private var previewsPruned: Bool {
@@ -1095,6 +1221,8 @@ final class BatchStore: ObservableObject {
     /// a 3000-photo shoot is ~570MB and a full 15-entry menu can reach several
     /// GB — the menu showed no hint of that, and 移除/清除 were the only way to
     /// reclaim it. Measured off-main because it walks every preview directory.
+    /// 只算「移除历史记录」真会删的（预览图 + 拼图蒙版，sessionCacheDirs）：判决、拼图这些小文件移除时留着，
+    /// 算进去菜单报的数就和实际释放的对不上。
     @Published private(set) var sessionSizes: [String: Int64] = [:]
 
     var totalSessionBytes: Int64 { sessionSizes.values.reduce(0, +) }
@@ -1120,7 +1248,8 @@ final class BatchStore: ObservableObject {
         Task.detached(priority: .utility) {
             var sizes: [String: Int64] = [:]
             for key in keys {
-                sizes[key] = Self.directorySize(root.appendingPathComponent(key))
+                let dir = root.appendingPathComponent(key)
+                sizes[key] = Self.sessionCacheDirs.reduce(Int64(0)) { $0 + Self.directorySize(dir.appendingPathComponent($1)) }
             }
             let result = sizes
             await MainActor.run { [weak self] in self?.sessionSizes = result }
@@ -1160,8 +1289,10 @@ final class BatchStore: ObservableObject {
         refreshSessionSizes()
     }
 
-    /// Drop one shoot from the menu and delete its cached analysis (previews,
-    /// layer results, overrides). The photos themselves are never touched.
+    /// 从菜单里拿掉一场，只清它能重新生成的缓存（预览图、拼图蒙版，和掉出最近 15 场一样走 clearSessionCache）。
+    /// 人工改判、接受推荐、客户选中、确认表、机身对时、拼图工程和存着的方案都留着：重新打开这个文件夹就原样回来。
+    /// 以前是整个 sessions/<key> 删掉，不确认、不进废纸篓（审查 S06）—— 想腾地方清掉一场已交付的，几周后客户回来
+    /// 改相册才发现拼图、改判全没了。照片本身从来不碰。
     /// Removing the shoot that's currently open also clears the view — its
     /// previews are about to vanish, so leaving it on screen would show holes.
     func removeSession(_ entry: SessionEntry) {
@@ -1170,15 +1301,20 @@ final class BatchStore: ObservableObject {
             lastError = "正在处理中，先点“取消”再移除历史记录"
             return
         }
+        let isCurrent = photoDir != nil && currentSessionKey == entry.key
+        // 移除当前这一场会清掉界面（内存里的判决跟着没了）：还有没存上的先拦住（审查 S01）。
+        if isCurrent, !persistBeforeLeaving("移除这一场") { return }
+        let freed = sessionSizes[entry.key]
         recentSessions.removeAll { $0.key == entry.key }
         saveSessionsIndex()
-        if photoDir != nil, currentSessionKey == entry.key {
+        if isCurrent {
             resetToNoSession()
         }
-        try? FileManager.default.removeItem(
-            at: dataDir.appendingPathComponent("sessions/\(entry.key)"))
+        Self.clearSessionCache(dataDir.appendingPathComponent("sessions/\(entry.key)"))
         refreshSessionAvailability(force: true)
-        progressText = "已从列表移除「\(entry.name)」(照片本身未动)"
+        let size = freed.map { "（\(Self.sizeText($0))）" } ?? ""
+        progressText = "已从列表移除「\(entry.name)」：清掉了预览图\(size)。判决、人工改判、客户选中、拼图和方案都还留着，" +
+                       "重新打开这个文件夹就回来 (照片本身未动)"
     }
 
     /// Empty the menu and wipe the cached sessions it listed. Originals untouched —
@@ -1190,16 +1326,21 @@ final class BatchStore: ObservableObject {
         }
         let count = recentSessions.count
         let listed = recentSessions.map(\.key)
+        // 当前这一场不在要删的里面（没分析过、没进菜单）又有没存上的：照切场次一样先拦住。在里面的反正整份删掉。
+        if photoDir != nil, !listed.contains(currentSessionKey), !persistBeforeLeaving("清除历史记录") { return }
         recentSessions = []
+        // sessions.json 里读不懂、原样留着的那几条也一起清出索引（它们不在菜单里，场次目录照下面只清预览）。
+        sessionsIndexUnknown = []
         saveSessionsIndex()
         resetToNoSession()
-        // 用户在确认框里点过的「全部清除」：菜单里列着的这几场整份删，判决、人工改判一起（确认框里写着）。
+        // 用户在确认框里点过的「全部清除」：菜单里列着的这几场整份删，判决、人工改判、客户选中、拼图和方案一起
+        // （确认框里一样样写着）。只想腾空间、判决留着的，用「移除历史记录」里的单场（removeSession）。
         // 掉出菜单的更早的场次确认框里没列，不能顺手把它们的判决也删了：只清预览（pruneOrphanedSessions，
         // 这时 keep 集是空的），判决这些 KB 级的小文件照旧留着。
         for key in listed {
             try? FileManager.default.removeItem(at: dataDir.appendingPathComponent("sessions/\(key)"))
         }
-        pruneOrphanedSessions()
+        pruneOrphanedSessions(force: true)
         refreshSessionAvailability(force: true)
         progressText = "已清除 \(count) 条历史记录 (照片本身未动)"
     }
@@ -1222,6 +1363,9 @@ final class BatchStore: ObservableObject {
         clientPickFilter = false
         verdictFilter = nil
         lastError = nil
+        // 走到这里的：没有挂着的（removeSession 先拦过），或者这一场刚被「全部清除」整份删掉 —— 没存上的也就不用存了。
+        persistFailures = [:]
+        updatePersistError()
         loadReviewPosition()
         loadThresholds()
         loadOverrides()
@@ -1312,6 +1456,127 @@ final class BatchStore: ObservableObject {
     // MARK: - Manual overrides
 
     private var overridesPath: URL { sessionDir.appendingPathComponent("overrides.json") }
+
+    // MARK: 场次文件读坏了（审查 S02）
+
+    /// 场次里的文件读坏了、已经挪开保住原件：批量页顶上一条橙色提醒，用户自己点掉才没（像 importNotice）。不放
+    /// lastError：switchSession 读完这些文件以后会用「文件夹不存在」「预览已清理」改写它，分析也会清它。
+    @Published var dataNotice: String?
+
+    /// 场次里那几份整份重写的文件。
+    enum PersistFile: CaseIterable {
+        case overrides, clientPicks, bodyOffsets
+
+        var label: String {
+            switch self {
+            case .overrides: return "判决"
+            case .clientPicks: return "客户选中"
+            case .bodyOffsets: return "机身对时"
+            }
+        }
+    }
+
+    /// 原件在、却读不出来（或者解不开又挪不开）的：这一场不写它 —— 拿内存里的空的去盖，原件就没了。重新打开这一场再读。
+    private var persistRefused: Set<PersistFile> = []
+    /// 这次打开这一场以后已经备份过（<名字>.bak）的文件。
+    private var backedUpPaths: Set<String> = []
+
+    /// 加一条读坏文件的提醒（几场、几个文件各有问题时攒着，最多 4 条）。
+    func addDataNotice(_ text: String) {
+        var lines = dataNotice.map { $0.components(separatedBy: "\n") } ?? []
+        lines.append(text)
+        dataNotice = lines.suffix(4).joined(separator: "\n")
+    }
+
+    /// 提醒里说是哪一场。
+    private var sessionLabel: String { photoDir.map { "「\($0.lastPathComponent)」" } ?? "" }
+
+    /// 读坏文件那条提醒的尾巴：在哪个目录、为什么先别写 XMP。
+    private var corruptNoticeTail: String {
+        "。先别写 XMP：现在是自动判决，写进去会盖掉 LR 里的星级（文件在 \(sessionDir.path)）"
+    }
+
+    private func refusePersist(_ file: PersistFile, _ text: String) {
+        persistRefused.insert(file)
+        addDataNotice(text)
+    }
+
+    /// 打开这一场以后第一次改写某个文件之前复制一份 .bak（照 LabelStore 的 backedUpSinceLoad）。
+    private func backupOnce(_ url: URL) {
+        guard !backedUpPaths.contains(url.path) else { return }
+        if SessionFiles.backup(url) { backedUpPaths.insert(url.path) }
+    }
+
+    // MARK: 判决、客户选中、对时没存上（审查 S01）
+
+    /// 判决、客户选中、机身对时写盘失败（现实里只有盘满）：批量页顶上一条常驻红条 + 「重试」，同一个文件下一次写成功
+    /// 才消失。以前全是 try? 吞掉，界面、日志都没有；切场次时 loadOverrides 从盘上读，内存里没存上的改判当场就没了。
+    /// 不放 lastError：切场次、分析都会清它。
+    @Published private(set) var persistError: String?
+    /// 没写成的文件 → 原因（CardImporter.describe）。每次都整份重写，所以下一次改判本身就是重试；另外红条上的
+    /// 「重试」、切场次之前、退出（willTerminate）时都再写一遍。
+    private var persistFailures: [PersistFile: String] = [:]
+    private var persistTerminateObserver: NSObjectProtocol?
+
+    /// 写这一份，顺手把之前没写成的也再写一遍。
+    private func persist(_ file: PersistFile) {
+        for f in PersistFile.allCases where f == file || persistFailures[f] != nil {
+            attemptWrite(f)
+        }
+        updatePersistError()
+    }
+
+    private func attemptWrite(_ file: PersistFile) {
+        // 原件读不出来、挪不开的（S02）：不写，免得拿内存里的空的盖掉它。
+        guard !persistRefused.contains(file) else { return }
+        do {
+            // 场次目录被别的程序删了（访达里删、清理工具）：建回来再写，不然「文件不见了」永远重试不成、切不了场次。
+            if !FileManager.default.fileExists(atPath: sessionDir.path) {
+                try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+            }
+            switch file {
+            case .overrides: try writeOverrides()
+            case .clientPicks: try writeClientPicks()
+            case .bodyOffsets: try writeBodyOffsets()
+            }
+            persistFailures[file] = nil
+        } catch {
+            let why = CardImporter.describe(error)
+            persistFailures[file] = why
+            SessionFiles.log.error("写\(file.label, privacy: .public)失败：\(why, privacy: .public)")
+        }
+    }
+
+    /// 红条上的「重试」、切场次之前、退出时：没写成的再写一遍。true = 都存上了（本来就没有挂着的也是 true）。
+    @discardableResult
+    func retryPersist() -> Bool {
+        for f in PersistFile.allCases where persistFailures[f] != nil {
+            attemptWrite(f)
+        }
+        updatePersistError()
+        return persistFailures.isEmpty
+    }
+
+    /// 离开这一场（切场次、移除当前这一场）之前：还有没存上的就再写一次，还写不上就拦住 —— 不然 switchSession 的
+    /// loadOverrides 从盘上读，内存里没存上的改判当场就没了。
+    private func persistBeforeLeaving(_ action: String) -> Bool {
+        guard !persistFailures.isEmpty, !retryPersist() else { return true }
+        lastError = "这一场还有改动没存上：先腾出磁盘空间、点顶上红条的「重试」，存上以后再\(action)"
+        return false
+    }
+
+    private func updatePersistError() {
+        let failed = PersistFile.allCases.filter { persistFailures[$0] != nil }
+        guard !failed.isEmpty else {
+            if persistError != nil { persistError = nil }
+            return
+        }
+        let reasons = Set(failed.compactMap { persistFailures[$0] }).sorted().joined(separator: "、")
+        let what = failed.map(\.label).joined(separator: "、")
+        let text = "\(sessionLabel)的\(what)没存上（\(reasons)）：改动还在，但只在内存里。" +
+                   "腾出磁盘空间后点「重试」；存上之前切不了场次，也先别退出"
+        if persistError != text { persistError = text }
+    }
 
     func setOverride(_ id: String, _ verdict: Verdict?) {
         setOverrideBatch([id], verdict)
@@ -1497,26 +1762,70 @@ final class BatchStore: ObservableObject {
     /// overrides.json 的格式不动（老版本照样读得懂），「接受推荐」的来源另存一份。
     private var acceptedPath: URL { sessionDir.appendingPathComponent("accepted.json") }
 
+    /// 读这一场的改判。以前读不出、解不开都直接 return（和「没有这个文件」一条路），之后随便改一张，saveOverrides
+    /// 就拿内存里那几条把原文件整份盖掉，accepted.json 也被 isEmpty 那支删掉（审查 S02）。
     private func loadOverrides() {
-        guard let data = try? Data(contentsOf: overridesPath),
-              let raw = try? JSONDecoder().decode([String: String].self, from: data) else { return }
-        overrides = raw.compactMapValues(Verdict.init(rawValue:))
-        let accepted = (try? Data(contentsOf: acceptedPath))
-            .flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
-        acceptedIDs = Set(accepted).filter { overrides[$0] != nil }
+        persistRefused.remove(.overrides)
+        backedUpPaths.subtract([overridesPath.path, acceptedPath.path])
+        let stamp = SessionFiles.timestamp()
+        switch SessionFiles.read([String: String].self, at: overridesPath, stamp: stamp) {
+        case .missing:
+            return
+        case .ok(let raw):
+            overrides = raw.compactMapValues(Verdict.init(rawValue:))
+        case .corrupt(let moved?):
+            // accepted.json 只对得上原来那份判决：一起挪开（同一个时间，好配对），别让下一次保存把它删掉。
+            var aside = ""
+            if FileManager.default.fileExists(atPath: acceptedPath.path) {
+                guard let acceptedMoved = SessionFiles.moveAside(acceptedPath, stamp: stamp) else {
+                    refusePersist(.overrides, "\(sessionLabel)的人工改判文件 overrides.json 解不开，原件已挪成 \(moved.lastPathComponent)；" +
+                                  "accepted.json 挪不开，为免覆盖，这一场的改判先不存盘" + corruptNoticeTail)
+                    return
+                }
+                aside = "（accepted.json 一起挪成 \(acceptedMoved.lastPathComponent)）"
+            }
+            addDataNotice("\(sessionLabel)的人工改判文件 overrides.json 解不开（被手改过或写坏了），原件已挪成 " +
+                          "\(moved.lastPathComponent)\(aside)，这一场的判决先按自动的显示" + corruptNoticeTail)
+            return
+        case .corrupt(nil):
+            refusePersist(.overrides, "\(sessionLabel)的人工改判文件 overrides.json 解不开、也挪不开，为免覆盖，这一场的改判先不存盘" +
+                          "（修好或移走这个文件后重新打开这一场）" + corruptNoticeTail)
+            return
+        case .unreadable(let why):
+            refusePersist(.overrides, "\(sessionLabel)的人工改判文件 overrides.json 读不出来（\(why)），为免覆盖，这一场的改判先不存盘" +
+                          "（重新打开这一场再读一次）" + corruptNoticeTail)
+            return
+        }
+        switch SessionFiles.read([String].self, at: acceptedPath, stamp: stamp) {
+        case .missing:
+            break
+        case .ok(let accepted):
+            acceptedIDs = Set(accepted).filter { overrides[$0] != nil }
+        case .corrupt(let moved?):
+            addDataNotice("\(sessionLabel)的 accepted.json 解不开，原件已挪成 \(moved.lastPathComponent)：" +
+                          "「接受推荐」钉住的那几张这回算成人工改判（判决本身没变）")
+        case .corrupt(nil), .unreadable:
+            refusePersist(.overrides, "\(sessionLabel)的 accepted.json 读不出来、也挪不开，为免覆盖，这一场的改判先不存盘" +
+                          "（修好或移走这个文件后重新打开这一场）")
+        }
     }
 
-    private func saveOverrides() {
-        let raw = overrides.mapValues(\.rawValue)
-        if let data = try? JSONEncoder().encode(raw) {
-            // .atomic: a crash mid-write here used to cost every manual verdict
-            // of the shoot.
-            try? data.write(to: overridesPath, options: .atomic)
-        }
+    private func saveOverrides() { persist(.overrides) }
+
+    private func writeOverrides() throws {
+        let data = try JSONEncoder().encode(overrides.mapValues(\.rawValue))
+        backupOnce(overridesPath)
+        // .atomic: a crash mid-write here used to cost every manual verdict
+        // of the shoot.
+        try data.write(to: overridesPath, options: .atomic)
         if acceptedIDs.isEmpty {
-            try? FileManager.default.removeItem(at: acceptedPath)
-        } else if let data = try? JSONEncoder().encode(acceptedIDs.sorted()) {
-            try? data.write(to: acceptedPath, options: .atomic)
+            guard FileManager.default.fileExists(atPath: acceptedPath.path) else { return }
+            backupOnce(acceptedPath)
+            try SessionFiles.remove(acceptedPath)
+        } else {
+            let accepted = try JSONEncoder().encode(acceptedIDs.sorted())
+            backupOnce(acceptedPath)
+            try accepted.write(to: acceptedPath, options: .atomic)
         }
     }
 
@@ -1525,16 +1834,35 @@ final class BatchStore: ObservableObject {
     private var clientPicksPath: URL { sessionDir.appendingPathComponent("client_picks.json") }
 
     private func loadClientPicks() {
-        let ids = (try? Data(contentsOf: clientPicksPath))
-            .flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
-        clientPicks = Set(ids)
+        persistRefused.remove(.clientPicks)
+        backedUpPaths.remove(clientPicksPath.path)
+        var loaded: [String] = []
+        defer { clientPicks = Set(loaded) }
+        switch SessionFiles.read([String].self, at: clientPicksPath) {
+        case .missing:
+            break
+        case .ok(let ids):
+            loaded = ids
+        case .corrupt(let moved?):
+            addDataNotice("\(sessionLabel)的客户选中 client_picks.json 解不开（被手改过或写坏了），原件已挪成 " +
+                          "\(moved.lastPathComponent)，这一场先当没有客户选中" + corruptNoticeTail)
+        case .corrupt(nil):
+            refusePersist(.clientPicks, "\(sessionLabel)的客户选中 client_picks.json 解不开、也挪不开，为免覆盖，这一场的客户选中先不存盘" +
+                          "（修好或移走这个文件后重新打开这一场）")
+        case .unreadable(let why):
+            refusePersist(.clientPicks, "\(sessionLabel)的客户选中 client_picks.json 读不出来（\(why)），为免覆盖，这一场的客户选中先不存盘" +
+                          "（重新打开这一场再读一次）")
+        }
     }
 
-    private func saveClientPicks() {
+    private func saveClientPicks() { persist(.clientPicks) }
+
+    private func writeClientPicks() throws {
+        backupOnce(clientPicksPath)
         if clientPicks.isEmpty {
-            try? FileManager.default.removeItem(at: clientPicksPath)
-        } else if let data = try? JSONEncoder().encode(clientPicks.sorted()) {
-            try? data.write(to: clientPicksPath, options: .atomic)
+            try SessionFiles.remove(clientPicksPath)
+        } else {
+            try JSONEncoder().encode(clientPicks.sorted()).write(to: clientPicksPath, options: .atomic)
         }
     }
 
@@ -2280,21 +2608,40 @@ final class BatchStore: ObservableObject {
     private var bodyOffsetsPath: URL { sessionDir.appendingPathComponent("body_offsets.json") }
 
     private func loadBodyOffsets() {
-        let stored = (try? Data(contentsOf: bodyOffsetsPath))
-            .flatMap { try? JSONDecoder().decode([String: Int].self, from: $0) } ?? [:]
+        persistRefused.remove(.bodyOffsets)
+        backedUpPaths.remove(bodyOffsetsPath.path)
+        var stored: [String: Int] = [:]
+        switch SessionFiles.read([String: Int].self, at: bodyOffsetsPath) {
+        case .missing:
+            break
+        case .ok(let offsets):
+            stored = offsets
+        case .corrupt(let moved?):
+            addDataNotice("\(sessionLabel)的机身对时 body_offsets.json 解不开（被手改过或写坏了），原件已挪成 " +
+                          "\(moved.lastPathComponent)，这一场先按没对过时显示（章节、拍摄顺序可能和上次不一样）")
+        case .corrupt(nil):
+            refusePersist(.bodyOffsets, "\(sessionLabel)的机身对时 body_offsets.json 解不开、也挪不开，为免覆盖，这一场的对时先不存盘" +
+                          "（修好或移走这个文件后重新打开这一场）")
+        case .unreadable(let why):
+            refusePersist(.bodyOffsets, "\(sessionLabel)的机身对时 body_offsets.json 读不出来（\(why)），为免覆盖，这一场的对时先不存盘" +
+                          "（重新打开这一场再读一次）")
+        }
         // 手改坏的、超过 ±48 小时的不认（不用 abs：Int.min 取绝对值会崩）。
         let allowed = -BodyClock.maxOffset...BodyClock.maxOffset
         bodyOffsets = stored.filter { allowed.contains($0.value) }
     }
 
-    private func saveBodyOffsets() {
+    private func saveBodyOffsets() { persist(.bodyOffsets) }
+
+    private func writeBodyOffsets() throws {
+        backupOnce(bodyOffsetsPath)
         if bodyOffsets.isEmpty {
-            try? FileManager.default.removeItem(at: bodyOffsetsPath)
+            try SessionFiles.remove(bodyOffsetsPath)
             return
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? encoder.encode(bodyOffsets) { try? data.write(to: bodyOffsetsPath, options: .atomic) }
+        try encoder.encode(bodyOffsets).write(to: bodyOffsetsPath, options: .atomic)
     }
 
     /// 改对时偏移（机身 key → 秒，一台或几台一起）：一条撤销记录、一次保存，然后整场重排时间。

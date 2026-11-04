@@ -785,7 +785,14 @@ extension LiveHandlers {
         // = 侧栏「最近场次」里点它（BatchView 的菜单就是这一句），只是不跟 bookmark：文件夹被挪进桌面 / 外置盘以后，
         // bookmark 会把 app 带过去读，绕过上面只按字符串的检查；不跟的话挪走了就是「照片文件夹已不存在」（app_says）。
         // 拼图工程跟着挂过去：AppModel 的订阅是下一拍才跑，这里同步挂一次，回复里的撤销栈和之后的 app_undo 看到的就是新场次的
-        batch.switchSession(to: URL(fileURLWithPath: entry.path), followBookmark: false)
+        // 没切成：这一场还有判决、客户选中、对时没存上（盘满了，审查 S01）—— 切过去内存里的就没了，app 先拦下。
+        guard batch.switchSession(to: URL(fileURLWithPath: entry.path), followBookmark: false) else {
+            if let unsaved = batch.persistError {
+                return .failure("save_failed", "app 里这一场还有改动没存上（\(unsaved)），这次没有切场次",
+                                ["executed": false, "hint": "照原话告诉用户：先腾出磁盘空间、点批量页顶上红条的「重试」，存上以后再切"])
+            }
+            return .failure("invalid_state", "选片工具没切场次：\(batch.lastError ?? "正在处理中")", ["executed": false])
+        }
         model.ensureCollageAttached()
         live.refreshSnapshot()
         model.aiLog.opened.append(entry.path)
