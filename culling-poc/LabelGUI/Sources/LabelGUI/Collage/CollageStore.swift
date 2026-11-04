@@ -255,6 +255,8 @@ final class CollageStore: ObservableObject {
     private var projectSaveRefused: String?
     /// 这次 attach 以后第一次保存前留过 <工程>.bak 没有（照 LabelStore 的 backedUpSinceLoad）。
     private var projectBackedUp = false
+    /// 最近一次写 collage.json 的结果（实时桥的写工具回 persisted，审查 S01b）：存盘队列上写完当场记下。
+    private let projectWriteResult = CollageWriteResult()
     private(set) var photoDir: URL?
     private var projectSaveTask: Task<Void, Never>?
     private var stateSaveTask: Task<Void, Never>?
@@ -504,6 +506,7 @@ final class CollageStore: ObservableObject {
         loaded.style = defaultStyle
         projectSaveRefused = nil
         projectBackedUp = false
+        projectWriteResult.reset()
         // 以前读不出、解不开都悄悄换成空工程，用户（或 AI）随便动一下，1 秒后就把整本相册和所有方案盖掉（审查 S02b）。
         // 解不开的先挪成 <工程>.corrupt-<时间>.json 保住原件；读不出来、挪不开的这次不存盘。没有这个文件是新场次的常态。
         let file = newURL.lastPathComponent
@@ -4002,10 +4005,20 @@ final class CollageStore: ObservableObject {
         }
     }
 
-    /// 立刻落盘（命令行脚本退出前调：延迟保存还没到点进程就退了）。
-    func flushSaves() {
+    /// 立刻落盘（命令行脚本退出前调：延迟保存还没到点进程就退了）。返回这一场的拼图工程现在没存上的原因（nil = 盘上是最新的）。
+    @discardableResult
+    func flushSaves() -> String? {
         flushProjectSave()
         flushStateSave()
+        return projectSaveProblem
+    }
+
+    /// 这一场的 collage.json 现在是不是最新的：nil = 是；否则是没存上的原因（写失败、原件读坏了这一场先不存盘）。
+    /// 后台那次写的结果在存盘队列上当场记下，flushSaves 等过存盘队列，之后读不用等 lastError 那一拍（审查 S01b）。
+    var projectSaveProblem: String? {
+        if let refused = projectSaveRefused { return refused }
+        guard let url = projectURL else { return nil }
+        return projectWriteResult.failure(for: url)
     }
 
     /// 还没到点的那一次现在写；已经交给后台在写的，等它写完再回来（换场次、退出、实时桥回复之前盘上要是最新的）。
@@ -4035,14 +4048,18 @@ final class CollageStore: ObservableObject {
         // 时间文件不存在）：整本被换掉、老版本丢了不认识的方案以后，打开时的那一版还在（审查 S02b）。
         let backup = !projectBackedUp
         projectBackedUp = true
+        let result = projectWriteResult
         let write: @Sendable () -> String? = {
             do {
                 let data = try JSONEncoder().encode(snapshot)
                 if backup { SessionFiles.backup(url) }
                 try data.write(to: url, options: .atomic)
+                result.record(url, failure: nil)
                 return nil
             } catch {
-                return "拼图项目保存失败: \(error.localizedDescription)"
+                let message = "拼图项目保存失败: \(error.localizedDescription)"
+                result.record(url, failure: message)
+                return message
             }
         }
         if inBackground {

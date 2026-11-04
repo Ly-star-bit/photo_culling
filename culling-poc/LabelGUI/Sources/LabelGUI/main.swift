@@ -557,6 +557,9 @@ if CommandLine.arguments.contains("--session-move-selftest") {
 if CommandLine.arguments.contains("--quit-selftest") {
     MainActor.assumeIsolated { QuitSelfTest.run() }
 }
+// 跟进小修自检（写盘失败报给 MCP、水印页按客户选中导入、复制原片连续失败就停……，见 FollowupSelfTest.swift）：
+// LABELGUI_DATA_DIR=<临时> LabelGUI --followup-selftest
+if CommandLine.arguments.contains("--followup-selftest") { MainActor.assumeIsolated { FollowupSelfTest.run() } }
 
 // 按机身对时（会写这一场的 body_offsets.json，只在临时数据目录下跑）：
 // LABELGUI_DATA_DIR=<临时> LabelGUI --body-offset <photo_dir> [--body '<机身 key>' --seconds +180 | --align id,id] [--undo]

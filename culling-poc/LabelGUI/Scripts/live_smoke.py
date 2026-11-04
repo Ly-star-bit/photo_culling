@@ -3163,6 +3163,40 @@ __attribute__((constructor)) static void init(void) {
             {"changes": {keep_id: "pick"}}, {"verdict": "pick"})]
         check(all(err_code(b) == "invalid_argument" for b in bad_sc) and steps(s_c, state(hm2)) == (0, 0),
               f"changes 和 ids + verdict 混着给 / 同一张两个判决 / 写成 {{id: 判决}} / 只给 verdict → invalid_argument {[err_code(b) for b in bad_sc]}")
+
+        # ---------- 存盘失败报给 AI（审查 S01b）：场次目录只读（模拟盘满）时，改判、app_undo、导入客户选中、拼图改字在 app 里
+        # 照常生效，结果 persisted:false + save_failed；窗口看不见那句不说「已存盘」；改回来以后下一次写 persisted:true、之前没存上的补上
+        def no_saved_claim(b):
+            return all("已存盘" not in (w.get("message") or "") for w in (b or {}).get("warnings") or [])
+
+        if os.geteuid() == 0:
+            skip("存盘失败报给 AI：root 跑时 chmod 只读挡不住写，这一条测不了")
+        else:
+            os.chmod(msess, 0o555)
+            try:
+                sf = mw("cull_set_verdicts", {"ids": [keep_id], "verdict": "usable"})
+                sf_un = mw("app_undo", {"target": "verdicts"})
+                sf_cp = mw("cull_import_client_picks", {"ids": [keep_id], "dry_run": False})
+                sf_dry = mw("cull_import_client_picks", {"ids": [keep_id]})
+                sf_ct = mw("collage_set_text", {"title": "存盘失败 " + uuid.uuid4().hex[:6]})
+            finally:
+                os.chmod(msess, 0o755)
+            check(sf.get("changed") == [keep_id] and sf.get("persisted") is False and "save_failed" in warn_codes(sf)
+                  and no_saved_claim(sf) and sf_un.get("ids") == [keep_id] and sf_un.get("persisted") is False
+                  and "save_failed" in warn_codes(sf_un) and no_saved_claim(sf_un),
+                  f"场次目录写不进去：cull_set_verdicts 照常改了、persisted false + save_failed，app_undo 同样（{warn_codes(sf)} / {warn_codes(sf_un)}）")
+            check(sf_cp.get("changed") is True and sf_cp.get("persisted") is False and "save_failed" in warn_codes(sf_cp)
+                  and "persisted" not in sf_dry and "save_failed" not in warn_codes(sf_dry)
+                  and sf_ct.get("changed") is True and sf_ct.get("persisted") is False and "save_failed" in warn_codes(sf_ct)
+                  and no_saved_claim(sf_ct),
+                  f"写不进去：导入客户选中、拼图改字也是 persisted false + save_failed，dry_run 不报（{warn_codes(sf_cp)} / {warn_codes(sf_ct)}）")
+            sf_ok = mw("cull_set_verdicts", {"ids": [keep_id], "verdict": "pick"})
+            sf_ct2 = mw("collage_set_text", {"title": "存上了 " + uuid.uuid4().hex[:6]})
+            disk_ov = json.load(open(os.path.join(msess, "overrides.json")))
+            disk_cp = json.load(open(cp_path)) if os.path.exists(cp_path) else []
+            check(sf_ok.get("persisted") is True and "save_failed" not in warn_codes(sf_ok) and disk_ov.get(keep_id) == "精选"
+                  and keep_id in disk_cp and sf_ct2.get("persisted") is True and "save_failed" not in warn_codes(sf_ct2),
+                  "改回能写以后：下一次改判 persisted true、overrides.json 里是精选，之前没存上的客户选中一起补进 client_picks.json，拼图 persisted true")
         hm2.term()
 
         # ---------- 第 16 条 旧版 app 少一个写方法：只有那个工具回 app_version_mismatch

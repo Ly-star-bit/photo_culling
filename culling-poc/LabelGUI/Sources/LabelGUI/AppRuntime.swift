@@ -17,6 +17,7 @@ enum AppRuntime {
         "--delivery-selftest",
         "--files-selftest",
         "--session-move-selftest",
+        "--followup-selftest",
         "--collage-export-selftest",
         "--app-ui", "--live-host",
         "--launch-gate-probe",

@@ -12,6 +12,7 @@
 #                        「停下并退出」流程（注入的弹框，从不真弹；合成 JPEG 真跑分析）
 #   --diag-selftest      诊断：状态栏提示历史、日志轮转、诊断包里没有照片和客户原话、逐张失败的原因、文件夹没权限
 #                        （端到端的命令行出口在 Scripts/diag_regression.py）
+#   --followup-selftest  跟进小修：写盘失败报给 MCP（persisted / save_failed）、水印页按客户选中导入、复制原片连续失败就停……
 #
 # 为什么每条都要临时数据目录：main.swift 在分派之前就建数据目录、往里写内置字体；ux / timeline / swiss 不查
 # LABELGUI_DATA_DIR，不设就会在 runner 上建出 ~/Library/Application Support/选片工具，MCP 冒烟里「不建目录」那一条就测不了
@@ -68,6 +69,7 @@ run delivery --delivery-selftest
 run session-move --session-move-selftest
 run quit --quit-selftest
 run diag --diag-selftest
+run followup --followup-selftest
 
 if [ $real_before -eq 0 ] && [ -e "$REAL_DATA" ]; then
     failed+=("真实数据目录")

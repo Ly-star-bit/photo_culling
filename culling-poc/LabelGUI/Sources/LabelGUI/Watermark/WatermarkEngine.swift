@@ -220,9 +220,8 @@ enum WatermarkEngine {
             } else if let focal = exif[kCGImagePropertyExifFocalLength] as? Double {
                 values["focal"] = String(format: "%.0fmm", focal)
             }
-            if let t = exif[kCGImagePropertyExifExposureTime] as? Double, t > 0 {
-                // ≥1s 用 %g：1.5s 保持 1.5，2s 保持 2（%.0f 会把 1.5 印成 2）。
-                values["shutter"] = t >= 1 ? String(format: "%g", t) : "1/\(Int((1 / t).rounded()))"
+            if let t = exif[kCGImagePropertyExifExposureTime] as? Double, let shutter = Self.shutterValue(t) {
+                values["shutter"] = shutter
             }
             if let dt = exif[kCGImagePropertyExifDateTimeOriginal] as? String {
                 values["datetime"] = dt
@@ -231,6 +230,17 @@ enum WatermarkEngine {
             if let make = values["make"] {
                 values["brand"] = Self.normalizeBrand(make)
             }
+        }
+
+        /// {shutter} 的值（模板里自己带「s」）：≥1s 用 %g（1.5s 保持 1.5，2s 保持 2；%.0f 会把 1.5 印成 2），
+        /// 不到 1s 写 1/250。0、负数、NaN、inf，或者 1/t 大到装不进 Int（非规格化小数 5e-324 → 1/t = inf）就不填 ——
+        /// 以前只判 t > 0，`Int((1 / t).rounded())` 碰到极小的正数照样 Int(+inf) 崩（1/s 那段的判法同 ExifMeta.shutterText）。
+        static func shutterValue(_ t: Double) -> String? {
+            guard t.isFinite, t > 0 else { return nil }
+            if t >= 1 { return String(format: "%g", t) }
+            let inverse: Double = (1 / t).rounded()
+            guard let denominator = Int(exactly: inverse) else { return nil }
+            return "1/\(denominator)"
         }
 
         /// 品牌归一化（frame.rs 的映射表）。

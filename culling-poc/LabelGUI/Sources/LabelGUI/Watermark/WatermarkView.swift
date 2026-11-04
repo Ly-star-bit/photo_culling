@@ -38,11 +38,7 @@ struct WatermarkView: View {
             Button("导入照片...") { pickPhotos() }
                 .keyboardShortcut("o", modifiers: .command)
                 .help("导入照片或文件夹 (⌘O)")
-            Button("导入选片结果 (\(keeperCount))") {
-                store.importFromBatch(batchStore, includeUsable: true)
-            }
-            .disabled(keeperCount == 0)
-            .help("把批量处理页当前的精选+可用照片拉进来 (RAW 自动用配对 JPG)")
+            importMenu
             Button("清空") { store.clearPhotos() }
                 .disabled(store.photos.isEmpty || store.isExporting)
             Spacer()
@@ -75,6 +71,26 @@ struct WatermarkView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.bar)
+    }
+
+    /// 「导入选片结果」：精选 / 精选 + 可用 / 客户选中（审查 F19，和拼图托盘「带照片」同一套）。
+    private var importMenu: some View {
+        let counts = batchStore.verdictCounts
+        let clientCount = batchStore.clientPickCount
+        return Menu("导入选片结果") {
+            Button("精选 (\(counts.pick))") { store.importFromBatch(batchStore, includeUsable: false) }
+                .disabled(counts.pick == 0)
+            Button("精选 + 可用 (\(keeperCount))") { store.importFromBatch(batchStore, includeUsable: true) }
+                .disabled(keeperCount == 0)
+            // 客户选中：批量页「导入客户选择」导进来的（不看判决，客户选中的废片也带）。没导入过就不占地方。
+            if clientCount > 0 {
+                Button("客户选中 (\(clientCount))") { store.importClientPicks(batchStore) }
+                    .help("批量页导入的客户选择（紫心），客户点名的废片也带进来")
+            }
+        }
+        .fixedSize()
+        .disabled(keeperCount == 0 && clientCount == 0)
+        .help("把批量处理页的精选、精选 + 可用或客户选中的照片拉进来 (RAW 自动用配对 JPG)")
     }
 
     /// 带进拼图：带过去的是原图 + 水印设置，水印在拼图里实时画（换版式、换裁切都不会被裁掉）。

@@ -356,10 +356,11 @@ enum MCPReadModel {
         if let sub = item.captureSubsec { d["capture_subsec"] = r3(sub) }
         if let e = item.exif {
             var exif: [String: Any] = [:]
-            if let v = e.shutterSec { exif["shutter_sec"] = v }
-            if let v = e.aperture { exif["aperture"] = r3(v) }
+            // 老 manifest 里存过的 0（EXIF 写 0/1、转接手动镜头）= 不知道，和 summary 一样不报（不让 AI 读成「快门 0 秒」「f/0」）
+            if let v = ImageLoader.positiveFinite(e.shutterSec) { exif["shutter_sec"] = v }
+            if let v = ImageLoader.positiveFinite(e.aperture) { exif["aperture"] = r3(v) }
             if let v = e.iso { exif["iso"] = v }
-            if let v = e.focal35 { exif["focal_35"] = v }
+            if let v = ImageLoader.positiveInt(e.focal35) { exif["focal_35"] = v }
             if let v = e.lens { exif["lens"] = v }
             if !e.summary.isEmpty { exif["summary"] = e.summary }
             d["exif"] = exif

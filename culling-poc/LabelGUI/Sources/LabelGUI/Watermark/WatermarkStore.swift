@@ -221,10 +221,31 @@ final class WatermarkStore: ObservableObject {
     /// 与选片流程打通：把当前批次的精选(+可用)直接拉进来加水印。
     /// RAW 用配对的 JPEG 解码路径 — 水印输出永远是 JPEG。
     func importFromBatch(_ batchStore: BatchStore, includeUsable: Bool) {
-        let chosen = batchStore.items.filter {
-            $0.verdict == .pick || (includeUsable && $0.verdict == .usable)
+        addPhotos(Self.batchPhotos(batchStore, includeUsable ? .picksAndUsable : .picks))
+    }
+
+    /// 「导入选片结果」菜单的三项（审查 F19，照拼图托盘「带照片」的菜单）。
+    enum BatchPick {
+        case picks, picksAndUsable
+        /// 批量页「导入客户选择」导进来的（紫心）：不看判决，客户选中的废片也带。
+        case clientPicks
+    }
+
+    /// 「导入选片结果 › 客户选中 (N)」：客户在确认表上点的那些，直接拉进来加水印交付。
+    func importClientPicks(_ batchStore: BatchStore) {
+        addPhotos(Self.batchPhotos(batchStore, .clientPicks))
+    }
+
+    /// 菜单里那一项要带的照片（批量页的顺序；RAW+JPG 用配对的 JPG 解码路径，只有 RAW 的就是 RAW）。
+    static func batchPhotos(_ batchStore: BatchStore, _ which: BatchPick) -> [URL] {
+        let chosen = batchStore.items.filter { item in
+            switch which {
+            case .picks: return item.verdict == .pick
+            case .picksAndUsable: return item.verdict == .pick || item.verdict == .usable
+            case .clientPicks: return batchStore.clientPicks.contains(item.id)
+            }
         }
-        addPhotos(chosen.map { URL(fileURLWithPath: $0.decodePath) })
+        return chosen.map { URL(fileURLWithPath: $0.decodePath) }
     }
 
     func removePhoto(_ url: URL) {

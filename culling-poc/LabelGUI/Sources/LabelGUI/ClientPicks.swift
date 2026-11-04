@@ -565,6 +565,9 @@ enum OriginalsCopier {
         var keptSidecar = false
         var failed: [String] = []
         var cancelled = false
+        /// 这一张因为目标那边写不进去而失败的原因（盘满、没权限、不支持、写完校验对不上）。原片读不出来、
+        /// 目标里刚冒出同名的别的文件不算：那不说明后面的也会失败（FailureStreak 只数这一种）。
+        var targetFailure: String?
     }
 
     /// 目标文件夹在拍摄文件夹里面、而且下次分析会扫到它（listPhotos 递归，只跳过导出JPG / 高ISO降噪这类
@@ -662,7 +665,9 @@ enum OriginalsCopier {
                 result.cancelled = true
                 return result
             } catch let error as CardImporter.ImportError {
-                result.failed.append(src.lastPathComponent + "：" + reason(error))
+                let why = reason(error)
+                result.failed.append(src.lastPathComponent + "：" + why)
+                if targetSide(error) { result.targetFailure = why }
             } catch {
                 result.failed.append(src.lastPathComponent + "：" + CardImporter.describe(error))
             }
@@ -674,8 +679,69 @@ enum OriginalsCopier {
     private static func reason(_ error: CardImporter.ImportError) -> String {
         switch error {
         case .sizeMismatch, .verifyFailed: return "复制后校验对不上（盘不稳？），没留下半截"
+        case .writeFailed(_, let why): return "写不进目标文件夹：" + localized(why)
         default: return error.shortReason
         }
+    }
+
+    /// 是目标那边的问题（后面的多半也写不进去）：写不进、盘满、写完校验对不上、路径不对。
+    private static func targetSide(_ error: CardImporter.ImportError) -> Bool {
+        switch error {
+        case .writeFailed, .diskFull, .sizeMismatch, .verifyFailed, .unsafePath: return true
+        case .readFailed, .targetExists, .cancelled, .unreadable: return false
+        }
+    }
+
+    /// copyOne 在 RENAME_EXCL 回了别的 errno 时给的是英文 strerror（「Operation not supported」）：认得出的换成中文
+    /// （和 CardImporter.describe 同一套说法，审查 S15）。
+    static func localized(_ why: String) -> String {
+        for code in [ENOTSUP, EOPNOTSUPP, EACCES, EPERM, EIO, ENOENT, ENOSPC, ENXIO, ENODEV, EROFS]
+        where why == String(cString: strerror(code)) {
+            switch code {
+            case EOPNOTSUPP: return CardImporter.describe(CardImporter.errnoError(ENOTSUP))
+            case EROFS: return "这块盘是只读的"
+            default: return CardImporter.describe(CardImporter.errnoError(code))
+            }
+        }
+        return why
+    }
+
+    /// 连续几张都写不进目标就停（审查 S15）：目标在不支持的共享 / 盘上、盘满、被拔时，以前每张都完整写完、回读一遍才失败，
+    /// 几百张 RAW 白跑一整批。只数目标那边的失败（targetFailure）；复制成了一个文件就重新数，跳过的（目标里一模一样）、
+    /// 只是原片读不出来的不算、也不打断。
+    struct FailureStreak {
+        static let limit = 3
+        private(set) var count = 0
+        /// 最后那一张的原因（停下时报给用户）。
+        private(set) var lastReason: String?
+        var shouldStop: Bool { count >= Self.limit }
+
+        mutating func record(_ r: ShotResult) {
+            if r.copied > 0 {
+                count = 0
+                lastReason = nil
+                return
+            }
+            guard let why = r.targetFailure else { return }
+            count += 1
+            lastReason = why
+        }
+    }
+
+    /// 停下来时状态栏那一句：几张、为什么、后面几张没试、怎么办。
+    static func stopNote(_ streak: FailureStreak, remaining: Int) -> String {
+        let why = streak.lastReason ?? "写不进目标文件夹"
+        return "连续 \(FailureStreak.limit) 张都没复制成（\(why)），停下了，后面 \(remaining) 张没再试：" + stopHint(why)
+    }
+
+    /// 按原因给的下一步：不支持 → 多半是 NAS 共享 / exFAT 盘；盘满；没权限 / 只读；别的先看盘还在不在。
+    static func stopHint(_ why: String) -> String {
+        if why.contains(CardImporter.describe(CardImporter.errnoError(ENOTSUP))) {
+            return "目标所在的盘或共享不支持这样写（NAS / SMB 共享、部分 exFAT 移动硬盘常见），换一个本机磁盘上的文件夹再复制"
+        }
+        if why.contains("盘满") { return "目标盘满了，腾出空间或换一块盘再复制一次（已经复制好的会跳过）" }
+        if why.contains("没有权限") || why.contains("只读") { return "这个文件夹写不进去，换一个文件夹再复制" }
+        return "看看目标盘还插着、能写，再复制一次（已经复制好的会跳过）"
     }
 }
 
@@ -851,6 +917,7 @@ extension BatchStore {
         Task.detached { [weak self] in
             var copied = 0, skipped = 0, renamed = 0, keptSidecars = 0, done = 0
             var failed: [String] = []
+            var streak = OriginalsCopier.FailureStreak()
             for shot in shots {
                 if flag.isSet { break }
                 let r = OriginalsCopier.copy(shot, to: dest, cancel: flag)
@@ -861,22 +928,29 @@ extension BatchStore {
                 if r.keptSidecar { keptSidecars += 1 }
                 failed += r.failed
                 done += 1
+                // 连续几张都写不进目标：后面的多半也一样，停下（审查 S15）
+                streak.record(r)
+                if streak.shouldStop && done < total { break }
                 let doneNow = done
                 await MainActor.run { [weak self] in
                     self?.progressText = "复制原片 \(doneNow)/\(total)..."
                     self?.progressFraction = Double(doneNow) / Double(total)
                 }
             }
+            let stopped = streak.shouldStop && done < total
+            let stopNote = stopped ? OriginalsCopier.stopNote(streak, remaining: total - done) : nil
             let summary = OriginalsCopier.summary(shots: done, copied: copied, skipped: skipped, renamed: renamed,
                                                   keptSidecars: keptSidecars, folder: dest.lastPathComponent,
-                                                  cancelled: flag.isSet)
+                                                  cancelled: flag.isSet, stopped: stopped)
             let failures = failed
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
                 self.isRunning = false
                 self.progressText = summary + (retouch.map { " · " + $0 } ?? "")
-                if !failures.isEmpty {
+                if let stopNote {
+                    self.lastError = "复制原片: " + stopNote
+                } else if !failures.isEmpty {
                     let names = failures.prefix(3).joined(separator: "；") + (failures.count > 3 ? "…" : "")
                     self.lastError = "复制原片: \(failures.count) 个文件没复制 (\(names))"
                 }
@@ -887,8 +961,9 @@ extension BatchStore {
 
 extension OriginalsCopier {
     static func summary(shots: Int, copied: Int, skipped: Int, renamed: Int, keptSidecars: Int,
-                        folder: String, cancelled: Bool) -> String {
-        var parts = [(cancelled ? "已取消: " : "复制原片完成: ") + "\(shots) 张 · 复制了 \(copied) 个文件 → \(folder)/"]
+                        folder: String, cancelled: Bool, stopped: Bool = false) -> String {
+        let head: String = cancelled ? "已取消: " : (stopped ? "复制原片停下了: " : "复制原片完成: ")
+        var parts = [head + "\(shots) 张 · 复制了 \(copied) 个文件 → \(folder)/"]
         if skipped > 0 { parts.append("\(skipped) 个目标里已经有了（一模一样）跳过") }
         if renamed > 0 { parts.append("\(renamed) 张和目标里的同名不同内容，另存为 -2") }
         if keptSidecars > 0 { parts.append("\(keptSidecars) 个 .xmp 目标里已有不一样的，没覆盖") }

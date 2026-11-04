@@ -604,7 +604,9 @@ extension LiveHandlers {
     // MARK: 第 10–13 步的共用部分
 
     /// 每个写结果都带的 live 对象（§9.3），窗口看不见时另加一条 warning（§9.5.6）。
-    static func liveInfo(_ req: Request, live: LiveServer, model: AppModel, notice: String?) -> ([String: Any], [[String: Any]]) {
+    /// `persisted`：这一步的改动存上盘没有（审查 S01b，batchPersistReport / collagePersistReport）；没存上时那句话不说「已存盘」。
+    static func liveInfo(_ req: Request, live: LiveServer, model: AppModel, notice: String?,
+                         persisted: Bool = true) -> ([String: Any], [[String: Any]]) {
         let (windows, ws) = live.windowState()
         var info: [String: Any] = ["op_id": req.opID ?? NSNull(), "replayed": false, "app_pid": Int(getpid())]
         info["tab"] = LiveServer.tabName(model.tab)
@@ -614,7 +616,7 @@ extension LiveHandlers {
         guard ws != "visible" else { return (info, []) }
         let why: [String: String] = ["hidden": "app 被隐藏了（⌘H）", "minimized": "窗口最小化了",
                                      "occluded": "窗口被挡住了或者在别的桌面上", "no_window": "app 开着但没有窗口"]
-        let message = "改动已生效并已存盘，但用户现在看不到选片工具的窗口（\(why[ws] ?? ws)）：请告诉用户切过去看；MCP 不会替用户把窗口拉出来。"
+        let message = windowNotVisibleText(why[ws] ?? ws, persisted: persisted)
         let hint = windows == 0 ? "用户点程序坞图标重新打开窗口就能看到" : "请告诉用户切到选片工具看"
         return (info, [MCPReadModel.warning("window_not_visible", message, hint: hint)])
     }
@@ -665,9 +667,12 @@ extension LiveHandlers {
         out["pages"] = collage.project.pages.count
         out["page"] = collage.project.pages.isEmpty ? 0 : collage.pageIndex + 1
         out["undo"] = undo
-        let (info, notVisible) = liveInfo(req, live: live, model: model, notice: notice)
+        // 存上盘没有（审查 S01b）：改了的那几条路在这之前都 flushSaves 过，这里读的是那次写的结果
+        let saved = collagePersistReport(collage.projectSaveProblem)
+        out["persisted"] = saved.persisted
+        let (info, notVisible) = liveInfo(req, live: live, model: model, notice: notice, persisted: saved.persisted)
         out["live"] = info
-        var all = warnings + notVisible
+        var all = warnings + saved.warnings + notVisible
         let (preview, settled) = await collagePreview(collage)
         out.merge(preview) { _, new in new }
         if preview.isEmpty {
@@ -884,9 +889,12 @@ extension LiveHandlers {
         out["verdict_counts"] = ["pick": counts.pick, "usable": counts.usable, "reject": counts.reject]
         out["collage_tray_refreshed"] = !changed.isEmpty
         out["undo"] = undoInfo(.verdicts, added: changed.isEmpty ? 0 : 1, model: model)
-        let (info, warnings) = liveInfo(req, live: live, model: model, notice: notice)
+        // 存上盘没有（审查 S01b）：applyAIOverrides 当场写 overrides.json，盘满时红条和这里一起说
+        let saved = batchPersistReport(batch, [.overrides])
+        out["persisted"] = saved.persisted
+        let (info, warnings) = liveInfo(req, live: live, model: model, notice: notice, persisted: saved.persisted)
         out["live"] = info
-        out["warnings"] = warnings
+        out["warnings"] = saved.warnings + warnings
         return .result(out)
     }
 
@@ -955,9 +963,12 @@ extension LiveHandlers {
             out["undo"] = undoInfo(.verdicts, added: changed ? 1 : 0, model: model)
         }
         if !dryRun && req.params["reveal"] as? Bool == true { model.tab = .batch }
-        let (info, shown) = liveInfo(req, live: live, model: model, notice: notice)
+        // 存上盘没有（审查 S01b）：dry_run 什么都没写，不报
+        let saved = dryRun ? PersistReport(persisted: true, warnings: []) : batchPersistReport(batch, [.clientPicks])
+        if !dryRun { out["persisted"] = saved.persisted }
+        let (info, shown) = liveInfo(req, live: live, model: model, notice: notice, persisted: saved.persisted)
         out["live"] = info
-        var warnings = shown
+        var warnings = saved.warnings + shown
         if resolution.ids.isEmpty {
             warnings.append(MCPReadModel.warning("nothing_recognized", "一张照片都没认出来：什么都没标。",
                                                  hint: "看 unknown 和 summary；文件名、文件号、确认表编号都认不出时请用户自己在 app 里看"))
@@ -1728,9 +1739,13 @@ extension LiveHandlers {
             out["session"] = currentKey(batch) ?? NSNull()
             out["verdict_counts"] = ["pick": counts.pick, "usable": counts.usable, "reject": counts.reject]
             out["undo"] = ["target": "verdicts", "steps_removed": 1, "depth": batch.overrideUndoDepth] as [String: Any]
-            let (info, warnings) = liveInfo(req, live: live, model: model, notice: text)
+            // 存上盘没有（审查 S01b）：撤的是 AI 导入的客户选中就看 client_picks.json，改判看 overrides.json
+            let files: [BatchStore.PersistFile] = entry.tool == "cull_import_client_picks" ? [.clientPicks] : [.overrides]
+            let saved = batchPersistReport(batch, files)
+            out["persisted"] = saved.persisted
+            let (info, warnings) = liveInfo(req, live: live, model: model, notice: text, persisted: saved.persisted)
             out["live"] = info
-            out["warnings"] = warnings
+            out["warnings"] = saved.warnings + warnings
             return .result(out)
         }
         let collage = model.collage
