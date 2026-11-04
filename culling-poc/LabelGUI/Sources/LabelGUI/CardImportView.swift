@@ -25,8 +25,13 @@ final class CardImportCenter: ObservableObject {
         /// 导入位置说不通（外接盘没插上、文件夹没了、写不进去）：不出计划、不导，框里说清楚 ——
         /// 绝不悄悄换回系统盘。
         var targetIssue: String?
+        /// 这张卡「这次不备份」（备份盘没带、不想等）。
+        var skipBackup = false
+        /// 开着备份、备份位置说不通（备份盘没插上……）：同样不导，让用户插上、换位置或者「这次不备份」——
+        /// 开着备份的人以为会有两份，不能悄悄只导一份。
+        var backupIssue: String?
         var id: String { volume.id }
-        var planning: Bool { plan == nil && error == nil && targetIssue == nil }
+        var planning: Bool { plan == nil && error == nil && targetIssue == nil && backupIssue == nil }
     }
 
     /// 点了「导入」、还没开始的（前面有导入或分析在跑）。
@@ -119,21 +124,23 @@ final class CardImportCenter: ObservableObject {
     /// 启动时用：先在后台读完卡，有新照片、而且这批没被「不导入」过才弹。
     private func offerIfNew(_ volume: CardImporter.Volume) {
         let ledgerURL = appDataDir.appendingPathComponent(CardImporter.ledgerFileName)
-        // 和确认框同一个目标（记住的导入位置）。
+        // 和确认框同一个目标（记住的导入位置、备份位置）。
         let target = CardImporter.target(settings: settings, choice: .saved)
+        let backup = CardImporter.backupTarget(settings: settings, primary: target)
         let flag = AnalysisEngine.CancelFlag()
         launchScans[volume.root.path] = flag
         Task.detached(priority: .utility) {
             let plan = try? CardImporter.plan(source: volume.root, destination: target.destination,
-                                              mustExist: target.mustExist,
+                                              mustExist: target.mustExist, backup: backup?.issue == nil ? backup : nil,
                                               ledger: CardImporter.Ledger.load(from: ledgerURL),
                                               includeImported: false, cancel: flag)
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.launchScans[volume.root.path] = nil
                 guard let plan, !flag.isSet, !plan.copies.isEmpty, !Self.wasDismissed(volume, plan) else { return }
-                // 导入位置说不通（外接盘没插上）：照样问，框里重读一遍、把原因说清楚。
-                self.enqueue(volume, plan: target.issue == nil ? plan : nil)
+                // 导入位置 / 备份位置说不通（外接盘没插上）：照样问，框里重读一遍、把原因说清楚。
+                let clear = target.issue == nil && backup?.issue == nil
+                self.enqueue(volume, plan: clear ? plan : nil)
             }
         }
     }
@@ -173,13 +180,16 @@ final class CardImportCenter: ObservableObject {
         current.planningNote = nil
         current.includeImported = includeImported
         let target = CardImporter.target(settings: settings, choice: current.choice)
+        let backup = CardImporter.backupTarget(settings: settings, primary: target, skip: current.skipBackup)
         current.targetIssue = target.issue
+        current.backupIssue = target.issue == nil ? backup?.issue : nil
         offer = current
-        guard target.issue == nil else { return }
+        guard target.issue == nil, backup?.issue == nil else { return }
         let ledgerURL = appDataDir.appendingPathComponent(CardImporter.ledgerFileName)
         Task.detached(priority: .userInitiated) {
             let result: Result<CardImporter.Plan, Error> = Result {
                 try CardImporter.plan(source: volume.root, destination: target.destination, mustExist: target.mustExist,
+                                      backup: backup,
                                       ledger: CardImporter.Ledger.load(from: ledgerURL),
                                       includeImported: includeImported, cancel: flag) { note in
                     Task { @MainActor [weak self] in
@@ -232,6 +242,38 @@ final class CardImportCenter: ObservableObject {
         settings.root = nil
         settings.save(to: appDataDir)
         replan(choice: .saved)
+    }
+
+    /// 「同时备份一份到另一块盘」开关。打开时还没选过备份位置就先选（不选就还是关着）。
+    func setBackupEnabled(_ on: Bool) {
+        if on && settings.backup == nil {
+            chooseBackupRoot()
+            return
+        }
+        settings.backupEnabled = on
+        settings.save(to: appDataDir)
+        offer?.skipBackup = false
+        replan(includeImported: offer?.includeImported ?? false)
+    }
+
+    /// 「换个备份位置…」：选第二块盘上的文件夹（记住；在它里面建和导入位置同名的文件夹）。
+    func chooseBackupRoot() {
+        let start = settings.backup.map { URL(fileURLWithPath: $0.path) } ?? URL(fileURLWithPath: "/Volumes")
+        guard let url = Self.pickFolder(prompt: "备份到这里",
+                                        message: "每次导卡同时往这里写第二份（选另一块盘：一块坏了还有一份）。同样校验、绝不覆盖",
+                                        start: start) else { return }
+        settings.backup = CardImporter.savedFolder(for: url)
+        settings.backupEnabled = true
+        settings.save(to: appDataDir)
+        offer?.skipBackup = false
+        replan(includeImported: offer?.includeImported ?? false)
+    }
+
+    /// 「这次不备份」：只管这张卡（用户自己点的）。
+    func skipBackupOnce() {
+        guard offer != nil else { return }
+        offer?.skipBackup = true
+        replan(includeImported: offer?.includeImported ?? false)
     }
 
     private func replan(choice: CardImporter.DestinationChoice) {
@@ -388,8 +430,10 @@ struct CardImportSheet: View {
     private func headline(_ offer: CardImportCenter.Offer) -> String {
         if offer.error != nil { return "读卡出了问题" }
         if offer.targetIssue != nil { return "导入位置找不到" }
+        if offer.backupIssue != nil { return "备份位置找不到" }
         guard let plan = offer.plan else { return "正在读取存储卡…" }
         if !plan.copies.isEmpty { return "要把照片导入到这台电脑吗？" }
+        if let backup = plan.backup, backup.fileCount > 0 { return "照片都导进来了，备份里还缺 \(backup.fileCount) 个文件" }
         if plan.cardFiles == 0 { return "卡上没有照片" }
         return plan.skippedImported > 0 ? "这张卡上的照片都导入过了" : "这些照片目标文件夹里都已经有了"
     }
@@ -402,6 +446,8 @@ struct CardImportSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
         } else if let issue = offer.targetIssue {
             targetIssueView(issue)
+        } else if let issue = offer.backupIssue {
+            backupIssueView(issue)
         } else if let plan = offer.plan {
             VStack(alignment: .leading, spacing: 10) {
                 if !plan.copies.isEmpty {
@@ -415,8 +461,23 @@ struct CardImportSheet: View {
                         destinationMenu(offer)
                     }
                 }
+                if let backup = plan.backup, !plan.copies.isEmpty || backup.fileCount > 0 {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        row("externaldrive", backupText(backup))
+                        Spacer(minLength: 4)
+                        backupMenu()
+                    }
+                }
                 notes(plan)
-                if !plan.copies.isEmpty && !plan.enoughSpace {
+                if let backup = plan.backup, backup.conflicts > 0 {
+                    row("exclamationmark.triangle", "\(backup.conflicts) 张备份里同名的是别的文件，这几张没法备份（主目标里有）")
+                }
+                if !plan.backupEnoughSpace, let backup = plan.backup {
+                    Label(backupSpaceText(backup), systemImage: "externaldrive.badge.exclamationmark")
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if !plan.copies.isEmpty && !plan.primaryEnoughSpace {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Label(spaceText(plan), systemImage: "externaldrive.badge.exclamationmark")
                             .foregroundStyle(.red)
@@ -451,9 +512,56 @@ struct CardImportSheet: View {
     }
 
     private func spaceText(_ plan: CardImporter.Plan) -> String {
-        let need = BatchStore.sizeText(plan.totalBytes)
+        let alsoBackup = plan.backup?.sameVolume == true
+        let bytes = plan.totalBytes + (alsoBackup ? plan.backup?.totalBytes ?? 0 : 0)
+        let need = BatchStore.sizeText(bytes)
         let free = BatchStore.sizeText(plan.freeBytes ?? 0)
-        return "空间不够：要 \(need)，这块盘只剩 \(free)（还得留 1 GB 余量）"
+        let what = alsoBackup ? "（连同同一块盘上的备份）" : ""
+        return "空间不够：要 \(need)\(what)，这块盘只剩 \(free)（还得留 1 GB 余量）"
+    }
+
+    /// 「另备份一份到 T7 › 备份 › 20261104（12 个文件，补备份 2 个）」
+    private func backupText(_ backup: CardImporter.Plan.Backup) -> String {
+        var text = "另备份一份到 " + CardImporter.displayPath(backup.destination)
+        var parts: [String] = []
+        if !backup.fromPrimary.isEmpty { parts.append("补备份以前导进来的 \(backup.fromPrimary.count) 个文件") }
+        if backup.sameVolume { parts.append("和导入位置在同一块盘上，盘坏了两份一起没") }
+        if !parts.isEmpty { text += "（" + parts.joined(separator: "；") + "）" }
+        return text
+    }
+
+    private func backupSpaceText(_ backup: CardImporter.Plan.Backup) -> String {
+        let need = BatchStore.sizeText(backup.totalBytes)
+        let free = BatchStore.sizeText(backup.freeBytes ?? 0)
+        return "备份盘空间不够：要 \(need)，只剩 \(free)（还得留 1 GB 余量）—— 换个备份位置，或者这次不备份"
+    }
+
+    /// 备份那一行的「更改」。
+    private func backupMenu() -> some View {
+        Menu("更改") {
+            Button("换个备份位置…") { center.chooseBackupRoot() }
+            Button("这次不备份") { center.skipBackupOnce() }
+            Divider()
+            Button("以后不备份") { center.setBackupEnabled(false) }
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .font(.callout)
+    }
+
+    /// 开着备份、备份盘不在：说清楚，插上、换位置或者这次不备份（不悄悄只导一份）。
+    private func backupIssueView(_ issue: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(issue, systemImage: "externaldrive.badge.xmark")
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Button("换个备份位置…") { center.chooseBackupRoot() }
+                Button("这次不备份") { center.skipBackupOnce() }
+                Button("以后不备份") { center.setBackupEnabled(false) }
+            }
+            .controlSize(.small)
+        }
     }
 
     /// 「更改」：换导入位置（记住）/ 这次导进已有的文件夹 / 改回去。
@@ -503,6 +611,8 @@ struct CardImportSheet: View {
 
     private func importTitle(_ plan: CardImporter.Plan?) -> String {
         let count = plan?.shotCount ?? 0
+        // 只是补备份（照片都在导入位置里了）。
+        if count == 0, let files = plan?.backup?.fileCount, files > 0 { return "补备份 \(files) 个文件" }
         if queuesBehind { return "排队导入 \(count) 张" }
         if stopsAnalysis { return "停下分析并导入 \(count) 张" }
         return "导入 \(count) 张"
@@ -591,6 +701,13 @@ struct CardImportSheet: View {
             if !plan.copies.isEmpty && plan.enoughSpace {
                 Toggle("导入完直接开始分析", isOn: $analyzeAfter)
             }
+            // 第二份备份（Photo Mechanic 的 Secondary、Lightroom 的「Make a Second Copy To」）。
+            if !plan.copies.isEmpty || plan.backup != nil {
+                Toggle("同时备份一份到另一块盘", isOn: Binding(
+                    get: { center.settings.backupOn && !offer.skipBackup },
+                    set: { center.setBackupEnabled($0) }))
+                    .help("主目标那份校验过以后再写一份到备份盘：同样校验、绝不覆盖。备份盘出问题不影响主目标，导完照实说")
+            }
             if plan.skippedImported > 0 || offer.includeImported {
                 Toggle("以前导入过的也再导一遍", isOn: Binding(
                     get: { offer.includeImported },
@@ -603,7 +720,7 @@ struct CardImportSheet: View {
 
     @ViewBuilder
     private func footer(_ offer: CardImportCenter.Offer) -> some View {
-        let canImport = offer.plan.map { !$0.copies.isEmpty && $0.enoughSpace } ?? false
+        let canImport = offer.plan.map { ($0.hasWork) && $0.enoughSpace } ?? false
         // 前面有卡在导 / 排着队：排在后面。在分析：「停下分析并导入」。别的任务（导出、VLM）：等它，或自己停。
         if canImport && (store.isRunning || !center.pending.isEmpty) {
             HStack(spacing: 8) {
@@ -646,6 +763,7 @@ struct CardImportSheet: View {
 /// --planning = 还在读卡；--free-bytes = 假装目标盘只剩这么多。
 /// --dest 也可以换成 --dest-root <根目录>（记住的导入位置，按今天建 yyyyMMdd；不在 = 画「导入位置找不到」）
 /// 或 --into-existing <已有文件夹>（这次导进已有的文件夹）—— 只在内存里，不写设置文件。
+/// --backup <备份根目录>：开着第二份备份（--backup-free-bytes N 假装备份盘只剩这么多）。
 enum CardImportSnapshot {
     @MainActor
     static func run(flagIndex: Int) -> Never {
@@ -670,6 +788,10 @@ enum CardImportSnapshot {
         // 导到哪：和界面一样算（设置只在内存里，不写数据目录）。
         var settings = CardImporter.DestinationSettings()
         if let root = option("--dest-root") { settings.root = CardImporter.savedFolder(for: URL(fileURLWithPath: root)) }
+        if let backupRoot = option("--backup") {
+            settings.backup = CardImporter.savedFolder(for: URL(fileURLWithPath: backupRoot))
+            settings.backupEnabled = true
+        }
         center.settings = settings
         let target: CardImporter.Target
         if let destPath = option("--dest") {
@@ -681,9 +803,12 @@ enum CardImportSnapshot {
             target = CardImporter.target(settings: settings, choice: .saved)
         }
         offer.targetIssue = target.issue
-        if !args.contains("--planning"), target.issue == nil {
+        let backupTarget = CardImporter.backupTarget(settings: settings, primary: target)
+        offer.backupIssue = target.issue == nil ? backupTarget?.issue : nil
+        if !args.contains("--planning"), target.issue == nil, backupTarget?.issue == nil {
             do {
                 offer.plan = try CardImporter.plan(source: card, destination: target.destination, mustExist: target.mustExist,
+                                                   backup: backupTarget,
                                                    ledger: .load(from: appDataDir.appendingPathComponent(CardImporter.ledgerFileName)),
                                                    includeImported: args.contains("--reimport"))
                 offer.includeImported = args.contains("--reimport")
@@ -693,6 +818,11 @@ enum CardImportSnapshot {
         }
         // --free-bytes N：假装目标盘只剩 N 字节（看「空间不够」那一行）。
         if let free = option("--free-bytes").flatMap(Int64.init) { offer.plan?.freeBytes = free }
+        if let free = option("--backup-free-bytes").flatMap(Int64.init) {
+            // 测试机上备份和导入位置总在同一块盘：假装是两块，才看得到「备份盘空间不够」那一行。
+            offer.plan?.backup?.sameVolume = false
+            offer.plan?.backup?.freeBytes = free
+        }
         center.offer = offer
         if args.contains("--running") {
             store.isRunning = true
@@ -723,6 +853,7 @@ enum CardImportSnapshot {
         }
         if let plan = offer.plan { print(CardImportCLI.describe(plan)) }
         if let issue = offer.targetIssue { print("导入位置有问题：\(issue)") }
+        if let issue = offer.backupIssue { print("备份位置有问题：\(issue)") }
         print("确认框快照 \(Int(size.width))x\(Int(size.height)) · \(out.path)")
         exit(0)
     }

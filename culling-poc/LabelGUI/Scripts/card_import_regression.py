@@ -569,6 +569,88 @@ else:
     finally:
         subprocess.run(["hdiutil", "detach", mnt, "-force"], capture_output=True)
 
+# ---------- 第二份备份：主目标校验过以后从主目标再写一份到备份盘；备份出问题只停备份、照实报 ----------
+bfiles = {"DCIM/100CANON/IMG_0001.CR3": rand(500_000), "DCIM/100CANON/IMG_0001.JPG": rand(120_000),
+          "DCIM/100CANON/IMG_0002.CR3": rand(500_000), "DCIM/100CANON/IMG_0002.JPG": rand(120_000)}
+bcard = mkcard("card_b", bfiles)
+BNAMES = sorted(os.path.basename(k) for k in bfiles)
+
+
+def same_as_card(folder, names=None):
+    return all(sha(os.path.join(folder, n)) == hashlib.sha256(bfiles["DCIM/100CANON/" + n]).hexdigest()
+               for n in (names or BNAMES))
+
+
+def ledger_dests(data):
+    path = os.path.join(data, "import_ledger.json")
+    return [v["dest"] for v in json.load(open(path))["entries"].values()] if os.path.exists(path) else []
+
+
+print("B1. 开着备份：两份都逐字节一致，账本照旧只记主目标，哪边都没有残留的 .part")
+d, broot = os.path.join(WORK, "dest_b1"), os.path.join(WORK, "backup_b1")
+os.makedirs(broot)
+data_b1 = os.path.join(WORK, "data_b1")
+r = run_card_env(bcard, data_b1, d, {}, "--backup", broot)
+bdest = os.path.join(broot, "dest_b1")
+check(r.returncode == 0 and listing(d) == BNAMES and listing(bdest) == BNAMES, f"主目标、备份都是 4 个（{listing(d)} / {listing(bdest)}）")
+check(same_as_card(d) and same_as_card(bdest), "两份内容都和卡上一样")
+check(hidden(d) == [] and hidden(bdest) == [], "没有残留的 .part")
+dests = ledger_dests(data_b1)
+check(len(dests) == 4 and all(x.startswith(os.path.realpath(d)) or x.startswith(d) for x in dests), f"账本只记主目标（{dests[:1]}…）")
+check("另备份 4 个文件" in r.stdout and "导入提醒" not in r.stdout, "摘要说另备份了 4 个，没有提醒")
+
+print("B1b. 走界面那条路（重做计划 → 复制 → 打开）：照样两份")
+d, broot = os.path.join(WORK, "dest_b1b"), os.path.join(WORK, "backup_b1b")
+os.makedirs(broot)
+r = run_card_env(bcard, os.path.join(WORK, "data_b1b"), d, {}, "--backup", broot, "--via-store", "--no-analyze")
+check(listing(d) == BNAMES and listing(os.path.join(broot, "dest_b1b")) == BNAMES and same_as_card(os.path.join(broot, "dest_b1b")),
+      "主目标、备份都齐了")
+check("另备份 4 个文件" in r.stdout and "导入提醒" not in r.stdout, "顶栏摘要说另备份了 4 个，没有提醒")
+
+print("B2. 备份里同名的是别的文件：两边一起换一个都空着的名字，备份里那个不动")
+d, broot = os.path.join(WORK, "dest_b2"), os.path.join(WORK, "backup_b2")
+os.makedirs(os.path.join(broot, "dest_b2"))
+planted_b2 = os.path.join(broot, "dest_b2", "IMG_0001.CR3")
+open(planted_b2, "wb").write(rand(7000))
+planted_sha = sha(planted_b2)
+r = run_card_env(bcard, os.path.join(WORK, "data_b2"), d, {}, "--backup", broot)
+want_b2 = ["IMG_0001_2.CR3", "IMG_0001_2.JPG", "IMG_0002.CR3", "IMG_0002.JPG"]
+check(r.returncode == 0 and listing(d) == want_b2, f"主目标里 IMG_0001 也改成了 _2，两边名字一样（{listing(d)}）")
+check(listing(os.path.join(broot, "dest_b2")) == sorted(want_b2 + ["IMG_0001.CR3"]) and sha(planted_b2) == planted_sha,
+      "备份里原来那个没动，新的用 _2")
+
+print("B3. 备份盘中途写满：主目标照样导完，备份停下、照实报，叫人先别格式化")
+d, broot = os.path.join(WORK, "dest_b3"), os.path.join(WORK, "backup_b3")
+os.makedirs(broot)
+data_b3 = os.path.join(WORK, "data_b3")
+r = run_card_env(bcard, data_b3, d, {}, "--backup", broot, "--backup-full-at", "2")
+check(listing(d) == BNAMES and same_as_card(d), "主目标 4 个都导进来了")
+check(len(listing(os.path.join(broot, "dest_b3"))) == 1 and hidden(os.path.join(broot, "dest_b3")) == [], "备份里只有满之前那 1 个，没有 .part")
+check(r.returncode != 0 and "备份没写全" in r.stdout and "先别格式化" in r.stdout and "备份盘满了" in r.stdout,
+      "退出码非 0，提醒说备份没写全（备份盘满了）、先别格式化")
+
+print("B4. 补备份：再插一次、勾重导 → 主目标里的不重复复制，只从主目标补到备份")
+r = run_card_env(bcard, data_b3, d, {}, "--backup", broot, "--reimport")
+check(r.returncode == 0 and "目标里已有 2 张" in r.stdout and "补备份 3 个" in r.stdout, "计划：目标里已有 2 张、补备份 3 个")
+check(listing(d) == BNAMES and listing(os.path.join(broot, "dest_b3")) == BNAMES and same_as_card(os.path.join(broot, "dest_b3")),
+      "主目标没多出 _2，备份补齐、逐字节一致")
+
+print("B5. 备份盘中途被拔：主目标照样导完，不在原路径上重建备份文件夹")
+d, broot = os.path.join(WORK, "dest_b5"), os.path.join(WORK, "backup_b5")
+os.makedirs(broot)
+r = run_card_env(bcard, os.path.join(WORK, "data_b5"), d, {}, "--backup", broot, "--unplug-backup-after", "1")
+check(listing(d) == BNAMES and same_as_card(d), "主目标 4 个都导进来了")
+check(not os.path.exists(broot) and r.returncode != 0 and "备份盘找不到了" in r.stdout, "说备份盘找不到了，原路径没重建")
+
+print("B6. 备份盘没插上 / 和导入位置是同一个地方：不导（开着备份的人以为有两份）")
+d = os.path.join(WORK, "dest_b6")
+r = run_card_env(bcard, os.path.join(WORK, "data_b6"), d, {}, "--backup", "/Volumes/NoSuchDisk_K/备份")
+check(r.returncode == 3 and "备份位置有问题" in r.stdout and "没插上" in r.stdout and not os.path.exists(d), "备份盘没插上：退出码 3、主目标也没写")
+root_b6 = os.path.join(WORK, "root_b6")
+os.makedirs(root_b6)
+r = run_card_env(bcard, os.path.join(WORK, "data_b6"), None, {}, "--dest-root", root_b6, "--backup", root_b6)
+check(r.returncode == 3 and "同一个地方" in r.stdout and listing(root_b6) == [], "备份位置就是导入位置：拒绝")
+
 print("F. 存储卡从头到尾没被动过")
 check(tree(CARD) == card_before, "卡上每个文件的大小 / 修改时间 / SHA-256 都和开始时一样")
 

@@ -24,6 +24,11 @@ extension CardImporter {
     struct DestinationSettings: Codable, Equatable {
         /// 导入根目录：在它里面按导入那天建 yyyyMMdd。nil = 「图片」。
         var root: SavedFolder?
+        /// 第二份备份的根目录（在它里面建和导入位置同名的文件夹）；backupEnabled 关着就不备份（位置留着，再打开不用重选）。
+        var backup: SavedFolder?
+        var backupEnabled: Bool?
+
+        var backupOn: Bool { backupEnabled == true && backup != nil }
 
         static let fileName = "card_import_settings.json"
 
@@ -135,6 +140,34 @@ extension CardImporter {
                 return Target(destination: url.appendingPathComponent(day, isDirectory: true), mustExist: url,
                               appending: false, issue: "导入位置（\(shown)）不在了（删了或挪走了）—— 换个位置")
             }
+        }
+    }
+
+    /// 第二份备份写到哪：备份根目录里和导入位置同名的文件夹（20261104，或追加的那个已有文件夹的名字）。
+    /// 没开备份 / 这次不备份 = nil。备份盘没插上、文件夹没了、写不进去、和导入位置是同一个地方：issue 说清楚，不导
+    /// （开着备份的人以为有两份 —— 不能悄悄只导一份）。
+    static func backupTarget(settings: DestinationSettings, primary: Target, skip: Bool = false) -> Target? {
+        guard !skip, settings.backupOn, let saved = settings.backup else { return nil }
+        let name = primary.destination.lastPathComponent
+        let shown = displayPath(URL(fileURLWithPath: saved.path))
+        switch resolve(saved) {
+        case .ok(let root):
+            let dest = root.appendingPathComponent(name, isDirectory: true)
+            var issue = writableIssue(root).map { "备份位置" + $0 }
+            let a = dest.resolvingSymlinksInPath().path
+            let b = primary.destination.resolvingSymlinksInPath().path
+            if a == b || a.hasPrefix(b + "/") || b.hasPrefix(a + "/") {
+                issue = "备份位置（\(shown)）和导入位置是同一个地方 —— 换一块盘上的文件夹"
+            }
+            return Target(destination: dest, mustExist: root, appending: false, issue: issue)
+        case .volumeOffline(let volume):
+            let root = URL(fileURLWithPath: saved.path)
+            return Target(destination: root.appendingPathComponent(name, isDirectory: true), mustExist: root,
+                          appending: false, issue: "备份位置（\(shown)）在「\(volume)」上，这块盘现在没插上 —— 插上它，或者这次不备份")
+        case .gone:
+            let root = URL(fileURLWithPath: saved.path)
+            return Target(destination: root.appendingPathComponent(name, isDirectory: true), mustExist: root,
+                          appending: false, issue: "备份位置（\(shown)）不在了（删了或挪走了）—— 换个备份位置，或者这次不备份")
         }
     }
 
