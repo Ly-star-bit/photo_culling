@@ -189,7 +189,8 @@ final class BatchStore: ObservableObject {
     @Published var progressText = ""
     /// 0...1 while a long task reports progress; nil hides the bar.
     @Published var progressFraction: Double?
-    @Published var lastError: String?
+    /// 一设上就记进状态栏提示的历史（ErrorHistory，审查 D03）；本身照旧是 String?（实时桥 app_says 读它）。
+    @Published var lastError: String? { didSet { ErrorHistory.shared.record(lastError, source: .batch) } }
     /// nil = show everything; otherwise only the chosen verdict group.
     @Published var verdictFilter: Verdict?
     /// When set, the 废片 section shows only rejects carrying this reason —

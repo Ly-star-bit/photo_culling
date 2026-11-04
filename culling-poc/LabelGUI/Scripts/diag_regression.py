@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """诊断这一组的端到端回归（审查 D03）：真命令行跑一遍，全部合成数据和临时目录。
-进程内的那一半（失败原因、文件夹权限）在 `--diag-selftest`（Scripts/selftests.sh 里跑）；
+进程内的那一半（提示历史、失败原因、文件夹权限）在 `--diag-selftest`（Scripts/selftests.sh 里跑）；
 这里验它们在命令行出口上接上了：
 
 2. --analyze 一个 chmod 000 的照片文件夹 → 退出码 1，说「没有权限读这个文件夹」并点名「系统设置 › 隐私与安全性 › 文件与文件夹」，

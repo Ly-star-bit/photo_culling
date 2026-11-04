@@ -106,16 +106,8 @@ struct WatermarkView: View {
     private var statusBar: some View {
         HStack(spacing: 12) {
             if let error = store.lastError {
-                HStack(spacing: 4) {
-                    Text(error).font(.caption).foregroundStyle(.red).lineLimit(1).help(error)
-                    Button {
-                        store.lastError = nil
-                    } label: {
-                        Image(systemName: "xmark.circle.fill").font(.caption).foregroundStyle(.tertiary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("关闭")
-                }
+                // 点一下弹出全文（可选中、复制）和最近的提示（ErrorNotice，审查 D03）。
+                ErrorNotice(text: error, source: .watermark, closeStyle: .tertiary, closeHelp: "关闭") { store.lastError = nil }
             }
             Spacer()
             if let notice = store.notice {

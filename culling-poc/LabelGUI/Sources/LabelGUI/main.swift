@@ -707,7 +707,7 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--export-jpeg"),
     }
 }
 
-// 诊断这一组的自检（逐张失败的原因、文件夹没权限）：
+// 诊断这一组的自检（状态栏提示历史、逐张失败的原因、文件夹没权限）：
 // LABELGUI_DATA_DIR=<临时> LabelGUI --diag-selftest [<photo_dir>]（见 Diagnostics/DiagnosticsSelfTest.swift）。
 if CommandLine.arguments.contains("--diag-selftest") {
     MainActor.assumeIsolated { DiagnosticsSelfTest.run() }
@@ -755,7 +755,18 @@ struct LabelGUIApp: App {
                     model.setLiveBridge(on)
                 }
             }
+            // 系统默认的「帮助」只有一项、点了说「帮助不可用」（没有帮助手册）。换成：快捷键一览、使用说明（审查 D03，
+            // 见 Diagnostics/Diagnostics.swift）。
+            CommandGroup(replacing: .help) {
+                HelpMenuItems()
+            }
         }
+        // 「帮助 › 快捷键一览」：状态栏键盘按钮、? 键弹的同一张表，在哪个页面都能打开。只有一个，不进 ⌘N。
+        Window("快捷键一览", id: ShortcutsWindow.id) {
+            ShortcutsPanel()
+                .preferredColorScheme(.dark)
+        }
+        .windowResizability(.contentSize)
     }
 }
 

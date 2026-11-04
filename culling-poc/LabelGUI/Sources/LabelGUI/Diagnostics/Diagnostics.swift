@@ -1,14 +1,17 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - 诊断（全项目审查 D03）
 //
 //   1. 逐张失败的原因翻成中文（导出 JPG、移到废纸篓、写 XMP、水印页）：在 CardImporter.describe 之前先认它不认的几种
 //      —— 盘不支持废纸篓、只读盘、EPERM（文件被锁定或者系统隐私权限）—— 其余照旧交给它。
 //   2. 照片文件夹被系统隐私权限（TCC）拒绝时的话：点名「系统设置 › 隐私与安全性 › 文件与文件夹 › 选片工具」里哪个开关。
+//   3. 「帮助」菜单（快捷键一览、使用说明）。
 
 enum Diagnostics {
     static let privacySettingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders")!
+    static let manualURL = URL(string: "https://github.com/Ly-star-bit/photo_culling#readme")!
 
     // MARK: 失败原因
 
@@ -93,15 +96,23 @@ enum Diagnostics {
     }
 }
 
-/// 「打开「隐私与安全性」设置」：系统设置 › 隐私与安全性 › 文件与文件夹（照片文件夹、存储卡读不了时）。
-struct PrivacySettingsButton: View {
+// MARK: - 帮助菜单
+
+/// 「快捷键一览」窗口（和状态栏键盘按钮、? 键弹的是同一张 ShortcutsPanel）。
+enum ShortcutsWindow {
+    static let id = "shortcuts"
+}
+
+/// 替换系统默认的「帮助」菜单（没有帮助手册，默认那一项点了只会说「帮助不可用」）。
+struct HelpMenuItems: View {
+    @Environment(\.openWindow) private var openWindow
     @Environment(\.openURL) private var openURL
 
     var body: some View {
-        Button("打开「隐私与安全性」设置") {
+        Button("快捷键一览") { openWindow(id: ShortcutsWindow.id) }
+        Button("使用说明（网页）") {
             guard !AppRuntime.headless else { return }
-            openURL(Diagnostics.privacySettingsURL)
+            openURL(Diagnostics.manualURL)
         }
-        .help("系统设置 › 隐私与安全性 › 文件与文件夹：给「选片工具」打开对应的开关")
     }
 }

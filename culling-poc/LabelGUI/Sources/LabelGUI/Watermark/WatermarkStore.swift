@@ -59,7 +59,8 @@ final class WatermarkStore: ObservableObject {
     /// 导入/预设这类一次性通知，和导出进度分开：否则"已导入 3 张"会一直挂着。
     /// 下一次操作或几秒后自动清掉。
     @Published private(set) var notice: String?
-    @Published var lastError: String?
+    /// 一设上就记进状态栏提示的历史（ErrorHistory，审查 D03）。
+    @Published var lastError: String? { didSet { ErrorHistory.shared.record(lastError, source: .watermark) } }
     /// 「拼图 (N) →」/「套到当前拼图」发出的请求；ContentView 接住后置 nil。
     @Published var collageRequest: WatermarkCollageRequest?
 
