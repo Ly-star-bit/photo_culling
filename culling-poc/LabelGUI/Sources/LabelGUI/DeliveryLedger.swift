@@ -77,11 +77,13 @@ enum DeliveryLedger {
         (try? decoder().decode([Lenient].self, from: data)).map { $0.compactMap(\.record) }
     }
 
-    /// 这一场的对照，最早的在前。没有 / 读不出 = 空。
+    /// 这一场的对照，最早的在前。没有 / 读不出 = 空。读不出来的不记进缓存：改回权限以后修改时间、大小都没变，
+    /// 记了就一直是空的。
     @MainActor static func load(_ url: URL) -> [DeliveryRecord] {
         guard let now = stamp(url) else { return [] }
         if let cache, cache.path == url.path, cache.stamp == now { return cache.records }
-        let records = (try? Data(contentsOf: url)).flatMap(decode) ?? []
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        let records = decode(data) ?? []
         cache = (url.path, now, records)
         return records
     }

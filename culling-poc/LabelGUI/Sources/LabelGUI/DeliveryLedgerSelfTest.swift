@@ -161,9 +161,16 @@ enum DeliveryLedgerSelfTest {
             return
         }
         let before = try? Data(contentsOf: ledger)
+        let elsewhere = dir.appendingPathComponent("elsewhere.json")
+        try? Data("[]".utf8).write(to: elsewhere)
         chmod(ledger.path, 0)
         let exported = export()
+        _ = DeliveryLedger.load(elsewhere)   // 缓存换成别的文件，下一次读这一场的才真去读盘
+        let whileLocked = batch.deliveryRecords.count
         chmod(ledger.path, 0o644)
+        let afterFix = batch.deliveryRecords.count
+        check(whileLocked == 0 && afterFix == 1, "读不出来时导入框当空的；改回权限马上读得到（读失败的空结果不进缓存）",
+              "\(whileLocked) → \(afterFix)")
         let after = try? Data(contentsOf: ledger)
         var failed = false
         if case .failed? = watermark.lastDelivery { failed = true }
