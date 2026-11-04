@@ -798,8 +798,8 @@ extension LiveHandlers {
                 data["unsaved_in_memory"] = inMemory
                 data["hint"] = "照原话告诉用户：这一场的\(what)原件读不出来，这次打开以后的改动没存盘，切过去就没了；" +
                                "用户同意丢掉这些改动再带 confirm:true 调，不同意就请用户先修好或移走那个文件（批量页顶上红条里有位置）"
-                message = "这一场的\(what)原件读不出来、这次打开以后的改动只在内存里，切场次就没了；" +
-                          "另外会清掉撤销记录（判决 \(verdictSteps) 步、拼图 \(collageSteps) 步）：这次没有切"
+                let undoNote: String = history ? "另外会清掉撤销记录（判决 \(verdictSteps) 步、拼图 \(collageSteps) 步）" : ""
+                message = "这一场的\(what)原件读不出来、这次打开以后的改动只在内存里，切场次就没了；" + undoNote + "：这次没有切"
             }
             return .failure("confirm_required", message, data)
         }
