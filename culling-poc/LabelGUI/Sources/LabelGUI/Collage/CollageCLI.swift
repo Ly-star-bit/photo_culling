@@ -49,7 +49,10 @@ enum CollageCLI {
         // 主体蒙版缓存和界面同一个地方（场次目录下 collage_masks/）。
         CollageMasks.setDirectory(store.sessionDir.appendingPathComponent("collage_masks"))
         let facts = CollageBridge.Facts(batch: store)
-        let pool = store.items.filter { $0.verdict != .reject }.compactMap { CollageBridge.ref(from: $0, facts: facts) }
+        // 相册：客户选中的废片也要（编排无条件保留客户选中的，和拼图页一样）。
+        let album = args.contains("--album")
+        let pool = store.items.filter { $0.verdict != .reject || (album && store.clientPicks.contains($0.id)) }
+            .compactMap { CollageBridge.ref(from: $0, facts: facts) }
         guard !pool.isEmpty else {
             print("没有可用的照片（先 --analyze）")
             exit(1)
@@ -2346,6 +2349,32 @@ enum CollageOpsScript {
             case "arrange":
                 store.autoArrangeAlbum(dedupe: arg != "all")
                 spin(60) { store.busyText == nil && !store.project.pages.isEmpty }
+            case "clientpicks":
+                // clientpicks:DSCF7209;DSCF7211（= 批量页「导入客户选择」；clientpicks: 空 = 清除）：托盘按批量页刷新（紫心）。
+                let ids = Set(arg.split(separator: ";").map(String.init))
+                batch.setClientPicks(ids)
+                store.refreshFromBatch()
+                let marked = store.project.photos.filter(\.clientPick).map(\.id)
+                print("  客户选中 \(batch.clientPickCount) 张 · 托盘里标紫心 \(marked.count) 张"
+                      + (marked.isEmpty ? "" : "：" + marked.joined(separator: " ")))
+            case "importclient":
+                // 托盘「带照片 › 客户选中 (N)」。
+                let before = store.project.photos.count
+                store.importClientPicks(batch: batch)
+                spin(20) { store.busyText == nil }
+                idle()
+                print("  托盘 \(before) → \(store.project.photos.count) 张")
+            case "albumdump":
+                // 编排结果：每个跨页几张、客户选中的上了哪个跨页、拿掉了哪些（arrange 之后看）。
+                print(CollageCLI.albumDump(store))
+            case "expect":
+                // expect:clientplaced（客户选中的都上了、没有一张在「拿掉」里）：编排结果的断言。
+                // 不对打一行「断言失败」（门禁按它算失败），写错了算参数不对。
+                switch CollageCLI.albumExpect(store, arg) {
+                case .pass(let detail): print("  断言通过 \(arg) · \(detail)")
+                case .fail(let detail): print("断言失败: \(op) · \(detail)")
+                case .unknown: ok = false
+                }
             case "page":
                 store.pageIndex = Int(arg) ?? 0
             case "addpage":

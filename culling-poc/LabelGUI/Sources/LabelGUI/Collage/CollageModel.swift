@@ -89,6 +89,9 @@ struct CollagePhotoRef: Codable, Hashable, Identifiable {
     var isMonochrome: Bool?
     /// 平均亮度 0…1（同上）：左右页亮度差、暗调整章用。
     var meanLuma: Double?
+    /// 客户选中（批量页「导入客户选择」的紫心，不改判决）：相册编排无条件保留 —— 废片、同一场只留精选、
+    /// 近似重复只留一张、「相似只留一张」都不拿掉它。外部文件 = false。
+    var clientPick = false
 
     init(id: String, path: String, previewPath: String? = nil, width: Int, height: Int) {
         self.id = id
@@ -1656,6 +1659,8 @@ extension CollagePhotoRef {
         body = c.softOptional(.body)
         isMonochrome = c.softOptional(.isMonochrome)
         meanLuma = c.softOptional(.meanLuma)
+        // 旧工程没有这个键 = 不是（attach / 切回拼图时按批量页刷一遍就对上了）。
+        clientPick = c.soft(.clientPick, false)
     }
 }
 

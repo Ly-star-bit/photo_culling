@@ -574,6 +574,12 @@ final class CollageStore: ObservableObject {
         addRefs(from: items, layout: .none, facts: CollageBridge.Facts(batch: batch))
     }
 
+    /// 「带照片 › 客户选中 (N)」：批量页导入的客户选择（不看判决：客户选中的废片也带进来，编排时照样上）。
+    func importClientPicks(batch: BatchStore) {
+        let items = batch.items.filter { batch.clientPicks.contains($0.id) }
+        addRefs(from: items, layout: .none, facts: CollageBridge.Facts(batch: batch))
+    }
+
     func importTop(_ n: Int, batch: BatchStore) {
         let ids = batch.topPicks(n).ids
         addRefs(from: ids.compactMap { batch.item(withID: $0) }, layout: .none, facts: CollageBridge.Facts(batch: batch))
@@ -1479,7 +1485,7 @@ final class CollageStore: ObservableObject {
             // 和「自动编排」一样。别的成套（单张、印样……）没有「拿掉」这回事，照旧清空。
             let used = generated.usedPhotoIDs
             self.albumDropped = generated.mode == .album && generated.albumTheme == .fineArt
-                ? generated.photos.filter { !used.contains($0.id) && $0.verdict != .reject } : []
+                ? generated.photos.filter { !used.contains($0.id) && ($0.verdict != .reject || $0.clientPick) } : []
             self.commitEdit()
             // 成套可能带进托盘里没有的照片（印样的废片、整场的帧）：补算路人信息。
             self.computeHints(for: generated.photos)
@@ -2885,11 +2891,12 @@ final class CollageStore: ObservableObject {
         // 编排也在作废机制里：编排期间切回单张、撤销、套模板，结果回来不能盖掉。
         let ticket = beginSolve()
         Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) { () -> ([CollagePage], [CollagePhotoRef], String?) in
+            let result = await Task.detached(priority: .userInitiated) { () -> ([CollagePage], [CollagePhotoRef], String?, String?) in
                 let plan = CollageAlbum.plan(photos, dedupe: dedupe, theme: theme, chapterMono: chapterMono, title: title)
                 // fine-art：拿掉的分开说（同一场只留精选一直开着，「相似只留一张」只管画面相似的）。
                 let note = theme == .fineArt && !plan.dropped.isEmpty ? CollageStyleFineArt.droppedNote(photos, plan: plan) : nil
-                return (CollageAlbum.build(plan, context: ctx, seed: 11), plan.dropped, note)
+                let client = CollageAlbum.clientPickNote(photos, plan: plan)
+                return (CollageAlbum.build(plan, context: ctx, seed: 11), plan.dropped, note, client)
             }.value
             // 编排期间换了场次：结果属于上一个场次，丢掉（不能写进新场次的项目）。
             guard let self, self.sessionToken == ticket.session else { return }
@@ -2902,10 +2909,12 @@ final class CollageStore: ObservableObject {
             self.pageIndex = 0
             self.clearAlternatives()
             self.commitEdit()
+            let client = result.3.map { "；" + $0 } ?? ""
             if let note = result.2 {
-                self.setNotice("编排好 \(result.0.count) 个跨页，\(note) 张（可在托盘里拖回）")
+                self.setNotice("编排好 \(result.0.count) 个跨页，\(note) 张（可在托盘里拖回）" + client)
             } else {
-                self.setNotice("编排好 \(result.0.count) 个跨页" + (result.1.isEmpty ? "" : "，相似的拿掉 \(result.1.count) 张（可在托盘里拖回）"))
+                self.setNotice("编排好 \(result.0.count) 个跨页" + (result.1.isEmpty ? "" : "，相似的拿掉 \(result.1.count) 张（可在托盘里拖回）")
+                               + client)
             }
         }
     }

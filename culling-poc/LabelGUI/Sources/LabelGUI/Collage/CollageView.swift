@@ -410,6 +410,11 @@ private struct CollageTrayHeader: View {
                     store.importVerdicts(batch: batchStore, includeUsable: true)
                 }
                 .disabled(batchStore.items.isEmpty)
+                // 客户选中：批量页「导入客户选择」导进来的（不看判决，客户选中的废片也带）。没导入过就不占地方。
+                if batchStore.clientPickCount > 0 {
+                    Button("客户选中 (\(batchStore.clientPickCount))") { store.importClientPicks(batch: batchStore) }
+                        .help("批量页导入的客户选择（紫心）。相册「自动编排」会把它们全部排上：客户选中的废片、同一场的第二张、连拍里的都不拿掉")
+                }
                 Button("精华 Top 20") { store.importTop(20, batch: batchStore) }
                     .disabled(batchStore.items.isEmpty)
                 Divider()
@@ -431,7 +436,7 @@ private struct CollageTrayHeader: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .help("从批量页带精选进来，或添加外部照片（也可以直接把文件拖到这里）；也在这里移除没用上的")
+            .help("从批量页带精选、客户选中进来，或添加外部照片（也可以直接把文件拖到这里）；也在这里移除没用上的")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -592,6 +597,16 @@ struct CollageTrayItem: View {
                     .shadow(radius: 1)
             }
         }
+        .overlay(alignment: .topLeading) {
+            // 客户选中：紫心（和批量页缩略图、确认表上客户点的那颗同一个符号同一个颜色）。
+            if photo.clientPick {
+                Image(systemName: "heart.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.purple)
+                    .padding(4)
+                    .shadow(radius: 1)
+            }
+        }
         .overlay(alignment: .bottomLeading) {
             if dropped {
                 Text(fineArt ? "拿掉" : "相似")
@@ -609,8 +624,17 @@ struct CollageTrayItem: View {
                     .strokeBorder(active ? Color.accentColor : Color.gray, lineWidth: 3)
             }
         }
-        .help(photo.id + (photo.isPick ? " · 精选" : "") + (uses > 1 ? " · 用了 \(uses) 次" : uses == 1 ? " · 已用" : "")
-              + (dropped ? (fineArt ? " · fine-art 编排没上（同一场只留精选 / 相似）" : " · 相册去重拿掉的") : ""))
+        .help(helpText)
+    }
+
+    /// 悬停提示（拆成一段段拼：一整串三元表达式加起来，CI 的编译器类型检查会超时）。
+    private var helpText: String {
+        var parts = [photo.id]
+        if photo.isPick { parts.append("精选") }
+        if photo.clientPick { parts.append("客户选中（编排不会拿掉）") }
+        if uses > 1 { parts.append("用了 \(uses) 次") } else if uses == 1 { parts.append("已用") }
+        if dropped { parts.append(fineArt ? "fine-art 编排没上（同一场只留精选 / 相似）" : "相册去重拿掉的") }
+        return parts.joined(separator: " · ")
     }
 }
 

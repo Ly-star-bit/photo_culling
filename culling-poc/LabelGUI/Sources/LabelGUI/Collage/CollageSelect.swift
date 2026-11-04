@@ -25,6 +25,8 @@ enum CollageBridge {
     struct Facts {
         var takeRank: [String: Int] = [:]
         var manual: Set<String> = []
+        /// 客户选中（批量页导入的客户选择）：托盘格标紫心、相册编排无条件保留。
+        var clientPicks: Set<String> = []
 
         init() {}
 
@@ -32,6 +34,7 @@ enum CollageBridge {
         init(batch: BatchStore) {
             takeRank = batch.takeRank
             manual = Set(batch.items.lazy.map(\.id).filter { batch.isManual($0) })
+            clientPicks = batch.clientPicks
         }
     }
 
@@ -62,6 +65,7 @@ enum CollageBridge {
         ref.captureSubsec = item.captureSubsec
         ref.verdict = verdict(item.verdict)
         ref.isManual = facts.manual.contains(item.id)
+        ref.clientPick = facts.clientPicks.contains(item.id)
         ref.eyesOpen = item.dynamicEyeClosed.map { !$0 }
         ref.exif = item.exif
         ref.body = item.body.isEmpty ? nil : item.body
@@ -422,7 +426,8 @@ enum CollageSelect {
     ///   姿势在书里出现三次就腻了。精选只受连拍规则约束。
     /// 按分数从高到低过，精选天然先留。返回同地同姿势的两两关系，编排时一个跨页里别堆
     /// 三张这样的。特征算不出来时原样返回。
-    static func distinctMoments(_ photos: [CollagePhotoRef])
+    /// keeping：这几张无条件留下（相册编排传客户选中）；它们照样算进「已经留下的」，和它们是连拍、同姿势的别的照片照常拿掉。
+    static func distinctMoments(_ photos: [CollagePhotoRef], keeping keep: Set<String> = [])
         -> (kept: [CollagePhotoRef], dropped: [CollagePhotoRef], similar: [String: Set<String>]) {
         let sorted = photos.sorted { $0.score > $1.score }
         let head = Array(sorted.prefix(120))
@@ -453,7 +458,7 @@ enum CollageSelect {
             let distances = kept.compactMap { dist[p.id + "|" + $0.id] }
             let nearest = distances.min() ?? .infinity
             let samePose = distances.filter { $0 < 0.76 * median }.count
-            if nearest < 0.54 * median || (!p.isPick && samePose >= 2) {
+            if !keep.contains(p.id), nearest < 0.54 * median || (!p.isPick && samePose >= 2) {
                 dropped.append(p)
             } else {
                 kept.append(p)
@@ -517,7 +522,8 @@ enum CollageAlbum {
         var dropped: [CollagePhotoRef] = []
         var similar: [String: Set<String>] = [:]
         if dedupe {
-            let r = CollageSelect.distinctMoments(photos)
+            // 客户选中的不拿掉（F19：客户点名要的照片不能被相似去重悄悄删了）。
+            let r = CollageSelect.distinctMoments(photos, keeping: CollageAlbum.clientPickIDs(photos))
             kept = r.kept
             dropped = r.dropped
             similar = r.similar

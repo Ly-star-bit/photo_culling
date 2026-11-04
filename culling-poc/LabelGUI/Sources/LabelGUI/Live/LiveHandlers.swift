@@ -272,6 +272,8 @@ enum LiveHandlers {
         let rows = collage.project.photos.prefix(trayRowLimit).map { p -> [String: Any] in
             var row: [String: Any] = ["id": p.id, "width": p.width, "height": p.height, "faces": p.faces.count]
             row["pick"] = p.isPick
+            // 客户选中才报（没导入过客户选择的场次，行和以前一样）
+            if p.clientPick { row["client_pick"] = true }
             row["used"] = usage[p.id] ?? 0
             return row
         }

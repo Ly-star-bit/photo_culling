@@ -101,6 +101,13 @@ final class AppModel: ObservableObject {
         tab = .collage
     }
 
+    /// 批量页多选「进托盘」：切到拼图页、带照片进托盘，不排版（做相册：之后点「自动编排」）。
+    func openCollageTray(batchIDs ids: [String]) {
+        ensureCollageAttached()
+        collage.importFromBatch(ids: ids, batch: batch, layout: false)
+        tab = .collage
+    }
+
     /// 水印页「拼图 (N) →」/「套到当前拼图」：原图 + 水印设置交给拼图页（水印在拼图里实时画）。
     func openCollage(watermark request: WatermarkCollageRequest) {
         CollageHandoff.fromWatermark(request, batch: batch, collage: collage)

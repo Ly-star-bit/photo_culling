@@ -43,6 +43,12 @@ struct ContentView: View {
             batchStore.collageRequest = nil
             model.openCollage(batchIDs: ids)
         }
+        // 批量页多选「进托盘」：切到拼图页、只进托盘（客户选中的做相册走这里）。
+        .onChange(of: batchStore.collageTrayRequest) { _, request in
+            guard let ids = request, !ids.isEmpty else { return }
+            batchStore.collageTrayRequest = nil
+            model.openCollageTray(batchIDs: ids)
+        }
         // 水印页「拼图 (N) →」/「套到当前拼图」：原图 + 水印设置交给拼图页（水印在拼图里实时画）。
         .onChange(of: watermarkStore.collageRequest) { _, request in
             guard let request else { return }

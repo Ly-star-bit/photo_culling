@@ -1322,6 +1322,12 @@ struct BatchView: View {
             }
             .buttonStyle(.bordered)
             .help("把选中的照片带到「拼图」页，直接排一版（按人脸裁切、主图最大）")
+            Button("进托盘 (\(selectedIDs.count))") {
+                store.collageTrayRequest = store.items.map(\.id).filter { selectedIDs.contains($0) }
+            }
+            .buttonStyle(.bordered)
+            .help("只把选中的照片放进「拼图」页的托盘，不排版。做相册：顶栏筛「客户选中」、⌘A、点这里，"
+                  + "再在拼图页切到相册点「自动编排」（客户选中的一张都不会被拿掉）")
             Spacer()
             Button("取消选择") { selectedIDs.removeAll() }
                 .keyboardShortcut(.escape, modifiers: [])
