@@ -87,6 +87,19 @@ enum ImageLoader {
         let decodeURL: URL
     }
 
+    /// 照片文件夹的顶层列得出来吗（审查 D03）：列得出来 = nil；列不出来 = 给人看的话 —— 被系统隐私权限（桌面、文稿、下载、
+    /// 外接盘、网络盘，点过「不允许」）拦下时点名系统设置里的开关，不再落到「没有支持的图片文件」。
+    /// 只在分析开始前调（AnalysisEngine）：别放进最近场次、切场次那几条路 —— 读目录内容会让系统弹隐私询问，
+    /// 最近菜单一刷就是 15 个框（README「别让系统意外弹隐私框」）。
+    static func folderReadProblem(_ directory: URL) -> String? {
+        do {
+            _ = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            return nil
+        } catch {
+            return Diagnostics.folderUnreadableMessage(directory, error: error)
+        }
+    }
+
     /// Recursive: wedding shoots routinely arrive as 仪式/晚宴/花絮 subfolders.
     /// RAW+JPEG pairing happens per-directory — same stem in different folders is
     /// two different shots, not a pair.

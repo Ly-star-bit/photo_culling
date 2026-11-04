@@ -707,7 +707,7 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--export-jpeg"),
     }
 }
 
-// 诊断这一组的自检（逐张失败的原因）：
+// 诊断这一组的自检（逐张失败的原因、文件夹没权限）：
 // LABELGUI_DATA_DIR=<临时> LabelGUI --diag-selftest [<photo_dir>]（见 Diagnostics/DiagnosticsSelfTest.swift）。
 if CommandLine.arguments.contains("--diag-selftest") {
     MainActor.assumeIsolated { DiagnosticsSelfTest.run() }

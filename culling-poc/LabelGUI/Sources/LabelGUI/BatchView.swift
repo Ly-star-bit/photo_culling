@@ -1189,6 +1189,7 @@ struct BatchView: View {
                     .foregroundStyle(.red)
                     .frame(maxWidth: 480)
                     .multilineTextAlignment(.center)
+                if Diagnostics.mentionsPrivacySettings(error) { PrivacySettingsButton() }
                 Button("重新分析") { store.runAnalysis() }
                     .disabled(store.photoDir == nil)
             } else if let dir = store.photoDir {

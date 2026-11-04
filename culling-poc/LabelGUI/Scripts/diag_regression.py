@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """诊断这一组的端到端回归（审查 D03）：真命令行跑一遍，全部合成数据和临时目录。
-进程内的那一半（失败原因）在 `--diag-selftest`（Scripts/selftests.sh 里跑）；
+进程内的那一半（失败原因、文件夹权限）在 `--diag-selftest`（Scripts/selftests.sh 里跑）；
 这里验它们在命令行出口上接上了：
 
+2. --analyze 一个 chmod 000 的照片文件夹 → 退出码 1，说「没有权限读这个文件夹」并点名「系统设置 › 隐私与安全性 › 文件与文件夹」，
+   不说「没有支持的图片文件」；空文件夹的对照组照旧说「没有支持的图片文件」。
 3. --export-xmp：照片文件夹 chmod 555（写不进 .xmp）→ 「N 个失败 … ；原因：没有权限」，一个 .xmp 都没写出来。
 4. --export-jpeg：导出目录 chmod 555 → 「JPG 导出: 0 成功, N 失败 (…)；原因：没有权限」；精华 Top N 建不了子文件夹 →
    「无法创建导出文件夹「Top…」: 没有权限」。
@@ -113,6 +115,27 @@ def synth_session(label, n):
     return photos, data, [q["id"] for q in rows]
 
 
+def section_analyze():
+    print("2. --analyze 读不了的照片文件夹：说没有权限、点名系统设置")
+    if IS_ROOT:
+        print("  skip root 跑：chmod 000 拦不住")
+        return
+    locked = os.path.join(WORK, "photos-locked")
+    os.makedirs(locked)
+    make_jpeg(os.path.join(locked, "DSCF0001.JPG"), seed=11)
+    lock(locked, 0)
+    r = run(["--analyze", locked], fresh_data("locked"))
+    err = r.stdout + r.stderr
+    check(r.returncode == 1 and "没有权限读这个文件夹「photos-locked」" in err
+          and "系统设置 › 隐私与安全性 › 文件与文件夹" in err and "没有支持的图片文件" not in err,
+          f"chmod 000：退出码 1，权限 + 系统设置，不说没有图片：{err.strip()[-300:]!r}")
+    empty = os.path.join(WORK, "photos-empty")
+    os.makedirs(empty)
+    r = run(["--analyze", empty], fresh_data("empty"))
+    err = r.stdout + r.stderr
+    check(r.returncode == 1 and "没有支持的图片文件" in err and "没有权限" not in err, "空文件夹的对照组照旧说没有图片")
+
+
 def section_xmp():
     print("3. --export-xmp 写不进照片文件夹：逐个失败说原因")
     if IS_ROOT:
@@ -149,6 +172,7 @@ def section_jpeg():
 
 
 try:
+    section_analyze()
     section_xmp()
     section_jpeg()
 finally:

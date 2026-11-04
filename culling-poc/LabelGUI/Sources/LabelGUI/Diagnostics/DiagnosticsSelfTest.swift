@@ -5,6 +5,8 @@ import UniformTypeIdentifiers
 /// 诊断这一组的无头自检（审查 D03）：LABELGUI_DATA_DIR=<临时> LabelGUI --diag-selftest [<photo_dir>]
 ///   D 失败原因：盘不支持废纸篓、没权限、只读盘、盘满、EPERM；原因汇总；废纸篓移走一半；不限体积那条路逐字节和以前一样、
 ///     写不进去报「没有权限」；writeJPEG 原片不在 / 解不开；水印页拿到真原因
+///   E 文件夹权限：chmod 000 的照片文件夹分析时报「没有权限读这个文件夹 … 系统设置 › 隐私与安全性 › 文件与文件夹」，
+///     不报「没有支持的图片文件」；空文件夹照旧；读不了的子文件夹跳过；开关按位置点名
 /// 只写 LABELGUI_DATA_DIR 下面（照片文件夹参数只读：拿第一张 JPG 再核对一次逐字节）。
 enum DiagnosticsSelfTest {
     @MainActor
@@ -17,6 +19,7 @@ enum DiagnosticsSelfTest {
         let check = Check()
 
         reasonChecks(work, check)
+        permissionChecks(work, check)
 
         check.unlockAll()
         try? fm.removeItem(at: work)
@@ -146,6 +149,65 @@ enum DiagnosticsSelfTest {
         } catch {
             check(error.localizedDescription.contains("没有权限"), "水印页的「首个原因」拿到真原因", error.localizedDescription)
         }
+    }
+
+    // MARK: E 文件夹权限
+
+    @MainActor
+    private static func permissionChecks(_ work: URL, _ check: Check) {
+        print("E. 照片文件夹读不了")
+        let fm = FileManager.default
+        let home = "/Users/someone"
+        let toggles: [(String, String?)] = [
+            (home + "/Desktop/婚礼", "桌面文件夹"), (home + "/Documents/a/b", "文稿文件夹"), (home + "/Downloads", "下载文件夹"),
+            (home + "/Library/Mobile Documents/com~apple~CloudDocs/x", "iCloud 云盘"), ("/Network/Servers/nas/x", "网络宗卷"),
+            ("/Volumes/没有这块盘-diag/DCIM", "可移除的宗卷"), (home + "/Pictures/20261104", nil), (home + "/Desktopx", nil),
+        ]
+        for (path, want) in toggles {
+            let got = Diagnostics.privacyToggle(for: URL(fileURLWithPath: path), home: home)
+            check(got == want, "\(path) → \(want ?? "认不出")", got ?? "nil")
+        }
+        let eperm = NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError,
+                            userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))])
+        let tcc = Diagnostics.folderUnreadableMessage(URL(fileURLWithPath: NSHomeDirectory() + "/Desktop/婚礼"), error: eperm)
+        check(tcc.contains("没有权限读这个文件夹「婚礼」") && tcc.contains("系统设置 › 隐私与安全性 › 文件与文件夹 › 选片工具 › 打开「桌面文件夹」")
+              && !tcc.contains("共享与权限"), "系统隐私权限（EPERM）：点名「桌面文件夹」开关", tcc)
+        check(Diagnostics.mentionsPrivacySettings(tcc), "状态栏点开时给「打开系统设置」按钮")
+
+        let photos = work.appendingPathComponent("照片-没权限", isDirectory: true)
+        try? fm.createDirectory(at: photos, withIntermediateDirectories: true)
+        try? Data("x".utf8).write(to: photos.appendingPathComponent("DSCF0001.JPG"))
+        check.lock(photos, 0o000)
+        let problem = ImageLoader.folderReadProblem(photos) ?? ""
+        check(problem.contains("没有权限读这个文件夹「照片-没权限」") && problem.contains("系统设置 › 隐私与安全性 › 文件与文件夹")
+              && problem.contains("共享与权限"), "chmod 000：没有权限读这个文件夹 + 系统设置 + 文件夹自己的权限", problem)
+        let sessionDir = work.appendingPathComponent("session", isDirectory: true)
+        try? fm.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+        do {
+            _ = try AnalysisEngine.analyzeFolder(photos, dataDir: sessionDir) { _ in }
+            check(false, "chmod 000 的文件夹分析应该失败")
+        } catch {
+            let text = error.localizedDescription
+            check(text.contains("没有权限读这个文件夹") && !text.contains("没有支持的图片文件"),
+                  "分析报权限，不再报「没有支持的图片文件」", text)
+        }
+        let empty = work.appendingPathComponent("照片-空的", isDirectory: true)
+        try? fm.createDirectory(at: empty, withIntermediateDirectories: true)
+        do {
+            _ = try AnalysisEngine.analyzeFolder(empty, dataDir: sessionDir) { _ in }
+            check(false, "空文件夹分析应该失败")
+        } catch {
+            check(error.localizedDescription.contains("没有支持的图片文件"), "真的没有图片时照旧", error.localizedDescription)
+        }
+        // 顶层读得了、一个子文件夹读不了：跳过它，照样列出别的（不让整场失败）。
+        let mixed = work.appendingPathComponent("照片-一个子文件夹没权限", isDirectory: true)
+        let locked = mixed.appendingPathComponent("锁着的", isDirectory: true)
+        try? fm.createDirectory(at: locked, withIntermediateDirectories: true)
+        try? Data("x".utf8).write(to: mixed.appendingPathComponent("DSCF0002.JPG"))
+        try? Data("x".utf8).write(to: locked.appendingPathComponent("DSCF0003.JPG"))
+        check.lock(locked, 0o000)
+        let listed = ImageLoader.listPhotos(in: mixed).map(\.stem)
+        check(ImageLoader.folderReadProblem(mixed) == nil && listed == ["DSCF0002"], "子文件夹读不了：跳过、照样列出别的", "\(listed)")
     }
 
     // MARK: 小工具

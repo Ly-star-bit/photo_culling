@@ -113,6 +113,10 @@ enum AnalysisEngine {
         let oldManifest = (try? Data(contentsOf: dataDir.appendingPathComponent("manifest.json")))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
         let previousIDs = ImageLoader.PreviousIDs(manifest: oldManifest, photoDir: photoDir)
+        // 顶层列不出来（多半是系统隐私权限没给）就照实说、点名系统设置的开关，不再报「没有支持的图片文件」（审查 D03）。
+        if let problem = ImageLoader.folderReadProblem(photoDir) {
+            throw NSError(domain: "AnalysisEngine", code: 3, userInfo: [NSLocalizedDescriptionKey: problem])
+        }
         let photos = ImageLoader.listPhotos(in: photoDir, previous: previousIDs)
         guard !photos.isEmpty else {
             throw NSError(domain: "AnalysisEngine", code: 1,
