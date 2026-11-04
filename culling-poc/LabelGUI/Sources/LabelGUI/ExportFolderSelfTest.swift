@@ -4,11 +4,13 @@ import Foundation
 /// （「== 拼图、水印导出不写进拍摄文件夹」那一组）。全在 `dir`（数据目录下的临时目录）里建合成的拍摄文件夹，不读真照片：
 /// - 判断本身：拍摄文件夹本身、里面的「交付」（还没建的也算）、指过去的软链接、经过软链接进去、/private 别名、大小写不同
 ///   → 拦；「水印导出」「拼图导出」「导出JPG/精华」、点开头的隐藏文件夹、拍摄文件夹的上一级、外面、拍摄文件夹不存在 → 不拦；
-///   「水印导出」确实在分析跳过的名单里；水印页要查的文件夹 = 批量页那一场 + 照片所在的文件夹、去重；
+///   「水印导出」确实在分析跳过的名单里；水印页要查的文件夹 = 批量页那一场 + 照片所在的文件夹、去重（照片在「导出JPG」
+///   「水印导出」里推到外面那一场；在别的候选的「.cache」里去掉，没有候选装着的点开头文件夹不往上推）；
 ///   最近场次只提醒（里面的提醒，外面的、分析跳过的子文件夹不提醒）；
 /// - 水印页 exportAll：输出目录 = 照片所在的文件夹、里面还没建的「交付/客户A」、批量页那一场里面 → 一张不写、目录不建、
 ///   给「导出到 水印导出/」（不传批量页那一场的对照组照常导）；点了就导进 <拍摄文件夹>/水印导出/、原片不动；面板选到里面
-///   不换、选外面的照换；最近场次里照常导、只提醒；
+///   不换、选外面的照换；最近场次里照常导、只提醒；照片来自「导出JPG」「水印导出」（分析跳过）→ 拍摄文件夹按外面那一场算：
+///   旁边的「导出JPG/带水印」照常导、那一场的「交付」照样拦且点名那一场，一键改用导进 <那一场>/水印导出/ 只点一次；
 /// - 拼图 startExport（导出按钮、MCP、命令行 export: 同一条路）：拍摄文件夹本身、里面的「交付」→ 拒绝、不建目录、
 ///   lastError 说清楚，MCP 入口（LiveHandlers.exportFolderRefused）回 invalid_state；默认的「拼图导出/」照常写出；
 ///   面板选到里面不换、选外面的照换、之前那句拦下的提示收掉。
@@ -30,6 +32,7 @@ enum ExportFolderSelfTest {
         try? fm.createSymbolicLink(at: link, withDestinationURL: shoot)
         judgement(dir, shoot: shoot, outside: outside, link: link, check: check)
         watermark(dir, shoot: shoot, outside: outside, check: check)
+        watermarkFromSkipped(dir, check: check)
         collage(dir, shoot: shoot, outside: outside, check: check)
         try? fm.removeItem(at: dir)
     }
@@ -93,6 +96,31 @@ enum ExportFolderSelfTest {
         let want: [String] = [outside, shoot, other].map(\.standardizedFileURL.path)
         let names = shoots.map { ($0 as NSString).lastPathComponent }
         check(shoots == want, "水印页要查的：批量页那一场 + 照片所在的文件夹，去重", "\(names)")
+        // 照片在 app 自己的输出文件夹里（分析跳过）：推到最上面那一段的上一级，不把「导出JPG」当成一场
+        let exported: [URL] = [sub("导出JPG/精华/x.jpg"), sub("水印导出/y.jpg"), sub("导出JPG/水印导出/z.jpg"), sub("导出JPG/w.jpg")]
+        let roots: [String] = ExportFolderGuard.watermarkShoots(batch: nil, photos: exported).map(\.standardizedFileURL.path)
+        let rootNames = roots.map { ($0 as NSString).lastPathComponent }
+        check(roots == [shoot.standardizedFileURL.path], "照片在「导出JPG/精华」「水印导出」「导出JPG/水印导出」里 → 拍摄文件夹是外面那一场",
+              "\(rootNames)")
+        let fromExport = ExportFolderGuard.watermarkShoots(batch: nil, photos: [sub("导出JPG/w.jpg")])
+        let besideExport: Bool = !hit(sub("导出JPG/带水印"), fromExport) && !hit(sub("导出JPG"), fromExport)
+        check(besideExport, "　…… 输出到「导出JPG」本身、里面的「导出JPG/带水印」→ 不拦", "")
+        let deliverHit = ExportFolderGuard.blockingShoot(sub("交付"), among: fromExport)
+        check(samePath(deliverHit, shoot), "　…… 输出到那一场的「交付」→ 照样拦，点名的是那一场", deliverHit?.lastPathComponent ?? "nil")
+        // 照片在点开头的文件夹里：落在别的候选分析跳过的子树里就去掉；不往上推（上一级不一定是一场）
+        func paths(_ urls: [URL]) -> [String] { urls.map(\.standardizedFileURL.path) }
+        let inHidden = ExportFolderGuard.watermarkShoots(batch: shoot, photos: [sub(".cache/q.jpg")])
+        check(paths(inHidden) == paths([shoot]), "照片在那一场的「.cache」里 → 只查那一场（.cache 不算一场）",
+              "\(inHidden.map(\.lastPathComponent))")
+        let hiddenBeside: Bool = !hit(sub(".cache/带水印"), inHidden) && hit(sub("交付"), inHidden)
+        check(hiddenBeside, "　…… 输出「.cache/带水印」→ 不拦，「交付」照样拦", "")
+        let byPhoto = ExportFolderGuard.watermarkShoots(batch: nil, photos: [sub("a.jpg"), sub(".cache/r.jpg")])
+        check(paths(byPhoto) == paths([shoot]), "　…… 批量页没开、同一批里有那一场根目录的照片 → 也去掉「.cache」",
+              "\(byPhoto.map(\.lastPathComponent))")
+        let loose = dir.appendingPathComponent(".藏/S2")
+        let notWidened = ExportFolderGuard.watermarkShoots(batch: outside, photos: [loose.appendingPathComponent("r.jpg")])
+        check(paths(notWidened) == paths([outside, loose]), "照片在「.藏/S2」、没有别的候选装着它 → 照样当一场查，不推成上一级",
+              "\(notWidened.map(\.lastPathComponent))")
 
         let sessions = [entry("别处那一场", other), entry("婚礼A", shoot)]
         let note: String = ExportFolderGuard.sessionReminder(sub("交付"), sessions: sessions, what: "拼图") ?? ""
@@ -189,6 +217,83 @@ enum ExportFolderSelfTest {
         let reminded: Bool = store.isExporting && notice.contains("「上周婚礼」")
         finish()
         check(reminded && listing(recentOut).count == 2, "水印：最近场次的拍摄文件夹里 → 照常导，只提醒", notice)
+    }
+
+    // MARK: - 水印页：照片在分析跳过的文件夹里
+
+    /// 照片来自「导出JPG」「水印导出」（分析跳过）：拍摄文件夹按外面那一场算。旁边的「导出JPG/带水印」、「导出JPG」本身照常导；
+    /// 那一场的「交付」照样拦、点名那一场（不是「导出JPG」），建议 <那一场>/水印导出/；照片同时来自那一场和它的「水印导出」时
+    /// 只拦一次，点「导出到 水印导出/」就真的导进 <那一场>/水印导出/（不是 水印导出/水印导出）。自己一个 ShootB，不动上面的。
+    private static func watermarkFromSkipped(_ dir: URL, check: Check) {
+        let fm = FileManager.default
+        let shoot = dir.appendingPathComponent("ShootB")
+        let exported = shoot.appendingPathComponent(ImageLoader.jpegExportSubfolder)
+        let marks = shoot.appendingPathComponent(ExportFolderGuard.watermarkSubfolder)
+        for folder in [exported, marks] { try? fm.createDirectory(at: folder, withIntermediateDirectories: true) }
+        let e1 = exported.appendingPathComponent("e1.jpg")
+        let e2 = exported.appendingPathComponent("e2.jpg")
+        let q1 = shoot.appendingPathComponent("q1.jpg")
+        let q0 = marks.appendingPathComponent("q0_wm.jpg")
+        for (index, url) in [e1, e2, q1, q0].enumerated() {
+            let gray = 0.2 + 0.15 * Double(index)
+            fm.createFile(atPath: url.path, contents: CollageExportSelfTest.jpeg(width: 96, height: 64, gray: gray))
+        }
+        let before = listing(shoot)
+        let store = WatermarkStore(dataDir: dir.appendingPathComponent("wm-data-skipped"))
+        store.config.frame.enabled = true
+        store.addPhotos([e1, e2])
+        check(store.photos.count == 2 && store.hasWatermarkContent, "前提：「导出JPG」里两张、开了相框", "\(store.photos.count)")
+        func finish(_ s: WatermarkStore) { CollageExportSelfTest.spin(60) { !s.isExporting } }
+        func marked(_ folder: URL, _ names: [String]) -> Bool {
+            let have = Set(listing(folder))
+            return names.allSatisfy { have.contains($0) }
+        }
+
+        let beside = exported.appendingPathComponent("带水印")
+        store.outputDir = beside
+        store.exportAll(shootDir: shoot, sessions: [])
+        let started1: Bool = store.isExporting && store.folderRefusal == nil
+        finish(store)
+        let wrote1: Bool = listing(beside) == ["e1_wm.jpg", "e2_wm.jpg"]
+        check(started1 && wrote1, "水印：照片在「导出JPG」、批量页开着那一场、输出「导出JPG/带水印」→ 照常导",
+              "\(store.lastError ?? "") \(listing(beside))")
+
+        store.outputDir = exported
+        store.exportAll(shootDir: nil, sessions: [])
+        let started2: Bool = store.isExporting && store.folderRefusal == nil
+        finish(store)
+        let wrote2: Bool = marked(exported, ["e1_wm.jpg", "e2_wm.jpg"])
+        check(started2 && wrote2, "水印：批量页没开、输出就是「导出JPG」本身（{原名}_wm）→ 照常导",
+              "\(store.lastError ?? "") \(listing(exported))")
+
+        let deliver = shoot.appendingPathComponent("交付")
+        store.outputDir = deliver
+        store.exportAll(shootDir: nil, sessions: [])
+        let message = store.lastError ?? ""
+        let named: Bool = message.hasPrefix("不能导出到拍摄文件夹「ShootB」") && !message.contains("「导出JPG」")
+        let safeIsShoot: Bool = samePath(store.folderRefusal?.safeFolder, marks)
+        check(!store.isExporting && named && safeIsShoot, "水印：照片在「导出JPG」、输出那一场的「交付」→ 拦，点名「ShootB」、建议 ShootB/水印导出",
+              "\(message) → \(store.folderRefusal?.safeFolder.path ?? "")")
+        finish(store)
+        check(!fm.fileExists(atPath: deliver.path), "　……「交付」没建出来", "")
+
+        // 照片同时来自那一场和它的「水印导出」：只拦一次，一键改用就导进 ShootB/水印导出/
+        let mixed = WatermarkStore(dataDir: dir.appendingPathComponent("wm-data-mixed"))
+        mixed.config.frame.enabled = true
+        mixed.addPhotos([q1, q0])
+        mixed.outputDir = deliver
+        mixed.exportAll(shootDir: nil, sessions: [])
+        let once: Bool = !mixed.isExporting && samePath(mixed.folderRefusal?.safeFolder, marks)
+        check(once && mixed.lastError?.hasPrefix("不能导出到拍摄文件夹「ShootB」") == true,
+              "水印：照片来自那一场和它的「水印导出」、输出「交付」→ 拦一次，建议 ShootB/水印导出", mixed.lastError ?? "")
+        mixed.useSafeOutputDir(shootDir: nil, sessions: [])
+        let resumed: Bool = mixed.isExporting && samePath(mixed.outputDir, marks) && mixed.folderRefusal == nil
+        finish(mixed)
+        let landed: Bool = marked(marks, ["q1_wm.jpg", "q0_wm_wm.jpg"])
+        let nested: Bool = fm.fileExists(atPath: marks.appendingPathComponent(ExportFolderGuard.watermarkSubfolder).path)
+        check(resumed && landed && !nested && mixed.lastError == nil, "　……「导出到 水印导出/」点一次就导进 ShootB/水印导出/（没有 水印导出/水印导出）",
+              "\(listing(marks)) \(mixed.lastError ?? "")")
+        check(listing(shoot) == before, "　…… ShootB 这一层一个文件都没多", "\(listing(shoot))")
     }
 
     // MARK: - 拼图
