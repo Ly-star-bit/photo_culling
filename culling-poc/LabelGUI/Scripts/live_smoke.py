@@ -3080,6 +3080,40 @@ __attribute__((constructor)) static void init(void) {
               and (un_m["undone"].get("op_id") == op_m) and cp_disk() == disk0 and ov_m3.get("client_pick_count") == picks0
               and (ov_m3.get("xmp") or {}).get("stale_count") == n_m - 1 and sm5["verdict_undo"]["depth"] == sm1["verdict_undo"]["depth"],
               f"app_undo target=verdicts 撤掉 AI 的导入：动到的是 {mid}、{mid2}，client_picks.json、客户选中数、XMP 过期都回到导入之前")
+        # 带修图要求的回复（审查：桥上以前丢客户备注）：文件名后面的话存成客户备注（client_notes.json，复制原片时写成精修要求.csv），
+        # 结果里 notes / new_notes；照片已经是客户选中、只补了备注也算改了（和导入框同一条路）；app_undo 连备注一起撤
+        cn_path = os.path.join(msess, "client_notes.json")
+
+        def cn_disk():
+            return json.load(open(cn_path)) if os.path.exists(cn_path) else None
+
+        sn0 = mst()
+        n_text = f"{mid} 去路人\n{mid2}：瘦脸"
+        nd = mw("cull_import_client_picks", {"text": n_text})
+        cn_dry = cn_disk()
+        na = mw("cull_import_client_picks", {"text": n_text, "dry_run": False})
+        sn1 = mst()
+        check(nd.get("notes") == {mid: "去路人", mid2: "瘦脸"} and nd.get("new_notes") == [mid, mid2] and nd.get("changed") is False
+              and cn_dry is None and na.get("changed") is True and na.get("new_ids") == [mid, mid2] and na.get("new_notes") == [mid, mid2]
+              and cn_disk() == {mid: "去路人", mid2: "瘦脸"} and {mid, mid2} <= set(cp_disk() or []) and steps(sn0, sn1) == (1, 0)
+              and (sn1.get("external_notice") or "").startswith("AI：标了 2 张客户选中 · 备注 2 张"),
+              f"带备注导入：dry_run 回 notes / new_notes、不写；dry_run:false 客户选中和 client_notes.json 一起写上、一步撤销（{cn_disk()}）")
+        nb = mw("cull_import_client_picks", {"text": f"{mid} 去路人，黑白", "dry_run": False})
+        sn2 = mst()
+        nc = mw("cull_import_client_picks", {"text": f"{mid} 去路人，黑白", "dry_run": False})
+        sn3 = mst()
+        check(nb.get("changed") is True and nb.get("new_ids") == [] and nb.get("already_picked") == 1 and nb.get("new_notes") == [mid]
+              and (cn_disk() or {}).get(mid) == "去路人，黑白" and (cn_disk() or {}).get(mid2) == "瘦脸"
+              and nb.get("undo", {}).get("steps_added") == 1 and steps(sn1, sn2) == (1, 0)
+              and (sn2.get("external_notice") or "").startswith("AI：更新了 1 张的客户备注")
+              and nc.get("changed") is False and nc.get("new_notes") == [] and steps(sn2, sn3) == (0, 0),
+              f"已经是客户选中、只补了备注：changed true、再压一步、{mid2} 的备注留着；同一句再导 changed false（{cn_disk()}）")
+        un_n = [mw("app_undo", {"target": "verdicts"}) for _ in range(2)]
+        sn4 = mst()
+        check([(u.get("undone") or {}).get("tool") for u in un_n] == ["cull_import_client_picks"] * 2 and cn_disk() is None
+              and cp_disk() == disk0 and m_ov().get("client_pick_count") == picks0
+              and sn4["verdict_undo"]["depth"] == sn0["verdict_undo"]["depth"],
+              f"app_undo 两下：备注、客户选中都回到导入之前，client_notes.json 删掉（{[err_code(u) for u in un_n]}）")
 
         # ---------- AI 改判的出处（ai_overrides.json，overrides.json 格式不动）：照样 manual:true，另有 changed_by ai、ai_override；
         # 用户亲手按一下就算用户的；app_undo 连出处一起撤；重开宿主读回来，overrides.json 对不上的丢掉

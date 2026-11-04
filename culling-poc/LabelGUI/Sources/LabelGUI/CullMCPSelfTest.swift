@@ -134,6 +134,52 @@ enum CullMCPSelfTest {
         let touched = store.undoLastOverride()
         check(store.clientPickCount == 0 && Set(touched) == Set(r.ids) && !FileManager.default.fileExists(atPath: file.path),
               "⌘Z：客户选中回到 0、动到的是那 2 张、client_picks.json 删掉：\(touched)")
+        clientNoteChecks(check, store: store, sessionDir: sessionDir)
+    }
+
+    /// 带修图要求的回复（审查：桥上以前只传 ids，备注丢了、summary 却说存了）：LiveHandlers.applyClientImport（handler 的
+    /// dry_run:false 就走它）和导入框同一条 importClientPicks(ids, notes:) —— 备注进 client_notes.json（精修要求.csv 的行）、
+    /// 和客户选中同一步撤销；照片已经是客户选中、只补了备注也算改了；什么都没变不压撤销。结果主体带 notes / new_notes。
+    static func clientNoteChecks(_ check: Check, store: BatchStore, sessionDir: URL) {
+        let fm = FileManager.default
+        let notesFile = sessionDir.appendingPathComponent("client_notes.json")
+        let noted = store.resolveClientReply("DSCF7208 去路人\nDSCF7209：瘦脸")
+        let wanted: [String: String] = ["DSCF7208": "去路人", "DSCF7209": "瘦脸"]
+        let body = LiveHandlers.clientPicksBody(noted, existing: store.clientPicks, existingNotes: store.clientNotes)
+        let bodyNotes = body["notes"] as? [String: String]
+        let bodyNew = body["new_notes"] as? [String]
+        check(noted.ids == ["DSCF7208", "DSCF7209"] && noted.notes == wanted && bodyNotes == wanted
+              && bodyNew == ["DSCF7208", "DSCF7209"],
+              "认出带备注的两行：notes 是客户原话、new_notes 是这两张：\(body)")
+        let pushes = store.overrideUndoPushes
+        let first = LiveHandlers.applyClientImport(noted, batch: store)
+        let rows = store.retouchRows(noted.ids)
+        check(first.fresh == noted.ids && first.renoted == noted.ids && store.clientNotes == wanted
+              && store.clientPicks == Set(noted.ids) && store.overrideUndoPushes == pushes + 1
+              && fm.fileExists(atPath: notesFile.path) && rows.count == 2,
+              "标上带备注的：客户选中 2 张、备注存进 client_notes.json（精修要求.csv 有 \(rows.count) 行）、一步撤销" +
+              "（\(store.clientNotes)、\(store.overrideUndoPushes - pushes) 步）")
+        let reopened = open()
+        check(reopened.clientNotes == wanted, "重开以后客户备注还在：\(reopened.clientNotes)")
+        // 照片已经是客户选中，客户又补了一句：只改备注也要存（导入框走 setClientReply），没写的那张留着原来的
+        let more = store.resolveClientReply("DSCF7208 去路人，黑白")
+        let moreBody = LiveHandlers.clientPicksBody(more, existing: store.clientPicks, existingNotes: store.clientNotes)
+        let second = LiveHandlers.applyClientImport(more, batch: store)
+        let merged = store.clientNotes["DSCF7208"] == "去路人，黑白" && store.clientNotes["DSCF7209"] == "瘦脸"
+        check(second.fresh.isEmpty && second.renoted == ["DSCF7208"] && second.changed && merged
+              && moreBody["new_ids"] as? [String] == [] && moreBody["new_notes"] as? [String] == ["DSCF7208"]
+              && store.overrideUndoPushes == pushes + 2
+              && LiveHandlers.clientImportNotice(second).hasPrefix("AI：更新了 1 张的客户备注"),
+              "都已经是客户选中、只补了备注：照样算改了、再压一步撤销，DSCF7209 的备注留着（\(store.clientNotes)）")
+        let third = LiveHandlers.applyClientImport(more, batch: store)
+        check(!third.changed && store.overrideUndoPushes == pushes + 2, "同一句再导一次：什么都不变、不压撤销")
+        let notice = LiveHandlers.clientImportNotice(first)
+        check(notice.hasPrefix("AI：标了 2 张客户选中 · 备注 2 张"), "状态栏那一句带备注张数：\(notice)")
+        _ = store.undoLastOverride()
+        check(store.clientNotes["DSCF7208"] == "去路人" && store.clientPickCount == 2, "⌘Z 一下：备注回到补之前（\(store.clientNotes)）")
+        _ = store.undoLastOverride()
+        check(store.clientPickCount == 0 && store.clientNotes.isEmpty && !fm.fileExists(atPath: notesFile.path),
+              "再 ⌘Z：客户选中和备注一起回到导入之前，client_notes.json 删掉（\(store.clientNotes)）")
     }
 
     // MARK: - 3. AI 改判的出处（ai_overrides.json）

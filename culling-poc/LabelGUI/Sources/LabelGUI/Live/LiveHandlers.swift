@@ -916,7 +916,8 @@ extension LiveHandlers {
 
     /// = 批量页「导出 › 导入客户选择…」：text 走 resolveClientReply（和导入框边打字边预览同一个函数），ids 要全在这一场。
     /// dry_run（默认）只回认出了哪些，不等用户停手、不压撤销；dry_run:false 走 importClientPicks（导入框「标记为客户选中」：
-    /// 加到原来的上面，一步判决撤销，app_undo target=verdicts 能撤）。客户选中不改判决，拼图托盘不用刷。
+    /// 加到原来的上面，文件名后面的修图要求一起存成客户备注，一步判决撤销，app_undo target=verdicts 能撤）。
+    /// 照片都已经是客户选中、只是这次补了备注也算改了（导入框一样会存）。客户选中不改判决，拼图托盘不用刷。
     static func importClientPicks(_ req: Request, live: LiveServer, model: AppModel) async -> Reply {
         if let bad = checkArgs("cull_import_client_picks", req) { return bad }
         let dryRun = req.params["dry_run"] as? Bool ?? true
@@ -939,20 +940,20 @@ extension LiveHandlers {
             }
             resolution.ids = ids
         }
-        let existing = batch.clientPicks
-        var out = clientPicksBody(resolution, existing: existing)
+        var out = clientPicksBody(resolution, existing: batch.clientPicks, existingNotes: batch.clientNotes)
         out["session"] = currentKey(batch) ?? NSNull()
         out["dry_run"] = dryRun
-        let fresh = resolution.ids.filter { !existing.contains($0) }
         var notice: String?
-        if !dryRun && !fresh.isEmpty {
+        if !dryRun {
             let pushesBefore = batch.overrideUndoPushes
-            batch.importClientPicks(resolution.ids)
-            model.aiLog.recordWrite(.verdicts, op: req.opID ?? "", tool: "cull_import_client_picks", before: pushesBefore,
-                                    after: batch.overrideUndoPushes, depth: batch.overrideUndoDepth)
-            let text = "AI：标了 \(fresh.count) 张客户选中 · 在批量页 ⌘Z 撤销"
-            batchNotice(batch, text)
-            notice = text
+            let delta = applyClientImport(resolution, batch: batch)
+            if delta.changed {
+                model.aiLog.recordWrite(.verdicts, op: req.opID ?? "", tool: "cull_import_client_picks", before: pushesBefore,
+                                        after: batch.overrideUndoPushes, depth: batch.overrideUndoDepth)
+                let text = clientImportNotice(delta)
+                batchNotice(batch, text)
+                notice = text
+            }
         }
         let changed = notice != nil
         out["changed"] = changed
@@ -977,10 +978,53 @@ extension LiveHandlers {
         return .result(out)
     }
 
-    /// 导入客户选择的结果主体（dry_run 和正式标一样）：认出的、没认出的原文、按哪张确认表对的、导入框里那几行预览。纯函数。
-    static func clientPicksBody(_ r: ClientReply.Resolution, existing: Set<String>) -> [String: Any] {
-        let fresh = r.ids.filter { !existing.contains($0) }
+    /// 这次导入会改什么：新增的客户选中、备注会变的照片（都按认出的顺序）。两样都空 = 导了也什么都不变（不压撤销、changed false）。
+    struct ClientImportDelta {
+        var fresh: [String] = []
+        var renoted: [String] = []
+        var changed: Bool { !fresh.isEmpty || !renoted.isEmpty }
+    }
+
+    /// 和 BatchStore.importClientPicks 同一条合并规则：同一张原来有备注的换成这次的，这次没写（或写的是空）的留着原来的。纯函数。
+    static func clientImportDelta(_ r: ClientReply.Resolution, picks: Set<String>,
+                                  notes: [String: String]) -> ClientImportDelta {
+        var d = ClientImportDelta()
+        d.fresh = r.ids.filter { !picks.contains($0) }
+        d.renoted = r.ids.filter { id in
+            guard let note = r.notes[id], !note.isEmpty else { return false }
+            return notes[id] != note
+        }
+        return d
+    }
+
+    /// dry_run:false 那一步 = 导入框的「标记为客户选中」（客户选中和备注一起，一步撤销）。什么都不变时不调
+    /// （不压撤销，状态栏也不写「新增 0 张」）。
+    static func applyClientImport(_ r: ClientReply.Resolution, batch: BatchStore) -> ClientImportDelta {
+        let delta = clientImportDelta(r, picks: batch.clientPicks, notes: batch.clientNotes)
+        guard delta.changed else { return delta }
+        batch.importClientPicks(r.ids, notes: r.notes)
+        return delta
+    }
+
+    /// 批量页状态栏那一句：「AI：标了 2 张客户选中 · 备注 2 张 · 在批量页 ⌘Z 撤销」；只改了备注 =「AI：更新了 1 张的客户备注 · …」。
+    static func clientImportNotice(_ d: ClientImportDelta) -> String {
+        let undo = " · 在批量页 ⌘Z 撤销"
+        guard !d.fresh.isEmpty else { return "AI：更新了 \(d.renoted.count) 张的客户备注" + undo }
+        let noted: String = d.renoted.isEmpty ? "" : " · 备注 \(d.renoted.count) 张"
+        return "AI：标了 \(d.fresh.count) 张客户选中" + noted + undo
+    }
+
+    /// 导入客户选择的结果主体（dry_run 和正式标一样）：认出的、没认出的原文、按哪张确认表对的、导入框里那几行预览、
+    /// 客户写的备注。`existingNotes` = 现在存着的客户备注（new_notes 按它比）。纯函数。
+    static func clientPicksBody(_ r: ClientReply.Resolution, existing: Set<String>,
+                                existingNotes: [String: String] = [:]) -> [String: Any] {
+        let delta = clientImportDelta(r, picks: existing, notes: existingNotes)
+        let fresh = delta.fresh
         var out: [String: Any] = ["ids": r.ids, "unknown": r.unknown, "new_ids": fresh]
+        // 文件名后面的修图要求（照片 id → 客户原话）：dry_run:false 时存成客户备注，复制原片时写成「精修要求.csv」；
+        // new_notes = 其中和现在存着的不一样、这次会写进去的
+        out["notes"] = r.notes
+        out["new_notes"] = delta.renoted
         out["already_picked"] = r.ids.count - fresh.count
         out["existing_count"] = existing.count
         out["summary"] = ClientReply.summary(r, existing: existing)
