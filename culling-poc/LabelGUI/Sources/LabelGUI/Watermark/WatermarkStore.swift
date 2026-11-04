@@ -380,6 +380,10 @@ final class WatermarkStore: ObservableObject {
         return Self.outputName(for: first, index: 1, template: options.nameTemplate) + ".jpg"
     }
 
+    /// 导出写完（含取消前已经写出的）：输出目录、[(写出去的文件, 原图)]，按导出顺序。批量页接上以后记进当前场次的
+    /// 交付对照（DeliveryLedger.swift 的 recordDeliveries）；没接 = 不记。
+    var onDelivered: (@MainActor (URL, [(file: URL, source: URL)]) -> Void)?
+
     func exportAll() {
         guard !isExporting, !photos.isEmpty else { return }
         guard let outputDir else {
@@ -428,29 +432,31 @@ final class WatermarkStore: ObservableObject {
             let workers = min(4, max(2, ProcessInfo.processInfo.activeProcessorCount / 4))
             var failures: [(name: String, reason: String)] = []
             var overLimit: [String] = []
+            /// 写出去了的（含压不到上限的）在 jobs 里的位置：收尾时记交付对照。
+            var written: [Int] = []
             var done = 0
-            var iterator = jobs.makeIterator()
-            await withTaskGroup(of: (String, String?, Bool).self) { group in
+            var iterator = jobs.enumerated().makeIterator()
+            await withTaskGroup(of: (Int, String, String?, Bool).self) { group in
                 func addNext() {
-                    guard let job = iterator.next() else { return }
+                    guard let (index, job) = iterator.next() else { return }
                     group.addTask {
                         do {
                             try WatermarkEngine.export(source: job.src, to: job.dest, signature: sig,
                                                        config: cfg, options: opts)
-                            return (job.src.lastPathComponent, nil, false)
+                            return (index, job.src.lastPathComponent, nil, false)
                         } catch WatermarkEngine.ExportError.overLimit {
                             // 写出去了，只是压不到上限：不算失败，收尾时点名。
-                            return (job.src.lastPathComponent, nil, true)
+                            return (index, job.src.lastPathComponent, nil, true)
                         } catch {
-                            return (job.src.lastPathComponent, error.localizedDescription, false)
+                            return (index, job.src.lastPathComponent, error.localizedDescription, false)
                         }
                     }
                 }
                 for _ in 0..<workers { addNext() }
                 // 取消后不再排新的，但把已经在跑的等完再收尾：这样 done 就是
                 // 真实写出的张数，而不是 break 时丢掉在途结果的近似值。
-                for await (name, failure, over) in group {
-                    if let failure { failures.append((name, failure)) }
+                for await (index, name, failure, over) in group {
+                    if let failure { failures.append((name, failure)) } else { written.append(index) }
                     if over { overLimit.append(name) }
                     done += 1
                     let doneNow = done
@@ -472,10 +478,12 @@ final class WatermarkStore: ObservableObject {
             let failed = failures
             let completed = done
             let overNames = overLimit
+            let delivered = written.sorted().map { (file: jobs[$0].dest, source: jobs[$0].src) }
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
                 self.isExporting = false
+                if !delivered.isEmpty { self.onDelivered?(outputDir, delivered) }
                 let succeeded = completed - failed.count
                 if self.exportCancelled {
                     // 已经写出的文件保留（撤销它们比留着更意外）。

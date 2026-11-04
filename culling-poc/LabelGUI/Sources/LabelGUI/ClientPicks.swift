@@ -42,9 +42,13 @@ enum ClientReply {
         var byFile: [String: Set<String>] = [:]
         var byName: [String: Set<String>] = [:]
         var byNumber: [String: Set<String>] = [:]
+        /// 导出过的交付文件名（exports.json，见 DeliveryLedger.swift）：小写的完整文件名 / 去掉 .jpg 的名字 → id。
+        /// 只收还在这一场的照片。好几次导出同一个名字指向不同的照片（{序号:3} 导了两回）= 重名，不替你挑。
+        var deliveredFile: [String: Set<String>] = [:]
+        var deliveredName: [String: Set<String>] = [:]
         var live: Set<String> = []
 
-        init(_ items: [BatchItem]) {
+        init(_ items: [BatchItem], deliveries: [DeliveryRecord] = []) {
             for item in items {
                 live.insert(item.id)
                 byName[item.id.lowercased(), default: []].insert(item.id)
@@ -58,13 +62,39 @@ enum ClientReply {
                 }
                 if let n = ClientReply.fileNumber(item.id) { byNumber[n, default: []].insert(item.id) }
             }
+            for entry in deliveries.flatMap(\.files) where live.contains(entry.id) {
+                let url = URL(fileURLWithPath: entry.file.lowercased())
+                deliveredFile[url.lastPathComponent, default: []].insert(entry.id)
+                deliveredName[url.deletingPathExtension().lastPathComponent, default: []].insert(entry.id)
+            }
         }
 
-        /// 按文件名认：完整文件名 → 名字 → 去掉扩展名再按名字。nil = 不是这一场的文件名；
+        /// 按文件名认：原片的文件名，加上导出过的交付文件名。两边都对上、又不是同一张 = 重名（返回两张），不替你挑；
+        /// 默认的导出 JPG 交付名就是原名，两边是同一张。
+        func byFilename(_ token: String) -> Set<String>? {
+            let original = originalFilename(token)
+            guard let delivered = deliveredFilename(token) else { return original }
+            return original.map { $0.union(delivered) } ?? delivered
+        }
+
+        /// 交付文件名：完整文件名 → 名字 → 去掉扩展名再按名字（扩展名的规矩和原片一样）。纯数字的名字（{序号:3}
+        /// 导出的 001）不带扩展名时不在这里认，走文件号 / 编号那条（resolve 里当第三种认法一起比）。
+        func deliveredFilename(_ token: String) -> Set<String>? {
+            let lower = token.lowercased()
+            if let hit = deliveredFile[lower] { return hit }
+            if !ClientReply.isDigits(Substring(lower)), let hit = deliveredName[lower] { return hit }
+            let url = URL(fileURLWithPath: lower)
+            let ext = url.pathExtension
+            guard !ext.isEmpty, ext.count <= 4, ext.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }),
+                  ext.contains(where: \.isLetter) else { return nil }
+            return deliveredName[url.deletingPathExtension().lastPathComponent]
+        }
+
+        /// 按原片文件名认：完整文件名 → 名字 → 去掉扩展名再按名字。nil = 不是这一场的文件名；
         /// 返回不止一张 = 重名（不同子文件夹里同名的照片），不替你挑。
         /// 扩展名不论：这一场只有 JPG，客户回 DSCF7207.CR3 / .CR2 / .3FR 也按名字认（不超过 4 个字母或数字，
         /// 至少带一个字母 —— 「DSCF7207.1」这种不算扩展名）。
-        func byFilename(_ token: String) -> Set<String>? {
+        func originalFilename(_ token: String) -> Set<String>? {
             let lower = token.lowercased()
             if let hit = byFile[lower] { return hit }
             if let hit = byName[lower] { return hit }
@@ -197,8 +227,10 @@ enum ClientReply {
         return t
     }
 
-    static func resolve(_ text: String, items: [BatchItem], sheets: [ProofSheet]) -> Resolution {
-        let lookup = Lookup(items)
+    /// `deliveries`：这一场导出过的交付对照（exports.json），客户按导出的文件名回也认得回原片。
+    static func resolve(_ text: String, items: [BatchItem], sheets: [ProofSheet],
+                        deliveries: [DeliveryRecord] = []) -> Resolution {
+        let lookup = Lookup(items, deliveries: deliveries)
         var r = Resolution()
         let (header, rest) = splitHeader(halfwidth(text))
         r.header = header
@@ -247,6 +279,17 @@ enum ClientReply {
             let byNumber = token.count >= 3 ? lookup.byNumber[fileNumber(token) ?? ""] : nil
             let byFile = byNumber?.count == 1 ? byNumber?.first : nil
             let byIndex = Int(token).flatMap(sheetPhoto)
+            // 纯数字的交付文件名（{序号:3} 导出的 001.jpg）：客户回「001」也可能说的是它，算第三种认法 ——
+            // 和文件号、编号指的不是同一张，一样说不准。
+            if let delivered = lookup.deliveredName[token] {
+                let others = Set([byFile, byIndex].compactMap { $0 })
+                if delivered.count == 1, let id = delivered.first, others.isSubset(of: [id]) {
+                    hit(id)
+                } else {
+                    miss(token + (delivered.count > 1 ? "（重名）" : "（交付文件名还是编号？）"))
+                }
+                continue
+            }
             switch (byFile, byIndex) {
             case let (file?, index?) where file != index:
                 miss(token + "（文件号还是编号？）")
@@ -537,7 +580,7 @@ extension BatchStore {
 
     /// 粘贴进来的客户回复认成哪些照片（导入框边打字边算）。
     func resolveClientReply(_ text: String) -> ClientReply.Resolution {
-        ClientReply.resolve(text, items: items, sheets: proofSheets)
+        ClientReply.resolve(text, items: items, sheets: proofSheets, deliveries: deliveryRecords)
     }
 
     /// 「标记为客户选中」：加到原来的客户选中上（客户常常分几次回，加选是常事）。一步 ⌘Z 撤回。

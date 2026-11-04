@@ -64,6 +64,8 @@ final class AppModel: ObservableObject {
         let labels = LabelStore(dataDir: batch.sessionDir)
         let cardCenter = CardImportCenter(store: batch)
         let watermark = WatermarkStore(dataDir: dataDir)
+        // 水印页导出的文件名记进当前场次的交付对照（DeliveryLedger.swift）。
+        watermark.recordDeliveries(into: batch)
         let collage = CollageStore(dataDir: dataDir)
         let model = AppModel(batch: batch, labels: labels, cardCenter: cardCenter,
                              watermark: watermark, collage: collage)

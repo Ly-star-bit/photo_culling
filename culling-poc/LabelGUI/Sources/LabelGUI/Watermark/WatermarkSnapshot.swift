@@ -100,8 +100,8 @@ enum WatermarkUISnapshot {
 
 // MARK: - 水印页批量导出（无头）
 
-/// LABELGUI_DATA_DIR=<临时目录> LabelGUI --watermark-batch <photo_dir> <out_dir> [--signature <sig.png>] [--exif]
-/// 走水印页「批量导出」同一个 exportAll（批内重名、目标里已有的都另存 -2，不覆盖），打印结果那一行。
+/// LABELGUI_DATA_DIR=<临时目录> LabelGUI --watermark-batch <photo_dir> <out_dir> [--signature <sig.png>] [--exif] [--session <dir>]
+/// 走水印页「批量导出」同一个 exportAll（批内重名、目标里已有的都另存 -2，不覆盖），打印结果那一行和记下的交付对照。
 /// 无头参数：导完不弹访达。
 enum WatermarkBatchCLI {
     @MainActor
@@ -124,12 +124,24 @@ enum WatermarkBatchCLI {
         let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
         store.addPhotos(files.filter { WatermarkStore.inputExtensions.contains($0.pathExtension.lowercased()) }
             .sorted { $0.path < $1.path })
+        // 和界面一样接上批量页：批量页开着的场次（--session，默认 <photo_dir>）分析过的话，导出的文件名记进它的
+        // 交付对照（exports.json）；原图按文件本身对，不是这一场的照片不记。
+        let batch = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
+        batch.switchSession(to: option("--session").map { URL(fileURLWithPath: $0) } ?? dir)
+        store.recordDeliveries(into: batch)
+        let ledgerBefore = batch.deliveryRecords.last
         store.exportAll()
         let deadline = Date().addingTimeInterval(300)
         while store.isExporting && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         let error = store.lastError
         print(store.progressText)
         if let error { print(error) }
+        if let record = batch.deliveryRecords.last, record != ledgerBefore {
+            print("交付对照 \(batch.deliveryLedgerPath.path) · \(record.kind) · 这次 \(record.files.count) 张")
+            for file in record.files { print("  对照 \(file.file) → \(file.id)") }
+        } else {
+            print("交付对照: 没记（这些照片不在分析过的场次里）")
+        }
         exit(error == nil && !store.isExporting ? 0 : 1)
     }
 }
