@@ -586,6 +586,10 @@ enum SessionMoveSelfTest {
               "修改时间变了（拷贝没保留）、拍摄时间一样 → 同一个")
         check(SessionLocation.sameFile(stamp, at: tagged, layer1: nil, captureTime: "2026-03-22T09:00:00") == false,
               "拍摄时间不一样 → 不是")
+        check(SessionLocation.sameFile(stamp, at: tagged, layer1: ["src_size": 999], captureTime: "2026-03-21T10:00:00") == true,
+              "大小变了（别的软件往 JPEG 里写过元数据）、拍摄时间一样 → 还算同一个")
+        check(SessionLocation.sameFile(stamp, at: tagged, layer1: ["src_size": 999], captureTime: "2026-03-22T09:00:00") == false,
+              "大小变了、拍摄时间也不一样 → 不是")
     }
 
     /// 一张带 EXIF DateTimeOriginal 的小 JPEG。

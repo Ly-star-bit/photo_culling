@@ -213,17 +213,24 @@ enum SessionLocation {
         return result
     }
 
-    /// 新位置上同名的这个文件是不是分析过的那一个：记了大小的只看大小（拷贝不改大小，两张不同的照片几乎不会一字节不差）；
-    /// 没记大小的，修改时间（差 2 秒以内，exFAT 只记到 2 秒）或者 EXIF 拍摄时间有一样对得上就算。nil = 什么都没记，分不出。
+    /// 新位置上同名的这个文件是不是分析过的那一个：记了大小的先看大小（拷贝不改大小，两张不同的照片几乎不会一字节不差）；
+    /// 大小变了的再看 EXIF 拍摄时间 —— 别的软件可能往 JPEG 里写过元数据（Lightroom 把星级直接写进 JPEG），拍摄时间
+    /// 一样的还算同一张，同一台相机另一场的同名照片拍摄时间对不上。没记大小的，修改时间（差 2 秒以内，exFAT 只记到 2 秒）
+    /// 或者 EXIF 拍摄时间有一样对得上就算。nil = 什么都没记，分不出。
     static func sameFile(_ stamp: ImageLoader.FileStamp, at url: URL, layer1: [String: Any]?, captureTime: String?) -> Bool? {
-        if let size = (layer1?["src_size"] as? NSNumber)?.intValue { return size == stamp.size }
+        let shot: String? = captureTime.flatMap { $0.count >= 19 ? String($0.prefix(19)) : nil }
+        if let size = (layer1?["src_size"] as? NSNumber)?.intValue {
+            if size == stamp.size { return true }
+            guard let shot, let exif = exifCaptureTime(url) else { return false }
+            return exif == shot
+        }
         var evidence: [Bool] = []
         if let mtime = (layer1?["src_mtime"] as? NSNumber)?.doubleValue {
             let gap = abs(mtime - stamp.mtime)
             evidence.append(gap < 2)
         }
-        if let recorded = captureTime, recorded.count >= 19, let exif = exifCaptureTime(url) {
-            evidence.append(exif == String(recorded.prefix(19)))
+        if let shot, let exif = exifCaptureTime(url) {
+            evidence.append(exif == shot)
         }
         guard !evidence.isEmpty else { return nil }
         return evidence.contains(true)
