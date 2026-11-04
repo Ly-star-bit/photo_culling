@@ -137,14 +137,49 @@ final class ProcessBox: @unchecked Sendable {
     private var process: Process?
     private var terminatedByUs = false
     private let lock = NSLock()
-    func set(_ p: Process?) { lock.lock(); process = p; lock.unlock() }
+    func set(_ p: Process?) {
+        lock.lock(); defer { lock.unlock() }
+        process = p
+        // 进程还没起来就点了取消 / 退出（runVLMOnSurvivors 先花最多 2 s 探 Ollama、写清单）：起来马上停，
+        // 不然这次取消落空，整批照样跑下去。
+        if p != nil, terminatedByUs, let child = signalLeader() {
+            DispatchQueue.global(qos: .utility).async { _ = SubprocessGroup.reap(child: child.pid, group: child.group) }
+        }
+    }
+    /// 取消：只给 uv 发 SIGTERM（见 signalLeader），后台再看着整组退干净（SubprocessGroup.reap）。
     func terminate() {
-        lock.lock(); terminatedByUs = true; process?.terminate(); lock.unlock()
+        lock.lock()
+        terminatedByUs = true
+        let child = signalLeader()
+        lock.unlock()
+        guard let child else { return }
+        DispatchQueue.global(qos: .utility).async { _ = SubprocessGroup.reap(child: child.pid, group: child.group) }
     }
     /// 用户点了“取消”吗？terminate() 让退出码非 0，不加区分就会把用户主动取消
     /// 报成“VLM 分析失败 (服务在跑吗?)”。
     var wasCancelled: Bool { lock.lock(); defer { lock.unlock() }; return terminatedByUs }
     func resetCancellation() { lock.lock(); terminatedByUs = false; lock.unlock() }
+
+    /// 退出时（审查 S05b）：和取消同一个信号，返回 uv 的 pid 和进程组号（没在跑 = nil），调用方同步等它们退、没退的补刀
+    /// （SubprocessGroup.reap）。
+    func terminateForQuit() -> (pid: pid_t, group: pid_t)? {
+        lock.lock(); defer { lock.unlock() }
+        terminatedByUs = true
+        return signalLeader()
+    }
+
+    /// 只给 uv 自己发 SIGTERM（kill(pid)），uv 转给 python 一次，layer2 的 on_sigterm 落盘后 os._exit。不用
+    /// Process.terminate()：macOS 上它是整组发（子进程自己当组长，python 在同一组），python 直接收一次、uv 再转一次，
+    /// 第二次嵌套进 on_sigterm 正好打断第一次的落盘 —— 照 layer2 的写法实测 8 次 0 次落完，只给 uv 发 8 次全落完。
+    /// 调用方持锁。返回 uv 的 pid、组号。
+    private func signalLeader() -> (pid: pid_t, group: pid_t)? {
+        guard let process, process.isRunning else { return nil }
+        let pid = process.processIdentifier
+        guard pid > 1 else { return nil }
+        let group = getpgid(pid)
+        kill(pid, SIGTERM)
+        return (pid, group)
+    }
 }
 
 /// 后台线程持续收集子进程 stderr。必须边跑边收：只在进程退出后才读的话，
@@ -494,11 +529,13 @@ final class BatchStore: ObservableObject {
                                    faceQuality: faceQualityThreshold, takeGap: takeGapSec,
                                    rejectBurstDuplicates: sessionRejectBurstDuplicates)
         let targets = [thresholdsPath(in: dataDir)] + (photoDir != nil ? [thresholdsPath(in: sessionDir)] : [])
+        pendingThresholdSave = (targets, state)  // 0.5 s 内退出时 flushPendingThresholdSave 写掉（审查 S05e）
         thresholdSaveTask = Task { [targets] in
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled, let data = try? JSONEncoder().encode(state) else { return }
             // 写不上只记日志：下次打开按「上次用的」打底，丢的只是这一次拖的滑杆（审查 S01）。
             for url in targets { SessionFiles.writeLogged(data, to: url) }
+            self.pendingThresholdSave = nil
         }
     }
 
@@ -1005,7 +1042,10 @@ final class BatchStore: ObservableObject {
     /// Mutable: the migration import repoints it at the imported runtime copy.
     @Published var pythonRoot: URL
     private var cancelFlag = AnalysisEngine.CancelFlag()
-    private let processBox = ProcessBox()
+    /// VLM / 复审的 uv 子进程。不是 private：--quit-selftest 拿它起假的 uv，核对退出时整组停掉。
+    let processBox = ProcessBox()
+    /// 分析、VLM、复审期间防闲置睡眠（审查 S05c，见 QuitSafety.swift）；退出确认框看它知道在跑哪一种。
+    let longTasks = LongTaskRegistry()
 
     // MARK: - Sessions (one shoot = one folder = one persistent dataset)
 
@@ -1049,6 +1089,13 @@ final class BatchStore: ObservableObject {
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated { _ = self?.retryPersist() }
+        }
+        // 退出时 VLM / 复审的 uv、python 子进程跟着停（审查 S05b：不然它把剩下的照片照样一张张发给 Ollama、结果全扔），
+        // 阈值防抖里还没写的那一次写掉（S05e）。见 prepareForQuit。
+        quitTerminateObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { _ = self?.prepareForQuit() }
         }
         loadSessionsIndex()
         // Reopen the most recent shoot so relaunching the app doesn't lose context.
@@ -1704,6 +1751,34 @@ final class BatchStore: ObservableObject {
         cancelFlag.set()
         processBox.terminate()
         progressText = "正在取消..."
+    }
+
+    /// 这一次的任务已经叫停了（退出确认框等它停下时看：排队的下一张卡开始导会换一面新的旗子，要再叫停一次）。
+    var cancelRequested: Bool { cancelFlag.isSet }
+
+    // MARK: 退出（审查 S05b / S05e）
+
+    private var quitTerminateObserver: NSObjectProtocol?
+    /// 阈值防抖里排着、还没写的那一次（排队那一刻的目标路径和阈值）：退出时同步写掉。写完、被下一次替换就清掉 ——
+    /// 只写真排着的，不在退出时拿当前值去盖（S02：读不出来的 thresholds.json 不写回去；上次用的那份也不该被没动过的场次改掉）。
+    private var pendingThresholdSave: (targets: [URL], state: ThresholdState)?
+
+    /// willTerminate（见 init）：阈值防抖里还没写的写掉；VLM / 复审在跑就停掉 uv 和 python（先只给 uv 发 SIGTERM，等不到
+    /// 再整组补刀，SubprocessGroup.reap）。返回子进程怎么收场的（没在跑 = nil，自检看）。最多阻塞两秒多一点。
+    func prepareForQuit() -> SubprocessGroup.Outcome? {
+        flushPendingThresholdSave()
+        guard let child = processBox.terminateForQuit() else { return nil }
+        let outcome = SubprocessGroup.reap(child: child.pid, group: child.group)
+        SessionFiles.log.notice("退出时停掉 VLM 子进程 \(child.pid)：\(outcome.rawValue, privacy: .public)")
+        return outcome
+    }
+
+    func flushPendingThresholdSave() {
+        guard let pending = pendingThresholdSave else { return }
+        pendingThresholdSave = nil
+        thresholdSaveTask?.cancel()
+        guard let data = try? JSONEncoder().encode(pending.state) else { return }
+        for url in pending.targets { SessionFiles.writeLogged(data, to: url) }
     }
 
     /// 别的长任务（存储卡导入）共用顶栏的「取消」：换一面新旗子交出去。
@@ -2374,8 +2449,10 @@ final class BatchStore: ObservableObject {
         // replacements (flushProvisional swaps by id).
         provisionalBuffer = []
         provisionalCount = 0
+        let sleepGuard = longTasks.begin(.analysis)
 
         Task.detached { [weak self] in
+            defer { sleepGuard.end() }  // 所有出口都放掉防睡眠（审查 S05c）
             // Runs natively (ImageIO/Vision) — no Python, no external deps.
             // Artifacts keep the prepare.py/layer1.py format so the VLM stage and
             // evaluate.py stay unchanged.
@@ -2463,8 +2540,10 @@ final class BatchStore: ObservableObject {
         let backendArgs = ["--backend", "ollama",
                            "--base-url", "http://localhost:11434",
                            "--model", Self.ollamaModel]
+        let sleepGuard = longTasks.begin(.vlm)
 
         Task.detached { [weak self] in
+            defer { sleepGuard.end() }  // 所有出口（含探 Ollama 失败、写清单失败）都放掉防睡眠（审查 S05c）
             guard let self else { return }
             // Preflight: fail in 2s with an actionable message instead of letting
             // the Python subprocess time out against a server that isn't there.
@@ -2582,8 +2661,10 @@ final class BatchStore: ObservableObject {
         let box = processBox
         let count = accused.count
         let summaryBox = SummaryBox()
+        let sleepGuard = longTasks.begin(.appeal)
 
         Task.detached { [weak self] in
+            defer { sleepGuard.end() }  // 所有出口都放掉防睡眠（审查 S05c）
             guard let self else { return }
             guard await self.checkVLMServer() else {
                 await MainActor.run { [weak self] in
