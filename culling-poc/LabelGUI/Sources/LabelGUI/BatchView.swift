@@ -495,8 +495,13 @@ struct BatchView: View {
                 .help("按焦段/ISO 的出片率统计")
 
             Menu {
-                Button("写入 XMP (LR/C1 可读)") { store.exportXMP() }
+                // 写过一次以后整场那一项叫「全部重写」：补被删掉、被别的软件整份覆盖的 sidecar；平常只写改了的（下一项、状态栏）。
+                Button(store.hasWrittenXMP ? "全部重写 XMP (LR/C1 可读)" : "写入 XMP (LR/C1 可读)") { store.exportXMP(.all) }
                     .disabled(store.items.isEmpty || store.isRunning)
+                if store.xmpStaleCount > 0 {
+                    Button("只更新改了的 \(store.xmpStaleCount) 张 XMP") { store.exportXMP(.changed) }
+                        .disabled(store.isRunning)
+                }
                 Button("导出 JPG...") { showJPEGSheet = true }
                     .disabled(jpegExportCount == 0 || store.isRunning)
                 Button("精华 Top N (JPG)...") { showHighlightsSheet = true }
@@ -558,13 +563,13 @@ struct BatchView: View {
             }
             // 上次写 XMP 之后又改了判决：Lightroom / C1 那边还是旧的，提醒一下、点一下就重写。
             if store.xmpStaleCount > 0 {
-                Button { store.exportXMP() } label: {
+                Button { store.exportXMP(.changed) } label: {
                     Label("XMP 待更新 \(store.xmpStaleCount) 张 · 点这里重新写入", systemImage: "arrow.triangle.2.circlepath")
                         .font(.caption).foregroundStyle(.orange)
                 }
                 .buttonStyle(.plain)
                 .disabled(store.isRunning)
-                .help("有 \(store.xmpStaleCount) 张的判决、星级或客户选中和上次写进 XMP 的不一样（或者上次没写进去），Lightroom / Capture One 读到的还是旧的。点这里按现在的判决重写（别的软件写的 XMP 只改星级/色标，调色等原样保留）")
+                .help(xmpStaleHelp)
             }
             if store.unparsedCount > 0 {
                 // Photos the engine couldn't read are invisible in the grid;
@@ -1206,6 +1211,14 @@ struct BatchView: View {
     private var acceptTitle: String {
         let scope = acceptScope != nil ? "把本章 " : "把 "
         return scope + "\(acceptPreview.takes) 场按推荐定案？"
+    }
+
+    /// 状态栏「XMP 待更新」的说明。单独成属性：插值拼在视图构建器里，Xcode 16 类型检查会超时（同 acceptTitle）。
+    private var xmpStaleHelp: String {
+        let n = store.xmpStaleCount
+        return "有 \(n) 张的判决、星级或客户选中和上次写进 XMP 的不一样（或者上次没写进去），Lightroom / Capture One 读到的还是旧的。" +
+            "点这里只重写这 \(n) 张，其余的一个字节不动（在 LR / C1 里改过星级、这边没动的照片不会被盖回去；别的软件写的 XMP 只改星级/色标，调色等原样保留）。" +
+            "sidecar 被删了、被别的软件整份覆盖了，用「导出 › 全部重写 XMP」"
     }
 
     /// 「废片移到废纸篓」确认框的说明：客户选中的废片不动，要说出来。
