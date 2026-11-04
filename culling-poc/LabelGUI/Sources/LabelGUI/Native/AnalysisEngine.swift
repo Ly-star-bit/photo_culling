@@ -281,10 +281,15 @@ enum AnalysisEngine {
             layer1ByID[p.id] = layer1Entry(p)
         }
         let orderedIds = photos.map(\.stem).filter { manifestByID[$0] != nil }
+        // 这一次列出来、没进 photos 的（取消时还没轮到的、解码失败的）也记下 id：id 记忆不跟着「这次分析完了哪些」走
+        // （PhotoIDMemory.swift 的 idOnlyKey），不然沿用下来的 id 掉出去一次，下一次就按撞名规矩重新起名。
+        let idOnly = photos.filter { manifestByID[$0.stem] == nil }.map { file -> [String: Any] in
+            ["id": file.stem, "raw_path": file.primaryURL.path, "decode_path": file.decodeURL.path]
+        }
         // Written even when cancelled: 2900 finished photos of a 3000-photo shoot
         // used to be thrown away (previews on disk, no JSON rows), so the next
         // run redid all of them. Now they become reusable entries.
-        try writeManifest(orderedIds.compactMap { manifestByID[$0] }, photoDir: photoDir, dataDir: dataDir)
+        try writeManifest(orderedIds.compactMap { manifestByID[$0] }, idOnly: idOnly, photoDir: photoDir, dataDir: dataDir)
         try writeLayer1(orderedIds.compactMap { layer1ByID[$0] }, dataDir: dataDir)
         let corrupt = orderedIds.filter { layer1ByID[$0]?["file_corrupt"] as? Bool == true }
         return Summary(analyzed: completed.count, reused: reusedFinal.count,
@@ -559,8 +564,11 @@ enum AnalysisEngine {
         ]
     }
 
-    private static func writeManifest(_ entries: [[String: Any]], photoDir: URL, dataDir: URL) throws {
-        let manifest: [String: Any] = ["photo_dir": photoDir.path, "photos": entries]
+    private static func writeManifest(_ entries: [[String: Any]], idOnly: [[String: Any]],
+                                      photoDir: URL, dataDir: URL) throws {
+        var manifest: [String: Any] = ["photo_dir": photoDir.path, "photos": entries]
+        // 和 photos 同一次原子写：两份不会一新一旧。没有就不写这个键（平常整场都分析完了）。
+        if !idOnly.isEmpty { manifest[ImageLoader.PreviousIDs.idOnlyKey] = idOnly }
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         // .atomic: 一场 3000 张的 manifest 要写好一会儿，中途被强退/断电会留下截断的
         // JSON —— 下次启动网格全空，而且整批要重新分析。

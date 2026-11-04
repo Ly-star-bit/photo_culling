@@ -1252,6 +1252,7 @@ final class BatchStore: ObservableObject {
         loadXMPState()
         loadBodyOffsets()
         loadResults()
+        remapOrphanKeys()
         recheckForeignSidecars()
         applyThresholds()
         // Cached results load happily from a folder that no longer exists — say
@@ -1291,6 +1292,151 @@ final class BatchStore: ObservableObject {
     private func postResultsChanged(previewsChanged: Bool) {
         NotificationCenter.default.post(name: .analysisDidFinish, object: nil,
                                         userInfo: ["dir": sessionDir, "previewsChanged": previewsChanged])
+    }
+
+    // MARK: - 旧 id 留下的孤儿键（已中招场次的回配，审查 S03）
+
+    /// 老版本只看「这一次」有没有撞名来起名：两个子文件夹里各有一张 DSC_0001，移走一张、重新分析以后，留下那张从
+    /// 仪式_DSC_0001 变成 DSC_0001，改判、客户选中、XMP 记录还挂在 仪式_DSC_0001 上，对不上任何照片（现在 id 沿用
+    /// 上一次的，不会再这样变；可已经变过的不会自己回来）。打开场次时（switchSession 读完以后）对一遍：
+    /// overrides（连同 accepted、AI 出处）、client_picks、client_notes、xmp_state 里对不上任何照片的键，只认带文件夹的 ——
+    /// 照片相对拍摄根目录的路径去掉扩展名、各级用 _ 连（老规矩撞名时起的就是它；多出来的单张再带 _扩展名）——
+    /// 全场只有一张照片拼得出它、这张在那份表里自己还没有记录，才挪过去，记日志。裸文件名的不认（是删掉的那张的，
+    /// 还是剩下这张的，分不出来）；对上几张的、两个旧键对上同一张的、目标已经有记录的都原样留着，不猜。
+    /// 挪完键就对上了，再打开什么也不做，不用另记标记；平常没有对不上的键，不读盘。
+    private func remapOrphanKeys() {
+        let itemIDs = Set(items.map(\.id))
+        var keys = Set(overrides.keys).union(clientPicks).union(clientNotes.keys)
+        if let state = xmpState {
+            keys.formUnion(state.marks.keys)
+            keys.formUnion(state.foreign)
+            keys.formUnion(state.sharedSidecar ?? [])
+        }
+        guard keys.contains(where: { !itemIDs.contains($0) }) else { return }
+        // 照片以 manifest 为准：没有 layer1 结果的那几行、这一次没分析成的（photos_without_results：取消时没轮到、
+        // 解码失败）也是照片 —— 它们的键不算孤儿，它们的路径也算候选（不然那张的旧键会被挪到同一个位置上的别的文件）。
+        let manifestURL = sessionDir.appendingPathComponent("manifest.json")
+        guard let data = try? Data(contentsOf: manifestURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let analyzed = json["photos"] as? [[String: Any]] else { return }
+        let rows = analyzed + (json[ImageLoader.PreviousIDs.idOnlyKey] as? [[String: Any]] ?? [])
+        let photoIDs = Set(rows.compactMap { $0["id"] as? String })
+        let orphans = keys.subtracting(photoIDs)
+        guard !orphans.isEmpty else { return }
+
+        // 带文件夹的旧 id → 拼得出它的照片。路径先相对 manifest 的 photo_dir（上一次分析起名时的根目录），再相对现在的。
+        var roots: [String] = []
+        if let old = json["photo_dir"] as? String, !old.isEmpty { roots.append(old) }
+        if let dir = photoDir { roots.append(dir.path) }
+        let relativizer = ImageLoader.PathRelativizer(roots: roots)
+        var owners: [String: Set<String>] = [:]
+        for row in rows {
+            guard let id = row["id"] as? String else { continue }
+            for field in ["raw_path", "decode_path"] {
+                guard let path = row[field] as? String, let rel = relativizer.relative(path) else { continue }
+                let parts = ImageLoader.PathRelativizer.dropExtension(rel).split(separator: "/")
+                guard parts.count >= 2 else { continue }
+                let scoped = parts.joined(separator: "_")
+                owners[scoped, default: []].insert(id)
+                let ext = (rel as NSString).pathExtension.lowercased()
+                if !ext.isEmpty, id.hasSuffix("_" + ext) { owners[scoped + "_" + ext, default: []].insert(id) }
+            }
+        }
+        var moves: [String: String] = [:]
+        for key in orphans {
+            guard let found = owners[key], found.count == 1, let id = found.first else { continue }
+            moves[key] = id
+        }
+        let perTarget = Dictionary(grouping: moves.values, by: { $0 }).mapValues(\.count)
+        moves = moves.filter { perTarget[$0.value] == 1 }
+
+        var newOverrides = overrides, newAccepted = acceptedIDs, newAI = aiOverrides
+        var newPicks = clientPicks, newNotes = clientNotes
+        var newXMP = xmpState
+        var movedOverrides = false, movedAI = false, movedPicks = false, movedNotes = false, movedXMP = false
+        var log: [String] = []
+        for (old, new) in moves.sorted(by: { $0.key < $1.key }) {
+            var what: [String] = []
+            if !persistRefused.contains(.overrides), let verdict = newOverrides[old], newOverrides[new] == nil {
+                newOverrides[old] = nil
+                newOverrides[new] = verdict
+                if newAccepted.remove(old) != nil { newAccepted.insert(new) }
+                if let mark = newAI.removeValue(forKey: old) {
+                    newAI[new] = mark
+                    movedAI = true
+                }
+                movedOverrides = true
+                what.append("改判")
+            }
+            if !persistRefused.contains(.clientPicks), newPicks.contains(old), !newPicks.contains(new) {
+                newPicks.remove(old)
+                newPicks.insert(new)
+                movedPicks = true
+                what.append("客户选中")
+            }
+            if let note = newNotes[old], newNotes[new] == nil {
+                newNotes[old] = nil
+                newNotes[new] = note
+                movedNotes = true
+                what.append("客户备注")
+            }
+            if var state = newXMP {
+                var touched = false
+                if let mark = state.marks[old], state.marks[new] == nil {
+                    state.marks[old] = nil
+                    state.marks[new] = mark
+                    touched = true
+                }
+                if state.foreign.contains(old), !state.foreign.contains(new) {
+                    state.foreign.remove(old)
+                    state.foreign.insert(new)
+                    touched = true
+                }
+                if var shared = state.sharedSidecar, shared.contains(old), !shared.contains(new) {
+                    shared.remove(old)
+                    shared.insert(new)
+                    state.sharedSidecar = shared
+                    touched = true
+                }
+                if touched {
+                    newXMP = state
+                    movedXMP = true
+                    what.append("XMP 记录")
+                }
+            }
+            if !what.isEmpty { log.append("\(old) → \(new)（\(what.joined(separator: "、"))）") }
+        }
+        let summary = "场次 \(currentSessionKey)：对不上照片的键 \(orphans.count) 个，按路径对回 \(log.count) 个"
+        guard !log.isEmpty else {
+            SessionFiles.log.info("\(summary, privacy: .public)，都原样留着")
+            return
+        }
+        let detail = log.joined(separator: "；")
+        SessionFiles.log.notice("\(summary, privacy: .public)：\(detail, privacy: .public)")
+
+        if movedOverrides {
+            overrides = newOverrides
+            acceptedIDs = newAccepted
+            saveOverrides()
+        }
+        if movedAI {
+            aiOverrides = newAI
+            saveAIOverrides()
+        }
+        if movedPicks {
+            clientPicks = newPicks
+            saveClientPicks()
+        }
+        if movedNotes {
+            clientNotes = newNotes
+            saveClientNotes()
+        }
+        if movedXMP, let state = newXMP {
+            // 不走 saveXMPState：它会把 foreignRechecked 记成已复查，switchSession 接着的 recheckForeignSidecars 就不查了。
+            xmpState = state
+            backupOnce(xmpStatePath)
+            if let encoded = try? JSONEncoder().encode(state) { try? encoded.write(to: xmpStatePath, options: .atomic) }
+        }
     }
 
     /// Register a session written outside the GUI (the `--analyze` CLI path) so
