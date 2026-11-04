@@ -247,6 +247,7 @@ enum JPEGExportCLI {
         print("设置: 尺寸 \(options.size) · 锐化 \(options.sharpen.rawValue) · 色彩 \(options.effectiveColor.rawValue)"
               + " · 去 GPS \(options.stripGPS ? "是" : "否") · 文件名 \(options.nameTemplate)"
               + " · 质量 \(Int((options.quality * 100).rounded()))" + (options.limitSize ? " · ≤\(options.maxMB) MB" : ""))
+        let ledgerBefore = store.deliveryRecords.last
         if let top {
             store.exportHighlights(count: top, into: dest, options: options)
         } else {
@@ -260,7 +261,15 @@ enum JPEGExportCLI {
         guard let report = store.lastJPEGExport else { exit(1) }
         print("文件夹 \(report.folder.path)")
         for url in report.written { print("  " + describe(url)) }
-        exit(report.failed.isEmpty ? 0 : 1)
+        // 交付对照：这次写出去的都要记进这一场的 exports.json（没记下就算失败，别把上一次的当成这次的）。
+        let records = store.deliveryRecords
+        guard let record = records.last, record != ledgerBefore else {
+            print("交付对照: 没记下 → \(store.deliveryLedgerPath.path)")
+            exit(report.written.isEmpty && report.failed.isEmpty ? 0 : 1)
+        }
+        print("交付对照 \(store.deliveryLedgerPath.path) · \(record.kind) · 共 \(records.count) 次 · 这次 \(record.files.count) 张")
+        for file in record.files { print("  对照 \(file.file) → \(file.id)") }
+        exit(report.failed.isEmpty && record.files.count == report.written.count ? 0 : 1)
     }
 
     private static func apply(_ options: inout DeliveryOptions, option: (String) -> String?, flags: Set<String>) {

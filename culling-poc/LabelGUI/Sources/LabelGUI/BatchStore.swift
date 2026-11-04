@@ -3325,6 +3325,9 @@ final class BatchStore: ObservableObject {
         let renamed = plan.renamed
         let folderLabel = label ?? folder.lastPathComponent
         let isHighlights = ranked
+        // 交付对照（DeliveryLedger.swift）：收尾时把写出去的文件名 → 哪一张、原片在哪记进这一场的 exports.json。
+        let originals = Dictionary(chosen.map { ($0.id, $0.rawPath) }, uniquingKeysWith: { first, _ in first })
+        let ledger = deliveryLedgerPath
         isRunning = true
         lastError = nil
         lastJPEGExport = nil
@@ -3379,6 +3382,11 @@ final class BatchStore: ObservableObject {
             let failedIds = failed
             let overIds = overLimit
             let writtenFiles = written.sorted { $0.lastPathComponent < $1.lastPathComponent }
+            // 按导出顺序（精华按名次）；取消了也记已经写出去的那些，文件都在。
+            let writtenPaths = Set(written.map(\.path))
+            let delivered = jobs.filter { writtenPaths.contains($0.dest.path) }.map {
+                DeliveryRecord.File(file: $0.dest.lastPathComponent, id: $0.id, original: originals[$0.id] ?? $0.source.path)
+            }
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
@@ -3396,6 +3404,7 @@ final class BatchStore: ObservableObject {
                 } else {
                     self.lastError = "JPG 导出: \(count) 成功, \(failedIds.count) 失败 (\(failedIds.prefix(3).joined(separator: ", ")))"
                 }
+                self.recordDelivery(isHighlights ? .highlights : .jpeg, folder: folder, files: delivered, into: ledger)
             }
         }
     }
