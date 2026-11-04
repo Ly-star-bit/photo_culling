@@ -50,6 +50,7 @@ enum SessionMoveSelfTest {
         copyIsNotAdopted(root.appendingPathComponent("copy"), batch: model.batch)
         reopenFromMenu(root.appendingPathComponent("menu"), batch: model.batch)
         unmatchedNotClaimed(root.appendingPathComponent("unmatched"), batch: model.batch)
+        idOnlyRowsFollow(root.appendingPathComponent("idonly"), batch: model.batch)
         relocate(root.appendingPathComponent("relocate"), batch: model.batch)
         liveBridgeDoesNotFollow(root.appendingPathComponent("live"), batch: model.batch)
         cardTable(root.appendingPathComponent("card-table"))
@@ -354,6 +355,44 @@ enum SessionMoveSelfTest {
         let relaunched = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         check(relaunched.sessionDir.lastPathComponent == key(e) && pathsUnder(relaunched, f),
               "重开 app：还是这一场，照片路径在新位置")
+    }
+
+    /// manifest 里只记了 id 的那一份（photos_without_results：取消时没轮到、解码失败的）也跟着换根：靠 id 记忆才叫
+    /// 「仪式_DSC_0001」的那张（同名的另一张已经移走了），文件夹改名以后下一次分析照样沿用这个 id。
+    private static func idOnlyRowsFollow(_ root: URL, batch: BatchStore) {
+        print("== 只记了 id 的照片（photos_without_results）跟着换根，下一次分析 id 不变")
+        let fm = FileManager.default
+        let w = root.appendingPathComponent("只记 id 原名")
+        let x = root.appendingPathComponent("只记 id 新名")
+        FileSafetySelfTest.writeShoot(w, [Fake(id: "DSCF0001", raw: "DSCF0001.JPG", jpeg: true)])
+        let ceremony = w.appendingPathComponent("仪式/DSC_0001.JPG")
+        try? fm.createDirectory(at: ceremony.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? FileSafetySelfTest.tinyJPEG().write(to: ceremony)
+        let manifestURL = appDataDir.appendingPathComponent("sessions/\(key(w))/manifest.json")
+        let idOnlyKey = ImageLoader.PreviousIDs.idOnlyKey
+        func manifest() -> [String: Any]? {
+            (try? Data(contentsOf: manifestURL)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        }
+        if var json = manifest() {
+            json[idOnlyKey] = [["id": "仪式_DSC_0001", "raw_path": ceremony.path, "decode_path": ceremony.path]]
+            try? JSONSerialization.data(withJSONObject: json).write(to: manifestURL)
+        }
+        check(batch.switchSession(to: w) && batch.items.count == 1, "打开原来的文件夹（1 张分析过，1 张只记了 id）")
+        try? fm.moveItem(at: w, to: x)
+        check(batch.switchSession(to: w) && sameDir(batch.photoDir, x), "从菜单点：书签跟到改了名的文件夹")
+        let json = manifest()
+        let row = (json?[idOnlyKey] as? [[String: Any]])?.first ?? [:]
+        func movedRight(_ field: String) -> Bool {
+            guard let path = row[field] as? String else { return false }
+            return under(path, x) && path.hasSuffix("/仪式/DSC_0001.JPG") && fm.fileExists(atPath: path)
+        }
+        check(movedRight("raw_path") && movedRight("decode_path") && row["id"] as? String == "仪式_DSC_0001",
+              "photos_without_results 那一行的 raw_path / decode_path 也改到新位置", "\(row)")
+        // 下一次分析起名：PreviousIDs 按改过的 manifest 建表，listPhotos 给这张的还是「仪式_DSC_0001」（不是裸的 DSC_0001）。
+        let previous = ImageLoader.PreviousIDs(manifest: json, photoDir: x)
+        let listed = ImageLoader.listPhotos(in: x, previous: previous)
+        let stem = listed.first { $0.primaryURL.lastPathComponent == "DSC_0001.JPG" }?.stem
+        check(stem == "仪式_DSC_0001", "改名以后再分析：这张沿用「仪式_DSC_0001」", stem ?? "nil")
     }
 
     /// 照片路径一条都换不过去（写法和 photo_dir 怎么都对不上）：不说「已改到现在的位置」，报 lastError，manifest 不动，

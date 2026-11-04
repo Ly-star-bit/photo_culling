@@ -107,28 +107,36 @@ enum SessionLocation {
         }
         var rows = 0
         var unmatched = 0
-        for i in photos.indices {
-            var changed = false
-            var hasPath = false
-            for key in ["raw_path", "decode_path"] {
-                guard let path = photos[i][key] as? String else { continue }
-                hasPath = true
-                guard let target = moved(path) else { continue }
-                photos[i][key] = target
-                changed = true
-            }
-            if changed {
-                rows += 1
-            } else if hasPath {
-                unmatched += 1
+        func rebaseRows(_ list: inout [[String: Any]]) {
+            for i in list.indices {
+                var changed = false
+                var hasPath = false
+                for key in ["raw_path", "decode_path"] {
+                    guard let path = list[i][key] as? String else { continue }
+                    hasPath = true
+                    guard let target = moved(path) else { continue }
+                    list[i][key] = target
+                    changed = true
+                }
+                if changed {
+                    rows += 1
+                } else if hasPath {
+                    unmatched += 1
+                }
             }
         }
+        rebaseRows(&photos)
+        // 这一次没分析成、只记了 id 的那一份（PhotoIDMemory.swift 的 idOnlyKey：取消时没轮到的、解码失败的）也换：
+        // 下次分析 PreviousIDs 按 photo_dir 和现在的根目录算相对路径，旧位置的绝对路径对不上，沿用下来的 id 又会变。
+        var idOnly = json[ImageLoader.PreviousIDs.idOnlyKey] as? [[String: Any]]
+        if idOnly != nil { rebaseRows(&idOnly!) }
         if rows == 0 && unmatched > 0 {
             SessionFiles.log.error("manifest.json 的照片路径一条都对不上原来的 photo_dir（\(old, privacy: .public)），没改")
             return (ManifestRebase(from: old, rows: 0, unmatched: unmatched), false)
         }
         json["photo_dir"] = new
         json["photos"] = photos
+        if let idOnly { json[ImageLoader.PreviousIDs.idOnlyKey] = idOnly }
         guard let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) else {
             return (nil, true)
         }
