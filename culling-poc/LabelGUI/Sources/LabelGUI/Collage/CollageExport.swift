@@ -161,6 +161,39 @@ enum CollageExport {
         committed = true
     }
 
+    /// 是不是 writePDF 起的临时文件名：.<名字>.pdf.<8 位大写十六进制>.tmp（UUID().uuidString 的前 8 位）。
+    /// 只认这一种：ImageLoader 预览缓存的 .<名字>.jpg.<8 位>.tmp、MCPOutput 的 .jpg.tmp-<pid>-<hex>、用户自己的文件都不算。
+    static func isPDFTempName(_ name: String) -> Bool {
+        guard name.hasPrefix("."), name.hasSuffix(".tmp") else { return false }
+        let inner = name.dropFirst().dropLast(4)
+        let hex = inner.suffix(8)
+        let head = inner.dropLast(9)
+        guard hex.count == 8, inner.dropLast(8).hasSuffix("."), head.hasSuffix(".pdf"), head.count > 4 else { return false }
+        return hex.allSatisfy { $0.isASCII && $0.isHexDigit && !$0.isLowercase }
+    }
+
+    /// 清掉 dir 第一层里 writePDF 留下的过期临时文件（导出写 PDF 时 ⌘Q、崩溃、被强制退出，defer 没跑，留下一份隐藏的
+    /// 半截 PDF，访达里看不见、名字带随机数以后也不会被覆盖）。只删名字是 isPDFTempName、本身是普通文件（不跟符号链接、
+    /// 不进子目录）、最后修改早于 age 秒的：正在写的那份（另一个窗口 / 命令行同时往这里导）一直在更新修改时间，不会被删。
+    /// 出错一律跳过。返回删掉的文件名（自检用）。
+    @discardableResult
+    static func sweepStalePDFTemps(in dir: URL, olderThan age: TimeInterval = 600, now: Date = Date()) -> [String] {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return [] }
+        var removed: [String] = []
+        for name in names where isPDFTempName(name) {
+            let url = dir.appendingPathComponent(name)
+            // attributesOfItem 不跟符号链接：链接本身的类型是 .typeSymbolicLink，不删。
+            guard let attrs = try? fm.attributesOfItem(atPath: url.path),
+                  attrs[.type] as? FileAttributeType == .typeRegular,
+                  let modified = attrs[.modificationDate] as? Date else { continue }
+            let idle = now.timeIntervalSince(modified)
+            guard idle > age else { continue }
+            if (try? fm.removeItem(at: url)) != nil { removed.append(name) }
+        }
+        return removed.sorted()
+    }
+
     /// 读回来核对一份 PDF：nil = 没问题，否则说哪里不对。只看结构（大小、结尾、页数），不解码图像。
     static func verifyPDF(at url: URL, pages expected: Int) -> String? {
         let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 0

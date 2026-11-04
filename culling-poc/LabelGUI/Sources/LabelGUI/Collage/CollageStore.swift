@@ -3652,6 +3652,8 @@ final class CollageStore: ObservableObject {
             lastError = "无法创建输出目录: \(error.localizedDescription)"
             return refuse(lastError ?? "无法创建输出目录", folder: folder)
         }
+        // 以前写 PDF 时退出 / 崩溃留下的隐藏半截 PDF（.<名字>.pdf.<随机>.tmp，超过 10 分钟没动过的）顺手清掉。
+        CollageExport.sweepStalePDFTemps(in: folder)
         let base = exportBase(in: folder, project: snapshot, options: options, name: name)
         let plan = Self.exportPlan(base: base, project: snapshot, options: options)
         isExporting = true
