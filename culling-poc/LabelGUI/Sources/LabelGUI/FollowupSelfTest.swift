@@ -8,6 +8,7 @@ import Foundation
 ///   - F19 水印页「导入选片结果」菜单：精选 / 精选 + 可用 / 客户选中（客户选中的废片也带，RAW+JPG 用 JPG）。
 ///   - 水印 EXIF 文字的快门：0、负数、非有限、非规格化的极小正数（1/t = inf）不崩、不填；≥1s 照旧 %g。
 ///   - S15「复制原片到…」连续 3 张写不进目标就停、说清楚原因和怎么办（不支持 → NAS / exFAT），英文 strerror 换成中文。
+///   - M01 近似重复去重：拍摄时刻完全一样、一张 RAW 一张 JPG（分卡存、分文件夹放的同一帧）时，RAW 不判「连拍重复」。
 /// 只写数据目录；改过的权限全部改回来，退出前删掉造出来的照片文件夹。
 @MainActor
 enum FollowupSelfTest {
@@ -36,6 +37,7 @@ enum FollowupSelfTest {
         watermarkImport(root.appendingPathComponent("wm"))
         watermarkShutter()
         originalsStop(root.appendingPathComponent("copy"))
+        splitTwinDedupe(root.appendingPathComponent("twin"))
         unlockAll()
         try? FileManager.default.removeItem(at: root)
         print(failures == 0 ? "跟进小修自检：全部通过（\(total) 条）" : "跟进小修自检：\(failures) / \(total) 条失败")
@@ -328,5 +330,103 @@ enum FollowupSelfTest {
         let copied = (try? FileManager.default.contentsOfDirectory(atPath: dest.path))?.filter { !$0.hasPrefix(".") } ?? []
         check(store.lastError == nil && copied.count == 6 && store.progressText.hasPrefix("复制原片完成: 6 张"),
               "改回能写以后再复制：6 张全部复制、没有报错", "\(store.lastError ?? "nil") · \(store.progressText) · \(copied.count)")
+    }
+
+    // MARK: - M01 去重不把分开放的同一帧 RAW 判成「连拍重复」
+
+    /// 一张假照片：文件（相对拍摄文件夹）、拍摄时间、小数秒、近似重复组、锐度（定谁赢）、机型。
+    struct DupFake {
+        let id: String
+        let file: String
+        let time: String
+        var subsec: Double?
+        let group: Int
+        let sharpness: Double
+        var camera = "X-T50"
+    }
+
+    /// 照 FileSafetySelfTest.writeShoot 手写 manifest / layer1（拍摄时间、小数秒、组号自己给），打开这一场。
+    static func makeDupShoot(_ dir: URL, _ photos: [DupFake]) -> BatchStore {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        var manifest: [[String: Any]] = []
+        var layer1: [[String: Any]] = []
+        for photo in photos {
+            let url = dir.appendingPathComponent(photo.file)
+            try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Data(("PHOTO " + photo.id).utf8).write(to: url)
+            manifest.append([
+                "id": photo.id, "raw_path": url.path, "decode_path": url.path, "preview_path": "previews/\(photo.id).jpg",
+                "capture_time": photo.time, "camera": photo.camera, "body_serial": "", "exif": ["iso": 400],
+            ])
+            var row: [String: Any] = [
+                "id": photo.id, "sharpness": photo.sharpness, "burst_group": photo.group, "face_found": false, "face_count": 0,
+                "highlight_clip_pct": 0.0, "shadow_clip_pct": 0.0, "frame_luma": 128, "frame_luma_p99": 220,
+            ]
+            if let sub = photo.subsec { row["capture_subsec"] = sub }
+            layer1.append(row)
+        }
+        let session = appDataDir.appendingPathComponent("sessions/" + BatchStore.sessionKey(for: dir))
+        try? fm.createDirectory(at: session, withIntermediateDirectories: true)
+        let m: [String: Any] = ["photo_dir": dir.path, "photos": manifest]
+        let l: [String: Any] = ["analysis_version": 2, "engine": "native", "results": layer1]
+        for (name, json) in [("manifest.json", m), ("layer1_results.json", l)] {
+            if let data = try? JSONSerialization.data(withJSONObject: json) {
+                try? data.write(to: session.appendingPathComponent(name))
+            }
+        }
+        let store = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
+        store.switchSession(to: dir)
+        return store
+    }
+
+    static func splitTwinDedupe(_ dir: URL) {
+        print("— M01 近似重复去重：同一帧拆成一张 RAW 一张 JPG 时，RAW 不判「连拍重复」")
+        // 每组隔一分钟（各成一场）。JPG 比 RAW 锐 = JPG 赢下这一组
+        let photos: [DupFake] = [
+            // 1 分卡存：RAW/、JPG/ 两个文件夹，同一帧（时刻到小数秒、机身都一样）
+            DupFake(id: "T1", file: "RAW/DSCF0001.RAF", time: "2026-03-21T10:00:00", subsec: 0.25, group: 1, sharpness: 90),
+            DupFake(id: "T1_2", file: "JPG/DSCF0001.JPG", time: "2026-03-21T10:00:00", subsec: 0.25, group: 1, sharpness: 95),
+            // 2 对照：两张 JPG 同一时刻（不是 RAW+JPG）→ 照常去重
+            DupFake(id: "J1", file: "J1.JPG", time: "2026-03-21T10:01:00", subsec: 0.5, group: 2, sharpness: 90),
+            DupFake(id: "J2", file: "J2.JPG", time: "2026-03-21T10:01:00", subsec: 0.5, group: 2, sharpness: 95),
+            // 3 对照：RAW + JPG 但小数秒不同（连拍里前后两帧）→ RAW 照常去重
+            DupFake(id: "S1", file: "S1.RAF", time: "2026-03-21T10:02:00", subsec: 0.1, group: 3, sharpness: 90),
+            DupFake(id: "S2", file: "S2.JPG", time: "2026-03-21T10:02:00", subsec: 0.3, group: 3, sharpness: 95),
+            // 4 对照：同一时刻但不是同一台机身（双机位）→ RAW 照常去重
+            DupFake(id: "B1", file: "B1.RAF", time: "2026-03-21T10:03:00", subsec: 0.5, group: 4, sharpness: 90, camera: "X-T50"),
+            DupFake(id: "B2", file: "B2.JPG", time: "2026-03-21T10:03:00", subsec: 0.5, group: 4, sharpness: 95, camera: "X-H2"),
+            // 5 RAW 更锐、赢下这一组：JPG 那张照常判连拍重复（只护 RAW）
+            DupFake(id: "W1", file: "RAW/DSCF0005.RAF", time: "2026-03-21T10:04:00", subsec: nil, group: 5, sharpness: 99),
+            DupFake(id: "W1_2", file: "JPG/DSCF0005.JPG", time: "2026-03-21T10:04:00", subsec: nil, group: 5, sharpness: 90),
+            // 6 一组三张：同一帧的 RAW + JPG、再加一张更好的 → JPG 判连拍重复，RAW 照样护着
+            DupFake(id: "G1", file: "RAW/DSCF0007.RAF", time: "2026-03-21T10:05:00", subsec: 0.2, group: 6, sharpness: 80),
+            DupFake(id: "G1_2", file: "JPG/DSCF0007.JPG", time: "2026-03-21T10:05:00", subsec: 0.2, group: 6, sharpness: 85),
+            DupFake(id: "G2", file: "JPG/DSCF0008.JPG", time: "2026-03-21T10:05:01", subsec: 0.1, group: 6, sharpness: 99),
+        ]
+        let store = makeDupShoot(dir, photos)
+        check(store.items.count == photos.count, "造的一场有 \(photos.count) 张", "\(store.items.count)")
+        store.rejectBurstDuplicates = true
+        func dup(_ id: String) -> Bool { store.item(withID: id)?.rejectReasons.contains("连拍重复") == true }
+        func verdict(_ id: String) -> Verdict? { store.item(withID: id)?.verdict }
+        // (说明, id, 期望是不是「连拍重复」)
+        let rows: [(String, String, Bool)] = [
+            ("分卡存的同一帧：RAW 输给自己那张 JPG 也不判连拍重复", "T1", false),
+            ("分卡存的同一帧：赢的 JPG 照旧", "T1_2", false),
+            ("对照 两张 JPG 同一时刻：输的那张照常去重", "J1", true),
+            ("对照 RAW + JPG 小数秒不同（前后两帧）：RAW 照常去重", "S1", true),
+            ("对照 同一时刻、不同机身（双机位）：RAW 照常去重", "B1", true),
+            ("RAW 赢下这一组：那张 JPG 照常去重（只护 RAW）", "W1_2", true),
+            ("RAW 赢下这一组：RAW 本身不动", "W1", false),
+            ("一组三张、更好的是另一帧：同一帧的 JPG 判连拍重复", "G1_2", true),
+            ("一组三张、更好的是另一帧：同一帧的 RAW 照样护着", "G1", false),
+        ]
+        for (name, id, want) in rows {
+            check(dup(id) == want, "去重 " + name, "\(id)：理由 \(store.item(withID: id)?.rejectReasons ?? []) · \(verdict(id).map(\.rawValue) ?? "—")")
+        }
+        check(verdict("T1") != .reject && verdict("G1") != .reject, "护着的 RAW 不是废片（移到废纸篓不会动它）",
+              "T1 \(verdict("T1").map(\.rawValue) ?? "—") · G1 \(verdict("G1").map(\.rawValue) ?? "—")")
+        store.rejectBurstDuplicates = false
+        check(!dup("J1") && !dup("S1"), "关掉去重：连拍重复整组回来")
     }
 }

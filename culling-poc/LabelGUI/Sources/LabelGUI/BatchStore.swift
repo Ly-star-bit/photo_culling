@@ -3507,6 +3507,9 @@ final class BatchStore: ObservableObject {
                     winners.insert(best)
                 }
                 for idx in indices where !winners.contains(idx) && overrides[updated[idx].id] == nil {
+                    // RAW、JPG 分卡存 / 分文件夹放时同一帧成了两张（审查 M01）：组里有它那张 JPG 时 RAW 不算「连拍重复」，
+                    // 不然「移到废纸篓」会把这一帧唯一的 RAW 挪走。只护 RAW，那张 JPG 照常去重。
+                    if indices.contains(where: { $0 != idx && Self.isSplitTwin(raw: updated[idx], of: updated[$0]) }) { continue }
                     updated[idx].rejectReasons.append("连拍重复")
                     updated[idx].verdict = .reject
                     rejected.insert(updated[idx].id)
