@@ -429,6 +429,10 @@ enum CollageSelect {
         return chosen
     }
 
+    /// 自检用：换掉 distinctMoments 的画面距离（合成照片没有 Vision 特征，distance 是 nil、走不到去重和 keeping 那段）。
+    /// 只有 --album-selftest 设、用完 defer 放回 nil；平时 nil = CollageVision.distance。
+    nonisolated(unsafe) static var distanceOverride: ((CollagePhotoRef, CollagePhotoRef) -> Double?)?
+
     /// 相册选片：
     /// - 连拍（特征距离 < 中位数 54%，同场连拍那种）只留分数高的一张；
     /// - 可用照片如果和已经留下的两张以上是同地同姿势（< 中位数 76%），不收 —— 同一个
@@ -440,11 +444,12 @@ enum CollageSelect {
         -> (kept: [CollagePhotoRef], dropped: [CollagePhotoRef], similar: [String: Set<String>]) {
         let sorted = photos.sorted { $0.score > $1.score }
         let head = Array(sorted.prefix(120))
+        let measure = distanceOverride ?? CollageVision.distance
         var dist: [String: Double] = [:]
         var all: [Double] = []
         for i in 0..<head.count {
             for j in (i + 1)..<head.count {
-                if let d = CollageVision.distance(head[i], head[j]) {
+                if let d = measure(head[i], head[j]) {
                     dist[head[i].id + "|" + head[j].id] = d
                     dist[head[j].id + "|" + head[i].id] = d
                     all.append(d)

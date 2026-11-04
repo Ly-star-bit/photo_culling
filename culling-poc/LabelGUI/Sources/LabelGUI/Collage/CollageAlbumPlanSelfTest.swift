@@ -9,6 +9,7 @@ enum CollageAlbumPlanSelfTest {
 
     static func run(book: CollageStyleFineArtSelfTest.Book, check: (Bool, String, String) -> Void) {
         checkClientPicks(book: book, check: check)
+        checkDistinctKeeping(check: check)
         checkBudgetClassic(book: book, check: check)
         checkBudgetFineArt(book: book, check: check)
         checkBudgetModel(check: check)
@@ -103,6 +104,36 @@ enum CollageAlbumPlanSelfTest {
                                              budget: CollageAlbumBudget(spreads: n + 5))
         check(CollageStyleFineArtSelfTest.signature(roomy) == CollageStyleFineArtSelfTest.signature(natural),
               "目标比编出来的多：和不指定一样（不加页）", "\(n) 个")
+        // 目标没卡到（不比编出来的跨页数少）：和不指定一字不差。呼吸图张数以前按 min(照片数 / 1.8 估的跨页数, 目标) 定，
+        // 检视器勾「指定跨页数」默认就是现在的跨页数，估的比编出来的多时，目标 = 编出来的也会少一张呼吸图、整本跟着变。
+        // 一章 27 张（5 张没脸）：估 15 个跨页（呼吸图 3 张），编出来不到 15 个，正好踩在 3 → 2 张那条线上。
+        let oneChapter = oneChapterBook()
+        for (name, photos, sim) in [("四章合成婚礼", book.photos, book.similarity), ("一章 27 张", oneChapter.photos, oneChapter.similarity)] {
+            let free = CollageStyleFineArt.plan(photos, dedupe: true, chapterMono: true, similarity: sim)
+            let real = free.spreads.count
+            let placedCount = free.spreads.reduce(0) { $0 + $1.photos.count }
+            let estimate = Int((Double(placedCount) / CollageStyleFineArt.targetPerSpread).rounded(.up))
+            let freeSig = CollageStyleFineArtSelfTest.signature(free)
+            var differ: [Int] = []
+            for target in real...max(real, estimate) {
+                let p = CollageStyleFineArt.plan(photos, dedupe: true, chapterMono: true, similarity: sim,
+                                                 budget: CollageAlbumBudget(spreads: target))
+                if CollageStyleFineArtSelfTest.signature(p) != freeSig { differ.append(target) }
+            }
+            check(differ.isEmpty, "\(name)：目标 \(real)–\(max(real, estimate))（不比编出来的 \(real) 个少）和不指定一字不差",
+                  differ.isEmpty ? "估 \(estimate) 个" : "目标 " + differ.map(String.init).joined(separator: " ") + " 变了")
+            // 卡到了（目标比编出来的少）：按目标少放呼吸图重编；重编出来比目标还少就不用它（并到正好），一张不丢。
+            let freeIDs = Set(free.spreads.flatMap(\.photos).map(\.id))
+            var bad: [String] = []
+            for target in stride(from: real - 1, through: max(2, real - 8), by: -1) {
+                let p = CollageStyleFineArt.plan(photos, dedupe: true, chapterMono: true, similarity: sim,
+                                                 budget: CollageAlbumBudget(spreads: target))
+                let ids = p.spreads.flatMap(\.photos).map(\.id)
+                let whole: Bool = Set(ids) == freeIDs && ids.count == freeIDs.count
+                if !whole || p.spreads.count < target || p.spreads.count > real { bad.append("\(target)→\(p.spreads.count)") }
+            }
+            check(bad.isEmpty, "\(name)：目标比编出来的少时不少于目标、不多于不指定、一张不丢", bad.joined(separator: " "))
+        }
         for target in [n - 4, 20, 8] {
             let plan = CollageStyleFineArt.plan(book.photos, dedupe: true, chapterMono: true, similarity: book.similarity,
                                                 budget: CollageAlbumBudget(spreads: target))
@@ -119,10 +150,135 @@ enum CollageAlbumPlanSelfTest {
             let pages = CollageStyleFineArt.build(plan, context: CollageStyleFineArtSelfTest.context(CollageCanvas.albums[0], book: book.photos))
             let onPages = pages.flatMap { $0.root.photoIDs }
             check(pages.count == plan.spreads.count && Set(onPages) == naturalIDs, "目标 \(target)：每个跨页都出了版式、照片都在格子里", "")
+            let broken = compressedViolations(plan.spreads, similar: book.similarity.similar)
+            check(broken.isEmpty, "目标 \(target)：压过的册子照样守 R1 / R4 / R7 / R8 / R10（不连着 4 个多图跨页、同姿势 / 黑白彩色不同页……）",
+                  broken.isEmpty ? counts(plan) : broken.joined(separator: "；"))
         }
+        // 一章 27 张的也压一压（并页只能在一章里挪，最容易连成一长串多图跨页）。
+        let single = oneChapterBook()
+        let singleFree = CollageStyleFineArt.plan(single.photos, dedupe: true, chapterMono: true, similarity: single.similarity)
+        var singleBroken: [String] = []
+        for target in [singleFree.spreads.count - 2, 8, 4] {
+            let p = CollageStyleFineArt.plan(single.photos, dedupe: true, chapterMono: true, similarity: single.similarity,
+                                             budget: CollageAlbumBudget(spreads: target))
+            singleBroken += compressedViolations(p.spreads, similar: single.similarity.similar).map { "目标 \(target) " + $0 }
+        }
+        check(singleBroken.isEmpty, "一章 27 张压到 \(singleFree.spreads.count - 2) / 8 / 4 个：照样守 R1 / R4 / R7 / R8 / R10",
+              singleBroken.joined(separator: "；"))
+        // 查规则的这一段自己也得认得出违规（不然上面几条白过）：四个对页双图连着、同姿势同页、黑白彩色同页、亮度差太大。
+        let ref = { (id: String) in book.photos.first { $0.id == id } }
+        func pairOf(_ a: String, _ b: String) -> CollageAlbum.Spread {
+            var s = CollageAlbum.Spread(kind: .pair, photos: [a, b].compactMap(ref))
+            s.fineArt = CollageFineArtSpread(kind: .pair, chapter: 2)
+            return s
+        }
+        let fourBusy = [pairOf("C02", "C12"), pairOf("C13", "C14"), pairOf("C15", "C16"), pairOf("C03", "C05")]
+        let probes: [(String, [CollageAlbum.Spread])] = [
+            ("R4", fourBusy), ("R10", [pairOf("C09", "C10")]), ("R7", [pairOf("A11", "C02")]), ("R8", [pairOf("D05", "D06")]),
+        ]
+        let caught = probes.map { rule, list in
+            compressedViolations(list, similar: book.similarity.similar).contains { $0.contains(rule) }
+        }
+        check(!caught.contains(false), "查压过的册子的规则认得出 R4 / R10 / R7 / R8 违规（自己不是白过）",
+              zip(probes, caught).map { "\($0.0.0) \($0.1 ? "认得" : "没认出")" }.joined(separator: " "))
+        // 直接喂 compress：并了会同姿势（C09 / C10）、黑白彩色混（E03 黑白）的那一对不并；对照：合得来的照样并。
+        func spreadOf(_ kind: CollageFineArtSpread.Kind, _ ids: [String], chapter: Int) -> CollageAlbum.Spread {
+            var s = CollageAlbum.Spread(kind: kind == .title ? .opener : (ids.count == 1 ? .solo : .pair), photos: ids.compactMap(ref))
+            s.fineArt = CollageFineArtSpread(kind: kind, chapter: chapter)
+            // 和 plan 一样：全是黑白照片的跨页是黑白页。
+            if s.photos.allSatisfy({ $0.isMonochrome == true }) { s.fineArt?.look = CollageStyleFineArt.monoLook }
+            return s
+        }
+        let opener = spreadOf(.title, ["A13"], chapter: 0)
+        let refused: [(String, [CollageAlbum.Spread])] = [
+            ("同姿势 对页+单", [opener, spreadOf(.pair, ["C02", "C09"], chapter: 1), spreadOf(.single, ["C10"], chapter: 1)]),
+            ("同姿势 单+单", [opener, spreadOf(.single, ["C09"], chapter: 1), spreadOf(.single, ["C10"], chapter: 1)]),
+            ("黑白彩色 对页+单", [opener, spreadOf(.pair, ["E02", "E06"], chapter: 3), spreadOf(.single, ["E03"], chapter: 3)]),
+            ("黑白彩色 单+单", [opener, spreadOf(.single, ["E02"], chapter: 3), spreadOf(.single, ["E03"], chapter: 3)]),
+        ]
+        var refusedBad: [String] = []
+        for (name, list) in refused {
+            var out = list
+            CollageStyleFineArt.compress(&out, toward: 2, similar: book.similarity.similar)
+            if out.count != list.count || !compressedViolations(out, similar: book.similarity.similar).isEmpty { refusedBad.append(name) }
+        }
+        var control = [opener, spreadOf(.pair, ["C02", "C12"], chapter: 1), spreadOf(.single, ["C13"], chapter: 1)]
+        CollageStyleFineArt.compress(&control, toward: 2, similar: book.similarity.similar)
+        check(refusedBad.isEmpty && control.count == 2 && control.last?.fineArt?.kind == .mainPlusTwo,
+              "compress 不并同姿势、黑白彩色混的（对页+单、单+单都是），合得来的照样并成一主两辅",
+              refusedBad.isEmpty ? "对照并成 \(control.count) 个" : "并了：" + refusedBad.joined(separator: " "))
         let tight = CollageStyleFineArt.plan(book.photos, dedupe: true, chapterMono: true, similarity: book.similarity,
                                              budget: CollageAlbumBudget(spreads: 8))
         check(tight.spreads.count > 8, "fine-art 压到 8 个放不下（每跨页最多 3 张）：多出来、不删片", "\(tight.spreads.count) 个")
+
+        // fine-art 每跨页固定 1–3 张、不看目标里的每跨页张数（命令行 / ops 的 20@1-2、默认编排时设的再换成 fine-art
+        // 都能把 1–2 带进来）：和 1–6 编出来一样，提示照实际的 3 张说，不说用户填的 2。
+        let sig20 = CollageStyleFineArtSelfTest.signature(CollageStyleFineArt.plan(
+            book.photos, dedupe: true, chapterMono: true, similarity: book.similarity, budget: CollageAlbumBudget(spreads: 20)))
+        let perSpreadSigs: [String] = [(1, 2), (2, 4), (1, 1)].map { lo, hi in
+            let b = CollageAlbumBudget(spreads: 20, minPerSpread: lo, maxPerSpread: hi)
+            let p = CollageStyleFineArt.plan(book.photos, dedupe: true, chapterMono: true, similarity: book.similarity, budget: b)
+            return CollageStyleFineArtSelfTest.signature(p)
+        }
+        check(perSpreadSigs.allSatisfy { $0 == sig20 }, "fine-art 不看每跨页张数：1–2、2–4、1–1 和 1–6 编出来一样（固定 1–3 张）",
+              perSpreadSigs.map { $0 == sig20 ? "同" : "不同" }.joined(separator: " "))
+        let capped2 = CollageAlbumBudget(spreads: 8, minPerSpread: 2, maxPerSpread: 2)
+        let overText = CollageAlbumBudget.outcome(spreads: 12, budget: capped2, photos: 30, fineArt: true) ?? ""
+        let underText = CollageAlbumBudget.outcome(spreads: 5, budget: capped2, photos: 9, fineArt: true) ?? ""
+        check(overText.contains("最多 \(CollageStyleFineArt.maxPerSpread) 张") && !overText.contains("最多 2 张")
+              && !underText.contains("至少"),
+              "fine-art 的提示照实际规则说（最多 3 张，不提用户填的每跨页张数）", overText + " / " + underText)
+    }
+
+    /// 压过的册子还得守的那几条（CollageStyleFineArt.compress 并页不许破坏的）：R1 一个跨页只放一章、章节按顺序；
+    /// R4 连着的多图跨页最多 maxBusyRun 个；R7 不混黑白和彩色（混的只能是黑白页）、全是黑白的是黑白页；R8 对页双图、
+    /// 一主两辅左右页亮度差不超 maxLumaGap；R10 同姿势不进同一跨页；每跨页最多 3 张。不查 R3（每章收尾单张、不连着 3 个
+    /// 单图）、R5（呼吸图张数）、R11（落单竖图的比例）：压页本来就是把这些并掉（checkPlan 全跑会误报）。
+    static func compressedViolations(_ spreads: [CollageAlbum.Spread], similar: [String: Set<String>]) -> [String] {
+        var out: [String] = []
+        var run = 0
+        for (i, s) in spreads.enumerated() {
+            let at = "第 \(i + 1) 个跨页"
+            run = s.photos.count >= 2 ? run + 1 : 0
+            if run > CollageStyleFineArt.maxBusyRun { out.append(at + " R4 连着 \(run) 个多图跨页") }
+            if s.photos.count > CollageStyleFineArt.maxPerSpread { out.append(at + " \(s.photos.count) 张") }
+            if Set(s.photos.map { $0.chapter ?? -1 }).count > 1 { out.append(at + " R1 跨章") }
+            let monoCount: Int = s.photos.filter { $0.isMonochrome == true }.count
+            let monoPage: Bool = s.fineArt?.look?.look == .mono
+            if monoCount > 0, !monoPage { out.append(at + " R7 " + (monoCount < s.photos.count ? "黑白彩色混" : "黑白照片不是黑白页")) }
+            let samePose: Bool = s.photos.contains { a in
+                s.photos.contains { b in a.id != b.id && (similar[a.id]?.contains(b.id) ?? false) }
+            }
+            if samePose { out.append(at + " R10 同姿势") }
+            guard let info = s.fineArt else { continue }
+            var gap: Double = 0
+            if info.kind == .pair, s.photos.count == 2 {
+                gap = CollageStyleFineArt.lumaGap([s.photos[0]], [s.photos[1]])
+            } else if info.kind == .mainPlusTwo, !s.photos.isEmpty {
+                let main = s.photos[min(info.mainIndex, s.photos.count - 1)]
+                gap = CollageStyleFineArt.lumaGap([main], s.photos.filter { $0.id != main.id })
+            }
+            if gap > CollageStyleFineArt.maxLumaGap { out.append(at + String(format: " R8 亮度差 %.2f", gap)) }
+        }
+        let chapterSeq: [Int] = spreads.dropFirst().compactMap { $0.fineArt?.chapter }
+        if chapterSeq != chapterSeq.sorted() { out.append("R1 章节顺序乱了") }
+        return out
+    }
+
+    /// 一章 27 张的合成册子（5 张没有人脸 = 呼吸图候选，3 张横图，2 张精选；没有场、连拍、黑白）。
+    static func oneChapterBook() -> CollageStyleFineArtSelfTest.Book {
+        typealias B = CollageStyleFineArtSelfTest.Book
+        var photos: [CollagePhotoRef] = []
+        for i in 0..<27 {
+            let faceless = [3, 8, 13, 18, 23].contains(i)
+            let landscape = [5, 15, 25].contains(i)
+            let score: Double = 1.3 + Double((i * 7) % 10) / 20
+            photos.append(B.ref(String(format: "S%02d", i + 1), 1, Double(i) * 3, portrait: !landscape,
+                                face: faceless ? 0 : 0.02, score: score, pick: i == 10 || i == 20,
+                                luma: 0.45 + Double(i % 3) / 20))
+        }
+        let sim = CollageStyleFineArt.Similarity(kept: photos, dropped: [], similar: [:])
+        return B(photos: photos, similarity: sim, monoChapters: [])
     }
 
     static func checkBudgetModel(check: (Bool, String, String) -> Void) {
@@ -153,6 +309,11 @@ enum CollageAlbumPlanSelfTest {
         check(parsed == [CollageAlbumBudget(spreads: 20).label, CollageAlbumBudget(spreads: 20, minPerSpread: 2, maxPerSpread: 5).label,
                          "-", "-", "-", "-"],
               "命令行 spreads:20 / 20@2-5 认得，写错的不认", parsed.joined(separator: " | "))
+        // 每一段都要整段是数（--target-spreads 20@1-6 再加 --per-spread 2-4 拼出来的 20@1-6@2-4 以前被认成 1–4）。
+        let strict = ["20@1-6@2-4", "20@a1-2-6", "20@1-2-6", "20@", "20@1-", "20@-6", "@20", "20@1-6x"]
+            .map { CollageCLI.parseBudget($0)?.label ?? "-" }
+        check(strict.allSatisfy { $0 == "-" }, "命令行每跨页张数写错（两个 @、夹字母、空段、多一个 -）不认、不猜",
+              strict.joined(separator: " | "))
         // 三种结果：沿用 / 改回自动 / 换成几个跨页；写错 = 「错」。
         func outcome(_ kit: CollageKitID, _ n: Int?, _ lo: Int?, _ hi: Int?) -> String {
             switch CollageBudgetChange.parse(kit: kit, spreads: n, min: lo, max: hi) {
@@ -171,6 +332,14 @@ enum CollageAlbumPlanSelfTest {
             outcome(.weddingAlbum, nil, 2, nil) == "错",
             outcome(.weddingAlbum, 18, 4, 3) == "错",
             outcome(.weddingAlbum, 0, 1, nil) == "错",
+            // 只给最少、比默认的最多 6 大：最多跟着抬（不报没给的那个 6）；两个都给了照样查。
+            outcome(.weddingAlbum, 18, 8, nil) == "18@8-8",
+            outcome(.weddingAlbum, 18, 6, nil) == "18@6-6",
+            outcome(.weddingAlbum, 18, 8, 7) == "错",
+            // 整本婚礼相册是 fine-art：每跨页固定 1–3 张，最多给 1、2 回参数不对（以前照收、报 2，编出来照样有 3 张的）。
+            outcome(.weddingAlbum, 18, nil, 2) == "错",
+            outcome(.weddingAlbum, 18, 1, 1) == "错",
+            outcome(.weddingAlbum, 18, nil, 3) == "18@1-3",
         ]
         check(mcp.allSatisfy { $0 }, "MCP 成套的 spreads：不给沿用、0 改回自动、只对整本婚礼相册、写错回参数不对",
               mcp.map { $0 ? "✓" : "✗" }.joined())
@@ -192,6 +361,43 @@ enum CollageAlbumPlanSelfTest {
 
     // MARK: - F19 客户选中
 
+    /// 相似去重豁免客户选中，走生产的 distinctMoments（合成照片没有 Vision 特征：注入画面距离）：
+    /// K1、K2 几乎一样，K2、K4 几乎一样，K1–K4 有点像但不到连拍，K3 和谁都远（中位数 = 远的那个）。
+    /// 不豁免：K2 和 K1 是连拍 → 拿掉；K4 只和 K1 有点像 → 留。豁免 K2：K2 留下、也算「已经留下的」→ K4 和它是连拍、拿掉。
+    /// 默认编排（CollageAlbum.plan dedupe）、fine-art（不给相似关系 = 生产那条路）、plan(theme: .fineArt) 各走一遍。
+    static func checkDistinctKeeping(check: (Bool, String, String) -> Void) {
+        print("== 相似去重豁免客户选中（注入画面距离，走 distinctMoments）")
+        typealias B = CollageStyleFineArtSelfTest.Book
+        let base = [B.ref("K1", 1, 0, score: 2.0), B.ref("K2", 1, 1, score: 1.5), B.ref("K3", 1, 2, score: 1.8),
+                    B.ref("K4", 1, 3, score: 1.4)]
+        let near: [Set<String>: Double] = [["K1", "K2"]: 0.1, ["K2", "K4"]: 0.1, ["K1", "K4"]: 0.6]
+        CollageSelect.distanceOverride = { a, b in near[[a.id, b.id]] ?? 1.0 }
+        defer { CollageSelect.distanceOverride = nil }
+        var picked = base
+        for i in picked.indices where picked[i].id == "K2" { picked[i].clientPick = true }
+
+        func ids(_ list: [CollagePhotoRef]) -> String { list.map(\.id).sorted().joined(separator: ",") }
+        let plain = CollageSelect.distinctMoments(base)
+        let kept = CollageSelect.distinctMoments(base, keeping: ["K2"])
+        check(ids(plain.dropped) == "K2" && ids(kept.dropped) == "K4",
+              "distinctMoments：不豁免拿掉 K2（和 K1 连拍）；豁免 K2 留下它、它也算留下的（和它连拍的 K4 拿掉）",
+              "不豁免拿掉 \(ids(plain.dropped)) · 豁免拿掉 \(ids(kept.dropped))")
+        let routes: [(String, ([CollagePhotoRef]) -> CollageAlbum.Plan)] = [
+            ("默认编排", { CollageAlbum.plan($0, dedupe: true) }),
+            ("默认编排 + 目标跨页数", { CollageAlbum.plan($0, dedupe: true, budget: CollageAlbumBudget(spreads: 3)) }),
+            ("fine-art", { CollageStyleFineArt.plan($0, dedupe: true, chapterMono: true) }),
+            ("plan(theme: .fineArt)", { CollageAlbum.plan($0, dedupe: true, theme: .fineArt) }),
+        ]
+        for (name, run) in routes {
+            let without = run(base)
+            let with = run(picked)
+            let placed = Set(with.spreads.flatMap(\.photos).map(\.id))
+            check(ids(without.dropped) == "K2" && placed.contains("K2") && ids(with.dropped) == "K4",
+                  "\(name)：相似去重拿掉 K2；客户选中了 K2 就留着（和它连拍的 K4 拿掉）",
+                  "没选拿掉 \(ids(without.dropped)) · 选了拿掉 \(ids(with.dropped))\(placed.contains("K2") ? "" : "，K2 没上")")
+        }
+    }
+
     static func checkClientPicks(book: CollageStyleFineArtSelfTest.Book, check: (Bool, String, String) -> Void) {
         print("== 客户选中无条件保留（fine-art）")
         // A05：场 1 有精选 A04 → 平时拿掉；A09：连拍组 5 的第二张 → 平时拿掉；E05：废片 → 平时不要；
@@ -199,14 +405,19 @@ enum CollageAlbumPlanSelfTest {
         let chosen: Set<String> = ["A05", "A09", "E05", "C10"]
         var photos = book.photos
         for i in photos.indices where chosen.contains(photos[i].id) { photos[i].clientPick = true }
+        // 相似关系用没标客户选中的那份算（和真的一样：去重的结果不带客户选中的标记，客户选中看要编的这批照片）。
         var sim = book.similarity
-        sim.kept = photos.filter { $0.id != "C10" }
-        sim.dropped = photos.filter { $0.id == "C10" }
+        sim.kept = book.photos.filter { $0.id != "C10" }
+        sim.dropped = book.photos.filter { $0.id == "C10" }
 
         let before = CollageStyleFineArt.plan(book.photos, dedupe: true, chapterMono: true, similarity: sim)
         let placedBefore = Set(before.spreads.flatMap(\.photos).map(\.id))
         check(placedBefore.isDisjoint(with: chosen), "对照：没有客户选中时这四张都不上（场里有精选 / 连拍第二张 / 废片 / 相似）",
               chosen.intersection(placedBefore).sorted().joined(separator: " "))
+        let rejectIDs = Set(book.photos.filter { $0.verdict == .reject }.map(\.id))
+        let accountedBefore = placedBefore.union(before.dropped.map(\.id)).union(rejectIDs)
+        check(before.dropped.contains { $0.id == "C10" } && accountedBefore == Set(book.photos.map(\.id)),
+              "对照：相似拿掉的 C10 在「拿掉的」里（每张要么上了、要么拿掉、要么是废片）", "")
 
         let plan = CollageStyleFineArt.plan(photos, dedupe: true, chapterMono: true, similarity: sim)
         let placed = plan.spreads.flatMap(\.photos).map(\.id)
