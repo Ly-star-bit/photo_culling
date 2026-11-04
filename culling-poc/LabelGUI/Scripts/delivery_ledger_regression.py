@@ -81,21 +81,24 @@ if len(KEY) != 16:
     sys.exit(2)
 
 
-def make_data(name):
+def make_data(name, shoot=SHOOT, key=KEY, rename=None):
+    """`rename`：fixture 的 id → 这一场的 id（照片文件名跟着它，见 I 段）；不给就照 fixture。"""
+    rename = rename or {}
     data = os.path.join(WORK, name)
-    sdir = os.path.join(data, "sessions", KEY)
+    sdir = os.path.join(data, "sessions", key)
     os.makedirs(os.path.join(sdir, "previews"))
     rows = []
     for p in PHOTOS:
         q = dict(p)
-        q["raw_path"] = q["decode_path"] = os.path.join(SHOOT, p["id"] + ".JPG")
-        q["preview_path"] = f"previews/{p['id']}.jpg"
+        q["id"] = rename.get(p["id"], p["id"])
+        q["raw_path"] = q["decode_path"] = os.path.join(shoot, q["id"] + ".JPG")
+        q["preview_path"] = f"previews/{q['id']}.jpg"
         q["body_serial"] = "SYN0001"
-        shutil.copyfile(q["raw_path"], os.path.join(sdir, "previews", p["id"] + ".jpg"))
+        shutil.copyfile(q["raw_path"], os.path.join(sdir, "previews", q["id"] + ".jpg"))
         rows.append(q)
-    json.dump({"photo_dir": SHOOT, "photos": rows}, open(os.path.join(sdir, "manifest.json"), "w"), ensure_ascii=False)
+    json.dump({"photo_dir": shoot, "photos": rows}, open(os.path.join(sdir, "manifest.json"), "w"), ensure_ascii=False)
     l1o = dict(l1)
-    l1o["results"] = [x for x in l1["results"] if x["id"] in IDS]
+    l1o["results"] = [dict(x, id=rename.get(x["id"], x["id"])) for x in l1["results"] if x["id"] in IDS]
     json.dump(l1o, open(os.path.join(sdir, "layer1_results.json"), "w"), ensure_ascii=False)
     return data, os.path.join(sdir, "exports.json")
 
@@ -109,11 +112,11 @@ def only_jpgs(folder):
     return bool(names) and all(n.endswith(".jpg") for n in names)
 
 
-def client_import(data, text):
+def client_import(data, text, shoot=SHOOT):
     path = os.path.join(WORK, "reply.txt")
     with open(path, "w") as f:
         f.write(text)
-    r = run(data, "--client-import", SHOOT, "--text", path)
+    r = run(data, "--client-import", shoot, "--text", path)
     lines = r.stdout.splitlines()
     got = next((l[len("认出: "):] for l in lines if l.startswith("认出: ")), "-")
     miss = next((l[len("没认出: "):] for l in lines if l.startswith("没认出: ")), "-")
@@ -295,6 +298,34 @@ else:
           and corrupt_copies() == moved,
           f"读不出来（chmod 000）：不当空的盖掉、不挪，退出码 1、说原因（{r.returncode}，"
           f"{'原件没动' if after == before else '原件被改了'}）")
+
+print("I. 原片本身就叫 001.JPG（按序号命名的扫描件、导入时改过名）：交付名 001.jpg 指的是另一张 = 不猜，带不带扩展名都一样")
+SEQ = os.path.join(WORK, "shoot-seq")
+os.makedirs(SEQ)
+# 倒着起名：拍得最早的叫 008，{序号:3} 导出来的 001.jpg 就不是原片 001。
+SEQ_NAME = {p["id"]: f"{len(PHOTOS) - i:03d}" for i, p in enumerate(PHOTOS)}
+for i, p in enumerate(PHOTOS):
+    make_jpeg(os.path.join(SEQ, SEQ_NAME[p["id"]] + ".JPG"), 360, 240, seed=300 + i)
+r = run(os.path.join(WORK, "data-key-seq"), "--session-key", SEQ, quiet=True)
+SEQ_KEY = r.stdout.strip().splitlines()[-1] if r.returncode == 0 and r.stdout.strip() else ""
+check(len(SEQ_KEY) == 16, f"第二场算得出 key（{SEQ_KEY!r}）")
+DATA_SEQ, LEDGER_SEQ = make_data("data-seq", shoot=SEQ, key=SEQ_KEY, rename=SEQ_NAME)
+r = run(DATA_SEQ, "--export-jpeg", SEQ, "--dest", os.path.join(WORK, "out-seq-orig"), "--scope", "picks+usable",
+        "--size", "long:200")
+got, miss = client_import(DATA_SEQ, "003\n005.jpg\n", shoot=SEQ)
+check(r.returncode == 0 and got == ["003", "005"] and miss == [],
+      f"默认 {{原名}} 导出：交付名就是原片名、两边是同一张，照认（认出 {got} · 没认出 {miss}）")
+os.remove(LEDGER_SEQ)
+r = run(DATA_SEQ, "--export-jpeg", SEQ, "--dest", os.path.join(WORK, "out-seq-num"), "--scope", "picks+usable",
+        "--name", "{序号:3}", "--size", "long:200")
+files = ledger(LEDGER_SEQ)[-1]["files"] if ledger(LEDGER_SEQ) else []
+clash = next((f for f in files if f["file"][:-4] != f["id"] and f["file"][:-4] in SEQ_NAME.values()), None)
+check(r.returncode == 0 and clash is not None, f"{{序号:3}} 导出：有一张交付名和另一张原片同名（{clash}）")
+if clash:
+    t = clash["file"][:-4]
+    got, miss = client_import(DATA_SEQ, f"{t}\n{t}.jpg\n", shoot=SEQ)
+    check(got == [] and miss == [f"{t}（交付文件名还是原片名？）", f"{t}.jpg（交付文件名还是原片名？）"],
+          f"「{t}」「{t}.jpg」：原片 {t} 和交付名 {t}.jpg（是 {clash['id']}）各指一张 → 都不猜（认出 {got} · 没认出 {miss}）")
 
 if CLEANUP:
     shutil.rmtree(WORK, ignore_errors=True)

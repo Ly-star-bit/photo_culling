@@ -74,12 +74,24 @@ enum ClientReply {
             }
         }
 
-        /// 按文件名认：原片的文件名，加上导出过的交付文件名。两边都对上、又不是同一张 = 重名（返回两张），不替你挑；
-        /// 默认的导出 JPG 交付名就是原名，两边是同一张。
+        /// 按文件名认：原片的文件名，加上导出过的交付文件名。两边都对上、又不是同一张 = 说不准（返回两张，见 ambiguity），
+        /// 不替你挑；默认的导出 JPG 交付名就是原名，两边是同一张。
+        /// 纯数字、范围样的交付名不带扩展名时 deliveredFilename 不认（留给 resolve 和编号一起比），可原片名已经认上了的话
+        /// （这一场的原片本来就叫 001.JPG），resolve 走不到编号那条：交付名在这里并进来一起比，不让原片名悄悄赢。
         func byFilename(_ token: String) -> Set<String>? {
             let original = originalFilename(token)
-            guard let delivered = deliveredFilename(token) else { return original }
+            let lower = token.lowercased()
+            let numberShaped = ClientReply.isDigits(Substring(lower)) || ClientReply.isRange(Substring(lower))
+            let bare = original != nil && numberShaped ? deliveredName[lower] : nil
+            guard let delivered = deliveredFilename(token) ?? bare else { return original }
             return original.map { $0.union(delivered) } ?? delivered
+        }
+
+        /// byFilename 对上不止一张时，没认出里跟的说明：原片名认出一张、交付名指的是别的 =「交付文件名还是原片名？」
+        /// （{序号:3} 导出的 001.jpg 是第 17 张，这一场又真有一张原片叫 001.JPG）；别的（不同子文件夹里同名、几次导出同名
+        /// 指向不同的照片）= 重名。
+        func ambiguity(_ token: String) -> String {
+            originalFilename(token)?.count == 1 ? "（交付文件名还是原片名？）" : "（重名）"
         }
 
         /// 交付文件名：完整文件名 → 名字 → 去掉扩展名再按名字（扩展名的规矩和原片一样）。纯数字的名字（{序号:3}
@@ -369,7 +381,7 @@ enum ClientReply {
             let token = word.token
             pendingNote = word.note
             if let ids = lookup.byFilename(token) {
-                if ids.count == 1, let id = ids.first { hit(id) } else { miss(token + "（重名）") }
+                if ids.count == 1, let id = ids.first { hit(id) } else { miss(token + lookup.ambiguity(token)) }
                 continue
             }
             let parts = token.split(separator: "-", omittingEmptySubsequences: false)

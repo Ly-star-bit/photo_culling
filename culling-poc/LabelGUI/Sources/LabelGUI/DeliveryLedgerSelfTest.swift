@@ -15,6 +15,31 @@ enum DeliveryLedgerSelfTest {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         matchCases(dir.appendingPathComponent("match"), check: check)
         wiring(dir.appendingPathComponent("wiring"), check: check)
+        replyCases(dir.appendingPathComponent("reply"), check: check)
+    }
+
+    // MARK: - 导入客户选择：数字样的名字有好几种认法时不猜
+
+    private static func replyCases(_ dir: URL, check: Check) {
+        // 原片本来就按序号起名（001.JPG…），{序号:3} 导出的 001.jpg 却是 017；{序号} 不补零再导一次另存的 1-2.jpg 是 023。
+        let names = ["001", "002", "017", "023"]
+        let store = FileSafetySelfTest.makeShoot(dir, names.map { FileSafetySelfTest.Fake(id: $0, raw: $0 + ".JPG") })
+        check(store.items.count == names.count, "前提：造的这一场 4 张", "\(store.items.count)")
+        func file(_ name: String, _ id: String) -> DeliveryRecord.File {
+            DeliveryRecord.File(file: name, id: id, original: dir.appendingPathComponent(id + ".JPG").path)
+        }
+        let record = DeliveryRecord(kind: .jpeg, folder: dir.appendingPathComponent("out"),
+                                    files: [file("001.jpg", "017"), file("002.jpg", "002"), file("1-2.jpg", "023"),
+                                            file("5-2.jpg", "017")])
+        func resolve(_ text: String, sheets: [ProofSheet]) -> (ids: [String], unknown: [String]) {
+            let r = ClientReply.resolve(text, items: store.items, sheets: sheets, deliveries: [record])
+            return (r.ids, r.unknown)
+        }
+        let plain = resolve("001\n001.jpg\n002\n017\n1-2\n", sheets: [])
+        check(plain.unknown == ["001（交付文件名还是原片名？）", "001.jpg（交付文件名还是原片名？）"],
+              "原片 001.JPG 和交付名 001.jpg（是 017）各指一张：「001」「001.jpg」都不猜", "\(plain.unknown)")
+        check(plain.ids == ["002", "017", "023"],
+              "交付名和原片名是同一张的（002）照认；没有确认表时「1-2」按交付名 1-2.jpg 认", "\(plain.ids)")
     }
 
     // MARK: - 水印页：原图按文件本身对回这一场
