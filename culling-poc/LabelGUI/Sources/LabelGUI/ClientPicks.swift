@@ -350,10 +350,20 @@ enum ClientReply {
             let id = sheet.ids[n - 1]
             return lookup.live.contains(id) ? id : nil
         }
-        /// 一行开头能带备注的：认得出唯一一张的文件名，或全场唯一的 ≥3 位文件号（编号也对得上另一张的不算，下面会报
+        /// 一行开头能带备注的：认得出唯一一张的文件名、只指一张的纯数字交付名，或全场唯一的 ≥3 位文件号（编号也对得上另一张的不算，下面会报
         /// 「文件号还是编号？」）。表上的编号不算：「12、35、78 都要」开头的 12 不能把后面当成备注。
         func uniqueHead(_ token: String) -> Bool {
             if let ids = lookup.byFilename(token) { return ids.count == 1 }
+            // 纯数字的交付文件名（{序号:3} 导出的 003.jpg，客户回「003 去路人」）：byFilename 故意不认它（留给下面主循环
+            // 当第三种认法），这里照主循环同一个判断 —— 交付名只指一张，文件号、表上编号要么没有、要么是同一张。
+            if isDigits(Substring(token)), let delivered = lookup.deliveredName[token] {
+                guard delivered.count == 1, let id = delivered.first else { return false }
+                let numbered: Set<String>? = token.count >= 3 ? lookup.byNumber[fileNumber(token) ?? ""] : nil
+                let byFile: String? = numbered?.count == 1 ? numbered?.first : nil
+                let byIndex: String? = Int(token).flatMap(sheetPhoto)
+                let others = Set([byFile, byIndex].compactMap { $0 })
+                return others.isSubset(of: [id])
+            }
             guard token.count >= 3, isDigits(Substring(token)), let number = fileNumber(token),
                   let ids = lookup.byNumber[number], ids.count == 1, let file = ids.first else { return false }
             if let index = Int(token).flatMap(sheetPhoto), index != file { return false }

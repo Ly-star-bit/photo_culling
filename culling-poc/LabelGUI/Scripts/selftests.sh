@@ -15,7 +15,9 @@
 #                        （端到端的命令行出口在 Scripts/diag_regression.py）
 #   --followup-selftest  跟进小修：写盘失败报给 MCP（persisted / save_failed）、水印页按客户选中导入、复制原片连续失败就停……
 #   --persist-selftest   场次持久化：删场次留判决、坏文件挪开不盖、读不了的拒绝切场次、写盘失败看得见（Fixtures/photot-session）
-#   --cull-mcp-selftest  选片 MCP 在真的 BatchStore 上：概览报 XMP 过期、AI 改判记出处、一次定一场、导入客户选择（同一份 fixture）
+#   --cull-mcp-selftest  选片 MCP 在真的 BatchStore 上：概览的 XMP 待更新 / 上次写的时间、导入客户选择（带备注、托盘跟着刷、
+#                        纯数字交付名）、AI 改判的出处（阈值建议不拿 AI 的当样本、亲手改过就拿掉）、一次定一场；
+#                        用 Fixtures/photot-session 的 JSON（不要照片），要一个空的数据目录（run 每条都给新的）
 #   --files-selftest     文件安全：XMP 只写改了的、同名共用 .xmp、废片避开拼图、高 ISO RAW 复制不互相顶掉
 #   --collage-export-selftest  拼图 / 相册导出：PDF 先写临时文件再改名、缺跨页不出 PDF、空照片格先确认
 #   --proof-selftest     选片确认表页面脚本（JavaScriptCore）：套餐张数、每张备注、复制的文字、确认表水印

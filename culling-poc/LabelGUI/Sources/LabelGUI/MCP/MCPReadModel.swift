@@ -106,7 +106,10 @@ enum MCPReadModel {
         // app 整组不写的 —— 点重写也降不下来，单独报，不让 AI 一直叫用户去点
         let xmpStale = s.xmpStaleCount
         let xmpShared = s.xmpSharedSidecarCount
-        out["xmp"] = ["stale_count": xmpStale, "written": s.xmpEverWritten, "shared_sidecar_count": xmpShared] as [String: Any]
+        var xmp: [String: Any] = ["stale_count": xmpStale, "written": s.xmpEverWritten, "shared_sidecar_count": xmpShared]
+        // 上次写进 XMP 的时间（带时区的 ISO 8601，xmp_state.json 里记的，不是文件 mtime）：旧版本写的没记这个 = 不报
+        if let at = s.xmpLastWritten { xmp["last_written"] = instantFormatter.string(from: at) }
+        out["xmp"] = xmp
 
         var thresholds: [String: Any] = ["sharpness": r3(s.sharpnessThreshold)]
         thresholds["clip_pct"] = r3(s.exposureThreshold * 100)
@@ -158,8 +161,10 @@ enum MCPReadModel {
         }
         let xmpWritable = max(0, xmpStale - xmpShared)
         if xmpWritable > 0 {
+            // 按钮名照批量页状态栏上的字（BatchView.xmpStaleLabel）：同名冲突时括号里多一句，开头「XMP 待更新」不变
             warnings.append(warning("xmp_stale", "上次写 XMP 之后有 \(xmpWritable) 张的判决、星级或客户选中变了：Lightroom / Capture One 里还是旧的。",
-                                    hint: "改完以后提醒用户在 app 里点状态栏「XMP 待更新」重新写入（MCP 不写 XMP）"))
+                                    hint: "改完以后提醒用户在 app 里点批量页状态栏橙色的「XMP 待更新 \(xmpStale) 张 · 点这里重新写入」"
+                                        + "（或「导出 › 只更新改了的 \(xmpStale) 张 XMP」）重写（MCP 不写 XMP）"))
         }
         if xmpShared > 0 {
             warnings.append(warning("xmp_shared_sidecar",

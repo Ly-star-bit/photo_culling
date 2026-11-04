@@ -711,6 +711,8 @@ final class BatchStore: ObservableObject {
     var xmpStaleCount: Int { derived.xmpStaleCount }
     /// 这一场写过 XMP 没有（xmp_state.json 在）：没写过时 xmpStaleCount 永远是 0，MCP 的概览要分得清「没过期」和「没写过」。
     var xmpEverWritten: Bool { xmpState != nil }
+    /// 上次写进 XMP 的时间（XMPState.writtenAt）：没写过、旧版本写的那份没记 = nil。
+    var xmpLastWritten: Date? { xmpState?.writtenAt }
     var clientPickCount: Int { derived.clientPickCount }
     var clientPickRejectCount: Int { derived.clientPickRejectCount }
     /// 「废片移到废纸篓」默认真会移的张数：废片里去掉客户选中的（客户点名要精修的照片不扔）、拼图里在用的
@@ -779,6 +781,10 @@ final class BatchStore: ObservableObject {
         var foreignRechecked: Bool?
         /// 上次写 XMP 时认出来的同名冲突（几张照片共用一个 .xmp，整组没写）。旧版本没有这个字段 = nil。
         var sharedSidecar: Set<String>?
+        /// 上次写 XMP 真写进去（或盘上本来就对）至少一张的时间：exportXMP 写完时记，只碰到别人的 sidecar、一张都没写进去
+        /// 的那次不改它；复查别人的 sidecar（recheckForeignSidecars）、挪场次重写这份文件都原样带过去 —— 所以不拿文件的
+        /// mtime 当它。旧版本写的没有这个字段 = nil（MCP 概览就不报 last_written）。
+        var writtenAt: Date?
     }
     private var xmpState: XMPState?
     private var xmpStatePath: URL { sessionDir.appendingPathComponent("xmp_state.json") }
@@ -4078,6 +4084,11 @@ final class BatchStore: ObservableObject {
     /// 亲手做的决定。写进去的都记在 acceptedIDs：判决钉住了，但不算「人工改判」。
     /// 整个操作一条撤销记录，⌘Z 一次全部回来。
     /// chapter 非 nil = 只动这一章（时间轴「只看这一章」开着时的「本章接受推荐」）。
+    ///
+    /// AI 出处（aiOverrides）和分组行的「接受推荐」（applyOverrides(recommendedDecision, accepted: true)）归属不一样，是有意的：
+    /// 分组行把这一场每一张都写一遍，AI 放行成精选、这次判决没变的那张也在里面 —— 用户看着这一场点了确认，就算用户的
+    /// （拿掉 AI 标记，之后进阈值建议、changed_by 是 user，和亲手按一下同一个判决一样）。这里只写要变的（本来就钉成精选的
+    /// 不写），没写到的照片用户没在这一步碰过，AI 标记留着、照旧算 AI 的。产品规则：用户在这一场上确认过 = 用户的。
     @discardableResult
     func acceptAllRecommendations(inChapter chapter: Int? = nil) -> Int {
         var changes: [(id: String, verdict: Verdict)] = []
@@ -5000,6 +5011,7 @@ final class BatchStore: ObservableObject {
                         state.foreign.remove(id)
                     }
                     state.sharedSidecar = sharedIDs.isEmpty ? nil : sharedIDs
+                    if !writtenIds.isEmpty { state.writtenAt = Date() }
                     self.saveXMPState(state)
                 }
                 // 写的这段时间里判决可能又变了：按现在的判决重数一遍。

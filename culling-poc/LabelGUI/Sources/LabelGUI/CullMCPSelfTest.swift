@@ -42,6 +42,7 @@ enum CullMCPSelfTest {
         }
         xmpChecks(check, sessionDir: sessionDir)
         clientPickChecks(check, sessionDir: sessionDir)
+        deliveredNoteChecks(check)
         provenanceChecks(check, sessionDir: sessionDir)
         sceneChecks(check)
         for f in failures { print("FAIL " + f) }
@@ -66,6 +67,12 @@ enum CullMCPSelfTest {
         let xmp = ov["xmp"] as? [String: Any] ?? [:]
         let warned = (ov["warnings"] as? [[String: Any]] ?? []).contains { $0["code"] as? String == "xmp_stale" }
         return (xmp["stale_count"] as? Int, xmp["written"] as? Bool, warned)
+    }
+
+    /// 概览 xmp 里的 last_written（没有这个键 = nil）。
+    static func lastWritten(_ store: BatchStore) -> Any? {
+        let ov = MCPReadModel.overview(store, session: store.sessionDir.lastPathComponent)
+        return (ov["xmp"] as? [String: Any])?["last_written"]
     }
 
     // MARK: - 1. 概览的 xmp（XMP 过期）
@@ -98,9 +105,47 @@ enum CullMCPSelfTest {
         // 21 张：2 张对得上，1 张是别人的，剩下 18 张（3 张对不上 + 15 张没写过）都算过期
         check(seeded.stale == n - 3 && seeded.written == true && seeded.warned && reopened.xmpStaleCount == n - 3,
               "写过 XMP 以后：xmp.stale_count = \(n - 3)、written true、带 xmp_stale：\(seeded)")
+        // hint 里的按钮名要和批量页状态栏上的字一样（BatchView.xmpStaleLabel「XMP 待更新 N 张 · 点这里重新写入」），
+        // 以前写的「XMP 过期」app 里找不到
+        let warnings = MCPReadModel.overview(reopened, session: reopened.sessionDir.lastPathComponent)["warnings"] as? [[String: Any]] ?? []
+        let hint = warnings.first { $0["code"] as? String == "xmp_stale" }?["hint"] as? String ?? ""
+        check(hint.contains("「XMP 待更新 \(n - 3) 张 · 点这里重新写入」") && !hint.contains("XMP 过期"),
+              "xmp_stale 的 hint 用状态栏上真的按钮名：\(hint)")
+        // last_written 记在 xmp_state.json 里（writtenAt），不拿文件 mtime 顶：老版本写的那份没有 → 不报
+        check(lastWritten(reopened) == nil, "老版本写的 xmp_state.json（没有 writtenAt）：xmp 里没有 last_written")
+        // 这一版写的带 writtenAt（JSONEncoder 默认的 Date：从 2001-01-01 起的秒数）→ 概览报带时区的 ISO 8601
+        let at = Date(timeIntervalSinceReferenceDate: 815_000_000)
+        var stamped = state
+        stamped["writtenAt"] = at.timeIntervalSinceReferenceDate
+        if let data = try? JSONSerialization.data(withJSONObject: stamped) { try? data.write(to: path, options: .atomic) }
+        let withTime = lastWritten(open()) as? String
+        let wantTime = MCPReadModel.instantFormatter.string(from: at)
+        check(withTime == wantTime, "xmp_state.json 记了 writtenAt：last_written = \(wantTime)（实际 \(withTime ?? "nil")）")
         try? FileManager.default.removeItem(at: path)
         let cleared = overviewXMP(open())
         check(cleared.stale == 0 && cleared.written == false && !cleared.warned, "删掉 xmp_state.json 以后回到没写过：\(cleared)")
+        xmpWrittenAtChecks(check)
+    }
+
+    /// 真写一次 XMP（数据目录里造的假拍摄，照 FileSafetySelfTest.makeShoot；照片旁边写 .xmp）：写之前没有 last_written，
+    /// 写完是刚才的时间，重开这一场读得回来同一个。
+    static func xmpWrittenAtChecks(_ check: Check) {
+        let dir = appDataDir.appendingPathComponent("cull-mcp-xmp-shoot")
+        let fakes = ["x1", "x2"].map { FileSafetySelfTest.Fake(id: $0, raw: $0 + ".ARW") }
+        let store = FileSafetySelfTest.makeShoot(dir, fakes)
+        check(store.items.count == 2 && lastWritten(store) == nil, "假拍摄还没写过 XMP：没有 last_written（\(store.items.count) 张）")
+        let before = Date()
+        store.exportXMP(.all)
+        FileSafetySelfTest.wait(store)
+        let text = lastWritten(store) as? String
+        let parsed = text.flatMap { MCPReadModel.instantFormatter.date(from: $0) }
+        let sinceStart = parsed.map { $0.timeIntervalSince(before) } ?? -99
+        let untilNow = parsed.map { $0.timeIntervalSinceNow } ?? 99
+        check(sinceStart > -2 && untilNow < 2 && store.xmpStaleCount == 0,
+              "写完 XMP：last_written 是刚才那次（\(text ?? "nil")，\(store.progressText)）")
+        let reopened = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
+        reopened.switchSession(to: dir)
+        check(text != nil && lastWritten(reopened) as? String == text, "重开这一场：last_written 读回来是同一个时间")
     }
 
     // MARK: - 2. 导入客户选择（cull_import_client_picks 用的那几样）
@@ -134,6 +179,100 @@ enum CullMCPSelfTest {
         let touched = store.undoLastOverride()
         check(store.clientPickCount == 0 && Set(touched) == Set(r.ids) && !FileManager.default.fileExists(atPath: file.path),
               "⌘Z：客户选中回到 0、动到的是那 2 张、client_picks.json 删掉：\(touched)")
+        clientNoteChecks(check, store: store, sessionDir: sessionDir)
+    }
+
+    /// 带修图要求的回复（审查：桥上以前只传 ids，备注丢了、summary 却说存了）：LiveHandlers.applyClientImport（handler 的
+    /// dry_run:false 就走它）和导入框同一条 importClientPicks(ids, notes:) —— 备注进 client_notes.json（精修要求.csv 的行）、
+    /// 和客户选中同一步撤销；照片已经是客户选中、只补了备注也算改了；什么都没变不压撤销。结果主体带 notes / new_notes。
+    static func clientNoteChecks(_ check: Check, store: BatchStore, sessionDir: URL) {
+        let fm = FileManager.default
+        let notesFile = sessionDir.appendingPathComponent("client_notes.json")
+        let noted = store.resolveClientReply("DSCF7208 去路人\nDSCF7209：瘦脸")
+        let wanted: [String: String] = ["DSCF7208": "去路人", "DSCF7209": "瘦脸"]
+        let body = LiveHandlers.clientPicksBody(noted, existing: store.clientPicks, existingNotes: store.clientNotes)
+        let bodyNotes = body["notes"] as? [String: String]
+        let bodyNew = body["new_notes"] as? [String]
+        check(noted.ids == ["DSCF7208", "DSCF7209"] && noted.notes == wanted && bodyNotes == wanted
+              && bodyNew == ["DSCF7208", "DSCF7209"],
+              "认出带备注的两行：notes 是客户原话、new_notes 是这两张：\(body)")
+        // 拼图托盘里已经有 DSCF7208（没刷之前 clientPick false）：标完要跟着刷成 true —— 相册编排按它保留客户选中，
+        // 用户停在拼图页没切 tab 时没人替它刷（审查：以前 handler 不刷）
+        let collage = trayWithPhoto("DSCF7208", store: store, sessionDir: sessionDir)
+        let trayBefore = collage.project.photos.first { $0.id == "DSCF7208" }?.clientPick
+        let pushes = store.overrideUndoPushes
+        let first = LiveHandlers.applyClientImport(noted, batch: store, collage: collage)
+        let trayAfter = collage.project.photos.first { $0.id == "DSCF7208" }?.clientPick
+        check(trayBefore == false && trayAfter == true,
+              "导入以后拼图托盘里 DSCF7208 的 clientPick 跟着刷成 true（之前 \(String(describing: trayBefore))，之后 \(String(describing: trayAfter))）")
+        let rows = store.retouchRows(noted.ids)
+        check(first.fresh == noted.ids && first.renoted == noted.ids && store.clientNotes == wanted
+              && store.clientPicks == Set(noted.ids) && store.overrideUndoPushes == pushes + 1
+              && fm.fileExists(atPath: notesFile.path) && rows.count == 2,
+              "标上带备注的：客户选中 2 张、备注存进 client_notes.json（精修要求.csv 有 \(rows.count) 行）、一步撤销" +
+              "（\(store.clientNotes)、\(store.overrideUndoPushes - pushes) 步）")
+        let reopened = open()
+        check(reopened.clientNotes == wanted, "重开以后客户备注还在：\(reopened.clientNotes)")
+        // 照片已经是客户选中，客户又补了一句：只改备注也要存（导入框走 setClientReply），没写的那张留着原来的
+        let more = store.resolveClientReply("DSCF7208 去路人，黑白")
+        let moreBody = LiveHandlers.clientPicksBody(more, existing: store.clientPicks, existingNotes: store.clientNotes)
+        let second = LiveHandlers.applyClientImport(more, batch: store, collage: collage)
+        let merged = store.clientNotes["DSCF7208"] == "去路人，黑白" && store.clientNotes["DSCF7209"] == "瘦脸"
+        check(second.fresh.isEmpty && second.renoted == ["DSCF7208"] && second.changed && merged
+              && moreBody["new_ids"] as? [String] == [] && moreBody["new_notes"] as? [String] == ["DSCF7208"]
+              && store.overrideUndoPushes == pushes + 2
+              && LiveHandlers.clientImportNotice(second).hasPrefix("AI：更新了 1 张的客户备注"),
+              "都已经是客户选中、只补了备注：照样算改了、再压一步撤销，DSCF7209 的备注留着（\(store.clientNotes)）")
+        let third = LiveHandlers.applyClientImport(more, batch: store, collage: collage)
+        check(!third.changed && store.overrideUndoPushes == pushes + 2, "同一句再导一次：什么都不变、不压撤销")
+        let notice = LiveHandlers.clientImportNotice(first)
+        check(notice.hasPrefix("AI：标了 2 张客户选中 · 备注 2 张"), "状态栏那一句带备注张数：\(notice)")
+        _ = store.undoLastOverride()
+        check(store.clientNotes["DSCF7208"] == "去路人" && store.clientPickCount == 2, "⌘Z 一下：备注回到补之前（\(store.clientNotes)）")
+        _ = store.undoLastOverride()
+        check(store.clientPickCount == 0 && store.clientNotes.isEmpty && !fm.fileExists(atPath: notesFile.path),
+              "再 ⌘Z：客户选中和备注一起回到导入之前，client_notes.json 删掉（\(store.clientNotes)）")
+    }
+
+    /// 纯数字交付名开头的那一行（审查：W 的 uniqueHead 不看 D 的交付名）：「{序号:3}」导出的 003.jpg、017.jpg 发给客户，
+    /// 客户回「003 去路人」「017瘦脸」—— 交付名认得出那张，后面的话也要当备注（以前「去路人」被当闲聊丢掉、「017瘦脸」整个
+    /// 没认出）；和「003.jpg 去路人」结果一样。确认表上第 3 张是另一张时说不准：不认、不切备注，照旧报「交付文件名还是编号？」。
+    static func deliveredNoteChecks(_ check: Check) {
+        let items = open().items
+        let others = items.filter { $0.id != "DSCF7208" && $0.id != "DSCF7209" }
+        guard let a = items.first(where: { $0.id == "DSCF7208" }), let b = items.first(where: { $0.id == "DSCF7209" }),
+              others.count >= 3 else {
+            check(false, "fixture 里找不到 DSCF7208 / DSCF7209")
+            return
+        }
+        let files = [DeliveryRecord.File(file: "003.jpg", id: a.id, original: a.rawPath),
+                     DeliveryRecord.File(file: "017.jpg", id: b.id, original: b.rawPath)]
+        let record = DeliveryRecord(kind: .jpeg, folder: URL(fileURLWithPath: "/tmp/labelgui-fixture-交付"), files: files)
+        let r = ClientReply.resolve("003 去路人\n017瘦脸", items: items, sheets: [], deliveries: [record])
+        let wanted: [String: String] = [a.id: "去路人", b.id: "瘦脸"]
+        check(r.ids == [a.id, b.id] && r.notes == wanted && r.unknown.isEmpty,
+              "纯数字交付名开头：003 / 017 认出那两张，后面的话是备注：ids \(r.ids)、notes \(r.notes)、没认出 \(r.unknown)")
+        let dotted = ClientReply.resolve("003.jpg 去路人", items: items, sheets: [], deliveries: [record])
+        check(dotted.ids == [a.id] && dotted.notes == [a.id: "去路人"], "带 .jpg 写也一样：\(dotted.notes)")
+        let sheet = ProofSheet(id: "20261104-120000", date: Date(), scope: "仅精选", ids: others.prefix(3).map(\.id))
+        let clash = ClientReply.resolve("003 去路人", items: items, sheets: [sheet], deliveries: [record])
+        check(clash.ids.isEmpty && clash.notes.isEmpty && clash.unknown == ["003（交付文件名还是编号？）"],
+              "确认表上第 3 张是另一张：说不准，不认也不切备注：ids \(clash.ids)、没认出 \(clash.unknown)")
+    }
+
+    /// 一个托盘里只有这一张（clientPick 先记成 false）的拼图工程：写进这一场的 collage.json，再挂到批量页这一场
+    /// （= 用户开着拼图页；挂上时按批量页刷一遍，这时还不是客户选中）。
+    static func trayWithPhoto(_ id: String, store: BatchStore, sessionDir: URL) -> CollageStore {
+        var project = CollageProject()
+        var ref = CollagePhotoRef(id: id, path: photoDir.appendingPathComponent(id + ".JPG").path, width: 3, height: 2)
+        ref.clientPick = false
+        project.photos = [ref]
+        if let data = try? JSONEncoder().encode(project) {
+            try? data.write(to: sessionDir.appendingPathComponent("collage.json"), options: .atomic)
+        }
+        let collage = CollageStore(dataDir: appDataDir)
+        collage.attach(sessionDir: sessionDir, photoDir: photoDir, batch: store)
+        return collage
     }
 
     // MARK: - 3. AI 改判的出处（ai_overrides.json）
@@ -265,5 +404,35 @@ enum CullMCPSelfTest {
               && store.overrideUndoDepth == depth,
               "⌘Z 一下：这一场全部回到改判之前，另一张回到用户判的精选，出处都没了")
         store.undoLastOverride()
+        acceptAttributionChecks(check)
+    }
+
+    /// 两个「接受推荐」对 AI 出处的归属不一样，是产品规则（见 BatchStore.acceptAllRecommendations 旁的注释）：AI 把一场里
+    /// 一张可用放行成精选以后，顶栏「全部接受推荐」不写本来就钉成精选的那张 → 照旧算 AI 的，同一场别的可用照样变废片；
+    /// 分组行「接受推荐」把这一场每一张都写一遍 → 用户在这一场上确认过，算用户的。
+    static func acceptAttributionChecks(_ check: Check) {
+        let store = open()
+        func autoUsable(_ take: Int) -> [String] {
+            store.members(ofTake: take).filter { $0.verdict == .usable && store.overrides[$0.id] == nil }.map(\.id)
+        }
+        guard let take = store.takeRows.map(\.take).first(where: { autoUsable($0).count >= 2 }) else {
+            check(false, "fixture 里找不到有 2 张以上自动可用的场")
+            return
+        }
+        let usable = autoUsable(take)
+        let target = usable[0]
+        let loser = usable[1]
+        store.applyAIOverrides([(id: target, verdict: .pick)], opID: "op-ai-accept", tool: "cull_set_verdicts")
+        store.acceptAllRecommendations()
+        let keptAI = store.aiOverride(target)?.opID == "op-ai-accept" && store.overrides[target] == .pick
+        check(keptAI && store.overrides[loser] == .reject,
+              "顶栏「全部接受推荐」：同一场的可用 \(loser) 变废片，AI 放行成精选的 \(target) 没被写、照旧算 AI 的")
+        store.undoLastOverride()
+        store.applyOverrides(store.recommendedDecision(for: store.members(ofTake: take)), accepted: true)
+        check(store.aiOverride(target) == nil && store.overrides[target] == .pick && store.overrides[loser] == .reject,
+              "分组行「接受推荐」：整场写一遍，用户在这一场上确认过，\(target) 不再算 AI 的")
+        store.undoLastOverride()
+        store.undoLastOverride()
+        check(store.overrides.isEmpty && store.aiOverrideCount == 0, "撤回去：没有改判、没有出处")
     }
 }

@@ -144,7 +144,7 @@ enum MCPToolDefs {
      "annotations":"$READ"},
 
     {"name":"cull_session_overview","title":"场次概览",
-     "description":"app 当前打开的那一场的选片概览：精选/可用/废片（pick/usable/reject）各多少张、废片理由计数、当前阈值和放宽建议、章节列表和每章的计数、场（scene，按快门间隔切开的一串连拍）和近似重复组（near_duplicate）的统计、还没处理的场、多机身和对时偏移、XMP 过期了几张（xmp.stale_count：上次写 XMP 之后判决、星级或客户选中变了的，Lightroom / C1 里还是旧的，改完判决要提醒用户在 app 里重写；xmp.written 为 false 是这一场还没写过 XMP）、警告、app 是否正在分析。读的是 app 内存里的状态（含还没存盘的改动），和窗口里看到的一致。要看具体照片用 cull_list_photos。",
+     "description":"app 当前打开的那一场的选片概览：精选/可用/废片（pick/usable/reject）各多少张、废片理由计数、当前阈值和放宽建议、章节列表和每章的计数、场（scene，按快门间隔切开的一串连拍）和近似重复组（near_duplicate）的统计、还没处理的场、多机身和对时偏移、XMP 过期了几张（xmp.stale_count：上次写 XMP 之后判决、星级或客户选中变了的，Lightroom / C1 里还是旧的，改完判决要提醒用户在 app 里重写；xmp.written 为 false 是这一场还没写过 XMP；xmp.last_written 是上次写进 XMP 的时间，旧版本写的没记就没有这个键）、警告、app 是否正在分析。读的是 app 内存里的状态（含还没存盘的改动），和窗口里看到的一致。要看具体照片用 cull_list_photos。",
      "inputSchema":{"type":"object","properties":{"session":"$SESSION"},"required":["session"],"additionalProperties":false},
      "annotations":"$READ"},
 
@@ -400,7 +400,7 @@ enum MCPToolDefs {
      "annotations":"$WRITE"},
 
     {"name":"cull_import_client_picks","title":"导入客户选择",
-     "description":"在 app 里导入客户的选择（= 批量页「导出 › 导入客户选择…」）：客户发回来的文字原样放进 text（微信里回的文件名、文件号 7221、确认表上的编号 12、35、78 或 12-15、确认表「复制我的选择」那一段、Pixieset 导出的 CSV），app 按和导入框同一套规则认成照片；你自己已经认出是哪几张时改用 ids（都要是这一场的，有一张不在就什么都不标）。认出的标成「客户选中」（紫心、XMP 紫色标），不改判决。dry_run 默认 true：只回认出了哪些（ids）、没认出的原文（unknown）、编号按哪张确认表对的（sheet）和导入框里那几行预览（summary），什么都不改；照着 summary 告诉用户、用户确认了再带 dry_run:false 标上。标是加到原来的客户选中上，不清掉原来的；一次调用是一步撤销（批量页 ⌘Z，或 app_undo target=verdicts），都已经是客户选中时什么都不做（changed=false）。导入框开着或者连拍挑选开着时回 user_busy，app 正在分析时回 analysis_running。op_id 只用来原样重发同一次调用（同一个 op_id 的 dry_run 和正式标会拿到同一份结果）。客户回复的原文会随对话发给 AI 服务商。",
+     "description":"在 app 里导入客户的选择（= 批量页「导出 › 导入客户选择…」）：客户发回来的文字原样放进 text（微信里回的文件名、文件号 7221、确认表上的编号 12、35、78 或 12-15、确认表「复制我的选择」那一段、Pixieset 导出的 CSV），app 按和导入框同一套规则认成照片；你自己已经认出是哪几张时改用 ids（都要是这一场的，有一张不在就什么都不标）。认出的标成「客户选中」（紫心、XMP 紫色标），不改判决；一行开头是照片、后面跟着的修图要求（「DSCF7207 去路人」「7207：瘦脸」「DSCF7207 备注：黑白」）认成客户备注（notes：照片 id → 原话；new_notes 是和现在存着的不一样、这次会写进去的），和客户选中一起存，复制原片时写成「精修要求.csv」。dry_run 默认 true：只回认出了哪些（ids）、没认出的原文（unknown）、编号按哪张确认表对的（sheet）、备注和导入框里那几行预览（summary），什么都不改；照着 summary 告诉用户、用户确认了再带 dry_run:false 标上。标是加到原来的客户选中上，不清掉原来的；同一张原来有备注的换成这次的；一次调用是一步撤销（批量页 ⌘Z，或 app_undo target=verdicts，客户选中和备注一起回去），都已经是客户选中、备注也没变时什么都不做（changed=false）。导入框开着或者连拍挑选开着时回 user_busy，app 正在分析时回 analysis_running。op_id 只用来原样重发同一次调用（同一个 op_id 的 dry_run 和正式标会拿到同一份结果）。客户回复的原文会随对话发给 AI 服务商。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "text":{"type":"string","minLength":1,"maxLength":50000,"description":"客户回复的原文，原样放进来；和 ids 只能给一个"},
