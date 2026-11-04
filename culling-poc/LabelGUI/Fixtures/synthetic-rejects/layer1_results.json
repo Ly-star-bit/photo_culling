@@ -2297,6 +2297,100 @@
    "blink_score": 0.3606059688334634,
    "burst_group": 44,
    "capture_subsec": 0.0,
+   "capture_time": "2026-03-21T10:15:00",
+   "elapsed_sec": 0.3550189733505249,
+   "eye_closed": false,
+   "face_area_pct": 0.004,
+   "face_bbox": [
+    0.3098121203482151,
+    0.35238868445158006,
+    0.4557225339114666,
+    0.4496622934937477
+   ],
+   "face_count": 1,
+   "face_found": true,
+   "face_luma": 168,
+   "face_quality": 0.6318359375,
+   "faces": [
+    {
+     "area_pct": 0.004,
+     "bbox": [
+      0.3098121203482151,
+      0.35238868445158006,
+      0.4557225339114666,
+      0.4496622934937477
+     ],
+     "ear": 0.07,
+     "ear_full_res": false,
+     "eye_closed": false
+    }
+   ],
+   "file_corrupt": false,
+   "frame_luma": 142,
+   "frame_luma_p99": 217,
+   "highlight_clip_pct": 7.947285970052084e-07,
+   "horizon_deg": null,
+   "id": "X01-ear007-floor",
+   "phash": "d8a306457e9097ed",
+   "shadow_clip_pct": 0.0020658175150553384,
+   "sharpness": 88.37491298251209,
+   "sharpness_scope": "features",
+   "src_mtime": 1774101940,
+   "src_size": 23649254,
+   "subject_highlight_clip_pct": 8.820442256974764e-06,
+   "subject_shadow_clip_pct": 0.010555864271034549
+  },
+  {
+   "blink_score": 0.3606059688334634,
+   "burst_group": 44,
+   "capture_subsec": 0.0,
+   "capture_time": "2026-03-21T10:15:01",
+   "elapsed_sec": 0.3550189733505249,
+   "eye_closed": false,
+   "face_area_pct": 0.004,
+   "face_bbox": [
+    0.3098121203482151,
+    0.35238868445158006,
+    0.4557225339114666,
+    0.4496622934937477
+   ],
+   "face_count": 1,
+   "face_found": true,
+   "face_luma": 168,
+   "face_quality": 0.6318359375,
+   "faces": [
+    {
+     "area_pct": 0.004,
+     "bbox": [
+      0.3098121203482151,
+      0.35238868445158006,
+      0.4557225339114666,
+      0.4496622934937477
+     ],
+     "ear": 0.05,
+     "ear_full_res": false,
+     "eye_closed": false
+    }
+   ],
+   "file_corrupt": false,
+   "frame_luma": 142,
+   "frame_luma_p99": 217,
+   "highlight_clip_pct": 7.947285970052084e-07,
+   "horizon_deg": null,
+   "id": "X02-ear005-floor",
+   "phash": "d8a306457e9097ed",
+   "shadow_clip_pct": 0.0020658175150553384,
+   "sharpness": 88.37491298251209,
+   "sharpness_scope": "features",
+   "src_mtime": 1774101940,
+   "src_size": 23649254,
+   "subject_highlight_clip_pct": 8.820442256974764e-06,
+   "subject_shadow_clip_pct": 0.010555864271034549
+  },
+  {
+   "blink_score": 0.3606059688334634,
+   "burst_group": 45,
+   "capture_subsec": 0.0,
    "capture_time": "2026-03-21T12:00:00",
    "elapsed_sec": 0.3550189733505249,
    "eye_closed": false,
@@ -2342,7 +2436,7 @@
   },
   {
    "blink_score": 0.3606059688334634,
-   "burst_group": 45,
+   "burst_group": 46,
    "capture_subsec": 0.0,
    "capture_time": "2026-03-21T12:00:20",
    "elapsed_sec": 0.3550189733505249,
@@ -2389,7 +2483,7 @@
   },
   {
    "blink_score": 0.3606059688334634,
-   "burst_group": 46,
+   "burst_group": 47,
    "capture_subsec": 0.0,
    "capture_time": "2026-03-21T12:00:40",
    "elapsed_sec": 0.3550189733505249,

@@ -803,6 +803,38 @@
   },
   {
    "camera": "X-T50",
+   "capture_time": "2026-03-21T10:15:00",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/X01-ear007-floor.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "X01-ear007-floor",
+   "orientation": null,
+   "preview_path": "previews/X01-ear007-floor.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/X01-ear007-floor.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:15:01",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/X02-ear005-floor.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "X02-ear005-floor",
+   "orientation": null,
+   "preview_path": "previews/X02-ear005-floor.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/X02-ear005-floor.JPG"
+  },
+  {
+   "camera": "X-T50",
    "capture_time": "2026-03-21T12:00:00",
    "decode_path": "/tmp/labelgui-fixture-synthetic/Z01-corrupt.JPG",
    "exif": {
