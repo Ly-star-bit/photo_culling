@@ -34,6 +34,7 @@ enum PersistSelfTest {
         t.dedupePerSession()
         t.dataNoticeCap()
         t.refusedEditsSurface()
+        t.clientNotesGuarded()
         print("persist-selftest: \(t.passed) 通过 \(t.failed) 失败")
         exit(t.failed == 0 ? 0 : 1)
     }

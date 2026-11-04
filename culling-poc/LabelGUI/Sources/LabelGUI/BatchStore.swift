@@ -1374,7 +1374,7 @@ final class BatchStore: ObservableObject {
                 movedPicks = true
                 what.append("客户选中")
             }
-            if let note = newNotes[old], newNotes[new] == nil {
+            if !writeRefused(.clientNotes), let note = newNotes[old], newNotes[new] == nil {
                 newNotes[old] = nil
                 newNotes[new] = note
                 movedNotes = true
@@ -1947,12 +1947,13 @@ final class BatchStore: ObservableObject {
 
     /// 场次里那几份整份重写的文件。
     enum PersistFile: CaseIterable {
-        case overrides, clientPicks, bodyOffsets
+        case overrides, clientPicks, clientNotes, bodyOffsets
 
         var label: String {
             switch self {
             case .overrides: return "判决"
             case .clientPicks: return "客户选中"
+            case .clientNotes: return "客户备注"
             case .bodyOffsets: return "机身对时"
             }
         }
@@ -2034,7 +2035,7 @@ final class BatchStore: ObservableObject {
     private func attemptWrite(_ file: PersistFile) {
         // 原件读不出来、挪不开的（S02）：不写，免得拿内存里的空的盖掉它；记下这一份有没存盘的改动（红条、离开前问）。
         // 不记进 persistFailures：重试永远写不成，「重试」和切场次前的拦截就再也过不去了。
-        guard !persistRefused.contains(file) else {
+        guard !writeRefused(file) else {
             refusedDirty.insert(file)
             return
         }
@@ -2046,6 +2047,7 @@ final class BatchStore: ObservableObject {
             switch file {
             case .overrides: try writeOverrides()
             case .clientPicks: try writeClientPicks()
+            case .clientNotes: try writeClientNotes()
             case .bodyOffsets: try writeBodyOffsets()
             }
             persistFailures[file] = nil
@@ -2081,7 +2083,13 @@ final class BatchStore: ObservableObject {
     /// 实时桥写工具的回复要说「存上没有」（审查 S01b）：这几份里现在还没存上的 —— 写失败（盘满，红条 persistError）、
     /// 原件读坏了这一场先不写（提醒在 dataNotice）。两样都空 = 盘上是最新的。
     func unsavedFiles(_ files: [PersistFile]) -> (failed: [PersistFile], refused: [PersistFile]) {
-        (files.filter { persistFailures[$0] != nil }, files.filter { persistRefused.contains($0) })
+        (files.filter { persistFailures[$0] != nil }, files.filter(writeRefused))
+    }
+
+    /// 这一份这一场不写：原件读不出来、挪不开（persistRefused）。客户备注和客户选中是同一次导入、同一步撤销写的：选中不写时
+    /// 备注也不写，不然盘上留下这次的备注、上次的选中，重新打开对不上。
+    private func writeRefused(_ file: PersistFile) -> Bool {
+        persistRefused.contains(file) || (file == .clientNotes && persistRefused.contains(.clientPicks))
     }
 
     /// 离开这一场（切场次、移除当前这一场）之前：还有没存上的就再写一次，还写不上就拦住 —— 不然 switchSession 的
@@ -2513,23 +2521,42 @@ final class BatchStore: ObservableObject {
 
     private var clientNotesPath: URL { sessionDir.appendingPathComponent("client_notes.json") }
 
+    /// 和客户选中一样走 SessionFiles（审查 S02 跟进）：以前解不开就静默当空，下一次导入带备注的回复就拿这次的几条整份盖掉
+    /// 上一轮客户的修图要求；写失败只设一下 lastError（切场次就清掉），重试、切场次前的拦截都不管它。
     private func loadClientNotes() {
-        clientNotes = (try? Data(contentsOf: clientNotesPath))
-            .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+        persistRefused.remove(.clientNotes)
+        refusedDirty.remove(.clientNotes)
+        backedUpPaths.remove(clientNotesPath.path)
+        var loaded: [String: String] = [:]
+        defer { clientNotes = loaded }
+        switch SessionFiles.read([String: String].self, at: clientNotesPath) {
+        case .missing:
+            break
+        case .ok(let notes):
+            loaded = notes
+        case .corrupt(let moved?):
+            addDataNotice("\(sessionLabel)的客户备注 client_notes.json 解不开（被手改过或写坏了），原件已挪成 " +
+                          "\(moved.lastPathComponent)，这一场先当没有客户备注（客户的修图要求还在那个文件里）")
+        case .corrupt(nil):
+            refusePersist(.clientNotes, "\(sessionLabel)的客户备注 client_notes.json 解不开、也挪不开，为免覆盖，这一场的客户备注先不存盘" +
+                          "（修好或移走这个文件后重新打开这一场）")
+        case .unreadable(let why):
+            refusePersist(.clientNotes, "\(sessionLabel)的客户备注 client_notes.json 读不出来（\(why)），为免覆盖，这一场的客户备注先不存盘" +
+                          "（重新打开这一场再读一次）")
+        }
     }
 
-    private func saveClientNotes() {
+    private func saveClientNotes() { persist(.clientNotes) }
+
+    private func writeClientNotes() throws {
+        backupOnce(clientNotesPath)
         if clientNotes.isEmpty {
-            try? FileManager.default.removeItem(at: clientNotesPath)
+            try SessionFiles.remove(clientNotesPath)
             return
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        do {
-            try encoder.encode(clientNotes).write(to: clientNotesPath, options: .atomic)
-        } catch {
-            lastError = "客户备注没存上: \(error.localizedDescription)"
-        }
+        try encoder.encode(clientNotes).write(to: clientNotesPath, options: .atomic)
     }
 
     /// 客户选中和客户备注一起换（导入带备注的回复；清除客户选中时备注一起清）：一条撤销记录，⌘Z 两样一起回去。

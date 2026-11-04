@@ -106,4 +106,91 @@ extension PersistSelfTestHarness {
         check(store.overrides["DSCF7207"] == .reject && store.persistError == nil && asked.count == 3,
               "权限恢复后重新打开：原来的改判读回来，没有红条（这次没改过，切走不问）")
     }
+
+    // MARK: - 客户备注（client_notes.json）走同一套护栏
+
+    func savedNotes(_ s: Session) -> [String: String]? {
+        read(s.dir.appendingPathComponent("client_notes.json")).flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }
+    }
+
+    func clientNotesGuarded() {
+        print("— 客户备注：解不开挪开、读不出来不写、选中不写时备注也不写、写不上上红条 / 拦切场次 / 重试补写")
+        freshIndex()
+        let other = makeSession("notes-other")
+
+        // 解不开：挪开保住原件、提示；下一次导入带备注的回复只写这次的，挪开的原件不碰
+        let bad = makeSession("notes-corrupt")
+        let garbage = Data("{\"DSCF7207\": \"提亮一点\", \"DSCF72".utf8)
+        try? garbage.write(to: bad.dir.appendingPathComponent("client_notes.json"))
+        let store = newStore()
+        store.switchSession(to: bad.folder)
+        guard let id = store.items.first?.id, let id2 = store.items.dropFirst().first?.id else {
+            check(false, "fixture 读进来了")
+            return
+        }
+        let aside = corruptCopies(of: "client_notes.json", in: bad.dir)
+        check(aside.count == 1 && aside.first.flatMap(read) == garbage && store.clientNotes.isEmpty,
+              "client_notes.json 解不开：原件挪成 \(aside.first?.lastPathComponent ?? "—")、一字不差，这一场先当没有备注")
+        check(store.dataNotice?.contains("client_notes.json") == true, "橙条点名 client_notes.json：\(store.dataNotice ?? "nil")")
+        store.importClientPicks([id2], notes: [id2: "去掉路人"])
+        let wantNew: [String: String] = [id2: "去掉路人"]
+        check(savedNotes(bad) == wantNew && aside.first.flatMap(read) == garbage && store.persistError == nil,
+              "导入带备注的回复：只写这次的那条，挪开的原件没被碰到")
+
+        // 读不出来（权限）：不挪、不写；导入以后红条点名客户备注；原件一字不差
+        if chmodBlocks {
+            let locked = makeSession("notes-locked")
+            let url = locked.dir.appendingPathComponent("client_notes.json")
+            let original = Data("{\"DSCF7207\":\"肤色暖一点\"}".utf8)
+            try? original.write(to: url)
+            setMode(url, 0o000)
+            store.switchSession(to: locked.folder)
+            check(store.dataNotice?.contains("客户备注") == true && corruptCopies(of: "client_notes.json", in: locked.dir).isEmpty,
+                  "读不出来：提示、没挪")
+            store.importClientPicks([id2], notes: [id2: "裁掉左边"])
+            check(store.persistError?.contains("客户备注") == true && store.persistError?.contains("只在内存里") == true,
+                  "导入带备注的回复：红条说客户备注只在内存里：\(store.persistError ?? "nil")")
+            setMode(url, 0o644)
+            check(read(url) == original, "读不出来的原件没被盖掉")
+            store.switchSession(to: other.folder)
+            store.switchSession(to: locked.folder)
+            let wantOriginal: [String: String] = ["DSCF7207": "肤色暖一点"]
+            check(store.clientNotes == wantOriginal && store.persistError == nil, "权限恢复后重新打开：原来的备注读回来")
+
+            // 客户选中读不出来：同一次导入的备注也不写（盘上两份对得上）
+            let picksLocked = makeSession("notes-picks-locked")
+            let picksURL = picksLocked.dir.appendingPathComponent("client_picks.json")
+            try? Data("[\"DSCF7207\"]".utf8).write(to: picksURL)
+            setMode(picksURL, 0o000)
+            store.switchSession(to: picksLocked.folder)
+            store.importClientPicks([id2], notes: [id2: "调亮"])
+            let banner = store.persistError ?? ""
+            let notesURL = picksLocked.dir.appendingPathComponent("client_notes.json")
+            check(!exists(notesURL) && banner.contains("客户选中") && banner.contains("客户备注"),
+                  "客户选中读不出来：备注也不写，红条两样都点名：\(banner)")
+            check(LiveHandlers.batchPersistReport(store, [.clientNotes]).persisted == false,
+                  "实时桥问客户备注存上没有：没有（跟着客户选中一起不写）")
+            setMode(picksURL, 0o644)
+            store.switchSession(to: other.folder)
+        } else {
+            print("SKIP root 跑时 chmod 000 挡不住读，读不出来那两段测不了")
+        }
+
+        // 写不上（场次目录只读 = 盘满）：红条点名客户备注、切场次拦住，腾出空间点「重试」补写
+        let full = makeSession("notes-full")
+        store.switchSession(to: full.folder)
+        store.importClientPicks([id])
+        setWritable(full.dir, false)
+        defer { setWritable(full.dir, true) }
+        store.importClientPicks([id], notes: [id: "眼睛提亮"])
+        let error = store.persistError ?? ""
+        check(chmodBlocks ? error.contains("客户备注") && store.persistRetryable : true,
+              "写不上：红条点名客户备注、给「重试」：\(error)")
+        let blocked: Bool = !store.switchSession(to: other.folder) && store.sessionDir.lastPathComponent == full.key
+        check(chmodBlocks ? blocked && store.clientNotes[id] == "眼睛提亮" : true, "没存上之前切场次被拦下，内存里的备注还在")
+        setWritable(full.dir, true)
+        let retried = store.retryPersist()
+        let wantFull: [String: String] = [id: "眼睛提亮"]
+        check(retried && store.persistError == nil && savedNotes(full) == wantFull, "腾出空间点「重试」：备注写上、红条消失")
+    }
 }
