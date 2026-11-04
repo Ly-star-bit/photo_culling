@@ -1140,14 +1140,15 @@ enum WatermarkEngine {
         return nil
     }
 
-    /// 同一个文件？先比标准化路径，两边都存在时再比文件系统 id —— 大小写不敏感
-    /// 的卷、符号链接、`/tmp` 这类软链目录都骗不过 id 比较。
+    /// 同一个文件？先比标准化路径，两边都存在时再比 stat 的设备号 + inode（像 BatchStore.firstOriginal）——
+    /// 大小写不敏感的卷、硬链接、`/tmp` 这类软链目录都骗不过。stat 跟着符号链接走，所以最后一段本身是指向原片的
+    /// 符号链接也认得出（以前的 resourceValues 不跟链接，把它当成另一个文件）。有一边不存在 = 不是。
     static func isSameFile(_ a: URL, _ b: URL) -> Bool {
         if a.standardizedFileURL.path == b.standardizedFileURL.path { return true }
-        let keys: Set<URLResourceKey> = [.fileResourceIdentifierKey]
-        guard let ida = try? a.resourceValues(forKeys: keys).fileResourceIdentifier,
-              let idb = try? b.resourceValues(forKeys: keys).fileResourceIdentifier else { return false }
-        return ida.isEqual(idb)
+        var sa = stat()
+        var sb = stat()
+        guard stat(a.path, &sa) == 0, stat(b.path, &sb) == 0 else { return false }
+        return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino
     }
 
     // MARK: - 绘制辅助

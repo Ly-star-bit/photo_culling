@@ -4,7 +4,7 @@
 Scripts/selftests.sh 里跑）；这里验它们在命令行出口上确实接上了：
 
 1. --watermark 输出路径就是原片（同一路径、. 和 ..、大小写不同、硬链接）→ 退出码 1、原片逐字节不变；
-   指向原片的符号链接 → 不管成不成功，原片逐字节不变。
+   指向原片的符号链接 → 原片逐字节不变，而且也认得出是同一个文件（退出码 1，链接本身不被换掉）。
 2. --watermark-batch 输出目录在拍摄文件夹里面（照片目录本身、里面还没建的「交付」、--session 那一场里面）、文件名模板
    {原名}（先写好 watermark/state.json）→ 退出码 1、报「不能导出到拍摄文件夹」、照片目录一个文件都不多、子目录不建（审查 S11）；
    导进照片目录里的「水印导出/」（分析跳过）照常、原片不变，再导一次全是 -2；
@@ -257,6 +257,9 @@ def same_file_section():
     r = run(["--watermark", a, os.path.join(d, "link.jpg")], fresh_data("wm-link"))
     check(sha(a) == before, f"指向原片的符号链接：原片逐字节不变（退出码 {r.returncode}；"
                             f"链接{'被换成了普通文件' if not os.path.islink(os.path.join(d, 'link.jpg')) else '还在'}）")
+    # isSameFile 改成比 stat 的设备号 + inode（跟着链接走）以后，最后一段是链接的也认得出、直接不写
+    check(r.returncode == 1 and "输出路径与原片相同" in r.stderr and os.path.islink(os.path.join(d, "link.jpg")),
+          f"　…… 而且认得出是同一个文件：退出码 {r.returncode}（要 1）、报「输出路径与原片相同」、链接本身也没被换掉")
 
 
 # ---------------------------------------------------------------- 2. 水印批量输出到照片目录

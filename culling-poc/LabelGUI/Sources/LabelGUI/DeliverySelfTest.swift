@@ -355,10 +355,9 @@ enum DeliverySelfTest {
         t.check(WatermarkEngine.isSameFile(a, a), "同一个路径")
         let dotted = URL(fileURLWithPath: dir.path + "/./sub/../a.jpg")
         t.check(WatermarkEngine.isSameFile(dotted, a), "路径里带 . 和 ..", dotted.path)
-        // 最后一段本身是指向原片的符号链接：resourceValues 不跟链接，isSameFile 把它当成另一个文件（注释里说符号链接
-        // 骗不过，这一种其实骗得过）。实际写的时候 ImageIO 先写临时文件再改名，换掉的是链接本身、原片不动 ——
-        // delivery_regression.py 端到端验了原片字节不变。所以这里只记一笔、不算失败（见审查车道 T 的 open issue）。
-        print("INFO 指向原片的符号链接（最后一段是链接）：isSameFile = \(WatermarkEngine.isSameFile(link, a))")
+        // 最后一段本身是指向原片的符号链接：isSameFile 比 stat 的设备号 + inode，stat 跟着链接走（以前 resourceValues
+        // 不跟，这一种骗得过）。端到端 delivery_regression.py 另外验原片字节不变。
+        t.check(WatermarkEngine.isSameFile(link, a), "指向原片的符号链接（最后一段是链接）")
         t.check(WatermarkEngine.isSameFile(linkDir.appendingPathComponent("a.jpg"), a), "经过符号链接的目录")
         t.check(WatermarkEngine.isSameFile(hard, a), "硬链接（同一个 inode，写它就是写原片）")
         if caseInsensitive(dir) {
