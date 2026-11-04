@@ -287,16 +287,16 @@ extension CollageStyleFineArt {
         // 扉页的色调同样看照片本身。
         if title.isMonochrome == true { spreads[0].fineArt?.look = monoLook }
         if let b = budget?.normalized, spreads.count > b.spreads {
-            // 目标真卡到了：呼吸图按目标定张数重编一次（去重、相似关系照用这一次的，不再跑 Vision）。重编出来比目标还少
-            // 就不用它：这一本并几个正好凑到目标。
+            compress(&spreads, toward: b.spreads, similar: similar)
+            // 目标真卡到了：呼吸图按目标定张数重编一次（薄册子少放空镜；去重、相似关系照用这一次的，不再跑 Vision）。
+            // 重编的那本并完比这一本离目标还远（并页要守 R4，空镜少了不一定并得更薄）、或者比目标还少，就还用这一本。
             let thin = min(natural, b.spreads)
             if breathSpreads == nil, breathQuota(spreads: thin) < quota {
                 let same = Similarity(kept: kept, dropped: dropped, similar: similar)
                 let again = plan(photos, dedupe: dedupe, chapterMono: chapterMono, title: bookTitle, similarity: same,
                                  budget: budget, breathSpreads: thin)
-                if again.spreads.count >= b.spreads { return again }
+                if again.spreads.count >= b.spreads, again.spreads.count <= spreads.count { return again }
             }
-            compress(&spreads, toward: b.spreads, similar: similar)
         }
         return CollageAlbum.Plan(spreads: spreads, dropped: dropped, theme: .fineArt, budget: budget)
     }

@@ -149,7 +149,63 @@ enum CollageAlbumPlanSelfTest {
             let pages = CollageStyleFineArt.build(plan, context: CollageStyleFineArtSelfTest.context(CollageCanvas.albums[0], book: book.photos))
             let onPages = pages.flatMap { $0.root.photoIDs }
             check(pages.count == plan.spreads.count && Set(onPages) == naturalIDs, "目标 \(target)：每个跨页都出了版式、照片都在格子里", "")
+            let broken = compressedViolations(plan.spreads, similar: book.similarity.similar)
+            check(broken.isEmpty, "目标 \(target)：压过的册子照样守 R1 / R4 / R7 / R8 / R10（不连着 4 个多图跨页、同姿势 / 黑白彩色不同页……）",
+                  broken.isEmpty ? counts(plan) : broken.joined(separator: "；"))
         }
+        // 一章 27 张的也压一压（并页只能在一章里挪，最容易连成一长串多图跨页）。
+        let single = oneChapterBook()
+        let singleFree = CollageStyleFineArt.plan(single.photos, dedupe: true, chapterMono: true, similarity: single.similarity)
+        var singleBroken: [String] = []
+        for target in [singleFree.spreads.count - 2, 8, 4] {
+            let p = CollageStyleFineArt.plan(single.photos, dedupe: true, chapterMono: true, similarity: single.similarity,
+                                             budget: CollageAlbumBudget(spreads: target))
+            singleBroken += compressedViolations(p.spreads, similar: single.similarity.similar).map { "目标 \(target) " + $0 }
+        }
+        check(singleBroken.isEmpty, "一章 27 张压到 \(singleFree.spreads.count - 2) / 8 / 4 个：照样守 R1 / R4 / R7 / R8 / R10",
+              singleBroken.joined(separator: "；"))
+        // 查规则的这一段自己也得认得出违规（不然上面几条白过）：四个对页双图连着、同姿势同页、黑白彩色同页、亮度差太大。
+        let ref = { (id: String) in book.photos.first { $0.id == id } }
+        func pairOf(_ a: String, _ b: String) -> CollageAlbum.Spread {
+            var s = CollageAlbum.Spread(kind: .pair, photos: [a, b].compactMap(ref))
+            s.fineArt = CollageFineArtSpread(kind: .pair, chapter: 2)
+            return s
+        }
+        let fourBusy = [pairOf("C02", "C12"), pairOf("C13", "C14"), pairOf("C15", "C16"), pairOf("C03", "C05")]
+        let probes: [(String, [CollageAlbum.Spread])] = [
+            ("R4", fourBusy), ("R10", [pairOf("C09", "C10")]), ("R7", [pairOf("A11", "C02")]), ("R8", [pairOf("D05", "D06")]),
+        ]
+        let caught = probes.map { rule, list in
+            compressedViolations(list, similar: book.similarity.similar).contains { $0.contains(rule) }
+        }
+        check(!caught.contains(false), "查压过的册子的规则认得出 R4 / R10 / R7 / R8 违规（自己不是白过）",
+              zip(probes, caught).map { "\($0.0.0) \($0.1 ? "认得" : "没认出")" }.joined(separator: " "))
+        // 直接喂 compress：并了会同姿势（C09 / C10）、黑白彩色混（E03 黑白）的那一对不并；对照：合得来的照样并。
+        func spreadOf(_ kind: CollageFineArtSpread.Kind, _ ids: [String], chapter: Int) -> CollageAlbum.Spread {
+            var s = CollageAlbum.Spread(kind: kind == .title ? .opener : (ids.count == 1 ? .solo : .pair), photos: ids.compactMap(ref))
+            s.fineArt = CollageFineArtSpread(kind: kind, chapter: chapter)
+            // 和 plan 一样：全是黑白照片的跨页是黑白页。
+            if s.photos.allSatisfy({ $0.isMonochrome == true }) { s.fineArt?.look = CollageStyleFineArt.monoLook }
+            return s
+        }
+        let opener = spreadOf(.title, ["A13"], chapter: 0)
+        let refused: [(String, [CollageAlbum.Spread])] = [
+            ("同姿势 对页+单", [opener, spreadOf(.pair, ["C02", "C09"], chapter: 1), spreadOf(.single, ["C10"], chapter: 1)]),
+            ("同姿势 单+单", [opener, spreadOf(.single, ["C09"], chapter: 1), spreadOf(.single, ["C10"], chapter: 1)]),
+            ("黑白彩色 对页+单", [opener, spreadOf(.pair, ["E02", "E06"], chapter: 3), spreadOf(.single, ["E03"], chapter: 3)]),
+            ("黑白彩色 单+单", [opener, spreadOf(.single, ["E02"], chapter: 3), spreadOf(.single, ["E03"], chapter: 3)]),
+        ]
+        var refusedBad: [String] = []
+        for (name, list) in refused {
+            var out = list
+            CollageStyleFineArt.compress(&out, toward: 2, similar: book.similarity.similar)
+            if out.count != list.count || !compressedViolations(out, similar: book.similarity.similar).isEmpty { refusedBad.append(name) }
+        }
+        var control = [opener, spreadOf(.pair, ["C02", "C12"], chapter: 1), spreadOf(.single, ["C13"], chapter: 1)]
+        CollageStyleFineArt.compress(&control, toward: 2, similar: book.similarity.similar)
+        check(refusedBad.isEmpty && control.count == 2 && control.last?.fineArt?.kind == .mainPlusTwo,
+              "compress 不并同姿势、黑白彩色混的（对页+单、单+单都是），合得来的照样并成一主两辅",
+              refusedBad.isEmpty ? "对照并成 \(control.count) 个" : "并了：" + refusedBad.joined(separator: " "))
         let tight = CollageStyleFineArt.plan(book.photos, dedupe: true, chapterMono: true, similarity: book.similarity,
                                              budget: CollageAlbumBudget(spreads: 8))
         check(tight.spreads.count > 8, "fine-art 压到 8 个放不下（每跨页最多 3 张）：多出来、不删片", "\(tight.spreads.count) 个")
@@ -171,6 +227,41 @@ enum CollageAlbumPlanSelfTest {
         check(overText.contains("最多 \(CollageStyleFineArt.maxPerSpread) 张") && !overText.contains("最多 2 张")
               && !underText.contains("至少"),
               "fine-art 的提示照实际规则说（最多 3 张，不提用户填的每跨页张数）", overText + " / " + underText)
+    }
+
+    /// 压过的册子还得守的那几条（CollageStyleFineArt.compress 并页不许破坏的）：R1 一个跨页只放一章、章节按顺序；
+    /// R4 连着的多图跨页最多 maxBusyRun 个；R7 不混黑白和彩色（混的只能是黑白页）、全是黑白的是黑白页；R8 对页双图、
+    /// 一主两辅左右页亮度差不超 maxLumaGap；R10 同姿势不进同一跨页；每跨页最多 3 张。不查 R3（每章收尾单张、不连着 3 个
+    /// 单图）、R5（呼吸图张数）、R11（落单竖图的比例）：压页本来就是把这些并掉（checkPlan 全跑会误报）。
+    static func compressedViolations(_ spreads: [CollageAlbum.Spread], similar: [String: Set<String>]) -> [String] {
+        var out: [String] = []
+        var run = 0
+        for (i, s) in spreads.enumerated() {
+            let at = "第 \(i + 1) 个跨页"
+            run = s.photos.count >= 2 ? run + 1 : 0
+            if run > CollageStyleFineArt.maxBusyRun { out.append(at + " R4 连着 \(run) 个多图跨页") }
+            if s.photos.count > CollageStyleFineArt.maxPerSpread { out.append(at + " \(s.photos.count) 张") }
+            if Set(s.photos.map { $0.chapter ?? -1 }).count > 1 { out.append(at + " R1 跨章") }
+            let monoCount: Int = s.photos.filter { $0.isMonochrome == true }.count
+            let monoPage: Bool = s.fineArt?.look?.look == .mono
+            if monoCount > 0, !monoPage { out.append(at + " R7 " + (monoCount < s.photos.count ? "黑白彩色混" : "黑白照片不是黑白页")) }
+            let samePose: Bool = s.photos.contains { a in
+                s.photos.contains { b in a.id != b.id && (similar[a.id]?.contains(b.id) ?? false) }
+            }
+            if samePose { out.append(at + " R10 同姿势") }
+            guard let info = s.fineArt else { continue }
+            var gap: Double = 0
+            if info.kind == .pair, s.photos.count == 2 {
+                gap = CollageStyleFineArt.lumaGap([s.photos[0]], [s.photos[1]])
+            } else if info.kind == .mainPlusTwo, !s.photos.isEmpty {
+                let main = s.photos[min(info.mainIndex, s.photos.count - 1)]
+                gap = CollageStyleFineArt.lumaGap([main], s.photos.filter { $0.id != main.id })
+            }
+            if gap > CollageStyleFineArt.maxLumaGap { out.append(at + String(format: " R8 亮度差 %.2f", gap)) }
+        }
+        let chapterSeq: [Int] = spreads.dropFirst().compactMap { $0.fineArt?.chapter }
+        if chapterSeq != chapterSeq.sorted() { out.append("R1 章节顺序乱了") }
+        return out
     }
 
     /// 一章 27 张的合成册子（5 张没有人脸 = 呼吸图候选，3 张横图，2 张精选；没有场、连拍、黑白）。

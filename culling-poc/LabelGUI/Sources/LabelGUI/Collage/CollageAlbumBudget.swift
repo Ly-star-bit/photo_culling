@@ -47,7 +47,9 @@ struct CollageAlbumBudget: Codable, Hashable {
         if count == b.spreads { return "正好 \(b.spreads) 个跨页" }
         if count > b.spreads {
             // fine-art 不看目标里的每跨页张数（固定 1–3 张）：照实际的上限说，不说用户填的那个。
-            let cap = fineArt ? "婚礼 fine-art 每跨页最多 \(CollageStyleFineArt.maxPerSpread) 张"
+            // 并页还要守版式规则（CollageStyleFineArt.compress）：并了会破坏的不并，所以会多。
+            let cap = fineArt ? "婚礼 fine-art 每跨页最多 \(CollageStyleFineArt.maxPerSpread) 张、并页不破坏版式（不连着 4 个多图跨页、"
+                + "同姿势 / 黑白彩色不进同一跨页、左右页亮度差不大），"
                 : "每跨页最多 \(b.maxPerSpread) 张"
             let fix = fineArt ? "编排换「默认」、或从托盘拿掉一些" : "调高每跨页张数、或从托盘拿掉一些"
             return "比目标 \(b.spreads) 个多 \(count - b.spreads) 个：\(cap)放不下这 \(photos) 张（目标跨页数不替你删片）—— \(fix)"
@@ -287,8 +289,9 @@ extension CollageStyleFineArt {
 
     /// 目标跨页数（F06）：fine-art 编出来比目标多，就把同一章里相邻的单图跨页并起来（单 + 单 → 对页双图，
     /// 对页双图 + 单 → 一主两辅），一张都不拿掉、每跨页还是最多 3 张；扉页、章节开篇不动。先并正文里落单的，
-    /// 再并呼吸页、每章收尾的单张；同姿势、亮度差太多的先不并，实在并不动了再放开。并到目标或者再也并不动为止
-    /// （多出来的跨页条上标橙）。比目标少不加页。
+    /// 再并呼吸页、每章收尾的单张。并出来的跨页照样守 fine-art 的规则，会破坏的那一对就不并（宁可多几个跨页）：
+    /// 连着的多图跨页不超过 maxBusyRun 个（R4）、同姿势不进同一跨页（R10）、黑白彩色不混（R7）、左右页亮度差不超
+    /// maxLumaGap（R8）。并到目标或者再也并不动为止（多出来的跨页条上标橙，提示里说）。比目标少不加页。
     /// cap：并出来的跨页最多几张（fine-art 固定 3 张：plan 不传目标里的「每跨页最多」，那个只对默认编排）。
     /// （辅助函数都拿数组当参数、不捕获 inout：release 下 Swift 6.3 的 CopyPropagation 遇到捕获 inout 的局部函数会崩。）
     static func compress(_ spreads: inout [CollageAlbum.Spread], toward target: Int, cap: Int = maxPerSpread,
@@ -302,26 +305,38 @@ extension CollageStyleFineArt {
     }
 
     /// 这一轮最该并的那一对（i、i+1）和并成的跨页；并不动 = nil。
-    /// 先比档（正文落单的 0、呼吸页 / 章末收尾 1；放开同姿势、亮度检查 +2），再比单 + 单优先，再比哪章更松，最后比位置。
+    /// 先比档（正文落单的 0、呼吸页 / 章末收尾 1），再比单 + 单优先，再比哪章更松，最后比位置。
+    /// 并了会让连着的多图跨页超过 maxBusyRun 个的不并（R4：打断一串多图跨页的那张单图正是 plan 特意插的）。
     private static func bestMerge(_ list: [CollageAlbum.Spread], cap: Int,
                                   similar: [String: Set<String>]) -> (index: Int, spread: CollageAlbum.Spread)? {
         var best: (key: [Double], index: Int, spread: CollageAlbum.Spread)?
         for i in 0..<max(0, list.count - 1) {
             let base = max(singleTier(list, i), singleTier(list, i + 1))
-            var candidate = mergedSpread(list[i], list[i + 1], cap: cap, similar: similar, strict: true)
-            var relaxed = 0
-            if candidate == nil {
-                candidate = mergedSpread(list[i], list[i + 1], cap: cap, similar: similar, strict: false)
-                relaxed = 2
-            }
-            guard let c = candidate else { continue }
+            guard let c = mergedSpread(list[i], list[i + 1], cap: cap, similar: similar),
+                  busyRun(list, merging: i) <= maxBusyRun else { continue }
             let size: Double = c.photos.count == 2 ? 0 : 1
             let loose: Double = chapterSparsity(list, c.fineArt?.chapter ?? 0)
-            let key: [Double] = [Double(base + relaxed), size, -loose, Double(i)]
+            let key: [Double] = [Double(base), size, -loose, Double(i)]
             if let b = best, !key.lexicographicallyPrecedes(b.key) { continue }
             best = (key, i, c)
         }
         return best.map { ($0.index, $0.spread) }
+    }
+
+    /// i、i+1 并成一个多图跨页以后，它所在那一串连着的多图跨页有几个（前后挨着的多图跨页都算，跨章也算）。
+    private static func busyRun(_ list: [CollageAlbum.Spread], merging i: Int) -> Int {
+        var run = 1
+        var k = i - 1
+        while k >= 0, list[k].photos.count >= 2 {
+            run += 1
+            k -= 1
+        }
+        k = i + 2
+        while k < list.count, list[k].photos.count >= 2 {
+            run += 1
+            k += 1
+        }
+        return run
     }
 
     /// 单图跨页的档：正文里落单的 0，呼吸页、每章最后一个（收尾）1；多图跨页 0。
@@ -341,9 +356,10 @@ extension CollageStyleFineArt {
     }
 
     /// 相邻两个跨页并成一个：同一章、都不是扉页 / 章节开篇、加起来 2–3 张（不超过 cap）。2 张 = 对页双图，
-    /// 3 张 = 一主两辅（主图那页和配图那页亮度差超了就不并）。strict：同姿势、黑白彩色混、亮度差太多的不并。
+    /// 3 张 = 一主两辅（主图那页和配图那页亮度差超了就不并）。同姿势、黑白彩色混、亮度差太多的不并（同一场的可以，
+    /// 和 capSingles 并落单的一样）。以前并不动时还有一档连这些都不看，并出过同姿势、黑白彩色混在一起的跨页。
     private static func mergedSpread(_ a: CollageAlbum.Spread, _ b: CollageAlbum.Spread, cap: Int,
-                                     similar: [String: Set<String>], strict: Bool) -> CollageAlbum.Spread? {
+                                     similar: [String: Set<String>]) -> CollageAlbum.Spread? {
         guard let infoA = a.fineArt, let infoB = b.fineArt, infoA.chapter == infoB.chapter else { return nil }
         let structural: Set<CollageFineArtSpread.Kind> = [.title, .chapter]
         guard !structural.contains(infoA.kind), !structural.contains(infoB.kind) else { return nil }
@@ -355,19 +371,15 @@ extension CollageStyleFineArt {
         if all.count == 2 {
             let x = all[0]
             let y = all[1]
-            if strict {
-                guard compatible(y, with: [x], similar: similar, mono: mono, relaxTake: true),
-                      lumaGap([x], [y]) <= maxLumaGap else { return nil }
-            }
+            guard compatible(y, with: [x], similar: similar, mono: mono, relaxTake: true),
+                  lumaGap([x], [y]) <= maxLumaGap else { return nil }
             out = CollageAlbum.Spread(kind: .pair, photos: CollageSelect.chronological(all))
             out.fineArt = CollageFineArtSpread(kind: .pair, chapter: infoA.chapter)
             out.fineArt?.merged = true
         } else {
             let pair = a.photos.count == 2 ? a.photos : b.photos
             let lone = a.photos.count == 2 ? b.photos[0] : a.photos[0]
-            if strict {
-                guard compatible(lone, with: pair, similar: similar, mono: mono, relaxTake: true) else { return nil }
-            }
+            guard compatible(lone, with: pair, similar: similar, mono: mono, relaxTake: true) else { return nil }
             guard let trio = mainPlusTwoSpread(CollageSelect.chronological(all)) else { return nil }
             out = trio.with(chapter: infoA.chapter)
         }
@@ -428,7 +440,8 @@ struct CollageAlbumBudgetControls: View {
                     }
                     .help("每个跨页最少、最多放几张（扉页固定一张）")
                 }
-                let rule = fineArt ? "婚礼 fine-art 每跨页固定 1–3 张（每跨页张数只对默认编排）：并掉落单的单图跨页往目标凑，凑不够就多出几个（不删片）"
+                let rule = fineArt ? "婚礼 fine-art 每跨页固定 1–3 张（每跨页张数只对默认编排）：把落单的单图、呼吸页、章末收尾并起来往目标凑，"
+                    + "并了会破坏版式（连着 4 个多图跨页、同姿势 / 黑白彩色同页、左右亮度差太大）的不并，凑不够就多出几个（不删片）"
                     : "照片全部排进去、不替你删：每跨页最多 \(b.maxPerSpread) 张放不下时，多出来的跨页在跨页条上标橙"
                 Text(rule + "。改完点工具条的「自动编排」生效")
                     .font(.caption2).foregroundStyle(.secondary)
@@ -529,7 +542,11 @@ enum CollageBudgetChange {
         let placed = project.usedPhotoIDs.count
         let message = CollageAlbumBudget.outcome(spreads: count, budget: b, photos: placed,
                                                  fineArt: project.albumTheme == .fineArt) ?? ""
-        let hint = "请用户决定：在 app 里把相册的编排换成「默认」再点「自动编排」（默认编排每跨页最多 \(b.maxPerSpread) 张，会塞进目标），"
+        // fine-art 压页会把落单的单图、呼吸页、章末收尾并掉，但不破坏版式规则，并不动就多（CollageStyleFineArt.compress）。
+        let rules = project.albumTheme == .fineArt
+            ? "婚礼 fine-art 往目标并时会把落单的单图、呼吸页、章末收尾并掉，但并了会破坏版式（连着 4 个多图跨页、同姿势 / 黑白彩色同页、左右亮度差太大）的不并。"
+            : ""
+        let hint = rules + "请用户决定：在 app 里把相册的编排换成「默认」再点「自动编排」（默认编排每跨页最多 \(b.maxPerSpread) 张，会塞进目标），"
             + "或者从托盘拿掉一些照片再成套。AI 不替用户删片"
         return (body, MCPReadModel.warning("over_target", message, hint: hint))
     }
