@@ -251,6 +251,7 @@ enum DiagnosticsSelfTest {
               "诊断信息：系统、机型、界面状态（路径换成代号）", info)
         targetChecks(work, data: data, check)
         redactorChecks(check)
+        quoteChecks(work, check)
         liveFolderChecks(work, check)
     }
 
@@ -307,6 +308,75 @@ enum DiagnosticsSelfTest {
         check(at(14) == texts[14], "不是路径、不是文件夹名的不误伤（说明文字、文件名、分数、斜杠）", at(14))
         check(at(15).hasPrefix("跳过 /Volumes/<盘 ") && at(15).contains("/DSCF0004.RAF 和（/Volumes/<盘 ") && at(15).hasSuffix(">）"),
               "文件夹名里的括号算路径的一部分；包着路径的括号留在外面", at(15))
+    }
+
+    /// 打码（纯函数）：系统错误文案（Foundation 的 NSError，这个 app 拿到的是英文、名字用弯引号 “X”）、日志里打印出来的 NSError
+    /// （"…" 里套着 “…”）、直引号里的文件夹名，和「」一样按前后文换代号（英文的 the folder / the file 也算）；弯引号包着的整条路径
+    /// 也打码；按钮名、照片文件名不误伤。
+    @MainActor
+    private static func quoteChecks(_ work: URL, _ check: Check) {
+        print("C2b. 打码：系统错误文案里 “…” 和 \"…\" 里的文件夹名")
+        let key = BatchStore.sessionKey(for: URL(fileURLWithPath: "/Volumes/T7/张三婚礼"))
+        let sessions = [DiagnosticsBundle.SessionDigest(key: key, path: "/Volumes/T7/张三婚礼", name: "张三婚礼_交付",
+                                                        photoCount: 3, lastAnalyzed: "")]
+        let redact = Redactor(home: "/Users/someone", sessions: sessions)
+        // 真的系统错误（Foundation 自己的说法，列一个不存在的文件夹）：一个没登记的名字、一个认得的场次名。
+        func systemError(_ name: String) -> String {
+            let url = work.appendingPathComponent("quote-checks", isDirectory: true).appendingPathComponent(name, isDirectory: true)
+            do {
+                _ = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
+                return ""
+            } catch {
+                return (error as NSError).localizedDescription
+            }
+        }
+        let realUnknown = systemError("李四订婚")
+        let realKnown = systemError("张三婚礼")
+        check(realUnknown.contains("“李四订婚”") && realKnown.contains("“张三婚礼”"),
+              "前提：系统的 NSError 文案用弯引号包着文件夹名", realUnknown + " / " + realKnown)
+        let texts = [
+            "分析失败: " + realUnknown,
+            "列照片失败: " + realKnown,
+            "You don’t have permission to save the file “a.csv” in the folder “王五订婚”.",
+            "The folder “赵六写真” doesn’t exist.",
+            "未能打开文件夹“周九婚纱”。",
+            "导出失败：Error Domain=NSCocoaErrorDomain Code=260 \"The file “张三婚礼_交付” couldn’t be opened because there is no such file.\""
+                + " UserInfo={NSFilePath=/Volumes/T7/张三婚礼}",
+            "照片文件夹\"吴十订婚\"不存在",
+            "{\"a\":\"\",\"name\":\"张三婚礼\"}",
+            "The file “/Volumes/T7/张三婚礼” couldn’t be opened; “/Users/someone/Desktop/客户钱七” too",
+            "先点“取消”再移除历史记录；先点“启动 VLM 服务”",
+            "The file “DSCF0001.RAF” couldn’t be opened; 写入「封面.jpg」失败",
+            "又看了一遍：「李四订婚」、“王五订婚”、\"赵六写真\"",
+        ]
+        let out = redact.applyAll(texts)
+        func at(_ i: Int) -> String { i < out.count ? out[i] : "" }
+        func label(in text: String) -> String {
+            ProofSheetSelfTest.matches("[“\"「](<文件夹 [0-9]+>)[”\"」]", in: text).first ?? "?"
+        }
+        let banned = ["张三", "李四", "王五", "赵六", "周九", "吴十", "钱七", "T7", "someone"]
+        let all = out.joined(separator: "\n")
+        check(banned.allSatisfy { !all.contains($0) }, "弯引号、直引号里的客户名都换掉了", all)
+        check(at(0).hasPrefix("分析失败: ") && at(0).contains("“<文件夹 "),
+              "真的系统错误里没登记的文件夹名（the file / the folder “X”）换成 <文件夹 N>", at(0))
+        check(at(1).contains("“<场次 1>”"), "真的系统错误里认得的场次名，前面没有「文件夹」也换成 <场次 1>", at(1))
+        check(at(2).hasPrefix("You don’t have permission to save the file “a.csv” in the folder “<文件夹 ") && at(2).hasSuffix(">”."),
+              "the folder “X” 换掉，the file “a.csv” 这种文件名留着", at(2))
+        check(at(3).hasPrefix("The folder “<文件夹 ") && at(3).hasSuffix(">” doesn’t exist."), "The folder “X” doesn’t exist", at(3))
+        check(at(4).hasPrefix("未能打开文件夹“<文件夹 ") && at(4).hasSuffix(">”。"), "中文的 文件夹“X” 和「」一样换", at(4))
+        check(at(5).contains("\"The file “<场次 1>” couldn’t be opened because there is no such file.\"")
+              && at(5).hasSuffix("NSFilePath=<场次 1>}"), "日志里打印的 NSError：\"…\" 里套着的 “X” 也认得", at(5))
+        check(at(6).hasPrefix("照片文件夹\"<文件夹 ") && at(6).hasSuffix(">\"不存在"), "直引号里的文件夹名按同样的前后文换", at(6))
+        check(at(7) == "{\"a\":\"\",\"name\":\"<场次 1>\"}", "JSON 里的空串不打乱直引号的配对", at(7))
+        check(at(8).hasPrefix("The file “<场次 1>” couldn’t be opened; “~/Desktop/<文件夹 ") && at(8).hasSuffix(">” too"),
+              "弯引号包着的整条路径：认得的换成 <场次 1>，别的逐段打码", at(8))
+        check(at(9) == texts[9], "弯引号里的按钮名不误伤", at(9))
+        check(at(10) == texts[10], "引号里的照片文件名不误伤", at(10))
+        let li = label(in: at(0))
+        let wang = label(in: at(2))
+        let zhao = label(in: at(3))
+        check(at(11) == "又看了一遍：「\(li)」、“\(wang)”、\"\(zhao)\"",
+              "一处认出的文件夹名，别处「」、“”、\"\" 里的也换成同一个代号", at(11) + " / " + li + wang + zhao)
     }
 
     /// 界面那一路（真的 AppModel、BatchStore）：认回的场次（photoDir 是改名以后的新路径、sessions.json 里钉着旧路径）、

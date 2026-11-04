@@ -11,7 +11,7 @@ import UniformTypeIdentifiers
 //   3. 诊断包：「帮助 › 导出诊断信息…」和无头 --diag-export 打同一个 zip —— 版本、系统、最近的提示和日志、数据目录里
 //      有哪些文件（只列名字和大小，照片、预览图连名字都不列）、场次概况（几个、几张，不带路径和 bookmark）。场次 JSON、
 //      sessions.json、客户备注一律不放；所有文字里的路径都打码（家目录 ~、盘名 <盘 N>、场次文件夹 <场次 N>、别的文件夹
-//      <文件夹 N>，不只认 sessions.json 里登记的，见 Redactor），「」里的文件夹名、盘名同样换掉。
+//      <文件夹 N>，不只认 sessions.json 里登记的，见 Redactor），「」“”"" 里的文件夹名、盘名同样换掉。
 //   4. 「帮助」菜单（快捷键一览、使用说明、导出 / 复制诊断信息、日志文件夹）。
 
 enum Diagnostics {
@@ -628,7 +628,9 @@ enum DiagnosticsBundle {
 ///      最后一段是英文数字名字的文件（DSCF0001.RAF、app.1.log）照原样，中文名的文件换成 <文件 N>.扩展名；其余每段换成
 ///      <文件夹 N>（同一个名字在整个包里是同一个代号）。
 ///   3. 「」里的名字：上面认得的、路径里打过码的同一个名字换成同一个代号；「文件夹「X」」「场次「X」」「存储卡「X」」
-///      「「X」里找不到」这种一看就是文件夹 / 盘名的，没见过也换掉。
+///      「「X」里找不到」这种一看就是文件夹 / 盘名的，没见过也换掉。弯引号 “X”（系统 NSError 的 localizedDescription：
+///      The file “X” couldn’t be opened…，这个 app 拿到的是英文）、直引号 "X"（日志里打印的 NSError、英文）同样认，
+///      英文的 the folder / the directory “X”、不像文件名的 the file “X”（列不存在的文件夹时系统也说 file）也算文件夹。
 /// 不做裸词替换：文件夹叫「照片」「婚礼」也不会把正文里的这几个字换掉。
 final class Redactor {
     /// 第 1 步：整条路径 → 代号（长的在前）。
@@ -677,7 +679,7 @@ final class Redactor {
         let forms = knownForms.keys.sorted { $0.count > $1.count }
         if !forms.isEmpty {
             let alternatives = forms.map { NSRegularExpression.escapedPattern(for: $0) }.joined(separator: "|")
-            let boundary = #"(?=[/.…\s」）)\]}"'：:，、;；|·⏎（(<>→]|$)"#
+            let boundary = #"(?=[/.…\s」”）)\]}"'：:，、;；|·⏎（(<>→]|$)"#
             knownRegex = try? NSRegularExpression(pattern: "(?:" + alternatives + ")" + boundary)
         }
     }
@@ -764,8 +766,8 @@ final class Redactor {
     /// 路径从这些字后面开始（行首、空白、左括号引号、冒号等号……、代号的 >），到中文标点、引号、换行、日志里折行的 ⏎ 为止。
     /// 括号不算终点（文件夹名里常有「婚礼（张三）」）：多出来的右括号在 splitTail 里切掉。
     private static let pathRegex: NSRegularExpression = {
-        let starts = #"\s(（「\[{"'=:：,，、;；|>→/"#
-        let stops = #"\n\r\t」\]}"'：:，、;；|·⏎<>→"#
+        let starts = #"\s(（「“\[{"'=:：,，、;；|>→/"#
+        let stops = #"\n\r\t」”\]}"'：:，、;；|·⏎<>→"#
         // (?<!:/)：网址 https://… 的第二个 / 不算路径开头。
         let pattern = "(?<![^" + starts + "])(?<!:/)(?:~(?=/)|/(?=[^/\\s<]))[^" + stops + "]*"
         return try! NSRegularExpression(pattern: pattern)
@@ -947,7 +949,14 @@ final class Redactor {
 
     // MARK: 第 3 步：「」里的名字
 
-    private static let quotedRegex = try! NSRegularExpression(pattern: "「([^「」\\n]{1,120})」")
+    /// 三种引号：「X」（app 自己的话）、“X”（系统 NSError 的 localizedDescription）、"X"（日志里打印的 NSError、英文）。
+    /// 各扫各的：日志里 "The file “X” couldn’t…" 整句在直引号里，里面的 “X” 也要认出来。直引号允许空的（JSON 里的 ""
+    /// 不打乱后面的配对）。
+    private static let quoteForms: [(open: String, close: String, regex: NSRegularExpression)] = [
+        ("「", "」", try! NSRegularExpression(pattern: "「([^「」\\n]{1,120})」")),
+        ("“", "”", try! NSRegularExpression(pattern: "“([^“”\\n]{1,120})”")),
+        ("\"", "\"", try! NSRegularExpression(pattern: "\"([^\"\\n]{0,120})\"")),
+    ]
 
     /// 「」前面是这些字：里面是文件夹 / 场次的名字。
     private static let folderBefore = ["文件夹", "场次", "认出了", "移除", "目录"]
@@ -956,21 +965,26 @@ final class Redactor {
                                       "的位置"]
 
     private func forEachQuoted(_ ns: NSString, _ body: (_ name: String, _ before: String, _ after: String) -> Void) {
-        for match in Self.quotedRegex.matches(in: ns as String, range: NSRange(location: 0, length: ns.length)) {
-            let name = ns.substring(with: match.range(at: 1))
-            let beforeStart = max(0, match.range.location - 6)
-            let before = ns.substring(with: NSRange(location: beforeStart, length: match.range.location - beforeStart))
-            let afterStart = match.range.location + match.range.length
-            let after = ns.substring(with: NSRange(location: afterStart, length: min(10, ns.length - afterStart)))
-            body(name, before, after)
+        for form in Self.quoteForms {
+            for match in form.regex.matches(in: ns as String, range: NSRange(location: 0, length: ns.length)) {
+                let name = ns.substring(with: match.range(at: 1))
+                let beforeStart = max(0, match.range.location - 12)
+                let before = ns.substring(with: NSRange(location: beforeStart, length: match.range.location - beforeStart))
+                let afterStart = match.range.location + match.range.length
+                let after = ns.substring(with: NSRange(location: afterStart, length: min(10, ns.length - afterStart)))
+                body(name, before, after)
+            }
         }
     }
 
     private func learnQuoted(_ ns: NSString) {
         forEachQuoted(ns) { name, before, after in
-            guard !Self.isLabel(name), knownLabel(name) == nil else { return }
+            guard !name.isEmpty, !Self.isLabel(name), knownLabel(name) == nil else { return }
+            let english = Self.englishWord(before: before)
             let folderish = Self.folderBefore.contains(where: { before.hasSuffix($0) })
                 || Self.folderAfter.contains(where: { after.hasPrefix($0) })
+                || english == "folder" || english == "directory"
+                || (english == "file" && !Self.looksLikeFile(name) && !Self.keepsName(name))
             if before.hasSuffix("卡") || after.hasPrefix("上，") {
                 _ = volumeLabel(name)
             } else if folderish {
@@ -979,14 +993,32 @@ final class Redactor {
         }
     }
 
+    /// 引号前面紧挨着的那个英文词（「the folder “X”」→ folder），小写；不是「词 + 空格」结尾的 = nil。
+    private static func englishWord(before: String) -> String? {
+        guard before.hasSuffix(" ") else { return nil }
+        let word = before.dropLast().reversed().prefix { $0.isASCII && $0.isLetter }
+        return word.isEmpty ? nil : String(word.reversed()).lowercased()
+    }
+
+    /// 带认得的扩展名（a.csv、DSCF0001.RAF）：the file “X” 里这种是文件，不当文件夹换。
+    private static func looksLikeFile(_ name: String) -> Bool {
+        let ext = (name as NSString).pathExtension
+        return !ext.isEmpty && fileExtensions.contains(ext.lowercased())
+    }
+
     private func knownLabel(_ name: String) -> String? {
         names[name] ?? volumes[name] ?? folders[name]
     }
 
     private func maskQuoted(_ ns: NSString) -> NSString {
-        Self.replacing(Self.quotedRegex, in: ns) { match in
-            knownLabel(ns.substring(with: match.range(at: 1))).map { "「" + $0 + "」" }
+        var out = ns
+        for form in Self.quoteForms {
+            let current = out
+            out = Self.replacing(form.regex, in: current) { match in
+                knownLabel(current.substring(with: match.range(at: 1))).map { form.open + $0 + form.close }
+            }
         }
+        return out
     }
 }
 
