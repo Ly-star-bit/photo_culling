@@ -1,7 +1,7 @@
 import Foundation
 import Darwin
 
-// 长任务和退出（全项目审查 S05）：VLM 子进程不变孤儿（S05b）。
+// 长任务和退出（全项目审查 S05）：VLM 子进程不变孤儿（S05b）、长任务防闲置睡眠（S05c）。
 
 /// VLM / 复审跑的是 `uv run python layer2.py`：Foundation 的 Process 让 uv 自己当进程组长，uv 起的 python 在同一组
 /// （本机 uv 0.13 实测：组号 = uv 的 pid）。app 退出时没人给它们发信号的话，父进程一退 layer2 打下一行进度就 BrokenPipe、
@@ -53,4 +53,95 @@ enum SubprocessGroup {
         kill(-group, SIGKILL)
         return waitGone(group, timeout: 0.5) ? .killed : .stuck
     }
+}
+
+// MARK: - 分析、VLM、复审期间防闲置睡眠（S05c）
+
+/// 哪一种长任务（退出确认框按它说话）。
+enum LongTaskKind: String, Sendable, CaseIterable {
+    case analysis, vlm, appeal
+
+    var label: String {
+        switch self {
+        case .analysis: return "分析照片"
+        case .vlm: return "VLM 判片"
+        case .appeal: return "VLM 复审废片"
+        }
+    }
+
+    /// 系统里这条电源断言的名字（pmset -g assertions 看得到，自检按它认）。只能用 ASCII：带中文的整个名字会变成空串（实测）。
+    var reason: String { "LabelGUI \(rawValue): long task running, idle system sleep disabled" }
+}
+
+/// 分析、VLM、复审期间拿着 ProcessInfo 的 activity：夜里挂着跑几小时的 VLM，人一走开 Mac 闲置睡眠，Python 和 Ollama
+/// 一起停住，早上一看没跑完（审查 S05c）。以前全仓只有实时桥拿了一个 .userInitiatedAllowingIdleSystemSleep，等于没防。
+/// 合盖照样睡（那是用户自己的选择）；显示器照样可以灭。无头（命令行、测试宿主）不拿，只记账（退出确认框和自检看）。
+/// 每次 begin 拿到一个 token，任务的 Task.detached 第一行 defer { token.end() } —— 所有出口（探 Ollama 失败、写清单失败、
+/// 成功、失败、取消）都放掉，不然 app 开着期间 Mac 一直不睡。
+final class LongTaskRegistry: @unchecked Sendable {
+    /// .userInitiated 本身就含 .idleSystemSleepDisabled，写出来是为了看得见；也顺带不让 App Nap 给进程内的分析降速、
+    /// 不让系统趁空闲悄悄把 app 结束（sudden / automatic termination）。
+    static let activityOptions: ProcessInfo.ActivityOptions = [.userInitiated, .idleSystemSleepDisabled]
+
+    /// 无头不拿：测试脚本跑分析不该让 runner 不睡；--live-host / --app-ui 也不是用户在等。
+    static func holdsSystemActivity(headless: Bool) -> Bool { !headless }
+
+    private let lock = NSLock()
+    private var running: [(id: Int, kind: LongTaskKind)] = []
+    private var nextID = 0
+    /// nil = 按 AppRuntime.headless 定；自检设 true，走真的 beginActivity 去 pmset 里核对。
+    var forceSystemActivity: Bool?
+
+    /// 正在跑的长任务（按开始的先后）。
+    var active: [LongTaskKind] {
+        lock.lock(); defer { lock.unlock() }
+        return running.map(\.kind)
+    }
+
+    func begin(_ kind: LongTaskKind) -> LongTaskToken {
+        let hold = forceSystemActivity ?? Self.holdsSystemActivity(headless: AppRuntime.headless)
+        let activity = hold ? ProcessInfo.processInfo.beginActivity(options: Self.activityOptions, reason: kind.reason) : nil
+        lock.lock()
+        nextID += 1
+        let id = nextID
+        running.append((id, kind))
+        lock.unlock()
+        return LongTaskToken(registry: self, id: id, activity: activity)
+    }
+
+    fileprivate func finish(_ id: Int) {
+        lock.lock(); defer { lock.unlock() }
+        running.removeAll { $0.id == id }
+    }
+}
+
+/// 一次长任务的凭据。end() 可以在任何线程调、调几次都行；忘了调，释放时也会放掉（兜底，别指望它）。
+final class LongTaskToken: @unchecked Sendable {
+    private let lock = NSLock()
+    private let registry: LongTaskRegistry
+    private let id: Int
+    private var activity: NSObjectProtocol?
+    private var ended = false
+    /// 真的拿了系统的 activity（GUI）还是只记账（无头）。
+    let holdsSystemActivity: Bool
+
+    fileprivate init(registry: LongTaskRegistry, id: Int, activity: NSObjectProtocol?) {
+        self.registry = registry
+        self.id = id
+        self.activity = activity
+        holdsSystemActivity = activity != nil
+    }
+
+    func end() {
+        lock.lock()
+        guard !ended else { lock.unlock(); return }
+        ended = true
+        let held = activity
+        activity = nil
+        lock.unlock()
+        if let held { ProcessInfo.processInfo.endActivity(held) }
+        registry.finish(id)
+    }
+
+    deinit { end() }
 }

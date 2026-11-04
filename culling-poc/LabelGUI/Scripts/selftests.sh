@@ -6,7 +6,8 @@
 #   --minimal / --mask / --album / --fashion / --newspaper-selftest   不给照片文件夹时只验合成数据
 #   --delivery-selftest  交付环节的数据安全：XMP 归属 / 合并、同名另存 -2、截断 JPEG、同一个文件、两条去 GPS
 #                        （端到端的命令行出口在 Scripts/delivery_regression.py）
-#   --quit-selftest      长任务和退出：退出 / 取消时 VLM 的 uv、python 子进程整组停掉（假的 uv），阈值防抖退出时写掉
+#   --quit-selftest      长任务和退出：退出 / 取消时 VLM 的 uv、python 子进程整组停掉（假的 uv），阈值防抖退出时写掉，
+#                        分析 / VLM 期间防闲置睡眠（pmset 里核对电源断言）、所有出口都放掉
 #
 # 为什么每条都要临时数据目录：main.swift 在分派之前就建数据目录、往里写内置字体；ux / timeline / swiss 不查
 # LABELGUI_DATA_DIR，不设就会在 runner 上建出 ~/Library/Application Support/选片工具，MCP 冒烟里「不建目录」那一条就测不了

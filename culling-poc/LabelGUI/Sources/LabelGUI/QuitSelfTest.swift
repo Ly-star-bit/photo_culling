@@ -1,11 +1,12 @@
 import AppKit
 import Foundation
 
-/// 长任务和退出的自检（全项目审查 S05b / S05e）：
+/// 长任务和退出的自检（全项目审查 S05b / S05c / S05e）：
 ///     LABELGUI_DATA_DIR=<空的临时目录> LABELGUI_NO_GUI=1 LabelGUI --quit-selftest
 /// 不要照片：假的 uv（/bin/sh 脚本，转发 / 不转发 SIGTERM / 子进程不理 SIGTERM 三种）走 BatchStore 同一个 runProcess、同一个
 /// processBox，核对 willTerminate 以后子进程整组都没了、python 那一层只收到一次 SIGTERM；阈值防抖里排着的那次退出时写掉、
-/// 没排着的不写。会写数据目录：只在临时目录里跑。每条打一行 PASS / FAIL，有 FAIL 退出码 1。不弹任何框。
+/// 没排着的不写；防睡眠的 activity 在 pmset 里真的有、放掉就没，分析（合成的噪点 JPEG）跑完 / 取消、VLM 探不到服务都放掉。
+/// 会写数据目录：只在临时目录里跑。每条打一行 PASS / FAIL，有 FAIL 退出码 1。不弹任何框。
 enum QuitSelfTest {
     @MainActor
     static func run() -> Never {
@@ -17,6 +18,7 @@ enum QuitSelfTest {
         t.vlmChildStopsOnQuit()
         t.cancelSignalsOnlyUV()
         t.thresholdFlushOnQuit()
+        t.sleepGuardDuringLongTasks()
         print("quit-selftest: \(t.passed) 通过 \(t.failed) 失败")
         exit(t.failed == 0 ? 0 : 1)
     }
@@ -258,6 +260,153 @@ final class QuitSelfTestHarness {
         let deadline = Date().addingTimeInterval(4)
         while Date() < deadline, !allGone(pids(marker)) { usleep(50_000) }
         check(allGone(pids(marker)), "进程起来之前就点了取消：一个都不剩（\(pids(marker))）")
+    }
+
+    // MARK: - S05c 分析、VLM、复审期间防闲置睡眠
+
+    /// 合成照片文件夹：count 张 360×240 的噪点渐变 JPEG（原生引擎当真照片分析）。
+    func makePhotoFolder(_ name: String, count: Int) -> URL {
+        let folder = work.appendingPathComponent(name, isDirectory: true)
+        try? fm.removeItem(at: folder)
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        var seed: UInt32 = 12345
+        for i in 0..<count {
+            let w = 360, h = 240
+            var pixels = [UInt8](repeating: 255, count: w * h * 4)
+            for y in 0..<h {
+                for x in 0..<w {
+                    seed = seed &* 1_103_515_245 &+ 12345
+                    let noise = Int((seed >> 16) & 0x3F)
+                    let base = (x * 180 / w + y * 60 / h + i * 7) % 200
+                    let o = (y * w + x) * 4
+                    pixels[o] = UInt8(min(255, base + noise))
+                    pixels[o + 1] = UInt8(min(255, base / 2 + noise))
+                    pixels[o + 2] = UInt8(min(255, 255 - base + noise / 2))
+                }
+            }
+            guard let ctx = CGContext(data: &pixels, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+                  let image = ctx.makeImage() else { continue }
+            _ = ProofSheetSelfTest.writeJPEG(image, to: folder.appendingPathComponent(String(format: "QS%04d.jpg", i)))
+        }
+        return folder
+    }
+
+    func pmsetAssertions() -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+        p.arguments = ["-g", "assertions"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        guard (try? p.run()) != nil else { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// 本进程有没有一条名字里带 tag 的 PreventUserIdleSystemSleep 断言（nil = pmset 用不了）。
+    func preventsIdleSleep(_ tag: String) -> Bool? {
+        guard let text = pmsetAssertions(), text.contains("Listed by owning process") else { return nil }
+        let me = "pid \(getpid())("
+        return text.split(separator: "\n").contains {
+            $0.contains(me) && $0.contains("PreventUserIdleSystemSleep") && $0.contains(tag)
+        }
+    }
+
+    func waitFor(_ seconds: Double, _ cond: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !cond() {
+            if Date() >= deadline { return false }
+            usleep(100_000)
+        }
+        return true
+    }
+
+    /// Ollama 有没有在本机跑着（在跑的话不起 VLM：不拿真的模型跑自检）。
+    func ollamaUp(_ store: BatchStore) -> Bool {
+        final class Flag: @unchecked Sendable { var up = false; var done = false }
+        let flag = Flag()
+        Task.detached {
+            let up = await store.checkVLMServer()
+            await MainActor.run { flag.up = up; flag.done = true }
+        }
+        spin(5) { flag.done }
+        return flag.up
+    }
+
+    func sleepGuardDuringLongTasks() {
+        print("— S05c 分析、VLM、复审期间不让 Mac 闲置睡眠（无头只记账），所有出口都放掉")
+        let options = LongTaskRegistry.activityOptions
+        check(options.contains(.idleSystemSleepDisabled) && options.contains(.userInitiated),
+              "选项是 .userInitiated + .idleSystemSleepDisabled（不是实时桥那种 AllowingIdleSystemSleep）")
+        check(LongTaskRegistry.holdsSystemActivity(headless: false) && !LongTaskRegistry.holdsSystemActivity(headless: true),
+              "开界面才拿系统的 activity；命令行、测试宿主不拿")
+
+        let reg = LongTaskRegistry()
+        let a = reg.begin(.analysis)
+        let v = reg.begin(.vlm)
+        check(reg.active == [.analysis, .vlm] && !a.holdsSystemActivity, "无头：只记账（\(reg.active.map(\.rawValue))），不拿系统的")
+        a.end()
+        a.end()
+        check(reg.active == [.vlm], "end 两次也只放一次")
+        do { _ = reg.begin(.appeal) }
+        check(reg.active == [.vlm], "token 丢了（忘了 end）释放时也放掉")
+        v.end()
+        check(reg.active.isEmpty, "都放掉了")
+
+        let forced = LongTaskRegistry()
+        forced.forceSystemActivity = true
+        let tag = LongTaskKind.vlm.reason
+        if preventsIdleSleep(tag) == nil {
+            print("SKIP pmset -g assertions 用不了：不核对系统里的电源断言")
+        } else {
+            let token = forced.begin(.vlm)
+            let held = waitFor(3) { preventsIdleSleep(tag) == true }
+            check(held && token.holdsSystemActivity, "拿着时 pmset 里有本进程的 PreventUserIdleSystemSleep「\(LongTaskKind.vlm.reason)」")
+            token.end()
+            check(waitFor(3) { preventsIdleSleep(tag) == false }, "放掉以后 pmset 里没有了")
+            let control = "LabelGUI quit-selftest control"
+            let bridgeStyle = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: control)
+            usleep(500_000)
+            check(preventsIdleSleep(control) == false, "对照：实时桥那种 .userInitiatedAllowingIdleSystemSleep 不挡闲置睡眠（以前全仓只有它）")
+            ProcessInfo.processInfo.endActivity(bridgeStyle)
+        }
+
+        // 真的流程（无头 store：只记账）。
+        let store = newStore()
+        let folder = makePhotoFolder("photos-s05c", count: 12)
+        _ = store.switchSession(to: folder)
+        store.runAppealOnRejects()
+        check(store.longTasks.active.isEmpty && !store.isRunning, "没有可复审的废片：直接返回，不拿")
+        store.runAnalysis()
+        check(store.longTasks.active == [.analysis], "分析一开始就拿着")
+        spin(60) { !store.isRunning && store.longTasks.active.isEmpty }
+        check(!store.isRunning && store.longTasks.active.isEmpty && store.progressText.hasPrefix("完成"),
+              "分析跑完放掉（\(store.progressText)，\(store.items.count) 张）")
+        store.runAnalysis()
+        store.cancel()
+        spin(60) { !store.isRunning && store.longTasks.active.isEmpty }
+        check(!store.isRunning && store.longTasks.active.isEmpty && store.progressText.contains("已取消"),
+              "分析中途取消也放掉（\(store.progressText)）")
+        if ollamaUp(store) {
+            // 本机 Ollama 在跑：不起真的 VLM。场次目录设成只读，走「写清单失败就返回」那个出口（CI 上没有 Ollama，走下面那个）。
+            let dir = store.sessionDir.path
+            _ = chmod(dir, 0o500)
+            store.runVLMOnSurvivors()
+            check(store.longTasks.active == [.vlm], "VLM 一开始就拿着")
+            spin(15) { !store.isRunning && store.longTasks.active.isEmpty }
+            _ = chmod(dir, 0o755)
+            check(!store.isRunning && store.longTasks.active.isEmpty && (store.lastError ?? "").contains("写入待分析清单失败"),
+                  "写不了待分析清单提前返回也放掉（\(store.lastError ?? "")）")
+        } else {
+            store.runVLMOnSurvivors()
+            check(store.longTasks.active == [.vlm], "VLM 一开始就拿着")
+            spin(15) { !store.isRunning && store.longTasks.active.isEmpty }
+            check(!store.isRunning && store.longTasks.active.isEmpty && (store.lastError ?? "").contains("Ollama"),
+                  "探不到 Ollama 提前返回也放掉（\(store.lastError ?? "")）")
+        }
     }
 
     // MARK: - S05e 阈值防抖里排着的那次，退出时写掉

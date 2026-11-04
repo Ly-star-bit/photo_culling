@@ -995,6 +995,8 @@ final class BatchStore: ObservableObject {
     private var cancelFlag = AnalysisEngine.CancelFlag()
     /// VLM / 复审的 uv 子进程。不是 private：--quit-selftest 拿它起假的 uv，核对退出时整组停掉。
     let processBox = ProcessBox()
+    /// 分析、VLM、复审期间防闲置睡眠（审查 S05c，见 QuitSafety.swift）；退出确认框看它知道在跑哪一种。
+    let longTasks = LongTaskRegistry()
 
     // MARK: - Sessions (one shoot = one folder = one persistent dataset)
 
@@ -2292,8 +2294,10 @@ final class BatchStore: ObservableObject {
         // replacements (flushProvisional swaps by id).
         provisionalBuffer = []
         provisionalCount = 0
+        let sleepGuard = longTasks.begin(.analysis)
 
         Task.detached { [weak self] in
+            defer { sleepGuard.end() }  // 所有出口都放掉防睡眠（审查 S05c）
             // Runs natively (ImageIO/Vision) — no Python, no external deps.
             // Artifacts keep the prepare.py/layer1.py format so the VLM stage and
             // evaluate.py stay unchanged.
@@ -2381,8 +2385,10 @@ final class BatchStore: ObservableObject {
         let backendArgs = ["--backend", "ollama",
                            "--base-url", "http://localhost:11434",
                            "--model", Self.ollamaModel]
+        let sleepGuard = longTasks.begin(.vlm)
 
         Task.detached { [weak self] in
+            defer { sleepGuard.end() }  // 所有出口（含探 Ollama 失败、写清单失败）都放掉防睡眠（审查 S05c）
             guard let self else { return }
             // Preflight: fail in 2s with an actionable message instead of letting
             // the Python subprocess time out against a server that isn't there.
@@ -2500,8 +2506,10 @@ final class BatchStore: ObservableObject {
         let box = processBox
         let count = accused.count
         let summaryBox = SummaryBox()
+        let sleepGuard = longTasks.begin(.appeal)
 
         Task.detached { [weak self] in
+            defer { sleepGuard.end() }  // 所有出口都放掉防睡眠（审查 S05c）
             guard let self else { return }
             guard await self.checkVLMServer() else {
                 await MainActor.run { [weak self] in
