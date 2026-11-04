@@ -247,8 +247,47 @@ def run(binary, work):
 
 
 def watermark(lg, work, photos, session, ids, picks, preview_hash, page_a):
-    """M06：确认表可选水印（用水印页的签名）。"""
-    return
+    """M06：确认表可选水印（用水印页的签名）。像素位置、淡不淡在 --proof-selftest 里查，这里查整条路。"""
+    out = os.path.join(work, "out")
+    sig = os.path.join(work, "sig.png")
+    png_signature(sig)
+    sheets_path = os.path.join(session, "proof_sheets.json")
+
+    # 没签名也没文字：不导（不悄悄导出一张不带水印的），也不记表。
+    before = open(sheets_path, encoding="utf-8").read()
+    p = lg("--proof-sheet", photos, "--out", os.path.join(out, "none.html"), "--with-watermark", ok=False)
+    check(p.returncode != 0 and "水印页没有签名也没开文字" in p.stdout, "带水印却没东西可画：不导", p.stdout + p.stderr)
+    check(not os.path.exists(os.path.join(out, "none.html")) and open(sheets_path, encoding="utf-8").read() == before,
+          "没导的不写 HTML、不记表")
+
+    time.sleep(1.1)
+    c_html = os.path.join(out, "c.html")
+    p = lg("--proof-sheet", photos, "--out", c_html, "--with-watermark", "--signature", sig)
+    check(p.returncode == 0 and "水印: 签名 360×120 · 没有文字 · 左下 · 不透明度 0.5" in p.stdout, "带水印导出（签名）", p.stdout + p.stderr)
+    check("选片确认表已导出（带水印）: 5 张" in p.stdout, "状态栏说带水印")
+    with open(c_html, encoding="utf-8") as f:
+        page_c = f.read()
+    plain, marked = cells(page_a), cells(page_c)
+    check([c[0] for c in marked] == picks, "带水印：照片和顺序不变")
+    check(len(marked) == len(plain) and all(a[1] != b[1] for a, b in zip(plain, marked)), "带水印：每张图都变了")
+    sheets = json.load(open(sheets_path, encoding="utf-8"))
+    check(sheets[-1]["ids"] == picks and "lists" not in sheets[-1], "带水印：表上记的照片顺序一样（水印不进 proof_sheets.json）")
+    now = {pid: sha(os.path.join(session, "previews", pid + ".jpg")) for pid in ids}
+    check(now == preview_hash, "预览文件一个字节没动")
+
+    time.sleep(1.1)
+    d_html = os.path.join(out, "d.html")
+    p = lg("--proof-sheet", photos, "--out", d_html, "--with-watermark", "--watermark-text", "样片 · 小何摄影")
+    check(p.returncode == 0 and "水印: 没有签名 · 文字" in p.stdout, "只有文字也能导", p.stdout + p.stderr)
+    with open(d_html, encoding="utf-8") as f:
+        page_d = f.read()
+    check(all(a[1] != b[1] for a, b in zip(plain, cells(page_d))), "文字水印：每张图都变了")
+
+    # 体积：bytesPerPhoto / watermarkedBytesPerPhoto 的依据（这里是造的图，真实照片的数在提交说明里）。
+    def avg(cs):
+        return sum(len(c[1]) for c in cs) // max(1, len(cs))
+    print("体积: 每张平均 base64 {} 字节（不带水印）· {}（签名角标）· {}（文字角标）".format(
+        avg(plain), avg(marked), avg(cells(page_d))))
 
 
 if __name__ == "__main__":

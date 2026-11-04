@@ -101,6 +101,7 @@ extension ClientReply {
 // MARK: - 无头测试入口（只给测试 / 自动化用，不开界面）
 //
 // LABELGUI_DATA_DIR=<临时> LabelGUI --proof-sheet <照片文件夹> --out <x.html> [--scope picks|picks+usable] [--ids a,b] [--quota N]
+//     [--with-watermark [--signature sig.png] [--watermark-text 样片]]（不叫 --watermark：那是 main.swift 里单张水印的入口）
 // LABELGUI_DATA_DIR=<临时> LabelGUI --client-import <照片文件夹> (--text <回复.txt> | --clear) [--apply] [--undo]
 // LABELGUI_DATA_DIR=<临时> LabelGUI --copy-list <照片文件夹> --format lr|c1|lines [--scope all|picks|usable|client] [--ids a,b]
 // LABELGUI_DATA_DIR=<临时> LabelGUI --copy-originals <照片文件夹> --dest <目录> [--scope ...] [--ids a,b]
@@ -163,14 +164,38 @@ enum ClientPicksCLI {
         let ids = option("--ids").map { $0.split(separator: ",").map(String.init) }
         let previous = store.proofSheets.last?.id
         let quota = option("--quota").flatMap(Int.init)
+        let watermark = CommandLine.arguments.contains("--with-watermark") ? proofWatermark() : nil
         store.exportContactSheet(to: URL(fileURLWithPath: out), includeUsable: option("--scope") == "picks+usable", ids: ids,
-                                 quota: quota)
+                                 quota: quota, watermark: watermark)
         waitAndReport(store)
         // 这次没记下新的一张（导出失败、取消）就算失败，别把上一张当成这次的。
         guard let sheet = store.proofSheets.last, sheet.id != previous else { exit(1) }
         let limit = sheet.quota.map { " · 套餐 \($0) 张" } ?? ""
         print("表号 \(sheet.id) · \(sheet.scope) · \(sheet.ids.count) 张\(limit): " + sheet.ids.joined(separator: " "))
         exit(0)
+    }
+
+    /// --with-watermark：和界面上同一个快照（水印页的设置从数据目录的 watermark/state.json 读），--signature / --watermark-text
+    /// 再往上改。没东西可画就退出（和界面一样不导没水印的）。
+    @MainActor
+    private static func proofWatermark() -> ProofWatermark {
+        let marks = WatermarkStore(dataDir: appDataDir)
+        if let sig = option("--signature") {
+            marks.signatureURL = URL(fileURLWithPath: sig)
+            marks.config.signatureEnabled = true
+        }
+        if let text = option("--watermark-text") {
+            marks.config.exifText.enabled = true
+            marks.config.exifText.customText = text
+        }
+        guard let snapshot = marks.proofWatermark() else {
+            print("--with-watermark：水印页没有签名也没开文字（给 --signature <png> 或 --watermark-text <字>）")
+            exit(1)
+        }
+        let sig = snapshot.signature.map { "签名 \($0.width)×\($0.height)" } ?? "没有签名"
+        let text = snapshot.config.exifText.enabled ? "文字" : "没有文字"
+        print("水印: \(sig) · \(text) · 左下 · 不透明度 \(snapshot.config.opacity)")
+        return snapshot
     }
 
     @MainActor

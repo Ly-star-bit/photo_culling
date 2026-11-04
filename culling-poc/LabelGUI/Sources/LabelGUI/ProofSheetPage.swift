@@ -70,9 +70,13 @@ enum ProofSheetPage {
     /// 超过这个就提醒：微信传得慢，手机浏览器可能打不开。
     static let largeBytes: Int64 = 40_000_000
 
+    /// 带水印时每张多大：同样 21 张真实预览（2026-11-04 重测，不带水印 121,911 字节），左下签名角标平均 122,094，
+    /// 文字角标（带半透明底条）124,558 —— 按大的那个估。
+    static let watermarkedBytesPerPhoto: Int64 = 125_000
+
     /// 导出前的体积估计（菜单上显示）。
-    static func estimate(_ count: Int) -> String {
-        "约 " + BatchStore.sizeText(Int64(count) * bytesPerPhoto)
+    static func estimate(_ count: Int, watermark: Bool = false) -> String {
+        "约 " + BatchStore.sizeText(Int64(count) * (watermark ? watermarkedBytesPerPhoto : bytesPerPhoto))
     }
 
     /// 导出后太大时的提醒。

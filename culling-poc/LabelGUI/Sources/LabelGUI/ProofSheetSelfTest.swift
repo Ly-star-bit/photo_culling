@@ -1,5 +1,8 @@
 import Foundation
 import JavaScriptCore
+import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 
 // MARK: - 选片确认表自检（LabelGUI --proof-selftest，不读写数据目录、不开界面）
 //
@@ -28,8 +31,186 @@ enum ProofSheetSelfTest {
         exit(failures == 0 ? 0 : 1)
     }
 
-    /// 给 M06 等后面的检查留的口子（同一个 --proof-selftest 里跑）。
-    private static func extraChecks() {}
+    /// 后面加的检查（同一个 --proof-selftest 里跑）。
+    private static func extraChecks() {
+        watermarkChecks()
+    }
+
+    // MARK: 确认表水印（只画在内存里的 800px 小样上）
+
+    /// 一张纯灰的图（sRGB、不透明）。
+    static func solid(_ w: Int, _ h: Int, gray: CGFloat) -> CGImage? {
+        guard let ctx = rgbaContext(w, h) else { return nil }
+        ctx.setFillColor(CGColor(srgbRed: gray, green: gray, blue: gray, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        return ctx.makeImage()
+    }
+
+    /// 签名图：整块不透明的白（外接框就是签名的大小，好量位置）。
+    static func whiteSignature(_ w: Int, _ h: Int) -> CGImage? { solid(w, h, gray: 1) }
+
+    static func rgbaContext(_ w: Int, _ h: Int) -> CGContext? {
+        CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                  space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    }
+
+    /// 像素（RGBA，第 0 行是最上面一行）。
+    static func pixels(_ image: CGImage) -> [UInt8] {
+        let w = image.width, h = image.height
+        guard let ctx = rgbaContext(w, h) else { return [] }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let data = ctx.data else { return [] }
+        let count = w * h * 4
+        return Array(UnsafeBufferPointer(start: data.bindMemory(to: UInt8.self, capacity: count), count: count))
+    }
+
+    /// 两张一样大的图哪里不一样（左上原点的外接框、不一样的地方最亮的那个值）；一样 = nil。
+    static func changed(_ a: [UInt8], _ b: [UInt8], width w: Int, height h: Int,
+                        threshold: Int = 10) -> (box: CGRect, brightest: Int)? {
+        guard a.count == b.count, a.count == w * h * 4 else { return nil }
+        var minX = w, minY = h, maxX = -1, maxY = -1, brightest = 0
+        for y in 0..<h {
+            for x in 0..<w {
+                let i = (y * w + x) * 4
+                let d = abs(Int(a[i]) - Int(b[i]))
+                guard d > threshold else { continue }
+                minX = min(minX, x); maxX = max(maxX, x)
+                minY = min(minY, y); maxY = max(maxY, y)
+                brightest = max(brightest, Int(b[i]))
+            }
+        }
+        guard maxX >= 0 else { return nil }
+        let box = CGRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
+        return (box, brightest)
+    }
+
+    /// 改版之前的 contactSheetJPEG（原样抄一份）：不带水印的输出要和它逐字节一样。
+    static func legacyContactJPEG(path: String) -> Data? {
+        guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceThumbnailMaxPixelSize: 800,
+              ] as CFDictionary) else { return nil }
+        let out = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dest, cg, [kCGImageDestinationLossyCompressionQuality: 0.72] as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return out as Data
+    }
+
+    static func writeJPEG(_ image: CGImage, to url: URL) -> Bool {
+        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
+            return false
+        }
+        CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
+        return CGImageDestinationFinalize(dest)
+    }
+
+    private static func watermarkChecks() {
+        // 1. 水印页怎么设都裁成左下一个淡角标。
+        var wild = WatermarkEngine.Config()
+        wild.position = .topRight
+        wild.landscapeOverrideEnabled = true
+        wild.landscapeOverride = .center
+        wild.tile.enabled = true
+        wild.frame.enabled = true
+        wild.canvasRatio.enabled = true
+        wild.opacity = 1
+        wild.sizeRatio = 0.5
+        wild.exifText.enabled = true
+        wild.exifText.position = .topRight
+        wild.exifText.opacity = 1
+        guard let sig = whiteSignature(300, 100), let base = solid(800, 533, gray: 100.0 / 255) else {
+            check(false, "造得出测试图")
+            return
+        }
+        let made = ProofWatermark.make(config: wild, signature: sig)
+        let c = made?.config
+        check(c?.frame.enabled == false && c?.canvasRatio.enabled == false, "相框、画布比例强制关")
+        check(c?.tile.enabled == false, "不平铺（斜纹会挡脸）")
+        check(c?.position == .bottomLeft && c?.landscapeOverrideEnabled == false, "签名挪到左下（右上留给 ♥）")
+        check(c?.exifText.position == .bottomLeft, "文字也挪到左下")
+        check(c?.opacity == ProofWatermark.opacityCap && c?.exifText.opacity == ProofWatermark.opacityCap, "不透明度压到 0.5")
+        check(c?.sizeRatio == ProofWatermark.sizeRatioCap, "签名最宽占短边 20%")
+        var noSig = WatermarkEngine.Config()
+        noSig.exifText.enabled = false
+        check(ProofWatermark.make(config: noSig, signature: nil) == nil, "没签名图也没文字：没东西可画（nil）")
+        var off = WatermarkEngine.Config()
+        off.signatureEnabled = false
+        check(ProofWatermark.make(config: off, signature: sig) == nil, "签名关着也没文字：nil")
+        var textOnly = WatermarkEngine.Config()
+        textOnly.exifText.enabled = true
+        textOnly.exifText.customText = "样片 · 小何摄影"
+        let textMark = ProofWatermark.make(config: textOnly, signature: nil)
+        check(textMark != nil && textMark?.config.signatureEnabled == false && textMark?.signature == nil,
+              "只有文字：签名关掉、照样画文字")
+
+        // 2. 画在 800px 小样上：尺寸不变、只动左下那一块、淡。
+        let before = pixels(base)
+        guard let made, let marked = made.apply(to: base, original: "") else {
+            check(false, "签名画得上")
+            return
+        }
+        check(marked.width == 800 && marked.height == 533, "画完还是 800×533（相框、画布比例没生效）",
+              "\(marked.width)×\(marked.height)")
+        let after = pixels(marked)
+        if let diff = changed(before, after, width: 800, height: 533) {
+            // 读不到原片：按长边 6000 算，边距 30 × 800/6000 = 4px；签名宽 = 短边 533 × 20% = 107。
+            let box = diff.box
+            check(abs(Int(box.minX) - 4) <= 1 && abs(Int(box.maxY) - (533 - 4)) <= 1,
+                  "签名在左下、边距按原片换算（读不到原片按长边 6000：4px）", "\(box)")
+            check(abs(Int(box.width) - 107) <= 2, "签名宽 = 短边 × 20%", "\(box)")
+            check(box.maxX < 400 && box.minY > 266, "只动左下那一块（右上的 ♥、中间的脸都没碰）", "\(box)")
+            check(diff.brightest <= 185 && diff.brightest >= 170, "不透明度 0.5：白签名压在灰上是半亮", "\(diff.brightest)")
+        } else {
+            check(false, "小样上真画了水印")
+        }
+
+        // 3. 原片读得到：边距按原片长边换算（3000 长边 → 30 × 800/3000 = 8px）。
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("proof-selftest-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let originalURL = dir.appendingPathComponent("DSCF7207.JPG")
+        if let big = solid(3000, 2000, gray: 0.4), writeJPEG(big, to: originalURL),
+           let scaled = made.apply(to: base, original: originalURL.path),
+           let diff = changed(before, pixels(scaled), width: 800, height: 533) {
+            check(abs(Int(diff.box.minX) - 8) <= 1 && abs(Int(diff.box.maxY) - (533 - 8)) <= 1,
+                  "边距按原片长边换算（3000 → 8px）", "\(diff.box)")
+        } else {
+            check(false, "原片读得到时画得上")
+        }
+
+        // 4. 竖图、只有文字：一样在左下，右上 ♥ 那块不碰。
+        if let tall = solid(533, 800, gray: 100.0 / 255), let textMark,
+           let drawn = textMark.apply(to: tall, original: ""),
+           let diff = changed(pixels(tall), pixels(drawn), width: 533, height: 800) {
+            check(diff.box.maxX < 533 - 52 || diff.box.minY > 52, "竖图：文字不压右上的 ♥", "\(diff.box)")
+            check(diff.box.minY > 400 && diff.box.minX < 40, "竖图：文字在左下", "\(diff.box)")
+        } else {
+            check(false, "只有文字时画得上")
+        }
+
+        // 5. 确认表里那一张：不带水印和改版前逐字节一样；带水印的变了、尺寸一样；预览文件一个字节没动。
+        let previewURL = dir.appendingPathComponent("preview.jpg")
+        guard let preview = solid(1024, 683, gray: 0.45), writeJPEG(preview, to: previewURL),
+              let previewBytes = try? Data(contentsOf: previewURL) else {
+            check(false, "造得出预览")
+            return
+        }
+        let plain = BatchStore.contactSheetJPEG(path: previewURL.path)
+        check(plain != nil && plain == legacyContactJPEG(path: previewURL.path), "不带水印：和改版前逐字节一样")
+        let withMark = BatchStore.contactSheetJPEG(path: previewURL.path, watermark: made, original: originalURL.path)
+        check(withMark != nil && withMark != plain, "带水印：图变了")
+        func size(_ data: Data?) -> String {
+            guard let data, let src = CGImageSourceCreateWithData(data as CFData, nil),
+                  let s = WatermarkEngine.uprightSize(of: src) else { return "?" }
+            return "\(s.width)×\(s.height)"
+        }
+        check(size(withMark) == size(plain) && size(plain).hasPrefix("800×"), "带水印：尺寸和不带的一样（800 长边）",
+              size(withMark) + " / " + size(plain))
+        check((try? Data(contentsOf: previewURL)) == previewBytes, "预览文件一个字节没动")
+    }
 
     // MARK: 页面脚本（JavaScriptCore）
 
