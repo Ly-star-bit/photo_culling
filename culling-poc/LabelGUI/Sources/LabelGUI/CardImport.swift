@@ -781,7 +781,13 @@ enum CardImporter {
         }
 
         var ledger = Ledger.load(from: ledgerURL, backupCorrupt: true)
-        for (key, path) in plan.alreadyThere { ledger.record(key, dest: path) }
+        // 主目标里早就有、这次还要从它补备份的（fromPrimary）：补成了再记。半路取消了就不记 —— 下次插卡它还算
+        // 「目标里已经有、备份里缺」，接着补；先记了的话下次整张按「导入过」跳过，备份永远缺它（审查发现）。
+        let repairPaths = Set(plan.backup?.fromPrimary.map(\.source.path) ?? [])
+        var repairKeys: [String: String] = [:]      // 主目标里的路径 → 账本 key
+        for (key, path) in plan.alreadyThere {
+            if repairPaths.contains(path) { repairKeys[path] = key } else { ledger.record(key, dest: path) }
+        }
 
         // 一张照片的几个文件（plan 里挨着放）。
         var shots: [[Copy]] = []
@@ -885,7 +891,6 @@ enum CardImporter {
                             progress(filesDone, bytesDone)
                         }
                     }
-                    if let key { ledger.record(key, dest: copy.target.path) }
                     outcome.copiedFiles += 1
                     outcome.copiedBytes += copy.size
                     copiedShots.insert(copy.shot)
@@ -897,10 +902,14 @@ enum CardImporter {
                                           size: copy.size, modified: copy.modified, created: copy.created,
                                           originalName: copy.originalName, shot: copy.shot)
                         if !backupOne(second) {
+                            // 取消落在这个文件的备份上：主目标那份好好的，第二份没写成 —— 不记账本。下次插卡导进同一个
+                            // 文件夹时它算「目标里已经有」，只从主目标补备份（记了的话整张按「导入过」跳过，备份永远缺它）。
                             outcome.cancelled = true
                             break shotLoop
                         }
                     }
+                    // 账本记在备份之后（备份盘满了、拔了这类没写成的照旧记 —— 提醒里叫人补备份；只有取消不记）。
+                    if let key { ledger.record(key, dest: copy.target.path) }
                 } catch ImportError.cancelled {
                     outcome.cancelled = true
                     break shotLoop
@@ -950,9 +959,14 @@ enum CardImporter {
                     outcome.cancelled = true
                     break
                 }
+                if let key = repairKeys.removeValue(forKey: copy.source.path) { ledger.record(key, dest: copy.source.path) }
             }
             let bfd = open(backup.destination.path, O_RDONLY)
             if bfd >= 0 { _ = fcntl(bfd, F_FULLFSYNC); close(bfd) }
+        }
+        // 补备份没轮到、没写成（备份盘满了、拔了）而不是取消的：照旧记（主目标那份在，提醒里说怎么补）。
+        if !outcome.cancelled {
+            for (path, key) in repairKeys { ledger.record(key, dest: path) }
         }
         outcome.backupAborted = backupStop
         // 一次 F_FULLFSYNC 把盘的写缓存刷下去 —— 用户看到「导入完成」可能马上就去格式化存储卡。

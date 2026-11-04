@@ -716,6 +716,29 @@ r = card_ui("--dest-root", root_b7, "--backup", "/Volumes/NoSuchDisk_K/备份")
 check(r.returncode == 0 and "备份位置有问题" in r.stdout and "要导入" not in r.stdout, "备份盘没插上：不出计划，说清楚")
 check(listing(root_b7) == [] and listing(broot_b7) == [], "确认框读卡不往任何地方写")
 
+print("B8. 开着备份、取消落在一张照片最后那个文件的备份上：那个文件不记账本，再插一次（不勾重导）就从主目标补上备份")
+d, broot = os.path.join(WORK, "dest_b8"), os.path.join(WORK, "backup_b8")
+os.makedirs(broot)
+data_b8 = os.path.join(WORK, "data_b8")
+bdest = os.path.join(broot, "dest_b8")
+# 字节按主目标、备份一起数：IMG_0001.CR3 50 万 + 它的备份 50 万 + IMG_0001.JPG 12 万 = 112 万，再多一个字节就落在 JPG 的备份上。
+r = run_card_env(bcard, data_b8, d, {}, "--backup", broot, "--cancel-at-bytes", str(1_120_001))
+check("已取消导入" in r.stdout and listing(d) == ["IMG_0001.CR3", "IMG_0001.JPG"] and listing(bdest) == ["IMG_0001.CR3"],
+      f"取消时 JPG 主目标那份写成了、备份没写成（{listing(d)} / {listing(bdest)}）")
+check(hidden(d) == [] and hidden(bdest) == [], "两边都没有残留的 .part")
+dests_b8 = ledger_dests(data_b8)
+check(len(dests_b8) == 1 and dests_b8[0].endswith("IMG_0001.CR3"), f"账本只记了两份都写成的 IMG_0001.CR3（{[os.path.basename(x) for x in dests_b8]}）")
+r = run_card_env(bcard, data_b8, d, {}, "--backup", broot, "--plan-only")
+check("补备份 1 个" in r.stdout and "要导入：1 张" in r.stdout, "再插一次：从主目标补备份 1 个（IMG_0001.JPG）、导剩下的 1 张")
+# 这次取消落在补备份那一步（IMG_0002 两份 124 万字节之后）：补备份的那个也不该先记进账本。
+r = run_card_env(bcard, data_b8, d, {}, "--backup", broot, "--cancel-at-bytes", str(1_240_001))
+check("已取消导入" in r.stdout and "IMG_0001.JPG" not in listing(bdest) and len(listing(bdest)) == 3,
+      f"取消落在补备份上：IMG_0002 两份都齐，IMG_0001.JPG 的备份没写成（{listing(bdest)}）")
+check(not any(x.endswith("IMG_0001.JPG") for x in ledger_dests(data_b8)), "补备份没写成的 IMG_0001.JPG 还是没记账本")
+r = run_card_env(bcard, data_b8, d, {}, "--backup", broot)
+check(r.returncode == 0 and listing(d) == BNAMES and listing(bdest) == BNAMES and same_as_card(bdest),
+      f"两份都齐了、逐字节一致（{listing(bdest)}）")
+
 print("F. 存储卡从头到尾没被动过")
 check(tree(CARD) == card_before, "卡上每个文件的大小 / 修改时间 / SHA-256 都和开始时一样")
 
