@@ -114,6 +114,17 @@ enum CardImporter {
         var enoughSpace: Bool { primaryEnoughSpace && backupEnoughSpace }
         /// 有事可做：有新照片要导，或者（勾了重导时）只是要补备份。
         var hasWork: Bool { !copies.isEmpty || (backup?.fileCount ?? 0) > 0 }
+        /// 勾了「以前导入过的也再导一遍」、开着备份，以前导到的那个文件夹还在、却不是这次的目标（换了一天，或者上次是
+        /// 「这次导进一个已有的文件夹」）：多半是照提醒来补备份的，可这样会整张再复制一份到新文件夹（备份也写进新的同名
+        /// 文件夹），原来那份备份照样缺着。确认框提醒一句、给「改成导进那个文件夹」（审查发现）。
+        var reimportElsewhere: URL? {
+            guard includeImported, backup != nil, !copies.isEmpty, let first = previousFolders.first else { return nil }
+            let folder = URL(fileURLWithPath: first).standardizedFileURL
+            let here = destination.standardizedFileURL
+            guard folder.path != here.path, folder.resolvingSymlinksInPath().path != here.resolvingSymlinksInPath().path,
+                  CardImporter.directoryExists(folder) else { return nil }
+            return folder
+        }
         /// 导入位置那块盘够不够（备份在同一块盘上就连备份一起算）。
         var primaryEnoughSpace: Bool {
             guard let free = freeBytes else { return true }
@@ -189,6 +200,8 @@ enum CardImporter {
         var backupAborted: String?
         /// 主目标里已经有、备份里同名的却是别的文件，没法备份（张）。
         var backupConflicts = 0
+        /// 这次导到的文件夹（补备份要导回这里 —— 提醒里写出来）。
+        var destination: URL?
         var elapsed: TimeInterval = 0
     }
 
@@ -590,14 +603,17 @@ enum CardImporter {
                     ledgerKeys.append(nil)
                 }
             }
-            if !includeImported, ledgerKeys.allSatisfy({ $0 != nil }) {
-                skippedImported += 1
+            //    勾了重导也数以前导到了哪：换了一天勾重导去「补备份」会整张再导进新文件夹，确认框要说出原来那个（审查发现）。
+            if ledgerKeys.allSatisfy({ $0 != nil }) {
                 for key in ledgerKeys.compactMap({ $0 }) {
                     if let dest = ledger.entry(for: key)?.dest {
                         previousFolders[URL(fileURLWithPath: dest).deletingLastPathComponent().path, default: 0] += 1
                     }
                 }
-                continue
+                if !includeImported {
+                    skippedImported += 1
+                    continue
+                }
             }
 
             // 2. 目标文件夹：找一个能用的名字。原名先试；被别的照片占了就 _2、_3……
@@ -748,6 +764,7 @@ enum CardImporter {
         var outcome = Outcome()
         outcome.scanProblems = plan.scanProblems
         outcome.plannedFiles = plan.copies.count
+        outcome.destination = plan.destination
         func finish() -> Outcome {
             var done = outcome
             done.elapsed = Date().timeIntervalSince(start)
@@ -1357,8 +1374,9 @@ extension CardImporter.Outcome {
             parts.append("卡上有 \(scanProblems.count) 处读不出来（\(shown)），那里的照片没导")
         }
         if let aborted { parts.append(aborted) }
-        // 备份没做全：电脑上只有一份，同样先别格式化。补备份：再插卡勾「以前导入过的也再导一遍」——
-        // 主目标里内容一样的不会重复复制，只从主目标那份补到备份。
+        // 备份没做全：电脑上只有一份，同样先别格式化。补备份：再插卡勾「以前导入过的也再导一遍」、导进同一个文件夹 ——
+        // 主目标里内容一样的不会重复复制，只从主目标那份补到备份。换了一天确认框默认是今天的新文件夹，照着勾重导会整张
+        // 再导一份，所以写出原来那个文件夹和怎么选回它（审查发现）。
         let backupHint = !cancelled ? backupProblemText : nil
         if let backupHint { parts.append(backupHint) }
         // 改了名不是「先别格式化」的理由（照片都好好导进来了），只照实说一句。
@@ -1369,7 +1387,9 @@ extension CardImporter.Outcome {
         }
         var tail = " —— 先别格式化存储卡，再插一次会只补没导的"
         if backupHint != nil {
-            tail += "（补备份要勾「以前导入过的也再导一遍」，已经导进来的不会重复复制）"
+            let place = destination.map { "「\(CardImporter.displayPath($0))」" } ?? "原来那个文件夹"
+            tail += "（补备份：再插这张卡、勾「以前导入过的也再导一遍」，导进同一个文件夹\(place) —— 换了一天就在" +
+                "「更改 › 这次导进一个已有的文件夹…」里选它；已经导进去的不会重复复制，只补备份）"
         }
         return "存储卡「\(card)」：" + (parts + info).joined(separator: "；") + tail
     }
@@ -1713,6 +1733,9 @@ enum CardImportCLI {
         }
         if plan.renamedShots > 0 {
             lines.append("改名：\(plan.renamedShots) 张（如 \(plan.renamedExample ?? "-")）· 其中 RAW+JPG 一起改 \(plan.renamedWithPair) 张")
+        }
+        if let elsewhere = plan.reimportElsewhere {
+            lines.append("重导提醒：以前导到 \(elsewhere.path)，勾着重导会在这里再复制一份（不是补备份）")
         }
         if let other = plan.otherFilesText { lines.append("其他文件：\(other)") }
         if let problems = plan.scanProblemText { lines.append("读不出来：\(problems)") }

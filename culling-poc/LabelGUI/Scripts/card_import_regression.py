@@ -669,6 +669,7 @@ check(listing(d) == BNAMES and same_as_card(d), "主目标 4 个都导进来了"
 check(len(listing(os.path.join(broot, "dest_b3"))) == 1 and hidden(os.path.join(broot, "dest_b3")) == [], "备份里只有满之前那 1 个，没有 .part")
 check(r.returncode != 0 and "备份没写全" in r.stdout and "先别格式化" in r.stdout and "备份盘满了" in r.stdout,
       "退出码非 0，提醒说备份没写全（备份盘满了）、先别格式化")
+check("导进同一个文件夹「" in r.stdout and "dest_b3」" in r.stdout, "补备份的指引写出了要导回的那个文件夹")
 
 print("B4. 补备份：再插一次、勾重导 → 主目标里的不重复复制，只从主目标补到备份")
 r = run_card_env(bcard, data_b3, d, {}, "--backup", broot, "--reimport")
@@ -738,6 +739,34 @@ check(not any(x.endswith("IMG_0001.JPG") for x in ledger_dests(data_b8)), "补�
 r = run_card_env(bcard, data_b8, d, {}, "--backup", broot)
 check(r.returncode == 0 and listing(d) == BNAMES and listing(bdest) == BNAMES and same_as_card(bdest),
       f"两份都齐了、逐字节一致（{listing(bdest)}）")
+
+print("B9. 换了一天来补备份：提醒写出原来那个文件夹；勾重导时计划里说「会再复制一份」，「改成导进那个文件夹」只补备份")
+root_b9, broot_b9 = os.path.join(WORK, "root_b9"), os.path.join(WORK, "backup_b9")
+yday = os.path.join(root_b9, "20261001")              # 「昨天」那场：这次导进一个已有的文件夹
+os.makedirs(yday)
+os.makedirs(broot_b9)
+data_b9 = os.path.join(WORK, "data_b9")
+r = run_card_env(bcard, data_b9, None, {}, "--into-existing", yday, "--backup", broot_b9, "--backup-full-at", "2")
+notice = [l for l in r.stdout.splitlines() if l.startswith("导入提醒：")]
+check(r.returncode != 0 and len(notice) == 1 and "备份没写全" in notice[0] and "root_b9/20261001" in notice[0]
+      and "这次导进一个已有的文件夹" in notice[0], f"提醒写出了原来那个文件夹、怎么选回它（{notice}）")
+r = run_card_env(bcard, data_b9, None, {}, "--dest-root", root_b9, "--backup", broot_b9, "--reimport", "--plan-only")
+warn = [l for l in r.stdout.splitlines() if l.startswith("重导提醒：")]
+check(len(warn) == 1 and warn[0].startswith("重导提醒：以前导到 ") and "root_b9/20261001" in warn[0],
+      f"今天的文件夹 + 勾重导：计划里提醒以前导到 20261001、会再复制一份（{warn}）")
+r = run_card_env(bcard, data_b9, None, {}, "--into-existing", yday, "--backup", broot_b9, "--reimport", "--plan-only")
+check("重导提醒" not in r.stdout and "要导入：没有" in r.stdout and "补备份 3 个" in r.stdout, "导回原来那个文件夹：不提醒，只补备份 3 个")
+png_b9 = os.path.join(WORK, "card_ui_b9.png")
+r = subprocess.run([BIN, "--card-ui", bcard, png_b9, "--via-replan", "--reimport", "--then-into-previous",
+                    "--dest-root", root_b9, "--backup", broot_b9],
+                   env=dict(os.environ, LABELGUI_DATA_DIR=data_b9), capture_output=True, text=True, timeout=120)
+print("    " + r.stdout.strip().replace("\n", "\n    "))
+check(r.returncode == 0 and "重导提醒" not in r.stdout and "要导入：没有" in r.stdout and "补备份 3 个" in r.stdout
+      and "root_b9/20261001（原有 4 个文件）" in r.stdout, "确认框点「改成导进那个文件夹」：重读出的计划只补备份 3 个")
+r = run_card_env(bcard, data_b9, None, {}, "--into-existing", yday, "--backup", broot_b9, "--reimport")
+check(r.returncode == 0 and listing(yday) == BNAMES and listing(os.path.join(broot_b9, "20261001")) == BNAMES
+      and same_as_card(os.path.join(broot_b9, "20261001")) and not os.path.exists(os.path.join(root_b9, TODAY)),
+      f"原来那份备份补齐了，主目标没多出 _2、也没建今天的文件夹（{listing(os.path.join(broot_b9, '20261001'))}）")
 
 print("F. 存储卡从头到尾没被动过")
 check(tree(CARD) == card_before, "卡上每个文件的大小 / 修改时间 / SHA-256 都和开始时一样")
