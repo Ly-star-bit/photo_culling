@@ -2189,10 +2189,11 @@ struct BatchView: View {
                 .help("只作用在「几乎同一张」这一层 (2秒内 + phash 汉明距离≤10)，不是整场。" +
                       "场里人在动、表情在变，哪张好是审美判断，交给你在堆栈里勾选。" +
                       "这是可随时关掉的规则，不会覆盖你手动改判过的照片。" +
+                      "开关每场各记各的：只改这一场，别的场次不跟着变。" +
                       "本场共 \(stats.groups) 组近似重复、\(stats.photos) 张候选")
                 .disabled(stats.groups == 0)
             Text(stats.groups > 0
-                 ? "\(stats.groups) 组近似重复 · \(stats.photos) 张（和上面的「场」是两层）"
+                 ? "\(stats.groups) 组近似重复 · \(stats.photos) 张（和上面的「场」是两层）· 开关只改这一场"
                  : "本场没有近似重复的照片")
                 .font(.caption2).foregroundStyle(.tertiary)
         }
@@ -2265,10 +2266,11 @@ struct BatchView: View {
                         Toggle("只看临界照片 (\(store.borderlineCount))", isOn: $store.borderlineFilter)
                             .font(.caption)
                             .help("任一阈值 ±15% 区间内的照片 — 调完滑杆先过一眼刀口上的这些，误杀都藏在这里")
-                        Stepper("每章节最少保留 \(store.minKeepersPerChapter == 0 ? "—" : "\(store.minKeepersPerChapter) 张")",
+                        Stepper("每章节最少保留 \(store.minKeepersPerChapter == 0 ? "—" : "\(store.minKeepersPerChapter) 张") · 所有场次",
                                 value: $store.minKeepersPerChapter, in: 0...50)
                             .font(.caption)
-                            .help("某个章节（仪式/晚宴…）留下的张数低于这个数就在状态栏和时间轴上提醒。0 = 只在整章全灭时提醒")
+                            .help("某个章节（仪式/晚宴…）留下的张数低于这个数就在状态栏和时间轴上提醒。0 = 只在整章全灭时提醒。" +
+                                  "所有场次通用（只管提醒，不改任何判决）")
                         Text("拖动实时生效 · 红字 = 该项当前淘汰数")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }

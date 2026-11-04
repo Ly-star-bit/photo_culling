@@ -38,8 +38,8 @@ fi
 #   1. 用一个全新的数据目录（--accept-all 写 overrides.json、--clear-recents 删场次目录，共用会串）；
 #   2. 输出和 expected_<名字>.txt 逐字比对；
 #   3. 带 --per-photo 的再按 cases.tsv 逐张核对判决和理由 —— 期望文件是按设计核过的，不是跑出来什么就记什么。
-# --dedupe 会经 didSet 把 batch.rejectBurstDuplicates=true 写进裸二进制的 LabelGUI 设置域；最后一条不带 --dedupe，
-# 把它写回 false（live_smoke 的 verdicts_cli 只在这两个键是 0 / 0 时跑）。
+# 去重开关按场次存（thresholds.json 的 rejectBurstDuplicates，审查 S20a）：--dedupe 只在内存里钉成开，不写设置域、
+# 不写这一场的 thresholds.json；不带 --dedupe 按这一场存的（这份夹具没存这个键 = 老场次，回落到钉住的全局值：关）。
 # 夹具和 cases.tsv 都是 Scripts/gen_synthetic_rejects.py 生成的。有意改了判决：先改那个脚本里的期望、重新生成，
 # 再 UPDATE_SYNTH=1 Scripts/verdict_regression.sh <bin>（逐张核对过了才写期望文件）。
 SYN="$ROOT/Fixtures/synthetic-rejects"
@@ -66,6 +66,10 @@ syn_check() {
 }
 
 # syn_run <名字> <cases.tsv 的列，0 = 不逐张核对> <LabelGUI 参数…>
+# 每条跑完都核对这一场的 thresholds.json 一个字节都没变（还在的话；--clear-recents 会整场删掉）：--dedupe 只在内存里、
+# 不落盘，夹具没存去重这个键（老场次）时无头也不把回落的全局值写回去（审查 S20a）。只对这一条的两个旋钮：
+#   SYN_STORED_DEDUPE=true|false  这一场的 thresholds.json 多存一个 rejectBurstDuplicates（按场次存的去重开关）
+#   SYN_EXPECT=<名字>              和 expected_<名字>.txt 比（同一组判决换一种设法），UPDATE_SYNTH 时也不改写它
 syn_run() {
     local name="$1" col="$2"; shift 2
     local d="$DATA/syn-$name"
@@ -75,6 +79,11 @@ syn_run() {
     mkdir -p "$d/sessions/$key"
     cp "$SYN/manifest.json" "$SYN/layer1_results.json" "$SYN/layer2_results.json" "$SYN/appeal_results.json" \
         "$SYN/thresholds.json" "$SYN/overrides.json" "$d/sessions/$key/"
+    if [ -n "${SYN_STORED_DEDUPE:-}" ]; then
+        printf '{"sharpness": 45, "exposure": 0.15, "faceQuality": 0.30, "rejectBurstDuplicates": %s}\n' "$SYN_STORED_DEDUPE" \
+            > "$d/sessions/$key/thresholds.json"
+    fi
+    cp "$d/sessions/$key/thresholds.json" "$d/thresholds.before.json"
     # 一场早就掉出「最近」菜单的旧场次（不在 sessions.json 里，只剩人工改判）：--clear-recents 不能顺手删它。
     mkdir -p "$d/sessions/feedfacefeedface"
     printf '{"OLD0001":"精选"}' > "$d/sessions/feedfacefeedface/overrides.json"
@@ -90,26 +99,36 @@ syn_run() {
         syn_bad=1
         return
     fi
-    local want="$SYN/expected_$name.txt"
-    if [ "${UPDATE_SYNTH:-}" = "1" ]; then
+    if [ -e "$d/sessions/$key/thresholds.json" ] && ! cmp -s "$d/thresholds.before.json" "$d/sessions/$key/thresholds.json"; then
+        echo "!! 合成坏片 ${name}：这一场的 thresholds.json 被改了（命令行钉的去重开关、无头回落的全局值都不该落盘）：" >&2
+        diff "$d/thresholds.before.json" "$d/sessions/$key/thresholds.json" >&2
+        syn_bad=1
+        return
+    fi
+    local want="$SYN/expected_${SYN_EXPECT:-$name}.txt"
+    if [ "${UPDATE_SYNTH:-}" = "1" ] && [ -z "${SYN_EXPECT:-}" ]; then
         cp "$d/actual.txt" "$want"
         echo "expected_$name.txt 已更新"
     elif diff -u "$want" "$d/actual.txt"; then
         echo "合成坏片 $name OK: $(grep -m1 '^照片 ' "$d/actual.txt" || head -1 "$d/actual.txt")"
     else
-        echo "!! 合成坏片 ${name}：输出和 Fixtures/synthetic-rejects/expected_$name.txt 不一致。有意改动请改 cases.tsv 后 UPDATE_SYNTH=1 重跑。" >&2
+        echo "!! 合成坏片 ${name}：输出和 Fixtures/synthetic-rejects/expected_${SYN_EXPECT:-$name}.txt 不一致。有意改动请改 cases.tsv 后 UPDATE_SYNTH=1 重跑。" >&2
         syn_bad=1
     fi
 }
 
 syn_run per_photo 2 --verdicts "$SYN_PHOTOS" --per-photo
 syn_run dedupe 3 --verdicts "$SYN_PHOTOS" --dedupe --per-photo
+# 去重开关按场次存：这一场存着开、不带 --dedupe → 和 --dedupe 那份一模一样（按场次读，不看全局）；存着关、带 --dedupe
+# → 也一样，跑完这一场的 thresholds.json 逐字节不变（命令行钉的值不落盘）。
+SYN_STORED_DEDUPE=true SYN_EXPECT=dedupe syn_run stored_dedupe 3 --verdicts "$SYN_PHOTOS" --per-photo
+SYN_STORED_DEDUPE=false SYN_EXPECT=dedupe syn_run pinned_dedupe 3 --verdicts "$SYN_PHOTOS" --dedupe --per-photo
 syn_run accept_all 4 --verdicts "$SYN_PHOTOS" --accept-all --per-photo
 # 连拍挑选的按键脚本（和界面同一个 PickSession）：选第 3 张、⏎ 定下一组、⌘ 点多留一张、全留、撤销、方向键 + 空格……
-# 每一步的草稿和 ⏎ 会怎么定都打出来，逐字比对。它不带 --dedupe、却会读 batch.rejectBurstDuplicates，所以跟在
-# 一条不带 --dedupe 的 --verdicts 后面（上一条已经写回 false）。⏎ 写 overrides.json：只在这个临时数据目录里。
+# 每一步的草稿和 ⏎ 会怎么定都打出来，逐字比对。它不带 --dedupe，去重按这一场存的（没存 = 关）。
+# ⏎ 写 overrides.json：只在这个临时数据目录里。
 syn_run compare 0 --compare "$SYN_PHOTOS" --keys "3,enter,cmd:C03-q056,enter,keepall,enter,undo,right,space,enter"
-# 最后一条不带 --dedupe（见上）：接受全部推荐、撤销一次，判决回到默认那一列；再「全部清除」最近场次
+# 接受全部推荐、撤销一次，判决回到默认那一列；再「全部清除」最近场次
 # （列在菜单里的这一场整份删，掉出菜单的 feedfacefeedface 留着）。
 syn_run accept_undo 2 --verdicts "$SYN_PHOTOS" --accept-all --undo --per-photo --clear-recents
 if [ "$syn_bad" != "0" ]; then

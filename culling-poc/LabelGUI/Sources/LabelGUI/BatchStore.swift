@@ -339,13 +339,36 @@ final class BatchStore: ObservableObject {
     /// 自动带上「连拍重复」理由淘汰。这是规则式的（不写进 overrides），关掉开关
     /// 整组立刻全部回来——和手动的「保留选中·其余废片」正好互补，后者是永久的。
     /// 默认关：老场次重新打开时废片数不该无声无息地翻倍。
-    @Published var rejectBurstDuplicates: Bool =
-        UserDefaults.standard.bool(forKey: "batch.rejectBurstDuplicates") {
+    ///
+    /// 按场次存（thresholds.json 的 rejectBurstDuplicates，审查 S20a）：以前是全局的 UserDefaults，在一场里拨一下，
+    /// 别的场次下次打开时没定完的近似重复组就被重新判（精选掉成可用、写过 XMP 的冒出「待更新」）。现在拨开关只改这一场，
+    /// 连同阈值一起写进这一场和数据目录里「上次用的」那份（新场次照它打底）；**不再写 UserDefaults**：
+    /// batch.rejectBurstDuplicates 冻在升级前的值，只给还没有这个键的老场次回落用（见 loadThresholds），
+    /// 不然在新场次拨一下，还没打开过的老场次第一次打开时照样跟着变。
+    @Published var rejectBurstDuplicates: Bool = BatchStore.globalRejectBurstDuplicates {
         didSet {
-            if !AppRuntime.headless { UserDefaults.standard.set(rejectBurstDuplicates, forKey: "batch.rejectBurstDuplicates") }
+            guard !batchingThresholds else { return }
+            // 命令行钉着（--verdicts --dedupe）时只在内存里：这一场存的值不动
+            if AppRuntime.pinnedRejectBurstDuplicates == nil { sessionRejectBurstDuplicates = rejectBurstDuplicates }
             applyThresholds()
+            scheduleThresholdSave()
         }
     }
+
+    /// 升级前那个全局开关（UserDefaults 的 batch.rejectBurstDuplicates）：没存这个键的老场次回落到它、新场次没有「上次用的」时
+    /// 照它打底。界面不再写它。无头入口钉在 argument domain 里（AppRuntime.pinBatchSettings），读到的是钉的值。
+    nonisolated static var globalRejectBurstDuplicates: Bool {
+        UserDefaults.standard.bool(forKey: "batch.rejectBurstDuplicates")
+    }
+
+    /// 这一场 thresholds.json 里该写的去重开关：nil = 文件里没有这个键（老场次、还没回落写回），写的时候照样不写这个键。
+    /// 和 rejectBurstDuplicates 分开记，是因为命令行钉的值只在内存里，不能顺着拖滑杆、--gap 写进这一场。
+    private var sessionRejectBurstDuplicates: Bool?
+
+    /// 老场次（thresholds.json 里没有去重这个键）第一次打开时，把回落到的全局值写回这一场，以后就按它、不再跟着全局走。
+    /// 无头入口不写：它们读到的全局值是钉在内存里的（默认关），不是用户界面里的那个，写回去就把老场次冻成了错的值。
+    /// --persist-selftest 打开它来验界面那条路。
+    var writesBackLegacyDedupe = !AppRuntime.headless
 
     // MARK: Threshold persistence (per shoot, plus a "last used" default)
 
@@ -359,6 +382,9 @@ final class BatchStore: ObservableObject {
         var faceQuality: Double
         /// 可选：老的 thresholds.json 没有这个键，解码后回落到默认值。
         var takeGap: Double?
+        /// 「近似重复只留最佳」（按场次存，审查 S20a）。可选：老的 thresholds.json 没有这个键，打开时回落到升级前的全局开关并写回
+        /// 这一场（loadThresholds）。只保得住升级那天看到的判决，保不住当初写 XMP 时用的那个值。
+        var rejectBurstDuplicates: Bool?
     }
 
     private var thresholdSaveTask: Task<Void, Never>?
@@ -411,7 +437,10 @@ final class BatchStore: ObservableObject {
             fm.fileExists(atPath: sessionDir.appendingPathComponent($0).path)
         }
         let lastUsed = readThresholds(dataDir)
-        let state = lastUsed ?? (analyzed ? legacyThresholds : freshThresholds)
+        var state = lastUsed ?? (analyzed ? legacyThresholds : freshThresholds)
+        // 去重开关：全新的场次照「上次用的」；已经分析过的老场次不跟「上次用的」走（那是升级以后别的场次拨的），
+        // 留空，打开时回落到升级前的全局开关（loadThresholds），和它一直看到的判决一样。
+        if analyzed { state.rejectBurstDuplicates = nil }
         if writable, let data = try? JSONEncoder().encode(state) {
             SessionFiles.writeLogged(data, to: ownURL)
         }
@@ -423,27 +452,47 @@ final class BatchStore: ObservableObject {
     private func loadThresholds() {
         // 没开文件夹（sessions/default）不落盘，和 scheduleThresholdSave 一样。
         let state: ThresholdState
+        var fileIsSound = false
         if photoDir != nil {
             let checked = Self.sessionThresholdsChecked(sessionDir: sessionDir, dataDir: dataDir)
             state = checked.state
+            fileIsSound = checked.notice == nil
             if let notice = checked.notice { addDataNotice(sessionLabel + notice) }
         } else {
             state = Self.readThresholds(dataDir) ?? Self.freshThresholds
         }
+        // 去重开关按场次（审查 S20a）：这一场存的优先；没存（老场次）回落到全局开关 —— 读 UserDefaults，
+        // 不用内存里上一场的值，不然从开着的那场切过来，老场次就跟着上一场变了。
+        let globalDedupe = Self.globalRejectBurstDuplicates
+        sessionRejectBurstDuplicates = state.rejectBurstDuplicates
+        if state.rejectBurstDuplicates == nil, photoDir != nil, fileIsSound, writesBackLegacyDedupe {
+            // 只写这一场那份（不经 scheduleThresholdSave：打开老场次不算「用过」，数据目录里「上次用的」不动）
+            var migrated = state
+            migrated.rejectBurstDuplicates = globalDedupe
+            if let data = try? JSONEncoder().encode(migrated),
+               SessionFiles.writeLogged(data, to: thresholdsPath(in: sessionDir)) {
+                sessionRejectBurstDuplicates = globalDedupe
+            }
+        }
+        let storedDedupe: Bool = sessionRejectBurstDuplicates ?? globalDedupe
         batchingThresholds = true
         sharpnessThreshold = state.sharpness
         exposureThreshold = state.exposure
         faceQualityThreshold = state.faceQuality
         takeGapSec = state.takeGap ?? Self.defaultTakeGapSec
+        // 命令行钉的（--verdicts --dedupe）盖过这一场存的，只在内存里
+        rejectBurstDuplicates = AppRuntime.pinnedRejectBurstDuplicates ?? storedDedupe
         batchingThresholds = false
     }
 
     /// Debounced: a slider drag fires once per pixel. Writes the session copy
     /// and the app-wide "last used" copy that seeds brand-new shoots.
+    /// 去重开关写的是这一场存的那个（sessionRejectBurstDuplicates）：命令行钉的值不落盘，老场次没回落写回时照样不写这个键。
     private func scheduleThresholdSave() {
         thresholdSaveTask?.cancel()
         let state = ThresholdState(sharpness: sharpnessThreshold, exposure: exposureThreshold,
-                                   faceQuality: faceQualityThreshold, takeGap: takeGapSec)
+                                   faceQuality: faceQualityThreshold, takeGap: takeGapSec,
+                                   rejectBurstDuplicates: sessionRejectBurstDuplicates)
         let targets = [thresholdsPath(in: dataDir)] + (photoDir != nil ? [thresholdsPath(in: sessionDir)] : [])
         thresholdSaveTask = Task { [targets] in
             try? await Task.sleep(for: .milliseconds(500))

@@ -67,7 +67,8 @@ if CommandLine.arguments.contains("--mcp-selftest") {
 }
 // 无头入口一律钉住 batch.*（去重关 / 每章最少保留 0 / 按拍摄时间，只在内存里）：输出不跟着本机设置域漂，
 // 也不会有谁赋值以后经 didSet 写回去。BatchStore 的初值在构造时读，这里在任何分派之前，一处管全部入口；
-// --verdicts 自己再按 --dedupe 钉一次，--live-host 按 LABELGUI_LIVE_TEST_SETTINGS 钉（LiveHost.pinBatchSettings）。
+// --verdicts 带 --dedupe 时另外钉 AppRuntime.pinnedRejectBurstDuplicates（去重按场次存，argument domain 里的只是老场次回落的全局值），
+// --live-host 按 LABELGUI_LIVE_TEST_SETTINGS 钉（LiveHost.pinBatchSettings）。
 // --mcp 不钉（上面已经永不返回）：它报的是 app 的真实设置。
 if AppRuntime.headless && !CommandLine.arguments.contains("--live-host") {
     AppRuntime.pinBatchSettings()
@@ -223,6 +224,7 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--session-key"),
 // Headless verdict smoke test (连拍去重用):
 // LabelGUI --verdicts <photo_dir> [--dedupe] [--per-photo]
 // 加载该场次的缓存结果，套用当前阈值，打印判决/理由统计和多张连拍组的组内判决。
+// --dedupe：去重钉成开（只在内存里）；不带就按这一场 thresholds.json 存的开关，没存的老场次 = 关。
 // --per-photo：最后再逐张打印「id 判决 理由」（单张的场上面不打印），对比两次分析用。
 //   两台以上机身时每行后面再带机身、对时后的拍摄时间、章节，最后打每台机身和按拍摄时间的顺序（单机身输出不变）。
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
@@ -241,9 +243,12 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
     if CommandLine.arguments.contains("--clear-recents") {
         CollageCLI.requireIsolatedDataDir("--verdicts --clear-recents", "会删场次缓存")
     }
-    // 去重按 --dedupe、每章最少保留固定 0（章节警告受它影响），钉进 argument domain 再建 store：CI 的期望输出不跟着
-    // UserDefaults 漂，也不给属性赋值（didSet 会写进设置域：从 .app 里跑就改了用户界面里的开关）。
-    AppRuntime.pinBatchSettings(rejectBurstDuplicates: dedupe, minKeepersPerChapter: 0)
+    // 每章最少保留固定 0（章节警告受它影响），钉进 argument domain 再建 store：CI 的期望输出不跟着 UserDefaults 漂，
+    // 也不给属性赋值（didSet 会写进设置域：从 .app 里跑就改了用户界面里的开关）。
+    // 去重按场次存（审查 S20a）：不带 --dedupe 按这一场 thresholds.json 里存的（没存的老场次回落到钉住的全局值：关）；
+    // 带 --dedupe 钉成开、只在内存里 —— 不写进这一场的 thresholds.json（--gap 写阈值时也照样写原来存的那个）。
+    AppRuntime.pinBatchSettings(minKeepersPerChapter: 0)
+    if dedupe { AppRuntime.pinnedRejectBurstDuplicates = true }
     MainActor.assumeIsolated {
         let store = BatchStore(dataDir: appDataDir,
                                pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
@@ -260,7 +265,7 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
             }
         }
         let counts = store.verdictCounts
-        print("连拍去重: \(dedupe ? "开" : "关")")
+        print("连拍去重: \(store.rejectBurstDuplicates ? "开" : "关")")
         print("照片 \(store.items.count) · 精选 \(counts.pick) · 可用 \(counts.usable) · 废片 \(counts.reject)")
         let stats = store.burstGroupStats
         let takes = store.takeStats
