@@ -379,6 +379,75 @@ def run_all():
     check(len(set(second.values())) == 3, "三张 id 各不相同")
     check(h.verdicts().get(first.get("A/DSCF0001.JPG")) == "精选", "改判还对得上")
 
+    print("I. 老版本已经改过名的场次（同名那张移走以后留下的变回 DSC_0001，改判还挂在 仪式_DSC_0001 上）：打开场次时按路径对回来")
+    s = Shoot("shoot_i")
+    s.put("仪式/DSC_0001.JPG"); s.put("晚宴/DSC_0001.JPG"); s.put("仪式/DSC_0002.JPG")
+    s.put("仪式/DSC_0007.JPG"); s.put("晚宴/DSC_0007.JPG")
+    s.put("a/b/DSC_0003.JPG"); s.put("a_b/DSC_0003.JPG")
+    expect_run(s.analyze(), 7, 0, "第一次")
+    by_raw, _ = s.ids()
+    check(by_raw.get("仪式/DSC_0001.JPG") == "仪式_DSC_0001" and by_raw.get("仪式/DSC_0007.JPG") == "仪式_DSC_0007",
+          f"第一次照老规矩起名（实际 {by_raw}）")
+    ab = [rel for rel in ("a/b/DSC_0003.JPG", "a_b/DSC_0003.JPG") if by_raw.get(rel) == "a_b_DSC_0003"]
+    check(len(ab) == 1, f"a/b 和 a_b 两张拼出来都是 a_b_DSC_0003，一张拿 _2（实际 {by_raw}）")
+    # 照老版本的样子改坏：晚宴那两张移走（purge 掉它们的行），仪式/DSC_0001 改名成 DSC_0001；
+    # a_b_DSC_0003 那张也改个名，让 a_b_DSC_0003 这个键对上两张照片的路径（不猜）。
+    s.rm("晚宴/DSC_0001.JPG"); s.rm("晚宴/DSC_0007.JPG")
+    renames = {"仪式_DSC_0001": "DSC_0001", "a_b_DSC_0003": "DSC_0003"}
+    gone = {"晚宴_DSC_0001", "晚宴_DSC_0007"}
+
+    def damage(rows, preview):
+        out = []
+        for p in rows:
+            if p["id"] in gone:
+                continue
+            if p["id"] in renames:
+                p["id"] = renames[p["id"]]
+                if preview:
+                    p["preview_path"] = os.path.join(s.session, "previews", p["id"] + ".jpg")
+            out.append(p)
+        return out
+
+
+    s.edit("manifest.json", lambda j: j.update(photos=damage(j["photos"], True)))
+    s.edit("layer1_results.json", lambda j: j.update(results=damage(j["results"], False)))
+    for old, new in renames.items():
+        os.rename(os.path.join(s.session, "previews", old + ".jpg"), os.path.join(s.session, "previews", new + ".jpg"))
+    overrides = {"仪式_DSC_0001": "精选",       # 带路径、唯一对上 仪式/DSC_0001 → 挪
+                 "DSC_0007": "废片",            # 裸文件名（比如访达里删掉的根目录 DSC_0007）→ 不认
+                 "仪式_DSC_0002": "可用", "DSC_0002": "废片",   # 目标自己有改判 → 不动
+                 "a_b_DSC_0003": "精选"}        # 对上两张 → 不动
+    s.write("overrides.json", overrides)
+    s.write("accepted.json", ["仪式_DSC_0001"])
+    s.write("client_picks.json", ["DSC_0007", "仪式_DSC_0001"])
+    s.write("client_notes.json", {"仪式_DSC_0001": "去路人"})
+    s.write("xmp_state.json", {"marks": {"仪式_DSC_0001": {"v": "精选", "s": 4, "c": True}}, "foreign": [],
+                               "foreignRechecked": True})
+
+    def read(name):
+        with open(os.path.join(s.session, name)) as f:
+            return json.load(f)
+
+
+    v = s.verdicts()
+    check(v.get("DSC_0001") == "精选" and v.get("DSC_0002") == "废片",
+          f"打开以后改判对回来：DSC_0001 精选、DSC_0002 还是废片（实际 DSC_0001={v.get('DSC_0001')} DSC_0002={v.get('DSC_0002')}）")
+    want = {"DSC_0001": "精选", "DSC_0007": "废片", "仪式_DSC_0002": "可用", "DSC_0002": "废片", "a_b_DSC_0003": "精选"}
+    check(read("overrides.json") == want, f"overrides.json 只挪了 仪式_DSC_0001（实际 {read('overrides.json')}）")
+    check(read("accepted.json") == ["DSC_0001"], f"accepted.json 跟着挪（实际 {read('accepted.json')}）")
+    check(sorted(read("client_picks.json")) == ["DSC_0001", "DSC_0007"],
+          f"client_picks.json：仪式_DSC_0001 挪成 DSC_0001，裸文件名的 DSC_0007 不动（实际 {read('client_picks.json')}）")
+    check(read("client_notes.json") == {"DSC_0001": "去路人"}, f"客户备注跟着挪（实际 {read('client_notes.json')}）")
+    xmp = read("xmp_state.json")
+    check(sorted(xmp.get("marks", {})) == ["DSC_0001"] and xmp.get("foreignRechecked") is True,
+          f"xmp_state.json 的记录挪到 DSC_0001（实际 {xmp}）")
+    with open(os.path.join(s.session, "overrides.json"), "rb") as f:
+        before = f.read()
+    r = s.client_import("谢谢")
+    check(r.get("客户选中") == "DSC_0001", f"再打开一次：客户选中是 DSC_0001（实际 {r.get('客户选中')}）")
+    with open(os.path.join(s.session, "overrides.json"), "rb") as f:
+        check(f.read() == before, "再打开一次什么也不改（overrides.json 一个字节没动）")
+
 # 中途抛异常（比如分析失败、manifest 没写出来）也要删工作目录：它在 .build 底下，CI 会把 .build 整个缓存起来。
 try:
     run_all()
