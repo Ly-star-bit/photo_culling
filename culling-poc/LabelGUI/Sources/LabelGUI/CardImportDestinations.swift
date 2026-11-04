@@ -85,7 +85,7 @@ extension CardImporter {
     }
 
     /// 记住的文件夹现在在不在。先跟书签（改名 / 挪动过也找得到；不自动连网络盘、不弹框），再看路径；
-    /// 找到的文件夹不在原来那块盘上（卷 UUID 对不上）不算。
+    /// 找到的文件夹不在原来那块盘上（卷 UUID 对不上）不算，在废纸篓里也不算。
     static func resolve(_ saved: SavedFolder) -> FolderState {
         var candidates: [URL] = []
         if let bookmark = saved.bookmark {
@@ -96,7 +96,9 @@ extension CardImporter {
             }
         }
         candidates.append(URL(fileURLWithPath: saved.path))
-        for url in candidates where directoryExists(url) {
+        // 在访达里「删掉」文件夹就是挪进废纸篓（同一块盘上的一次改名）：书签按文件身份跟过去，卷 UUID 也对得上 ——
+        // 不挡的话照片会导进 ~/.Trash/… 或 /Volumes/T7/.Trashes/501/…，清倒废纸篓就没了（审查发现）。当成「不在了」。
+        for url in candidates where directoryExists(url) && !isInTrash(url) {
             if let want = saved.volumeUUID,
                let actual = (try? url.resourceValues(forKeys: [.volumeUUIDStringKey]))?.volumeUUIDString,
                actual != want { continue }
@@ -192,6 +194,13 @@ extension CardImporter {
         let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeUUIDStringKey],
                                                          options: []) ?? []
         return Set(urls.compactMap { (try? $0.resourceValues(forKeys: [.volumeUUIDStringKey]))?.volumeUUIDString })
+    }
+
+    /// 在废纸篓里吗：路径里有 .Trash（家目录的废纸篓、iCloud 的）或 .Trashes（外接盘、网络盘的 .Trashes/<uid>）。
+    /// 只看路径（不问 FileManager 的废纸篓位置：网络盘卡住时会跟着卡）。
+    static func isInTrash(_ url: URL) -> Bool {
+        let parts = url.standardizedFileURL.resolvingSymlinksInPath().pathComponents
+        return parts.contains(".Trash") || parts.contains(".Trashes")
     }
 
     static func directoryExists(_ url: URL) -> Bool {
