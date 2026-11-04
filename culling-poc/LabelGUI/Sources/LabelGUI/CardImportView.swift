@@ -243,6 +243,10 @@ final class CardImportCenter: ObservableObject {
         replan(choice: .existing(url))
     }
 
+    /// 「改成导进那个文件夹」：勾了重导、以前导到的文件夹还在却不是这次的目标时（多半是来补备份的），这张卡改成导进
+    /// 那个文件夹 —— 已经在那里的不会重复复制，只补备份。
+    func useExistingFolder(_ folder: URL) { replan(choice: .existing(folder)) }
+
     /// 记住的导入位置不在时：「这次导到「图片」」（用户自己点的，不是悄悄换的）。
     func usePicturesOnce() { replan(choice: .pictures) }
 
@@ -656,6 +660,15 @@ struct CardImportSheet: View {
         if plan.skippedImported > 0 {
             row("checkmark.circle", "\(plan.skippedImported) 张以前导入过" + previousText(plan) + "，这次跳过")
         }
+        // 勾了重导、以前导到的文件夹还在、却不是这次的目标：照着「补备份」的提醒来的话，这样会整张再导一份。
+        if let elsewhere = plan.reimportElsewhere {
+            VStack(alignment: .leading, spacing: 4) {
+                row("exclamationmark.triangle", reimportElsewhereText(elsewhere))
+                Button("改成导进那个文件夹") { center.useExistingFolder(elsewhere) }
+                    .controlSize(.small)
+                    .padding(.leading, 24)
+            }
+        }
         if plan.skippedInDest > 0 {
             row("equal.circle", "\(plan.skippedInDest) 张目标文件夹里已经有一模一样的，不再复制")
         }
@@ -688,6 +701,13 @@ struct CardImportSheet: View {
                 "认不准是不是同一帧，没配成一对，会多出一张"
         }
         return text
+    }
+
+    /// 「这些照片以前导到了 图片 › 20261103：勾着重导会在上面这个新文件夹里再复制一份……」
+    private func reimportElsewhereText(_ folder: URL) -> String {
+        let before = CardImporter.displayPath(folder)
+        return "这些照片以前导到了 \(before)：勾着「以前导入过的也再导一遍」会在上面这个新文件夹里再复制一份（备份也一样），" +
+            "不是补备份。要补原来那份备份，改成导进那个文件夹 —— 已经在那里的不会重复复制"
     }
 
     private func previousText(_ plan: CardImporter.Plan) -> String {
@@ -778,7 +798,8 @@ struct CardImportSheet: View {
 /// --dest 也可以换成 --dest-root <根目录>（记住的导入位置，按今天建 yyyyMMdd；不在 = 画「导入位置找不到」）
 /// 或 --into-existing <已有文件夹>（这次导进已有的文件夹）—— 只在内存里，不写设置文件。
 /// --backup <备份根目录>：开着第二份备份（--backup-free-bytes N 假装备份盘只剩这么多）。
-/// --via-replan：走确认框自己的 CardImportCenter.replan（后台找目标、出计划）再画。
+/// --via-replan：走确认框自己的 CardImportCenter.replan（后台找目标、出计划）再画；再加 --then-into-previous =
+/// 接着点「改成导进那个文件夹」（勾了重导、以前导到的文件夹还在时那一行的按钮）。
 enum CardImportSnapshot {
     @MainActor
     static func run(flagIndex: Int) -> Never {
@@ -830,6 +851,13 @@ enum CardImportSnapshot {
             let deadline = Date().addingTimeInterval(60)
             while center.offer?.planning == true, Date() < deadline {
                 RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            // --then-into-previous：再点「改成导进那个文件夹」（勾了重导、以前导到的文件夹还在时那一行的按钮），重读完再画。
+            if args.contains("--then-into-previous"), let folder = center.offer?.plan?.reimportElsewhere {
+                center.useExistingFolder(folder)
+                while center.offer?.planning == true, Date() < deadline {
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+                }
             }
             offer = center.offer ?? start
         } else if !args.contains("--planning"), target.issue == nil, backupTarget?.issue == nil {
