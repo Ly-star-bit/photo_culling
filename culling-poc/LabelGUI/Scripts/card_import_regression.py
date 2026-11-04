@@ -911,6 +911,106 @@ check(r.returncode == 0 and listing(yday) == BNAMES and listing(os.path.join(bro
       and same_as_card(os.path.join(broot_b9, "20261001")) and not os.path.exists(os.path.join(root_b9, TODAY)),
       f"原来那份备份补齐了，主目标没多出 _2、也没建今天的文件夹（{listing(os.path.join(broot_b9, '20261001'))}）")
 
+# ---------- 日期文件夹的名字被挪走了的那一场占着（审查）：场次按路径的哈希认，改了名 / 挪走的那一场 key 还是原路径的 ----------
+def bmp_l(w, h):
+    """真能解码的 BMP（随机字节的「JPG」解不开：分析不出照片、不进「最近场次」，就测不到书签那一路）。"""
+    row = (w * 3 + 3) & ~3
+    pixels = os.urandom(row * h)
+    header = b"BM" + (54 + len(pixels)).to_bytes(4, "little") + b"\0\0\0\0" + (54).to_bytes(4, "little")
+    info = (40).to_bytes(4, "little") + w.to_bytes(4, "little") + h.to_bytes(4, "little") + \
+        (1).to_bytes(2, "little") + (24).to_bytes(2, "little") + b"\0" * 24
+    return header + info + pixels
+
+
+def opened_l(stdout):
+    """「现在打开的：<照片文件夹> · N 张 · 状态栏」那一行拆成 (文件夹, 整行)。"""
+    line = next((l for l in stdout.splitlines() if l.startswith("现在打开的：")), "")
+    return line[len("现在打开的："):].split(" · ")[0], line
+
+
+def manifests_l(data):
+    """数据目录里各场 manifest：key → (photo_dir, 照片路径列表)。"""
+    out = {}
+    sessions = os.path.join(data, "sessions")
+    for key in sorted(os.listdir(sessions)) if os.path.isdir(sessions) else []:
+        path = os.path.join(sessions, key, "manifest.json")
+        if os.path.exists(path):
+            j = json.load(open(path))
+            out[key] = (j.get("photo_dir", ""), [p.get("raw_path", "") for p in j.get("photos", [])])
+    return out
+
+
+root_l = os.path.join(WORK, "root_l")
+os.makedirs(root_l)
+data_l = os.path.join(WORK, "data_l")
+p_l = os.path.join(root_l, TODAY)
+q_l = os.path.join(root_l, TODAY + " 张三")
+p2_l = p_l + "-2"
+LNAMES = ["IMG_0001.BMP", "IMG_0002.BMP"]
+
+print("L1. 第一张卡导进 yyyyMMdd、分析完；改了名以后同一天再导一张：导进 yyyyMMdd-2，打开、分析的是新卡")
+card_la = mkcard("card_la", {"DCIM/100CANON/" + n: bmp_l(320, 240) for n in LNAMES})
+r = run_card_env(card_la, data_l, None, {}, "--dest-root", root_l, "--via-store")
+folder, line = opened_l(r.stdout)
+check(r.returncode == 0 and listing(p_l) == LNAMES and folder.endswith("/" + TODAY) and " · 2 张" in line,
+      f"第一张卡导进 {TODAY}、打开并分析了 2 张（{line}）")
+a_sizes = {n: os.path.getsize(os.path.join(p_l, n)) for n in LNAMES}
+os.rename(p_l, q_l)                       # 用户在访达里把这一场改名成「yyyyMMdd 张三」
+card_lb = mkcard("card_lb", {"DCIM/100CANON/" + n: bmp_l(360, 240) for n in LNAMES})   # 第二机位：同名、不同片
+r = run_card_env(card_lb, data_l, None, {}, "--dest-root", root_l, "--via-store")
+folder, line = opened_l(r.stdout)
+check(f"{TODAY}-2（原有 0 个文件）" in r.stdout, f"计划的目标是 {TODAY}-2（{TODAY} 这个名字被改了名的那一场占着）")
+check(r.returncode == 0 and listing(p2_l) == LNAMES and not os.path.exists(p_l),
+      f"导进了 {TODAY}-2，没在原路径上重新建出 {TODAY}（{listing(p2_l)}）")
+check(folder.endswith("/" + TODAY + "-2") and " · 2 张" in line and "lastError" not in r.stdout,
+      f"自动打开、分析的是 {TODAY}-2 这一场（新卡的 2 张），不是改了名的那一场（{line}）")
+check(listing(q_l) == LNAMES and all(os.path.getsize(os.path.join(q_l, n)) == a_sizes[n] for n in LNAMES),
+      "改了名的那一场的照片没被动")
+q_session = [k for k, (d, _) in manifests_l(data_l).items() if d.endswith(" 张三")]
+check(len(q_session) == 1, f"改了名的那一场还在（manifest 跟到了新名字，{manifests_l(data_l)}）")
+
+print("L2. 同一天第三张卡：yyyyMMdd-2 是它自己那一场的，照旧导进去（追加），不再往后编号")
+card_lc = mkcard("card_lc", {"DCIM/100CANON/IMG_0003.BMP": bmp_l(320, 200)})
+r = run_card_env(card_lc, data_l, None, {}, "--dest-root", root_l, "--via-store")
+folder, line = opened_l(r.stdout)
+check(r.returncode == 0 and listing(p2_l) == LNAMES + ["IMG_0003.BMP"] and not os.path.exists(p_l + "-3"),
+      f"导进了 {TODAY}-2（{listing(p2_l)}）")
+check(folder.endswith("/" + TODAY + "-2") and " · 3 张" in line, f"打开、分析的是 {TODAY}-2 这一场，3 张（{line}）")
+
+print("L3. 「这次导进一个已有的文件夹…」选了原路径（上面又建了 yyyyMMdd）：自动打开认出的是改了名的那一场 —— 不接着分析，红条和横幅说要先改名")
+os.makedirs(p_l)
+card_ld = mkcard("card_ld", {"DCIM/100CANON/" + n: bmp_l(400, 240) for n in LNAMES})   # 同名、不同片
+q_before = manifests_l(data_l)[q_session[0]] if q_session else None
+r = run_card_env(card_ld, data_l, None, {}, "--into-existing", p_l, "--via-store")
+folder, line = opened_l(r.stdout)
+err = next((l for l in r.stdout.splitlines() if l.startswith("lastError：")), "")
+notice = next((l for l in r.stdout.splitlines() if l.startswith("导入提醒：")), "")
+check(r.returncode == 0 and listing(p_l) == LNAMES, f"照片导进了选的 {TODAY}（{listing(p_l)}）")
+check(folder.endswith("/" + TODAY + " 张三") and " · 2 张" in line, f"按 {TODAY} 认出的是改了名的那一场（{line}）")
+check("另一个文件夹" in err and "改个名" in err, f"红条说原路径现在是另一个文件夹、要改名再开，没被接着的分析清掉（{err}）")
+check("分析" not in line.split(" · ", 2)[-1], f"没接着分析改了名的那一场（{line}）")
+check("2 张导到了" in notice and "改个名" in notice and "选择文件夹" in notice, f"导入横幅说新导的这批没打开、怎么打开（{notice}）")
+check(q_session and manifests_l(data_l).get(q_session[0]) == q_before, "改了名的那一场的 manifest 一字没动（新卡的照片没混进去）")
+
+print("L4. 改了名的那一场所在的盘拔了（书签解析不到）、原路径上是另一张卡的同名照片：启动重开、导完自动打开都不把那一场的照片路径改回原路径，也不接着分析")
+stash_l = os.path.join(WORK, "unplugged_l")
+shutil.copytree(q_l, stash_l)              # 盘上的东西拷一份留着，再删掉（改名不行：书签跟着改名走）
+shutil.rmtree(q_l)
+card_le = mkcard("card_le", {"DCIM/100CANON/IMG_0009.BMP": bmp_l(300, 200)})
+r = run_card_env(card_le, data_l, None, {}, "--into-existing", p_l, "--via-store")
+folder, line = opened_l(r.stdout)
+err = next((l for l in r.stdout.splitlines() if l.startswith("lastError：")), "")
+notice = next((l for l in r.stdout.splitlines() if l.startswith("导入提醒：")), "")
+after = manifests_l(data_l)
+check(r.returncode == 0 and listing(p_l) == LNAMES + ["IMG_0009.BMP"], f"照片导进了选的 {TODAY}（{listing(p_l)}）")
+check(q_session and after.get(q_session[0]) == q_before, "那一场的 manifest 一字没动（照片路径没被改到原路径上那张卡的同名照片上）")
+check(not any(d.rstrip("/").endswith("/" + TODAY) for d, _ in after.values()),
+      f"没有哪一场的照片文件夹记成原路径（原路径上的新卡没被当成那一场分析，{sorted(d for d, _ in after.values())}）")
+check(folder.endswith("/" + TODAY + " 张三") and "已改到" not in r.stdout and "分析" not in line.split(" · ", 2)[-1],
+      f"打开的是记在拔掉的盘上的那一场，不说「照片路径已改到现在的位置」，没接着分析（{line}）")
+check("不是这一场的照片" in err and "重新定位文件夹" in err, f"红条说原路径上的不是这一场的照片、照片路径没改（{err}）")
+check("改个名" in notice, f"导入横幅说新导的这批没打开、要先改名（{notice}）")
+
 print("F. 存储卡从头到尾没被动过")
 check(tree(CARD) == card_before, "卡上每个文件的大小 / 修改时间 / SHA-256 都和开始时一样")
 

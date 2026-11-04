@@ -128,24 +128,30 @@ extension CardImporter {
         return .gone
     }
 
-    /// 这次的目标。
-    static func target(settings: DestinationSettings, choice: DestinationChoice, now: Date = Date()) -> Target {
+    /// 这次的目标。`dataDir`：看日期文件夹的名字是不是被挪走了的一场占着（dayFolder），测试给隔离的数据目录。
+    static func target(settings: DestinationSettings, choice: DestinationChoice, now: Date = Date(),
+                       dataDir: URL = appDataDir) -> Target {
         let day = dayFormatter.string(from: now)
+        let sessions = dataDir.appendingPathComponent("sessions", isDirectory: true)
         switch choice {
         case .existing(let folder):
             let url = folder.standardizedFileURL
             let issue = directoryExists(url) ? writableIssue(url) : "「\(displayPath(url))」不在了（盘拔掉了，或者删了、挪走了）"
             return Target(destination: url, mustExist: url, appending: true, issue: issue)
         case .pictures:
-            return Target(destination: defaultDestination(now: now), mustExist: nil, appending: false, issue: nil)
+            let pictures = defaultDestination(now: now).deletingLastPathComponent()
+            return Target(destination: dayFolder(in: pictures, day: day, sessionsDir: sessions), mustExist: nil,
+                          appending: false, issue: nil)
         case .saved:
             guard let root = settings.root else {
-                return Target(destination: defaultDestination(now: now), mustExist: nil, appending: false, issue: nil)
+                let pictures = defaultDestination(now: now).deletingLastPathComponent()
+                return Target(destination: dayFolder(in: pictures, day: day, sessionsDir: sessions), mustExist: nil,
+                              appending: false, issue: nil)
             }
             let shown = displayPath(URL(fileURLWithPath: root.path))
             switch resolve(root) {
             case .ok(let url):
-                return Target(destination: url.appendingPathComponent(day, isDirectory: true), mustExist: url,
+                return Target(destination: dayFolder(in: url, day: day, sessionsDir: sessions), mustExist: url,
                               appending: false, issue: writableIssue(url))
             case .volumeOffline(let name):
                 let url = URL(fileURLWithPath: root.path)
@@ -157,6 +163,35 @@ extension CardImporter {
                               appending: false, issue: "导入位置（\(shown)）不在了（删了或挪走了）—— 换个位置")
             }
         }
+    }
+
+    /// 导入那天的文件夹（`parent`/yyyyMMdd）；这个名字被一场挪走了的占着就换成 yyyyMMdd-2、-3……（审查）。
+    /// 场次按照片文件夹路径的哈希认（BatchStore.sessionKey）：那一场在访达里改了名、挪走、重新定位到外接盘以后，key 还是
+    /// 原路径的。原路径上再建一个同名文件夹导进去，导完自动打开时按原路径认成挪走的那一场（书签跟过去、红条叫人改名，新导的
+    /// 照片没人分析）；书签解析不到时更会把新卡里同名的照片当成那一场的。换个名字，新卡就是干干净净的一场。
+    /// 同一天接着导、那个文件夹还是那一场的（manifest 记的就是它）照旧导进去，追加到那一场。
+    static func dayFolder(in parent: URL, day: String, sessionsDir: URL) -> URL {
+        let first = parent.appendingPathComponent(day, isDirectory: true)
+        guard nameTakenByMovedSession(first, sessionsDir: sessionsDir) else { return first }
+        for n in 2...99 {
+            let candidate = parent.appendingPathComponent("\(day)-\(n)", isDirectory: true)
+            if !nameTakenByMovedSession(candidate, sessionsDir: sessionsDir) { return candidate }
+        }
+        return first
+    }
+
+    /// `folder` 这个路径的 key 下已经有一场（sessions/<key>/manifest.json 在），而 `folder` 不是它的照片文件夹：`folder` 不在
+    /// （那一场改了名、挪走、删了），或者 manifest 记的照片文件夹是别处（按设备号 + inode 比；记的那个现在打不开也算别处）。
+    /// 只读数据目录里的一个小 JSON、stat 两次。
+    static func nameTakenByMovedSession(_ folder: URL, sessionsDir: URL) -> Bool {
+        let manifest = sessionsDir.appendingPathComponent(BatchStore.sessionKey(for: folder), isDirectory: true)
+            .appendingPathComponent("manifest.json")
+        guard FileManager.default.fileExists(atPath: manifest.path) else { return false }
+        guard let here = SessionLocation.identity(folder.path) else { return true }
+        guard let data = try? Data(contentsOf: manifest),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let recorded = json["photo_dir"] as? String else { return false }
+        return SessionLocation.identity(recorded) != here
     }
 
     /// 第二份备份写到哪：备份根目录里和导入位置同名的文件夹（20261104，或追加的那个已有文件夹的名字）。

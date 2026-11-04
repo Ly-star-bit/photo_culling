@@ -1567,6 +1567,15 @@ extension BatchStore {
             finishedImport = done
             return
         }
+        // 按导到的这个位置认出的是已经改名 / 挪走的那一场（审查：「这次导进一个已有的文件夹…」选了原路径，或者确认之后
+        // 那一场才挪走）：打开的是那一场，红条说了要改名再开。别接着分析 —— 分析的会是那一场（全部复用），红条被清掉，新导进来的
+        // 照片照样没打开。导入横幅上留一句怎么打开新导的这批（不把 finishedImport 放回去：再点还是同一个死胡同）。
+        if let away = lastSwitchOpenedElsewhere {
+            addImportNotice("\(done.shots) 张导到了 \(CardImporter.displayPath(done.folder))，可按这个位置认出的是原来那一场" +
+                            "（已改名 / 挪到 \(CardImporter.displayPath(away))），打开的是那一场、没分析，新导进来的这批还没打开 —— " +
+                            "先在访达里给「\(done.folder.lastPathComponent)」改个名，再用文件夹菜单「选择文件夹…」打开它")
+            return
+        }
         if done.analyze { runAnalysis() }
     }
 
