@@ -98,7 +98,12 @@ enum MCPReadModel {
         out["verdict_counts"] = ["pick": counts.pick, "usable": counts.usable, "reject": counts.reject]
         out["reason_counts"] = s.reasonCounts
         out["manual_override_count"] = s.manualOverrideCount
+        // 其中 AI 经实时桥改的（照样算人工改判；阈值建议不拿它们当样本）
+        out["ai_override_count"] = s.aiOverrideCount
         out["client_pick_count"] = s.clientPickCount
+        // 「XMP 过期」（状态栏那一句）：LR / C1 看的是 XMP，AI 改完判决它就过期了；没写过 XMP 时 stale_count 一直是 0
+        let xmpStale = s.xmpStaleCount
+        out["xmp"] = ["stale_count": xmpStale, "written": s.xmpEverWritten] as [String: Any]
 
         var thresholds: [String: Any] = ["sharpness": r3(s.sharpnessThreshold)]
         thresholds["clip_pct"] = r3(s.exposureThreshold * 100)
@@ -144,6 +149,10 @@ enum MCPReadModel {
         if s.unparsedCount > 0 {
             warnings.append(warning("unparsed_photos", "有 \(s.unparsedCount) 张照片在清单里、但没有分析结果（不在任何计数里）。",
                                     hint: "请用户在 app 里点「重新分析」"))
+        }
+        if xmpStale > 0 {
+            warnings.append(warning("xmp_stale", "上次写 XMP 之后有 \(xmpStale) 张的判决、星级或客户选中变了：Lightroom / Capture One 里还是旧的。",
+                                    hint: "改完以后提醒用户在 app 里点状态栏「XMP 过期」重写（MCP 不写 XMP）"))
         }
         out["warnings"] = warnings
         return out
@@ -285,9 +294,23 @@ enum MCPReadModel {
         r["faces"] = item.faceCount
         r["eyes_closed"] = item.faces.filter { $0.eyeClosed == true }.count
         r["manual"] = s.isManual(item.id)
+        if let by = changedBy(item.id, s) { r["changed_by"] = by }
         if s.clientPicks.contains(item.id) { r["client_pick"] = true }
         return r
     }
+
+    /// 人工改判是谁改的：AI 经实时桥改的（有出处）是 "ai"，其余是 "user"；不是人工改判 = nil（不带这个字段）。
+    static func changedBy(_ id: String, _ s: BatchStore) -> String? {
+        guard s.isManual(id) else { return nil }
+        return s.aiOverride(id) != nil ? "ai" : "user"
+    }
+
+    /// AI 改判的出处时间：带时区的 ISO 8601（这是一个时刻，不是照片的拍摄时间）。
+    static let instantFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.timeZone = TimeZone.current
+        return f
+    }()
 
     // MARK: - cull_get_photos
 
@@ -370,6 +393,11 @@ enum MCPReadModel {
         if !item.vlmRescued.isEmpty { d["vlm_rescued"] = item.vlmRescued }
         d["override"] = s.overrides[item.id].map { verdictName($0) } ?? NSNull()
         d["accepted_recommendation"] = s.overrides[item.id] != nil && !s.isManual(item.id)
+        if let mark = s.aiOverride(item.id) {
+            var ai: [String: Any] = ["op_id": mark.opID, "tool": mark.tool, "at": instantFormatter.string(from: mark.at)]
+            ai["previous"] = mark.previous.flatMap(Verdict.init(rawValue:)).map(verdictName) ?? "auto"
+            d["ai_override"] = ai
+        }
         d["client_pick"] = s.clientPicks.contains(item.id)
         return d
     }
@@ -491,6 +519,7 @@ enum MCPReadModel {
         let shown = members.prefix(memberCap)
         g["members"] = shown.map { m -> [String: Any] in
             var row: [String: Any] = ["id": m.id, "verdict": verdictName(m.verdict), "manual": s.isManual(m.id)]
+            if let by = changedBy(m.id, s) { row["changed_by"] = by }
             if let r = rank(m) {
                 row["rank"] = r
                 if r == 1 { recommended = m.id }
@@ -590,6 +619,9 @@ enum MCPArgs {
         case layout
         /// 颜色："#RRGGBB" 或色名（CollageLayoutSpec.namedColors）。
         case color
+        /// cull_set_verdicts 的 changes：[{id, verdict}]，每张各自的判决（一次调用一步撤销）。写成对象数组而不是 {id: verdict}：
+        /// 键不固定的 object 在 schema 里只能写 additionalProperties:{…}，有的客户端（Gemini / Antigravity）不认。
+        case verdictChanges(count: ClosedRange<Int>)
     }
 
     struct ToolSpec {
@@ -637,12 +669,15 @@ enum MCPArgs {
     // 写工具（§9.3）：reveal / op_id / if_digest / inline 是几个工具共用的
     static let digest: Spec = .text(maxLength: 64)
     static let openSpec = ToolSpec(props: ["session": session, "confirm": .bool, "reveal": .bool, "op_id": .opID], required: [])
+    /// ids + verdict（这些改成同一个判决）和 changes（每张各自的）二选一：rules 查。
     static let verdictsSpec: ToolSpec = {
         var p: [String: Spec] = ["session": session, "reveal": .bool, "op_id": .opID]
         p["ids"] = .strings(count: 1...500, maxLength: 128, oneOf: nil)
-        p["verdict"] = .oneOf(["pick", "usable", "reject", "auto"])
-        return ToolSpec(props: p, required: ["ids", "verdict"])
+        p["verdict"] = .oneOf(verdictValues)
+        p["changes"] = .verdictChanges(count: 1...500)
+        return ToolSpec(props: p, required: [])
     }()
+    static let verdictValues = ["pick", "usable", "reject", "auto"]
     static let showSpec: ToolSpec = {
         var p: [String: Spec] = ["session": session, "reveal": .bool, "mode": .oneOf(["select", "focus"])]
         p["ids"] = .strings(count: 1...200, maxLength: 128, oneOf: nil)
@@ -724,6 +759,15 @@ enum MCPArgs {
         let p: [String: Spec] = ["session": session, "op_id": .opID, "target": .oneOf(["verdicts", "collage"])]
         return ToolSpec(props: p, required: ["target"])
     }()
+    /// 导入客户选择：text（客户回复的原文）和 ids 给一个（rules 查）。
+    static let clientPicksSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "dry_run": .bool, "reveal": .bool, "op_id": .opID]
+        p["text"] = .string(maxLength: clientReplyMaxLength)
+        p["ids"] = .strings(count: 1...500, maxLength: 128, oneOf: nil)
+        return ToolSpec(props: p, required: [])
+    }()
+    /// 客户回复原文的上限（微信里回的几行、确认表「复制我的选择」、几百行的 CSV 都放得下）。
+    static let clientReplyMaxLength = 50_000
 
     /// 每个工具认的参数和必填的（session 不在必填里：它的规矩在路由表，§10.2）。
     static let specs: [String: ToolSpec] = {
@@ -745,6 +789,7 @@ enum MCPArgs {
         s["collage_export"] = exportSpec
         s["collage_set_layout"] = setLayoutSpec
         s["collage_auto_layout"] = autoLayoutSpec
+        s["cull_import_client_picks"] = clientPicksSpec
         return s
     }()
 
@@ -768,6 +813,21 @@ enum MCPArgs {
         case "collage_auto_layout":
             if given("photos") && given("count") {
                 return Problem(message: "photos 和 count 只能给一个：photos 指定用哪几张，count 让 app 从托盘挑几张。", hint: "")
+            }
+        case "cull_set_verdicts":
+            if given("changes") {
+                if given("ids") || given("verdict") {
+                    return Problem(message: "ids + verdict 和 changes 只能用一种：ids + verdict 是这些照片改成同一个判决，changes 是每张各自的判决。",
+                                   hint: "一场里一张 pick、其余 reject 这种，全写进 changes：[{\"id\":\"…\",\"verdict\":\"pick\"}, …]")
+                }
+            } else if !given("ids") || !given("verdict") {
+                return Problem(message: "cull_set_verdicts 要给 ids + verdict（这些照片改成同一个判决），或者 changes（每张各自的判决）。",
+                               hint: "能用的参数：changes、ids、op_id、reveal、session、verdict")
+            }
+        case "cull_import_client_picks":
+            if given("text") == given("ids") {
+                return Problem(message: "text 和 ids 要给一个、只能给一个：text 是客户回复的原文（app 来认），ids 是你已经认出的照片 id。",
+                               hint: "客户在微信里回的那段话原样放进 text")
             }
         default:
             break
@@ -866,8 +926,38 @@ enum MCPArgs {
             } catch {
                 return Problem(message: (error as? CollageLayoutSpec.Problem)?.text ?? "\(name) 不是颜色。", hint: "")
             }
+        case .verdictChanges(let count):
+            if case .failure(let p) = verdictChanges(value, name: name, count: count) { return p }
         }
         return nil
+    }
+
+    /// changes 解出来：[(id, 判决名)]，按给的顺序、同一张重复给同一个判决的去重。同一张给了两个不同的判决、键不对、
+    /// 判决不认、张数不在范围里都是错。LiveHandlers 执行时用同一个函数取值。
+    static func verdictChanges(_ value: Any?, name: String = "changes",
+                               count: ClosedRange<Int> = 1...500) -> Result<[(id: String, verdict: String)], Problem> {
+        let shape = Problem(message: "\(name) 要写成 [{\"id\":\"DSCF7208\",\"verdict\":\"pick\"}, …]：id 是 1–128 个字的照片 id，"
+                            + "verdict 只能是 " + verdictValues.joined(separator: " / ") + "。", hint: "")
+        guard let list = value as? [Any] else { return .failure(shape) }
+        var out: [(id: String, verdict: String)] = []
+        var seen: [String: String] = [:]
+        for raw in list {
+            guard let obj = raw as? [String: Any], Set(obj.keys) == ["id", "verdict"],
+                  let id = obj["id"] as? String, !id.isEmpty, id.count <= 128,
+                  let verdict = obj["verdict"] as? String, verdictValues.contains(verdict) else { return .failure(shape) }
+            if let before = seen[id] {
+                guard before == verdict else {
+                    return .failure(Problem(message: "\(name) 里 \(id) 给了两个不同的判决（\(before)、\(verdict)）。", hint: "一张照片只写一次"))
+                }
+                continue
+            }
+            seen[id] = verdict
+            out.append((id: id, verdict: verdict))
+        }
+        guard count.contains(out.count) else {
+            return .failure(Problem(message: "\(name) 要 \(count.lowerBound)–\(count.upperBound) 张（去重以后）。", hint: ""))
+        }
+        return .success(out)
     }
 
     /// JSON 里的数（整数、小数都算；true / false、非有限数不算）。

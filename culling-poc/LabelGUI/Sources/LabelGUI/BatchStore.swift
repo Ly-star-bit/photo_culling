@@ -261,6 +261,38 @@ final class BatchStore: ObservableObject {
     /// 这张的判决是你亲手改的（不是「接受推荐」钉住的）。
     func isManual(_ id: String) -> Bool { overrides[id] != nil && !acceptedIDs.contains(id) }
 
+    /// AI 经实时桥（cull_set_verdicts）改的判决的出处：id → 哪一次、哪个工具、什么时候、改之前、AI 判的。判决照样钉住、照样
+    /// isManual（✋、「人工改判 N」、拼图挑片都不变），只是阈值建议、「滑杆漏掉」不拿它们当你纠错的样本，状态栏「人工改判 N
+    /// （其中 AI M）」和 MCP 行的 changed_by 分得出来。你之后亲手改过（改判、定案、接受推荐）就拿掉。存 ai_overrides.json。
+    private(set) var aiOverrides: [String: AIOverride] = [:]
+
+    struct AIOverride: Codable, Equatable {
+        let opID: String
+        let tool: String
+        let at: Date
+        /// AI 第一次动这张之前的判决（Verdict.rawValue；nil = 自动判的）。AI 改了好几次也留最早那次之前的。
+        let previous: String?
+        /// AI 判的（Verdict.rawValue）。读回来时和 overrides 里的对不上 = 之后被别的（老版本 app）改过，丢掉。
+        let aiVerdict: String
+
+        enum CodingKeys: String, CodingKey {
+            case opID = "op_id", tool, at, previous, aiVerdict = "ai_verdict"
+        }
+
+        /// previous 是 nil（原来是自动判的）也写出来（null），不省掉这个键。
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(opID, forKey: .opID)
+            try c.encode(tool, forKey: .tool)
+            try c.encode(at, forKey: .at)
+            try c.encode(previous, forKey: .previous)
+            try c.encode(aiVerdict, forKey: .aiVerdict)
+        }
+    }
+
+    /// 这张现在的判决是 AI 改的（有出处、还是人工改判）。
+    func aiOverride(_ id: String) -> AIOverride? { isManual(id) ? aiOverrides[id] : nil }
+
     /// 客户选中（「导入客户选择…」：客户在确认表里点的、微信里回的文件名 / 编号）。和判决是两回事：
     /// 不改判决、不进 overrides，只多一个标记 —— 缩略图上的紫心、「只看客户选中」、XMP 紫色标。
     /// 存 client_picks.json。改它的地方都压撤销记录（和改判同一条 ⌘Z）。
@@ -516,6 +548,8 @@ final class BatchStore: ObservableObject {
         var autoRejectCount = 0
         /// 真正经你手改过的张数（overrides 去掉「接受推荐」钉的）：状态栏「人工改判 N」。
         var manualOverrideCount = 0
+        /// 其中 AI 经实时桥改的（aiOverrides）：状态栏「人工改判 N（其中 AI M）」。
+        var aiOverrideCount = 0
         /// 上次写 XMP 之后判决变了的张数（从没写过 = 0，不提醒）。Lightroom / C1 看的是 XMP，
         /// 在这里改完忘了重写，那边还是旧结果。
         var xmpStaleCount = 0
@@ -540,6 +574,13 @@ final class BatchStore: ObservableObject {
     var borderlineCount: Int { derived.borderlineCount }
     var pendingTakeCount: Int { derived.pendingTakeCount }
     var manualOverrideCount: Int { derived.manualOverrideCount }
+    var aiOverrideCount: Int { derived.aiOverrideCount }
+    /// 状态栏那一句：「人工改判 N」，其中有 AI 经实时桥改的再带「（其中 AI M）」。
+    var manualOverrideLabel: String {
+        let ai = aiOverrideCount
+        let tail = ai > 0 ? "（其中 AI \(ai)）" : ""
+        return "人工改判 \(manualOverrideCount)" + tail
+    }
     var pendingTakes: [Int] { derived.pendingTakes }
 
     /// 「待处理」的场：还留着 2 张以上没淘汰，而且其中还有没经你手的（自动判的）。
@@ -576,6 +617,8 @@ final class BatchStore: ObservableObject {
     }
     var autoRejectCount: Int { derived.autoRejectCount }
     var xmpStaleCount: Int { derived.xmpStaleCount }
+    /// 这一场写过 XMP 没有（xmp_state.json 在）：没写过时 xmpStaleCount 永远是 0，MCP 的概览要分得清「没过期」和「没写过」。
+    var xmpEverWritten: Bool { xmpState != nil }
     var clientPickCount: Int { derived.clientPickCount }
     var clientPickRejectCount: Int { derived.clientPickRejectCount }
     /// 「废片移到废纸篓」默认真会移的张数：废片里去掉客户选中的（客户点名要精修的照片不扔）、拼图里在用的
@@ -818,6 +861,7 @@ final class BatchStore: ObservableObject {
         }
         d.verdictCounts = (r, u, p)
         d.manualOverrideCount = overrides.keys.filter { !acceptedIDs.contains($0) }.count
+        d.aiOverrideCount = aiOverrides.keys.filter { isManual($0) }.count
         for (idx, item) in items.enumerated() { d.byVerdict[item.verdict, default: []].append(idx) }
         d.sharpnessBins = Self.histogramBins(items.map(\.sharpness), range: Self.sharpnessHistRange, sqrtScale: false)
         d.exposureBins = Self.histogramBins(items.map(\.worstClipPct), range: Self.exposureHistRange, sqrtScale: true)
@@ -1050,6 +1094,7 @@ final class BatchStore: ObservableObject {
         loadReviewPosition()
         loadThresholds()
         loadOverrides()
+        loadAIOverrides()
         loadClientPicks()
         loadXMPState()
         loadBodyOffsets()
@@ -1422,6 +1467,7 @@ final class BatchStore: ObservableObject {
         loadReviewPosition()
         loadThresholds()
         loadOverrides()
+        loadAIOverrides()
         loadClientPicks()
         loadXMPState()
         loadBodyOffsets()
@@ -1635,10 +1681,10 @@ final class BatchStore: ObservableObject {
         setOverrideBatch([id], verdict)
     }
 
-    /// ⌘Z 的一步：一次改判（每张原来的判决、原来是不是「接受推荐」钉的），或者一次导入 / 清除
+    /// ⌘Z 的一步：一次改判（每张原来的判决、原来是不是「接受推荐」钉的、原来是不是 AI 改的），或者一次导入 / 清除
     /// 客户选中（之前的整份）。两种放在同一条栈里：导入客户选择 → 改判 → ⌘Z ⌘Z 按时间倒着撤。
     private enum UndoStep {
-        case verdicts([(id: String, previous: Verdict?, accepted: Bool)])
+        case verdicts([(id: String, previous: Verdict?, accepted: Bool, ai: AIOverride?)])
         case clientPicks(Set<String>)
         /// 按机身对时之前的整份偏移。
         case bodyOffsets([String: Int])
@@ -1663,9 +1709,9 @@ final class BatchStore: ObservableObject {
         return false
     }
 
-    /// 动手之前压一条撤销记录：每张原来的判决，和它原来是不是「接受推荐」钉的。
+    /// 动手之前压一条撤销记录：每张原来的判决，和它原来是不是「接受推荐」钉的、是不是 AI 改的（⌘Z 连出处一起回去）。
     private func pushUndo(_ ids: some Collection<String>) {
-        pushUndoStep(.verdicts(ids.map { ($0, overrides[$0], acceptedIDs.contains($0)) }))
+        pushUndoStep(.verdicts(ids.map { ($0, overrides[$0], acceptedIDs.contains($0), aiOverrides[$0]) }))
     }
 
     private func pushUndoStep(_ step: UndoStep) {
@@ -1683,15 +1729,17 @@ final class BatchStore: ObservableObject {
             if case .bodyOffsets(let previous) = step { restoreBodyOffsets(previous) }
             return []
         }
-        for (id, previous, accepted) in last {
+        for (id, previous, accepted, ai) in last {
             if let previous {
                 overrides[id] = previous
             } else {
                 overrides.removeValue(forKey: id)
             }
             if accepted { acceptedIDs.insert(id) } else { acceptedIDs.remove(id) }
+            aiOverrides[id] = ai
         }
         saveOverrides()
+        saveAIOverrides()
         applyThresholds()
         return last.map(\.id)
     }
@@ -1707,7 +1755,33 @@ final class BatchStore: ObservableObject {
                 overrides.removeValue(forKey: id)
             }
         }
+        dropAIMarks(ids)
         saveOverrides()
+        applyThresholds()
+    }
+
+    /// 实时桥（AI 的 cull_set_verdicts）改判：一组判决（nil = 恢复自动）一次写进去，一条撤销记录、一次保存、一次重算。
+    /// 和 setOverrideBatch 一样算人工改判（判决钉住、✋），另外记下出处（aiOverrides → ai_overrides.json）；
+    /// 恢复自动的那几张没有判决可记，出处一起拿掉。用户亲手改判走 setOverrideBatch，不走这里。
+    func applyAIOverrides(_ changes: [(id: String, verdict: Verdict?)], opID: String, tool: String) {
+        guard !changes.isEmpty else { return }
+        pushUndo(changes.map(\.id))
+        let now = Date()
+        for (id, verdict) in changes {
+            acceptedIDs.remove(id)
+            guard let verdict else {
+                overrides.removeValue(forKey: id)
+                aiOverrides.removeValue(forKey: id)
+                continue
+            }
+            // AI 改了好几次：previous 留 AI 第一次动它之前的（以后「撤销 AI 的全部改判」要回到那里）
+            let first: String?
+            if let mark = aiOverrides[id] { first = mark.previous } else { first = overrides[id]?.rawValue }
+            overrides[id] = verdict
+            aiOverrides[id] = AIOverride(opID: opID, tool: tool, at: now, previous: first, aiVerdict: verdict.rawValue)
+        }
+        saveOverrides()
+        saveAIOverrides()
         applyThresholds()
     }
 
@@ -1730,6 +1804,7 @@ final class BatchStore: ObservableObject {
             overrides[id] = keep.contains(id) ? keeperVerdict : .reject
             acceptedIDs.remove(id)
         }
+        dropAIMarks(all)
         saveOverrides()
         applyThresholds()
     }
@@ -1750,6 +1825,7 @@ final class BatchStore: ObservableObject {
             }
             overrides[id] = changes[id]
         }
+        dropAIMarks(ids)
         saveOverrides()
         applyThresholds()
     }
@@ -1880,6 +1956,41 @@ final class BatchStore: ObservableObject {
             backupOnce(acceptedPath)
             try accepted.write(to: acceptedPath, options: .atomic)
         }
+    }
+
+    /// AI 改判的出处也另存一份（和 accepted.json 一样挨着 overrides.json，overrides.json 的格式不动）：
+    /// {id: {op_id, tool, at, previous, ai_verdict}}，老版本 app 不认它也不碍事。
+    private var aiOverridesPath: URL { sessionDir.appendingPathComponent("ai_overrides.json") }
+
+    /// 在 loadOverrides 之后调。只留现在判决还等于 AI 判的、也不是「接受推荐」钉的：老版本 app 打开过这一场、改了判决又
+    /// 不维护这份文件，对不上的就丢掉（比 accepted.json 只看「在不在」严）。
+    private func loadAIOverrides() {
+        aiOverrides = [:]
+        guard let data = try? Data(contentsOf: aiOverridesPath) else { return }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let raw = try? decoder.decode([String: AIOverride].self, from: data) else { return }
+        aiOverrides = raw.filter { id, mark in overrides[id]?.rawValue == mark.aiVerdict && !acceptedIDs.contains(id) }
+    }
+
+    private func saveAIOverrides() {
+        guard !aiOverrides.isEmpty else {
+            try? FileManager.default.removeItem(at: aiOverridesPath)
+            return
+        }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        if let data = try? encoder.encode(aiOverrides) {
+            try? data.write(to: aiOverridesPath, options: .atomic)
+        }
+    }
+
+    /// 你亲手动过的这几张不再算 AI 改的（改判、定案、接受推荐、移进废纸篓都走这里）；真拿掉了才写文件。
+    private func dropAIMarks(_ ids: some Collection<String>) {
+        var dropped = false
+        for id in ids where aiOverrides.removeValue(forKey: id) != nil { dropped = true }
+        if dropped { saveAIOverrides() }
     }
 
     // MARK: - 客户选中（client_picks.json）
@@ -3376,6 +3487,7 @@ final class BatchStore: ObservableObject {
             overrides[c.id] = c.verdict
             acceptedIDs.insert(c.id)
         }
+        dropAIMarks(changes.map(\.id))
         saveOverrides()
         applyThresholds()
         return takes
@@ -3435,11 +3547,12 @@ final class BatchStore: ObservableObject {
     /// 至少 3 张样本才开口。建议值 = 能救回 ≥75% 放行张的那条线（再退一格滑杆
     /// 步长），不是"救回全部"—— 第一版用放行里最差的那张，你放行的 4 张虚焦里
     /// 有一张锐度 20 的纪念照，建议就变成"降到 15"，按这个拧全场虚焦全放进来。
+    /// AI 经实时桥放行的（aiOverrides）也不算：那是模型的判断，不是你在纠正滑杆。
     private func computeThresholdSuggestions() -> [ThresholdSuggestion] {
         func released(_ reason: String) -> [BatchItem] {
             items.filter { item in
                 item.rejectReasons.contains(reason) && overrides[item.id].map { $0 != .reject } == true
-                    && !acceptedIDs.contains(item.id)
+                    && !acceptedIDs.contains(item.id) && aiOverrides[item.id] == nil
             }
         }
         /// 排好序的值里，覆盖 ≥75% 的那个分位点。`lineIsMinimum` = 这条线是下限
@@ -3495,9 +3608,11 @@ final class BatchStore: ObservableObject {
     }
 
     /// 你手动废掉、但当前滑杆一个理由都没给的张数 —— 滑杆漏掉的。只报数，不编建议：
-    /// 没有信号说明是哪条线该收紧。「接受推荐」废掉的落选张不算：那是算法自己的推荐，不是你在纠错。
+    /// 没有信号说明是哪条线该收紧。「接受推荐」废掉的落选张不算：那是算法自己的推荐，不是你在纠错；AI 经实时桥废掉的也不算。
     var manualRejectsWithoutReason: Int {
-        items.filter { overrides[$0.id] == .reject && $0.rejectReasons.isEmpty && !acceptedIDs.contains($0.id) }.count
+        items.filter {
+            overrides[$0.id] == .reject && $0.rejectReasons.isEmpty && !acceptedIDs.contains($0.id) && aiOverrides[$0.id] == nil
+        }.count
     }
 
     // MARK: - Trash rejects
@@ -3605,6 +3720,7 @@ final class BatchStore: ObservableObject {
                     self.overrides.removeValue(forKey: id)
                     self.acceptedIDs.remove(id)
                 }
+                self.dropAIMarks(trashed)
                 self.saveOverrides()
                 if !self.clientPicks.isDisjoint(with: trashed) {
                     self.clientPicks.subtract(trashed)

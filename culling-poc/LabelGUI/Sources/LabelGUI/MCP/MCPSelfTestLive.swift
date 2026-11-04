@@ -175,7 +175,7 @@ extension MCPSelfTest {
             "collage_set_style": "collage.set_style", "app_undo": "undo",
             "collage_save_variant": "collage.save_variant", "collage_open_variant": "collage.open_variant",
             "collage_export": "collage.export", "collage_set_layout": "collage.set_layout",
-            "collage_auto_layout": "collage.auto_layout",
+            "collage_auto_layout": "collage.auto_layout", "cull_import_client_picks": "cull.import_client_picks",
         ]
         let appTools = MCPToolDefs.tools(live: true).compactMap { $0["name"] as? String }.dropFirst(3)
         check(Set(appTools) == Set(methods.keys) && Set(MCPLiveTools.routes.keys) == Set(methods.keys),
