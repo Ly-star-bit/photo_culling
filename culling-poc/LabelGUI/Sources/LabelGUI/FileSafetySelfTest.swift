@@ -318,8 +318,8 @@ extension FileSafetySelfTest {
         check(waitUntil { pageIDs(collage) == ["a"] }, "现在这一版只剩 a（b 只在方案里）", "\(pageIDs(collage).sorted())")
         collage.importFromBatch(ids: ["c"], batch: batch, layout: false)
         check(waitUntil { collage.project.photos.contains { $0.id == "c" } }, "c 只进了托盘")
-        waitUntil(0.8) { false }   // 等 AppModel 那边 0.3 s 的防抖推过来
-        check(batch.collageInUseIDs == ["a", "b"], "批量页拿到拼图在用的：页上的 a、方案里的 b",
+        // AppModel 那边攒 0.3 s 防抖再推过来（不手动刷新：验的就是这条接线）。
+        check(waitUntil(10) { batch.collageInUseIDs == ["a", "b"] }, "批量页拿到拼图在用的：页上的 a、方案里的 b",
               "\(batch.collageInUseIDs.sorted())")
         check(Set(batch.trashableRejects.map(\.id)) == ["c", "d", "f"],
               "默认要移的：只在托盘的 c、没进拼图的 d f；客户选中的 e 不动", "\(batch.trashableRejects.map(\.id))")
