@@ -1281,14 +1281,25 @@ final class BatchStore: ObservableObject {
                         "文件夹挪到了别处的，在文件夹菜单「重新定位文件夹…」里指给它现在的位置"
         } else if rebase.failed {
             lastError = "这一场的照片文件夹挪过，可 manifest.json 写不进去、照片路径没改过来：先别移废片、写 XMP（会按旧位置找）"
+        } else if let r = rebase.rebase, r.untouched {
+            // 一行都没换过去（照片路径和 photo_dir 的写法怎么都对不上）：manifest 原样没动，下次打开再试，不说「已改好」。
+            lastError = "这一场的照片文件夹挪过（原来在 \(CardImporter.displayPath(URL(fileURLWithPath: r.from)))），" +
+                        "可 manifest.json 里的 \(r.unmatched) 张照片路径都对不上原来记的文件夹，没改过来：" +
+                        "先别移废片、写 XMP（会按旧位置找）"
         } else if previewsPruned {
             lastError = "这一场的预览图已清理省空间（掉出了最近 15 场，或者从「移除历史记录」里移除过），判决和人工改判都还在。" +
                         "点「重新分析」补回预览：没变的照片只重做预览，人工改判不会动"
         }
+        // 照片路径真的改过来了（或者不用改）才说「接上了」「已改到现在的位置」；只改了一部分的说没改的有几张。
+        let pathsFixed = !rebase.failed && !(rebase.rebase?.untouched ?? false)
+        let unmatchedRows: Int = rebase.rebase?.unmatched ?? 0
+        let leftOver: String = (pathsFixed && unmatchedRows > 0) ? "（另有 \(unmatchedRows) 张的路径不在原来记的文件夹下面，没改）" : ""
         if let moved {
-            progressText = "认出了「\(moved.name)」那一场：同一个文件夹改了名或挪了位置，判决、人工改判、客户选中、拼图都接上了"
-        } else if let from = rebase.rebase?.from {
-            progressText = "这一场的照片文件夹挪过（原来在 \(CardImporter.displayPath(URL(fileURLWithPath: from)))），照片路径已改到现在的位置"
+            progressText = pathsFixed
+                ? "认出了「\(moved.name)」那一场：同一个文件夹改了名或挪了位置，判决、人工改判、客户选中、拼图都接上了" + leftOver
+                : "认出了「\(moved.name)」那一场（同一个文件夹改了名或挪了位置）"
+        } else if let from = rebase.rebase?.from, pathsFixed {
+            progressText = "这一场的照片文件夹挪过（原来在 \(CardImporter.displayPath(URL(fileURLWithPath: from)))），照片路径已改到现在的位置" + leftOver
         }
         // Register a session that HAS cached results as soon as it's opened, not
         // just after an analysis: pruneOrphanedSessions clears the previews of

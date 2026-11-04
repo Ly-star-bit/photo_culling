@@ -41,17 +41,50 @@ enum SessionLocation {
         return new + path.dropFirst(old.count)
     }
 
+    /// 路径里最深的、还在的那一级解析过符号链接，再接上后面已经不在的几段：/Users/x/Pictures/NAS/0321（0321 改了名、
+    /// NAS → /Volumes/T7/Photos）→ /Volumes/T7/Photos/0321。resolvingSymlinksInPath 对不存在的路径原样返回 ——
+    /// 符号链接底下的拍摄文件夹改了名以后，photo_dir（给的写法）和枚举器给的照片路径（真实路径）就对不上了。
+    /// 整条都在的照常解析；一级都不在的 nil。
+    static func resolvedThroughExistingParent(_ path: String) -> String? {
+        let fm = FileManager.default
+        var url = URL(fileURLWithPath: path).standardizedFileURL
+        var tail: [String] = []
+        while !fm.fileExists(atPath: url.path) {
+            guard url.pathComponents.count > 1 else { return nil }
+            tail.insert(url.lastPathComponent, at: 0)
+            url = url.deletingLastPathComponent()
+        }
+        var out = url.resolvingSymlinksInPath()
+        for part in tail { out.appendPathComponent(part) }
+        return out.path
+    }
+
+    /// 相对拍摄根目录算路径用：原样的写法、/private 折叠（PathRelativizer 自己做），再加上解析过符号链接的写法
+    /// （根已经不在了也解析得到它还在的上一级）。
+    static func relativizer(forRoot root: String) -> ImageLoader.PathRelativizer {
+        var roots = [root]
+        if let resolved = resolvedThroughExistingParent(root), resolved != root { roots.append(resolved) }
+        return ImageLoader.PathRelativizer(roots: roots)
+    }
+
     /// manifest.json 改写了什么。
     struct ManifestRebase: Equatable {
         /// 原来记的拍摄文件夹（photo_dir）。
         let from: String
         /// 改了几行（raw_path / decode_path 任一改了算一行）。
         let rows: Int
+        /// 有路径、却一条都换不过去的行（不在原来记的拍摄文件夹下面，换了写法也认不出来）。
+        var unmatched = 0
+        /// 一行都没换过去：manifest 原样没动（photo_dir 也没改，下次打开再试）。不能说「已改到现在的位置」。
+        var untouched: Bool { rows == 0 && unmatched > 0 }
     }
 
     /// 这一场的 manifest 记的拍摄文件夹（photo_dir）不是 `folder`（挪了、改了名，书签跟到了新位置）：raw_path、
     /// decode_path、photo_dir 按相对位置改到 `folder` 下。不改的话移废片、写 XMP、导出都还按旧路径走 —— 旧位置要是
     /// 又有了同名文件，就会去动它。preview_path 指的是场次目录（key 不变，目录也不变），不动。
+    /// 照片路径按各级比、不按字符串前缀（PathRelativizer：/var 和 /private/var、拍摄文件夹在符号链接底下时 photo_dir
+    /// 和照片路径写法不一样）。一行都换不过去的（rows == 0、unmatched > 0）整份不写，photo_dir 也不改 —— 不然下次打开
+    /// photo_dir 已经是新位置，再也不会去改那些照片路径。
     /// 同一个文件夹换了写法（/tmp 和 /private/tmp、符号链接）、`folder` 不存在、没有 photo_dir 的不改，返回 nil。
     /// 写的方式和分析引擎一样（JSONSerialization、prettyPrinted + sortedKeys、atomic）。`failed` = 要改但写不进去。
     static func rebaseManifest(in sessionDir: URL, to folder: URL) -> (rebase: ManifestRebase?, failed: Bool) {
@@ -65,15 +98,34 @@ enum SessionLocation {
         let new = folder.path
         guard old != new else { return (nil, false) }
         if let a = identity(old), let b = identity(new), a == b { return (nil, false) }
+        let relativizer = relativizer(forRoot: old)
+        func moved(_ path: String) -> String? {
+            let rel = relativizer.relative(path)
+                ?? resolvedThroughExistingParent(path).flatMap { relativizer.relative($0) }
+            if let rel, !rel.isEmpty { return (new as NSString).appendingPathComponent(rel) }
+            return rebased(path, from: old, to: new)
+        }
         var rows = 0
+        var unmatched = 0
         for i in photos.indices {
             var changed = false
+            var hasPath = false
             for key in ["raw_path", "decode_path"] {
-                guard let path = photos[i][key] as? String, let moved = rebased(path, from: old, to: new) else { continue }
-                photos[i][key] = moved
+                guard let path = photos[i][key] as? String else { continue }
+                hasPath = true
+                guard let target = moved(path) else { continue }
+                photos[i][key] = target
                 changed = true
             }
-            if changed { rows += 1 }
+            if changed {
+                rows += 1
+            } else if hasPath {
+                unmatched += 1
+            }
+        }
+        if rows == 0 && unmatched > 0 {
+            SessionFiles.log.error("manifest.json 的照片路径一条都对不上原来的 photo_dir（\(old, privacy: .public)），没改")
+            return (ManifestRebase(from: old, rows: 0, unmatched: unmatched), false)
         }
         json["photo_dir"] = new
         json["photos"] = photos
@@ -86,7 +138,7 @@ enum SessionLocation {
             SessionFiles.log.error("manifest.json 改不了路径：\(error.localizedDescription, privacy: .public)")
             return (nil, true)
         }
-        return (ManifestRebase(from: old, rows: rows), false)
+        return (ManifestRebase(from: old, rows: rows, unmatched: unmatched), false)
     }
 
     /// 「重新定位文件夹…」之前的检查：这一场的照片（按 photo_dir 下的相对位置；没有 photo_dir 的按文件名）在 `folder`

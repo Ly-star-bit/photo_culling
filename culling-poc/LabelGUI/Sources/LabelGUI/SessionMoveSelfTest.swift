@@ -49,6 +49,7 @@ enum SessionMoveSelfTest {
         renamedThenPicked(root.appendingPathComponent("pick"), model: model)
         copyIsNotAdopted(root.appendingPathComponent("copy"), batch: model.batch)
         reopenFromMenu(root.appendingPathComponent("menu"), batch: model.batch)
+        unmatchedNotClaimed(root.appendingPathComponent("unmatched"), batch: model.batch)
         relocate(root.appendingPathComponent("relocate"), batch: model.batch)
         liveBridgeDoesNotFollow(root.appendingPathComponent("live"), batch: model.batch)
         cardTable(root.appendingPathComponent("card-table"))
@@ -152,14 +153,78 @@ enum SessionMoveSelfTest {
         let rows = after?["photos"] as? [[String: Any]] ?? []
         let a = rows.first { $0["id"] as? String == "a" } ?? [:]
         let b = rows.first { $0["id"] as? String == "b" } ?? [:]
-        check(moved.rebase == SessionLocation.ManifestRebase(from: old, rows: 1) && after?["photo_dir"] as? String == new.path,
-              "挪了：photo_dir 改成新位置，改了 1 行", "\(String(describing: moved.rebase))")
+        check(moved.rebase == SessionLocation.ManifestRebase(from: old, rows: 1, unmatched: 1)
+              && after?["photo_dir"] as? String == new.path,
+              "挪了：photo_dir 改成新位置，改了 1 行（不在旧根下的那 1 行记成没换过去）", "\(String(describing: moved.rebase))")
         check(a["raw_path"] as? String == new.path + "/a.RAF" && a["decode_path"] as? String == new.path + "/a.JPG"
               && a["preview_path"] as? String == "previews/a.jpg" && a["camera"] as? String == "X-T5",
               "raw_path / decode_path 换根，preview_path 和别的字段不动", "\(a)")
         check(b["raw_path"] as? String == "/别处/b.JPG", "不在旧根下面的路径不动")
         let missing = SessionLocation.rebaseManifest(in: session, to: dir.appendingPathComponent("不存在"))
         check(missing.rebase == nil && !missing.failed, "新位置不存在：不改")
+        spelledDifferently(dir)
+    }
+
+    /// 枚举器给的照片路径是真实路径，photo_dir 是调用方给的写法（/var 和 /private/var、拍摄文件夹在符号链接底下）：
+    /// 改名以后照样按相对位置换过去；一行都换不过去的整份不写、photo_dir 不改（下次打开再试）。
+    private static func spelledDifferently(_ dir: URL) {
+        let fm = FileManager.default
+        let session = dir.appendingPathComponent("session-spelling")
+        try? fm.createDirectory(at: session, withIntermediateDirectories: true)
+        func write(photoDir: String, raw: String) {
+            let json: [String: Any] = ["photo_dir": photoDir, "photos": [["id": "a", "raw_path": raw, "decode_path": raw]]]
+            try? JSONSerialization.data(withJSONObject: json).write(to: session.appendingPathComponent("manifest.json"))
+        }
+        func rows() -> [String: Any] {
+            let json = (try? Data(contentsOf: session.appendingPathComponent("manifest.json")))
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            return (json?["photos"] as? [[String: Any]])?.first ?? [:]
+        }
+        guard let realC = realpath(dir.path, nil) else {
+            check(false, "取测试目录的真实路径")
+            return
+        }
+        let real = String(cString: realC)
+        free(realC)
+
+        // (a) photo_dir 是 /var/…（或者 /private/var/…），照片路径是另一种写法。
+        let plainOld = dir.appendingPathComponent("写法旧")
+        let plainNew = dir.appendingPathComponent("写法新")
+        try? fm.createDirectory(at: plainOld, withIntermediateDirectories: true)
+        let realOld = real + "/写法旧"
+        let alias = realOld.hasPrefix("/private/") ? String(realOld.dropFirst("/private".count)) : "/private" + realOld
+        if SessionLocation.identity(alias) == SessionLocation.identity(realOld) {
+            write(photoDir: alias, raw: realOld + "/a.JPG")
+            try? fm.moveItem(at: plainOld, to: plainNew)
+            let r = SessionLocation.rebaseManifest(in: session, to: plainNew)
+            let row = rows()
+            check(r.rebase?.rows == 1 && r.rebase?.unmatched == 0
+                  && row["raw_path"] as? String == plainNew.path + "/a.JPG" && row["decode_path"] as? String == plainNew.path + "/a.JPG",
+                  "photo_dir 和照片路径一个带 /private、一个不带：改名以后照片路径照样换过去", "\(String(describing: r.rebase)) \(row)")
+        }
+
+        // (b) 拍摄文件夹在符号链接底下：photo_dir 是链接的写法，照片路径是真实路径；改名以后链接那一级还在，旧根已经不在了。
+        let parent = dir.appendingPathComponent("真实上级")
+        let link = dir.appendingPathComponent("链接上级")
+        try? fm.createDirectory(at: parent.appendingPathComponent("拍摄"), withIntermediateDirectories: true)
+        try? fm.createSymbolicLink(at: link, withDestinationURL: parent)
+        write(photoDir: link.path + "/拍摄", raw: real + "/真实上级/拍摄/a.JPG")
+        try? fm.moveItem(at: parent.appendingPathComponent("拍摄"), to: parent.appendingPathComponent("拍摄改名"))
+        let target = URL(fileURLWithPath: real + "/真实上级/拍摄改名")
+        let viaLink = SessionLocation.rebaseManifest(in: session, to: target)
+        let linkRow = rows()
+        check(viaLink.rebase?.rows == 1 && linkRow["raw_path"] as? String == target.path + "/a.JPG",
+              "拍摄文件夹在符号链接底下、改了名：照片路径按相对位置换过去（不再只改 photo_dir）",
+              "\(String(describing: viaLink.rebase)) \(linkRow)")
+
+        // (c) 照片路径怎么都对不上 photo_dir：整份不写，photo_dir 不改，不说改好了。
+        let elsewhere = dir.appendingPathComponent("对不上的新位置")
+        try? fm.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        write(photoDir: dir.appendingPathComponent("对不上的旧位置").path, raw: "/完全别处/x.JPG")
+        let before = manifestText(session)
+        let none = SessionLocation.rebaseManifest(in: session, to: elsewhere)
+        check(none.rebase?.untouched == true && none.rebase?.unmatched == 1 && !none.failed && manifestText(session) == before,
+              "照片路径一条都对不上：manifest 原样（photo_dir 也没改，下次打开再试）", "\(String(describing: none.rebase))")
     }
 
     private static func manifestText(_ session: URL) -> String {
@@ -289,6 +354,35 @@ enum SessionMoveSelfTest {
         let relaunched = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         check(relaunched.sessionDir.lastPathComponent == key(e) && pathsUnder(relaunched, f),
               "重开 app：还是这一场，照片路径在新位置")
+    }
+
+    /// 照片路径一条都换不过去（写法和 photo_dir 怎么都对不上）：不说「已改到现在的位置」，报 lastError，manifest 不动，
+    /// 下次打开再试。
+    private static func unmatchedNotClaimed(_ root: URL, batch: BatchStore) {
+        print("== 照片路径换不过去：不说已改好，下次打开再试")
+        let fm = FileManager.default
+        let u = root.appendingPathComponent("对不上原名")
+        let v = root.appendingPathComponent("对不上新名")
+        FileSafetySelfTest.writeShoot(u, shoot(u))
+        check(batch.switchSession(to: u) && batch.items.count == 3, "打开原来的文件夹")
+        let manifestURL = appDataDir.appendingPathComponent("sessions/\(key(u))/manifest.json")
+        if var json = (try? Data(contentsOf: manifestURL)).flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }),
+           var photos = json["photos"] as? [[String: Any]] {
+            for i in photos.indices {
+                let name = ((photos[i]["raw_path"] as? String ?? "") as NSString).lastPathComponent
+                photos[i]["raw_path"] = "/完全别处/" + name
+                photos[i]["decode_path"] = "/完全别处/" + name
+            }
+            json["photos"] = photos
+            try? JSONSerialization.data(withJSONObject: json).write(to: manifestURL)
+        }
+        try? fm.moveItem(at: u, to: v)
+        batch.progressText = ""
+        check(batch.switchSession(to: u), "从菜单点原来那一条（书签跟到新位置）")
+        check((batch.lastError ?? "").contains("对不上") && !batch.progressText.contains("已改到"),
+              "报照片路径对不上、没改过来，不说已改好", "\(batch.lastError ?? "nil") / \(batch.progressText)")
+        check(manifestPhotoDir(key(u)) == u.path, "manifest 的 photo_dir 没改（下次打开还会再试）", manifestPhotoDir(key(u)) ?? "nil")
+        check(batch.switchSession(to: u) && (batch.lastError ?? "").contains("对不上"), "再打开一次：照样再试、照样说")
     }
 
     // MARK: - 重新定位文件夹
