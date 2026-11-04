@@ -543,7 +543,7 @@ if CommandLine.arguments.contains("--files-selftest") {
     MainActor.assumeIsolated { FileSafetySelfTest.run() }
 }
 
-// 长任务和退出自检（退出时 VLM 子进程整组停掉、阈值防抖写掉）：LABELGUI_DATA_DIR=<临时> LabelGUI --quit-selftest（见 QuitSelfTest.swift）
+// 长任务和退出自检（退出时 VLM 子进程整组停掉、阈值防抖写掉、防闲置睡眠、⌘Q 确认）：LABELGUI_DATA_DIR=<临时> LabelGUI --quit-selftest（见 QuitSelfTest.swift）
 if CommandLine.arguments.contains("--quit-selftest") {
     MainActor.assumeIsolated { QuitSelfTest.run() }
 }
@@ -722,6 +722,8 @@ if let unknown = CommandLine.arguments.dropFirst().first(where: { $0.hasPrefix("
 struct LabelGUIApp: App {
     /// 五个 store 和当前 tab（见 AppModel.swift）：跟着 app 活，整个进程一份。
     @StateObject private var model: AppModel
+    /// 分析、VLM、导卡在跑 / 判决没存上时按 ⌘Q 先问一句（审查 S05d，见 AppDelegate.swift）。只有这条开界面的路装它。
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     init() {
         // 先建好再包：store 在这里就建出来，不等 SwiftUI 第一次取。
@@ -731,6 +733,7 @@ struct LabelGUIApp: App {
             bridge: .gui
         )
         _model = StateObject(wrappedValue: model)
+        AppDelegate.batch = model.batch
     }
 
     var body: some Scene {

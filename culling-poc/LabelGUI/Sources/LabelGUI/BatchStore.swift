@@ -1601,6 +1601,9 @@ final class BatchStore: ObservableObject {
         progressText = "正在取消..."
     }
 
+    /// 这一次的任务已经叫停了（退出确认框等它停下时看：排队的下一张卡开始导会换一面新的旗子，要再叫停一次）。
+    var cancelRequested: Bool { cancelFlag.isSet }
+
     // MARK: 退出（审查 S05b / S05e）
 
     private var quitTerminateObserver: NSObjectProtocol?

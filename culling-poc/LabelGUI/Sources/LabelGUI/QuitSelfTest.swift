@@ -1,11 +1,12 @@
 import AppKit
 import Foundation
 
-/// 长任务和退出的自检（全项目审查 S05b / S05c / S05e）：
+/// 长任务和退出的自检（全项目审查 S05b / S05c / S05d / S05e）：
 ///     LABELGUI_DATA_DIR=<空的临时目录> LABELGUI_NO_GUI=1 LabelGUI --quit-selftest
 /// 不要照片：假的 uv（/bin/sh 脚本，转发 / 不转发 SIGTERM / 子进程不理 SIGTERM 三种）走 BatchStore 同一个 runProcess、同一个
 /// processBox，核对 willTerminate 以后子进程整组都没了、python 那一层只收到一次 SIGTERM；阈值防抖里排着的那次退出时写掉、
-/// 没排着的不写；防睡眠的 activity 在 pmset 里真的有、放掉就没，分析（合成的噪点 JPEG）跑完 / 取消、VLM 探不到服务都放掉。
+/// 没排着的不写；防睡眠的 activity 在 pmset 里真的有、放掉就没，分析（合成的色块 JPEG）跑完 / 取消、VLM 提前返回都放掉；
+/// ⌘Q 确认的判断表（QuitGuard）和流程（QuitCoordinator，弹框、回 AppKit 都换成假的，在 modal panel 模式里等停下）。
 /// 会写数据目录：只在临时目录里跑。每条打一行 PASS / FAIL，有 FAIL 退出码 1。不弹任何框。
 enum QuitSelfTest {
     @MainActor
@@ -19,6 +20,8 @@ enum QuitSelfTest {
         t.cancelSignalsOnlyUV()
         t.thresholdFlushOnQuit()
         t.sleepGuardDuringLongTasks()
+        t.quitDecisionTable()
+        t.quitCoordinatorFlows()
         print("quit-selftest: \(t.passed) 通过 \(t.failed) 失败")
         exit(t.failed == 0 ? 0 : 1)
     }
@@ -264,30 +267,30 @@ final class QuitSelfTestHarness {
 
     // MARK: - S05c 分析、VLM、复审期间防闲置睡眠
 
-    /// 合成照片文件夹：count 张 360×240 的噪点渐变 JPEG（原生引擎当真照片分析）。
-    func makePhotoFolder(_ name: String, count: Int) -> URL {
+    /// 合成照片文件夹：count 张 width×height 的色块 JPEG（每张底色、色块都不一样；原生引擎当真照片分析）。
+    func makePhotoFolder(_ name: String, count: Int, width: Int = 360, height: Int = 240) -> URL {
         let folder = work.appendingPathComponent(name, isDirectory: true)
         try? fm.removeItem(at: folder)
         try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
         var seed: UInt32 = 12345
+        func next() -> CGFloat {
+            seed = seed &* 1_103_515_245 &+ 12345
+            return CGFloat((seed >> 16) & 0x7FFF) / 32767
+        }
+        let w = CGFloat(width), h = CGFloat(height)
         for i in 0..<count {
-            let w = 360, h = 240
-            var pixels = [UInt8](repeating: 255, count: w * h * 4)
-            for y in 0..<h {
-                for x in 0..<w {
-                    seed = seed &* 1_103_515_245 &+ 12345
-                    let noise = Int((seed >> 16) & 0x3F)
-                    let base = (x * 180 / w + y * 60 / h + i * 7) % 200
-                    let o = (y * w + x) * 4
-                    pixels[o] = UInt8(min(255, base + noise))
-                    pixels[o + 1] = UInt8(min(255, base / 2 + noise))
-                    pixels[o + 2] = UInt8(min(255, 255 - base + noise / 2))
-                }
-            }
-            guard let ctx = CGContext(data: &pixels, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+            guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
                                       space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
-                  let image = ctx.makeImage() else { continue }
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { continue }
+            let tint = CGFloat(i % 7) / 7
+            ctx.setFillColor(CGColor(red: tint, green: 0.4, blue: 1 - tint, alpha: 1))
+            ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            for _ in 0..<60 {
+                ctx.setFillColor(CGColor(red: next(), green: next(), blue: next(), alpha: 1))
+                let rect = CGRect(x: next() * w, y: next() * h, width: next() * w / 4, height: next() * h / 4)
+                ctx.fill(rect)
+            }
+            guard let image = ctx.makeImage() else { continue }
             _ = ProofSheetSelfTest.writeJPEG(image, to: folder.appendingPathComponent(String(format: "QS%04d.jpg", i)))
         }
         return folder
@@ -406,6 +409,267 @@ final class QuitSelfTestHarness {
             spin(15) { !store.isRunning && store.longTasks.active.isEmpty }
             check(!store.isRunning && store.longTasks.active.isEmpty && (store.lastError ?? "").contains("Ollama"),
                   "探不到 Ollama 提前返回也放掉（\(store.lastError ?? "")）")
+        }
+    }
+
+    // MARK: - S05d 退出确认（纯函数 + 注入的弹框，从不真弹）
+
+    func fourCC(_ s: String) -> OSType {
+        s.utf8.reduce(0) { ($0 << 8) | OSType($1) }
+    }
+
+    func quitDecisionTable() {
+        print("— S05d 退出确认的判断：在跑就问「停下并退出 / 继续」，系统注销重启不问直接停下保存，没存上的问一句，无头一律直接退")
+        let jobs: [QuitGuard.Job] = [.analysis, .vlm, .appeal, .cardImport(queued: 1), .other]
+        var wrong: [String] = []
+        for headless in [false, true] {
+            for reason in [QuitGuard.Reason.user, .system] {
+                for running in [nil] + jobs.map(Optional.some) {
+                    for unsaved in [nil, "判决没存上"] as [String?] {
+                        let got = QuitGuard.decide(headless: headless,
+                                                   state: QuitGuard.State(running: running, unsaved: unsaved), reason: reason)
+                        let expect: QuitGuard.Decision
+                        if headless {
+                            expect = .quit
+                        } else if let running {
+                            expect = reason == .system ? .stopThenQuit(running) : .askStop(running)
+                        } else if let unsaved, reason == .user {
+                            expect = .askUnsaved(unsaved)
+                        } else {
+                            expect = .quit
+                        }
+                        if got != expect { wrong.append("headless=\(headless) \(reason) \(String(describing: running)) \(unsaved ?? "-") → \(got)") }
+                    }
+                }
+            }
+        }
+        check(wrong.isEmpty, "判断表 \(2 * 2 * 6 * 2) 种组合都对" + (wrong.isEmpty ? "" : "：\(wrong.prefix(3))"))
+
+        let mapping: [(Bool, Bool, Bool, Int, [LongTaskKind], QuitGuard.Job?, String)] = [
+            (false, false, false, 0, [], nil, "没在跑"),
+            (true, true, false, 0, [.analysis], .analysis, "分析"),
+            (true, false, false, 0, [.vlm], .vlm, "VLM"),
+            (true, false, false, 0, [.appeal], .appeal, "复审"),
+            (true, false, true, 2, [], .cardImport(queued: 2), "导卡（后面排着 2 张）"),
+            (true, false, false, 0, [], .other, "导出 / 复制 / 写 XMP"),
+            (false, false, false, 0, [.vlm], nil, "isRunning 已经落下、防睡眠还没放（defer 晚一拍）= 不在跑"),
+        ]
+        for (running, analyzing, importing, queued, long, expect, what) in mapping {
+            let got = QuitGuard.runningJob(isRunning: running, analyzing: analyzing, importing: importing,
+                                           queuedCards: queued, longTasks: long)
+            check(got == expect, "在跑什么：\(what) → \(got.map { "\($0)" } ?? "nil")")
+        }
+
+        let codes = ["logo", "rlgo", "rrst", "rest", "rsdn", "shut"].map(fourCC)
+        check(Set(codes) == QuitGuard.systemQuitReasons, "注销 / 重启 / 关机六种 kAEQuitReason 都认（logo rlgo rrst rest rsdn shut）")
+        check(codes.allSatisfy { QuitGuard.reason(quitReasonCode: $0) == .system }, "系统要退的原因 → 不弹框")
+        check(QuitGuard.reason(quitReasonCode: nil) == .user && QuitGuard.reason(quitReasonCode: fourCC("quit")) == .user,
+              "⌘Q（没有 Apple 事件）、程序坞退出（不带原因）→ 用户退的")
+
+        let analysis = QuitGuard.prompt(for: .askStop(.analysis))
+        check(analysis?.primaryQuits == true && analysis?.primary == "停下并退出" && analysis?.secondary == "继续分析"
+              && (analysis?.message.contains("已经分析完的照片存好") ?? false),
+              "分析在跑：「停下并退出」（回车）/「继续分析」（Esc），说清已分析的会存好")
+        let vlm = QuitGuard.prompt(for: .askStop(.vlm))
+        check((vlm?.message.contains("Python 进程一起停掉") ?? false) && vlm?.secondary == "继续判片", "VLM 在跑：说清后台 Python 一起停")
+        let card = QuitGuard.prompt(for: .askStop(.cardImport(queued: 2)))
+        check((card?.message.contains("另外 2 张卡") ?? false) && (card?.message.contains("先别格式化") ?? false)
+              && (card?.message.contains("不留半截") ?? false),
+              "导卡在跑：已校验的留着、不留半截、排着的卡不导、先别格式化")
+        let unsaved = QuitGuard.prompt(for: .askUnsaved("「婚礼」的判决没存上（盘满了）"))
+        check(unsaved?.primaryQuits == false && unsaved?.quitIsDestructive == true && unsaved?.primary == "不退出"
+              && (unsaved?.message.contains("「婚礼」的判决没存上（盘满了）") ?? false),
+              "没存上：默认「不退出」，「仍然退出」标成破坏性，原因原样带上")
+        check(QuitGuard.prompt(for: .quit) == nil && QuitGuard.prompt(for: .stopThenQuit(.vlm)) == nil, "直接退、系统要退：没有弹框")
+    }
+
+    /// 自检里假的 store。
+    final class FakeTarget: QuitTarget {
+        var isRunning = false
+        var analyzing = false
+        var importing = false
+        var queuedCardImports = 0
+        var runningLongTasks: [LongTaskKind] = []
+        var persistError: String?
+        var cancelRequested = false
+        var cancels = 0
+        var retries = 0
+        var onCancel: ((FakeTarget) -> Void)?
+        func cancel() { cancels += 1; cancelRequested = true; onCancel?(self) }
+        func retryPersist() -> Bool { retries += 1; return persistError == nil }
+    }
+
+    final class Recorder {
+        var asked: [QuitGuard.Decision] = []
+        var replies: [Bool] = []
+        var answer: (QuitGuard.Decision) -> Bool = { _ in true }
+    }
+
+    func coordinator(_ target: QuitTarget, _ rec: Recorder, headless: Bool = false) -> QuitCoordinator {
+        QuitCoordinator(target: target, headless: headless,
+                        ask: { rec.asked.append($0); return rec.answer($0) },
+                        reply: { rec.replies.append($0) })
+    }
+
+    /// AppKit 在 .terminateLater 期间跑的那种模式。
+    func spinModal(_ seconds: Double, until done: () -> Bool) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline, !done() {
+            if !RunLoop.main.run(mode: .modalPanel, before: Date().addingTimeInterval(0.02)) { usleep(5_000) }
+        }
+    }
+
+    final class Hits { var main = false; var actor = false; var after = false }
+
+    func quitCoordinatorFlows() {
+        print("— S05d 退出确认的流程：选「停下并退出」先叫停、等写完再放行（在 modal run loop 里也走得到），选「继续」照常跑")
+        // 和开界面时一样有 NSApplication（.prohibited：不进程序坞、不开窗口），NSModalPanelRunLoopMode 才是 common mode。
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        let hits = Hits()
+        DispatchQueue.main.async { hits.main = true }
+        Task { @MainActor in hits.actor = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { hits.after = true }
+        spinModal(3) { hits.main && hits.actor && hits.after }
+        check(hits.main && hits.actor && hits.after,
+              "modal panel 模式下主队列、MainActor 任务、asyncAfter 都跑得到（.terminateLater 期间等停下靠它们）")
+
+        // 真的 store、真的分析（合成色块 JPEG）。
+        let store = newStore()
+        let photoCount = 48
+        let folderA = makePhotoFolder("photos-s05d-a", count: photoCount, width: 1600, height: 1066)
+        let folderB = makePhotoFolder("photos-s05d-b", count: 30)
+        _ = store.switchSession(to: folderA)
+        let idle = Recorder()
+        check(coordinator(store, idle).shouldTerminate(reason: .user) == .terminateNow && idle.asked.isEmpty,
+              "没在跑、都存上了：直接退，不问")
+
+        let stop = Recorder()
+        let c1 = coordinator(store, stop)
+        store.runAnalysis()
+        // 等分析完几张再按 ⌘Q：核对的是「已经分析完的存好」，不是一张没跑就停。
+        spin(20) { (store.progressFraction ?? 0) > 0 || !store.isRunning }
+        let r1 = c1.shouldTerminate(reason: .user)
+        check(r1 == .terminateLater && stop.asked == [.askStop(.analysis)] && store.cancelRequested,
+              "分析中 ⌘Q、选「停下并退出」：叫停、回 .terminateLater（先不退）")
+        withExtendedLifetime(c1) { spinModal(30) { !stop.replies.isEmpty } }
+        let saved = store.progressText.split(separator: " ").dropFirst(2).first.flatMap { Int($0) } ?? -1
+        check(stop.replies == [true] && !store.isRunning && store.progressText.hasPrefix("已取消: 已保存"),
+              "停下、写完才放行退出（\(store.progressText)）")
+        let layer1 = store.sessionDir.appendingPathComponent("layer1_results.json")
+        let rows = (try? Data(contentsOf: layer1))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            .flatMap { $0["results"] as? [Any] }?.count ?? -1
+        check(saved > 0 && saved < photoCount && rows == saved,
+              "放行之前已经分析完的 \(saved) 张写进了 layer1_results.json（\(rows) 行，下次复用），没跑完的 \(photoCount - saved) 张下次再分析")
+
+        let keep = Recorder()
+        keep.answer = { _ in false }
+        store.runAnalysis()
+        let r2 = coordinator(store, keep).shouldTerminate(reason: .user)
+        check(r2 == .terminateCancel && keep.asked == [.askStop(.analysis)] && !store.cancelRequested,
+              "选「继续分析」：不退、不叫停")
+        spin(60) { !store.isRunning }
+        check(store.progressText.hasPrefix("完成") && keep.replies.isEmpty, "分析照常跑完（\(store.progressText)）")
+
+        _ = store.switchSession(to: folderB)
+        let system = Recorder()
+        store.runAnalysis()
+        let c3 = coordinator(store, system)  // AppDelegate 一直拿着它；这里也得拿着，不然等停下的那一拍找不到它
+        let r3 = c3.shouldTerminate(reason: .system)
+        check(r3 == .terminateLater && system.asked.isEmpty && store.cancelRequested, "注销 / 重启时分析在跑：不弹框，直接叫停")
+        withExtendedLifetime(c3) { spinModal(30) { !system.replies.isEmpty } }
+        check(system.replies == [true] && !store.isRunning, "停下保存完放行，不挡系统")
+
+        // 判决没存上（场次目录只读 = 写不进去，和盘满走同一条路）。
+        _ = store.switchSession(to: folderA)
+        if let id = store.items.first?.id {
+            let dir = store.sessionDir.path
+            _ = chmod(dir, 0o500)
+            store.setOverride(id, .reject)
+            check(store.persistError != nil, "只读场次目录：改判没存上，有红条")
+            let stay = Recorder()
+            stay.answer = { _ in false }
+            let r4 = coordinator(store, stay).shouldTerminate(reason: .user)
+            let askedUnsaved: Bool
+            if case .askUnsaved? = stay.asked.first { askedUnsaved = true } else { askedUnsaved = false }
+            check(r4 == .terminateCancel && stay.asked.count == 1 && askedUnsaved, "先重试一次还是没存上：问一句，选「不退出」就不退")
+            let anyway = Recorder()
+            check(coordinator(store, anyway).shouldTerminate(reason: .user) == .terminateNow && anyway.asked.count == 1,
+                  "选「仍然退出」：退")
+            let sys = Recorder()
+            check(coordinator(store, sys).shouldTerminate(reason: .system) == .terminateNow && sys.asked.isEmpty,
+                  "系统要退：不弹框（willTerminate 里还会再写一次）")
+            _ = chmod(dir, 0o755)
+            let fixed = Recorder()
+            check(coordinator(store, fixed).shouldTerminate(reason: .user) == .terminateNow && fixed.asked.isEmpty
+                  && store.persistError == nil, "腾出空间以后：退出前那次重试写上了，不问、直接退")
+        } else {
+            check(false, "分析完有照片（\(store.items.count) 张）")
+        }
+
+        // 假的 store：等不到、排队的下一张卡、再按一次 ⌘Q、停下后还没存上、无头。
+        let stuck = FakeTarget()
+        stuck.isRunning = true
+        let rs = Recorder()
+        let cs = coordinator(stuck, rs)
+        cs.userStopTimeout = 0.4
+        let start = Date()
+        check(cs.shouldTerminate(reason: .user) == .terminateLater, "停不下来的任务：先 .terminateLater")
+        check(cs.shouldTerminate(reason: .user) == .terminateCancel && rs.asked.count == 1,
+              "等的时候又按了一次 ⌘Q：不另起一轮、不再弹框")
+        withExtendedLifetime(cs) { spinModal(3) { !rs.replies.isEmpty } }
+        let waited = Date().timeIntervalSince(start)
+        check(rs.replies == [true] && waited >= 0.35 && waited < 2.5, String(format: "等满时限照样放行（%.2f s）", waited))
+
+        let queue = FakeTarget()
+        queue.isRunning = true
+        queue.importing = true
+        queue.queuedCardImports = 1
+        queue.onCancel = { t in
+            if t.cancels == 1 {
+                // 这张停下，排着的下一张接着开始导（换了一面新的旗子）。
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { t.cancelRequested = false; t.importing = true }
+            } else {
+                t.isRunning = false
+                t.importing = false
+            }
+        }
+        let rq = Recorder()
+        let cq = coordinator(queue, rq)
+        _ = cq.shouldTerminate(reason: .user)
+        withExtendedLifetime(cq) { spinModal(5) { !rq.replies.isEmpty } }
+        check(rq.asked == [.askStop(.cardImport(queued: 1))] && queue.cancels == 2 && rq.replies == [true],
+              "导卡时退出：排着的下一张刚开始也叫停（叫停 \(queue.cancels) 次），都停了才退")
+
+        let both = FakeTarget()
+        both.isRunning = true
+        both.persistError = "判决没存上（盘满了）"
+        both.onCancel = { t in t.isRunning = false }
+        let rb = Recorder()
+        rb.answer = { if case .askStop = $0 { return true } else { return false } }
+        let cb = coordinator(both, rb)
+        _ = cb.shouldTerminate(reason: .user)
+        withExtendedLifetime(cb) { spinModal(3) { !rb.replies.isEmpty } }
+        check(rb.asked == [.askStop(.other), .askUnsaved("判决没存上（盘满了）")] && rb.replies == [false],
+              "又在跑又没存上：先问停不停，停完还写不上再问一句，选「不退出」就不退")
+
+        let headlessTarget = FakeTarget()
+        headlessTarget.isRunning = true
+        let rh = Recorder()
+        check(coordinator(headlessTarget, rh, headless: true).shouldTerminate(reason: .user) == .terminateNow
+              && rh.asked.isEmpty && headlessTarget.cancels == 0, "无头：直接退，不问、不叫停")
+
+        // 装在 app 上的那一个：无头时一律直接退（弹框还有第二道闸 QuitAlert.mayShow）。前提不对就不调，免得真弹框。
+        if AppRuntime.headless && !QuitAlert.mayShow {
+            AppDelegate.batch = store
+            store.runAnalysis()
+            let reply = AppDelegate().applicationShouldTerminate(NSApplication.shared)
+            check(reply == .terminateNow && !store.cancelRequested, "AppDelegate 在无头进程里：直接退、不叫停、不弹框")
+            check(QuitAlert.ask(.askStop(.analysis)), "QuitAlert 在无头进程里不弹框，直接当成退出那一边")
+            spin(60) { !store.isRunning }
+            AppDelegate.batch = nil
+        } else {
+            check(false, "自检进程是无头的（AppRuntime.headless），QuitAlert 不会弹框")
         }
     }
 
