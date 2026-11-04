@@ -103,7 +103,10 @@ enum MCPReadModel {
         out["client_pick_count"] = s.clientPickCount
         // 「XMP 待更新」（状态栏那一句）：LR / C1 看的是 XMP，AI 改完判决它就过期了；没写过 XMP 时 stale_count 一直是 0
         let xmpStale = s.xmpStaleCount
-        out["xmp"] = ["stale_count": xmpStale, "written": s.xmpEverWritten] as [String: Any]
+        var xmp: [String: Any] = ["stale_count": xmpStale, "written": s.xmpEverWritten]
+        // 上次写进 XMP 的时间（带时区的 ISO 8601，xmp_state.json 里记的，不是文件 mtime）：旧版本写的没记这个 = 不报
+        if let at = s.xmpLastWritten { xmp["last_written"] = instantFormatter.string(from: at) }
+        out["xmp"] = xmp
 
         var thresholds: [String: Any] = ["sharpness": r3(s.sharpnessThreshold)]
         thresholds["clip_pct"] = r3(s.exposureThreshold * 100)

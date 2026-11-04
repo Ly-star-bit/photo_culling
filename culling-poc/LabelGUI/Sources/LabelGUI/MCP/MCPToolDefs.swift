@@ -144,7 +144,7 @@ enum MCPToolDefs {
      "annotations":"$READ"},
 
     {"name":"cull_session_overview","title":"场次概览",
-     "description":"app 当前打开的那一场的选片概览：精选/可用/废片（pick/usable/reject）各多少张、废片理由计数、当前阈值和放宽建议、章节列表和每章的计数、场（scene，按快门间隔切开的一串连拍）和近似重复组（near_duplicate）的统计、还没处理的场、多机身和对时偏移、XMP 过期了几张（xmp.stale_count：上次写 XMP 之后判决、星级或客户选中变了的，Lightroom / C1 里还是旧的，改完判决要提醒用户在 app 里重写；xmp.written 为 false 是这一场还没写过 XMP）、警告、app 是否正在分析。读的是 app 内存里的状态（含还没存盘的改动），和窗口里看到的一致。要看具体照片用 cull_list_photos。",
+     "description":"app 当前打开的那一场的选片概览：精选/可用/废片（pick/usable/reject）各多少张、废片理由计数、当前阈值和放宽建议、章节列表和每章的计数、场（scene，按快门间隔切开的一串连拍）和近似重复组（near_duplicate）的统计、还没处理的场、多机身和对时偏移、XMP 过期了几张（xmp.stale_count：上次写 XMP 之后判决、星级或客户选中变了的，Lightroom / C1 里还是旧的，改完判决要提醒用户在 app 里重写；xmp.written 为 false 是这一场还没写过 XMP；xmp.last_written 是上次写进 XMP 的时间，旧版本写的没记就没有这个键）、警告、app 是否正在分析。读的是 app 内存里的状态（含还没存盘的改动），和窗口里看到的一致。要看具体照片用 cull_list_photos。",
      "inputSchema":{"type":"object","properties":{"session":"$SESSION"},"required":["session"],"additionalProperties":false},
      "annotations":"$READ"},
 

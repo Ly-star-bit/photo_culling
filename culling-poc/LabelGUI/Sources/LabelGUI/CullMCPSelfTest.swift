@@ -68,6 +68,12 @@ enum CullMCPSelfTest {
         return (xmp["stale_count"] as? Int, xmp["written"] as? Bool, warned)
     }
 
+    /// 概览 xmp 里的 last_written（没有这个键 = nil）。
+    static func lastWritten(_ store: BatchStore) -> Any? {
+        let ov = MCPReadModel.overview(store, session: store.sessionDir.lastPathComponent)
+        return (ov["xmp"] as? [String: Any])?["last_written"]
+    }
+
     // MARK: - 1. 概览的 xmp（XMP 过期）
 
     /// 没写过 XMP → written false、stale 0、没有 warning；放一份 xmp_state.json（2 张记成写过、判决和现在的一样，
@@ -104,9 +110,41 @@ enum CullMCPSelfTest {
         let hint = warnings.first { $0["code"] as? String == "xmp_stale" }?["hint"] as? String ?? ""
         check(hint.contains("「XMP 待更新 \(n - 3) 张 · 点这里重新写入」") && !hint.contains("XMP 过期"),
               "xmp_stale 的 hint 用状态栏上真的按钮名：\(hint)")
+        // last_written 记在 xmp_state.json 里（writtenAt），不拿文件 mtime 顶：老版本写的那份没有 → 不报
+        check(lastWritten(reopened) == nil, "老版本写的 xmp_state.json（没有 writtenAt）：xmp 里没有 last_written")
+        // 这一版写的带 writtenAt（JSONEncoder 默认的 Date：从 2001-01-01 起的秒数）→ 概览报带时区的 ISO 8601
+        let at = Date(timeIntervalSinceReferenceDate: 815_000_000)
+        var stamped = state
+        stamped["writtenAt"] = at.timeIntervalSinceReferenceDate
+        if let data = try? JSONSerialization.data(withJSONObject: stamped) { try? data.write(to: path, options: .atomic) }
+        let withTime = lastWritten(open()) as? String
+        let wantTime = MCPReadModel.instantFormatter.string(from: at)
+        check(withTime == wantTime, "xmp_state.json 记了 writtenAt：last_written = \(wantTime)（实际 \(withTime ?? "nil")）")
         try? FileManager.default.removeItem(at: path)
         let cleared = overviewXMP(open())
         check(cleared.stale == 0 && cleared.written == false && !cleared.warned, "删掉 xmp_state.json 以后回到没写过：\(cleared)")
+        xmpWrittenAtChecks(check)
+    }
+
+    /// 真写一次 XMP（数据目录里造的假拍摄，照 FileSafetySelfTest.makeShoot；照片旁边写 .xmp）：写之前没有 last_written，
+    /// 写完是刚才的时间，重开这一场读得回来同一个。
+    static func xmpWrittenAtChecks(_ check: Check) {
+        let dir = appDataDir.appendingPathComponent("cull-mcp-xmp-shoot")
+        let fakes = ["x1", "x2"].map { FileSafetySelfTest.Fake(id: $0, raw: $0 + ".ARW") }
+        let store = FileSafetySelfTest.makeShoot(dir, fakes)
+        check(store.items.count == 2 && lastWritten(store) == nil, "假拍摄还没写过 XMP：没有 last_written（\(store.items.count) 张）")
+        let before = Date()
+        store.exportXMP(.all)
+        FileSafetySelfTest.wait(store)
+        let text = lastWritten(store) as? String
+        let parsed = text.flatMap { MCPReadModel.instantFormatter.date(from: $0) }
+        let sinceStart = parsed.map { $0.timeIntervalSince(before) } ?? -99
+        let untilNow = parsed.map { $0.timeIntervalSinceNow } ?? 99
+        check(sinceStart > -2 && untilNow < 2 && store.xmpStaleCount == 0,
+              "写完 XMP：last_written 是刚才那次（\(text ?? "nil")，\(store.progressText)）")
+        let reopened = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
+        reopened.switchSession(to: dir)
+        check(text != nil && lastWritten(reopened) as? String == text, "重开这一场：last_written 读回来是同一个时间")
     }
 
     // MARK: - 2. 导入客户选择（cull_import_client_picks 用的那几样）

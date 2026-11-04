@@ -711,6 +711,8 @@ final class BatchStore: ObservableObject {
     var xmpStaleCount: Int { derived.xmpStaleCount }
     /// 这一场写过 XMP 没有（xmp_state.json 在）：没写过时 xmpStaleCount 永远是 0，MCP 的概览要分得清「没过期」和「没写过」。
     var xmpEverWritten: Bool { xmpState != nil }
+    /// 上次写进 XMP 的时间（XMPState.writtenAt）：没写过、旧版本写的那份没记 = nil。
+    var xmpLastWritten: Date? { xmpState?.writtenAt }
     var clientPickCount: Int { derived.clientPickCount }
     var clientPickRejectCount: Int { derived.clientPickRejectCount }
     /// 「废片移到废纸篓」默认真会移的张数：废片里去掉客户选中的（客户点名要精修的照片不扔）、拼图里在用的
@@ -767,6 +769,10 @@ final class BatchStore: ObservableObject {
         var foreignRechecked: Bool?
         /// 上次写 XMP 时认出来的同名冲突（几张照片共用一个 .xmp，整组没写）。旧版本没有这个字段 = nil。
         var sharedSidecar: Set<String>?
+        /// 上次写 XMP 真写进去（或盘上本来就对）至少一张的时间：exportXMP 写完时记，只碰到别人的 sidecar、一张都没写进去
+        /// 的那次不改它；复查别人的 sidecar（recheckForeignSidecars）、挪场次重写这份文件都原样带过去 —— 所以不拿文件的
+        /// mtime 当它。旧版本写的没有这个字段 = nil（MCP 概览就不报 last_written）。
+        var writtenAt: Date?
     }
     private var xmpState: XMPState?
     private var xmpStatePath: URL { sessionDir.appendingPathComponent("xmp_state.json") }
@@ -4824,6 +4830,7 @@ final class BatchStore: ObservableObject {
                         state.foreign.remove(id)
                     }
                     state.sharedSidecar = sharedIDs.isEmpty ? nil : sharedIDs
+                    if !writtenIds.isEmpty { state.writtenAt = Date() }
                     self.saveXMPState(state)
                 }
                 // 写的这段时间里判决可能又变了：按现在的判决重数一遍。
