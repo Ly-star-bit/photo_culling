@@ -102,6 +102,8 @@ enum GridExifImportSelfTest {
         t.check(second.ids == ["u1"], "多选 按完数字键清掉选中：接着方向键 + 数字改的是焦点那张，不是早先那几张",
                 "得到 \(second.ids)")
 
+        refocusCases(t)
+
         let pruneRows: [(String, Set<String>, [String], Set<String>)] = [
             ("⌘A 后切到「废片」筛选：精选、可用的选中剪掉", ["p1", "u1", "r1", "r2"], ["r1", "r2"], ["r1", "r2"]),
             ("换章（[ ] / 时间轴）：上一章的选中剪掉", ["c1a", "c1b"], ["c2a", "c2b"], []),
@@ -119,6 +121,51 @@ enum GridExifImportSelfTest {
         let restore = GridSelectionRules.changedNotice(count: 2, verdict: nil) ?? "nil"
         t.check(restore == "已改 2 张 → 恢复自动 · ⌘Z 撤销", "多选 按 0 恢复自动也提示", "得到 \(restore)")
         t.check(GridSelectionRules.changedNotice(count: 1, verdict: .pick) == nil, "多选 只改一张不提示")
+    }
+
+    /// 多选改判以后焦点落在哪（GridSelectionRules.refocus，数字键和批量栏共用）。
+    private static func refocusCases(_ t: Tally) {
+        typealias R = GridSelectionRules.Refocus
+        // (说明, 焦点, 这一下改了的, 改判前看得见的（顺序）, 改判后看得见的, 期望)
+        let rows: [(String, String?, [String], [String], [String], R)] = [
+            ("「可用」筛选下 ⇧选 A–D 按 1：四张都藏了 → 落到没改的 E（以前焦点留在藏起的 A 上）",
+             "A", ["A", "B", "C", "D"], ["A", "B", "C", "D", "E", "F"], ["E", "F"], .move("E")),
+            ("按判决分区时选中的一串跳去精选区 → 落到原来后面没改的 E，不跟着落到那一串的第二张 B",
+             "A", ["A", "B", "C", "D"], ["p1", "A", "B", "C", "D", "E", "r1"], ["A", "B", "C", "D", "p1", "E", "r1"], .move("E")),
+            ("按判决分区、选中的一串改完还在原来两张没改的照片之间 → 不动",
+             "A", ["A", "B", "C", "D"], ["p1", "A", "B", "C", "D", "E"], ["p1", "A", "B", "C", "D", "E"], .stay),
+            ("焦点没选、还看得见 → 不动", "F", ["A", "B", "C", "D"], ["A", "B", "C", "D", "E", "F"], ["E", "F"], .stay),
+            ("焦点没选、却跟着整场定完叠掉（只看待处理）→ 落到下一场第一张",
+             "t3", ["t1", "t2"], ["t1", "t2", "t3", "u1", "u2"], ["u1", "u2"], .move("u1")),
+            ("「保留选中」：焦点那张废了被筛掉、留下的 B 一起改了 → 落到没改的 X",
+             "A", ["A", "B"], ["A", "B", "X"], ["B", "X"], .move("X")),
+            ("一起改了的那几张之外没有看得见的 → 退回去落在一起改了、还看得见的那张",
+             "A", ["A", "B"], ["A", "B"], ["B"], .move("B")),
+            ("⌘A 以后全被筛掉、一张都没得落 → 清掉焦点（下一次数字键什么都不改）",
+             "A", ["A", "B"], ["A", "B"], [], .clear),
+            ("改焦点那张：唯一一张被筛掉 → 清掉焦点（以前留在看不见的它上面）", "p1", ["p1"], ["p1"], [], .clear),
+            ("改焦点那张：位置没变 → 不动", "a2", ["a2"], ["a1", "a2", "a3"], ["a1", "a2", "a3"], .stay),
+            ("没有焦点 → 不动", nil, ["A"], ["A", "B"], ["B"], .stay),
+        ]
+        for (name, focused, changed, before, after, want) in rows {
+            let got = GridSelectionRules.refocus(focused: focused, changed: changed, before: before, after: after)
+            t.check(got == want, "多选 改完焦点 " + name, "得到 \(got)")
+        }
+
+        // 审查报告的情形连起来走一遍：按 1 改 A–D，再按 3 —— 改的是看得见的 E，不是藏起来的 A。
+        let visible = ["A", "B", "C", "D", "E", "F"]
+        let first = GridSelectionRules.digitTargets(selected: ["A", "B", "C", "D"], visible: visible, focused: "A")
+        let after = ["E", "F"]
+        var focus: String? = "A"
+        switch GridSelectionRules.refocus(focused: focus, changed: first.ids, before: visible, after: after) {
+        case .stay: break
+        case .clear: focus = nil
+        case .move(let next): focus = next
+        }
+        let afterClear: Set<String> = first.clearSelection ? [] : ["A", "B", "C", "D"]
+        let second = GridSelectionRules.digitTargets(selected: afterClear, visible: after, focused: focus)
+        t.check(second.ids == ["E"], "多选 ⇧选 A–D 按 1 藏掉以后再按 3：改的是看得见的 E，不是藏起来的 A",
+                "得到 \(second.ids)")
     }
 
     // MARK: - 水印页导入的 RAW+JPG 配对（S26a）
