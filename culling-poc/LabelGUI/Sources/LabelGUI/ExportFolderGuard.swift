@@ -26,15 +26,26 @@ enum ExportFolderGuard {
     /// 照片所在的文件夹是 app 自己的输出文件夹（路径里有「导出JPG」「水印导出」这些分析跳过的名字）时，拍摄文件夹是
     /// 最上面那一段的上一级（S/导出JPG/精华、S/水印导出、S/导出JPG/水印导出 → S）：这些文件夹分析时根本不扫，
     /// 当成拍摄文件夹会把 S/导出JPG/带水印 误拦下、还说「拍摄文件夹「导出JPG」」；改成 S 以后 S/交付 照样挡住。
-    /// 批量页那一场原样查，不推。
+    /// 点开头的文件夹不往上推（它的上一级不一定是一场：/Volumes/.timemachine/… 推成 /Volumes 会把所有外置盘都拦了），
+    /// 只在它落在别的候选（批量页那一场、别的照片文件夹）分析跳过的子树里时去掉（S/.cache/x 有 S 就不用再查）。
+    /// 批量页那一场原样查，不推、不去掉。
     static func watermarkShoots(batch: URL?, photos: [URL]) -> [URL] {
         var dirs: [URL] = []
+        var fromPhotos: [Bool] = []
         var seen = Set<String>()
-        for dir in (batch.map { [$0] } ?? []) + photos.map({ photoShootRoot($0.deletingLastPathComponent()) })
-        where seen.insert(dir.standardizedFileURL.path).inserted {
+        let batchDirs: [(URL, Bool)] = batch.map { [($0, false)] } ?? []
+        let photoDirs: [(URL, Bool)] = photos.map { (photoShootRoot($0.deletingLastPathComponent()), true) }
+        for (dir, isPhoto) in batchDirs + photoDirs where seen.insert(dir.standardizedFileURL.path).inserted {
             dirs.append(dir)
+            fromPhotos.append(isPhoto)
         }
-        return dirs
+        var kept: [URL] = []
+        for (index, dir) in dirs.enumerated() {
+            let covered: Bool = fromPhotos[index] && hasHiddenSegment(dir)
+                && dirs.indices.contains { $0 != index && skipped(dir, under: dirs[$0]) }
+            if !covered { kept.append(dir) }
+        }
+        return kept
     }
 
     /// 照片所在的文件夹往上推到拍摄文件夹：路径里最上面那一段分析跳过的子文件夹名（ImageLoader.excludedSubfolders，
@@ -47,6 +58,31 @@ enum ExportFolderGuard {
             if ImageLoader.excludedSubfolders.contains(url.lastPathComponent) { root = parent }
             guard parent.path != url.path, url.path != "/" else { return root }
             url = parent
+        }
+    }
+
+    /// 解开软链接以后路径里有点开头的一段（去掉别的候选只可能是因为这个：分析跳过的名字已经在 photoShootRoot 推掉了）。
+    /// 先粗筛，几百个照片文件夹两两 stat 不划算（选完目录、点导出都在主线程上）。
+    private static func hasHiddenSegment(_ dir: URL) -> Bool {
+        let parts = dir.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+        return parts.contains { $0.hasPrefix(".") && $0 != "." && $0 != ".." }
+    }
+
+    /// `folder` 在 `shoot` 里面、而且落在它分析跳过的子树里（中间有一段是排除的子文件夹名或点开头）：`shoot` 的分析扫不到它。
+    /// 和 OriginalsCopier.insideAnalysis 同一种往上走法（设备号 + inode）；stat 不到 `shoot`、不在里面 = false。
+    private static func skipped(_ folder: URL, under shoot: URL) -> Bool {
+        var root = stat()
+        guard stat(shoot.path, &root) == 0 else { return false }
+        var url = folder.resolvingSymlinksInPath().standardizedFileURL
+        var below: [String] = []
+        while true {
+            var here = stat()
+            if stat(url.path, &here) == 0, here.st_dev == root.st_dev, here.st_ino == root.st_ino {
+                return below.contains { ImageLoader.excludedSubfolders.contains($0) || $0.hasPrefix(".") }
+            }
+            guard url.path != "/" else { return false }
+            below.append(url.lastPathComponent)
+            url = url.deletingLastPathComponent()
         }
     }
 

@@ -4,7 +4,8 @@ import Foundation
 /// （「== 拼图、水印导出不写进拍摄文件夹」那一组）。全在 `dir`（数据目录下的临时目录）里建合成的拍摄文件夹，不读真照片：
 /// - 判断本身：拍摄文件夹本身、里面的「交付」（还没建的也算）、指过去的软链接、经过软链接进去、/private 别名、大小写不同
 ///   → 拦；「水印导出」「拼图导出」「导出JPG/精华」、点开头的隐藏文件夹、拍摄文件夹的上一级、外面、拍摄文件夹不存在 → 不拦；
-///   「水印导出」确实在分析跳过的名单里；水印页要查的文件夹 = 批量页那一场 + 照片所在的文件夹、去重；
+///   「水印导出」确实在分析跳过的名单里；水印页要查的文件夹 = 批量页那一场 + 照片所在的文件夹、去重（照片在「导出JPG」
+///   「水印导出」里推到外面那一场；在别的候选的「.cache」里去掉，没有候选装着的点开头文件夹不往上推）；
 ///   最近场次只提醒（里面的提醒，外面的、分析跳过的子文件夹不提醒）；
 /// - 水印页 exportAll：输出目录 = 照片所在的文件夹、里面还没建的「交付/客户A」、批量页那一场里面 → 一张不写、目录不建、
 ///   给「导出到 水印导出/」（不传批量页那一场的对照组照常导）；点了就导进 <拍摄文件夹>/水印导出/、原片不动；面板选到里面
@@ -106,6 +107,20 @@ enum ExportFolderSelfTest {
         check(besideExport, "　…… 输出到「导出JPG」本身、里面的「导出JPG/带水印」→ 不拦", "")
         let deliverHit = ExportFolderGuard.blockingShoot(sub("交付"), among: fromExport)
         check(samePath(deliverHit, shoot), "　…… 输出到那一场的「交付」→ 照样拦，点名的是那一场", deliverHit?.lastPathComponent ?? "nil")
+        // 照片在点开头的文件夹里：落在别的候选分析跳过的子树里就去掉；不往上推（上一级不一定是一场）
+        func paths(_ urls: [URL]) -> [String] { urls.map(\.standardizedFileURL.path) }
+        let inHidden = ExportFolderGuard.watermarkShoots(batch: shoot, photos: [sub(".cache/q.jpg")])
+        check(paths(inHidden) == paths([shoot]), "照片在那一场的「.cache」里 → 只查那一场（.cache 不算一场）",
+              "\(inHidden.map(\.lastPathComponent))")
+        let hiddenBeside: Bool = !hit(sub(".cache/带水印"), inHidden) && hit(sub("交付"), inHidden)
+        check(hiddenBeside, "　…… 输出「.cache/带水印」→ 不拦，「交付」照样拦", "")
+        let byPhoto = ExportFolderGuard.watermarkShoots(batch: nil, photos: [sub("a.jpg"), sub(".cache/r.jpg")])
+        check(paths(byPhoto) == paths([shoot]), "　…… 批量页没开、同一批里有那一场根目录的照片 → 也去掉「.cache」",
+              "\(byPhoto.map(\.lastPathComponent))")
+        let loose = dir.appendingPathComponent(".藏/S2")
+        let notWidened = ExportFolderGuard.watermarkShoots(batch: outside, photos: [loose.appendingPathComponent("r.jpg")])
+        check(paths(notWidened) == paths([outside, loose]), "照片在「.藏/S2」、没有别的候选装着它 → 照样当一场查，不推成上一级",
+              "\(notWidened.map(\.lastPathComponent))")
 
         let sessions = [entry("别处那一场", other), entry("婚礼A", shoot)]
         let note: String = ExportFolderGuard.sessionReminder(sub("交付"), sessions: sessions, what: "拼图") ?? ""
