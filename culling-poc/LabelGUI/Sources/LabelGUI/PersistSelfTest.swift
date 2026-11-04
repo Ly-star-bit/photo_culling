@@ -25,6 +25,8 @@ enum PersistSelfTest {
         }
         let t = PersistSelfTestHarness(dataDir: appDataDir, fixture: fixture)
         t.removeSessionKeepsVerdicts()
+        t.corruptFilesKept()
+        t.unreadableFileRefused()
         print("persist-selftest: \(t.passed) 通过 \(t.failed) 失败")
         exit(t.failed == 0 ? 0 : 1)
     }
@@ -156,5 +158,101 @@ final class PersistSelfTestHarness {
         check(store.overrides[id] == .reject && store.clientPicks.contains(id),
               "重新打开这个文件夹：改判、客户选中原样回来")
         check(store.lastError?.contains("移除") == true, "提示预览清掉了、怎么补（也涵盖「移除过」）：\(store.lastError ?? "nil")")
+    }
+
+    // MARK: - S02a 判决、客户选中、对时、确认表、阈值读坏了
+
+    func read(_ url: URL) -> Data? { try? Data(contentsOf: url) }
+
+    /// 场次目录里 `<stem>.corrupt-*` 的那几份（挪开的原件）。
+    func corruptCopies(of name: String, in dir: URL) -> [URL] {
+        let stem = (name as NSString).deletingPathExtension + ".corrupt-"
+        let names = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
+        return names.filter { $0.hasPrefix(stem) }.sorted().map { dir.appendingPathComponent($0) }
+    }
+
+    func corruptFilesKept() {
+        print("— S02a 判决、客户选中、对时、确认表、阈值读坏了：挪开保住原件、提示，下一次保存不盖掉")
+        freshIndex()
+        let s = makeSession("s02a"), other = makeSession("s02a-other")
+        let garbage: [(String, Data)] = [
+            ("overrides.json", Data("{\"DSCF7207\": \"精选\", \"DSCF72".utf8)),  // 截断
+            ("accepted.json", Data("[\"DSCF7207\"]".utf8)),                       // 好的：跟着 overrides.json 一起挪
+            ("client_picks.json", Data()),                                         // 零长度
+            ("body_offsets.json", Data("[1, 2, 3]".utf8)),                         // 类型不对
+            ("thresholds.json", Data("{\"sharpness\": \"高\"}".utf8)),
+            ("proof_sheets.json", Data("not json".utf8)),
+        ]
+        for (name, data) in garbage { try? data.write(to: s.dir.appendingPathComponent(name)) }
+        let store = newStore()
+        store.switchSession(to: s.folder)
+        guard let id = store.items.first?.id else {
+            check(false, "fixture 读进来了")
+            return
+        }
+        for (name, data) in garbage where name != "proof_sheets.json" {
+            let aside = corruptCopies(of: name, in: s.dir)
+            check(aside.count == 1 && read(aside[0]) == data,
+                  "\(name) 原件挪成 \(aside.first?.lastPathComponent ?? "—")，内容一字不差")
+        }
+        let pair = corruptCopies(of: "overrides.json", in: s.dir).first?.lastPathComponent.dropFirst("overrides".count)
+        let acceptedPair = corruptCopies(of: "accepted.json", in: s.dir).first?.lastPathComponent.dropFirst("accepted".count)
+        check(pair != nil && pair == acceptedPair, "overrides.json 和 accepted.json 挪开用同一个时间（好配对）")
+        check(store.overrides.isEmpty && store.clientPicks.isEmpty && store.bodyOffsets.isEmpty, "这几样从空的开始")
+        let notice = store.dataNotice ?? ""
+        let named = ["overrides.json", "client_picks.json", "body_offsets.json", "thresholds.json"].allSatisfy(notice.contains)
+        check(named && notice.contains("XMP"), "提示里点名了这几个文件、说了先别写 XMP")
+        let rewritten = read(s.dir.appendingPathComponent("thresholds.json"))
+            .flatMap { try? JSONDecoder().decode(BatchStore.ThresholdState.self, from: $0) }
+        check(rewritten?.faceQuality == BatchStore.legacyThresholds.faceQuality && store.faceQualityThreshold == 0,
+              "thresholds.json 按原来的回落顺序重定了一份（有分析结果、没有「上次用的」→ 升级前的默认）")
+
+        store.setOverride(id, .reject)
+        store.setClientPicks([id])
+        let saved = read(s.dir.appendingPathComponent("overrides.json"))
+            .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }
+        check(saved == [id: Verdict.reject.rawValue], "改判以后 overrides.json 只写了这一条")
+        check(read(corruptCopies(of: "overrides.json", in: s.dir)[0]) == garbage[0].1, "挪开的原件没被这次保存碰到")
+
+        store.recordProofSheet(ProofSheet(id: "selftest-1", date: Date(), scope: "仅精选", ids: [id]))
+        let sheetAside = corruptCopies(of: "proof_sheets.json", in: s.dir)
+        check(sheetAside.count == 1 && read(sheetAside[0]) == garbage[5].1 && store.proofSheets.map(\.id) == ["selftest-1"],
+              "确认表记录：解不开的挪开，新记录只有这一张")
+
+        // .bak：重新打开以后第一次改写前留一份打开时的样子，一次打开只备份一次
+        let atOpen = read(s.dir.appendingPathComponent("overrides.json"))
+        store.switchSession(to: other.folder)
+        store.switchSession(to: s.folder)
+        store.setOverride(id, .pick)
+        let bak = s.dir.appendingPathComponent("overrides.json.bak")
+        check(atOpen != nil && read(bak) == atOpen, "重新打开后第一次改判前留了 overrides.json.bak（打开时那一版）")
+        store.setOverride(id, .usable)
+        check(read(bak) == atOpen, ".bak 一次打开只备份一次（第二次改判不覆盖它）")
+        check(store.overrides[id] == .usable && store.dataNotice != nil, "改判照常；提醒留着等用户点掉")
+    }
+
+    func unreadableFileRefused() {
+        print("— S02a 读不出来的（权限）：不挪、不覆盖，这一场先不存")
+        freshIndex()
+        let s = makeSession("s02a-locked")
+        let url = s.dir.appendingPathComponent("overrides.json")
+        let original = Data("{\"DSCF7207\":\"废片\"}".utf8)
+        try? original.write(to: url)
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: url.path)
+        defer { try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path) }
+        let store = newStore()
+        store.switchSession(to: s.folder)
+        guard let id = store.items.first?.id else {
+            check(false, "fixture 读进来了")
+            return
+        }
+        check(store.dataNotice?.contains("读不出来") == true && corruptCopies(of: "overrides.json", in: s.dir).isEmpty,
+              "提示读不出来、没挪：\(store.dataNotice ?? "nil")")
+        store.setOverride(id, .pick)
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+        check(read(url) == original, "改判没把读不出来的原件盖掉")
+        store.switchSession(to: makeSession("s02a-locked-other").folder)
+        store.switchSession(to: s.folder)
+        check(store.overrides["DSCF7207"] == .reject, "权限恢复后重新打开：原来的改判读回来了")
     }
 }

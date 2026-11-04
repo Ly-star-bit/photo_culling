@@ -346,23 +346,52 @@ final class BatchStore: ObservableObject {
     /// 的默认值，全新的场次用「标准」。命令行 --analyze 不经过 BatchStore，分析前也先调它，和界面一致。
     @discardableResult
     nonisolated static func sessionThresholds(sessionDir: URL, dataDir: URL) -> ThresholdState {
-        if let own = readThresholds(sessionDir) { return own }
+        sessionThresholdsChecked(sessionDir: sessionDir, dataDir: dataDir).state
+    }
+
+    /// 同上，另外报一句这一场的 thresholds.json 出了什么事（nil = 没事）。以前解不开就悄悄换成「上次用的」并写回去，
+    /// 这一场的自动判决跟着变、原件也没了（审查 S02）：现在解不开的先挪成 thresholds.corrupt-<时间>.json，再照原来的
+    /// 回落顺序定一份；读不出来、挪不开的照样回落，但不写回去。
+    nonisolated static func sessionThresholdsChecked(sessionDir: URL, dataDir: URL) -> (state: ThresholdState, notice: String?) {
+        let ownURL = sessionDir.appendingPathComponent("thresholds.json")
+        var problem: String?
+        var writable = true
+        switch SessionFiles.read(ThresholdState.self, at: ownURL) {
+        case .ok(let own): return (own, nil)
+        case .missing: break
+        case .corrupt(let moved?):
+            problem = "阈值文件 thresholds.json 解不开（被手改过或写坏了），原件已挪成 \(moved.lastPathComponent)"
+        case .corrupt(nil):
+            problem = "阈值文件 thresholds.json 解不开、也挪不开（先不写回去）"
+            writable = false
+        case .unreadable(let why):
+            problem = "阈值文件 thresholds.json 读不出来（\(why)，先不写回去）"
+            writable = false
+        }
         let fm = FileManager.default
         let analyzed = ["layer1_results.json", "manifest.json"].contains {
             fm.fileExists(atPath: sessionDir.appendingPathComponent($0).path)
         }
-        let state = readThresholds(dataDir) ?? (analyzed ? legacyThresholds : freshThresholds)
-        if let data = try? JSONEncoder().encode(state) {
-            try? data.write(to: sessionDir.appendingPathComponent("thresholds.json"), options: .atomic)
+        let lastUsed = readThresholds(dataDir)
+        let state = lastUsed ?? (analyzed ? legacyThresholds : freshThresholds)
+        if writable, let data = try? JSONEncoder().encode(state) {
+            SessionFiles.writeLogged(data, to: ownURL)
         }
-        return state
+        guard let problem else { return (state, nil) }
+        let fallback = lastUsed != nil ? "上次用的阈值" : (analyzed ? "升级前的默认阈值" : "「标准」预设")
+        return (state, problem + "，这一场先按\(fallback)判：判决可能和上次不一样，看一眼右侧的滑杆")
     }
 
     private func loadThresholds() {
         // 没开文件夹（sessions/default）不落盘，和 scheduleThresholdSave 一样。
-        let state = photoDir != nil
-            ? Self.sessionThresholds(sessionDir: sessionDir, dataDir: dataDir)
-            : Self.readThresholds(dataDir) ?? Self.freshThresholds
+        let state: ThresholdState
+        if photoDir != nil {
+            let checked = Self.sessionThresholdsChecked(sessionDir: sessionDir, dataDir: dataDir)
+            state = checked.state
+            if let notice = checked.notice { addDataNotice(sessionLabel + notice) }
+        } else {
+            state = Self.readThresholds(dataDir) ?? Self.freshThresholds
+        }
         batchingThresholds = true
         sharpnessThreshold = state.sharpness
         exposureThreshold = state.exposure
@@ -381,7 +410,8 @@ final class BatchStore: ObservableObject {
         thresholdSaveTask = Task { [targets] in
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled, let data = try? JSONEncoder().encode(state) else { return }
-            for url in targets { try? data.write(to: url, options: .atomic) }
+            // 写不上只记日志：下次打开按「上次用的」打底，丢的只是这一次拖的滑杆（审查 S01）。
+            for url in targets { SessionFiles.writeLogged(data, to: url) }
         }
     }
 
@@ -1330,6 +1360,56 @@ final class BatchStore: ObservableObject {
 
     private var overridesPath: URL { sessionDir.appendingPathComponent("overrides.json") }
 
+    // MARK: 场次文件读坏了（审查 S02）
+
+    /// 场次里的文件读坏了、已经挪开保住原件：批量页顶上一条橙色提醒，用户自己点掉才没（像 importNotice）。不放
+    /// lastError：switchSession 读完这些文件以后会用「文件夹不存在」「预览已清理」改写它，分析也会清它。
+    @Published var dataNotice: String?
+
+    /// 场次里那几份整份重写的文件。
+    enum PersistFile: CaseIterable {
+        case overrides, clientPicks, bodyOffsets
+
+        var label: String {
+            switch self {
+            case .overrides: return "判决"
+            case .clientPicks: return "客户选中"
+            case .bodyOffsets: return "机身对时"
+            }
+        }
+    }
+
+    /// 原件在、却读不出来（或者解不开又挪不开）的：这一场不写它 —— 拿内存里的空的去盖，原件就没了。重新打开这一场再读。
+    private var persistRefused: Set<PersistFile> = []
+    /// 这次打开这一场以后已经备份过（<名字>.bak）的文件。
+    private var backedUpPaths: Set<String> = []
+
+    /// 加一条读坏文件的提醒（几场、几个文件各有问题时攒着，最多 4 条）。
+    func addDataNotice(_ text: String) {
+        var lines = dataNotice.map { $0.components(separatedBy: "\n") } ?? []
+        lines.append(text)
+        dataNotice = lines.suffix(4).joined(separator: "\n")
+    }
+
+    /// 提醒里说是哪一场。
+    private var sessionLabel: String { photoDir.map { "「\($0.lastPathComponent)」" } ?? "" }
+
+    /// 读坏文件那条提醒的尾巴：在哪个目录、为什么先别写 XMP。
+    private var corruptNoticeTail: String {
+        "。先别写 XMP：现在是自动判决，写进去会盖掉 LR 里的星级（文件在 \(sessionDir.path)）"
+    }
+
+    private func refusePersist(_ file: PersistFile, _ text: String) {
+        persistRefused.insert(file)
+        addDataNotice(text)
+    }
+
+    /// 打开这一场以后第一次改写某个文件之前复制一份 .bak（照 LabelStore 的 backedUpSinceLoad）。
+    private func backupOnce(_ url: URL) {
+        guard !backedUpPaths.contains(url.path) else { return }
+        if SessionFiles.backup(url) { backedUpPaths.insert(url.path) }
+    }
+
     func setOverride(_ id: String, _ verdict: Verdict?) {
         setOverrideBatch([id], verdict)
     }
@@ -1514,26 +1594,77 @@ final class BatchStore: ObservableObject {
     /// overrides.json 的格式不动（老版本照样读得懂），「接受推荐」的来源另存一份。
     private var acceptedPath: URL { sessionDir.appendingPathComponent("accepted.json") }
 
+    /// 读这一场的改判。以前读不出、解不开都直接 return（和「没有这个文件」一条路），之后随便改一张，saveOverrides
+    /// 就拿内存里那几条把原文件整份盖掉，accepted.json 也被 isEmpty 那支删掉（审查 S02）。
     private func loadOverrides() {
-        guard let data = try? Data(contentsOf: overridesPath),
-              let raw = try? JSONDecoder().decode([String: String].self, from: data) else { return }
-        overrides = raw.compactMapValues(Verdict.init(rawValue:))
-        let accepted = (try? Data(contentsOf: acceptedPath))
-            .flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
-        acceptedIDs = Set(accepted).filter { overrides[$0] != nil }
+        persistRefused.remove(.overrides)
+        backedUpPaths.subtract([overridesPath.path, acceptedPath.path])
+        let stamp = SessionFiles.timestamp()
+        switch SessionFiles.read([String: String].self, at: overridesPath, stamp: stamp) {
+        case .missing:
+            return
+        case .ok(let raw):
+            overrides = raw.compactMapValues(Verdict.init(rawValue:))
+        case .corrupt(let moved?):
+            // accepted.json 只对得上原来那份判决：一起挪开（同一个时间，好配对），别让下一次保存把它删掉。
+            var aside = ""
+            if FileManager.default.fileExists(atPath: acceptedPath.path) {
+                guard let acceptedMoved = SessionFiles.moveAside(acceptedPath, stamp: stamp) else {
+                    refusePersist(.overrides, "\(sessionLabel)的人工改判文件 overrides.json 解不开，原件已挪成 \(moved.lastPathComponent)；" +
+                                  "accepted.json 挪不开，为免覆盖，这一场的改判先不存盘" + corruptNoticeTail)
+                    return
+                }
+                aside = "（accepted.json 一起挪成 \(acceptedMoved.lastPathComponent)）"
+            }
+            addDataNotice("\(sessionLabel)的人工改判文件 overrides.json 解不开（被手改过或写坏了），原件已挪成 " +
+                          "\(moved.lastPathComponent)\(aside)，这一场的判决先按自动的显示" + corruptNoticeTail)
+            return
+        case .corrupt(nil):
+            refusePersist(.overrides, "\(sessionLabel)的人工改判文件 overrides.json 解不开、也挪不开，为免覆盖，这一场的改判先不存盘" +
+                          "（修好或移走这个文件后重新打开这一场）" + corruptNoticeTail)
+            return
+        case .unreadable(let why):
+            refusePersist(.overrides, "\(sessionLabel)的人工改判文件 overrides.json 读不出来（\(why)），为免覆盖，这一场的改判先不存盘" +
+                          "（重新打开这一场再读一次）" + corruptNoticeTail)
+            return
+        }
+        switch SessionFiles.read([String].self, at: acceptedPath, stamp: stamp) {
+        case .missing:
+            break
+        case .ok(let accepted):
+            acceptedIDs = Set(accepted).filter { overrides[$0] != nil }
+        case .corrupt(let moved?):
+            addDataNotice("\(sessionLabel)的 accepted.json 解不开，原件已挪成 \(moved.lastPathComponent)：" +
+                          "「接受推荐」钉住的那几张这回算成人工改判（判决本身没变）")
+        case .corrupt(nil), .unreadable:
+            refusePersist(.overrides, "\(sessionLabel)的 accepted.json 读不出来、也挪不开，为免覆盖，这一场的改判先不存盘" +
+                          "（修好或移走这个文件后重新打开这一场）")
+        }
     }
 
     private func saveOverrides() {
-        let raw = overrides.mapValues(\.rawValue)
-        if let data = try? JSONEncoder().encode(raw) {
-            // .atomic: a crash mid-write here used to cost every manual verdict
-            // of the shoot.
-            try? data.write(to: overridesPath, options: .atomic)
+        guard !persistRefused.contains(.overrides) else { return }
+        do {
+            try writeOverrides()
+        } catch {
+            SessionFiles.log.error("写判决失败：\(CardImporter.describe(error), privacy: .public)")
         }
+    }
+
+    private func writeOverrides() throws {
+        let data = try JSONEncoder().encode(overrides.mapValues(\.rawValue))
+        backupOnce(overridesPath)
+        // .atomic: a crash mid-write here used to cost every manual verdict
+        // of the shoot.
+        try data.write(to: overridesPath, options: .atomic)
         if acceptedIDs.isEmpty {
-            try? FileManager.default.removeItem(at: acceptedPath)
-        } else if let data = try? JSONEncoder().encode(acceptedIDs.sorted()) {
-            try? data.write(to: acceptedPath, options: .atomic)
+            guard FileManager.default.fileExists(atPath: acceptedPath.path) else { return }
+            backupOnce(acceptedPath)
+            try SessionFiles.remove(acceptedPath)
+        } else {
+            let accepted = try JSONEncoder().encode(acceptedIDs.sorted())
+            backupOnce(acceptedPath)
+            try accepted.write(to: acceptedPath, options: .atomic)
         }
     }
 
@@ -1542,16 +1673,42 @@ final class BatchStore: ObservableObject {
     private var clientPicksPath: URL { sessionDir.appendingPathComponent("client_picks.json") }
 
     private func loadClientPicks() {
-        let ids = (try? Data(contentsOf: clientPicksPath))
-            .flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
-        clientPicks = Set(ids)
+        persistRefused.remove(.clientPicks)
+        backedUpPaths.remove(clientPicksPath.path)
+        var loaded: [String] = []
+        defer { clientPicks = Set(loaded) }
+        switch SessionFiles.read([String].self, at: clientPicksPath) {
+        case .missing:
+            break
+        case .ok(let ids):
+            loaded = ids
+        case .corrupt(let moved?):
+            addDataNotice("\(sessionLabel)的客户选中 client_picks.json 解不开（被手改过或写坏了），原件已挪成 " +
+                          "\(moved.lastPathComponent)，这一场先当没有客户选中" + corruptNoticeTail)
+        case .corrupt(nil):
+            refusePersist(.clientPicks, "\(sessionLabel)的客户选中 client_picks.json 解不开、也挪不开，为免覆盖，这一场的客户选中先不存盘" +
+                          "（修好或移走这个文件后重新打开这一场）")
+        case .unreadable(let why):
+            refusePersist(.clientPicks, "\(sessionLabel)的客户选中 client_picks.json 读不出来（\(why)），为免覆盖，这一场的客户选中先不存盘" +
+                          "（重新打开这一场再读一次）")
+        }
     }
 
     private func saveClientPicks() {
+        guard !persistRefused.contains(.clientPicks) else { return }
+        do {
+            try writeClientPicks()
+        } catch {
+            SessionFiles.log.error("写客户选中失败：\(CardImporter.describe(error), privacy: .public)")
+        }
+    }
+
+    private func writeClientPicks() throws {
+        backupOnce(clientPicksPath)
         if clientPicks.isEmpty {
-            try? FileManager.default.removeItem(at: clientPicksPath)
-        } else if let data = try? JSONEncoder().encode(clientPicks.sorted()) {
-            try? data.write(to: clientPicksPath, options: .atomic)
+            try SessionFiles.remove(clientPicksPath)
+        } else {
+            try JSONEncoder().encode(clientPicks.sorted()).write(to: clientPicksPath, options: .atomic)
         }
     }
 
@@ -2297,21 +2454,47 @@ final class BatchStore: ObservableObject {
     private var bodyOffsetsPath: URL { sessionDir.appendingPathComponent("body_offsets.json") }
 
     private func loadBodyOffsets() {
-        let stored = (try? Data(contentsOf: bodyOffsetsPath))
-            .flatMap { try? JSONDecoder().decode([String: Int].self, from: $0) } ?? [:]
+        persistRefused.remove(.bodyOffsets)
+        backedUpPaths.remove(bodyOffsetsPath.path)
+        var stored: [String: Int] = [:]
+        switch SessionFiles.read([String: Int].self, at: bodyOffsetsPath) {
+        case .missing:
+            break
+        case .ok(let offsets):
+            stored = offsets
+        case .corrupt(let moved?):
+            addDataNotice("\(sessionLabel)的机身对时 body_offsets.json 解不开（被手改过或写坏了），原件已挪成 " +
+                          "\(moved.lastPathComponent)，这一场先按没对过时显示（章节、拍摄顺序可能和上次不一样）")
+        case .corrupt(nil):
+            refusePersist(.bodyOffsets, "\(sessionLabel)的机身对时 body_offsets.json 解不开、也挪不开，为免覆盖，这一场的对时先不存盘" +
+                          "（修好或移走这个文件后重新打开这一场）")
+        case .unreadable(let why):
+            refusePersist(.bodyOffsets, "\(sessionLabel)的机身对时 body_offsets.json 读不出来（\(why)），为免覆盖，这一场的对时先不存盘" +
+                          "（重新打开这一场再读一次）")
+        }
         // 手改坏的、超过 ±48 小时的不认（不用 abs：Int.min 取绝对值会崩）。
         let allowed = -BodyClock.maxOffset...BodyClock.maxOffset
         bodyOffsets = stored.filter { allowed.contains($0.value) }
     }
 
     private func saveBodyOffsets() {
+        guard !persistRefused.contains(.bodyOffsets) else { return }
+        do {
+            try writeBodyOffsets()
+        } catch {
+            SessionFiles.log.error("写机身对时失败：\(CardImporter.describe(error), privacy: .public)")
+        }
+    }
+
+    private func writeBodyOffsets() throws {
+        backupOnce(bodyOffsetsPath)
         if bodyOffsets.isEmpty {
-            try? FileManager.default.removeItem(at: bodyOffsetsPath)
+            try SessionFiles.remove(bodyOffsetsPath)
             return
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? encoder.encode(bodyOffsets) { try? data.write(to: bodyOffsetsPath, options: .atomic) }
+        try encoder.encode(bodyOffsets).write(to: bodyOffsetsPath, options: .atomic)
     }
 
     /// 改对时偏移（机身 key → 秒，一台或几台一起）：一条撤销记录、一次保存，然后整场重排时间。

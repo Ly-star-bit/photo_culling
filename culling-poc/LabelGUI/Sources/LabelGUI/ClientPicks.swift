@@ -504,16 +504,34 @@ enum OriginalsCopier {
 extension BatchStore {
     private var proofSheetsPath: URL { sessionDir.appendingPathComponent("proof_sheets.json") }
 
-    /// 这一场导出过的确认表，最早的在前。
+    /// 这一场导出过的确认表，最早的在前。只读不挪（导入框每敲一个字读一次）：解不开的到下一次记一笔时再挪开。
     var proofSheets: [ProofSheet] {
-        (try? Data(contentsOf: proofSheetsPath)).flatMap { try? JSONDecoder().decode([ProofSheet].self, from: $0) } ?? []
+        if case .ok(let sheets) = SessionFiles.read([ProofSheet].self, at: proofSheetsPath, moveAside: false) { return sheets }
+        return []
     }
 
-    /// 导出成功后记一笔（只留最近 30 张）。
+    /// 导出成功后记一笔（只留最近 30 张）。以前记录文件解不开就当空的，记这一笔时把以前的整份盖掉（审查 S02）：
+    /// 现在先挪成 proof_sheets.corrupt-<时间>.json；读不出来、挪不开的不写，免得盖掉。
     func recordProofSheet(_ sheet: ProofSheet) {
-        let sheets = Array((proofSheets.filter { $0.id != sheet.id } + [sheet]).suffix(30))
-        if let data = try? JSONEncoder().encode(sheets) {
-            try? data.write(to: proofSheetsPath, options: .atomic)
+        let lost = "这张表的编号没记下：客户只回编号时认不出（回文件名照样认）"
+        var existing: [ProofSheet] = []
+        switch SessionFiles.read([ProofSheet].self, at: proofSheetsPath) {
+        case .missing:
+            break
+        case .ok(let sheets):
+            existing = sheets
+        case .corrupt(let moved?):
+            let name = photoDir.map { "「\($0.lastPathComponent)」" } ?? ""
+            addDataNotice("\(name)的确认表记录 proof_sheets.json 解不开，原件已挪成 \(moved.lastPathComponent)：" +
+                          "以前导出的确认表，客户只回编号时认不出（回文件名照样认）")
+        case .corrupt(nil), .unreadable:
+            lastError = "确认表导出了，但记录文件 proof_sheets.json 读不出来、也挪不开，" + lost
+            return
+        }
+        let sheets = Array((existing.filter { $0.id != sheet.id } + [sheet]).suffix(30))
+        guard let data = try? JSONEncoder().encode(sheets), SessionFiles.writeLogged(data, to: proofSheetsPath) else {
+            lastError = "确认表导出了，但写 proof_sheets.json 失败，" + lost
+            return
         }
     }
 

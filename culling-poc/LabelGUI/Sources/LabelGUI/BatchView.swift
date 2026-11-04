@@ -186,6 +186,8 @@ struct BatchView: View {
                 }
             }
         }
+        // 判决没存上 / 场次文件读坏了的常驻提醒（PersistBanner.swift）：审片、连拍挑选时也在。
+        .safeAreaInset(edge: .top, spacing: 0) { persistBanner }
         .sheet(isPresented: Binding(
             get: { inspectedID != nil },
             set: { if !$0 { inspectedID = nil } }
