@@ -6,7 +6,8 @@ import Foundation
 /// 不要照片：假的 uv（/bin/sh 脚本，转发 / 不转发 SIGTERM / 子进程不理 SIGTERM 三种）走 BatchStore 同一个 runProcess、同一个
 /// processBox，核对 willTerminate 以后子进程整组都没了、python 那一层只收到一次 SIGTERM；阈值防抖里排着的那次退出时写掉、
 /// 没排着的不写；防睡眠的 activity 在 pmset 里真的有、放掉就没，分析（合成的色块 JPEG）跑完 / 取消、VLM 提前返回都放掉；
-/// ⌘Q 确认的判断表（QuitGuard）和流程（QuitCoordinator，弹框、回 AppKit 都换成假的，在 modal panel 模式里等停下）。
+/// ⌘Q 确认的判断表（QuitGuard）和流程（QuitCoordinator，弹框、回 AppKit 都换成假的，在 modal panel 模式里等停下）；
+/// ⌘Q 也看拼图工程、标注存上没有（真的 AppModel、场次目录 / collage.json chmod 成写不进、读不出）。
 /// 会写数据目录：只在临时目录里跑。每条打一行 PASS / FAIL，有 FAIL 退出码 1。不弹任何框。
 enum QuitSelfTest {
     @MainActor
@@ -22,6 +23,7 @@ enum QuitSelfTest {
         t.sleepGuardDuringLongTasks()
         t.quitDecisionTable()
         t.quitCoordinatorFlows()
+        t.quitChecksCollageAndLabels()
         print("quit-selftest: \(t.passed) 通过 \(t.failed) 失败")
         exit(t.failed == 0 ? 0 : 1)
     }
@@ -511,10 +513,19 @@ final class QuitSelfTestHarness {
         var answer: (QuitGuard.Decision) -> Bool = { _ in true }
     }
 
-    func coordinator(_ target: QuitTarget, _ rec: Recorder, headless: Bool = false) -> QuitCoordinator {
-        QuitCoordinator(target: target, headless: headless,
+    func coordinator(_ target: QuitTarget, _ rec: Recorder, headless: Bool = false,
+                     saveChecks: @escaping () -> [QuitSaveCheck] = { [] }) -> QuitCoordinator {
+        QuitCoordinator(target: target, headless: headless, saveChecks: saveChecks,
                         ask: { rec.asked.append($0); return rec.answer($0) },
                         reply: { rec.replies.append($0) })
+    }
+
+    /// 自检里假的拼图 / 标注存盘。
+    final class FakeSaveCheck: QuitSaveCheck {
+        var problem: String?
+        var calls = 0
+        init(_ problem: String?) { self.problem = problem }
+        func unsavedForQuit() -> String? { calls += 1; return problem }
     }
 
     /// AppKit 在 .terminateLater 期间跑的那种模式。
@@ -678,6 +689,165 @@ final class QuitSelfTestHarness {
         } else {
             check(false, "自检进程是无头的（AppRuntime.headless），QuitAlert 不会弹框")
         }
+    }
+
+    // MARK: - ⌘Q 也看拼图工程、标注存上没有
+
+    /// collage.json 盘上那一份的缝宽（读不出来 = nil）。
+    func diskGutter(_ url: URL) -> Double? {
+        guard let data = try? Data(contentsOf: url),
+              let project = try? JSONDecoder().decode(CollageProject.self, from: data) else { return nil }
+        return Double(project.style.gutter)
+    }
+
+    /// 改一下拼图（缝宽），不 flush：防抖里排着、还没到点写。
+    func nudgeCollage(_ store: CollageStore) {
+        var style = store.project.style
+        style.gutter += 0.002
+        store.setStyle(style, coalesce: false)
+    }
+
+    func isAskUnsaved(_ d: QuitGuard.Decision?, containing text: String) -> Bool {
+        if case .askUnsaved(let message)? = d { return message.contains(text) }
+        return false
+    }
+
+    func quitChecksCollageAndLabels() {
+        print("— ⌘Q 也看拼图工程、标注存上没有：写失败（盘满）问一句，腾出空间以后退出前那次重写写上了就不问；原件读坏了但没改过的不误问")
+        // 判断表：判决、拼图、标注没存上的原因合在一起问；又在跑又没存上，先问停不停，停完再问。
+        let fakeTarget = FakeTarget()
+        let collageFail = FakeSaveCheck("「婚礼」的拼图没存上：拼图项目保存失败: 盘满了")
+        let labelsOK = FakeSaveCheck(nil)
+        let r0 = Recorder()
+        r0.answer = { _ in false }
+        let c0 = coordinator(fakeTarget, r0, saveChecks: { [collageFail, labelsOK] })
+        check(c0.shouldTerminate(reason: .user) == .terminateCancel
+              && r0.asked == [.askUnsaved("「婚礼」的拼图没存上：拼图项目保存失败: 盘满了")] && collageFail.calls == 1 && labelsOK.calls == 1,
+              "判断表：拼图写失败 → 问「有改动没存上」，选「不退出」就不退（标注那边也看了）")
+        collageFail.problem = nil
+        let r0b = Recorder()
+        check(coordinator(fakeTarget, r0b, saveChecks: { [collageFail, labelsOK] }).shouldTerminate(reason: .user) == .terminateNow
+              && r0b.asked.isEmpty, "判断表：拼图 / 标注都存上了（原件读坏了但没改过的也报 nil）→ 直接退")
+        collageFail.problem = "拼图没存上"
+        let r0c = Recorder()
+        check(coordinator(fakeTarget, r0c, saveChecks: { [collageFail] }).shouldTerminate(reason: .system) == .terminateNow
+              && r0c.asked.isEmpty, "判断表：系统要退（注销、关机）时拼图没存上：不弹框")
+        let both = FakeTarget()
+        both.persistError = "判决没存上"
+        let r0d = Recorder()
+        r0d.answer = { _ in false }
+        _ = coordinator(both, r0d, saveChecks: { [collageFail, FakeSaveCheck("标注没存上")] }).shouldTerminate(reason: .user)
+        check(r0d.asked == [.askUnsaved("判决没存上\n拼图没存上\n标注没存上")], "判决、拼图、标注都没存上：一个框里一行一样说全（\(r0d.asked)）")
+        let busy = FakeTarget()
+        busy.isRunning = true
+        busy.onCancel = { t in t.isRunning = false }
+        let r0e = Recorder()
+        r0e.answer = { if case .askStop = $0 { return true } else { return false } }
+        let c0e = coordinator(busy, r0e, saveChecks: { [collageFail] })
+        let callsBefore = collageFail.calls
+        _ = c0e.shouldTerminate(reason: .user)
+        withExtendedLifetime(c0e) { spinModal(3) { !r0e.replies.isEmpty } }
+        check(r0e.asked == [.askStop(.other), .askUnsaved("拼图没存上")] && r0e.replies == [false] && collageFail.calls - callsBefore == 2,
+              "又在跑、拼图又没存上：先问停不停，停完再写一次拼图，还没存上再问，选「不退出」就不退")
+
+        // 真的 AppModel（和 app 同一套接线，不开实时桥）、真的 CollageStore。
+        try? fm.removeItem(at: dataDir.appendingPathComponent("sessions.json"))
+        let model = AppModel.make(dataDir: dataDir, pythonRoot: work, bridge: .none)
+        let folder = work.appendingPathComponent("photos-quit-collage", isDirectory: true)
+        let other = work.appendingPathComponent("photos-quit-collage-other", isDirectory: true)
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: other, withIntermediateDirectories: true)
+        _ = model.batch.switchSession(to: folder)
+        model.ensureCollageAttached()
+        let collage = model.collage
+        let dir = model.batch.sessionDir
+        let project = dir.appendingPathComponent("collage.json")
+
+        AppDelegate.model = nil
+        let unwired = AppDelegate.saveChecks()
+        AppDelegate.model = model
+        let wired = AppDelegate.saveChecks()
+        check(unwired.isEmpty && wired.count == 2 && wired.first === collage && wired.last === model.labels,
+              "AppDelegate 退出前看 AppModel 里的拼图工程和标注（LabelGUIApp.init 设 AppDelegate.model；没设时不看）")
+        func quit(_ reason: QuitGuard.Reason = .user, answer: Bool = false) -> (reply: NSApplication.TerminateReply, asked: [QuitGuard.Decision]) {
+            let rec = Recorder()
+            rec.answer = { _ in answer }
+            let reply = coordinator(model.batch, rec, saveChecks: { AppDelegate.saveChecks() }).shouldTerminate(reason: reason)
+            return (reply, rec.asked)
+        }
+
+        let clean = quit()
+        check(clean.reply == .terminateNow && clean.asked.isEmpty, "拼图没改过：直接退，不问")
+        nudgeCollage(collage)
+        let pending = quit()
+        let wantGutter = Double(collage.project.style.gutter)
+        check(pending.reply == .terminateNow && pending.asked.isEmpty && diskGutter(project) == wantGutter,
+              "刚改完拼图（防抖还没到点）就 ⌘Q：退出前写上了，不问（盘上缝宽 \(diskGutter(project).map { "\($0)" } ?? "nil")）")
+
+        // 写失败（场次目录只读 = 写不进去，和盘满走同一条路）。root 跑时 chmod 挡不住写，这一段测不了。
+        _ = chmod(dir.path, 0o500)
+        let probe = dir.appendingPathComponent("quit-probe")
+        let chmodBlocks = (try? Data().write(to: probe)) == nil
+        try? fm.removeItem(at: probe)
+        if chmodBlocks {
+            nudgeCollage(collage)
+            let stay = quit(answer: false)
+            let name = "「\(folder.lastPathComponent)」的拼图没存上"
+            check(stay.reply == .terminateCancel && stay.asked.count == 1 && isAskUnsaved(stay.asked.first, containing: name)
+                  && isAskUnsaved(stay.asked.first, containing: "保存失败"),
+                  "拼图写不进去：⌘Q 问「有改动没存上」（说是哪一场的拼图、原话），选「不退出」就不退：\(stay.asked)")
+            check(collage.projectSaveProblem != nil && diskGutter(project) != Double(collage.project.style.gutter),
+                  "（对照）这时盘上的 collage.json 确实是旧的，CollageStore 也记着写失败")
+            let anyway = quit(answer: true)
+            check(anyway.reply == .terminateNow && anyway.asked.count == 1, "选「仍然退出」：退")
+            let system = quit(.system)
+            check(system.reply == .terminateNow && system.asked.isEmpty, "系统要退：不弹框")
+            _ = chmod(dir.path, 0o755)
+            let fixed = quit()
+            check(fixed.reply == .terminateNow && fixed.asked.isEmpty && collage.projectSaveProblem == nil
+                  && diskGutter(project) == Double(collage.project.style.gutter),
+                  "腾出空间以后、没再改拼图：退出前那次重写写上了，不问、直接退（盘上是最新的）")
+        } else {
+            _ = chmod(dir.path, 0o755)
+            print("SKIP root 跑时 chmod 挡不住写：拼图写失败那一段测不了")
+        }
+
+        // 原件读不出来（这一场的拼图先不存盘）：没改过不误问，改过才问。
+        let original = (try? Data(contentsOf: project)) ?? Data("{\"pages\":[]}".utf8)
+        try? original.write(to: project)
+        _ = chmod(project.path, 0o000)
+        let unreadable = (try? Data(contentsOf: project)) == nil
+        model.batch.confirmDiscardRefused = { _, _ in true }
+        if unreadable {
+            _ = model.batch.switchSession(to: other)
+            model.ensureCollageAttached()
+            _ = model.batch.switchSession(to: folder)
+            model.ensureCollageAttached()
+            check(collage.projectSaveProblem != nil && !collage.hasRefusedEdits,
+                  "（对照）collage.json 读不出来：projectSaveProblem 不是 nil（直接拿它当「没存上」，每次 ⌘Q 都会误问）")
+            let untouched = quit()
+            check(untouched.reply == .terminateNow && untouched.asked.isEmpty, "拼图原件读不出来、一下没动过：⌘Q 不问")
+            nudgeCollage(collage)
+            let edited = quit(answer: false)
+            check(edited.reply == .terminateCancel && isAskUnsaved(edited.asked.first, containing: "拼图没存上")
+                  && isAskUnsaved(edited.asked.first, containing: "读不出来"),
+                  "拼图原件读不出来、这次打开以后又改过（改动只在内存里）：⌘Q 问一句：\(edited.asked)")
+        } else {
+            print("SKIP root 跑时 chmod 000 挡不住读：拼图原件读不出来那一段测不了")
+        }
+        _ = chmod(project.path, 0o644)
+        _ = model.batch.switchSession(to: other)
+        model.ensureCollageAttached()
+
+        // 标注（labels.csv）：flush 以后还有 saveError = 改过、没写上。标注页自己的写盘不在这里测，直接设 saveError。
+        model.labels.saveError = "保存 labels.csv 失败: 盘满了"
+        let labels = quit(answer: false)
+        check(labels.reply == .terminateCancel && isAskUnsaved(labels.asked.first, containing: "标注没存上：保存 labels.csv 失败"),
+              "标注没存上：⌘Q 一样问：\(labels.asked)")
+        model.labels.saveError = nil
+        let labelsOK2 = quit()
+        check(labelsOK2.reply == .terminateNow && labelsOK2.asked.isEmpty, "标注存上了：直接退")
+        AppDelegate.model = nil
     }
 
     // MARK: - S05e 阈值防抖里排着的那次，退出时写掉
