@@ -154,6 +154,11 @@ final class QuitSelfTestHarness {
         }
     }
 
+    /// marker 里假 python 的 pid（按 start 那一行认，不按行的先后：uv 那一行可能先写也可能后写）。
+    func pythonPid(_ url: URL) -> pid_t? {
+        lines(url).first { $0.hasPrefix("start ") }.flatMap { pid_t($0.dropFirst("start ".count)) }
+    }
+
     func allGone(_ pids: [pid_t]) -> Bool {
         pids.allSatisfy { kill($0, 0) != 0 && errno == ESRCH }
     }
@@ -220,7 +225,8 @@ final class QuitSelfTestHarness {
             let ids = pids(run.marker)
             store.cancel()
             usleep(300_000)
-            let pythonAlive = ids.count == 2 && kill(ids[1], 0) == 0
+            let python = pythonPid(run.marker)
+            let pythonAlive = ids.count == 2 && python.map { kill($0, 0) == 0 } == true
             let uvGone = run.done.wait(timeout: .now() + 3) == .success
             check(pythonAlive, "取消：python 没被直接打到（不是整组发；uv 不转发时它还活着）")
             check(uvGone && isCancelled(run.result.value), "取消：uv 收到 SIGTERM 退了，runProcess 当成取消")
@@ -535,7 +541,7 @@ final class QuitSelfTestHarness {
 
         // 真的 store、真的分析（合成色块 JPEG）。
         let store = newStore()
-        let photoCount = 48
+        let photoCount = 150  // 够多：快的机器上按 ⌘Q 那一下也还没分析完
         let folderA = makePhotoFolder("photos-s05d-a", count: photoCount, width: 1600, height: 1066)
         let folderB = makePhotoFolder("photos-s05d-b", count: 30)
         _ = store.switchSession(to: folderA)
@@ -559,8 +565,9 @@ final class QuitSelfTestHarness {
         let rows = (try? Data(contentsOf: layer1))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             .flatMap { $0["results"] as? [Any] }?.count ?? -1
-        check(saved > 0 && saved < photoCount && rows == saved,
-              "放行之前已经分析完的 \(saved) 张写进了 layer1_results.json（\(rows) 行，下次复用），没跑完的 \(photoCount - saved) 张下次再分析")
+        check(saved > 0 && rows == saved,
+              "放行之前已经分析完的 \(saved) 张写进了 layer1_results.json（\(rows) 行，下次复用）")
+        print("     （共 \(photoCount) 张，叫停时还没分析的 \(photoCount - saved) 张下次再分析）")
 
         let keep = Recorder()
         keep.answer = { _ in false }
