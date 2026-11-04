@@ -65,6 +65,11 @@ if let mcpMode = MCPServerMain.mode(CommandLine.arguments), let mcpFDs {
 if CommandLine.arguments.contains("--mcp-selftest") {
     MCPSelfTest.run()
 }
+// 选片确认表自检（页面脚本用 JavaScriptCore 跑：套餐张数、每张备注、复制的文字；客户回复里的备注；确认表水印）：
+// LabelGUI --proof-selftest。不读写数据目录（放在建目录之前）。
+if CommandLine.arguments.contains("--proof-selftest") {
+    ProofSheetSelfTest.run()
+}
 
 // --app-ui、--live-host 是测试宿主：整套 store 都会写数据目录，所以 LABELGUI_DATA_DIR 没设、或者指到真实数据目录的，
 // 在建目录、注册字体之前就退出（它们自己的分派里还会再查一遍，那时已经晚了）。不跑 Python，不同步运行时（§9.7、§10.5）；

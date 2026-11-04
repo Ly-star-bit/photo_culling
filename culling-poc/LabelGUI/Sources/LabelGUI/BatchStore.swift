@@ -267,6 +267,9 @@ final class BatchStore: ObservableObject {
     @Published private(set) var clientPicks: Set<String> = []
     /// 「只看客户选中」：和判决筛选叠加；复制文件名 / 复制原片没选中照片时就按它定范围。换场次清掉。
     @Published var clientPickFilter = false
+    /// 客户在确认表上给照片写的备注（修图要求：「去路人」「瘦脸」），照片 id → 原话。导入客户选择时和客户选中一起进来、
+    /// 同一步 ⌘Z；存 client_notes.json。复制原片时写成「精修要求.csv」。不写进 XMP（dc:description 放的是判决理由）。
+    @Published private(set) var clientNotes: [String: String] = [:]
 
     // Slider thresholds. Sharpness below → reject; worst clip pct above → reject;
     // face quality below → reject (0 disables; only applies to photos with a face).
@@ -870,6 +873,7 @@ final class BatchStore: ObservableObject {
             loadThresholds()
             loadOverrides()
             loadClientPicks()
+            loadClientNotes()
             loadXMPState()
             loadBodyOffsets()
             loadResults()
@@ -957,6 +961,7 @@ final class BatchStore: ObservableObject {
         loadThresholds()
         loadOverrides()
         loadClientPicks()
+        loadClientNotes()
         loadXMPState()
         loadBodyOffsets()
         loadResults()
@@ -1225,6 +1230,7 @@ final class BatchStore: ObservableObject {
         loadThresholds()
         loadOverrides()
         loadClientPicks()
+        loadClientNotes()
         loadXMPState()
         loadBodyOffsets()
         loadResults()
@@ -1321,6 +1327,8 @@ final class BatchStore: ObservableObject {
     private enum UndoStep {
         case verdicts([(id: String, previous: Verdict?, accepted: Bool)])
         case clientPicks(Set<String>)
+        /// 一次导入带备注的客户回复 / 连备注一起清除：之前的整份客户选中和整份客户备注。
+        case clientReply(picks: Set<String>, notes: [String: String])
         /// 按机身对时之前的整份偏移。
         case bodyOffsets([String: Int])
     }
@@ -1361,6 +1369,7 @@ final class BatchStore: ObservableObject {
         guard let step = overrideUndoStack.popLast() else { return [] }
         guard case .verdicts(let last) = step else {
             if case .clientPicks(let previous) = step { return restoreClientPicks(previous) }
+            if case .clientReply(let picks, let notes) = step { return restoreClientReply(picks: picks, notes: notes) }
             if case .bodyOffsets(let previous) = step { restoreBodyOffsets(previous) }
             return []
         }
@@ -1553,6 +1562,49 @@ final class BatchStore: ObservableObject {
         clientPicks = previous
         saveClientPicks()
         applyThresholds()
+        return items.map(\.id).filter(touched.contains)
+    }
+
+    // MARK: - 客户备注（client_notes.json）
+
+    private var clientNotesPath: URL { sessionDir.appendingPathComponent("client_notes.json") }
+
+    private func loadClientNotes() {
+        clientNotes = (try? Data(contentsOf: clientNotesPath))
+            .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+    }
+
+    private func saveClientNotes() {
+        if clientNotes.isEmpty {
+            try? FileManager.default.removeItem(at: clientNotesPath)
+            return
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        do {
+            try encoder.encode(clientNotes).write(to: clientNotesPath, options: .atomic)
+        } catch {
+            lastError = "客户备注没存上: \(error.localizedDescription)"
+        }
+    }
+
+    /// 客户选中和客户备注一起换（导入带备注的回复；清除客户选中时备注一起清）：一条撤销记录，⌘Z 两样一起回去。
+    func setClientReply(picks: Set<String>, notes: [String: String]) {
+        guard picks != clientPicks || notes != clientNotes else { return }
+        pushUndoStep(.clientReply(picks: clientPicks, notes: clientNotes))
+        clientPicks = picks
+        clientNotes = notes
+        saveClientPicks()
+        saveClientNotes()
+        applyThresholds()
+    }
+
+    /// ⌘Z 撤回一次带备注的导入 / 清除：选中变了的、备注变了的都算动到（按网格顺序）。
+    private func restoreClientReply(picks: Set<String>, notes: [String: String]) -> [String] {
+        let renoted = Set(clientNotes.keys).union(notes.keys).filter { clientNotes[$0] != notes[$0] }
+        clientNotes = notes
+        saveClientNotes()
+        let touched = Set(restoreClientPicks(picks)).union(renoted)
         return items.map(\.id).filter(touched.contains)
     }
 
@@ -2586,8 +2638,9 @@ final class BatchStore: ObservableObject {
     /// WeChat as one file. Preview JPEGs are embedded base64 (re-encoded at 800px/q0.72).
     /// 客户在页面上点选、「复制我的选择」发回文件名清单（见 ProofSheetPage）；这次导出的照片顺序
     /// 记进 proof_sheets.json，客户只回编号时按对的那张表认。`ids` 给定时只导这几张（选中的照片，
-    /// 大场次分批发），否则按判决选。
-    func exportContactSheet(to url: URL, includeUsable: Bool, ids: [String]? = nil) {
+    /// 大场次分批发），否则按判决选。`quota` = 套餐张数（页面上「已选 12 / 30 张」，选超了只提示；nil = 不限），
+    /// 跟着这张表记下来，导入客户选择时说超没超。
+    func exportContactSheet(to url: URL, includeUsable: Bool, ids: [String]? = nil, quota: Int? = nil) {
         guard !isRunning else { return }
         let wanted = ids.map(Set.init)
         let chosen = items.filter { item in
@@ -2629,7 +2682,7 @@ final class BatchStore: ObservableObject {
             }
             let dateString = DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .none)
             let html = ProofSheetPage.html(title: title, sheetID: sheetID, count: shown.count,
-                                           date: dateString, cells: cells)
+                                           date: dateString, cells: cells, quota: quota)
             let cancelled = flag.isSet
             var writeError: String?
             if !cancelled {
@@ -2638,7 +2691,8 @@ final class BatchStore: ObservableObject {
             }
             let failure = writeError
             let bytes = Int64(html.utf8.count)
-            let sheet = ProofSheet(id: sheetID, date: Date(), scope: scope, ids: shown)
+            let sheet = ProofSheet(id: sheetID, date: Date(), scope: scope, ids: shown,
+                                   lists: ProofSheet.lists(quota: quota))
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil

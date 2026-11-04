@@ -1735,11 +1735,13 @@ struct BatchView: View {
     }
 
     /// 两条角标各一个 tooltip，代替以前每个小图标各挂一个（一格 8 个 .help）。
-    static func statusHelp(rank: Int?, manual: Bool, client: Bool, pick: Bool, groupSize: Int) -> String {
+    static func statusHelp(rank: Int?, manual: Bool, client: Bool, pick: Bool, groupSize: Int,
+                           note: String? = nil) -> String {
         var parts: [String] = []
         if let rank { parts.append("本场评分第 \(rank)") }
         if manual { parts.append("人工改判") }
-        if client { parts.append("客户选中") }
+        // 客户在确认表上写的备注（修图要求）跟着紫心一起看。
+        if client { parts.append(note.map { "客户选中（备注：\($0)）" } ?? "客户选中") }
         if pick { parts.append("精选") }
         if groupSize > 1 { parts.append("同场 \(groupSize) 张") }
         return parts.joined(separator: " · ")
@@ -1898,7 +1900,8 @@ struct BatchView: View {
                         .background(.black.opacity(0.55), in: Capsule())
                         .padding(4)
                         .help(Self.statusHelp(rank: rank, manual: manual, client: client,
-                                              pick: item.verdict == .pick, groupSize: groupSize))
+                                              pick: item.verdict == .pick, groupSize: groupSize,
+                                              note: client ? store.clientNotes[item.id] : nil))
                     }
                 }
                 // 左下一条：信息（淘汰理由 · VLM 平反 · 慢门 · 水平 · 合影睁眼）。
@@ -2207,8 +2210,11 @@ struct BatchView: View {
         if let htmlType = UTType(filenameExtension: "html") {
             panel.allowedContentTypes = [htmlType]
         }
+        // 套餐张数：默认这一场上次导出那张表填的。
+        let accessory = ProofSheetSaveAccessory(quota: store.proofSheets.last?.quota)
+        panel.accessoryView = accessory.view
         if panel.runModal() == .OK, let url = panel.url {
-            store.exportContactSheet(to: url, includeUsable: includeUsable, ids: ids)
+            store.exportContactSheet(to: url, includeUsable: includeUsable, ids: ids, quota: accessory.quota)
         }
     }
 
