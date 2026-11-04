@@ -11,9 +11,14 @@ import ImageIO
 ///    另编的 JPEG）都写出每个跨页 + 一份页数对的 PDF，PDF 列在 files 最后，目录里没有临时文件。
 /// 3. 相册有跨页没写出来（testExportFailPages 当成渲染失败）：不出 PDF（盘上没有、files 里没有、没有临时文件），failure 写明
 ///    缺第几个跨页，写出来的跨页照实列出；同一次导出还有软警告（照片读不了）时「导出失败」不被它盖掉，警告接在后面。
+///    PNG 跨页写出来了、只是 PDF 那份 JPEG 编不出来（testExportFailPDFEncodePages）：照样不出 PDF，提示说「图写出来了、
+///    但没能放进 PDF」、不说「没写出来」，和 files 对得上；和渲染失败的同时有时两句各说各的页号。
 /// 4. 空照片格（emptyPhotoSlots / emptySlotWarning，导出按钮和 MCP 共用）：只数网格页上没照片（或照片不在托盘）的照片格，
 ///    留白格、文字格、散落版、印样不算；提醒那句话写对页号；导出按钮有空格时先不导、等确认（exportConfirm），点了「仍然导出」
 ///    才导，没有空格直接导、不问。
+/// 5. 写 PDF 时退出 / 崩溃留下的隐藏临时文件：sweepStalePDFTemps 只删输出目录第一层、名字是 writePDF 那种
+///    （.<名字>.pdf.<8 位大写十六进制>.tmp，和 writePDF 真起的名字对得上）、普通文件、10 分钟没动过的；新的、预览缓存那种
+///    .jpg 的、小写 / 7 位的、看得见的、目录、符号链接（目标也不碰）、子目录里的都不动；startExport 开工时清一遍。
 /// 全过退出 0，否则 1。
 enum CollageExportSelfTest {
 
@@ -29,6 +34,8 @@ enum CollageExportSelfTest {
         print("== 相册 PDF：临时文件 + 校验 + 改名")
         pdfWrite(root.appendingPathComponent("pdf"), check: check)
         let store = CollageStore(dataDir: appDataDir)
+        print("== PDF 临时文件残留清理")
+        staleTempSweep(store, root.appendingPathComponent("sweep"), check: check)
         print("== 相册导出全流程")
         albumExport(store, root.appendingPathComponent("album"), check: check)
         print("== 相册有跨页没写出来")
@@ -240,6 +247,94 @@ enum CollageExportSelfTest {
         check(CollageExport.verifyPDF(at: dir.appendingPathComponent("没有.pdf"), pages: 1) != nil, "verifyPDF：没有这个文件不过")
     }
 
+    // MARK: - 5. PDF 临时文件残留清理
+
+    @MainActor
+    private static func staleTempSweep(_ store: CollageStore, _ dir: URL, check: Checks) {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let hourAgo = Date().addingTimeInterval(-3600)
+        func touch(_ name: String, at date: Date?, in folder: URL? = nil) {
+            let url = (folder ?? dir).appendingPathComponent(name)
+            try? Data("半截 PDF".utf8).write(to: url)
+            if let date { try? fm.setAttributes([.modificationDate: date], ofItemAtPath: url.path) }
+        }
+        func exists(_ name: String, in folder: URL? = nil) -> Bool {
+            // 符号链接自己在不在（fileExists 会跟着链接走）
+            (try? fm.attributesOfItem(atPath: (folder ?? dir).appendingPathComponent(name).path)) != nil
+        }
+
+        // writePDF 真起的临时文件名得是清理认的那一种（两边的规则走样了这里先红）
+        var realTemp = ""
+        if let page = jpeg(width: 624, height: 324, gray: 0.5) {
+            try? CollageExport.writePDF(pages: [.data(page)], canvas: smallSpread, to: dir.appendingPathComponent("真.pdf"),
+                                        title: "自检", cropMarks: false, overwrite: false) { realTemp = $0.lastPathComponent }
+        }
+        check(CollageExport.isPDFTempName(realTemp) && !exists(realTemp), "writePDF 的临时文件名清理认得、写完已经没了",
+              realTemp)
+        let names: [(String, Bool)] = [
+            (".相册.pdf.1A2B3C4D.tmp", true), (".20261104-101500-2.pdf.0F9E8D7C.tmp", true),
+            (".相册.pdf.1a2b3c4d.tmp", false), (".相册.pdf.1A2B3C4.tmp", false), (".相册.pdf.1A2B3C4D5.tmp", false),
+            (".相册_跨页_01.jpg.ABCDEF01.tmp", false), (".pdf.1A2B3C4D.tmp", false), ("相册.pdf.1A2B3C4D.tmp", false),
+            (".相册.pdf.1A2B3C4D", false), (".相册.pdf.GHIJKLMN.tmp", false), (".x.jpg.tmp-123-abcd", false),
+            (".相册.pdf.1A2B3C4D.tmp.tmp", false),
+        ]
+        let wrong = names.filter { CollageExport.isPDFTempName($0.0) != $0.1 }.map(\.0)
+        check(wrong.isEmpty, "临时文件名规则：只认 .<名字>.pdf.<8 位大写十六进制>.tmp", wrong.joined(separator: " "))
+
+        let stale = ".相册.pdf.1A2B3C4D.tmp"
+        let fresh = ".相册.pdf.5E6F7A8B.tmp"
+        let nineMinutes = ".相册.pdf.99990000.tmp"
+        touch(stale, at: hourAgo)
+        touch(fresh, at: nil)
+        touch(nineMinutes, at: Date().addingTimeInterval(-540))
+        // 小写那个不能和 stale 只差大小写：APFS 默认不分大小写，会是同一个文件
+        let keptStale = [".相册_跨页_01.jpg.ABCDEF01.tmp", ".相册.pdf.abcdef12.tmp", ".相册.pdf.1A2B3C4.tmp",
+                         "相册.pdf.1A2B3C4D.tmp", "别人的.tmp", ".x.jpg.tmp-123-abcd", ".DS_Store", "相册.pdf"]
+        for name in keptStale { touch(name, at: hourAgo) }
+        // 名字对得上的目录、符号链接（自己和目标都是一小时前）、子目录里的：都不动
+        let folderNamed = ".目录.pdf.0A0B0C0D.tmp"
+        try? fm.createDirectory(at: dir.appendingPathComponent(folderNamed), withIntermediateDirectories: true)
+        try? fm.setAttributes([.modificationDate: hourAgo], ofItemAtPath: dir.appendingPathComponent(folderNamed).path)
+        let target = "链接目标.pdf"
+        touch(target, at: hourAgo)
+        let link = ".链接.pdf.11112222.tmp"
+        try? fm.createSymbolicLink(atPath: dir.appendingPathComponent(link).path, withDestinationPath: target)
+        var times = [timeval(tv_sec: Int(hourAgo.timeIntervalSince1970), tv_usec: 0),
+                     timeval(tv_sec: Int(hourAgo.timeIntervalSince1970), tv_usec: 0)]
+        _ = lutimes(dir.appendingPathComponent(link).path, &times)
+        let linkDate = (try? fm.attributesOfItem(atPath: dir.appendingPathComponent(link).path))?[.modificationDate] as? Date
+        let sub = dir.appendingPathComponent("子目录")
+        try? fm.createDirectory(at: sub, withIntermediateDirectories: true)
+        touch(stale, at: hourAgo, in: sub)
+        check(linkDate.map { $0 < Date().addingTimeInterval(-1800) } == true, "符号链接自己的修改时间也是一小时前（夹具）",
+              "\(linkDate.map { "\($0)" } ?? "nil")")
+
+        let removed = CollageExport.sweepStalePDFTemps(in: dir)
+        check(removed == [stale] && !exists(stale), "只删了那份一小时前的 PDF 临时文件", removed.joined(separator: " "))
+        check(exists(fresh) && exists(nineMinutes), "刚写的、9 分钟前的（可能正在写）留着")
+        let gone = keptStale.filter { !exists($0) }
+        check(gone.isEmpty, "预览缓存、小写、7 位、看得见的、别的隐藏文件、正式 PDF 都不动", gone.joined(separator: " "))
+        check(exists(folderNamed) && exists(link) && exists(target) && exists(stale, in: sub),
+              "名字对得上的目录、符号链接和它的目标、子目录里的都不动")
+        check(CollageExport.sweepStalePDFTemps(in: dir.appendingPathComponent("没有这个目录")).isEmpty, "目录不存在：什么也不做")
+
+        // startExport 开工时清一遍（导出按钮、MCP 同一条路）
+        let out = dir.appendingPathComponent("导出")
+        try? fm.createDirectory(at: out, withIntermediateDirectories: true)
+        touch(stale, at: hourAgo, in: out)
+        touch(fresh, at: nil, in: out)
+        var options = CollageStore.ExportOptions()
+        options.outputPath = out.path
+        options.pdf = true
+        store.exportOptions = options
+        let outcome = runExport(store, project: albumProject(pages: 2), options: options, name: "清理")
+        check(outcome?.failure == nil && outcome?.files.last == "清理.pdf" && pageCount(out.appendingPathComponent("清理.pdf")) == 2,
+              "导出照常（2 个跨页 + PDF）", "\(outcome?.files ?? []) \(outcome?.failure ?? "")")
+        check(!exists(stale, in: out) && exists(fresh, in: out) && leftovers(out) == [fresh],
+              "导出开工时清掉了过期的临时文件，新的留着", leftovers(out).joined(separator: " "))
+    }
+
     // MARK: - 2. 相册导出全流程
 
     @MainActor
@@ -321,6 +416,50 @@ enum CollageExportSelfTest {
               "只有软警告：PDF 照出（3 页）", "\(o3?.failure ?? "") \(o3?.files ?? [])")
         check(store.lastError == o3?.warning && store.lastError != nil && store.progressText.hasPrefix("导出完成"),
               "只有软警告：界面是那条警告 + 导出完成", "\(store.lastError ?? "") / \(store.progressText)")
+
+        // e) PNG：第 2 个跨页的图写出来了，只是 PDF 用的那份 JPEG 编不出来 —— 照样不出 PDF，但不说「没写出来」
+        let e = dir.appendingPathComponent("e")
+        options.outputPath = e.path
+        options.format = .png
+        store.exportOptions = options
+        store.testExportFailPDFEncodePages = [1]
+        let o5 = runExport(store, project: albumProject(pages: 3), options: options, name: "编码")
+        store.testExportFailPDFEncodePages = []
+        let failure5 = o5?.failure ?? ""
+        check(o5?.files == ["编码_跨页_01.png", "编码_跨页_02.png", "编码_跨页_03.png"]
+              && fm.fileExists(atPath: e.appendingPathComponent("编码_跨页_02.png").path)
+              && !fm.fileExists(atPath: e.appendingPathComponent("编码.pdf").path) && leftovers(e).isEmpty,
+              "PNG 跨页写出来了、PDF 那份编不出来：三张都列出、不出 PDF", "\(o5?.files ?? [])")
+        check(failure5.contains("转不成 PDF 页") && failure5.contains("没生成 PDF")
+              && failure5.contains("第 2 个跨页的图写出来了、但没能放进 PDF") && !failure5.contains("没写出来"),
+              "提示说图写出来了、没能放进 PDF，不说「没写出来」", failure5)
+        check((store.lastError ?? "").hasPrefix("导出失败") && !store.progressText.hasPrefix("导出完成"),
+              "界面照样是导出失败", store.lastError ?? "")
+
+        // f) 第 1 个跨页渲染失败 + 第 3 个跨页只是 PDF 那份编不出来：两句各说各的页号
+        let f = dir.appendingPathComponent("f")
+        options.outputPath = f.path
+        store.exportOptions = options
+        store.testExportFailPages = [0]
+        store.testExportFailPDFEncodePages = [2]
+        let o6 = runExport(store, project: albumProject(pages: 3), options: options, name: "两种")
+        store.testExportFailPages = []
+        store.testExportFailPDFEncodePages = []
+        let failure6 = o6?.failure ?? ""
+        check(o6?.files == ["两种_跨页_02.png", "两种_跨页_03.png"]
+              && !fm.fileExists(atPath: f.appendingPathComponent("两种.pdf").path),
+              "渲染失败的不列、只缺 PDF 那份的照列，不出 PDF", "\(o6?.files ?? [])")
+        check(failure6.contains("第 1 个跨页没写出来，第 3 个跨页的图写出来了、但没能放进 PDF")
+              && !failure6.contains("第 3 个跨页没写出来"), "两种失败各说各的页号", failure6)
+
+        // pdfSkippedNote 本身：跨页多时只列前 8 个（以前多打了一个「个」：「等 10 个 个跨页」）
+        let many = CollageStore.pdfSkippedNote(Array(0..<10))
+        check(many.contains("第 1、2、3、4、5、6、7、8 等 10 个跨页没写出来") && !many.contains("个 个"),
+              "跨页多时只列前 8 个", many)
+        let mixed = CollageStore.pdfSkippedNote([0, 1, 2], written: [1])
+        check(mixed.hasPrefix("没生成 PDF：第 1、3 个跨页没写出来，第 2 个跨页的图写出来了、但没能放进 PDF"),
+              "没写出来的、只缺 PDF 的分开列", mixed)
+        options.format = .jpeg
 
         // d) 单张模式不受影响（没有 PDF）
         let d = dir.appendingPathComponent("d")
