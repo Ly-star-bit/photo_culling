@@ -215,12 +215,15 @@ final class PersistSelfTestHarness {
         store.setClientPicks([id])
         let saved = read(s.dir.appendingPathComponent("overrides.json"))
             .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }
-        check(saved == [id: Verdict.reject.rawValue], "改判以后 overrides.json 只写了这一条")
+        let wantSaved: [String: String] = [id: Verdict.reject.rawValue]
+        check(saved == wantSaved, "改判以后 overrides.json 只写了这一条")
         check(read(corruptCopies(of: "overrides.json", in: s.dir)[0]) == garbage[0].1, "挪开的原件没被这次保存碰到")
 
         store.recordProofSheet(ProofSheet(id: "selftest-1", date: Date(), scope: "仅精选", ids: [id]))
         let sheetAside = corruptCopies(of: "proof_sheets.json", in: s.dir)
-        check(sheetAside.count == 1 && read(sheetAside[0]) == garbage[5].1 && store.proofSheets.map(\.id) == ["selftest-1"],
+        let sheetIDs: [String] = store.proofSheets.map(\.id)
+        let sheetKept: Bool = sheetAside.count == 1 && read(sheetAside[0]) == garbage[5].1
+        check(sheetKept && sheetIDs == ["selftest-1"],
               "确认表记录：解不开的挪开，新记录只有这一张")
 
         // .bak：重新打开以后第一次改写前留一份打开时的样子，一次打开只备份一次
@@ -413,8 +416,11 @@ final class PersistSelfTestHarness {
         setWritable(s.dir, true)
         store.setOverride(id, .usable)
         let picks = read(s.dir.appendingPathComponent("client_picks.json")).flatMap { try? JSONDecoder().decode([String].self, from: $0) }
-        check(store.persistError == nil && savedVerdicts(s) == [id: Verdict.usable.rawValue, id2: Verdict.reject.rawValue] && picks == [id2],
-              "腾出空间后的下一次改判：之前没存上的判决、客户选中一起写回去，红条消失")
+        // 期望值拆成有类型的 let：CI 上的 Xcode 16 对一长串 && 里的字面量类型检查很慢。
+        let wantVerdicts: [String: String] = [id: Verdict.usable.rawValue, id2: Verdict.reject.rawValue]
+        let wantPicks: [String] = [id2]
+        let flushed: Bool = store.persistError == nil && savedVerdicts(s) == wantVerdicts && picks == wantPicks
+        check(flushed, "腾出空间后的下一次改判：之前没存上的判决、客户选中一起写回去，红条消失")
 
         if let body = store.bodies.first?.key {
             setWritable(s.dir, false)
@@ -425,8 +431,9 @@ final class PersistSelfTestHarness {
             func offsets() -> [String: Int]? { read(url).flatMap { try? JSONDecoder().decode([String: Int].self, from: $0) } }
             let before = offsets()
             let retried = store.retryPersist()
-            check(before == nil && retried && store.persistError == nil && offsets() == [body: 90],
-                  "点「重试」写回去、红条消失")
+            let want: [String: Int] = [body: 90]
+            let ok: Bool = before == nil && retried && store.persistError == nil && offsets() == want
+            check(ok, "点「重试」写回去、红条消失")
         } else {
             check(false, "fixture 里有机身（对时那一条要用）")
         }
