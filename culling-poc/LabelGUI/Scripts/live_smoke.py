@@ -2008,9 +2008,12 @@ __attribute__((constructor)) static void init(void) {
               "概览：settings.source=app、analysis.running、pending_writes；没有 §10.1 删掉的字段")
         xmp = ov.get("xmp") or {}
         xmp_ok = (isinstance(xmp.get("stale_count"), int) and isinstance(xmp.get("written"), bool)
-                  and ("xmp_stale" in warn_codes(ov)) == (xmp.get("stale_count", 0) > 0)
-                  and (not CI or xmp == {"stale_count": 0, "written": False}))
-        check(xmp_ok, f"概览的 xmp：stale_count、written，过期了才带 xmp_stale（fixture 没写过 XMP：0、false）：{xmp}")
+                  and isinstance(xmp.get("shared_sidecar_count"), int)
+                  and ("xmp_stale" in warn_codes(ov)) == (xmp.get("stale_count", 0) - xmp.get("shared_sidecar_count", 0) > 0)
+                  and ("xmp_shared_sidecar" in warn_codes(ov)) == (xmp.get("shared_sidecar_count", 0) > 0)
+                  and (not CI or xmp == {"stale_count": 0, "written": False, "shared_sidecar_count": 0}))
+        check(xmp_ok, f"概览的 xmp：stale_count、written、shared_sidecar_count，写得了的过期了才带 xmp_stale、"
+              f"有同名冲突才带 xmp_shared_sidecar（fixture 没写过 XMP：0、false、0）：{xmp}")
         groups, cur, pages = [], None, 0
         while pages < 20:
             a = {"session": KEY, "kind": "scene", "limit": 2}
@@ -3025,7 +3028,8 @@ __attribute__((constructor)) static void init(void) {
 
         ov_m = m_ov()
         n_m = ov_m.get("photo_count") or 0
-        check(ov_m.get("xmp") == {"stale_count": n_m - 1, "written": True} and "xmp_stale" in warn_codes(ov_m),
+        check(ov_m.get("xmp") == {"stale_count": n_m - 1, "written": True, "shared_sidecar_count": 0}
+              and "xmp_stale" in warn_codes(ov_m) and "xmp_shared_sidecar" not in warn_codes(ov_m),
               f"XMP 过期：xmp_state.json 里只有 {mid} 写过、和现在一样 → stale_count = {n_m} - 1、written true、带 xmp_stale（{ov_m.get('xmp')}）")
         # dry_run（默认）：认出了哪些、没认出的原文，什么都不改；用户开着导入框（batch_sheet）也照样能看
         picks0 = ov_m.get("client_pick_count")

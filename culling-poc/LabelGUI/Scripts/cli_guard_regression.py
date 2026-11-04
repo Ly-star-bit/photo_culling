@@ -115,6 +115,8 @@ WRITERS = [
     # 诊断（审查 D03）：打包会读数据目录里的日志、自检会建 logs/ 和假场次
     ["--diag-export", o("diag.zip")],
     ["--diag-selftest"],
+    # 文件安全自检：会在数据目录里造 5 场假拍摄、改最近场次（以前只拦「没设」）
+    ["--files-selftest"],
 ]
 SESSIONS = os.path.join(FAKE_REAL, "sessions")
 
@@ -141,7 +143,8 @@ variants = [("原样", FAKE_REAL), ("符号链接", link), ("大写", FAKE_REAL.
 for label, path in variants:
     for args in (["--compare", PHOTOS, "--keys", "enter"], ["--verdicts", PHOTOS, "--accept-all"],
                  ["--collage", PHOTOS, "--auto", "4", "--out", o("c.jpg")], ["--collage-ops", PHOTOS, "--ops", "clear"],
-                 ["--body-offset", PHOTOS], ["--ingest", CARD, "--dest", o("ingest")], ["--export-xmp", PHOTOS]):
+                 ["--body-offset", PHOTOS], ["--ingest", CARD, "--dest", o("ingest")], ["--export-xmp", PHOTOS],
+                 ["--files-selftest"]):
         expect_refused(args, env_for(path), label)
 
 print("D. 临时数据目录照常跑（闸不多拦）")
