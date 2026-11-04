@@ -81,6 +81,15 @@ enum CardImporter {
         let skippedInDest: Int
         /// 和目标里别的照片重名、整组改了名的（张）。
         let renamedShots: Int
+        /// 改了名的里面，RAW+JPG 一起改的（张）—— 只有这些才是「改了名还是一对」。
+        let renamedWithPair: Int
+        /// 改了名的头一个新主名（确认框举例：IMG_0001_2）。
+        let renamedExample: String?
+        /// 改了名的里面，目标里同主名的是另一类（RAW↔JPG）、但文件头读不全（拍摄时间 / SubSec / 型号 /
+        /// 机身序列号）、认不准是不是同一帧的（张）—— 这些没配成一对，会多出一张。
+        let unconfirmedHalves: Int
+        /// 目标里同主名只有另一类、文件头确认是同一帧（RAW、JPG 分卡存的另一张卡）：补在旁边、不改名（张）。
+        let pairedShots: Int
         let videoCount: Int
         /// 不是照片、不是视频、也不是相机配套小文件的（录音备注、不认识的格式）：个数和几个例子。
         let otherCount: Int
@@ -125,6 +134,10 @@ enum CardImporter {
         var aborted: String?
         /// 计划时卡上读不出来的地方（照搬 Plan.scanProblems，导完一起提醒）。
         var scanProblems: [String] = []
+        /// 导进来的里面和目标里别的照片重名、改了名的（张）和一个例子（新主名）—— 导完照实说一句：
+        /// 双读卡器同时插两张卡时，确认框里的改名数是前一张卡导到一半时算的，不准。
+        var renamedShots = 0
+        var renamedExample: String?
         var elapsed: TimeInterval = 0
     }
 
@@ -404,6 +417,8 @@ enum CardImporter {
         var copies: [Copy] = []
         var alreadyThere: [(key: String, path: String)] = []
         var skippedImported = 0, skippedInDest = 0, renamedShots = 0
+        var renamedWithPair = 0, unconfirmedHalves = 0, pairedShots = 0
+        var renamedExample: String?
         var previousFolders: [String: Int] = [:]
         var fingerprints: [URL: String] = [:]
         var digests: [URL: SHA256.Digest] = [:]
@@ -431,6 +446,25 @@ enum CardImporter {
             }
             guard let other = try? sha256(of: url, cancel: cancel) else { return false }
             return full == other
+        }
+        var identities: [URL: FrameIdentity?] = [:]
+        var frameChecks = 0
+        func identity(_ url: URL) -> FrameIdentity? {
+            if let cached = identities[url] { return cached }
+            let id = frameIdentity(of: url)
+            identities[url] = id
+            return id
+        }
+        /// 卡上这张的每个文件、目标里的另一半，文件头是不是同一帧：nil = 有一样读不到。
+        func sameFrame(_ members: [CardFile], _ halves: [URL]) -> Bool? {
+            frameChecks += 1
+            if frameChecks % 50 == 1 { progress?("核对目标里同名的 RAW / JPG 是不是同一帧（第 \(frameChecks) 张）…") }
+            var ids: [FrameIdentity] = []
+            for url in members.map(\.url) + halves {
+                guard let id = identity(url) else { return nil }
+                ids.append(id)
+            }
+            return ids.allSatisfy { $0 == ids[0] }
         }
 
         for groupKey in groups.keys.sorted() {
@@ -461,8 +495,12 @@ enum CardImporter {
             //    · 占着这个名字的全是「这张本身、内容整份一样」→ 已经在了，缺哪个补哪个；
             //    · 有不相干的文件（别的照片、只剩 .xmp 的、坏掉的旧副本）→ 这个名字不能用，换下一个。
             let baseStem = members[0].url.deletingPathExtension().lastPathComponent
+            // 这张全是 RAW（true）或全是 JPG 这一类（false）时，目标里同主名的另一类可能是它的另一半。
+            let kinds = Set(members.map { pairKind($0.ext) })
+            let memberKind: Bool? = kinds.count == 1 ? kinds.first ?? nil : nil
             var n = 1
-            var chosen: (stem: String, missing: [CardFile])?
+            var chosen: (stem: String, missing: [CardFile], paired: Bool)?
+            var baseUnconfirmed = false
             while chosen == nil, n < 10_000 {
                 if cancel?.isSet == true { throw ImportError.cancelled }
                 let stem = n == 1 ? baseStem : "\(baseStem)_\(n)"
@@ -470,10 +508,11 @@ enum CardImporter {
                 if planned.contains(stem.lowercased()) { continue }
                 let taken = occupants(of: stem)
                 if taken.isEmpty {
-                    chosen = (stem, members)
+                    chosen = (stem, members, false)
                     break
                 }
                 var identical: Set<String> = []     // 已经在的成员（原文件名）
+                var halves: [URL] = []              // 同主名（大小写也一样）的另一类：可能是同一帧的另一半
                 var foreign = false, sidecar = false
                 for url in taken {
                     let name = url.lastPathComponent.lowercased()
@@ -481,6 +520,9 @@ enum CardImporter {
                         identical.insert(m.name)
                     } else if url.pathExtension.lowercased() == "xmp" {
                         sidecar = true
+                    } else if let kind = memberKind, url.deletingPathExtension().lastPathComponent == stem,
+                              pairKind(url.pathExtension) == !kind {
+                        halves.append(url)
                     } else {
                         foreign = true
                     }
@@ -488,12 +530,22 @@ enum CardImporter {
                 if foreign { continue }
                 let missing = members.filter { !identical.contains($0.name) }
                 if missing.isEmpty {
-                    chosen = (stem, [])
+                    chosen = (stem, [], false)
                     break
                 }
-                // 补缺的文件不往一个已经有 .xmp 的名字上挂：那份 xmp 不一定是这张的。
-                if sidecar { continue }
-                chosen = (stem, missing)
+                // RAW、JPG 分卡存：目标里同主名只有另一类。文件头说是同一帧才补在旁边、不改名；读不全（nil）
+                // 或者对不上，都当成别的照片，换下一个名字（两台同号机身的 RAW、JPG 不能拼成一张）。
+                var paired = false
+                if !halves.isEmpty {
+                    let same = sameFrame(members, halves)
+                    if same == nil, stem == baseStem { baseUnconfirmed = true }
+                    guard same == true else { continue }
+                    paired = true
+                }
+                // 补缺的文件不往一个已经有 .xmp 的名字上挂：那份 xmp 不一定是这张的。文件头确认了的另一半
+                // 旁边的 .xmp 就是这一帧的（Lightroom 给 RAW 写的那份），放行。
+                if sidecar && !paired { continue }
+                chosen = (stem, missing, paired)
             }
             if cancel?.isSet == true { throw ImportError.cancelled }
             guard let chosen else { continue }
@@ -510,7 +562,13 @@ enum CardImporter {
                 skippedInDest += 1
                 continue
             }
-            if chosen.stem != baseStem { renamedShots += 1 }
+            if chosen.stem != baseStem {
+                renamedShots += 1
+                if renamedExample == nil { renamedExample = chosen.stem }
+                if kinds.contains(true) && kinds.contains(false) { renamedWithPair += 1 }
+                if baseUnconfirmed { unconfirmedHalves += 1 }
+            }
+            if chosen.paired { pairedShots += 1 }
             for m in chosen.missing {
                 copies.append(Copy(source: m.url, target: destination.appendingPathComponent(chosen.stem + "." + m.ext),
                                    size: m.size, modified: m.modified, created: m.created,
@@ -525,7 +583,9 @@ enum CardImporter {
                     skippedImported: skippedImported,
                     previousFolders: folders,
                     previousFolderGone: folders.first.map { !isDirectory(URL(fileURLWithPath: $0)) } ?? false,
-                    skippedInDest: skippedInDest, renamedShots: renamedShots, videoCount: videos,
+                    skippedInDest: skippedInDest, renamedShots: renamedShots,
+                    renamedWithPair: renamedWithPair, renamedExample: renamedExample,
+                    unconfirmedHalves: unconfirmedHalves, pairedShots: pairedShots, videoCount: videos,
                     otherCount: others.count, otherExamples: Array(others.prefix(3)),
                     scanProblems: problems,
                     includeImported: includeImported, existingInDest: existingInDest,
@@ -666,6 +726,13 @@ enum CardImporter {
         if fd >= 0 { _ = fcntl(fd, F_FULLFSYNC); close(fd) }
         try? ledger.save(to: ledgerURL)
         outcome.copiedShots = copiedShots.count
+        var renamed: [String: String] = [:]     // 张 → 新主名
+        for copy in plan.copies where copiedShots.contains(copy.shot) {
+            let newStem = copy.target.deletingPathExtension().lastPathComponent
+            if newStem != (copy.originalName as NSString).deletingPathExtension { renamed[copy.shot] = newStem }
+        }
+        outcome.renamedShots = renamed.count
+        outcome.renamedExample = renamed.values.sorted().first
         progress(filesDone, bytesDone)
         return finish()
     }
@@ -946,7 +1013,15 @@ extension CardImporter.Outcome {
         }
         if !cancelled && missingFiles > 0 { text += " · \(missingFiles) 个文件没导进来" }
         if !scanProblems.isEmpty { text += " · 卡上有 \(scanProblems.count) 处读不出来" }
+        if let renamedText { text += " · " + renamedText }
         return text
+    }
+
+    /// 「3 张和目标里别的照片重名，改名导入了（如 IMG_0001_2）」
+    var renamedText: String? {
+        guard renamedShots > 0 else { return nil }
+        let example = renamedExample.map { "（如 \($0)）" } ?? ""
+        return "\(renamedShots) 张和目标里别的照片重名，改名导入了\(example)"
     }
 
     /// 要用户记住的那句（BatchStore.importNotice）：有文件没导进来、卡上有读不出来的地方、中途停了。
@@ -963,8 +1038,13 @@ extension CardImporter.Outcome {
             parts.append("卡上有 \(scanProblems.count) 处读不出来（\(shown)），那里的照片没导")
         }
         if let aborted { parts.append(aborted) }
-        guard !parts.isEmpty else { return nil }
-        return "存储卡「\(card)」：" + parts.joined(separator: "；") + " —— 先别格式化存储卡，再插一次会只补没导的"
+        // 改了名不是「先别格式化」的理由（照片都好好导进来了），只照实说一句。
+        let info = [renamedText].compactMap { $0 }
+        if parts.isEmpty {
+            guard !info.isEmpty else { return nil }
+            return "存储卡「\(card)」：" + info.joined(separator: "；")
+        }
+        return "存储卡「\(card)」：" + (parts + info).joined(separator: "；") + " —— 先别格式化存储卡，再插一次会只补没导的"
     }
 
     static func durationText(_ t: TimeInterval) -> String {
@@ -1213,6 +1293,12 @@ enum CardImportCLI {
         lines.append("跳过：以前导入过 \(plan.skippedImported) 张 · 目标里已有 \(plan.skippedInDest) 张 · 改名 \(plan.renamedShots) 张" +
                      (plan.previousFolders.isEmpty ? "" : " · 以前导到 \(plan.previousFolders.map { URL(fileURLWithPath: $0).lastPathComponent }.joined(separator: "、"))") +
                      (plan.previousFolderGone ? "（那个文件夹已经不在了）" : ""))
+        if plan.pairedShots > 0 || plan.unconfirmedHalves > 0 {
+            lines.append("RAW/JPG 配对：补成一对 \(plan.pairedShots) 张 · 认不准没配 \(plan.unconfirmedHalves) 张")
+        }
+        if plan.renamedShots > 0 {
+            lines.append("改名：\(plan.renamedShots) 张（如 \(plan.renamedExample ?? "-")）· 其中 RAW+JPG 一起改 \(plan.renamedWithPair) 张")
+        }
         if let other = plan.otherFilesText { lines.append("其他文件：\(other)") }
         if let problems = plan.scanProblemText { lines.append("读不出来：\(problems)") }
         lines.append("目标：\(CardImporter.displayPath(plan.destination))（原有 \(plan.existingInDest) 个文件）· 空间\(plan.enoughSpace ? "够" : "不够")")

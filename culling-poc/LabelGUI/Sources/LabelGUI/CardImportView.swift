@@ -402,9 +402,13 @@ struct CardImportSheet: View {
         if plan.skippedInDest > 0 {
             row("equal.circle", "\(plan.skippedInDest) 张目标文件夹里已经有一模一样的，不再复制")
         }
+        if plan.pairedShots > 0 {
+            row("link", "\(plan.pairedShots) 张和目标里同名的 RAW / JPG 是同一帧（拍摄时间、机身序列号都对得上），" +
+                "补到它旁边、用一样的名字，配成一对")
+        }
         if plan.renamedShots > 0 {
             // 别用 textformat.abc：中文系统下这个符号画成「甲乙丙」。
-            row("pencil", "\(plan.renamedShots) 张和目标里别的照片重名，整组改名（如 IMG_0001_2），RAW+JPG 还是一对")
+            row("pencil", renamedText(plan))
         }
         if plan.videoCount > 0 {
             row("video.slash", "卡上还有 \(plan.videoCount) 个视频，不导入（只导照片）")
@@ -412,6 +416,21 @@ struct CardImportSheet: View {
         if let other = plan.otherFilesText {
             row("doc.questionmark", "卡上还有 " + other)
         }
+    }
+
+    /// 「RAW+JPG 还是一对」只对卡上本来就成对、一起改名的那些成立；RAW、JPG 分卡存又认不准是不是同一帧的，
+    /// 改了名就和目标里那一半拆开了，要照实说。
+    private func renamedText(_ plan: CardImporter.Plan) -> String {
+        let example = plan.renamedExample ?? "IMG_0001_2"
+        var text = "\(plan.renamedShots) 张和目标里别的照片重名，改名导入（如 \(example)）"
+        if plan.renamedWithPair > 0 {
+            text += plan.renamedWithPair == plan.renamedShots ? "，RAW+JPG 一起改，还是一对" : "，同一张的 RAW+JPG 一起改，还是一对"
+        }
+        if plan.unconfirmedHalves > 0 {
+            text += "；其中 \(plan.unconfirmedHalves) 张目标里有同名的 RAW / JPG，但文件头读不全（拍摄时间或机身序列号），" +
+                "认不准是不是同一帧，没配成一对，会多出一张"
+        }
+        return text
     }
 
     private func previousText(_ plan: CardImporter.Plan) -> String {

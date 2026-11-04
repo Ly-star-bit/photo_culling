@@ -356,6 +356,116 @@ r = run_card_env(c, os.path.join(WORK, "data_k3"), d, {}, "--plant-symlink-after
 check(listing(d) == ["IMG_0001.CR3", "IMG_0001.JPG", "IMG_0002.JPG"], f"IMG_0002 整张没导（{listing(d)}）")
 check(os.path.islink(os.path.join(d, "IMG_0002.JPG")), "符号链接还在")
 
+# ---------- RAW、JPG 分卡存：文件头（拍摄时间、SubSec、型号、机身序列号）认同一帧 ----------
+import struct
+
+# 8x8 灰色基线 JPEG（sips 生成、去掉了 APP 段），塞一段 EXIF 进去 ImageIO 就读得出文件头。
+TINY_JPEG = bytes.fromhex(
+    "ffd8ffc00011080008000803012200021101031101ffc4001f0000010501010101010100000000000000000102030405060708090a0b"
+    "ffc400b5100002010303020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f024"
+    "33627282090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475767778"
+    "797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9"
+    "dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffc4001f0100030101010101010101010000000000000102030405060708090a0b"
+    "ffc400b51100020102040403040705040400010277000102031104052131061241510761711322328108144291a1b1c109233352f015"
+    "6272d10a162434e125f11718191a262728292a35363738393a434445464748494a535455565758595a636465666768696a7374757677"
+    "78797a82838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7"
+    "d8d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9faffdb0043000606060606060a06060a0e0a0a0a0e120e0e0e0e1217121212121217"
+    "1c1717171717171c1c1c1c1c1c1c1c22222222222227272727272c2c2c2c2c2c2c2c2c2cffdb0043010707070b0a0b130a0a132e1f1a"
+    "1f2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2effdd00"
+    "040001ffda000c03010002110311003f0028a28a00ffd9")
+
+
+def exif_tiff(model, when, subsec, serial):
+    """TIFF 块：IFD0（Make、Model、指向 EXIF）+ EXIF（DateTimeOriginal、SubSecTimeOriginal、BodySerialNumber）。"""
+    def asc(s):
+        return s.encode() + b"\0"
+    ifd0 = [(0x010F, asc("SONY")), (0x0110, asc(model))]
+    sub = [(tag, asc(v)) for tag, v in [(0x9003, when), (0x9291, subsec), (0xA431, serial)] if v is not None]
+    exif_off = 8 + 2 + 12 * (len(ifd0) + 1) + 4
+    data_off = exif_off + 2 + 12 * len(sub) + 4
+    blobs = bytearray()
+
+    def entry(tag, val):
+        if len(val) <= 4:
+            return struct.pack("<HHI", tag, 2, len(val)) + val.ljust(4, b"\0")
+        off = data_off + len(blobs)
+        blobs.extend(val + (b"\0" if len(val) % 2 else b""))
+        return struct.pack("<HHII", tag, 2, len(val), off)
+    head = struct.pack("<H", len(ifd0) + 1) + b"".join(entry(t, v) for t, v in ifd0)
+    head += struct.pack("<HHII", 0x8769, 4, 1, exif_off) + struct.pack("<I", 0)
+    body = struct.pack("<H", len(sub)) + b"".join(entry(t, v) for t, v in sub) + struct.pack("<I", 0)
+    return b"II" + struct.pack("<HI", 42, 8) + head + body + bytes(blobs)
+
+
+def fake_arw(model, when, subsec, serial, size=300_000):
+    t = exif_tiff(model, when, subsec, serial)
+    return t + os.urandom(size - len(t))
+
+
+def fake_jpg(model, when, subsec, serial, size=120_000):
+    app1 = b"Exif\0\0" + exif_tiff(model, when, subsec, serial)
+    head = TINY_JPEG[:2] + b"\xff\xe1" + struct.pack(">H", len(app1) + 2) + app1 + TINY_JPEG[2:]
+    return head + os.urandom(size - len(head))
+
+
+def describe_count(stdout, label):
+    m = re.search(label + r" (\d+) 张", stdout)
+    return int(m.group(1)) if m else 0
+
+
+T1, T2 = "2026:10:01 09:30:00", "2026:10:01 09:31:07"
+CAM1, CAM2 = "4012345", "4099999"
+print("M1. RAW、JPG 分卡存：卡 A 只有 RAW、卡 B 只有同名 JPG，文件头一致 → 补成一对、不改名；旁边 LR 的 .xmp 不挡")
+card_a = mkcard("card_m_a", {"DCIM/100MSDCF/DSC00001.ARW": fake_arw("ILCE-7M4", T1, "123", CAM1),
+                             "DCIM/100MSDCF/DSC00002.ARW": fake_arw("ILCE-7M4", T2, "045", CAM1)})
+card_b = mkcard("card_m_b", {"DCIM/100MSDCF/DSC00001.JPG": fake_jpg("ILCE-7M4", T1, "123", CAM1),
+                             "DCIM/100MSDCF/DSC00002.JPG": fake_jpg("ILCE-7M4", T2, "045", CAM1)})
+d = os.path.join(WORK, "dest_m1")
+data_m = os.path.join(WORK, "data_m1")
+r = run_card(card_a, data_m, d)
+check(r.returncode == 0 and listing(d) == ["DSC00001.ARW", "DSC00002.ARW"], f"卡 A 的 RAW 导进来了（{listing(d)}）")
+open(os.path.join(d, "DSC00002.xmp"), "w").write("<x:xmpmeta/>")          # Lightroom 给 RAW 写的
+r = run_card(card_b, data_m, d, "--plan-only")
+check(describe_count(r.stdout, "补成一对") == 2 and "改名 0 张" in r.stdout, "计划：补成一对 2 张、改名 0 张")
+r = run_card(card_b, data_m, d)
+check(r.returncode == 0 and listing(d) == ["DSC00001.ARW", "DSC00001.JPG", "DSC00002.ARW", "DSC00002.JPG", "DSC00002.xmp"],
+      f"JPG 用原名补在 RAW 旁边（{listing(d)}）")
+check(sha(os.path.join(d, "DSC00001.JPG")) == sha(os.path.join(card_b, "DCIM/100MSDCF/DSC00001.JPG")), "补进来的就是卡 B 的 JPG")
+check("改名导入了" not in r.stdout and "导入提醒" not in r.stdout, "导完的摘要、提醒里都没有改名")
+r = run_card(card_b, data_m, d, "--reimport")
+check("要导入：没有" in r.stdout and "目标里已有 2 张" in r.stdout, "再导一次卡 B（勾重导）：都认出来、不多出 _2")
+
+print("M2. 反例：同号不同时间 → 照旧改名；序列号读不到 → 照旧改名（认不准，确认框照实说）；摘要、提醒都说改了名")
+card_c = mkcard("card_m_c", {"DCIM/100MSDCF/DSC00001.JPG": fake_jpg("ILCE-7M4", "2026:10:02 18:00:00", "123", CAM1)})
+r = run_card(card_c, data_m, d)
+check("DSC00001_2.JPG" in listing(d) and sha(os.path.join(d, "DSC00001_2.JPG")) == sha(os.path.join(card_c, "DCIM/100MSDCF/DSC00001.JPG")),
+      f"时间不一样的那张改名 DSC00001_2.JPG（{listing(d)}）")
+check(sha(os.path.join(d, "DSC00001.JPG")) == sha(os.path.join(card_b, "DCIM/100MSDCF/DSC00001.JPG")), "原来那对没被动")
+check("改名导入了（如 DSC00001_2）" in r.stdout, "导完的摘要里说了改名")
+notice = [l for l in r.stdout.splitlines() if l.startswith("导入提醒：")]
+check(len(notice) == 1 and "改名导入了" in notice[0] and "先别格式化" not in notice[0], f"提醒里说了改名、没叫人先别格式化（{notice}）")
+d2 = os.path.join(WORK, "dest_m2")
+card_ns_a = mkcard("card_m_nsa", {"DCIM/100MSDCF/DSC00005.ARW": fake_arw("ILCE-7M4", T1, "123", None)})
+card_ns_b = mkcard("card_m_nsb", {"DCIM/100MSDCF/DSC00005.JPG": fake_jpg("ILCE-7M4", T1, "123", None)})
+run_card(card_ns_a, os.path.join(WORK, "data_m2"), d2)
+r = run_card(card_ns_b, os.path.join(WORK, "data_m2"), d2)
+check(listing(d2) == ["DSC00005.ARW", "DSC00005_2.JPG"], f"序列号读不到 → 改名、不硬配（{listing(d2)}）")
+check(describe_count(r.stdout, "认不准没配") == 1, "计划里数出 1 张认不准没配")
+
+print("M3. 两台同号机身（防的就是把它们拼成一张）：各自的 JPG 找到各自的 RAW")
+d3 = os.path.join(WORK, "dest_m3")
+data_m3 = os.path.join(WORK, "data_m3")
+cam1_raw = mkcard("card_m3_r1", {"DCIM/100MSDCF/DSC00009.ARW": fake_arw("ILCE-7M4", T1, "500", CAM1)})
+cam2_raw = mkcard("card_m3_r2", {"DCIM/100MSDCF/DSC00009.ARW": fake_arw("ILCE-7M4", T1, "500", CAM2)})
+cam1_jpg = mkcard("card_m3_j1", {"DCIM/100MSDCF/DSC00009.JPG": fake_jpg("ILCE-7M4", T1, "500", CAM1)})
+cam2_jpg = mkcard("card_m3_j2", {"DCIM/100MSDCF/DSC00009.JPG": fake_jpg("ILCE-7M4", T1, "500", CAM2)})
+for card in (cam1_raw, cam2_raw, cam2_jpg, cam1_jpg):
+    run_card(card, data_m3, d3)
+check(listing(d3) == ["DSC00009.ARW", "DSC00009.JPG", "DSC00009_2.ARW", "DSC00009_2.JPG"], f"两对各归各（{listing(d3)}）")
+pairs_m3 = {"DSC00009.ARW": cam1_raw, "DSC00009.JPG": cam1_jpg, "DSC00009_2.ARW": cam2_raw, "DSC00009_2.JPG": cam2_jpg}
+check(all(sha(os.path.join(d3, k)) == sha(os.path.join(v, "DCIM/100MSDCF/" + k.replace("_2", ""))) for k, v in pairs_m3.items()),
+      "机身 1 的 JPG 配机身 1 的 RAW、机身 2 的配机身 2 的（逐字节核对）")
+
 print("F. 存储卡从头到尾没被动过")
 check(tree(CARD) == card_before, "卡上每个文件的大小 / 修改时间 / SHA-256 都和开始时一样")
 
