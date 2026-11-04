@@ -359,6 +359,28 @@ struct BatchView: View {
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(Color.orange.opacity(0.14))
         }
+        // 直接把存储卡当一场打开（审查 S07）：卡上的东西一个不动，给导入的入口。
+        if store.isCardSession {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "sdcard").foregroundStyle(.orange)
+                Text(cardSessionText).font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button("从存储卡导入...") {
+                    NotificationCenter.default.post(name: .cardImportRequested, object: nil)
+                }
+                .controlSize(.small)
+                .disabled(store.isRunning)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(Color.orange.opacity(0.10))
+        }
+    }
+
+    private var cardSessionText: String {
+        let head = "\(store.cardSession.subject)：可以看片、改判，但移废片、写 XMP、高 ISO 复制、导出到卡上都关了，卡上的东西一个不动。"
+        let tail = "要正式选片先导入这张卡（复制到电脑、逐个校验过再分析）—— 在卡上做的改判不会跟到导入后的那一场。"
+        return head + tail
     }
 
     private func finishedImportText(_ done: CardImporter.FinishedImport) -> String {
@@ -381,6 +403,17 @@ struct BatchView: View {
                         let missing = store.missingSessionKeys.contains(session.key)
                         Button("\(session.name) · \(session.photoCount) 张\(missing ? " (文件夹已不存在)" : "")") {
                             store.switchSession(to: URL(fileURLWithPath: session.path))
+                        }
+                    }
+                    // 找不到照片文件夹的那几场（挪到了别的盘、卷名变了）：指给它现在的位置，判决、拼图接着用（审查 S04）。
+                    // NSMenu 的一行挂不了右键菜单，和下面「移除历史记录」一样放子菜单。
+                    let missingSessions = store.recentSessions.filter { store.missingSessionKeys.contains($0.key) }
+                    if !missingSessions.isEmpty {
+                        Menu("重新定位文件夹...") {
+                            Text("照片挪到了别处：指给它现在的位置，判决、拼图接着用")
+                            ForEach(missingSessions) { session in
+                                Button("\(session.name) · \(session.photoCount) 张...") { relocateSession(session) }
+                            }
                         }
                     }
                     Divider()
@@ -534,7 +567,9 @@ struct BatchView: View {
                     showTrashConfirm = true
                 }
                 // 拼图里在用的默认不移、但确认框里能「连这些一起移」：只有两样都是 0 才灰掉。
-                .disabled(store.trashableRejectCount + store.collageProtectedRejectCount == 0 || store.isRunning)
+                // 存储卡上的一场（审查 S07）也灰掉：确认框那句「系统废纸篓，可随时恢复」在卡上不成立（顶上横幅说为什么）。
+                .disabled(store.trashableRejectCount + store.collageProtectedRejectCount == 0 || store.isRunning
+                          || store.isCardSession)
             } label: {
                 Label("导出", systemImage: "square.and.arrow.up")
             }
@@ -2327,6 +2362,23 @@ struct BatchView: View {
                     store.runAnalysis()
                 }
             }
+        }
+    }
+
+    /// 「重新定位文件夹…」：选这一场的照片现在在哪（审查 S04）。面板从原来那一级（还在的话）开始找。
+    private func relocateSession(_ session: BatchStore.SessionEntry) {
+        modalPanelOpen = true
+        defer { modalPanelOpen = false }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.message = "「\(session.name)」的照片现在在哪个文件夹？"
+        panel.prompt = "重新定位"
+        let parent = URL(fileURLWithPath: session.path).deletingLastPathComponent()
+        if FileManager.default.fileExists(atPath: parent.path) { panel.directoryURL = parent }
+        if panel.runModal() == .OK, let url = panel.url {
+            store.relocateSession(session, to: url)
         }
     }
 

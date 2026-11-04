@@ -47,9 +47,18 @@ enum CollageBridge {
         return ref
     }
 
+    /// 照片文件夹挪过（改名、换了卷名、重新定位，审查 S04）：批量页那张的路径已经改到新位置，拼图里这张跟上。只换字符串、
+    /// 不开文件（同一个 id 就是同一张文件，尺寸不变）；外面拖进来的（没有 previewPath）不动。
+    static func followPaths(_ ref: inout CollagePhotoRef, of item: BatchItem) {
+        guard ref.previewPath != nil else { return }
+        if ref.path != item.decodePath { ref.path = item.decodePath }
+        if ref.previewPath != item.previewPath { ref.previewPath = item.previewPath }
+    }
+
     /// 托盘里的照片按批量页的现状刷新（重新判过、调过场的间隔、重新分析之后）：分析和判决带来的字段都换成
-    /// 新的；文件路径、尺寸不动（同一个 id 就是同一张文件，不为刷新重新开文件）。建 ref 也走这里。
+    /// 新的；尺寸不动（同一个 id 就是同一张文件，不为刷新重新开文件），文件路径跟着批量页（followPaths）。建 ref 也走这里。
     static func refresh(_ ref: inout CollagePhotoRef, from item: BatchItem, facts: Facts) {
+        followPaths(&ref, of: item)
         var faces = item.faces.map(\.bbox).filter { $0.count == 4 }
         if faces.isEmpty, let primary = item.faceBbox, primary.count == 4 { faces = [primary] }
         ref.faces = faces

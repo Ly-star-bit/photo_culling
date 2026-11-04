@@ -452,6 +452,8 @@ final class CollageStore: ObservableObject {
             ?? stateDir.appendingPathComponent("scratch.json")
         guard newURL != projectURL else {
             // 同一个场次（切回拼图 tab）：批量页那边可能改过判决、调过场的间隔。
+            // 照片文件夹可能挪过（同一个 key，书签跟到了新位置、重新定位过，审查 S04）：跟上，refreshFromBatch 才认这一场。
+            self.photoDir = photoDir
             refreshFromBatch()
             return
         }
@@ -536,7 +538,7 @@ final class CollageStore: ObservableObject {
     func refreshFromBatch() {
         guard let batch, let photoDir, let batchDir = batch.photoDir,
               batchDir.standardizedFileURL.path == photoDir.standardizedFileURL.path,
-              !project.photos.isEmpty else { return }
+              !project.photos.isEmpty || !project.variants.isEmpty else { return }
         let facts = CollageBridge.Facts(batch: batch)
         func refreshed(_ p: CollageProject) -> CollageProject? {
             var out = p
@@ -548,6 +550,19 @@ final class CollageStore: ObservableObject {
                 if ref != out.photos[i] {
                     out.photos[i] = ref
                     changed = true
+                }
+            }
+            // 方案里存着自己那份照片（不在托盘里的也有）：只跟上文件路径（照片文件夹挪过，审查 S04），别的照存时的样子。
+            for v in out.variants.indices {
+                for j in out.variants[v].project.photos.indices {
+                    let ref = out.variants[v].project.photos[j]
+                    guard let item = batch.item(withID: ref.id), ref.previewPath != nil else { continue }
+                    var moved = ref
+                    CollageBridge.followPaths(&moved, of: item)
+                    if moved != ref {
+                        out.variants[v].project.photos[j] = moved
+                        changed = true
+                    }
                 }
             }
             return changed ? out : nil
@@ -3513,7 +3528,15 @@ final class CollageStore: ObservableObject {
     // MARK: - 导出
 
     var defaultOutputFolder: URL? {
-        photoDir?.appendingPathComponent(ImageLoader.collageExportSubfolder)
+        // 批量页这一场开在存储卡上（审查 S07）：默认的「拼图导出/」在卡上，不给（导出按钮、AI 的 collage_export 都要先选卡外的目录）。
+        if onCardSession { return nil }
+        return photoDir?.appendingPathComponent(ImageLoader.collageExportSubfolder)
+    }
+
+    /// 这个拼图工程的照片文件夹就是批量页开在存储卡上的那一场。
+    private var onCardSession: Bool {
+        guard let batch, batch.isCardSession, let photoDir, let batchDir = batch.photoDir else { return false }
+        return batchDir.standardizedFileURL.path == photoDir.standardizedFileURL.path
     }
 
     var outputFolder: URL? {
@@ -3523,8 +3546,16 @@ final class CollageStore: ObservableObject {
     var exportBlockedReason: String? {
         if isExporting { return "正在导出" }
         if project.pages.isEmpty { return "还没有版式" }
+        if outputFolder == nil, onCardSession { return "照片在存储卡上：先选一个不在卡上的输出目录（或者先导入这张卡）" }
         if outputFolder == nil { return "先选择输出目录" }
+        if let why = cardOutputRefusal { return why }
         return nil
+    }
+
+    /// 输出目录在存储卡上（批量页这一场开在卡上，审查 S07）：给的原因；nil = 照常导。
+    var cardOutputRefusal: String? {
+        guard onCardSession, let batch, let folder = outputFolder else { return nil }
+        return batch.cardDestinationRefusal(folder)
     }
 
     /// 一次导出的结局：导出按钮看 progressText / lastError，AI 的 collage_export 拿这个。
@@ -3565,7 +3596,14 @@ final class CollageStore: ObservableObject {
         }
         if isExporting { return refuse("正在导出") }
         if snapshot.pages.isEmpty { return refuse("还没有版式") }
-        guard let folder = outputFolder else { return refuse("先选择输出目录") }
+        guard let folder = outputFolder else {
+            return refuse(onCardSession ? "照片在存储卡上：先选一个不在卡上的输出目录（或者先导入这张卡）" : "先选择输出目录")
+        }
+        // 批量页这一场开在存储卡上、输出目录也在卡上（审查 S07）：不写卡。
+        if let why = cardOutputRefusal {
+            lastError = why
+            return refuse(why, folder: folder)
+        }
         let hints = self.hints
         // 直接写进输出目录（以前每次先建一个「标题_时间」子目录再往里写）。
         do {
