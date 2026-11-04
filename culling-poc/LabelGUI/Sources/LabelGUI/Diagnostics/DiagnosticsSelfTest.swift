@@ -7,7 +7,9 @@ import UniformTypeIdentifiers
 ///   A 状态栏提示的历史：20 条环形、新的在前、连着一样的只记次数、分级；三个 store 的 lastError 一设上就记、类型还是 String?
 ///   B 持久日志：一条一行、换行折掉、轮转（个数、大小）、提示历史跟着进日志
 ///   C 诊断包：zip 里有说明 / 诊断信息 / 提示 / 日志 / 场次概况 / 目录结构 / 崩溃报告（只要最近的、选片工具的），
-///     没有照片、预览图（连名字都没有）、bookmark、客户备注原文、场次文件夹名、家目录
+///     没有照片、预览图（连名字都没有）、bookmark、客户备注原文、场次文件夹名、家目录；目标已经有文件 / 文件夹时一个字节都不动；
+///     打码不只认 sessions.json（纯函数：任意路径逐段打码、「」里的文件夹名、不误伤；界面那一路：真的 AppModel 里认回的场次、
+///     没登记的当前文件夹、掉出最近场次的旧场次、日志里的新路径、崩溃报告里转义过的路径 —— zip 里哪个文件都没有客户名）
 ///   D 失败原因：盘不支持废纸篓、没权限、只读盘、盘满、EPERM；原因汇总；废纸篓移走一半；不限体积那条路逐字节和以前一样、
 ///     写不进去报「没有权限」；writeJPEG 原片不在 / 解不开；水印页拿到真原因
 ///   E 文件夹权限：chmod 000 的照片文件夹分析时报「没有权限读这个文件夹 … 系统设置 › 隐私与安全性 › 文件与文件夹」，
@@ -241,6 +243,189 @@ enum DiagnosticsSelfTest {
         check(info.contains("macOS：") && info.contains("机型：") && info.contains("当前场次：<场次 1>（key \(key1)）"),
               "诊断信息：系统、机型、界面状态（路径换成代号）", info)
         targetChecks(work, data: data, check)
+        redactorChecks(check)
+        liveFolderChecks(work, check)
+    }
+
+    /// 打码（纯函数）：任意路径逐段打码、只在一段结尾处换、「」里的文件夹名、网址和系统路径不动。
+    @MainActor
+    private static func redactorChecks(_ check: Check) {
+        print("C2. 打码：不只认 sessions.json 里登记的")
+        let home = "/Users/someone"
+        let key = BatchStore.sessionKey(for: URL(fileURLWithPath: "/Volumes/T7/张三婚礼"))
+        let sessions = [DiagnosticsBundle.SessionDigest(key: key, path: "/Volumes/T7/张三婚礼", name: "张三婚礼_交付",
+                                                        photoCount: 3, lastAnalyzed: "")]
+        let redact = Redactor(home: home, sessions: sessions)
+        let texts = [
+            "照片文件夹「张三婚礼」不存在 ⏎ /Volumes/T7/张三婚礼/DSCF0001.RAF",
+            "列照片时跳过读不了的 /Volumes/T7 1/交付/张三婚礼_交付/锁着的：没有权限",
+            "数据目录：/Users/someone/Library/Application Support/选片工具 · 所在的盘还剩 1 GB",
+            "分析失败: 没有权限读这个文件夹「王五订婚」：到 系统设置 › 隐私与安全性",
+            "导出到 /Users/someone/Desktop/客户钱七/精选/DSCF0002.JPG 等 3 张",
+            "「孙八挑错的」里找不到「张三婚礼_交付」的照片",
+            "/Users/other/Pictures/20261104/DCIM/100CANON/IMG_0001.CR3",
+            "socket：/var/folders/ab/xyz123/T/xuanpian-live/0123456789abcdef/s.sock",
+            "可执行文件：/Applications/选片工具.app/Contents/MacOS/LabelGUI",
+            "写入 ~/Desktop/封面 周九.jpg 失败",
+            "核对存储卡「EOS_DIGITAL」…",
+            "使用说明 https://github.com/x/y#readme",
+            "/Volumes/T7/张三婚礼2/x.JPG 和 /Volumes/T7/张三婚礼",
+            "「客户钱七」不存在",
+            "场次 key 对得上「数据目录结构」里的 sessions/<key>；写入「封面.jpg」失败；1/2 倍、JPG/RAW、a / b",
+            "跳过 /Volumes/T7/婚礼（张三）/DSCF0004.RAF 和（/Volumes/T7/客户吴十）",
+        ]
+        let out = redact.applyAll(texts)
+        func at(_ i: Int) -> String { i < out.count ? out[i] : "" }
+        let banned = ["张三", "王五", "钱七", "孙八", "周九", "吴十", "T7", "EOS_DIGITAL", "someone", "/Users/other"]
+        let all = out.joined(separator: "\n")
+        check(banned.allSatisfy { !all.contains($0) }, "客户名、盘名、用户名都换掉了", all)
+        check(at(0) == "照片文件夹「<场次 1>」不存在 ⏎ <场次 1>/DSCF0001.RAF", "认得的场次：路径和「文件夹名」换成 <场次 1>，照片文件名留着",
+              at(0))
+        check(at(1).hasPrefix("列照片时跳过读不了的 /Volumes/<盘 1>/<文件夹 ") && at(1).contains("/<场次 1>/<文件夹 ")
+              && at(1).hasSuffix("：没有权限"), "认回以后的新路径（盘名变了、上面多一层）：盘、文件夹逐段打码，场次名认得", at(1))
+        check(at(2) == "数据目录：~/Library/Application Support/选片工具 · 所在的盘还剩 1 GB", "家目录换成 ~，系统文件夹照原样", at(2))
+        check(at(3).hasPrefix("分析失败: 没有权限读这个文件夹「<文件夹 "), "没登记、只在「」里出现的文件夹名（隐私权限拦下）也换掉", at(3))
+        check(at(4).hasPrefix("导出到 ~/Desktop/<文件夹 ") && at(4).hasSuffix("/DSCF0002.JPG 等 3 张"),
+              "随便哪条路径：桌面留着、文件夹打码、照片文件名和后面的字留着", at(4))
+        check(at(5).hasPrefix("「<文件夹 ") && at(5).hasSuffix("」里找不到「<场次 1>」的照片"), "「X」里找不到：两个名字都换掉", at(5))
+        check(at(6) == "/Users/<用户>/Pictures/20261104/DCIM/100CANON/IMG_0001.CR3", "别的用户名换掉；日期、DCIM、100CANON 留着", at(6))
+        check(at(7) == texts[7], "临时目录、socket 路径照原样", at(7))
+        check(at(8) == texts[8], "app 自己的路径照原样", at(8))
+        check(at(9).hasPrefix("写入 ~/Desktop/<文件 ") && at(9).hasSuffix(".jpg 失败"), "中文名的文件换成 <文件 N>.jpg", at(9))
+        check(at(10).hasPrefix("核对存储卡「<盘 "), "存储卡「卷名」换成 <盘 N>", at(10))
+        check(at(11) == texts[11], "网址不动", at(11))
+        check(at(12).hasSuffix("/x.JPG 和 <场次 1>") && !at(12).contains("<场次 1>2"), "只在一段结尾处换：张三婚礼2 不会换成「<场次 1>2」",
+              at(12))
+        check(at(13).hasPrefix("「<文件夹 ") && at(13).hasSuffix("」不存在"), "路径里打过码的名字，别处「」里的也换（同一个代号）", at(13))
+        check(at(14) == texts[14], "不是路径、不是文件夹名的不误伤（说明文字、文件名、分数、斜杠）", at(14))
+        check(at(15).hasPrefix("跳过 /Volumes/<盘 ") && at(15).contains("/DSCF0004.RAF 和（/Volumes/<盘 ") && at(15).hasSuffix(">）"),
+              "文件夹名里的括号算路径的一部分；包着路径的括号留在外面", at(15))
+    }
+
+    /// 界面那一路（真的 AppModel、BatchStore）：认回的场次（photoDir 是改名以后的新路径、sessions.json 里钉着旧路径）、
+    /// 还没登记的当前文件夹（隐私权限拦下那种）、掉出最近场次的旧场次、日志里随便哪条路径 —— zip 里哪个文件都没有客户名。
+    @MainActor
+    private static func liveFolderChecks(_ work: URL, _ check: Check) {
+        print("C3. 诊断包（界面那一路）：认回的场次、没登记的当前文件夹、日志里的新路径都打码")
+        let fm = FileManager.default
+        var root = work.appendingPathComponent("gui", isDirectory: true)
+        try? fm.createDirectory(at: root, withIntermediateDirectories: true)
+        // 和 --session-move-selftest 一样：/private/tmp 下面换成不带 /private 的写法，改名前后按路径算的 key 才稳。
+        if root.path.hasPrefix("/private/") {
+            let alias = URL(fileURLWithPath: String(root.path.dropFirst("/private".count)), isDirectory: true)
+            if SessionLocation.identity(alias.path) == SessionLocation.identity(root.path) { root = alias }
+        }
+        AppLog.uninstallFileLog()
+        AppLog.installFileLog(dataDir: appDataDir, role: "自检")
+        defer { AppLog.uninstallFileLog() }
+        ErrorHistory.shared.clear()
+        let model = AppModel.make(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir),
+                                  bridge: .none)
+        let batch = model.batch
+
+        // 1. 认回：分析过的「张三婚礼」改名成「张三婚礼_已交付精修」，从新路径打开 → 沿用旧 key、photoDir 是新路径。
+        let a = root.appendingPathComponent("张三婚礼", isDirectory: true)
+        let b = root.appendingPathComponent("张三婚礼_已交付精修", isDirectory: true)
+        let shoot = [FileSafetySelfTest.Fake(id: "DSCF0001", raw: "DSCF0001.JPG", jpeg: true),
+                     FileSafetySelfTest.Fake(id: "DSCF0002", raw: "DSCF0002.JPG", jpeg: true)]
+        FileSafetySelfTest.writeShoot(a, shoot)
+        let oldKey = BatchStore.sessionKey(for: a)
+        let opened = batch.switchSession(to: a) && batch.items.count == 2
+        FileSafetySelfTest.waitUntil(0.3) { false }
+        AppLog.notice("batch", "照片文件夹「张三婚礼」里 \(a.path)/DSCF0001.JPG（改名以前的一行）")
+        let renamed = (try? fm.moveItem(at: a, to: b)) != nil
+        let reopened = renamed && batch.switchSession(to: b)
+        let samePlace = SessionLocation.identity(batch.photoDir?.path ?? "/nonexistent") == SessionLocation.identity(b.path)
+        let adopted = reopened && samePlace && batch.sessionDir.lastPathComponent == oldKey
+        check(opened && adopted, "前提：改了名的文件夹认回原来那一场（photoDir 是新路径，key 还是旧的）",
+              "\(opened) \(reopened) \(batch.photoDir?.path ?? "nil") \(batch.sessionDir.lastPathComponent)")
+        let lockedB = b.appendingPathComponent("锁着的第二机位", isDirectory: true)
+        try? fm.createDirectory(at: lockedB, withIntermediateDirectories: true)
+        check.lock(lockedB, 0o000)
+        _ = ImageLoader.listPhotos(in: b)   // 日志：列照片时跳过读不了的 <新路径>/锁着的第二机位
+        batch.lastError = "「孙八挑错的文件夹」里找不到「\(b.lastPathComponent)」的照片"
+        let first = exportAndRead(model, to: work.appendingPathComponent("gui-1.zip"), crashDir: nil, check)
+        let info1 = first.first { $0.key.hasSuffix("/info.txt") }?.value ?? ""
+        let newKey = BatchStore.sessionKey(for: b)
+        check(info1.contains("（key \(oldKey)）") && !info1.contains(newKey), "info.txt 的 key 是钉住的旧 key（对得上 sessions.txt）",
+              info1)
+        check(info1.contains("当前场次：<场次 1>（key"), "info.txt 里认回的场次（新路径）换成 <场次 1>", info1)
+
+        // 2. 没登记的当前文件夹：分析被隐私权限拦下（一张都没有，不进 sessions.json）。
+        let c = root.appendingPathComponent("王五订婚照", isDirectory: true)
+        let lockedC = c.appendingPathComponent("客户挑的", isDirectory: true)
+        try? fm.createDirectory(at: lockedC, withIntermediateDirectories: true)
+        check.lock(lockedC, 0o000)
+        let switched = batch.switchSession(to: c)
+        let unregistered = !batch.recentSessions.contains { $0.key == BatchStore.sessionKey(for: c) }
+        check(switched && unregistered, "前提：当前打开的「王五订婚照」不在最近场次里")
+        let eperm = NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError,
+                            userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))])
+        batch.lastError = "分析失败: " + Diagnostics.folderUnreadableMessage(c, error: eperm)
+        _ = ImageLoader.listPhotos(in: c)   // 日志：列照片时跳过读不了的 <路径>/客户挑的
+        // 3. 掉出最近场次的旧场次（只剩数据目录里的 manifest）和日志里只出现过一次的路径。
+        let goneKey = BatchStore.sessionKey(for: URL(fileURLWithPath: "/Volumes/T7/赵六旧场次"))
+        let gone = appDataDir.appendingPathComponent("sessions/\(goneKey)", isDirectory: true)
+        try? fm.createDirectory(at: gone, withIntermediateDirectories: true)
+        try? Data(#"{"photo_dir":"/Volumes/T7/赵六旧场次","photos":[]}"#.utf8).write(to: gone.appendingPathComponent("manifest.json"))
+        AppLog.error("batch", "照片文件夹「赵六旧场次」不存在 (被删除、改名或硬盘未挂载) ⏎ /Volumes/T7/赵六旧场次/DSCF0009.RAF")
+        AppLog.error("export", "导出到 /Volumes/客户钱七的盘/钱七写真/精选：写入「DSCF0003.jpg」失败")
+        // 4. 崩溃报告：.ips 里的路径是 JSON 转义过的 \/Users\/…
+        let crash = work.appendingPathComponent("gui-crash", isDirectory: true)
+        try? fm.createDirectory(at: crash, withIntermediateDirectories: true)
+        let escapedHome = NSHomeDirectory().replacingOccurrences(of: "/", with: "\\/")
+        try? Data("{\"procPath\":\"\(escapedHome)\\/Desktop\\/孙八私房\\/x\"}".utf8)
+            .write(to: crash.appendingPathComponent("LabelGUI-2026-11-04-101010.ips"))
+        let second = exportAndRead(model, to: work.appendingPathComponent("gui-2.zip"), crashDir: crash, check)
+
+        let banned = ["张三婚礼", "已交付精修", "锁着的第二机位", "孙八", "王五订婚照", "客户挑的", "赵六旧场次", "客户钱七的盘",
+                      "钱七写真", "/Volumes/T7/", NSHomeDirectory() + "/", escapedHome]
+        for (label, files) in [("第一个包", first), ("第二个包", second)] {
+            var leaks: [String] = []
+            for (name, text) in files {
+                for word in banned where text.contains(word) { leaks.append("\(name)：\(word)") }
+            }
+            check(!files.isEmpty && leaks.isEmpty, "\(label)：zip 里哪个文件都没有客户名、盘名、家目录", "\(leaks)")
+        }
+        let info2 = second.first { $0.key.hasSuffix("/info.txt") }?.value ?? ""
+        check(info2.contains("当前场次：<当前场次>（key "), "没登记的当前文件夹 → <当前场次>", info2)
+        let log2 = second.first { $0.key.hasSuffix("/logs/app.log") }?.value ?? ""
+        check(log2.contains("/DSCF0009.RAF") && log2.contains("/Volumes/<盘 ") && log2.contains("「DSCF0003.jpg」"),
+              "日志里照片文件名、盘的位置（代号）还看得出来", String(log2.suffix(600)))
+        let crash2 = second.first { $0.key.contains("/crash-reports/") }?.value ?? ""
+        check(crash2.contains("~/Desktop/<文件夹 "), "崩溃报告里转义过的路径也打码", crash2)
+        check.unlockAll()
+        try? fm.removeItem(at: root)
+    }
+
+    /// 用界面那一路的参数（diagnosticLines、提示历史、diagnosticFolders）打一个包，解开读回每个文件。
+    @MainActor
+    private static func exportAndRead(_ model: AppModel, to zip: URL, crashDir: URL?, _ check: Check) -> [String: String] {
+        let fm = FileManager.default
+        do {
+            _ = try DiagnosticsBundle.write(dataDir: appDataDir, to: zip, context: model.diagnosticLines(),
+                                            history: ErrorHistory.shared.plainText(), crashDir: crashDir,
+                                            folders: model.batch.diagnosticFolders)
+        } catch {
+            check(false, "打包 \(zip.lastPathComponent)", Diagnostics.describeIO(error))
+            return [:]
+        }
+        let unpacked = zip.deletingPathExtension().appendingPathExtension("unpacked")
+        let ditto = Process()
+        ditto.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        ditto.arguments = ["-x", "-k", zip.path, unpacked.path]
+        try? ditto.run()
+        ditto.waitUntilExit()
+        var files: [String: String] = [:]
+        let base = unpacked.standardizedFileURL.path + "/"
+        if let e = fm.enumerator(at: unpacked, includingPropertiesForKeys: [.isRegularFileKey]) {
+            for case let url as URL in e where (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true {
+                files[String(url.standardizedFileURL.path.dropFirst(base.count))] = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            }
+        }
+        try? fm.removeItem(at: unpacked)
+        try? fm.removeItem(at: zip)
+        return files
     }
 
     /// 打包的目标位置已经有东西：一个字节都不动（以前先 removeItem 再挪：给的是文件夹就整个递归删掉）。
