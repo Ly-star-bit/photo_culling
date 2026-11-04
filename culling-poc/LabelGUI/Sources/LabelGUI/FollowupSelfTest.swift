@@ -6,6 +6,7 @@ import Foundation
 ///   - S01b 判决、客户选中、拼图写盘失败时，实时桥写工具的结果 persisted:false + save_failed，「已存盘」只在真存上时说
 ///     （场次目录 chmod 只读模拟盘满；后台那次拼图保存失败也算得上，不等 lastError 那一拍）。
 ///   - F19 水印页「导入选片结果」菜单：精选 / 精选 + 可用 / 客户选中（客户选中的废片也带，RAW+JPG 用 JPG）。
+///   - 水印 EXIF 文字的快门：0、负数、非有限、非规格化的极小正数（1/t = inf）不崩、不填；≥1s 照旧 %g。
 /// 只写数据目录；改过的权限全部改回来，退出前删掉造出来的照片文件夹。
 @MainActor
 enum FollowupSelfTest {
@@ -32,6 +33,7 @@ enum FollowupSelfTest {
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         persistReport(root.appendingPathComponent("persist"))
         watermarkImport(root.appendingPathComponent("wm"))
+        watermarkShutter()
         unlockAll()
         try? FileManager.default.removeItem(at: root)
         print(failures == 0 ? "跟进小修自检：全部通过（\(total) 条）" : "跟进小修自检：\(failures) / \(total) 条失败")
@@ -219,5 +221,36 @@ enum FollowupSelfTest {
         check(after == Set(client + picks) && wm.photos.count == after.count,
               "再导入精选：加上 P1，和已经在列表里的 RW 不重复", "\(names(wm.photos))")
         wm.clearPhotos()
+    }
+
+    // MARK: - 水印 EXIF 文字的快门（第一波 G 车道留下的：ExifTags 只判了 t > 0）
+
+    static func watermarkShutter() {
+        print("— 水印 EXIF 文字 {shutter}：极小正数不再 Int(+inf) 崩")
+        // (说明, 曝光时间秒数, 期望 {shutter} 的值；nil = 不填，模板里的 {shutter} 原样留着)
+        let rows: [(String, Double, String?)] = [
+            ("最小的非规格化小数 5e-324（1/t 溢出成 inf）", 5e-324, nil),
+            ("1e-300（1/t 有限但远超 Int.max）", 1e-300, nil),
+            ("1e-19（1/t ≈ 1e19 > Int.max）", 1e-19, nil),
+            ("0（EXIF 写 0/1）", 0, nil),
+            ("负数", -0.004, nil),
+            ("NaN", Double.nan, nil),
+            ("+inf（以前印成 inf）", Double.infinity, nil),
+            ("1/250 照常", 0.004, "1/250"),
+            ("1/8000 照常", 1.0 / 8000, "1/8000"),
+            ("0.5s → 1/2", 0.5, "1/2"),
+            ("1.5s 保持 1.5（%g）", 1.5, "1.5"),
+            ("2s → 2", 2, "2"),
+            ("30s → 30", 30, "30"),
+        ]
+        for (name, t, want) in rows {
+            let got = WatermarkEngine.ExifTags.shutterValue(t)
+            check(got == want, "水印快门 " + name, "得到 \(got ?? "nil")，期望 \(want ?? "nil")")
+        }
+        // 模板照旧：没填的 {shutter} 原样留着（exif_text 语义），填了的带上模板里的「s」
+        var tags = WatermarkEngine.ExifTags(source: nil)
+        tags.values["shutter"] = WatermarkEngine.ExifTags.shutterValue(1.0 / 250)
+        let filled = tags.fill(template: "{shutter}s · ISO {iso}")
+        check(filled == "1/250s · ISO {iso}", "模板 {shutter}s 填出 1/250s，找不到的 {iso} 原样留着", filled)
     }
 }
