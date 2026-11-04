@@ -1,7 +1,8 @@
 #!/bin/bash
 # 不要照片的进程内自检（CI 的「自检」步骤）：每条都在一个新的临时 LABELGUI_DATA_DIR 里跑，任何一条退出码不是 0 就红。
 #   --ux-selftest        网格改判后焦点落在哪（BatchView.placeAfterChange）
-#   --timeline-selftest  时间轴 3000 组随机章节不出界、不重叠；随机数按 seed 播种，这里固定跑 3 个 seed
+#   --timeline-selftest  时间轴 3000 组随机章节不出界、不重叠；随机数按 seed 播种，这里固定跑 3 个 seed（seed 先混开再和
+#                        trial 组合，三个 seed 是三批互不相同的 3000 组，自检开头核对）
 #   --swiss-selftest     瑞士风版式规则（完全不收照片参数）
 #   --minimal / --mask / --album / --fashion / --newspaper-selftest   不给照片文件夹时只验合成数据
 #   --delivery-selftest  交付环节的数据安全：XMP 归属 / 合并、同名另存 -2、截断 JPEG、同一个文件、两条去 GPS

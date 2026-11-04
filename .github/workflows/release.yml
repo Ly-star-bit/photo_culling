@@ -79,7 +79,7 @@ jobs:
 
       # 不要照片的进程内自检：网格改判后的焦点、时间轴不出界、五种杂志风和人物挡字的版式规则、场次持久化、选片 MCP、
       # 文件安全、拼图导出、确认表……每条都在新的临时 LABELGUI_DATA_DIR 里跑（要 fixture 的传 Fixtures/photot-session）；
-      # 时间轴自检的随机数按 seed 播种，固定跑 3 个 seed（FAIL 行带 seed 和 trial，原样能复现）。最后核对「CI 登记」：
+      # 时间轴自检的随机数按 seed 播种，固定跑 3 个 seed（三批互不相同的 3000 组；FAIL 行带 seed 和 trial，原样能复现）。最后核对「CI 登记」：
       # AppRuntime.headlessFlags 里每个 --*-selftest 都有人跑、Scripts/ 下每个 *_regression.py / *_smoke.py 在这个文件里都有一步。
       # 和下面几步一样放在 MCP 冒烟后面（见 MCP 冒烟那段注释）。
       - name: 自检 (--*-selftest)
