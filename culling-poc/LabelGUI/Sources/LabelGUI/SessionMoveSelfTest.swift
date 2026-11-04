@@ -1,4 +1,6 @@
 import Foundation
+import CoreGraphics
+import ImageIO
 
 /// 挪了的文件夹认得回来（2026-11 全项目审查 S04 第一步）、存储卡当一场打开时不写卡（S07）：
 ///     LABELGUI_DATA_DIR=<临时目录> LabelGUI --session-move-selftest
@@ -44,13 +46,18 @@ enum SessionMoveSelfTest {
             if SessionLocation.identity(alias.path) == SessionLocation.identity(root.path) { root = alias }
         }
         pureRebase(root.appendingPathComponent("pure"))
+        relocationPure(root.appendingPathComponent("relocation-pure"))
         let model = AppModel.make(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir),
                                   bridge: .none)
         renamedThenPicked(root.appendingPathComponent("pick"), model: model)
         copyIsNotAdopted(root.appendingPathComponent("copy"), batch: model.batch)
         reopenFromMenu(root.appendingPathComponent("menu"), batch: model.batch)
+        unmatchedNotClaimed(root.appendingPathComponent("unmatched"), batch: model.batch)
+        idOnlyRowsFollow(root.appendingPathComponent("idonly"), batch: model.batch)
+        newFolderAtOldPath(root.appendingPathComponent("old-path"), batch: model.batch)
         relocate(root.appendingPathComponent("relocate"), batch: model.batch)
         liveBridgeDoesNotFollow(root.appendingPathComponent("live"), batch: model.batch)
+        liveBridgeAfterGUIRebase(root.appendingPathComponent("live-after-gui"), batch: model.batch)
         cardTable(root.appendingPathComponent("card-table"))
         cardSession(root.appendingPathComponent("card"), model: model)
         try? FileManager.default.removeItem(at: root)
@@ -152,14 +159,78 @@ enum SessionMoveSelfTest {
         let rows = after?["photos"] as? [[String: Any]] ?? []
         let a = rows.first { $0["id"] as? String == "a" } ?? [:]
         let b = rows.first { $0["id"] as? String == "b" } ?? [:]
-        check(moved.rebase == SessionLocation.ManifestRebase(from: old, rows: 1) && after?["photo_dir"] as? String == new.path,
-              "挪了：photo_dir 改成新位置，改了 1 行", "\(String(describing: moved.rebase))")
+        check(moved.rebase == SessionLocation.ManifestRebase(from: old, rows: 1, unmatched: 1)
+              && after?["photo_dir"] as? String == new.path,
+              "挪了：photo_dir 改成新位置，改了 1 行（不在旧根下的那 1 行记成没换过去）", "\(String(describing: moved.rebase))")
         check(a["raw_path"] as? String == new.path + "/a.RAF" && a["decode_path"] as? String == new.path + "/a.JPG"
               && a["preview_path"] as? String == "previews/a.jpg" && a["camera"] as? String == "X-T5",
               "raw_path / decode_path 换根，preview_path 和别的字段不动", "\(a)")
         check(b["raw_path"] as? String == "/别处/b.JPG", "不在旧根下面的路径不动")
         let missing = SessionLocation.rebaseManifest(in: session, to: dir.appendingPathComponent("不存在"))
         check(missing.rebase == nil && !missing.failed, "新位置不存在：不改")
+        spelledDifferently(dir)
+    }
+
+    /// 枚举器给的照片路径是真实路径，photo_dir 是调用方给的写法（/var 和 /private/var、拍摄文件夹在符号链接底下）：
+    /// 改名以后照样按相对位置换过去；一行都换不过去的整份不写、photo_dir 不改（下次打开再试）。
+    private static func spelledDifferently(_ dir: URL) {
+        let fm = FileManager.default
+        let session = dir.appendingPathComponent("session-spelling")
+        try? fm.createDirectory(at: session, withIntermediateDirectories: true)
+        func write(photoDir: String, raw: String) {
+            let json: [String: Any] = ["photo_dir": photoDir, "photos": [["id": "a", "raw_path": raw, "decode_path": raw]]]
+            try? JSONSerialization.data(withJSONObject: json).write(to: session.appendingPathComponent("manifest.json"))
+        }
+        func rows() -> [String: Any] {
+            let json = (try? Data(contentsOf: session.appendingPathComponent("manifest.json")))
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            return (json?["photos"] as? [[String: Any]])?.first ?? [:]
+        }
+        guard let realC = realpath(dir.path, nil) else {
+            check(false, "取测试目录的真实路径")
+            return
+        }
+        let real = String(cString: realC)
+        free(realC)
+
+        // (a) photo_dir 是 /var/…（或者 /private/var/…），照片路径是另一种写法。
+        let plainOld = dir.appendingPathComponent("写法旧")
+        let plainNew = dir.appendingPathComponent("写法新")
+        try? fm.createDirectory(at: plainOld, withIntermediateDirectories: true)
+        let realOld = real + "/写法旧"
+        let alias = realOld.hasPrefix("/private/") ? String(realOld.dropFirst("/private".count)) : "/private" + realOld
+        if SessionLocation.identity(alias) == SessionLocation.identity(realOld) {
+            write(photoDir: alias, raw: realOld + "/a.JPG")
+            try? fm.moveItem(at: plainOld, to: plainNew)
+            let r = SessionLocation.rebaseManifest(in: session, to: plainNew)
+            let row = rows()
+            check(r.rebase?.rows == 1 && r.rebase?.unmatched == 0
+                  && row["raw_path"] as? String == plainNew.path + "/a.JPG" && row["decode_path"] as? String == plainNew.path + "/a.JPG",
+                  "photo_dir 和照片路径一个带 /private、一个不带：改名以后照片路径照样换过去", "\(String(describing: r.rebase)) \(row)")
+        }
+
+        // (b) 拍摄文件夹在符号链接底下：photo_dir 是链接的写法，照片路径是真实路径；改名以后链接那一级还在，旧根已经不在了。
+        let parent = dir.appendingPathComponent("真实上级")
+        let link = dir.appendingPathComponent("链接上级")
+        try? fm.createDirectory(at: parent.appendingPathComponent("拍摄"), withIntermediateDirectories: true)
+        try? fm.createSymbolicLink(at: link, withDestinationURL: parent)
+        write(photoDir: link.path + "/拍摄", raw: real + "/真实上级/拍摄/a.JPG")
+        try? fm.moveItem(at: parent.appendingPathComponent("拍摄"), to: parent.appendingPathComponent("拍摄改名"))
+        let target = URL(fileURLWithPath: real + "/真实上级/拍摄改名")
+        let viaLink = SessionLocation.rebaseManifest(in: session, to: target)
+        let linkRow = rows()
+        check(viaLink.rebase?.rows == 1 && linkRow["raw_path"] as? String == target.path + "/a.JPG",
+              "拍摄文件夹在符号链接底下、改了名：照片路径按相对位置换过去（不再只改 photo_dir）",
+              "\(String(describing: viaLink.rebase)) \(linkRow)")
+
+        // (c) 照片路径怎么都对不上 photo_dir：整份不写，photo_dir 不改，不说改好了。
+        let elsewhere = dir.appendingPathComponent("对不上的新位置")
+        try? fm.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        write(photoDir: dir.appendingPathComponent("对不上的旧位置").path, raw: "/完全别处/x.JPG")
+        let before = manifestText(session)
+        let none = SessionLocation.rebaseManifest(in: session, to: elsewhere)
+        check(none.rebase?.untouched == true && none.rebase?.unmatched == 1 && !none.failed && manifestText(session) == before,
+              "照片路径一条都对不上：manifest 原样（photo_dir 也没改，下次打开再试）", "\(String(describing: none.rebase))")
     }
 
     private static func manifestText(_ session: URL) -> String {
@@ -248,6 +319,29 @@ enum SessionMoveSelfTest {
               "写 XMP：3 个 .xmp 都写在新位置，原来的位置没被建回来", batch.lastError ?? "")
     }
 
+    /// 认回以后这一条登记的是原路径、书签指着新位置；原路径上又有了新文件夹（同一天第二次导卡）：照旧打开原来那一场，
+    /// 但说清楚新文件夹没打开、要改名再开。
+    private static func newFolderAtOldPath(_ root: URL, batch: BatchStore) {
+        print("== 原路径上又有了新文件夹：打开的是挪走的那一场，说清楚")
+        let fm = FileManager.default
+        let p = root.appendingPathComponent("20261104")
+        let q = root.appendingPathComponent("20261104 张三")
+        FileSafetySelfTest.writeShoot(p, shoot(p))
+        check(batch.switchSession(to: p) && batch.items.count == 3, "打开导卡建的文件夹")
+        try? fm.moveItem(at: p, to: q)
+        check(batch.switchSession(to: q) && batch.sessionDir.lastPathComponent == key(p), "改名以后从「选择文件夹…」打开：认回")
+        check(batch.switchSession(to: p) && !(batch.lastError ?? "").contains("另一个文件夹"),
+              "原路径上没有东西时从菜单点：照常跟书签，不说「另一个文件夹」", batch.lastError ?? "")
+        // 第二张卡导到同一个日期文件夹。
+        try? fm.createDirectory(at: p, withIntermediateDirectories: true)
+        try? Data(repeating: 0x45, count: 800).write(to: p.appendingPathComponent("DSCF9001.JPG"))
+        check(batch.switchSession(to: p), "打开原路径上的新文件夹")
+        let error = batch.lastError ?? ""
+        check(sameDir(batch.photoDir, q) && error.contains("另一个文件夹") && error.contains("20261104 张三") && error.contains("改个名"),
+              "打开的是挪走的那一场，红条说原路径现在是另一个文件夹、要改名再开", error)
+        check(manifestAt(key(p), q), "原来那一场的 manifest 没被改到新文件夹上")
+    }
+
     // MARK: - 拷贝出来的副本
 
     private static func copyIsNotAdopted(_ root: URL, batch: BatchStore) {
@@ -291,6 +385,73 @@ enum SessionMoveSelfTest {
               "重开 app：还是这一场，照片路径在新位置")
     }
 
+    /// manifest 里只记了 id 的那一份（photos_without_results：取消时没轮到、解码失败的）也跟着换根：靠 id 记忆才叫
+    /// 「仪式_DSC_0001」的那张（同名的另一张已经移走了），文件夹改名以后下一次分析照样沿用这个 id。
+    private static func idOnlyRowsFollow(_ root: URL, batch: BatchStore) {
+        print("== 只记了 id 的照片（photos_without_results）跟着换根，下一次分析 id 不变")
+        let fm = FileManager.default
+        let w = root.appendingPathComponent("只记 id 原名")
+        let x = root.appendingPathComponent("只记 id 新名")
+        FileSafetySelfTest.writeShoot(w, [Fake(id: "DSCF0001", raw: "DSCF0001.JPG", jpeg: true)])
+        let ceremony = w.appendingPathComponent("仪式/DSC_0001.JPG")
+        try? fm.createDirectory(at: ceremony.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? FileSafetySelfTest.tinyJPEG().write(to: ceremony)
+        let manifestURL = appDataDir.appendingPathComponent("sessions/\(key(w))/manifest.json")
+        let idOnlyKey = ImageLoader.PreviousIDs.idOnlyKey
+        func manifest() -> [String: Any]? {
+            (try? Data(contentsOf: manifestURL)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        }
+        if var json = manifest() {
+            json[idOnlyKey] = [["id": "仪式_DSC_0001", "raw_path": ceremony.path, "decode_path": ceremony.path]]
+            try? JSONSerialization.data(withJSONObject: json).write(to: manifestURL)
+        }
+        check(batch.switchSession(to: w) && batch.items.count == 1, "打开原来的文件夹（1 张分析过，1 张只记了 id）")
+        try? fm.moveItem(at: w, to: x)
+        check(batch.switchSession(to: w) && sameDir(batch.photoDir, x), "从菜单点：书签跟到改了名的文件夹")
+        let json = manifest()
+        let row = (json?[idOnlyKey] as? [[String: Any]])?.first ?? [:]
+        func movedRight(_ field: String) -> Bool {
+            guard let path = row[field] as? String else { return false }
+            return under(path, x) && path.hasSuffix("/仪式/DSC_0001.JPG") && fm.fileExists(atPath: path)
+        }
+        check(movedRight("raw_path") && movedRight("decode_path") && row["id"] as? String == "仪式_DSC_0001",
+              "photos_without_results 那一行的 raw_path / decode_path 也改到新位置", "\(row)")
+        // 下一次分析起名：PreviousIDs 按改过的 manifest 建表，listPhotos 给这张的还是「仪式_DSC_0001」（不是裸的 DSC_0001）。
+        let previous = ImageLoader.PreviousIDs(manifest: json, photoDir: x)
+        let listed = ImageLoader.listPhotos(in: x, previous: previous)
+        let stem = listed.first { $0.primaryURL.lastPathComponent == "DSC_0001.JPG" }?.stem
+        check(stem == "仪式_DSC_0001", "改名以后再分析：这张沿用「仪式_DSC_0001」", stem ?? "nil")
+    }
+
+    /// 照片路径一条都换不过去（写法和 photo_dir 怎么都对不上）：不说「已改到现在的位置」，报 lastError，manifest 不动，
+    /// 下次打开再试。
+    private static func unmatchedNotClaimed(_ root: URL, batch: BatchStore) {
+        print("== 照片路径换不过去：不说已改好，下次打开再试")
+        let fm = FileManager.default
+        let u = root.appendingPathComponent("对不上原名")
+        let v = root.appendingPathComponent("对不上新名")
+        FileSafetySelfTest.writeShoot(u, shoot(u))
+        check(batch.switchSession(to: u) && batch.items.count == 3, "打开原来的文件夹")
+        let manifestURL = appDataDir.appendingPathComponent("sessions/\(key(u))/manifest.json")
+        if var json = (try? Data(contentsOf: manifestURL)).flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }),
+           var photos = json["photos"] as? [[String: Any]] {
+            for i in photos.indices {
+                let name = ((photos[i]["raw_path"] as? String ?? "") as NSString).lastPathComponent
+                photos[i]["raw_path"] = "/完全别处/" + name
+                photos[i]["decode_path"] = "/完全别处/" + name
+            }
+            json["photos"] = photos
+            try? JSONSerialization.data(withJSONObject: json).write(to: manifestURL)
+        }
+        try? fm.moveItem(at: u, to: v)
+        batch.progressText = ""
+        check(batch.switchSession(to: u), "从菜单点原来那一条（书签跟到新位置）")
+        check((batch.lastError ?? "").contains("对不上") && !batch.progressText.contains("已改到"),
+              "报照片路径对不上、没改过来，不说已改好", "\(batch.lastError ?? "nil") / \(batch.progressText)")
+        check(manifestPhotoDir(key(u)) == u.path, "manifest 的 photo_dir 没改（下次打开还会再试）", manifestPhotoDir(key(u)) ?? "nil")
+        check(batch.switchSession(to: u) && (batch.lastError ?? "").contains("对不上"), "再打开一次：照样再试、照样说")
+    }
+
     // MARK: - 重新定位文件夹
 
     private static func relocate(_ root: URL, batch: BatchStore) {
@@ -299,7 +460,10 @@ enum SessionMoveSelfTest {
         let g = root.appendingPathComponent("移动硬盘上的")
         let h = root.appendingPathComponent("NAS 上的")
         let empty = root.appendingPathComponent("选错的空文件夹")
+        let sameNames = root.appendingPathComponent("同一台相机的另一场")
+        let ownShoot = root.appendingPathComponent("另开过一场的同名文件夹")
         FileSafetySelfTest.writeShoot(g, shoot(g))
+        stampLayer1(g)
         check(batch.switchSession(to: g) && batch.items.count == 3, "打开原来的文件夹")
         batch.setOverride("DSCF0001", .pick)
         try? fm.copyItem(at: g, to: h)
@@ -317,7 +481,34 @@ enum SessionMoveSelfTest {
         check(!batch.relocateSession(row, to: empty) && (batch.lastError ?? "").contains("找不到"),
               "指给一个没有这一场照片的文件夹：不换", batch.lastError ?? "")
         check(entry(batch, key(g))?.bookmark == row.bookmark, "选错了：书签没换")
-        check(batch.relocateSession(row, to: h), "指给拷过去的文件夹", batch.lastError ?? "")
+        // 同名、不是同一批照片（计数器重叠、两台同型号机身）：文件名、子文件夹全对得上，大小不一样 —— 不换，说清楚对上几张。
+        for (i, rel) in ["DSCF0001.JPG", "DSCF0002.JPG", "第二机位/IMG_0003.JPG"].enumerated() {
+            let url = sameNames.appendingPathComponent(rel)
+            try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Data(repeating: 0x42, count: 700 + i).write(to: url)
+        }
+        check(!batch.relocateSession(row, to: sameNames)
+              && (batch.lastError ?? "").contains("找到 3 张") && (batch.lastError ?? "").contains("只有 0 张")
+              && (batch.lastError ?? "").contains("3 张同名"),
+              "指给一个同名文件全对得上、大小不一样的文件夹：不换，说找到 3 张、0 张是同一个", batch.lastError ?? "")
+        check(entry(batch, key(g))?.bookmark == row.bookmark, "同名的另一场：书签没换")
+        // 另开过一场（自己有 manifest）的同名文件夹：照样按大小比，不换。
+        FileSafetySelfTest.writeShoot(ownShoot, [
+            Fake(id: "DSCF0001", raw: "DSCF0001.JPG", content: Data(repeating: 0x43, count: 900)),
+            Fake(id: "DSCF0002", raw: "DSCF0002.JPG", content: Data(repeating: 0x43, count: 901)),
+            Fake(id: "IMG_0003", raw: "第二机位/IMG_0003.JPG", content: Data(repeating: 0x43, count: 902)),
+        ])
+        check(!batch.relocateSession(row, to: ownShoot) && (batch.lastError ?? "").contains("只有 0 张")
+              && entry(batch, key(g))?.bookmark == row.bookmark,
+              "指给另开过一场、同名不同片的文件夹：不换、书签没动", batch.lastError ?? "")
+        // 一张对得上、两张同名不同片：没到八成，不换。
+        let mixed = root.appendingPathComponent("混着的")
+        try? fm.copyItem(at: h, to: mixed)
+        try? Data(repeating: 0x44, count: 333).write(to: mixed.appendingPathComponent("DSCF0002.JPG"))
+        try? Data(repeating: 0x44, count: 334).write(to: mixed.appendingPathComponent("第二机位/IMG_0003.JPG"))
+        check(!batch.relocateSession(row, to: mixed) && (batch.lastError ?? "").contains("只有 1 张"),
+              "3 张里只有 1 张是同一个文件：不换", batch.lastError ?? "")
+        check(batch.relocateSession(row, to: h), "指给拷过去的文件夹（大小都对得上）", batch.lastError ?? "")
         check(batch.sessionDir.lastPathComponent == key(g) && batch.items.count == 3 && batch.overrides["DSCF0001"] == .pick,
               "key 不变，3 张、人工改判都在")
         check(sameDir(batch.photoDir, h) && pathsUnder(batch, h) && manifestAt(key(g), h),
@@ -331,7 +522,160 @@ enum SessionMoveSelfTest {
               "重新定位以后直接选新位置：认回原来那一场")
     }
 
+    /// writeShoot 写的 layer1 没有 src_size：按真文件补上（分析引擎就是这样记的，记的是解码用的那个文件）。
+    private static func stampLayer1(_ dir: URL) {
+        let session = appDataDir.appendingPathComponent("sessions/\(key(dir))")
+        let manifestURL = session.appendingPathComponent("manifest.json")
+        let layer1URL = session.appendingPathComponent("layer1_results.json")
+        func read(_ url: URL) -> [String: Any]? {
+            (try? Data(contentsOf: url)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        }
+        guard let photos = read(manifestURL)?["photos"] as? [[String: Any]], var layer1 = read(layer1URL),
+              var results = layer1["results"] as? [[String: Any]] else {
+            check(false, "给 layer1 补 src_size")
+            return
+        }
+        var sizes: [String: Int] = [:]
+        for photo in photos {
+            guard let id = photo["id"] as? String, let path = photo["decode_path"] as? String,
+                  let stamp = ImageLoader.FileStamp.of(URL(fileURLWithPath: path)) else { continue }
+            sizes[id] = stamp.size
+        }
+        for i in results.indices {
+            if let id = results[i]["id"] as? String, let size = sizes[id] { results[i]["src_size"] = size }
+        }
+        layer1["results"] = results
+        try? JSONSerialization.data(withJSONObject: layer1).write(to: layer1URL)
+    }
+
+    /// 重新定位防选错的判断（纯函数）+ 指纹比对的三层（大小、修改时间、EXIF 拍摄时间）。
+    private static func relocationPure(_ dir: URL) {
+        print("== 重新定位防选错：判断表 + 指纹比对")
+        typealias R = SessionLocation.RelocationCheck
+        check(!R(sampled: 50).accepted, "一张都没找到 → 不换")
+        check(R(sampled: 50, matched: 40, different: 10).accepted, "分得出的 50 张里 40 张是同一个（八成）→ 换")
+        check(!R(sampled: 50, matched: 39, different: 11).accepted, "不到八成 → 不换")
+        check(!R(sampled: 50, matched: 0, different: 3).accepted, "找到的同名文件全是别的照片 → 不换")
+        check(R(sampled: 50, matched: 3).accepted, "只找到 3 张、都是同一个（挪了一部分）→ 换：找不到的不算反对")
+        check(!R(sampled: 50, matched: 2, different: 1).accepted, "3 张里 2 张对上（不到八成）→ 不换")
+        check(R(sampled: 2, matched: 2).accepted, "整场只有 2 张、都对上 → 换（至少对上 min(3, 分得出的张数)）")
+        check(R(sampled: 50, unverified: 5).accepted, "很老的场次（什么都没记）：照旧按名字认")
+
+        let fm = FileManager.default
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let plain = dir.appendingPathComponent("没有 EXIF.JPG")
+        try? FileSafetySelfTest.tinyJPEG().write(to: plain)
+        let stamp = ImageLoader.FileStamp(size: 1000, mtime: 1_700_000_000)
+        check(SessionLocation.sameFile(stamp, at: plain, layer1: ["src_size": 1000], captureTime: nil) == true, "记了大小：一样 → 同一个")
+        check(SessionLocation.sameFile(stamp, at: plain, layer1: ["src_size": 1001, "src_mtime": 1_700_000_000.0],
+                                       captureTime: nil) == false, "记了大小：不一样 → 不是（时间对得上也不算）")
+        check(SessionLocation.sameFile(stamp, at: plain, layer1: ["src_mtime": 1_700_000_001.5], captureTime: nil) == true,
+              "没记大小：修改时间差 2 秒以内 → 同一个")
+        check(SessionLocation.sameFile(stamp, at: plain, layer1: ["src_mtime": 1_600_000_000.0], captureTime: nil) == false,
+              "没记大小：修改时间对不上、也没有 EXIF → 不是")
+        check(SessionLocation.sameFile(stamp, at: plain, layer1: nil, captureTime: "2026-03-21T10:00:00") == nil,
+              "什么都没记、文件里也没有拍摄时间 → 分不出")
+        let tagged = dir.appendingPathComponent("带 EXIF.JPG")
+        writeJPEG(tagged, dateTimeOriginal: "2026:03:21 10:00:00")
+        check(SessionLocation.exifCaptureTime(tagged) == "2026-03-21T10:00:00", "只读文件头拿 EXIF 拍摄时间，写成 capture_time 的写法",
+              SessionLocation.exifCaptureTime(tagged) ?? "nil")
+        check(SessionLocation.sameFile(stamp, at: tagged, layer1: nil, captureTime: "2026-03-21T10:00:00") == true,
+              "没记大小、时间：EXIF 拍摄时间一样 → 同一个")
+        check(SessionLocation.sameFile(stamp, at: tagged, layer1: ["src_mtime": 1_600_000_000.0],
+                                       captureTime: "2026-03-21T10:00:00") == true,
+              "修改时间变了（拷贝没保留）、拍摄时间一样 → 同一个")
+        check(SessionLocation.sameFile(stamp, at: tagged, layer1: nil, captureTime: "2026-03-22T09:00:00") == false,
+              "拍摄时间不一样 → 不是")
+        check(SessionLocation.sameFile(stamp, at: tagged, layer1: ["src_size": 999], captureTime: "2026-03-21T10:00:00") == true,
+              "大小变了（别的软件往 JPEG 里写过元数据）、拍摄时间一样 → 还算同一个")
+        check(SessionLocation.sameFile(stamp, at: tagged, layer1: ["src_size": 999], captureTime: "2026-03-22T09:00:00") == false,
+              "大小变了、拍摄时间也不一样 → 不是")
+    }
+
+    /// 一张带 EXIF DateTimeOriginal 的小 JPEG。
+    private static func writeJPEG(_ url: URL, dateTimeOriginal: String) {
+        guard let ctx = CGContext(data: nil, width: 16, height: 16, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+              let image = ctx.makeImage(),
+              let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) else { return }
+        let exif: [CFString: Any] = [kCGImagePropertyExifDateTimeOriginal: dateTimeOriginal]
+        let props: [CFString: Any] = [kCGImagePropertyExifDictionary: exif]
+        CGImageDestinationAddImage(dest, image, props as CFDictionary)
+        CGImageDestinationFinalize(dest)
+    }
+
     // MARK: - 实时桥
+
+    /// 子线程上跑完的结果放这里，主线程转 run loop 等它（PreviewJob.run 是 async）。
+    private final class ResultBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [String: Any]?
+        var value: [String: Any]? {
+            get { lock.lock(); defer { lock.unlock() }; return stored }
+            set { lock.lock(); stored = newValue; lock.unlock() }
+        }
+    }
+
+    private static func runPreview(_ job: PreviewJob) -> [String: Any] {
+        let box = ResultBox()
+        let sendable = LiveBox(job)
+        Task.detached { box.value = await sendable.value.run() }
+        FileSafetySelfTest.waitUntil(20) { box.value != nil }
+        return box.value ?? [:]
+    }
+
+    /// 先在 GUI 里打开挪了的文件夹（书签跟过去、manifest 的照片路径改到新位置，新位置当成受保护的：桌面、外置盘），切到
+    /// 别的场次，实时桥再按登记的旧路径打开：照片文件夹还是旧路径（不受保护），可要读的原图在新位置 —— 预览要按受保护处理、
+    /// 一次都不碰原图；app_open_session 按 manifest 的 photo_dir 也认得出挪进了受保护位置。
+    private static func liveBridgeAfterGUIRebase(_ root: URL, batch: BatchStore) {
+        print("== GUI 先打开挪了的文件夹、实时桥再按旧路径打开：要读的原图在受保护位置，不读")
+        let fm = FileManager.default
+        let k = root.appendingPathComponent("挪前")
+        let m = root.appendingPathComponent("挪进受保护位置")
+        let other = root.appendingPathComponent("别的场次")
+        FileSafetySelfTest.writeShoot(k, shoot(k))
+        FileSafetySelfTest.writeShoot(other, [Fake(id: "OTHER", raw: "OTHER.JPG", jpeg: true)])
+        let previews = appDataDir.appendingPathComponent("sessions/\(key(k))/previews")
+        try? fm.createDirectory(at: previews, withIntermediateDirectories: true)
+        for id in ["DSCF0001", "DSCF0002", "IMG_0003"] {
+            try? FileSafetySelfTest.tinyJPEG().write(to: previews.appendingPathComponent(id + ".jpg"))
+        }
+        check(batch.switchSession(to: k) && batch.items.count == 3, "打开原来的文件夹")
+        try? fm.moveItem(at: k, to: m)
+        check(batch.switchSession(to: k) && pathsUnder(batch, m), "GUI 从菜单点：书签跟到新位置，照片路径改过去")
+        check(batch.switchSession(to: other), "切到别的场次")
+        check(batch.switchSession(to: k, followBookmark: false) && batch.photoDir?.path == k.path,
+              "实时桥按登记的路径打开：照片文件夹停在旧路径上")
+        // 新位置本身和它下面的都算受保护（under 只认「下面的」，文件夹本身补一个 /）。
+        let isProtected: (String) -> Bool = { under($0.hasSuffix("/") ? $0 : $0 + "/", m) }
+        let folder = batch.photoDir?.path ?? ""
+        let items = batch.items
+        check(!isProtected(folder) && items.count == 3 && items.allSatisfy { isProtected($0.decodePath) },
+              "照片文件夹（旧路径）不受保护，可网格里的原图路径都在受保护的新位置", items.map(\.decodePath).joined(separator: ", "))
+        let protected = LiveHandlers.previewReadsProtected(folder: folder, items: items, isProtected: isProtected)
+        check(protected, "cull.preview 按要读的照片路径判：受保护")
+        let recorded = LiveHandlers.recordedPhotoDir(dataDir: appDataDir, key: key(k))
+        check(recorded.map(isProtected) == true, "app_open_session 读 manifest 的 photo_dir：在受保护的新位置（回 protected_location）",
+              recorded ?? "nil")
+        check(LiveHandlers.recordedPhotoDir(dataDir: appDataDir, key: key(other)).map(isProtected) == false,
+              "没挪过的场次：photo_dir 不受保护，照常打开")
+
+        let opensBefore = LiveImages.originalOpens.snapshot.count
+        let big = runPreview(PreviewJob(items: [items[0]], face: false, edge: 2048, protected: protected,
+                                        budget: 600 * 1024, gone: LiveFlag()))
+        let bigImage = (big["images"] as? [[String: Any]])?.first ?? [:]
+        let bigWarnings = (big["warnings"] as? [[String: Any]] ?? []).compactMap { $0["code"] as? String }
+        check(bigImage["source"] as? String == "preview" && bigWarnings.contains("protected_location"),
+              "max_edge 2048：给 1024 预览、warning protected_location", "\(bigImage["source"] ?? "nil") \(bigWarnings)")
+        let face = runPreview(PreviewJob(items: [items[1]], face: true, edge: 1024, protected: protected,
+                                         budget: 600 * 1024, gone: LiveFlag()))
+        let faceImage = (face["images"] as? [[String: Any]])?.first
+        let faceFailed = ((face["failed"] as? [[String: Any]])?.first?["reason"] as? String) ?? ""
+        let faceOK = faceImage?["source"] as? String == "preview" || faceFailed.contains("受保护位置")
+        check(faceOK, "crop=face：在预览上裁（或者说受保护位置不读原图）", "\(face)")
+        check(LiveImages.originalOpens.snapshot.count == opensBefore, "一次都没去打开原图（originalOpens 没多记）",
+              "\(LiveImages.originalOpens.snapshot.recent.suffix(2))")
+    }
 
     private static func liveBridgeDoesNotFollow(_ root: URL, batch: BatchStore) {
         print("== 实时桥（followBookmark: false）不跟书签、不认回、不改路径")
@@ -345,6 +689,23 @@ enum SessionMoveSelfTest {
         check(batch.photoDir?.path == i.path && (batch.lastError ?? "").contains("已不存在"),
               "停在登记的路径上，说文件夹不在了", batch.lastError ?? "")
         check(manifestPhotoDir(key(i)) == i.path, "manifest 没改")
+        // 上面那几条靠的是 restoreAccess 原来就有的闸（挪走了的原路径不存在，认回、改写本来就不会动手）。下面两条要
+        // switchSession 里那两道 followBookmark 闸自己挡：去掉任一道都会变红。
+        // 认回闸：实时桥直接给新路径 j（key(j) 下没有分析结果，最近场次里 i 那一条的书签解析到的就是 j）—— 不认回 i 那一场。
+        check(batch.switchSession(to: j, followBookmark: false) && batch.sessionDir.lastPathComponent == key(j)
+              && batch.items.isEmpty,
+              "实时桥给新路径：不认回原来那一场（按 key(新路径) 开，空的）", batch.sessionDir.lastPathComponent)
+        check(manifestPhotoDir(key(i)) == i.path, "认回闸：原来那一场的 manifest 没动")
+        // 改写闸：GUI 先从菜单点开（书签跟到 j，manifest 改到 j），原路径上又建了一个空文件夹，实时桥再按原路径打开 ——
+        // 不能把 manifest 改回原路径。
+        check(batch.switchSession(to: i) && manifestAt(key(i), j), "GUI 从菜单点：manifest 改到新位置")
+        try? fm.createDirectory(at: i, withIntermediateDirectories: true)
+        batch.progressText = ""
+        check(batch.switchSession(to: i, followBookmark: false) && batch.photoDir?.path == i.path
+              && batch.sessionDir.lastPathComponent == key(i),
+              "原路径又有了（空的）文件夹，实时桥按原路径打开：停在原路径、key 不变")
+        check(manifestAt(key(i), j) && !batch.progressText.contains("挪过"),
+              "改写闸：manifest 还指着新位置，没被改回原路径", "\(manifestPhotoDir(key(i)) ?? "nil") / \(batch.progressText)")
     }
 }
 

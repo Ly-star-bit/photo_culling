@@ -1230,6 +1230,15 @@ final class BatchStore: ObservableObject {
         // 判决、客户选中、对时还有没存上的（盘满了）：再写一次，还不行就不切（审查 S01）。
         guard persistBeforeLeaving("切场次") else { return false }
         let resolved = restoreAccess(to: folder, followBookmark: followBookmark)
+        // 给的文件夹自己在，书签却把它带到了另一个文件夹（审查）：这一场认回 / 重新定位以后登记的还是原路径、书签指着新位置，
+        // 原路径上后来又有了一个新文件夹（同一天第二次导卡、建了同名文件夹）。key 是原路径的哈希，按原路径打开都会认成原来
+        // 那一场 —— 照旧打开它，但说清楚，别让人以为新文件夹已经打开、分析过了。按设备号 + inode 比（同一个文件夹换了写法、
+        // 经过符号链接的不算）。
+        var carriedAway: URL?
+        if followBookmark, resolved.path != folder.path, let given = SessionLocation.identity(folder.path),
+           let target = SessionLocation.identity(resolved.path), given != target {
+            carriedAway = resolved
+        }
         // 认回挪了的文件夹（审查 S04 第一步）：这个路径还没有分析结果，「最近场次」里却有一条的书签解析到的就是它（同卷改名 /
         // 挪动、卷名变「T7 1」以后从「选择文件夹…」或拖进来打开的）—— 沿用那一条的 key 和 path，和从菜单点一个改了名的
         // 文件夹同一个样子，不再开一个空场次整场重分析。实时桥（followBookmark: false）不认：它就是要只按字符串走。
@@ -1281,14 +1290,29 @@ final class BatchStore: ObservableObject {
                         "文件夹挪到了别处的，在文件夹菜单「重新定位文件夹…」里指给它现在的位置"
         } else if rebase.failed {
             lastError = "这一场的照片文件夹挪过，可 manifest.json 写不进去、照片路径没改过来：先别移废片、写 XMP（会按旧位置找）"
+        } else if let r = rebase.rebase, r.untouched {
+            // 一行都没换过去（照片路径和 photo_dir 的写法怎么都对不上）：manifest 原样没动，下次打开再试，不说「已改好」。
+            lastError = "这一场的照片文件夹挪过（原来在 \(CardImporter.displayPath(URL(fileURLWithPath: r.from)))），" +
+                        "可 manifest.json 里的 \(r.unmatched) 张照片路径都对不上原来记的文件夹，没改过来：" +
+                        "先别移废片、写 XMP（会按旧位置找）"
+        } else if let carriedAway {
+            lastError = "「\(CardImporter.displayPath(folder))」现在是另一个文件夹：原来在这里的那一场已经改名 / 挪到了 " +
+                        "\(CardImporter.displayPath(carriedAway))，打开的是那一场（判决、人工改判都在）。" +
+                        "要分析新的这个文件夹，先在访达里给它改个名再打开 —— 按原来的名字打开都会认成原来那一场"
         } else if previewsPruned {
             lastError = "这一场的预览图已清理省空间（掉出了最近 15 场，或者从「移除历史记录」里移除过），判决和人工改判都还在。" +
                         "点「重新分析」补回预览：没变的照片只重做预览，人工改判不会动"
         }
+        // 照片路径真的改过来了（或者不用改）才说「接上了」「已改到现在的位置」；只改了一部分的说没改的有几张。
+        let pathsFixed = !rebase.failed && !(rebase.rebase?.untouched ?? false)
+        let unmatchedRows: Int = rebase.rebase?.unmatched ?? 0
+        let leftOver: String = (pathsFixed && unmatchedRows > 0) ? "（另有 \(unmatchedRows) 张的路径不在原来记的文件夹下面，没改）" : ""
         if let moved {
-            progressText = "认出了「\(moved.name)」那一场：同一个文件夹改了名或挪了位置，判决、人工改判、客户选中、拼图都接上了"
-        } else if let from = rebase.rebase?.from {
-            progressText = "这一场的照片文件夹挪过（原来在 \(CardImporter.displayPath(URL(fileURLWithPath: from)))），照片路径已改到现在的位置"
+            progressText = pathsFixed
+                ? "认出了「\(moved.name)」那一场：同一个文件夹改了名或挪了位置，判决、人工改判、客户选中、拼图都接上了" + leftOver
+                : "认出了「\(moved.name)」那一场（同一个文件夹改了名或挪了位置）"
+        } else if let from = rebase.rebase?.from, pathsFixed {
+            progressText = "这一场的照片文件夹挪过（原来在 \(CardImporter.displayPath(URL(fileURLWithPath: from)))），照片路径已改到现在的位置" + leftOver
         }
         // Register a session that HAS cached results as soon as it's opened, not
         // just after an analysis: pruneOrphanedSessions clears the previews of
@@ -1747,7 +1771,8 @@ final class BatchStore: ObservableObject {
     /// 「重新定位文件夹…」（审查 S04 第一步，像 Lightroom 的 Find Missing Folder）：菜单里标着「文件夹已不存在」的一场，
     /// 指给它照片现在在哪（挪到了别的盘、卷名变了）。只换书签，key 和 path 照旧钉着（现有的 pinned-key 那一套：restoreAccess
     /// 跟着书签走到新位置，switchSession 再把 manifest 里的照片路径改过去），然后打开它。判决、人工改判、客户选中、拼图都在
-    /// 场次目录里，一样不动。新位置里按原来的子文件夹和文件名一张这一场的照片都找不到的不换 —— 多半是选错了文件夹。
+    /// 场次目录里，一样不动。新位置里按原来的子文件夹和文件名找到的照片，大多数和分析时记的大小（老场次：修改时间、拍摄
+    /// 时间）对不上的不换 —— 多半是选错了文件夹（SessionLocation.relocationCheck）。
     /// 返回 false = 没换（原因在 lastError）；换了书签、却没切成（这一场还有改动没存上）的也是 false，书签留着新的。
     @discardableResult
     func relocateSession(_ entry: SessionEntry, to folder: URL) -> Bool {
@@ -1765,9 +1790,18 @@ final class BatchStore: ObservableObject {
             return false
         }
         let dir = dataDir.appendingPathComponent("sessions/\(entry.key)")
-        if SessionLocation.anyPhotoPresent(sessionDir: dir, under: folder) == false {
-            lastError = "「\(folder.lastPathComponent)」里找不到「\(entry.name)」的照片（按原来的子文件夹和文件名一张都没对上），" +
-                        "没有重新定位：看看是不是选错了文件夹"
+        // 防选错（审查）：不只看「有一张同名的」—— 同一台机身的另一场、两台同型号机身都有一堆同名文件。全场抽查、按大小
+        // （老场次按修改时间、拍摄时间）比，大多数对得上才换；对不上就不换，说清楚对上了几张。
+        if let check = SessionLocation.relocationCheck(sessionDir: dir, under: folder), !check.accepted {
+            if check.found == 0 {
+                lastError = "「\(folder.lastPathComponent)」里找不到「\(entry.name)」的照片（按原来的子文件夹和文件名一张都没对上），" +
+                            "没有重新定位：看看是不是选错了文件夹"
+            } else {
+                lastError = "「\(folder.lastPathComponent)」不像是「\(entry.name)」的照片：抽查了 \(check.sampled) 张，" +
+                            "按原来的子文件夹和文件名找到 \(check.found) 张，只有 \(check.matched) 张是同一个文件，" +
+                            "\(check.different) 张同名、大小或时间却不一样（多半是另一场拍摄，相机的文件名会重复），" +
+                            "没有重新定位：看看是不是选错了文件夹"
+            }
             return false
         }
         guard let bookmark = Self.makeBookmark(for: folder) else {
