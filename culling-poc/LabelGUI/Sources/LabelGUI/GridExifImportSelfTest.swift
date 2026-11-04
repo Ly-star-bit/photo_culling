@@ -147,6 +147,8 @@ enum GridExifImportSelfTest {
             ("列表里 RAF + DNG，再来 JPG：两张 RAW 都换掉", ["A.RAF", "A.DNG"], ["A.JPG"], ["A.JPG"], 0, 2, 0, 0),
             ("不同文件夹的同名不是一对", [], ["d1/A.JPG", "d2/A.RAF"], ["d1/A.JPG", "d2/A.RAF"], 2, 0, 0, 1),
             ("已经在列表里的不重复收", ["A.JPG"], ["A.JPG"], ["A.JPG"], 0, 0, 0, 0),
+            ("同一张 RAW 在这一批里出现两次（文件夹 + 里面的文件）：只算一次跳过",
+             [], ["A.JPG", "A.RAF", "A.RAF"], ["A.JPG"], 1, 0, 1, 0),
         ]
         for (name, existing, incoming, want, added, replaced, skipped, rawOnly) in rows {
             let m = WatermarkImportPairing.merge(existing: existing.map(u), incoming: incoming.map(u))

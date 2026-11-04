@@ -51,6 +51,8 @@ enum WatermarkImportPairing {
             let k = key(url)
             if isRaw(url) {
                 if nonRawKeys.contains(k) {
+                    // 记进 listed：同一张 RAW 在这一批里出现两次（文件夹 + 里面的文件一起拖）只算一次跳过。
+                    listed.insert(url.path)
                     skippedRaw += 1
                     continue
                 }
