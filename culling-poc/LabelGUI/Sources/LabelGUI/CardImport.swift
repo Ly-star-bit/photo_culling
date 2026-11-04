@@ -1078,10 +1078,7 @@ enum CardImportCLI {
             guard let i = args.firstIndex(of: name), args.count > i + 1 else { return nil }
             return args[i + 1]
         }
-        if (ProcessInfo.processInfo.environment["LABELGUI_DATA_DIR"] ?? "").isEmpty {
-            print("--ingest 会写导入账本：先设 LABELGUI_DATA_DIR=<临时目录> 再跑（不能碰真实数据）")
-            exit(2)
-        }
+        CollageCLI.requireIsolatedDataDir("--ingest", "会写导入账本")
         guard let destPath = option("--dest") else {
             print("--ingest 必须给 --dest <目标文件夹>（测试不往真的「图片」里写）")
             exit(2)

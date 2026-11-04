@@ -125,10 +125,7 @@ enum BodyClockCLI {
             guard let i = args.firstIndex(of: name), args.count > i + 1 else { return nil }
             return args[i + 1]
         }
-        guard !(ProcessInfo.processInfo.environment["LABELGUI_DATA_DIR"] ?? "").isEmpty else {
-            print("--body-offset 会改这一场的 body_offsets.json：先设 LABELGUI_DATA_DIR=<临时目录>")
-            exit(2)
-        }
+        CollageCLI.requireIsolatedDataDir("--body-offset", "会改这一场的 body_offsets.json")
         let dir = URL(fileURLWithPath: args[flagIndex + 1])
         let store = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         store.switchSession(to: dir)

@@ -264,10 +264,7 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
         // --clear-recents：打印完再点一次「全部清除」，数还剩哪些场次目录 —— 验证掉出菜单的旧场次
         // 判决不被顺手删掉。会删数据目录里的场次：只在临时 LABELGUI_DATA_DIR 下跑。
         if CommandLine.arguments.contains("--clear-recents") {
-            guard !(ProcessInfo.processInfo.environment["LABELGUI_DATA_DIR"] ?? "").isEmpty else {
-                print("--clear-recents 会删场次缓存：先设 LABELGUI_DATA_DIR=<临时目录>")
-                exit(2)
-            }
+            CollageCLI.requireIsolatedDataDir("--clear-recents", "会删场次缓存")
             store.clearRecentSessions()
             let root = appDataDir.appendingPathComponent("sessions")
             let left = ((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
@@ -463,11 +460,8 @@ if CommandLine.arguments.contains("--ux-selftest") {
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--export-xmp"),
    CommandLine.arguments.count > flagIndex + 1 {
     MainActor.assumeIsolated {
-        guard !(ProcessInfo.processInfo.environment["LABELGUI_DATA_DIR"] ?? "").isEmpty else {
-            print("--export-xmp 会改这一场的 xmp_state.json，还会在照片旁边写 .xmp：先设 LABELGUI_DATA_DIR=<临时目录>，" +
-                  "并且只对拷出来的临时照片文件夹跑")
-            exit(2)
-        }
+        CollageCLI.requireIsolatedDataDir("--export-xmp",
+                                          "会改这一场的 xmp_state.json，还会在照片旁边写 .xmp（只对拷出来的临时照片文件夹跑）")
         let dir = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])
         let store = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         store.switchSession(to: dir)

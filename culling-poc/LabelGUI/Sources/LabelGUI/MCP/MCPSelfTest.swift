@@ -188,6 +188,8 @@ enum MCPSelfTest {
         writeChecks(check)
         // 21–23. 设计版式的语法（MCPSelfTestLayout.swift）
         layoutChecks(check)
+        // 24. 启动和无头命令的护栏：真实数据目录、GUI 启动门控（GuardSelfTest.swift，不在 MCP/ 里）
+        guardChecks(check)
 
         for f in failures { print("FAIL " + f) }
         if failures.isEmpty {
