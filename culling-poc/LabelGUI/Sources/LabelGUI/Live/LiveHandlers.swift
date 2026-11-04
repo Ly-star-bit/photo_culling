@@ -1278,6 +1278,15 @@ extension LiveHandlers {
 
     // MARK: collage.export（导出成图片，= 拼图页「导出」）
 
+    /// 输出目录在拍摄文件夹里面、下次分析会扫到（审查 S11）：和导出按钮同一个判断（CollageStore.exportFolderRefusal，
+    /// startExport 里也拦），这里先回一个说得清的 invalid_state —— 不然只剩 export_failed「一个文件都没写出来」。
+    static func exportFolderRefused(_ collage: CollageStore) -> Reply? {
+        guard let folder = collage.outputFolder, let why = collage.exportFolderRefusal(folder) else { return nil }
+        let hint = "请用户在拼图页「导出」里点「用默认」（拍摄文件夹里的「\(ImageLoader.collageExportSubfolder)/」，分析时跳过），"
+            + "或选拍摄文件夹外面的目录"
+        return .failure("invalid_state", why, ["hint": hint, "executed": false, "folder": folder.path])
+    }
+
     /// 和导出按钮同一条路（CollageStore.startExport）：同一个输出目录、同样的重名规则；倍数、格式、文件名只管这一次。
     /// 不改拼图、不进撤销、不弹访达；等 app 写完再回。
     static func exportCollage(_ req: Request, live: LiveServer, model: AppModel) async -> Reply {
@@ -1332,6 +1341,8 @@ extension LiveHandlers {
             return .failure("invalid_state", "没有输出目录：app 还没打开照片文件夹，导出页上也没选目录。",
                             ["hint": "请用户在拼图页「导出」里选一个输出目录", "executed": false])
         }
+        if let refused = exportFolderRefused(collage) { return refused }
+        let folderReminder = collage.outputFolder.flatMap(collage.exportFolderReminder)
         var options = collage.exportOptions
         let askedScale = LiveWire.int(req.params["scale"])
         if let k = askedScale { options.scale = k }
@@ -1387,6 +1398,10 @@ extension LiveHandlers {
         }
         if let w = outcome.warning {
             warnings.append(MCPReadModel.warning("export_degraded", w, hint: "多半是原图挪走了、移动硬盘没插：请用户看一下"))
+        }
+        if let note = folderReminder {
+            warnings.append(MCPReadModel.warning("export_folder_in_session", note,
+                                                 hint: "请用户确认是不是真要导到那一场的拍摄文件夹里；不是的话在拼图页「导出」里换个目录"))
         }
         if outcome.cancelled {
             warnings.append(MCPReadModel.warning("export_cancelled", "用户中途取消了导出：只写出了前面几个文件。", hint: ""))

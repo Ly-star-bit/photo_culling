@@ -102,6 +102,7 @@ enum WatermarkUISnapshot {
 
 /// LABELGUI_DATA_DIR=<临时目录> LabelGUI --watermark-batch <photo_dir> <out_dir> [--signature <sig.png>] [--exif] [--session <dir>]
 /// 走水印页「批量导出」同一个 exportAll（批内重名、目标里已有的都另存 -2，不覆盖），打印结果那一行和记下的交付对照。
+/// <out_dir> 在 <photo_dir> 或 --session 那一场的拍摄文件夹里面（分析会扫到的地方）就不导、退出码 1（审查 S11）。
 /// 无头参数：导完不弹访达。
 enum WatermarkBatchCLI {
     @MainActor
@@ -130,7 +131,8 @@ enum WatermarkBatchCLI {
         batch.switchSession(to: option("--session").map { URL(fileURLWithPath: $0) } ?? dir)
         store.recordDeliveries(into: batch)
         let ledgerBefore = batch.deliveryRecords.last
-        store.exportAll()
+        // 同界面：批量页这一场、每张照片所在的文件夹都不让写进去（审查 S11），最近场次只提醒
+        store.exportAll(shootDir: batch.photoDir, sessions: batch.recentSessions)
         let deadline = Date().addingTimeInterval(300)
         while store.isExporting && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         let error = store.lastError

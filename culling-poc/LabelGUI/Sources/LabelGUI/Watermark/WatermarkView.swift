@@ -66,7 +66,7 @@ struct WatermarkView: View {
                     .keyboardShortcut(.escape, modifiers: [])
                     .help("停止排新的照片，已写出的保留 (Esc)")
             }
-            Button("批量导出 (\(store.photos.count))") { store.exportAll() }
+            Button("批量导出 (\(store.photos.count))") { store.exportAll(shootDir: batchStore.photoDir, sessions: batchStore.recentSessions) }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(!store.canExport)
@@ -116,6 +116,15 @@ struct WatermarkView: View {
                     .buttonStyle(.plain)
                     .help("关闭")
                 }
+            }
+            // 输出目录在拍摄文件夹里面被拦下（审查 S11）：一键改到拍摄文件夹里的「水印导出/」（分析时跳过）
+            if let refusal = store.folderRefusal, store.lastError == refusal.message {
+                Button(refusal.export ? "导出到 \(ExportFolderGuard.watermarkSubfolder)/"
+                                      : "改用 \(ExportFolderGuard.watermarkSubfolder)/") {
+                    store.useSafeOutputDir(shootDir: batchStore.photoDir, sessions: batchStore.recentSessions)
+                }
+                .controlSize(.small)
+                .help(refusal.safeFolder.path)
             }
             Spacer()
             if let notice = store.notice {
@@ -678,7 +687,8 @@ struct WatermarkView: View {
         panel.canCreateDirectories = true
         panel.prompt = "选择输出目录"
         if panel.runModal() == .OK, let url = panel.url {
-            store.outputDir = url
+            // 在拍摄文件夹里面（批量页这一场、或哪张照片所在的文件夹，下次分析会扫到）就不换（审查 S11）
+            store.chooseOutputDir(url, shootDir: batchStore.photoDir, sessions: batchStore.recentSessions)
         }
     }
 }

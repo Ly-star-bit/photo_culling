@@ -384,7 +384,51 @@ final class WatermarkStore: ObservableObject {
     /// 交付对照（DeliveryLedger.swift 的 recordDeliveries）；没接 = 不记。
     var onDelivered: (@MainActor (URL, [(file: URL, source: URL)]) -> Void)?
 
-    func exportAll() {
+    /// 输出目录在拍摄文件夹里面被拦下时（审查 S11，ExportFolderGuard）：那句提示、建议改用的「<拍摄文件夹>/水印导出/」
+    /// （分析时跳过）、是不是点导出时拦下的（是的话「导出到 水印导出/」点了接着导）。状态栏只在 lastError 还是这一句时
+    /// 显示那个按钮（提示被关掉、换成别的就不显示）。
+    struct FolderRefusal: Equatable {
+        let message: String
+        let safeFolder: URL
+        let export: Bool
+    }
+    @Published private(set) var folderRefusal: FolderRefusal?
+
+    /// 输出目录落在拍摄文件夹里面、会被分析扫到：拦下（lastError + folderRefusal），返回 true。拍摄文件夹 = 批量页开着的
+    /// 那一场（`shootDir`）+ 每张照片所在的文件夹（水印页的照片能从任意文件夹导入）。
+    private func refuseInsideShoot(_ folder: URL, shootDir: URL?, export: Bool) -> Bool {
+        let shoots = ExportFolderGuard.watermarkShoots(batch: shootDir, photos: photos)
+        guard let hit = ExportFolderGuard.blockingShoot(folder, among: shoots) else { return false }
+        let safe = hit.appendingPathComponent(ExportFolderGuard.watermarkSubfolder)
+        let message = ExportFolderGuard.refusal(shoot: hit, what: "水印副本",
+                                                fix: "用「导出到 \(ExportFolderGuard.watermarkSubfolder)/」")
+        lastError = message
+        folderRefusal = FolderRefusal(message: message, safeFolder: safe, export: export)
+        return true
+    }
+
+    /// 顶栏「输出目录...」面板选完（WatermarkView.pickOutputDir）：在拍摄文件夹里面就不换（原来的目录不动），说清楚为什么、
+    /// 给「改用 水印导出/」；在最近哪一场的拍摄文件夹里只提醒。`shootDir` = batchStore.photoDir，`sessions` = 最近场次。
+    func chooseOutputDir(_ url: URL, shootDir: URL?, sessions: [BatchStore.SessionEntry]) {
+        if let old = folderRefusal, lastError == old.message { lastError = nil }
+        folderRefusal = nil
+        if refuseInsideShoot(url, shootDir: shootDir, export: false) { return }
+        outputDir = url
+        if let note = ExportFolderGuard.sessionReminder(url, sessions: sessions, what: "水印副本") { setNotice(note) }
+    }
+
+    /// 状态栏「导出到 水印导出/」：输出目录换成拦下时建议的「<拍摄文件夹>/水印导出/」，是点导出时拦下的就接着导。
+    func useSafeOutputDir(shootDir: URL?, sessions: [BatchStore.SessionEntry]) {
+        guard let refusal = folderRefusal else { return }
+        folderRefusal = nil
+        if lastError == refusal.message { lastError = nil }
+        outputDir = refusal.safeFolder
+        if refusal.export { exportAll(shootDir: shootDir, sessions: sessions) }
+    }
+
+    /// 「批量导出」。`shootDir` = 批量页开着的那一场（WatermarkView 传 batchStore.photoDir，无头 --watermark-batch 传它的
+    /// 批量页），`sessions` = 批量页的最近场次：输出目录在拍摄文件夹里面就不导（见 refuseInsideShoot），只在最近哪一场里提醒。
+    func exportAll(shootDir: URL?, sessions: [BatchStore.SessionEntry]) {
         guard !isExporting, !photos.isEmpty else { return }
         guard let outputDir else {
             lastError = "先选择输出目录"
@@ -394,6 +438,9 @@ final class WatermarkStore: ObservableObject {
             lastError = "没有任何水印内容 — 选签名图或启用文字/相框"
             return
         }
+        folderRefusal = nil
+        if refuseInsideShoot(outputDir, shootDir: shootDir, export: true) { return }
+        let folderReminder = ExportFolderGuard.sessionReminder(outputDir, sessions: sessions, what: "水印副本")
         // 目标文件名在批次内去重：a.jpg + a.png、或两个子文件夹里的同名照片会算出
         // 同一个 dest，先写的那张被后写的顶掉，而两张都报"成功"。APFS 默认大小写
         // 不敏感，所以按小写路径去重。输出目录里已经有的也不覆盖（和拼图导出一样加 -2、-3……）：
@@ -420,6 +467,7 @@ final class WatermarkStore: ObservableObject {
         exportCancelled = false
         lastError = nil
         clearNotice()
+        if let folderReminder { setNotice(folderReminder) }
         progressText = "导出 0/\(jobs.count)..."
         progressFraction = 0
         let sig = signatureImage
