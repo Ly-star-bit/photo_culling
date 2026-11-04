@@ -965,11 +965,6 @@ extension LiveHandlers {
 
     // MARK: cull.import_client_picks（导入客户选择）
 
-    /// = 批量页「导出 › 导入客户选择…」：text 走 resolveClientReply（和导入框边打字边预览同一个函数），ids 要全在这一场。
-    /// dry_run（默认）只回认出了哪些，不等用户停手、不压撤销；dry_run:false 走 importClientPicks（导入框「标记为客户选中」：
-    /// 加到原来的上面，文件名后面的修图要求一起存成客户备注，一步判决撤销，app_undo target=verdicts 能撤）。
-    /// 照片都已经是客户选中、只是这次补了备注也算改了（导入框一样会存）。客户选中不改判决，但拼图托盘里的照片带着 clientPick
-    /// （紫心；相册编排按它无条件保留客户选中）：标完跟着刷，用户一直停在拼图页、没切 tab 时也对（applyClientImport）。
     /// 导入客户选择存上没有：客户选中和客户备注是同一次导入、同一步撤销写的（BatchStore.setClientReply），两份一起算 ——
     /// 以前只看 client_picks.json，备注写不上（client_notes.json 盘满、原件读坏了先不写）也回 persisted:true、说「已存盘」。
     static let clientReplyFiles: [BatchStore.PersistFile] = [.clientPicks, .clientNotes]
@@ -979,6 +974,11 @@ extension LiveHandlers {
         tool == "cull_import_client_picks" ? clientReplyFiles : [.overrides]
     }
 
+    /// = 批量页「导出 › 导入客户选择…」：text 走 resolveClientReply（和导入框边打字边预览同一个函数），ids 要全在这一场。
+    /// dry_run（默认）只回认出了哪些，不等用户停手、不压撤销；dry_run:false 走 importClientPicks（导入框「标记为客户选中」：
+    /// 加到原来的上面，文件名后面的修图要求一起存成客户备注，一步判决撤销，app_undo target=verdicts 能撤）。
+    /// 照片都已经是客户选中、只是这次补了备注也算改了（导入框一样会存）。客户选中不改判决，但拼图托盘里的照片带着 clientPick
+    /// （紫心；相册编排按它无条件保留客户选中）：标完跟着刷，用户一直停在拼图页、没切 tab 时也对（applyClientImport）。
     static func importClientPicks(_ req: Request, live: LiveServer, model: AppModel) async -> Reply {
         if let bad = checkArgs("cull_import_client_picks", req) { return bad }
         let dryRun = req.params["dry_run"] as? Bool ?? true
