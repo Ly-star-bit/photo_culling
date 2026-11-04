@@ -3,7 +3,10 @@ import Foundation
 /// 交付对照（DeliveryLedger.swift）的进程内自检，跑在 --delivery-selftest 里（CI 的「自检」步骤；端到端的命令行出口在
 /// Scripts/delivery_ledger_regression.py，那个脚本不在 CI 里）：
 /// - 水印页比对（DeliveryLedger.matchByFile）：同名的别处照片不认，链接、大小写不同照认，只 stat 名字对得上的场次照片。
-/// 临时文件都在 `dir` 下，调用方跑完删掉。
+/// - 界面那条路的接线：用和 app 同一个 AppModel.make 建 store，水印页真导出一次，对照要记进批量页这一场的 exports.json
+///   （AppModel.make 里 `watermark.recordDeliveries(into: batch)` 那一行丢了，这里就红；无头 --watermark-batch 自己接，测不到它）；
+///   exports.json 解不开：挪成 exports.corrupt-<时间>.json、批量页提醒；读不出来：不写、不挪，水印页自己的状态栏报出来。
+/// 临时文件都在 `dir` 下（场次 JSON 在数据目录的 sessions/ 里），调用方跑完删掉。
 @MainActor
 enum DeliveryLedgerSelfTest {
     typealias Check = (Bool, String, String) -> Void
@@ -11,6 +14,7 @@ enum DeliveryLedgerSelfTest {
     static func run(_ dir: URL, check: Check) {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         matchCases(dir.appendingPathComponent("match"), check: check)
+        wiring(dir.appendingPathComponent("wiring"), check: check)
     }
 
     // MARK: - 水印页：原图按文件本身对回这一场
@@ -67,5 +71,72 @@ enum DeliveryLedgerSelfTest {
         let none = DeliveryLedger.matchByFile([("y_wm.jpg", shoot.appendingPathComponent("gone.jpg").path)],
                                               photos: photos, statFile: counting)
         check(none.isEmpty, "原图不在了：不认", "\(none.map(\.id))")
+    }
+
+    // MARK: - AppModel.make 的接线：水印页导出 → 批量页这一场的交付对照
+
+    private static func wiring(_ dir: URL, check: Check) {
+        let fm = FileManager.default
+        let shoot = dir.appendingPathComponent("shoot")
+        FileSafetySelfTest.writeShoot(shoot, [FileSafetySelfTest.Fake(id: "w1", raw: "w1.JPG", jpeg: true),
+                                              FileSafetySelfTest.Fake(id: "w2", raw: "w2.JPG", jpeg: true)])
+        let other = dir.appendingPathComponent("other")
+        try? fm.createDirectory(at: other, withIntermediateDirectories: true)
+        let stranger = other.appendingPathComponent("w1.JPG")
+        fm.createFile(atPath: stranger.path, contents: FileSafetySelfTest.tinyJPEG())
+        // 和 app 同一套接线（AppModel.make），不开实时桥。
+        let model = AppModel.make(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir),
+                                  bridge: .none)
+        let batch = model.batch
+        let watermark = model.watermark
+        batch.switchSession(to: shoot)
+        check(batch.items.count == 2, "前提：批量页打开了造的这一场", "\(batch.items.count) 张")
+        watermark.config.frame.enabled = true
+        watermark.addPhotos([shoot.appendingPathComponent("w1.JPG"), stranger])
+        let out = dir.appendingPathComponent("out")
+        /// 水印页「批量导出」一次，等它连交付对照一起收完尾。
+        func export() -> Bool {
+            watermark.outputDir = out
+            watermark.exportAll(shootDir: batch.photoDir, sessions: [])
+            let started = watermark.isExporting
+            CollageExportSelfTest.spin(60) { !watermark.isExporting }
+            return started && !watermark.isExporting
+        }
+        let ledger = batch.deliveryLedgerPath
+
+        check(export(), "水印页批量导出 2 张（这一场的 w1、别处同名的 w1）", watermark.lastError ?? "")
+        let record = batch.deliveryRecords.last
+        let pairs = record?.files.map { "\($0.file)→\($0.id)" } ?? []
+        check(record?.kind == "watermark" && pairs == ["w1_wm.jpg→w1"],
+              "AppModel.make 接上了：水印页导出记进批量页这一场的 exports.json，别处同名的那张不记", "\(pairs)")
+        let reported: Bool = record.map { watermark.lastDelivery == .recorded($0) } ?? false
+        check(reported && watermark.lastError == nil, "　…… 水印页拿到「记下了」，没有报错", watermark.lastError ?? "")
+
+        try? Data("not json".utf8).write(to: ledger)
+        check(export(), "exports.json 写坏了再导一次", watermark.lastError ?? "")
+        let sessionDir = ledger.deletingLastPathComponent()
+        let moved = ((try? fm.contentsOfDirectory(atPath: sessionDir.path)) ?? []).filter { $0.hasPrefix("exports.corrupt-") }
+        let movedText = moved.first.flatMap {
+            try? String(contentsOf: sessionDir.appendingPathComponent($0), encoding: .utf8)
+        }
+        let noticed: Bool = batch.dataNotice?.contains(moved.first ?? "?") == true
+        check(moved.count == 1 && movedText == "not json" && batch.deliveryRecords.count == 1 && noticed,
+              "解不开：原件挪成 exports.corrupt-<时间>.json、这次照记、批量页提醒一句", "\(moved) · \(batch.dataNotice ?? "-")")
+
+        guard geteuid() != 0 else {
+            print("SKIP 读不出来的 exports.json（root 跑时 chmod 挡不住读）")
+            return
+        }
+        let before = try? Data(contentsOf: ledger)
+        chmod(ledger.path, 0)
+        let exported = export()
+        chmod(ledger.path, 0o644)
+        let after = try? Data(contentsOf: ledger)
+        var failed = false
+        if case .failed? = watermark.lastDelivery { failed = true }
+        let said: Bool = watermark.lastError?.contains("交付对照") == true && watermark.lastError?.contains("读不出来") == true
+        check(exported && failed && said && before != nil && after == before,
+              "读不出来（chmod 000）：不写、不挪，水印页自己的状态栏说没记进去", watermark.lastError ?? "-")
+        withExtendedLifetime(model) {}
     }
 }
