@@ -205,7 +205,7 @@ enum CullMCPSelfTest {
         let trayAfter = collage.project.photos.first { $0.id == "DSCF7208" }?.clientPick
         check(trayBefore == false && trayAfter == true,
               "导入以后拼图托盘里 DSCF7208 的 clientPick 跟着刷成 true（之前 \(String(describing: trayBefore))，之后 \(String(describing: trayAfter))）")
-        let rows = store.retouchRows(noted.ids)
+        let rows = store.retouchNotes(noted.ids)  // 带备注的几张（精修要求.csv 的行等复制完按实际文件名排）
         check(first.fresh == noted.ids && first.renoted == noted.ids && store.clientNotes == wanted
               && store.clientPicks == Set(noted.ids) && store.overrideUndoPushes == pushes + 1
               && fm.fileExists(atPath: notesFile.path) && rows.count == 2,
