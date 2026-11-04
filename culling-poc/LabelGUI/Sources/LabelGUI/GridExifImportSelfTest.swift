@@ -226,5 +226,32 @@ enum GridExifImportSelfTest {
         t.check(dupNotice == "没有可导入的照片 (格式不支持，或已经在列表里)", "水印导入提示：全在列表里照旧", "得到 \(dupNotice)")
         let nothing = WatermarkImportPairing.notice(for: WatermarkImportPairing.merge(existing: [], incoming: []), requested: false)
         t.check(nothing == nil, "水印导入提示：什么都没给就不提示")
+
+        collageFileCases(t, u: u, names: names)
+    }
+
+    /// 拼图托盘收外部文件（CollageStore.addFiles、水印页交接里认不出的）的 RAW+JPG 配对：CollageHandoff.pairedExternalFiles。
+    private static func collageFileCases(_ t: Tally, u: (String) -> URL, names: ([URL]) -> String) {
+        // (说明, 托盘里已有的, 这次拖进来的, 期望收的, 没收的 RAW 张数)
+        let rows: [(String, [String], [String], [String], Int)] = [
+            ("RAW+JPG 双存的文件夹拖进托盘：每一帧只收 JPG，纯 RAW 照收",
+             [], ["A.JPG", "A.RAF", "B.JPG", "B.RAF", "C.RAF"], ["A.JPG", "B.JPG", "C.RAF"], 2),
+            ("RAW 排在 JPG 前面（.ARW < .JPG）：照样只收 JPG", [], ["A.ARW", "A.JPG"], ["A.JPG"], 1),
+            ("扩展名大小写不同照样配对", [], ["a.raf", "a.JPG"], ["a.JPG"], 1),
+            ("托盘里已经有这一张的 JPG，再拖它的 RAW：不收", ["A.JPG"], ["A.RAF"], [], 1),
+            ("托盘里只有 RAW，再拖同名 JPG：照收 JPG（不原地换，托盘里那张可能已经上了版）", ["A.RAF"], ["A.JPG"], ["A.JPG"], 0),
+            ("同类同名不配对：RAF + DNG 都收", [], ["A.DNG", "A.RAF"], ["A.DNG", "A.RAF"], 0),
+            ("同类同名不配对：HEIC + JPG 都收", [], ["A.HEIC", "A.JPG"], ["A.HEIC", "A.JPG"], 0),
+            ("不同文件夹的同名不是一对", [], ["d1/A.JPG", "d2/A.RAF"], ["d1/A.JPG", "d2/A.RAF"], 0),
+            ("同一张 RAW 给了两次（文件夹 + 里面的文件）：只算一张没收", [], ["A.JPG", "A.RAF", "A.RAF"], ["A.JPG"], 1),
+        ]
+        for (name, tray, incoming, want, skipped) in rows {
+            let got = CollageHandoff.pairedExternalFiles(incoming.map(u), trayPaths: tray.map { u($0).path })
+            let gotList = names(got.kept)
+            let wantList = want.joined(separator: ",")
+            let ok: Bool = gotList == wantList && got.skippedRaw == skipped
+            t.check(ok, "拼图外部文件 " + name,
+                    "得到 [\(gotList)] 没收 \(got.skippedRaw)，期望 [\(wantList)] 没收 \(skipped)")
+        }
     }
 }
