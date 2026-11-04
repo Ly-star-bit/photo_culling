@@ -32,6 +32,12 @@ enum PersistSelfTest {
         t.sessionsIndexTolerant()
         t.writeFailureVisible()
         t.dedupePerSession()
+        t.dataNoticeCap()
+        t.refusedEditsSurface()
+        t.clientNotesGuarded()
+        t.aiOverridesFollowVerdicts()
+        t.sessionsIndexDropsKeyless()
+        t.collageUnknownBlocksTrash()
         print("persist-selftest: \(t.passed) 通过 \(t.failed) 失败")
         exit(t.failed == 0 ? 0 : 1)
     }
@@ -206,7 +212,9 @@ final class PersistSelfTestHarness {
         check(store.overrides.isEmpty && store.clientPicks.isEmpty && store.bodyOffsets.isEmpty, "这几样从空的开始")
         let notice = store.dataNotice ?? ""
         let named = ["overrides.json", "client_picks.json", "body_offsets.json", "thresholds.json"].allSatisfy(notice.contains)
-        check(named && notice.contains("XMP"), "提示里点名了这几个文件、说了先别写 XMP")
+        let namedAll: Bool = named && notice.contains("XMP")
+        // 红了时把整条提示打出来（橙条有上限：被挤掉的是哪个文件一眼看得出）
+        check(namedAll, "提示里点名了这几个文件、说了先别写 XMP" + (namedAll ? "" : "：\(notice)"))
         let rewritten = read(s.dir.appendingPathComponent("thresholds.json"))
             .flatMap { try? JSONDecoder().decode(BatchStore.ThresholdState.self, from: $0) }
         check(rewritten?.faceQuality == BatchStore.legacyThresholds.faceQuality && store.faceQualityThreshold == 0,

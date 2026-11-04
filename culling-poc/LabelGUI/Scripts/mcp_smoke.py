@@ -410,6 +410,12 @@ with open(os.path.join(NONAME, "sessions.json"), "w") as f:
     json.dump([entry(ONLINE, 5), entry(os.path.join(WORK, "noname"), 1, name=None)], f, ensure_ascii=False)
 NOINDEX = os.path.join(WORK, "data-noindex")
 os.makedirs(NOINDEX)
+# 除了好的那条只有认不出是哪一场的（null、{}）：app 写索引时就丢掉，MCP 也不报（审查跟进：以前它们原样写回去、
+# sessions_index_unreadable 一直报着，提示「打开任意场次」也消不掉）
+NOKEY = os.path.join(WORK, "data-nokey")
+os.makedirs(NOKEY)
+with open(os.path.join(NOKEY, "sessions.json"), "w") as f:
+    json.dump([entry(ONLINE, 5), None, {}], f, ensure_ascii=False)
 
 # 换个写法指进受保护位置（S2 评审）：APFS 按 Unicode 完整的大小写折叠比名字（ſ = s、ﬆ = st、K = k），根下的
 # /.nofollow/、/.resolve/<n>/ 是内核认的前缀。只会 lowercased() 的判断会把这些当成普通路径去 lstat，落点就是真的桌面。
@@ -462,7 +468,7 @@ for i in range(0, len(FOLD_GHOSTS), 15):
     with open(os.path.join(d, "sessions.json"), "w") as f:
         json.dump([entry(g, 1) for g, _ in FOLD_GHOSTS[i:i + 15]], f, ensure_ascii=False)
     FOLD_DIRS.append(d)
-fixture_before = {d: tree_manifest(d) for d in (FIXTURE, MANY, BAD, CTL, NONAME, NOINDEX, *FOLD_DIRS)}
+fixture_before = {d: tree_manifest(d) for d in (FIXTURE, MANY, BAD, CTL, NONAME, NOINDEX, NOKEY, *FOLD_DIRS)}
 procs_before = labelgui_processes()
 
 # ---------------------------------------------------------------- 0. 受保护位置（门禁：先跑）
@@ -1285,6 +1291,15 @@ if not PROTOCOL_ONLY:
               and [w["code"] for w in b["warnings"]] == ["sessions_index_unreadable"]
               and (st_bad or {}).get("sessions") == len(want) and "sessions_index_unreadable" in [w["code"] for w in st_bad["warnings"]],
               f"{what} + warning sessions_index_unreadable（cull_list_sessions 和 app_status）")
+    b = call_body(run_cli(["--mcp-call", "cull_list_sessions", "{}"], NONAME)) or {}
+    noname_hint = " ".join(w.get("hint", "") for w in b.get("warnings", []))
+    check("选择文件夹" in noname_hint and "任意场次" not in noname_hint and os.path.join(WORK, "noname") in noname_hint,
+          f"有一条缺 name：提示是重新打开那个文件夹（点名路径），不是「打开任意场次」（app 原样留着它）：{noname_hint}")
+    b = call_body(run_cli(["--mcp-call", "cull_list_sessions", "{}"], NOKEY))
+    st_nokey = call_body(run_cli(["--mcp-call", "app_status", "{}"], NOKEY)) or {}
+    check(b is not None and [r_["session"] for r_ in b["sessions"]] == [entry(ONLINE, 5)["key"]] and b["warnings"] == []
+          and "sessions_index_unreadable" not in [w["code"] for w in st_nokey.get("warnings", [])],
+          f"另外只有认不出是哪一场的 null、{{}}：只列好的那一条，不报 sessions_index_unreadable {(b or {}).get('warnings')}")
     b = call_body(run_cli(["--mcp-call", "cull_list_sessions", "{}"], NOINDEX))
     check(b is not None and b["sessions"] == [] and b["total"] == 0
           and [w["code"] for w in b["warnings"]] == ["sessions_index_missing"],

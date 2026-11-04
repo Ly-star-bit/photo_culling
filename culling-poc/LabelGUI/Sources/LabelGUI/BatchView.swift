@@ -1338,6 +1338,7 @@ struct BatchView: View {
     private var trashMenuTitle: String {
         let n = store.trashableRejectCount
         let inCollage = store.collageProtectedRejectCount
+        if store.collageInUseUnknown != nil, inCollage > 0 { return "废片移到废纸篓 (拼图工程没读进来，\(inCollage) 张先不移)" }
         return inCollage > 0 ? "废片移到废纸篓 (\(n)，另 \(inCollage) 张在拼图里)" : "废片移到废纸篓 (\(n))"
     }
 
@@ -1345,6 +1346,7 @@ struct BatchView: View {
     private var trashTitle: String {
         let n = store.trashableRejectCount
         let inCollage = store.collageProtectedRejectCount
+        if store.collageInUseUnknown != nil, inCollage > 0 { return "拼图工程没读进来：说不清哪些废片用在拼图里" }
         if n == 0 && inCollage > 0 { return "废片都用在拼图 / 印样 / 方案里 (\(inCollage) 张)" }
         return "把 \(n) 张废片移到废纸篓？"
     }
@@ -1360,9 +1362,14 @@ struct BatchView: View {
         let kept = store.clientPickRejectCount
         let client = kept > 0 ? "客户选中的 \(kept) 张废片不动 (客户点名要的)。" : ""
         let inCollage = store.collageProtectedRejectCount
-        let collage = inCollage > 0
+        var collage = inCollage > 0
             ? "废片里有 \(inCollage) 张用在拼图 / 印样 / 方案里，默认跳过；点「连这些一起移」的话，那些格子、印样帧会空着。"
             : ""
+        if let unknown = store.collageInUseUnknown, inCollage > 0 {
+            // 工程没读进来（审查跟进）：哪张在用说不清，默认一张都不移
+            collage = "这一场的拼图工程没读进来（\(unknown)），说不清哪些废片用在拼图 / 印样 / 方案里，默认一张都不移；" +
+                "修好拼图工程后重新打开这一场再移。确定不要了的话点「连这些一起移」，拼图里用到的格子、印样帧会空着。"
+        }
         return client + collage + "原图 (RAW+JPG 成对一起) 和 XMP 会移到系统废纸篓，可随时恢复，不是永久删除。"
     }
 

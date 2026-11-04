@@ -55,31 +55,39 @@ enum MCPPaths {
     /// 数据目录读不了（data_dir_unreadable）时照样试着读：目录只有 x 没有 r 时 sessions.json 照样读得到。读被拒
     /// （没权限、宿主的沙箱）时 `denied`，problem 不填，由调用方的 data_dir_unreadable 说（再报一条「sessions.json
     /// 读不了、请用户打开一次场次」是错的主意：是宿主不让读，不是文件坏了）。
-    static func readSessionsIndex() -> (entries: [SessionEntry], problem: String?, missing: Bool, denied: Bool) {
+    /// `hint`：`problem` 要的不是通用那句「打开一次任意场次、app 会重写」时给的（读不懂的那几条 app 原样留着，打开别的场次
+    /// 不会让警告消失）；nil = 用调用方自己的。
+    static func readSessionsIndex() -> (entries: [SessionEntry], problem: String?, missing: Bool, denied: Bool, hint: String?) {
         let dir = dataDirState()
-        guard dir.exists else { return ([], nil, true, false) }
+        guard dir.exists else { return ([], nil, true, false, nil) }
         let url = dataDir.appendingPathComponent("sessions.json", isDirectory: false)
         let data: Data
         do {
             data = try Data(contentsOf: url)
         } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError {
-            return ([], nil, true, false)
+            return ([], nil, true, false, nil)
         } catch let error as NSError where !dir.readable && error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoPermissionError {
-            return ([], nil, false, true)
+            return ([], nil, false, true, nil)
         } catch {
-            return ([], "读不了 sessions.json：\(error.localizedDescription)", false, false)
+            return ([], "读不了 sessions.json：\(error.localizedDescription)", false, false, nil)
         }
         // bookmark 照样解成 Data（base64），不解析、不往外给。和 app 一样一条一条解（SessionsIndexFile，审查 S02c）：
-        // 读不懂的那几条 app 不列（原样留在文件里），这里也不列，其余照常。
+        // 读不懂的那几条 app 不列（原样留在文件里），这里也不列，其余照常。认不出是哪一场的（null、{}）app 写索引时就丢掉，
+        // 这里不报。
         guard let index = SessionsIndexFile.decode(data) else {
-            return ([], "sessions.json 解析不了（选片工具自己也读不出「最近场次」）", false, false)
+            return ([], "sessions.json 解析不了（选片工具自己也读不出「最近场次」）", false, false, nil)
         }
         let entries: [SessionEntry] = index.entries.prefix(recentLimit).map { e in
             SessionEntry(key: e.key, folder: e.path, name: e.name, photoCount: e.photoCount, lastAnalyzed: e.lastAnalyzed)
         }
-        let problem: String? = index.unknown.isEmpty ? nil
-            : "sessions.json 里有 \(index.unknown.count) 条读不懂（选片工具的「最近场次」也不列它们），其余照常列出"
-        return (entries, problem, false, false)
+        guard !index.unknown.isEmpty else { return (entries, nil, false, false, nil) }
+        let folders = index.unknownFoldersText.map { "：\($0)" } ?? ""
+        let problem = "sessions.json 里有 \(index.unknown.count) 条读不懂（可能被手改过），选片工具原样留着、「最近场次」不列它们，" +
+                      "这里也不列\(folders)；其余照常列出"
+        let which = index.unknownFoldersText.map { "（\($0)）" } ?? ""
+        let hint = "这几场的判决、拼图都还在。请用户在选片工具里用「选择文件夹…」重新打开那个文件夹\(which)，新的一条会取代读不懂的那条；" +
+                   "打开别的场次不会让这条警告消失"
+        return (entries, problem, false, false, hint)
     }
 
     /// 预览输出目录（§10.3）：LABELGUI_MCP_OUT，默认 ~/Pictures/xuanpian-mcp。这里只算路径（isDirectory 显式给，

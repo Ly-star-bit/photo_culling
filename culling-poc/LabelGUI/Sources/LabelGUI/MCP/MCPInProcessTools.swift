@@ -33,7 +33,8 @@ enum MCPInProcessTools {
                                               hint: "请用户在选片工具里分析或打开一场"))
         }
         if let problem = index.problem {
-            warnings.append(MCPStatus.warning("sessions_index_unreadable", problem, hint: "请用户在选片工具里打开一次任意场次"))
+            warnings.append(MCPStatus.warning("sessions_index_unreadable", problem,
+                                              hint: index.hint ?? "请用户在选片工具里打开一次任意场次"))
         }
         let shown = Array(index.entries.prefix(limit))
         let checks = MCPPaths.foldersOnline(shown.map(\.folder))

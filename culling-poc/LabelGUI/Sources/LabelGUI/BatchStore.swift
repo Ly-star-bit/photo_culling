@@ -716,9 +716,11 @@ final class BatchStore: ObservableObject {
     /// 「废片移到废纸篓」默认真会移的张数：废片里去掉客户选中的（客户点名要精修的照片不扔）、拼图里在用的
     /// （不挖空拼图页、印样帧、存好的方案，见 collageInUseIDs）。
     var trashableRejectCount: Int { verdictCounts.reject - clientPickRejectCount - collageProtectedRejectCount }
-    /// 「废片移到废纸篓」默认要移的那些照片（和上面的张数是同一个条件）。
+    /// 「废片移到废纸篓」默认要移的那些照片（和上面的张数是同一个条件）。拼图工程这次没读进来（collageInUseUnknown）：
+    /// 说不清哪些在拼图里用，默认一张都不移。
     var trashableRejects: [BatchItem] {
-        items.filter { $0.verdict == .reject && !clientPicks.contains($0.id) && !collageInUseIDs.contains($0.id) }
+        guard collageInUseUnknown == nil else { return [] }
+        return items.filter { $0.verdict == .reject && !clientPicks.contains($0.id) && !collageInUseIDs.contains($0.id) }
     }
     /// 确认框里点「连这些一起移」时要移的：拼图里在用的也算上，客户选中的照样不动。
     var trashableRejectsIncludingCollage: [BatchItem] {
@@ -730,20 +732,30 @@ final class BatchStore: ObservableObject {
     /// 拼图各页（格子、图层、印样帧）和方案栏各方案用到的照片 id。AppModel 从内存里的 CollageStore 推过来（不读防抖
     /// 保存的 collage.json）；没接（--verdicts、--client-import 这类只开批量页的无头入口）= 空。只在托盘里的不算。
     @Published private(set) var collageInUseIDs: Set<String> = []
+    /// 拼图工程这次没读进来（读不出来、解不开：原件还在盘上或挪成了 .corrupt，内存里是空工程）的原因：说不清哪些照片在拼图里
+    /// 用，「废片移到废纸篓」默认一张都不移，确认框里只给「连这些一起移」（审查跟进：以前拿到的是空工程，一张都不拦）。
+    /// nil = 读进来了，或者没接拼图（只开批量页的无头入口）。
+    @Published private(set) var collageInUseUnknown: String?
     /// 现取一次（先让拼图工程挂到这一场再读）：AppModel 设。点「废片移到废纸篓」和真移之前走 refreshCollageInUse()。
-    var collageInUseSource: (() -> Set<String>)?
+    var collageInUseSource: (() -> (ids: Set<String>, unknown: String?))?
 
-    func setCollageInUse(_ ids: Set<String>) {
+    func setCollageInUse(_ ids: Set<String>, unknown: String?) {
         if ids != collageInUseIDs { collageInUseIDs = ids }
+        if unknown != collageInUseUnknown { collageInUseUnknown = unknown }
     }
 
     func refreshCollageInUse() {
-        if let source = collageInUseSource { setCollageInUse(source()) }
+        if let source = collageInUseSource {
+            let state = source()
+            setCollageInUse(state.ids, unknown: state.unknown)
+        }
     }
 
     /// 废片里客户没选中、但拼图里在用的张数：默认不移，确认框里可以选「连这些一起移」。只查拼图那一份 id，不扫整场。
+    /// 拼图工程没读进来时是客户没选中的全部废片（哪张在用说不清）。
     var collageProtectedRejectCount: Int {
-        collageInUseIDs.reduce(0) { n, id in
+        if collageInUseUnknown != nil { return verdictCounts.reject - clientPickRejectCount }
+        return collageInUseIDs.reduce(0) { n, id in
             guard let item = item(withID: id), item.verdict == .reject, !clientPicks.contains(id) else { return n }
             return n + 1
         }
@@ -1374,7 +1386,7 @@ final class BatchStore: ObservableObject {
                 movedPicks = true
                 what.append("客户选中")
             }
-            if let note = newNotes[old], newNotes[new] == nil {
+            if !writeRefused(.clientNotes), let note = newNotes[old], newNotes[new] == nil {
                 newNotes[old] = nil
                 newNotes[new] = note
                 movedNotes = true
@@ -1508,10 +1520,14 @@ final class BatchStore: ObservableObject {
         // sessions.json 就能让菜单无限长下去。
         recentSessions = Array(index.entries.prefix(15))
         sessionsIndexUnknown = index.unknown
+        if index.dropped > 0 {
+            SessionFiles.log.notice("sessions.json 里 \(index.dropped) 条认不出是哪一场（null、{}、没有 key 也没有 path）：丢掉，下次写索引时就没了")
+        }
         let recoverable = index.unknown.filter { $0.key != nil }.count
         if recoverable > 0 {
+            let folders = index.unknownFoldersText.map { "（\($0)）" } ?? ""
             addDataNotice("「最近场次」的索引 sessions.json 里有 \(recoverable) 条读不懂（可能被手改过），原样留在文件里：" +
-                          "这几场不进菜单、预览也不清，从「选择文件夹…」重新打开那个文件夹就回来")
+                          "这几场不进菜单、预览也不清，从「选择文件夹…」重新打开那个文件夹\(folders)就回来")
         }
         refreshSessionAvailability()
     }
@@ -1816,6 +1832,7 @@ final class BatchStore: ObservableObject {
         lastError = nil
         // 走到这里的：没有挂着的（removeSession 先拦过），或者这一场刚被「全部清除」整份删掉 —— 没存上的也就不用存了。
         persistFailures = [:]
+        refusedDirty = []
         updatePersistError()
         loadReviewPosition()
         loadThresholds()
@@ -1946,12 +1963,13 @@ final class BatchStore: ObservableObject {
 
     /// 场次里那几份整份重写的文件。
     enum PersistFile: CaseIterable {
-        case overrides, clientPicks, bodyOffsets
+        case overrides, clientPicks, clientNotes, bodyOffsets
 
         var label: String {
             switch self {
             case .overrides: return "判决"
             case .clientPicks: return "客户选中"
+            case .clientNotes: return "客户备注"
             case .bodyOffsets: return "机身对时"
             }
         }
@@ -1959,14 +1977,37 @@ final class BatchStore: ObservableObject {
 
     /// 原件在、却读不出来（或者解不开又挪不开）的：这一场不写它 —— 拿内存里的空的去盖，原件就没了。重新打开这一场再读。
     private var persistRefused: Set<PersistFile> = []
+    /// 上面那几份里，这次打开以后又改过的（要写、被拒了）：改动只在内存里。常驻红条（persistError，点不掉），
+    /// 切场次、移除当前这一场、退出前问一句（不硬拦：提示里的办法就是重新打开这一场，拦死了用户就困在这一场里）。
+    /// 以前只有打开时那条橙色提醒，点掉以后接着改几百张，切走或退出时一声不响全丢。
+    private var refusedDirty: Set<PersistFile> = []
     /// 这次打开这一场以后已经备份过（<名字>.bak）的文件。
     private var backedUpPaths: Set<String> = []
 
-    /// 加一条读坏文件的提醒（几场、几个文件各有问题时攒着，最多 4 条）。
+    /// 橙条最多显示几条提醒：一场里判决、AI 出处、客户选中、客户备注、对时、阈值一起坏，再加 sessions.json 那一条也放得下。
+    static let dataNoticeCap = 6
+    /// 橙条第一行「挤掉了几条」的开头（再加提醒时认出它、换成新的数）。
+    private static let droppedNoticePrefix = "（另有 "
+    /// 这次橙条（用户点掉以前）被挤掉的条数。
+    private var droppedNotices = 0
+
+    /// 加一条读坏文件的提醒（几场、几个文件各有问题时攒着，最多 dataNoticeCap 条）。以前超过 4 条直接丢掉最早的、
+    /// 什么都不说；现在每条都记进日志，挤掉的在第一行说一共几条。
     func addDataNotice(_ text: String) {
+        AppLog.notice("persist", "提醒：\(text)")
+        if dataNotice == nil { droppedNotices = 0 }
         var lines = dataNotice.map { $0.components(separatedBy: "\n") } ?? []
+        if lines.first?.hasPrefix(Self.droppedNoticePrefix) == true { lines.removeFirst() }
         lines.append(text)
-        dataNotice = lines.suffix(4).joined(separator: "\n")
+        let overflow = lines.count - Self.dataNoticeCap
+        if overflow > 0 {
+            droppedNotices += overflow
+            lines.removeFirst(overflow)
+        }
+        if droppedNotices > 0 {
+            lines.insert(Self.droppedNoticePrefix + "\(droppedNotices) 条更早的提醒放不下，已记进日志：帮助 › 导出诊断信息…）", at: 0)
+        }
+        dataNotice = lines.joined(separator: "\n")
     }
 
     /// 提醒里说是哪一场。
@@ -2008,8 +2049,12 @@ final class BatchStore: ObservableObject {
     }
 
     private func attemptWrite(_ file: PersistFile) {
-        // 原件读不出来、挪不开的（S02）：不写，免得拿内存里的空的盖掉它。
-        guard !persistRefused.contains(file) else { return }
+        // 原件读不出来、挪不开的（S02）：不写，免得拿内存里的空的盖掉它；记下这一份有没存盘的改动（红条、离开前问）。
+        // 不记进 persistFailures：重试永远写不成，「重试」和切场次前的拦截就再也过不去了。
+        guard !writeRefused(file) else {
+            refusedDirty.insert(file)
+            return
+        }
         do {
             // 场次目录被别的程序删了（访达里删、清理工具）：建回来再写，不然「文件不见了」永远重试不成、切不了场次。
             if !FileManager.default.fileExists(atPath: sessionDir.path) {
@@ -2018,6 +2063,7 @@ final class BatchStore: ObservableObject {
             switch file {
             case .overrides: try writeOverrides()
             case .clientPicks: try writeClientPicks()
+            case .clientNotes: try writeClientNotes()
             case .bodyOffsets: try writeBodyOffsets()
             }
             persistFailures[file] = nil
@@ -2029,39 +2075,93 @@ final class BatchStore: ObservableObject {
     }
 
     /// 红条上的「重试」、切场次之前、退出时：没写成的再写一遍。true = 都存上了（本来就没有挂着的也是 true）。
+    /// 原件读不出来、这次打开以后又改过的（refusedDirty）重试也写不上，算没存上：退出时（QuitCoordinator.finish）照样问。
     @discardableResult
     func retryPersist() -> Bool {
         for f in PersistFile.allCases where persistFailures[f] != nil {
             attemptWrite(f)
         }
         updatePersistError()
-        return persistFailures.isEmpty
+        return persistFailures.isEmpty && refusedDirty.isEmpty
     }
+
+    /// 红条上要不要「重试」：只有写失败（盘满）的才重试得上；原件读不出来、改动只在内存里的，重试没用。
+    var persistRetryable: Bool { !persistFailures.isEmpty }
+
+    /// 原件读不出来、这次打开以后又改过、改动只在内存里的那几份（实时桥切场次前要先问用户）。
+    var refusedUnsaved: [PersistFile] { PersistFile.allCases.filter(refusedDirty.contains) }
+    /// 拼图那边一样「原件读不出来、这次打开以后又改过」（AppModel 接 CollageStore.hasRefusedEdits；没接 = 没有）。
+    var collageHasRefusedEdits: (() -> Bool)?
+    /// 离开这一场前要问的「只在内存里」的几样：批量页这几份，加上拼图。
+    var refusedUnsavedLabels: [String] {
+        var labels = refusedUnsaved.map(\.label)
+        if collageHasRefusedEdits?() == true { labels.append("拼图") }
+        return labels
+    }
+
+    /// 离开这一场之前，原件读不出来、只在内存里的改动要不要丢：(动作「切场次」, 说明) → true = 丢掉、照常离开。
+    /// GUI 里弹框问（PersistLeaveAlert，无头不弹、直接放行）；自检换成假的；实时桥带了 confirm:true（AI 已经问过用户）时
+    /// 临时换成放行。
+    var confirmDiscardRefused: @MainActor (_ action: String, _ message: String) -> Bool = PersistLeaveAlert.ask
 
     /// 实时桥写工具的回复要说「存上没有」（审查 S01b）：这几份里现在还没存上的 —— 写失败（盘满，红条 persistError）、
     /// 原件读坏了这一场先不写（提醒在 dataNotice）。两样都空 = 盘上是最新的。
     func unsavedFiles(_ files: [PersistFile]) -> (failed: [PersistFile], refused: [PersistFile]) {
-        (files.filter { persistFailures[$0] != nil }, files.filter { persistRefused.contains($0) })
+        (files.filter { persistFailures[$0] != nil }, files.filter(writeRefused))
+    }
+
+    /// 这一份这一场不写：原件读不出来、挪不开（persistRefused）。客户备注和客户选中是同一次导入、同一步撤销写的：选中不写时
+    /// 备注也不写，不然盘上留下这次的备注、上次的选中，重新打开对不上。
+    private func writeRefused(_ file: PersistFile) -> Bool {
+        persistRefused.contains(file) || (file == .clientNotes && persistRefused.contains(.clientPicks))
     }
 
     /// 离开这一场（切场次、移除当前这一场）之前：还有没存上的就再写一次，还写不上就拦住 —— 不然 switchSession 的
-    /// loadOverrides 从盘上读，内存里没存上的改判当场就没了。
+    /// loadOverrides 从盘上读，内存里没存上的改判当场就没了。原件读不出来、只在内存里的改动不拦（重试写不上，
+    /// 办法本来就是重新打开这一场），先问一句；用户点了「仍要…」才走，没点就留在这一场。
     private func persistBeforeLeaving(_ action: String) -> Bool {
-        guard !persistFailures.isEmpty, !retryPersist() else { return true }
-        lastError = "这一场还有改动没存上：先腾出磁盘空间、点顶上红条的「重试」，存上以后再\(action)"
-        return false
+        if !persistFailures.isEmpty {
+            retryPersist()
+            if !persistFailures.isEmpty {
+                lastError = "这一场还有改动没存上：先腾出磁盘空间、点顶上红条的「重试」，存上以后再\(action)"
+                return false
+            }
+        }
+        let labels = refusedUnsavedLabels
+        guard !labels.isEmpty else { return true }
+        let what = labels.joined(separator: "、")
+        let message = "\(sessionLabel)的\(what)原件读不出来，为免覆盖没有写盘：这次打开以后的这些改动只在内存里，" +
+                      "现在\(action)就没了（盘上的原件不受影响）。要留着改动，先别\(action)，修好或移走原件（在 \(sessionDir.path)）以后再说"
+        guard confirmDiscardRefused(action, message) else {
+            lastError = "没有\(action)：这一场的\(what)还有只在内存里的改动（原件读不出来，见顶上红条）"
+            return false
+        }
+        SessionFiles.log.notice("\(action, privacy: .public)：用户确认丢掉只在内存里的\(what, privacy: .public)改动")
+        refusedDirty = []
+        updatePersistError()
+        return true
     }
 
     private func updatePersistError() {
         let failed = PersistFile.allCases.filter { persistFailures[$0] != nil }
-        guard !failed.isEmpty else {
+        let refused = refusedUnsaved
+        guard !failed.isEmpty || !refused.isEmpty else {
             if persistError != nil { persistError = nil }
             return
         }
-        let reasons = Set(failed.compactMap { persistFailures[$0] }).sorted().joined(separator: "、")
-        let what = failed.map(\.label).joined(separator: "、")
-        let text = "\(sessionLabel)的\(what)没存上（\(reasons)）：改动还在，但只在内存里。" +
-                   "腾出磁盘空间后点「重试」；存上之前切不了场次，也先别退出"
+        var lines: [String] = []
+        if !failed.isEmpty {
+            let reasons = Set(failed.compactMap { persistFailures[$0] }).sorted().joined(separator: "、")
+            let what = failed.map(\.label).joined(separator: "、")
+            lines.append("\(sessionLabel)的\(what)没存上（\(reasons)）：改动还在，但只在内存里。" +
+                         "腾出磁盘空间后点「重试」；存上之前切不了场次，也先别退出")
+        }
+        if !refused.isEmpty {
+            let what = refused.map(\.label).joined(separator: "、")
+            lines.append("\(sessionLabel)的\(what)原件读不出来，为免覆盖这一场不写盘：这次打开以后的改动只在内存里，" +
+                         "切场次、退出就没了（会先问一句）。修好或移走原件（在 \(sessionDir.path)）后重新打开这一场，原件会读回来")
+        }
+        let text = lines.joined(separator: "\n")
         if persistError != text { persistError = text }
     }
 
@@ -2129,8 +2229,7 @@ final class BatchStore: ObservableObject {
             if accepted { acceptedIDs.insert(id) } else { acceptedIDs.remove(id) }
             aiOverrides[id] = ai
         }
-        saveOverrides()
-        saveAIOverrides()
+        saveOverrides()  // 出处（aiOverrides）一起写
         applyThresholds()
         return last.map(\.id)
     }
@@ -2171,8 +2270,7 @@ final class BatchStore: ObservableObject {
             overrides[id] = verdict
             aiOverrides[id] = AIOverride(opID: opID, tool: tool, at: now, previous: first, aiVerdict: verdict.rawValue)
         }
-        saveOverrides()
-        saveAIOverrides()
+        saveOverrides()  // 出处（aiOverrides）一起写
         applyThresholds()
     }
 
@@ -2286,7 +2384,8 @@ final class BatchStore: ObservableObject {
     /// 就拿内存里那几条把原文件整份盖掉，accepted.json 也被 isEmpty 那支删掉（审查 S02）。
     private func loadOverrides() {
         persistRefused.remove(.overrides)
-        backedUpPaths.subtract([overridesPath.path, acceptedPath.path])
+        refusedDirty.remove(.overrides)
+        backedUpPaths.subtract([overridesPath.path, acceptedPath.path, aiOverridesPath.path])
         let stamp = SessionFiles.timestamp()
         switch SessionFiles.read([String: String].self, at: overridesPath, stamp: stamp) {
         case .missing:
@@ -2303,6 +2402,16 @@ final class BatchStore: ObservableObject {
                     return
                 }
                 aside = "（accepted.json 一起挪成 \(acceptedMoved.lastPathComponent)）"
+            }
+            // ai_overrides.json 是这份判决的出处（哪几张是 AI 改的）：一样一起挪开。留在原处的话，下一次 AI 改判、改一张再 ⌘Z
+            // 就拿内存里空的 / 新的几条把它整份盖掉、删掉，原件修好放回去以后 AI 改过哪些也找不回来了。
+            if FileManager.default.fileExists(atPath: aiOverridesPath.path) {
+                guard let aiMoved = SessionFiles.moveAside(aiOverridesPath, stamp: stamp) else {
+                    refusePersist(.overrides, "\(sessionLabel)的人工改判文件 overrides.json 解不开，原件已挪成 \(moved.lastPathComponent)\(aside)；" +
+                                  "ai_overrides.json 挪不开，为免覆盖，这一场的改判先不存盘" + corruptNoticeTail)
+                    return
+                }
+                aside += "（ai_overrides.json 一起挪成 \(aiMoved.lastPathComponent)）"
             }
             addDataNotice("\(sessionLabel)的人工改判文件 overrides.json 解不开（被手改过或写坏了），原件已挪成 " +
                           "\(moved.lastPathComponent)\(aside)，这一场的判决先按自动的显示" + corruptNoticeTail)
@@ -2338,6 +2447,7 @@ final class BatchStore: ObservableObject {
         // .atomic: a crash mid-write here used to cost every manual verdict
         // of the shoot.
         try data.write(to: overridesPath, options: .atomic)
+        try writeAIOverrides()
         if acceptedIDs.isEmpty {
             guard FileManager.default.fileExists(atPath: acceptedPath.path) else { return }
             backupOnce(acceptedPath)
@@ -2355,33 +2465,52 @@ final class BatchStore: ObservableObject {
 
     /// 在 loadOverrides 之后调。只留现在判决还等于 AI 判的、也不是「接受推荐」钉的：老版本 app 打开过这一场、改了判决又
     /// 不维护这份文件，对不上的就丢掉（比 accepted.json 只看「在不在」严）。
+    /// 和 overrides.json 一样走 SessionFiles（审查 S02 跟进）：以前读不出、解不开都当空，下一次 AI 改判就拿新的几条整份盖掉。
+    /// 解不开挪开、提示；读不出来 / 挪不开就整份判决这一场不写（它和 overrides.json 一起写，见 writeOverrides）。
     private func loadAIOverrides() {
         aiOverrides = [:]
-        guard let data = try? Data(contentsOf: aiOverridesPath) else { return }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard let raw = try? decoder.decode([String: AIOverride].self, from: data) else { return }
-        aiOverrides = raw.filter { id, mark in overrides[id]?.rawValue == mark.aiVerdict && !acceptedIDs.contains(id) }
+        switch SessionFiles.read([String: AIOverride].self, at: aiOverridesPath, decoder: decoder) {
+        case .missing:
+            break
+        case .ok(let raw):
+            aiOverrides = raw.filter { id, mark in overrides[id]?.rawValue == mark.aiVerdict && !acceptedIDs.contains(id) }
+        case .corrupt(let moved?):
+            addDataNotice("\(sessionLabel)的 AI 改判出处 ai_overrides.json 解不开（被手改过或写坏了），原件已挪成 " +
+                          "\(moved.lastPathComponent)：AI 改过的那几张这回算成人工改判（判决本身没变）")
+        case .corrupt(nil):
+            refusePersist(.overrides, "\(sessionLabel)的 AI 改判出处 ai_overrides.json 解不开、也挪不开，为免覆盖，这一场的改判先不存盘" +
+                          "（修好或移走这个文件后重新打开这一场）")
+        case .unreadable(let why):
+            refusePersist(.overrides, "\(sessionLabel)的 AI 改判出处 ai_overrides.json 读不出来（\(why)），为免覆盖，这一场的改判先不存盘" +
+                          "（重新打开这一场再读一次）")
+        }
     }
 
-    private func saveAIOverrides() {
+    /// AI 改判的出处和判决一起写（writeOverrides）：一样跟着 persistRefused（原件读不出来时不写不删）、写失败进红条、能重试、
+    /// 打开以后第一次改写前留 .bak。以前单独 try? 写，失败了谁都不知道，判决不存盘的那一场它照样被盖掉、删掉。
+    private func saveAIOverrides() { persist(.overrides) }
+
+    private func writeAIOverrides() throws {
         guard !aiOverrides.isEmpty else {
-            try? FileManager.default.removeItem(at: aiOverridesPath)
+            guard FileManager.default.fileExists(atPath: aiOverridesPath.path) else { return }
+            backupOnce(aiOverridesPath)
+            try SessionFiles.remove(aiOverridesPath)
             return
         }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]
-        if let data = try? encoder.encode(aiOverrides) {
-            try? data.write(to: aiOverridesPath, options: .atomic)
-        }
+        let data = try encoder.encode(aiOverrides)
+        backupOnce(aiOverridesPath)
+        try data.write(to: aiOverridesPath, options: .atomic)
     }
 
-    /// 你亲手动过的这几张不再算 AI 改的（改判、定案、接受推荐、移进废纸篓都走这里）；真拿掉了才写文件。
+    /// 你亲手动过的这几张不再算 AI 改的（改判、定案、接受推荐、移进废纸篓都走这里）。只改内存：调用方接着 saveOverrides，
+    /// 出处和判决一起写。
     private func dropAIMarks(_ ids: some Collection<String>) {
-        var dropped = false
-        for id in ids where aiOverrides.removeValue(forKey: id) != nil { dropped = true }
-        if dropped { saveAIOverrides() }
+        for id in ids { aiOverrides.removeValue(forKey: id) }
     }
 
     // MARK: - 客户选中（client_picks.json）
@@ -2390,6 +2519,7 @@ final class BatchStore: ObservableObject {
 
     private func loadClientPicks() {
         persistRefused.remove(.clientPicks)
+        refusedDirty.remove(.clientPicks)
         backedUpPaths.remove(clientPicksPath.path)
         var loaded: [String] = []
         defer { clientPicks = Set(loaded) }
@@ -2444,23 +2574,42 @@ final class BatchStore: ObservableObject {
 
     private var clientNotesPath: URL { sessionDir.appendingPathComponent("client_notes.json") }
 
+    /// 和客户选中一样走 SessionFiles（审查 S02 跟进）：以前解不开就静默当空，下一次导入带备注的回复就拿这次的几条整份盖掉
+    /// 上一轮客户的修图要求；写失败只设一下 lastError（切场次就清掉），重试、切场次前的拦截都不管它。
     private func loadClientNotes() {
-        clientNotes = (try? Data(contentsOf: clientNotesPath))
-            .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+        persistRefused.remove(.clientNotes)
+        refusedDirty.remove(.clientNotes)
+        backedUpPaths.remove(clientNotesPath.path)
+        var loaded: [String: String] = [:]
+        defer { clientNotes = loaded }
+        switch SessionFiles.read([String: String].self, at: clientNotesPath) {
+        case .missing:
+            break
+        case .ok(let notes):
+            loaded = notes
+        case .corrupt(let moved?):
+            addDataNotice("\(sessionLabel)的客户备注 client_notes.json 解不开（被手改过或写坏了），原件已挪成 " +
+                          "\(moved.lastPathComponent)，这一场先当没有客户备注（客户的修图要求还在那个文件里）")
+        case .corrupt(nil):
+            refusePersist(.clientNotes, "\(sessionLabel)的客户备注 client_notes.json 解不开、也挪不开，为免覆盖，这一场的客户备注先不存盘" +
+                          "（修好或移走这个文件后重新打开这一场）")
+        case .unreadable(let why):
+            refusePersist(.clientNotes, "\(sessionLabel)的客户备注 client_notes.json 读不出来（\(why)），为免覆盖，这一场的客户备注先不存盘" +
+                          "（重新打开这一场再读一次）")
+        }
     }
 
-    private func saveClientNotes() {
+    private func saveClientNotes() { persist(.clientNotes) }
+
+    private func writeClientNotes() throws {
+        backupOnce(clientNotesPath)
         if clientNotes.isEmpty {
-            try? FileManager.default.removeItem(at: clientNotesPath)
+            try SessionFiles.remove(clientNotesPath)
             return
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        do {
-            try encoder.encode(clientNotes).write(to: clientNotesPath, options: .atomic)
-        } catch {
-            lastError = "客户备注没存上: \(error.localizedDescription)"
-        }
+        try encoder.encode(clientNotes).write(to: clientNotesPath, options: .atomic)
     }
 
     /// 客户选中和客户备注一起换（导入带备注的回复；清除客户选中时备注一起清）：一条撤销记录，⌘Z 两样一起回去。
@@ -3213,6 +3362,7 @@ final class BatchStore: ObservableObject {
 
     private func loadBodyOffsets() {
         persistRefused.remove(.bodyOffsets)
+        refusedDirty.remove(.bodyOffsets)
         backedUpPaths.remove(bodyOffsetsPath.path)
         var stored: [String: Int] = [:]
         switch SessionFiles.read([String: Int].self, at: bodyOffsetsPath) {
@@ -4097,6 +4247,12 @@ final class BatchStore: ObservableObject {
         }
         // 真移之前现取一次拼图在用的（拼图工程先挂到这一场）：菜单上的张数是之前推过来的，这期间可能又排了一版。
         refreshCollageInUse()
+        // 拼图工程这次没读进来：说不清哪些废片在拼图里用，默认一张都不移（确认框里点「连这些一起移」才移）。
+        if !includeCollage, let unknown = collageInUseUnknown {
+            lastError = "拼图工程没读进来（\(unknown)），说不清哪些废片用在拼图 / 印样 / 方案里，默认一张都不移" +
+                " —— 修好拼图工程后重新打开这一场；确定不要了的话，在确认框里点「连这些一起移」（拼图里用到的格子会空）"
+            return
+        }
         let rejects = includeCollage ? trashableRejectsIncludingCollage : trashableRejects
         let keptForClient = clientPickRejectCount
         let keptForCollage = includeCollage ? 0 : collageProtectedRejectCount

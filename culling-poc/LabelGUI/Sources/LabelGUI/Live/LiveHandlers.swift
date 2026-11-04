@@ -785,19 +785,34 @@ extension LiveHandlers {
         // 拼图的重做栈切场次也会清掉（用户 ⌘Z 到底、还想 ⇧⌘Z 回去的时候撤销栈是空的）：一样要先问
         let collageRedo = model.collage.canRedo
         let history: Bool = verdictSteps > 0 || collageSteps > 0 || collageRedo
-        if history && req.params["confirm"] as? Bool != true {
+        // 这一场有原件读不出来、只在内存里的改动（审查 S02 跟进）：切过去就没了，一样先问用户。
+        let inMemory: [String] = batch.refusedUnsavedLabels
+        if (history || !inMemory.isEmpty) && req.params["confirm"] as? Bool != true {
             var data: [String: Any] = ["verdict_undo_steps": verdictSteps, "collage_undo_steps": collageSteps]
             data["collage_can_redo"] = collageRedo
             data["executed"] = false
             data["hint"] = "切场次会清掉用户在 app 里这一场的撤销记录：先问用户，同意了再带 confirm:true 调"
-            return .failure("confirm_required",
-                            "切场次会清掉 app 里这一场的撤销记录（判决 \(verdictSteps) 步、拼图 \(collageSteps) 步）：这次没有切", data)
+            var message = "切场次会清掉 app 里这一场的撤销记录（判决 \(verdictSteps) 步、拼图 \(collageSteps) 步）：这次没有切"
+            if !inMemory.isEmpty {
+                let what = inMemory.joined(separator: "、")
+                data["unsaved_in_memory"] = inMemory
+                data["hint"] = "照原话告诉用户：这一场的\(what)原件读不出来，这次打开以后的改动没存盘，切过去就没了；" +
+                               "用户同意丢掉这些改动再带 confirm:true 调，不同意就请用户先修好或移走那个文件（批量页顶上红条里有位置）"
+                let undoNote: String = history ? "另外会清掉撤销记录（判决 \(verdictSteps) 步、拼图 \(collageSteps) 步）" : ""
+                message = "这一场的\(what)原件读不出来、这次打开以后的改动只在内存里，切场次就没了；" + undoNote + "：这次没有切"
+            }
+            return .failure("confirm_required", message, data)
         }
         // = 侧栏「最近场次」里点它（BatchView 的菜单就是这一句），只是不跟 bookmark：文件夹被挪进桌面 / 外置盘以后，
         // bookmark 会把 app 带过去读，绕过上面只按字符串的检查；不跟的话挪走了就是「照片文件夹已不存在」（app_says）。
         // 拼图工程跟着挂过去：AppModel 的订阅是下一拍才跑，这里同步挂一次，回复里的撤销栈和之后的 app_undo 看到的就是新场次的
         // 没切成：这一场还有判决、客户选中、对时没存上（盘满了，审查 S01）—— 切过去内存里的就没了，app 先拦下。
-        guard batch.switchSession(to: URL(fileURLWithPath: entry.path), followBookmark: false) else {
+        // 带了 confirm:true（AI 已经问过用户）：只在内存里的改动不再在 app 里弹框问一遍（实时桥的请求不能挂在模态框上）。
+        let askLeaving = batch.confirmDiscardRefused
+        batch.confirmDiscardRefused = { _, _ in true }
+        let switched = batch.switchSession(to: URL(fileURLWithPath: entry.path), followBookmark: false)
+        batch.confirmDiscardRefused = askLeaving
+        guard switched else {
             if let unsaved = batch.persistError {
                 return .failure("save_failed", "app 里这一场还有改动没存上（\(unsaved)），这次没有切场次",
                                 ["executed": false, "hint": "照原话告诉用户：先腾出磁盘空间、点批量页顶上红条的「重试」，存上以后再切"])
