@@ -302,6 +302,20 @@ def fresh_data(label):
     return d
 
 
+def legacy_dedupe(d):
+    """这份数据目录里这一场的 thresholds.json 去掉 rejectBurstDuplicates，当成还没存这个键的老场次（审查 S20a 以后去重按场次存）：
+    本地模式的模板是真实数据的拷贝，用新版打开过的场次存了这个键，核对「LABELGUI_LIVE_TEST_SETTINGS 钉的值生效」的那几台宿主
+    就看不到钉的全局值了。CI 的 fixture 本来就没有这个文件。"""
+    p = os.path.join(d, "sessions", KEY, "thresholds.json")
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            t = json.load(f)
+        if isinstance(t, dict) and t.pop("rejectBurstDuplicates", None) is not None:
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(t, f)
+    return d
+
+
 def guard_data(d):
     if same_dir(d, REAL_DATA) or os.path.realpath(d) == os.path.realpath(REAL_DATA):
         print(f"LABELGUI_DATA_DIR {d} 指到了真实数据目录：不跑")
@@ -1115,7 +1129,7 @@ try:
     # ============================================================ B. 起宿主
     if "B" in ONLY:
         print("B. 起宿主")
-        h = Host("B")
+        h = Host("B", data=legacy_dedupe(fresh_data("B")))
         env = h.env()
         check(h.bridge == "on" and h.reason == "-", f"就绪 {h.ready_ms:.0f} ms：bridge={h.bridge}")
         st, ms = status(env)
@@ -1738,7 +1752,8 @@ try:
         check(h.bridge == "on" and h.ready_ms > 1400, f"无头写者占锁 1.5 s：宿主等它放锁才开桥（{h.ready_ms:.0f} ms 就绪）")
         h.term()
         # --no-view（CI 的退路，§9.8.1）：不建视图也照样 live；test.snapshot 没有；LABELGUI_LIVE_TEST_SETTINGS 改钉的值
-        h = Host("Cnv", args=("--no-view",), LABELGUI_LIVE_TEST_SETTINGS="rejectBurstDuplicates=1,minKeepersPerChapter=2,sortOrder=filename")
+        h = Host("Cnv", data=legacy_dedupe(fresh_data("Cnv")), args=("--no-view",),
+                 LABELGUI_LIVE_TEST_SETTINGS="rejectBurstDuplicates=1,minKeepersPerChapter=2,sortOrder=filename")
         st, _ = status(h.env())
         snap = test_call(h, "test.snapshot", {"name": "x"})
         got = state(h).get("settings")
