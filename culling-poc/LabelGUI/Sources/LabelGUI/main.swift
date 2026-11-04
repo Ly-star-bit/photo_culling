@@ -488,7 +488,8 @@ if CommandLine.arguments.contains("--ux-selftest") {
     }
 }
 
-// XMP 写入 + 「XMP 过期」提醒的端到端检查：LABELGUI_DATA_DIR=<临时> LabelGUI --export-xmp <photo_dir> [--then id=精选|可用|废片]
+// XMP 写入 + 「XMP 过期」提醒的端到端检查：LABELGUI_DATA_DIR=<临时> LabelGUI --export-xmp <photo_dir> [--then id=精选|可用|废片 [--incremental]]
+// --incremental：改判之后点「XMP 待更新」（只写改了的），断言只动了 1 个 sidecar（见 FileSafetySelfTest.swift）。
 // 会在 photo_dir 里原图旁边写 .xmp —— 只对拷出来的临时文件夹跑。
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--export-xmp"),
    CommandLine.arguments.count > flagIndex + 1 {
@@ -507,11 +508,17 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--export-xmp"),
         print(store.progressText)
         if let exportError { print(exportError) }
         print("写完：XMP 过期 \(store.xmpStaleCount) 张")
+        var incrementalFailed = false
         if let i = CommandLine.arguments.firstIndex(of: "--then"), CommandLine.arguments.count > i + 1 {
             let parts = CommandLine.arguments[i + 1].split(separator: "=").map(String.init)
             if parts.count == 2, let v = Verdict(rawValue: parts[1]) {
                 store.setOverride(parts[0], v)
                 print("改判 \(parts[0]) → \(v.rawValue)：XMP 过期 \(store.xmpStaleCount) 张")
+                // --incremental：点状态栏「XMP 待更新」那一路（只写改了的）—— 改 1 张就只动 1 个 sidecar，其余的文件一个不换。
+                if CommandLine.arguments.contains("--incremental") {
+                    let touched = XMPIncrementalCheck.run(store)
+                    if touched != 1 { incrementalFailed = true }
+                }
                 store.undoLastOverride()
                 print("撤销后：XMP 过期 \(store.xmpStaleCount) 张")
             }
@@ -520,9 +527,14 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--export-xmp"),
         let reopened = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         reopened.switchSession(to: dir)
         print("重开后：XMP 过期 \(reopened.xmpStaleCount) 张")
-        if exportError != nil { exit(1) }
+        if exportError != nil || incrementalFailed { exit(1) }
     }
     exit(0)
+}
+
+// 文件安全自检（XMP 只写改了的 / 同名共用 .xmp / 废片避开拼图 / 高 ISO 复制）：LABELGUI_DATA_DIR=<临时> LabelGUI --files-selftest
+if CommandLine.arguments.contains("--files-selftest") {
+    MainActor.assumeIsolated { FileSafetySelfTest.run() }
 }
 
 // 按机身对时（会写这一场的 body_offsets.json，只在临时数据目录下跑）：

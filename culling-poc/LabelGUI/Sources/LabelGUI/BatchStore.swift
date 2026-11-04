@@ -578,10 +578,41 @@ final class BatchStore: ObservableObject {
     var xmpStaleCount: Int { derived.xmpStaleCount }
     var clientPickCount: Int { derived.clientPickCount }
     var clientPickRejectCount: Int { derived.clientPickRejectCount }
-    /// 「废片移到废纸篓」真会移的张数：废片里去掉客户选中的（客户点名要精修的照片不扔）。
-    var trashableRejectCount: Int { verdictCounts.reject - clientPickRejectCount }
-    /// 「废片移到废纸篓」要移的那些照片（和上面的张数是同一个条件）。
-    var trashableRejects: [BatchItem] { items.filter { $0.verdict == .reject && !clientPicks.contains($0.id) } }
+    /// 「废片移到废纸篓」默认真会移的张数：废片里去掉客户选中的（客户点名要精修的照片不扔）、拼图里在用的
+    /// （不挖空拼图页、印样帧、存好的方案，见 collageInUseIDs）。
+    var trashableRejectCount: Int { verdictCounts.reject - clientPickRejectCount - collageProtectedRejectCount }
+    /// 「废片移到废纸篓」默认要移的那些照片（和上面的张数是同一个条件）。
+    var trashableRejects: [BatchItem] {
+        items.filter { $0.verdict == .reject && !clientPicks.contains($0.id) && !collageInUseIDs.contains($0.id) }
+    }
+    /// 确认框里点「连这些一起移」时要移的：拼图里在用的也算上，客户选中的照样不动。
+    var trashableRejectsIncludingCollage: [BatchItem] {
+        items.filter { $0.verdict == .reject && !clientPicks.contains($0.id) }
+    }
+
+    // MARK: - 拼图在用的照片（「废片移到废纸篓」默认不动）
+
+    /// 拼图各页（格子、图层、印样帧）和方案栏各方案用到的照片 id。AppModel 从内存里的 CollageStore 推过来（不读防抖
+    /// 保存的 collage.json）；没接（--verdicts、--client-import 这类只开批量页的无头入口）= 空。只在托盘里的不算。
+    @Published private(set) var collageInUseIDs: Set<String> = []
+    /// 现取一次（先让拼图工程挂到这一场再读）：AppModel 设。点「废片移到废纸篓」和真移之前走 refreshCollageInUse()。
+    var collageInUseSource: (() -> Set<String>)?
+
+    func setCollageInUse(_ ids: Set<String>) {
+        if ids != collageInUseIDs { collageInUseIDs = ids }
+    }
+
+    func refreshCollageInUse() {
+        if let source = collageInUseSource { setCollageInUse(source()) }
+    }
+
+    /// 废片里客户没选中、但拼图里在用的张数：默认不移，确认框里可以选「连这些一起移」。只查拼图那一份 id，不扫整场。
+    var collageProtectedRejectCount: Int {
+        collageInUseIDs.reduce(0) { n, id in
+            guard let item = item(withID: id), item.verdict == .reject, !clientPicks.contains(id) else { return n }
+            return n + 1
+        }
+    }
 
     /// 写进 XMP 的那几样：判决（色标 / -1 废片）、星级（判决定档，VLM 表情分只在档内排先后），
     /// 客户选中（紫色标）。`c` 只在客户选中时是 true，其余一律 nil（不是 false）：老的 xmp_state.json
@@ -599,6 +630,8 @@ final class BatchStore: ObservableObject {
         var foreign: Set<String> = []
         /// foreign 已按现在的归属规则复查过。旧版本存的没有这个字段（见 recheckForeignSidecars）。
         var foreignRechecked: Bool?
+        /// 上次写 XMP 时认出来的同名冲突（几张照片共用一个 .xmp，整组没写）。旧版本没有这个字段 = nil。
+        var sharedSidecar: Set<String>?
     }
     private var xmpState: XMPState?
     private var xmpStatePath: URL { sessionDir.appendingPathComponent("xmp_state.json") }
@@ -642,10 +675,30 @@ final class BatchStore: ObservableObject {
     private func xmpStale(in items: [BatchItem]) -> Int {
         guard let state = xmpState else { return 0 }
         var n = 0
-        for item in items where !state.foreign.contains(item.id) {
-            if state.marks[item.id] != Self.xmpMark(item, clientPick: clientPicks.contains(item.id)) { n += 1 }
+        for item in items where Self.xmpNeedsWrite(item, state: state, clientPick: clientPicks.contains(item.id)) {
+            n += 1
         }
         return n
+    }
+
+    /// 这一张要不要（重）写 XMP：别的软件的、合并不了的不算（菜单「全部重写 XMP」才再试）；记下的样子和现在的
+    /// 不一样（含从没写进去的）就要。状态栏「XMP 待更新 N 张」的 N 和点它时「只写改了的」挑哪几张都用这一个判断，
+    /// 两边不会算岔。不查 sidecar 在不在：xmpStale 在派生数据重算里跑（拖滑杆也算），丢了的、被别的软件整份
+    /// 覆盖的交给菜单里的全部重写。
+    private static func xmpNeedsWrite(_ item: BatchItem, state: XMPState, clientPick: Bool) -> Bool {
+        !state.foreign.contains(item.id) && state.marks[item.id] != xmpMark(item, clientPick: clientPick)
+    }
+
+    /// 这一场写过 XMP 没有（菜单上叫「写入 XMP」还是「全部重写 XMP」）。
+    var hasWrittenXMP: Bool { xmpState != nil }
+
+    /// 「XMP 待更新」里因为同名共用一个 .xmp 写不了的张数（上次写 XMP 时认出来的、还在这一场、还算待更新的）。
+    var xmpSharedSidecarCount: Int {
+        guard let state = xmpState, let shared = state.sharedSidecar else { return 0 }
+        return shared.reduce(0) { n, id in
+            guard let item = item(withID: id) else { return n }
+            return n + (Self.xmpNeedsWrite(item, state: state, clientPick: clientPicks.contains(id)) ? 1 : 0)
+        }
     }
 
     /// XMP 里的星级和色标。导出和「XMP 过期」比对共用这一份，两边不会算岔。
@@ -3455,15 +3508,26 @@ final class BatchStore: ObservableObject {
     /// disappears from the session + persisted artifacts so it doesn't resurface
     /// as a broken entry.
     /// 客户选中的废片不动：客户点名要精修的，判成废片也留着（菜单、确认框上的张数也不算它们）。
-    func trashRejects() {
+    /// 拼图页、印样帧、存好的方案里用到的默认也不动（`includeCollage` = 确认框里的「连这些一起移」，格子会空）。
+    func trashRejects(includeCollage: Bool = false) {
         guard !isRunning else {
             lastError = "正在处理中，先点“取消”再移动废片"
             return
         }
-        let rejects = trashableRejects
+        // 真移之前现取一次拼图在用的（拼图工程先挂到这一场）：菜单上的张数是之前推过来的，这期间可能又排了一版。
+        refreshCollageInUse()
+        let rejects = includeCollage ? trashableRejectsIncludingCollage : trashableRejects
         let keptForClient = clientPickRejectCount
+        let keptForCollage = includeCollage ? 0 : collageProtectedRejectCount
+        let inCollage = includeCollage ? collageInUseIDs : []
         guard !rejects.isEmpty else {
-            if keptForClient > 0 { lastError = "废片都是客户选中的 (\(keptForClient) 张)，没有要移的" }
+            if keptForCollage > 0 {
+                let client = keptForClient > 0 ? "客户选中的 (\(keptForClient) 张) 或" : ""
+                lastError = "废片都是" + client + "拼图 / 印样 / 方案里用到的 (\(keptForCollage) 张)，默认不移" +
+                    " —— 要连拼图里的一起移，在确认框里点「连这些一起移」"
+            } else if keptForClient > 0 {
+                lastError = "废片都是客户选中的 (\(keptForClient) 张)，没有要移的"
+            }
             return
         }
         // 照片文件夹不在了就别开工：一张也移不动，却会把这些 id 从结果里抹掉。
@@ -3476,9 +3540,15 @@ final class BatchStore: ObservableObject {
         // trashItem is a Finder-level operation (~ms each); hundreds of rejects
         // would beachball the UI if done here — file work goes off-main, only
         // the bookkeeping comes back.
+        // 旁边的 .xmp 只在共用它的照片（按整场算，不只看要移的）这次全都移走时才带走：同名的另一张还留着（HEIC 废了、
+        // JPG 留着），它的星级、LR 调色就在这个文件里。主线程按完整的 items 算好再交给后台。
+        let sidecars = SidecarSharing.trashSidecars(moving: rejects.map { ($0.id, $0.rawPath) },
+                                                    all: items.map { ($0.id, $0.rawPath) })
         let jobs = rejects.map {
-            (id: $0.id, rawPath: $0.rawPath, decodePath: $0.decodePath, previewPath: $0.previewPath)
+            (id: $0.id, rawPath: $0.rawPath, decodePath: $0.decodePath, previewPath: $0.previewPath,
+             xmp: sidecars.carry[$0.id]?.xmp, xmpAfter: sidecars.carry[$0.id]?.after ?? [])
         }
+        let keptSidecars = sidecars.kept
         let total = jobs.count
         cancelFlag = AnalysisEngine.CancelFlag()
         let flag = cancelFlag
@@ -3493,8 +3563,10 @@ final class BatchStore: ObservableObject {
                 if job.decodePath != job.rawPath {
                     urls.append(URL(fileURLWithPath: job.decodePath))
                 }
-                let xmp = URL(fileURLWithPath: job.rawPath).deletingPathExtension().appendingPathExtension("xmp")
-                if fm.fileExists(atPath: xmp.path) { urls.append(xmp) }
+                // 共用这个 .xmp 的另几张都移成了才带走它（排在前面，已经处理过）。
+                if let xmp = job.xmp, job.xmpAfter.allSatisfy(trashedIDs.contains), fm.fileExists(atPath: xmp.path) {
+                    urls.append(xmp)
+                }
                 do {
                     var movedAny = false
                     for url in urls where fm.fileExists(atPath: url.path) {
@@ -3524,6 +3596,7 @@ final class BatchStore: ObservableObject {
 
             let trashed = trashedIDs
             let failedIds = failed
+            let keptShared = keptSidecars.filter { fm.fileExists(atPath: $0.path) }.count
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
@@ -3546,8 +3619,14 @@ final class BatchStore: ObservableObject {
                 if flag.isSet {
                     self.progressText = "已取消: \(trashed.count) 张已移到废纸篓 (可恢复)，其余未动"
                 } else if failedIds.isEmpty {
-                    self.progressText = "已把 \(trashed.count) 张废片移到废纸篓 (可恢复)" +
-                        (keptForClient > 0 ? "；客户选中的 \(keptForClient) 张废片没动" : "")
+                    // 一段一段拼：一长串 + 和三元在 CI 的 Xcode 16 上类型检查会慢。
+                    let hollowed = trashed.intersection(inCollage).count
+                    var parts = ["已把 \(trashed.count) 张废片移到废纸篓 (可恢复)"]
+                    if keptForClient > 0 { parts.append("客户选中的 \(keptForClient) 张废片没动") }
+                    if keptForCollage > 0 { parts.append("拼图 / 印样 / 方案里用到的 \(keptForCollage) 张没动") }
+                    if hollowed > 0 { parts.append("其中 \(hollowed) 张用在拼图里，那些格子会空着（从废纸篓「放回原处」就回来）") }
+                    if keptShared > 0 { parts.append("\(keptShared) 个 .xmp 同名的另一张照片还在用，留着没移") }
+                    self.progressText = parts.joined(separator: "；")
                 } else {
                     self.lastError = "移到废纸篓: \(trashed.count) 成功, \(failedIds.count) 失败 (\(failedIds.prefix(3).joined(separator: ", ")))"
                 }
@@ -3853,6 +3932,8 @@ final class BatchStore: ObservableObject {
     /// COPIES (never moves — the session's paths must stay valid) the RAW of
     /// every photo at/above `minISO` into "<拍摄文件夹>/高ISO降噪". That subfolder
     /// is excluded from analysis scans, so re-running 开始分析 won't double-count.
+    /// 平铺，同名不同内容的另存 -2（不同子文件夹里同名的 RAW 不再互相顶掉）；一模一样的跳过；目标里的文件一个不删
+    /// （见 HighISOCopier）。只复制 RAW 本身。
     func exportHighISORaws(minISO: Int, keepersOnly: Bool) {
         guard !isRunning, let photoDir else { return }
         let (raws, jpegOnly) = highISOMatches(minISO: minISO, keepersOnly: keepersOnly)
@@ -3872,36 +3953,11 @@ final class BatchStore: ObservableObject {
         Task.detached { [weak self] in
             let fm = FileManager.default
             var copied = 0, existed = 0
+            var renamed: [String] = []
+            var partialLeftovers = 0
             var failed: [String] = []
             do {
                 try fm.createDirectory(at: destDir, withIntermediateDirectories: true)
-                func size(_ url: URL) -> Int? {
-                    ((try? fm.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.intValue
-                }
-                for (index, src) in sources.enumerated() {
-                    if flag.isSet { break }
-                    let dest = destDir.appendingPathComponent(src.lastPathComponent)
-                    if fm.fileExists(atPath: dest.path), let s = size(src), size(dest) == s {
-                        existed += 1  // complete copy from a previous run: skip
-                    } else {
-                        do {
-                            // Size mismatch = a copy interrupted mid-file last
-                            // time; replace it instead of trusting it forever.
-                            if fm.fileExists(atPath: dest.path) {
-                                try fm.removeItem(at: dest)
-                            }
-                            try fm.copyItem(at: src, to: dest)
-                            copied += 1
-                        } catch {
-                            failed.append(src.lastPathComponent)
-                        }
-                    }
-                    let done = index + 1
-                    await MainActor.run { [weak self] in
-                        self?.progressText = "复制 RAW \(done)/\(total)..."
-                        self?.progressFraction = Double(done) / Double(total)
-                    }
-                }
             } catch {
                 await MainActor.run { [weak self] in
                     self?.lastError = "创建 \(ImageLoader.denoiseSubfolder) 文件夹失败: \(error.localizedDescription)"
@@ -3909,9 +3965,32 @@ final class BatchStore: ObservableObject {
                 }
                 return
             }
+            for (index, src) in sources.enumerated() {
+                if flag.isSet { break }
+                let (outcome, partialLeftover) = HighISOCopier.copy(src, to: destDir, cancel: flag)
+                switch outcome {
+                case .copied(let name, let wasRenamed):
+                    copied += 1
+                    if wasRenamed { renamed.append(name) }
+                    if partialLeftover { partialLeftovers += 1 }
+                case .existed:
+                    existed += 1  // 上次复制的、一模一样：跳过
+                case .failed(let why):
+                    failed.append(why)
+                case .cancelled:
+                    break      // flag 已经立起来，下一轮就停
+                }
+                let done = index + 1
+                await MainActor.run { [weak self] in
+                    self?.progressText = "复制 RAW \(done)/\(total)..."
+                    self?.progressFraction = Double(done) / Double(total)
+                }
+            }
 
             let copiedCount = copied
             let existedCount = existed
+            let renamedNames = renamed
+            let partialCount = partialLeftovers
             let summaryFailed = failed
             await MainActor.run { [weak self] in
                 guard let self else { return }
@@ -3919,6 +3998,14 @@ final class BatchStore: ObservableObject {
                 self.isRunning = false
                 var parts = [(flag.isSet ? "已取消: 已复制 " : "已复制 ") + "\(copiedCount) 个 RAW → \(ImageLoader.denoiseSubfolder)/"]
                 if existedCount > 0 { parts.append("\(existedCount) 个已存在跳过") }
+                if !renamedNames.isEmpty {
+                    let shown = renamedNames.prefix(3).joined(separator: ", ") + (renamedNames.count > 3 ? "…" : "")
+                    parts.append("\(renamedNames.count) 个和文件夹里的同名文件内容不一样，另存为 \(shown)" +
+                                 "（多半是不同子文件夹里同名的 RAW）")
+                }
+                if partialCount > 0 {
+                    parts.append("其中 \(partialCount) 个原名的文件是旧版复制中断留下的半截，没删，核对后可以删掉")
+                }
                 if jpegOnly > 0 { parts.append("\(jpegOnly) 张只有 JPG 未复制") }
                 if summaryFailed.isEmpty {
                     self.progressText = parts.joined(separator: " · ")
@@ -3932,14 +4019,47 @@ final class BatchStore: ObservableObject {
 
     // MARK: - XMP export (native — writes sidecars directly, manual overrides included)
 
-    func exportXMP() {
+    /// 写 XMP 写哪些。`.all`：整场（菜单「全部重写 XMP」，也补被删掉、被别的软件整份覆盖的 sidecar，合并不了的再试一次）；
+    /// `.changed`：只写和上次写进去的不一样的（状态栏「XMP 待更新 N 张」，挑法同 xmpNeedsWrite）—— 其余的一个字节不碰，
+    /// 在 LR / C1 里改过星级、这边没动的照片不会被盖回去，几千张的场次也不用整场重读重写。
+    enum XMPExportScope {
+        case all, changed
+    }
+
+    func exportXMP(_ scope: XMPExportScope = .all) {
         guard !isRunning, !items.isEmpty else { return }
         isRunning = true
         lastError = nil
+        // 只写改了的：和「XMP 待更新」同一个判断。从没写过（xmpState == nil）时状态栏不提醒，走到这里就按整场写。
+        let chosen: [BatchItem]
+        if scope == .changed, let state = xmpState {
+            chosen = items.filter { Self.xmpNeedsWrite($0, state: state, clientPick: clientPicks.contains($0.id)) }
+        } else {
+            chosen = items
+        }
+        let untouched = items.count - chosen.count
+        // 同一个 .xmp 对应好几张（同目录同名、各自成片：HEIC+JPG、RAF 旁边的 DNG、JPG+TIF）：写哪张的星级色标都会盖掉
+        // 另一张，整组不写、点名。按整场找（只写改了的也一样：改了的那张和没改的那张共用一个文件）。
+        let sharedGroups = SidecarSharing.sharedGroups(items.map { ($0.id, $0.rawPath) })
+        let sharedIDs = Set(sharedGroups.flatMap { $0 })
+        let chosenIDs = Set(chosen.map(\.id))
+        let sharedInScope = sharedGroups.filter { $0.contains(where: chosenIDs.contains) }
+        let sharedNames: [String] = sharedInScope.map { group in
+            group.compactMap { item(withID: $0).map { URL(fileURLWithPath: $0.rawPath).lastPathComponent } }
+                .joined(separator: " + ")
+        }
+        let sharedPhotoCount = sharedInScope.reduce(0) { $0 + $1.count }
+        // 只写改了的不重试上次旁边是别的软件的 XMP、合并不了的那些（它们不算「待更新」），完成时说一声。
+        let foreignLeft: Int
+        if scope == .changed, let state = xmpState, !state.foreign.isEmpty {
+            foreignLeft = items.filter { state.foreign.contains($0.id) }.count
+        } else {
+            foreignLeft = 0
+        }
         // Verdicts/overrides live on the main actor, so the sidecar contents are
         // derived here; the detached task is pure file IO (thousands of atomic
         // writes on a big shoot would otherwise freeze the UI for seconds).
-        let jobs: [XMPJob] = items.map { item in
+        let jobs: [XMPJob] = chosen.filter { !sharedIDs.contains($0.id) }.map { item in
             // Red = the cross-app 淘汰 color — filterable in LR AND Capture One.
             // 客户选中的是紫色（压过绿 / 红），星级不变。
             let (stars, label) = Self.xmpRating(item, clientPick: clientPicks.contains(item.id))
@@ -3949,57 +4069,55 @@ final class BatchStore: ObservableObject {
             // 已经是别的色（你后来在 LR 里改的）就不动。
             let lastLabel = xmpState?.marks[item.id].flatMap(Self.writtenLabel)
             return XMPJob(id: item.id, url: xmpURL, content: Self.xmpContent(rating: stars, label: label, reason: reason),
-                          stars: stars, label: label, lastLabel: lastLabel)
+                          stars: stars, label: label, lastLabel: lastLabel,
+                          lightroomBlind: SidecarSharing.lightroomBlindFormat(rawPath: item.rawPath))
         }
         let total = jobs.count
         // 写完记下「每张这次写进去的是什么」，之后判决 / 星级 / 客户选中再变就提醒重写（状态栏）。
-        let marks = Dictionary(items.map { ($0.id, Self.xmpMark($0, clientPick: clientPicks.contains($0.id))) },
+        let marks = Dictionary(chosen.map { ($0.id, Self.xmpMark($0, clientPick: clientPicks.contains($0.id))) },
                                uniquingKeysWith: { first, _ in first })
-        // Lightroom Classic only reads .xmp sidecars for proprietary RAW; for
-        // JPEG/TIFF/DNG it expects the metadata embedded. Capture One reads
-        // sidecars for everything. Say so instead of reporting a clean success.
-        let jpegOnly = items.filter {
-            !ImageLoader.rawExtensions.contains(URL(fileURLWithPath: $0.rawPath).pathExtension.lowercased())
-        }.count
         cancelFlag = AnalysisEngine.CancelFlag()
         let flag = cancelFlag
+        // 开头就把进度条立起来：以前要等第 50 张自己的 sidecar 写完才第一次刷新，整场都是别的软件的 XMP 时一直没有进度条。
+        progressText = "写入 XMP 0/\(total)..."
+        progressFraction = total > 0 ? 0 : nil
 
         Task.detached { [weak self] in
             var written = 0
-            var writtenIDs: [String] = []
             var merged = 0
+            var unchanged = 0
+            // Lightroom Classic only reads .xmp sidecars for proprietary RAW; for
+            // JPEG/TIFF/DNG it expects the metadata embedded. Capture One reads
+            // sidecars for everything. Say so instead of reporting a clean success.
+            // 按这次真写进去（或本来就对）的数，格式记下来点名。
+            var lightroomBlind = 0
+            var blindFormats = Set<String>()
+            var writtenIDs: [String] = []
             var preserved: [String] = []
             var failed: [String] = []
             for (index, job) in jobs.enumerated() {
                 if flag.isSet { break }
-                // Lightroom 把调色参数、关键字、GPS 都存在同名 .xmp 里。别人的 sidecar 不能整份
-                // 覆盖成我们这份只有星级的模板 = 整场调色报废；只合并星级 / 色标，合并不了的不碰。
-                // 读不出来（权限、坏文件）也当别人的：以前读失败会落到下面整份覆盖。
-                if FileManager.default.fileExists(atPath: job.url.path) {
-                    let existing = try? Data(contentsOf: job.url)
-                    if existing.map(XMPSidecar.isOwn) != true {
-                        guard let existing,
-                              let data = XMPSidecar.merged(existing, rating: job.stars, label: job.label,
-                                                           lastLabel: job.lastLabel) else {
-                            preserved.append(job.id)
-                            continue
-                        }
-                        do {
-                            try data.write(to: job.url, options: .atomic)
-                            merged += 1
-                            writtenIDs.append(job.id)
-                        } catch {
-                            failed.append(job.id)
-                        }
-                        continue
-                    }
-                }
-                do {
-                    try job.content.write(to: job.url, atomically: true, encoding: .utf8)
+                // 合并、原样保留、写失败、没变都走到下面同一个进度更新（以前合并和保留两路 continue 跳过了它）。
+                let outcome = Self.writeSidecar(job)
+                switch outcome {
+                case .written:
                     written += 1
                     writtenIDs.append(job.id)
-                } catch {
+                case .merged:
+                    merged += 1
+                    writtenIDs.append(job.id)
+                case .unchanged:
+                    // 盘上已经是这一份：照样记成已同步，只是没重写（文件时间不变）。
+                    unchanged += 1
+                    writtenIDs.append(job.id)
+                case .preserved:
+                    preserved.append(job.id)
+                case .failed:
                     failed.append(job.id)
+                }
+                if let format = job.lightroomBlind, outcome != .preserved, outcome != .failed {
+                    lightroomBlind += 1
+                    blindFormats.insert(format)
                 }
                 let done = index + 1
                 if done % 50 == 0 || done == total {
@@ -4012,6 +4130,9 @@ final class BatchStore: ObservableObject {
 
             let writtenCount = written
             let mergedCount = merged
+            let unchangedCount = unchanged
+            let blindCount = lightroomBlind
+            let blindNames = blindFormats.sorted().joined(separator: "/")
             let writtenIds = writtenIDs
             let preservedIds = preserved
             let failedIds = failed
@@ -4021,7 +4142,10 @@ final class BatchStore: ObservableObject {
                 self.isRunning = false
                 // 只记真正写进去的（合并了星级色标的也算；取消、个别写失败也照记已写的那些）；
                 // 合并不了、没碰的那些记成「不归我们管」，不算过期 —— 这次结果里点名说了。
-                if !writtenIds.isEmpty || !preservedIds.isEmpty {
+                // 共用 .xmp 的那几张：不记成已同步（以前的版本给两张都记过），也不当别人的 —— 一直算「待更新」、每次点名，
+                // 直到挪开其中一张；单独记一份，状态栏说清楚这几张是写不了、不是忘了写。
+                let sharedChanged = sharedIDs != (self.xmpState?.sharedSidecar ?? [])
+                if !writtenIds.isEmpty || !preservedIds.isEmpty || sharedChanged {
                     var state = self.xmpState ?? XMPState()
                     for id in writtenIds {
                         state.marks[id] = marks[id]
@@ -4031,11 +4155,16 @@ final class BatchStore: ObservableObject {
                         state.marks[id] = nil
                         state.foreign.insert(id)
                     }
+                    for id in sharedIDs {
+                        state.marks[id] = nil
+                        state.foreign.remove(id)
+                    }
+                    state.sharedSidecar = sharedIDs.isEmpty ? nil : sharedIDs
                     self.saveXMPState(state)
                 }
                 // 写的这段时间里判决可能又变了：按现在的判决重数一遍。
                 self.derived.xmpStaleCount = self.xmpStale(in: self.items)
-                let done = writtenCount + mergedCount
+                let done = writtenCount + mergedCount + unchangedCount
                 let mergedNote = "其中 \(mergedCount) 个是其它软件的 XMP，只改了星级/色标，调色、关键字等原样保留"
                 // 没写进去的要说出来，不能混在「完成」里、也不能被写失败的提示盖掉：这几张在 LR/C1 里还是旧星级。
                 var keptNote: String?
@@ -4044,23 +4173,98 @@ final class BatchStore: ObservableObject {
                     keptNote = "\(preservedIds.count) 张没写星级 (\(names))：旁边已有其它软件的 XMP，" +
                         "格式读不全、合并怕写丢调色，原样保留了 —— 这几张请在 LR/C1 里自己标"
                 }
+                // 同名冲突单独一条，不混进「没写星级」「失败」：原因和办法都不一样。
+                var sharedNote: String?
+                if sharedPhotoCount > 0 {
+                    let shown = sharedNames.prefix(3).joined(separator: "、") + (sharedNames.count > 3 ? "…" : "")
+                    sharedNote = "同名冲突 \(sharedPhotoCount) 张没写 XMP (\(shown))：同一个文件夹里同名不同格式的照片共用一个 .xmp，" +
+                        "写哪张的星级色标都会盖掉另一张 —— 这几张请在 LR/C1 里自己标，或者把其中一张挪到别的文件夹再重新分析"
+                }
+                let warning = [keptNote, sharedNote].compactMap { $0 }.joined(separator: "；")
+                var notes: [String] = []
+                if unchangedCount > 0 && scope == .changed {
+                    notes.append("其中 \(unchangedCount) 个盘上本来就是这样，没重写")
+                }
+                if mergedCount > 0 { notes.append(mergedNote) }
+                if foreignLeft > 0 {
+                    notes.append("上次没写进去的 \(foreignLeft) 张（旁边是其它软件的 XMP、合并不了）这次没重试，" +
+                                 "「导出 › 全部重写 XMP」会再试")
+                }
+                if blindCount > 0 {
+                    notes.append("注意 \(blindCount) 张是 \(blindNames)：Lightroom Classic 不读这些格式旁边的 .xmp" +
+                                 "（它只认文件里内嵌的元数据；Capture One 能读）—— 要在 LR 里按判决筛，" +
+                                 "用「导出 › 复制文件名」粘到图库筛选器「文本 › 文件名」")
+                }
                 if failedIds.isEmpty {
-                    var summary = flag.isSet ? "XMP 已取消: 已写入 \(done) 个" : "XMP 完成: \(done) 个已写入原图目录"
-                    if mergedCount > 0 { summary += "；" + mergedNote }
-                    if jpegOnly > 0 {
-                        summary += "；注意 \(jpegOnly) 张是纯 JPG：Lightroom 不读 JPG 旁的 .xmp (Capture One 可读)"
+                    var summary: String
+                    if scope == .changed {
+                        summary = flag.isSet ? "XMP 已取消: 已更新 \(done) 张" : "XMP 已更新 \(done) 张，其余 \(untouched) 张没动"
+                    } else if flag.isSet {
+                        summary = "XMP 已取消: 已写入 \(done) 个"
+                    } else if unchangedCount > 0 {
+                        let rewritten = writtenCount + mergedCount
+                        summary = "XMP 完成: \(done) 个都已对上（重写 \(rewritten) 个，\(unchangedCount) 个本来就对、没动）"
+                    } else {
+                        summary = "XMP 完成: \(done) 个已写入原图目录"
                     }
+                    for note in notes { summary += "；" + note }
                     self.progressText = summary
-                    self.lastError = keptNote
+                    self.lastError = warning.isEmpty ? nil : warning
                 } else {
                     let failedNames = failedIds.prefix(3).joined(separator: ", ")
                     var message = "XMP: \(done) 个成功, \(failedIds.count) 个失败 (\(failedNames))"
-                    if mergedCount > 0 { message += "；" + mergedNote }
-                    if let keptNote { message += "；" + keptNote }
+                    for note in notes { message += "；" + note }
+                    if !warning.isEmpty { message += "；" + warning }
                     self.lastError = message
                 }
             }
         }
+    }
+
+    /// 一张 sidecar 这次是怎么落的。
+    private enum XMPWriteOutcome: Sendable {
+        /// 我们自己的整份模板写进去了（新建的，或者原来是我们写的、内容变了）。
+        case written
+        /// 别的软件的 sidecar，只合并了星级 / 色标。
+        case merged
+        /// 盘上已经是要写的这一份（自己的模板字节一样，或者合并出来和原来一样）：没写，文件时间不变。
+        case unchanged
+        /// 别的软件的 sidecar，读不全、合并不了：没碰。
+        case preserved
+        case failed
+    }
+
+    /// 写一张（后台线程，纯文件 IO）。别人的 sidecar 只合并星级 / 色标，合并不了的不碰；自己的写整份模板。
+    /// 要写的和盘上的字节一模一样就不写 ——「全部重写」也不白改几千个文件的修改时间（LR / C1 按它判「外部改过」）。
+    nonisolated private static func writeSidecar(_ job: XMPJob) -> XMPWriteOutcome {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: job.url.path) {
+            // Lightroom 把调色参数、关键字、GPS 都存在同名 .xmp 里。别人的 sidecar 不能整份
+            // 覆盖成我们这份只有星级的模板 = 整场调色报废；只合并星级 / 色标，合并不了的不碰。
+            // 读不出来（权限、坏文件）也当别人的：以前读失败会落到下面整份覆盖。
+            let existing = try? Data(contentsOf: job.url)
+            if existing.map(XMPSidecar.isOwn) != true {
+                guard let existing,
+                      let data = XMPSidecar.merged(existing, rating: job.stars, label: job.label,
+                                                   lastLabel: job.lastLabel) else {
+                    return .preserved
+                }
+                if data == existing { return .unchanged }
+                do {
+                    try data.write(to: job.url, options: .atomic)
+                } catch {
+                    return .failed
+                }
+                return .merged
+            }
+            if existing == Data(job.content.utf8) { return .unchanged }
+        }
+        do {
+            try job.content.write(to: job.url, atomically: true, encoding: .utf8)
+        } catch {
+            return .failed
+        }
+        return .written
     }
 
     /// 一张照片的 sidecar 要写什么：我们自己的整份模板，或者合并进别人 sidecar 的星级 / 色标。
@@ -4072,6 +4276,8 @@ final class BatchStore: ObservableObject {
         let label: String?
         /// 上次写进这张的色标（没写过 / 可用 = nil；客户选中的是 Purple）。
         let lastLabel: String?
+        /// Lightroom Classic 不读这种格式旁边的 .xmp（DNG、JPG……）：格式名，结尾提醒用；LR 读的 = nil。
+        let lightroomBlind: String?
     }
 
     /// Standard xmp:Rating (-1 rejected, 1-5 stars) + xmp:Label color, readable by

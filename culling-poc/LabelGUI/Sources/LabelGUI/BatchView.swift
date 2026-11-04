@@ -251,11 +251,15 @@ struct BatchView: View {
         } message: {
             Text(acceptMessage)
         }
-        .confirmationDialog(
-            "把 \(store.trashableRejectCount) 张废片移到废纸篓？",
-            isPresented: $showTrashConfirm
-        ) {
-            Button("移到废纸篓", role: .destructive) { store.trashRejects() }
+        .confirmationDialog(trashTitle, isPresented: $showTrashConfirm) {
+            // 默认只移不在拼图里的；拼图页、印样帧、方案里用到的另给一个按钮（做过「按卷出印样」整场废片都在页上，
+            // 默认那项是 0 张，只剩这一个）。
+            if store.trashableRejectCount > 0 {
+                Button("移到废纸篓", role: .destructive) { store.trashRejects() }
+            }
+            if store.collageProtectedRejectCount > 0 {
+                Button(trashAlsoCollageTitle, role: .destructive) { store.trashRejects(includeCollage: true) }
+            }
             Button("取消", role: .cancel) {}
         } message: {
             Text(trashMessage)
@@ -501,8 +505,13 @@ struct BatchView: View {
                 .help("按焦段/ISO 的出片率统计")
 
             Menu {
-                Button("写入 XMP (LR/C1 可读)") { store.exportXMP() }
+                // 写过一次以后整场那一项叫「全部重写」：补被删掉、被别的软件整份覆盖的 sidecar；平常只写改了的（下一项、状态栏）。
+                Button(store.hasWrittenXMP ? "全部重写 XMP (LR/C1 可读)" : "写入 XMP (LR/C1 可读)") { store.exportXMP(.all) }
                     .disabled(store.items.isEmpty || store.isRunning)
+                if store.xmpStaleCount > 0 {
+                    Button("只更新改了的 \(store.xmpStaleCount) 张 XMP") { store.exportXMP(.changed) }
+                        .disabled(store.isRunning)
+                }
                 Button("导出 JPG...") { showJPEGSheet = true }
                     .disabled(jpegExportCount == 0 || store.isRunning)
                 Button("精华 Top N (JPG)...") { showHighlightsSheet = true }
@@ -512,10 +521,13 @@ struct BatchView: View {
                 Divider()
                 clientMenuItems
                 Divider()
-                Button("废片移到废纸篓 (\(store.trashableRejectCount))", role: .destructive) {
+                Button(trashMenuTitle, role: .destructive) {
+                    // 打开确认框之前现取一次拼图在用的（拼图工程先挂到这一场），框上的张数和按下去移的对得上。
+                    store.refreshCollageInUse()
                     showTrashConfirm = true
                 }
-                .disabled(store.trashableRejectCount == 0 || store.isRunning)
+                // 拼图里在用的默认不移、但确认框里能「连这些一起移」：只有两样都是 0 才灰掉。
+                .disabled(store.trashableRejectCount + store.collageProtectedRejectCount == 0 || store.isRunning)
             } label: {
                 Label("导出", systemImage: "square.and.arrow.up")
             }
@@ -564,13 +576,13 @@ struct BatchView: View {
             }
             // 上次写 XMP 之后又改了判决：Lightroom / C1 那边还是旧的，提醒一下、点一下就重写。
             if store.xmpStaleCount > 0 {
-                Button { store.exportXMP() } label: {
-                    Label("XMP 待更新 \(store.xmpStaleCount) 张 · 点这里重新写入", systemImage: "arrow.triangle.2.circlepath")
+                Button { store.exportXMP(.changed) } label: {
+                    Label(xmpStaleLabel, systemImage: "arrow.triangle.2.circlepath")
                         .font(.caption).foregroundStyle(.orange)
                 }
                 .buttonStyle(.plain)
                 .disabled(store.isRunning)
-                .help("有 \(store.xmpStaleCount) 张的判决、星级或客户选中和上次写进 XMP 的不一样（或者上次没写进去），Lightroom / Capture One 读到的还是旧的。点这里按现在的判决重写（别的软件写的 XMP 只改星级/色标，调色等原样保留）")
+                .help(xmpStaleHelp)
             }
             if store.unparsedCount > 0 {
                 // Photos the engine couldn't read are invisible in the grid;
@@ -1214,11 +1226,53 @@ struct BatchView: View {
         return scope + "\(acceptPreview.takes) 场按推荐定案？"
     }
 
-    /// 「废片移到废纸篓」确认框的说明：客户选中的废片不动，要说出来。
+    /// 状态栏「XMP 待更新」的字：同名共用一个 .xmp 写不了的单独说（点了也写不了，点开是点名的提示）。
+    private var xmpStaleLabel: String {
+        let n = store.xmpStaleCount
+        let shared = store.xmpSharedSidecarCount
+        if shared > 0 && shared >= n { return "XMP：\(shared) 张同名共用一个 .xmp，没写 · 点这里看是哪几张" }
+        if shared > 0 { return "XMP 待更新 \(n) 张（\(shared) 张同名冲突写不了）· 点这里重新写入" }
+        return "XMP 待更新 \(n) 张 · 点这里重新写入"
+    }
+
+    /// 状态栏「XMP 待更新」的说明。单独成属性：插值拼在视图构建器里，Xcode 16 类型检查会超时（同 acceptTitle）。
+    private var xmpStaleHelp: String {
+        let n = store.xmpStaleCount
+        return "有 \(n) 张的判决、星级或客户选中和上次写进 XMP 的不一样（或者上次没写进去），Lightroom / Capture One 读到的还是旧的。" +
+            "点这里只重写这 \(n) 张，其余的一个字节不动（在 LR / C1 里改过星级、这边没动的照片不会被盖回去；别的软件写的 XMP 只改星级/色标，调色等原样保留）。" +
+            "sidecar 被删了、被别的软件整份覆盖了，用「导出 › 全部重写 XMP」"
+    }
+
+    /// 「废片移到废纸篓」菜单项：拼图里在用的默认不移，单独报出来（不悄悄归零）。
+    private var trashMenuTitle: String {
+        let n = store.trashableRejectCount
+        let inCollage = store.collageProtectedRejectCount
+        return inCollage > 0 ? "废片移到废纸篓 (\(n)，另 \(inCollage) 张在拼图里)" : "废片移到废纸篓 (\(n))"
+    }
+
+    /// 「废片移到废纸篓」确认框的标题。
+    private var trashTitle: String {
+        let n = store.trashableRejectCount
+        let inCollage = store.collageProtectedRejectCount
+        if n == 0 && inCollage > 0 { return "废片都用在拼图 / 印样 / 方案里 (\(inCollage) 张)" }
+        return "把 \(n) 张废片移到废纸篓？"
+    }
+
+    /// 确认框第二个按钮：连拼图里在用的一起移。
+    private var trashAlsoCollageTitle: String {
+        let total = store.trashableRejectCount + store.collageProtectedRejectCount
+        return "连这些一起移 (共 \(total) 张，格子会空)"
+    }
+
+    /// 「废片移到废纸篓」确认框的说明：客户选中的废片不动、拼图里在用的默认不动，都要说出来。
     private var trashMessage: String {
         let kept = store.clientPickRejectCount
         let client = kept > 0 ? "客户选中的 \(kept) 张废片不动 (客户点名要的)。" : ""
-        return client + "原图 (RAW+JPG 成对一起) 和 XMP 会移到系统废纸篓，可随时恢复，不是永久删除。"
+        let inCollage = store.collageProtectedRejectCount
+        let collage = inCollage > 0
+            ? "废片里有 \(inCollage) 张用在拼图 / 印样 / 方案里，默认跳过；点「连这些一起移」的话，那些格子、印样帧会空着。"
+            : ""
+        return client + collage + "原图 (RAW+JPG 成对一起) 和 XMP 会移到系统废纸篓，可随时恢复，不是永久删除。"
     }
 
     private var acceptMessage: String {
