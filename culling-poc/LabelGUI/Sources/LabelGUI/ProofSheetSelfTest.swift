@@ -35,6 +35,45 @@ enum ProofSheetSelfTest {
     private static func extraChecks() {
         watermarkChecks()
         multiPhotoLines()
+        markerChecks()
+    }
+
+    // MARK: 「备注：」记号：开头那张认不出也不拿备注去认照片（审查）
+
+    private static func markerChecks() {
+        let header = "\(ProofSheetPage.header) \(bigSheet.id)\n"
+        // 同名的两张（不同子文件夹）：开头那个词重名。
+        func at(_ id: String, _ file: String) -> BatchItem {
+            let path = "/nonexistent/proof-selftest/" + file
+            return BatchItem(
+                id: id, previewPath: "", rawPath: path, decodePath: path, sharpness: 0, worstClipPct: 0,
+                eyeClosed: nil, faceQuality: nil, faceCount: 0, faceBbox: nil, faceAreaPct: nil, faces: [],
+                burstGroup: 0, expressionScore: nil, vlmReject: false, vlmCompositionIssues: [], vlmReason: nil,
+                appealClosedEyes: nil, appealSubjectSharp: nil, appealIntentionalExposure: nil, appealReason: nil,
+                exif: nil, horizonDeg: nil)
+        }
+        let all = items() + [at("仪式_DSCF7301", "仪式/DSCF7301.JPG"), at("晚宴_DSCF7301", "晚宴/DSCF7301.JPG")]
+        func resolve(_ text: String) -> ClientReply.Resolution {
+            ClientReply.resolve(text, items: all, sheets: [bigSheet])
+        }
+        func detail(_ r: ClientReply.Resolution) -> String {
+            "认出 \(r.ids.joined(separator: " ")) · 备注 \(r.notes) · 没认出 \(r.unknown)"
+        }
+        let gone = resolve(header + "DSCF9999 \(ProofSheetPage.noteMarker)修 3 处\nDSCF7210\n")
+        check(gone.ids == ["DSCF7210"] && gone.notes.isEmpty && gone.unknown == ["DSCF9999"],
+              "开头那张不在这一场（移进了废纸篓）：只报它没认出，备注「修 3 处」不把表上第 3 张认进来", detail(gone))
+        let named = resolve(header + "DSCF9999 \(ProofSheetPage.noteMarker)和 DSCF7208 一样的调色\n")
+        check(named.ids.isEmpty && named.unknown == ["DSCF9999"],
+              "开头那张不在这一场：备注里的 DSCF7208 也不认", detail(named))
+        let twin = resolve(header + "DSCF7301 \(ProofSheetPage.noteMarker)修 3 处\n")
+        check(twin.ids.isEmpty && twin.notes.isEmpty && twin.unknown == ["DSCF7301（重名）"],
+              "开头那个词重名：只报（重名），备注里的 3 不认", detail(twin))
+        let kept = resolve(header + "晚宴_DSCF7301 \(ProofSheetPage.noteMarker)修 3 处，和 7208 一样\n")
+        check(kept.ids == ["晚宴_DSCF7301"] && kept.notes == ["晚宴_DSCF7301": "修 3 处，和 7208 一样"],
+              "页面复制的是照片 id：重名的照片用 id 照样认、备注原样", detail(kept))
+        let chat = resolve("选好了 \(ProofSheetPage.noteMarker)7207去路人")
+        check(chat.ids == ["DSCF7207"] && chat.notes == ["DSCF7207": "去路人"],
+              "记号前面不是照片（「选好了 备注：…」）：照旧按普通文字认", detail(chat))
     }
 
     // MARK: 一行好几张照片（审查：第二张被吞进第一张的备注）

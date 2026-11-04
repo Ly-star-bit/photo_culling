@@ -195,6 +195,10 @@ enum ClientReply {
                 continue
             }
             let raw = originals.count == lines.count ? originals[index] : line
+            if let marked = markedNote(line, original: raw, lookup: lookup, isHead: isHead) {
+                words.append(marked)
+                continue
+            }
             if let split = noteSplit(line, original: raw, lookup: lookup, isHead: isHead) {
                 words.append(Word(token: split.head, note: split.note))
                 continue
@@ -216,6 +220,28 @@ enum ClientReply {
             words += plainWords(line, lookup: lookup, isHead: isHead)
         }
         return words
+    }
+
+    /// 确认表复制出来的那种行：「DSCF7207 备注：去路人」（一个像照片的词、空白、记号）。记号后面整段原样算备注，一个字也
+    /// 不拿来认照片 —— 不等开头那张认出来才护着：开头那张不在这一场了（导出确认表以后移进了废纸篓）、重名的，只交开头那个词
+    /// 去认（进「没认出」/「（重名）」），备注不要；以前退回按分隔符切，备注「修 3 处」里的 3、「和 DSCF7208 一样」里的
+    /// DSCF7208 被当成要的照片。记号前面不是一个像照片的词（这一场的文件名，或带数字的一个词）的不算这个格式，
+    /// 照旧按普通文字认（「选好了 备注：7207去路人」）。
+    private static func markedNote(_ line: String, original: String, lookup: Lookup,
+                                   isHead: (String) -> Bool) -> Word? {
+        guard let mark = line.range(of: #"\s+备注[:：]"#, options: .regularExpression) else { return nil }
+        let headText = String(line[..<mark.lowerBound])
+        guard let head = clean(headText) else { return nil }
+        let oneWord = hasDigit(head) && tokens(headText).count == 1
+        guard lookup.byFilename(head) != nil || oneWord else { return nil }
+        guard isHead(head) else { return Word(token: head) }
+        let scalars = Array(line.unicodeScalars)
+        let source = Array(original.unicodeScalars)
+        let raw = source.count == scalars.count ? source : scalars
+        let offset = line.unicodeScalars.distance(from: line.unicodeScalars.startIndex, to: mark.upperBound)
+        let noteText = String(String.UnicodeScalarView(raw[min(offset, raw.count)...]))
+        let note = noteText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return Word(token: head, note: note.isEmpty ? nil : note)
     }
 
     /// 按分隔符切成词。紧贴着汉字写的照片（「7208瘦脸」）拆成这张照片和它的备注 —— 以前整个词进「没认出」；
