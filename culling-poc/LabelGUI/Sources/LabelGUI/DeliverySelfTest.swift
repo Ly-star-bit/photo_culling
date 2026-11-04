@@ -141,9 +141,10 @@ enum DeliverySelfTest {
                 "前提：合成的 LR sidecar ImageIO 读得出来", "\(before.count) 个字段")
         if let out = XMPSidecar.merged(lr, rating: 5, label: "Green", lastLabel: nil) {
             var after = xmpFields(out) ?? [:]
-            t.check(xmpValue(out, "xmp:Rating") == "5" && xmpValue(out, "xmp:Label") == "Green",
-                    "merged：星级 2→5、色标 Blue→Green",
-                    "\(xmpValue(out, "xmp:Rating") ?? "nil") / \(xmpValue(out, "xmp:Label") ?? "nil")")
+            let rating: String? = xmpValue(out, "xmp:Rating")
+            let label: String? = xmpValue(out, "xmp:Label")
+            t.check(rating == "5" && label == "Green", "merged：星级 2→5、色标 Blue→Green",
+                    "\(rating ?? "nil") / \(label ?? "nil")")
             var rest = before
             for key in ["xmp:Rating", "xmp:Label"] {
                 rest.removeValue(forKey: key)
@@ -160,17 +161,21 @@ enum DeliverySelfTest {
             t.check(false, "merged：普通的 LR sidecar 合并得了（不该返回 nil）")
         }
         let wasGreen = lightroomSidecar(label: "Green")
-        let dropped = XMPSidecar.merged(wasGreen, rating: 3, label: nil, lastLabel: "Green")
-        t.check(dropped != nil && xmpValue(dropped ?? Data(), "xmp:Label") == nil
-                    && xmpValue(dropped ?? Data(), "xmp:Rating") == "3",
-                "merged：这次是可用（不带色标）、文件里还是上次我们写的 Green → 拿掉")
-        let userBlue = XMPSidecar.merged(lr, rating: 3, label: nil, lastLabel: "Green")
-        t.check(userBlue != nil && xmpValue(userBlue ?? Data(), "xmp:Label") == "Blue",
-                "merged：文件里的色标是你后来在 LR 里改的 Blue → 留着")
-        let noLabel = XMPSidecar.merged(lightroomSidecar(label: nil), rating: -1, label: "Red", lastLabel: nil)
-        t.check(noLabel != nil && xmpValue(noLabel ?? Data(), "xmp:Label") == "Red"
-                    && xmpValue(noLabel ?? Data(), "xmp:Rating") == "-1",
-                "merged：原来没有色标的，废片加上 Red、星级 -1")
+        // 拆成一个个命名的 let：CI 的 Xcode 16 类型检查比本机慢，长的 && 链会超时。
+        let dropped: Data? = XMPSidecar.merged(wasGreen, rating: 3, label: nil, lastLabel: "Green")
+        let droppedLabel: String? = dropped.flatMap { xmpValue($0, "xmp:Label") }
+        let droppedRating: String? = dropped.flatMap { xmpValue($0, "xmp:Rating") }
+        t.check(dropped != nil && droppedLabel == nil && droppedRating == "3",
+                "merged：这次是可用（不带色标）、文件里还是上次我们写的 Green → 拿掉",
+                "色标 \(droppedLabel ?? "无")、星级 \(droppedRating ?? "nil")")
+        let userBlue: Data? = XMPSidecar.merged(lr, rating: 3, label: nil, lastLabel: "Green")
+        let userLabel: String? = userBlue.flatMap { xmpValue($0, "xmp:Label") }
+        t.check(userLabel == "Blue", "merged：文件里的色标是你后来在 LR 里改的 Blue → 留着", userLabel ?? "nil")
+        let noLabel: Data? = XMPSidecar.merged(lightroomSidecar(label: nil), rating: -1, label: "Red", lastLabel: nil)
+        let addedLabel: String? = noLabel.flatMap { xmpValue($0, "xmp:Label") }
+        let addedRating: String? = noLabel.flatMap { xmpValue($0, "xmp:Rating") }
+        t.check(addedLabel == "Red" && addedRating == "-1", "merged：原来没有色标的，废片加上 Red、星级 -1",
+                "\(addedLabel ?? "nil") / \(addedRating ?? "nil")")
 
         // 读不全的写法：宁可不写
         let resource = Data("""
