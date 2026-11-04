@@ -207,9 +207,12 @@ enum ClientPicksCLI {
         }
         let counts = store.verdictCounts
         print("判决: 精选 \(counts.pick) · 可用 \(counts.usable) · 废片 \(counts.reject) · overrides \(store.overrides.count)")
-        // 「废片移到废纸篓」菜单和确认框上的张数（客户选中的废片不移）。
+        // 「废片移到废纸篓」菜单和确认框上的张数（客户选中的废片不移；拼图里在用的默认不移，只开批量页的无头入口里没有拼图 = 0）。
         let kept = store.clientPickRejectCount
-        print("废片移到废纸篓: \(store.trashableRejectCount) 张" + (kept > 0 ? "（客户选中的 \(kept) 张废片不动）" : ""))
+        let inCollage = store.collageProtectedRejectCount
+        let clientNote: String = kept > 0 ? "（客户选中的 \(kept) 张废片不动）" : ""
+        let collageNote: String = inCollage > 0 ? "（拼图 / 印样 / 方案里用到的 \(inCollage) 张默认不动）" : ""
+        print("废片移到废纸篓: \(store.trashableRejectCount) 张" + clientNote + collageNote)
         print("  要移的: " + (store.trashableRejects.isEmpty ? "-" : store.trashableRejects.map(\.id).joined(separator: " ")))
         exit(0)
     }

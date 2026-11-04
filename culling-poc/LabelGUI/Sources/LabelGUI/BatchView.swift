@@ -249,11 +249,15 @@ struct BatchView: View {
         } message: {
             Text(acceptMessage)
         }
-        .confirmationDialog(
-            "把 \(store.trashableRejectCount) 张废片移到废纸篓？",
-            isPresented: $showTrashConfirm
-        ) {
-            Button("移到废纸篓", role: .destructive) { store.trashRejects() }
+        .confirmationDialog(trashTitle, isPresented: $showTrashConfirm) {
+            // 默认只移不在拼图里的；拼图页、印样帧、方案里用到的另给一个按钮（做过「按卷出印样」整场废片都在页上，
+            // 默认那项是 0 张，只剩这一个）。
+            if store.trashableRejectCount > 0 {
+                Button("移到废纸篓", role: .destructive) { store.trashRejects() }
+            }
+            if store.collageProtectedRejectCount > 0 {
+                Button(trashAlsoCollageTitle, role: .destructive) { store.trashRejects(includeCollage: true) }
+            }
             Button("取消", role: .cancel) {}
         } message: {
             Text(trashMessage)
@@ -511,10 +515,13 @@ struct BatchView: View {
                 Divider()
                 clientMenuItems
                 Divider()
-                Button("废片移到废纸篓 (\(store.trashableRejectCount))", role: .destructive) {
+                Button(trashMenuTitle, role: .destructive) {
+                    // 打开确认框之前现取一次拼图在用的（拼图工程先挂到这一场），框上的张数和按下去移的对得上。
+                    store.refreshCollageInUse()
                     showTrashConfirm = true
                 }
-                .disabled(store.trashableRejectCount == 0 || store.isRunning)
+                // 拼图里在用的默认不移、但确认框里能「连这些一起移」：只有两样都是 0 才灰掉。
+                .disabled(store.trashableRejectCount + store.collageProtectedRejectCount == 0 || store.isRunning)
             } label: {
                 Label("导出", systemImage: "square.and.arrow.up")
             }
@@ -1230,11 +1237,36 @@ struct BatchView: View {
             "sidecar 被删了、被别的软件整份覆盖了，用「导出 › 全部重写 XMP」"
     }
 
-    /// 「废片移到废纸篓」确认框的说明：客户选中的废片不动，要说出来。
+    /// 「废片移到废纸篓」菜单项：拼图里在用的默认不移，单独报出来（不悄悄归零）。
+    private var trashMenuTitle: String {
+        let n = store.trashableRejectCount
+        let inCollage = store.collageProtectedRejectCount
+        return inCollage > 0 ? "废片移到废纸篓 (\(n)，另 \(inCollage) 张在拼图里)" : "废片移到废纸篓 (\(n))"
+    }
+
+    /// 「废片移到废纸篓」确认框的标题。
+    private var trashTitle: String {
+        let n = store.trashableRejectCount
+        let inCollage = store.collageProtectedRejectCount
+        if n == 0 && inCollage > 0 { return "废片都用在拼图 / 印样 / 方案里 (\(inCollage) 张)" }
+        return "把 \(n) 张废片移到废纸篓？"
+    }
+
+    /// 确认框第二个按钮：连拼图里在用的一起移。
+    private var trashAlsoCollageTitle: String {
+        let total = store.trashableRejectCount + store.collageProtectedRejectCount
+        return "连这些一起移 (共 \(total) 张，格子会空)"
+    }
+
+    /// 「废片移到废纸篓」确认框的说明：客户选中的废片不动、拼图里在用的默认不动，都要说出来。
     private var trashMessage: String {
         let kept = store.clientPickRejectCount
         let client = kept > 0 ? "客户选中的 \(kept) 张废片不动 (客户点名要的)。" : ""
-        return client + "原图 (RAW+JPG 成对一起) 和 XMP 会移到系统废纸篓，可随时恢复，不是永久删除。"
+        let inCollage = store.collageProtectedRejectCount
+        let collage = inCollage > 0
+            ? "废片里有 \(inCollage) 张用在拼图 / 印样 / 方案里，默认跳过；点「连这些一起移」的话，那些格子、印样帧会空着。"
+            : ""
+        return client + collage + "原图 (RAW+JPG 成对一起) 和 XMP 会移到系统废纸篓，可随时恢复，不是永久删除。"
     }
 
     private var acceptMessage: String {

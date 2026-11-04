@@ -37,6 +37,8 @@ final class AppModel: ObservableObject {
 
     /// 批量页切场次 → 拼图工程跟着换。
     private var photoDirWatch: AnyCancellable?
+    /// 拼图里在用的照片 → 批量页（「废片移到废纸篓」默认不动它们）。
+    private var collageInUseWatch: AnyCancellable?
 
     private init(batch: BatchStore, labels: LabelStore, cardCenter: CardImportCenter,
                  watermark: WatermarkStore, collage: CollageStore) {
@@ -73,6 +75,21 @@ final class AppModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak model] _ in
                 MainActor.assumeIsolated { model?.ensureCollageAttached() }
+            }
+        // 「废片移到废纸篓」默认不动拼图各页、印样帧、方案里用到的照片：读内存里的拼图工程（collage.json 是防抖保存的，
+        // 读盘可能是旧的）。菜单上的张数跟着工程变（攒 0.3 s 再算再推：拖动时不每帧算）；点菜单、真移之前再现取一次，
+        // 那时先让拼图挂到这一场（换场次的那一下工程还是上一场的）。
+        batch.collageInUseSource = { [weak model] in
+            guard let model else { return [] }
+            model.ensureCollageAttached()
+            return model.collage.project.photoIDsInUseIncludingVariants
+        }
+        model.collageInUseWatch = collage.$project
+            .debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)
+            .map(\.photoIDsInUseIncludingVariants)
+            .removeDuplicates()
+            .sink { [weak batch] ids in
+                MainActor.assumeIsolated { batch?.setCollageInUse(ids) }
             }
         // store 都建好了：写锁文件那一行、设置开着才开 socket（§9.2.1 第 3–5 步）
         model.live = live

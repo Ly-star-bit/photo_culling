@@ -1509,6 +1509,14 @@ struct CollageProject: Codable, Hashable {
     /// 已经上了任何一页的照片 id（格子和自由图层）。
     var usedPhotoIDs: Set<String> { Set(pages.flatMap(\.photoIDs)) }
 
+    /// 作品里用到的全部照片 id：各页的格子、图层、印样帧（一页放不下的帧也算：改大容量还会画出来），加上方案栏每个
+    /// 方案的各页。「废片移到废纸篓」默认不动它们（AppModel 推给 BatchStore.collageInUseIDs）；只在托盘里的不算 ——
+    /// 不在任何作品里。只读。
+    var photoIDsInUseIncludingVariants: Set<String> {
+        func ids(_ pages: [CollagePage]) -> [String] { pages.flatMap { $0.photoIDs + ($0.contactSheet?.frames ?? []) } }
+        return Set(ids(pages) + variants.flatMap { ids($0.project.pages) })
+    }
+
     /// 存成方案的那一份：不带方案栏，托盘只留这一版用到的照片（切回来时托盘照旧是那时的，缺的补回去）。
     var variantSnapshot: CollageProject {
         var p = self

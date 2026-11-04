@@ -1,11 +1,15 @@
 import Foundation
 import ImageIO
+import CoreGraphics
+import UniformTypeIdentifiers
 
 /// 文件安全自检（2026-11 全项目审查 S08 / S09 / S10 / S17）：LABELGUI_DATA_DIR=<临时目录> LabelGUI --files-selftest
 /// 在数据目录里造几场假的拍摄（小文件 + 手写的 manifest / layer1，不用跑分析），逐条断言、打 PASS / FAIL：
 ///   - XMP：「XMP 待更新」只写改了的那几张，别的 sidecar 一个不换（LR 里改过的星级不被盖回去）；全部重写时内容没变的不重写。
 ///   - 同名不同格式共用一个 .xmp：整组不写、单独点名、不记成已同步；移废片时共用的 .xmp 全移走才带走。
 ///   - DNG / JPG 写完提醒 LR 不读旁边的 .xmp。
+///   - 废片移到废纸篓默认跳过拼图页、印样帧（放不下的也算）、存好的方案里用到的，只在托盘里的照常移
+///     （和 app 同一个 AppModel.make 接线；只算要移哪些，不真的往废纸篓里放）。
 /// 只写数据目录；退出前删掉造出来的照片文件夹。
 @MainActor
 enum FileSafetySelfTest {
@@ -31,6 +35,7 @@ enum FileSafetySelfTest {
         xmpIncremental(root.appendingPathComponent("xmp"))
         sharedSidecar(root.appendingPathComponent("shared"))
         lightroomFormats(root.appendingPathComponent("lr"))
+        collageGuard(root.appendingPathComponent("collage"))
         try? FileManager.default.removeItem(at: root)
         print(failures == 0 ? "文件安全自检：全部通过" : "文件安全自检：\(failures) 条失败")
         exit(failures == 0 ? 0 : 1)
@@ -46,11 +51,21 @@ enum FileSafetySelfTest {
         var iso = 400
         /// 原图的内容（不给 = 按 id 编一段）。
         var content: Data?
+        /// 原图写成一张解得开的小 JPEG（拼图要读尺寸）。
+        var jpeg = false
     }
 
     /// 照片文件写进 `dir`，manifest / layer1 写进这一场的场次目录，返回打开了这一场的 store。
     /// 每张隔一分钟、各自一组：不成连拍，判决只看下面手动设的。
     static func makeShoot(_ dir: URL, _ photos: [Fake]) -> BatchStore {
+        writeShoot(dir, photos)
+        let store = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
+        store.switchSession(to: dir)
+        return store
+    }
+
+    /// 只写照片文件和场次 JSON（打开交给调用方：AppModel 那一路要用它自己的 store）。
+    static func writeShoot(_ dir: URL, _ photos: [Fake]) {
         let fm = FileManager.default
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         var manifest: [[String: Any]] = []
@@ -58,7 +73,7 @@ enum FileSafetySelfTest {
         for (i, photo) in photos.enumerated() {
             let raw = dir.appendingPathComponent(photo.raw)
             try? fm.createDirectory(at: raw.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let content = photo.content ?? Data(("RAW " + photo.id + String(repeating: ".", count: 64 + i)).utf8)
+            let content = photo.jpeg ? tinyJPEG() : photo.content ?? Data(("RAW " + photo.id + String(repeating: ".", count: 64 + i)).utf8)
             try? content.write(to: raw)
             var decodePath = raw.path
             if let decode = photo.decode {
@@ -86,9 +101,32 @@ enum FileSafetySelfTest {
                 try? data.write(to: session.appendingPathComponent(name))
             }
         }
-        let store = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
-        store.switchSession(to: dir)
-        return store
+    }
+
+    /// 48×32 的一张纯色 JPEG。
+    static func tinyJPEG() -> Data {
+        let data = NSMutableData()
+        guard let ctx = CGContext(data: nil, width: 48, height: 32, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return Data() }
+        ctx.setFillColor(CGColor(red: 0.6, green: 0.5, blue: 0.4, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: 48, height: 32))
+        guard let image = ctx.makeImage(),
+              let dest = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else { return Data() }
+        CGImageDestinationAddImage(dest, image, nil)
+        CGImageDestinationFinalize(dest)
+        return data as Data
+    }
+
+    /// 转主线程 run loop 直到条件成立（拼图读照片、排版都在后台）。
+    @discardableResult
+    static func waitUntil(_ timeout: Double = 30, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            if Date() >= deadline { return false }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        return true
     }
 
     static func wait(_ store: BatchStore, timeout: Double = 60) {
@@ -244,6 +282,61 @@ enum FileSafetySelfTest {
         check(text.contains("注意 3 张是 DNG/JPG") && text.contains("Lightroom Classic 不读") && text.contains("复制文件名"),
               "点名 DNG/JPG、引导复制文件名去 LR 筛", text)
         check(FileManager.default.fileExists(atPath: xmp(dir, "d1").path), "DNG 旁边照样写了 .xmp（C1 能读）")
+    }
+}
+
+extension FileSafetySelfTest {
+    // MARK: - S08 废片移到废纸篓避开拼图
+
+    private static func pageIDs(_ collage: CollageStore) -> Set<String> {
+        collage.isSolving ? [] : collage.project.usedPhotoIDs
+    }
+
+    fileprivate static func collageGuard(_ dir: URL) {
+        print("== 废片移到废纸篓：避开拼图页、印样帧、方案")
+        let ids = ["a", "b", "c", "d", "e", "f"]
+        writeShoot(dir, ids.map { Fake(id: $0, raw: $0 + ".JPG", jpeg: true) })
+        // 和 app 同一套接线（AppModel.make），不开实时桥。
+        let model = AppModel.make(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir),
+                                  bridge: .none)
+        let batch = model.batch
+        let collage = model.collage
+        batch.switchSession(to: dir)
+        waitUntil(0.3) { false }
+        model.ensureCollageAttached()
+        for id in ids { batch.setOverride(id, .reject) }
+        batch.importClientPicks(["e"])
+        collage.importFromBatch(ids: ["a", "b"], batch: batch, layout: true)
+        check(waitUntil { pageIDs(collage) == ["a", "b"] }, "拼图排了一版 a + b", "\(pageIDs(collage).sorted())")
+        var saved = false
+        if case .saved = collage.saveVariant() { saved = true }
+        check(saved, "存成方案")
+        collage.layoutFresh(photoIDs: ["a"])
+        check(waitUntil { pageIDs(collage) == ["a"] }, "现在这一版只剩 a（b 只在方案里）", "\(pageIDs(collage).sorted())")
+        collage.importFromBatch(ids: ["c"], batch: batch, layout: false)
+        check(waitUntil { collage.project.photos.contains { $0.id == "c" } }, "c 只进了托盘")
+        waitUntil(0.8) { false }   // 等 AppModel 那边 0.3 s 的防抖推过来
+        check(batch.collageInUseIDs == ["a", "b"], "批量页拿到拼图在用的：页上的 a、方案里的 b",
+              "\(batch.collageInUseIDs.sorted())")
+        check(Set(batch.trashableRejects.map(\.id)) == ["c", "d", "f"],
+              "默认要移的：只在托盘的 c、没进拼图的 d f；客户选中的 e 不动", "\(batch.trashableRejects.map(\.id))")
+        check(batch.trashableRejectCount == 3 && batch.collageProtectedRejectCount == 2,
+              "菜单、确认框：3 张，另 2 张在拼图里", "\(batch.trashableRejectCount)/\(batch.collageProtectedRejectCount)")
+        check(Set(batch.trashableRejectsIncludingCollage.map(\.id)) == ["a", "b", "c", "d", "f"],
+              "「连这些一起移」：拼图里的也算上，客户选中的照样不动")
+
+        // 印样：托盘 a b c 排成一卷，再改成一页只放 1 帧（b c 成了放不下的帧）。
+        collage.makeContactSheet()
+        check(waitUntil { collage.project.pages.first?.contactSheet?.frames.count == 3 }, "托盘 a b c 排成一卷印样")
+        collage.updateContactSheet { sheet in
+            sheet.perStrip = 1
+            sheet.strips = 1
+        }
+        check(collage.project.usedPhotoIDs == ["a"], "一页只放 1 帧：页上只画 a", "\(collage.project.usedPhotoIDs.sorted())")
+        batch.refreshCollageInUse()
+        check(batch.collageInUseIDs == ["a", "b", "c"], "放不下的印样帧也算（改大容量还会画出来）",
+              "\(batch.collageInUseIDs.sorted())")
+        check(Set(batch.trashableRejects.map(\.id)) == ["d", "f"], "印样帧里的 c 也默认不移了")
     }
 }
 

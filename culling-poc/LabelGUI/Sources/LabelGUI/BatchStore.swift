@@ -547,10 +547,41 @@ final class BatchStore: ObservableObject {
     var xmpStaleCount: Int { derived.xmpStaleCount }
     var clientPickCount: Int { derived.clientPickCount }
     var clientPickRejectCount: Int { derived.clientPickRejectCount }
-    /// 「废片移到废纸篓」真会移的张数：废片里去掉客户选中的（客户点名要精修的照片不扔）。
-    var trashableRejectCount: Int { verdictCounts.reject - clientPickRejectCount }
-    /// 「废片移到废纸篓」要移的那些照片（和上面的张数是同一个条件）。
-    var trashableRejects: [BatchItem] { items.filter { $0.verdict == .reject && !clientPicks.contains($0.id) } }
+    /// 「废片移到废纸篓」默认真会移的张数：废片里去掉客户选中的（客户点名要精修的照片不扔）、拼图里在用的
+    /// （不挖空拼图页、印样帧、存好的方案，见 collageInUseIDs）。
+    var trashableRejectCount: Int { verdictCounts.reject - clientPickRejectCount - collageProtectedRejectCount }
+    /// 「废片移到废纸篓」默认要移的那些照片（和上面的张数是同一个条件）。
+    var trashableRejects: [BatchItem] {
+        items.filter { $0.verdict == .reject && !clientPicks.contains($0.id) && !collageInUseIDs.contains($0.id) }
+    }
+    /// 确认框里点「连这些一起移」时要移的：拼图里在用的也算上，客户选中的照样不动。
+    var trashableRejectsIncludingCollage: [BatchItem] {
+        items.filter { $0.verdict == .reject && !clientPicks.contains($0.id) }
+    }
+
+    // MARK: - 拼图在用的照片（「废片移到废纸篓」默认不动）
+
+    /// 拼图各页（格子、图层、印样帧）和方案栏各方案用到的照片 id。AppModel 从内存里的 CollageStore 推过来（不读防抖
+    /// 保存的 collage.json）；没接（--verdicts、--client-import 这类只开批量页的无头入口）= 空。只在托盘里的不算。
+    @Published private(set) var collageInUseIDs: Set<String> = []
+    /// 现取一次（先让拼图工程挂到这一场再读）：AppModel 设。点「废片移到废纸篓」和真移之前走 refreshCollageInUse()。
+    var collageInUseSource: (() -> Set<String>)?
+
+    func setCollageInUse(_ ids: Set<String>) {
+        if ids != collageInUseIDs { collageInUseIDs = ids }
+    }
+
+    func refreshCollageInUse() {
+        if let source = collageInUseSource { setCollageInUse(source()) }
+    }
+
+    /// 废片里客户没选中、但拼图里在用的张数：默认不移，确认框里可以选「连这些一起移」。只查拼图那一份 id，不扫整场。
+    var collageProtectedRejectCount: Int {
+        collageInUseIDs.reduce(0) { n, id in
+            guard let item = item(withID: id), item.verdict == .reject, !clientPicks.contains(id) else { return n }
+            return n + 1
+        }
+    }
 
     /// 写进 XMP 的那几样：判决（色标 / -1 废片）、星级（判决定档，VLM 表情分只在档内排先后），
     /// 客户选中（紫色标）。`c` 只在客户选中时是 true，其余一律 nil（不是 false）：老的 xmp_state.json
@@ -3129,15 +3160,26 @@ final class BatchStore: ObservableObject {
     /// disappears from the session + persisted artifacts so it doesn't resurface
     /// as a broken entry.
     /// 客户选中的废片不动：客户点名要精修的，判成废片也留着（菜单、确认框上的张数也不算它们）。
-    func trashRejects() {
+    /// 拼图页、印样帧、存好的方案里用到的默认也不动（`includeCollage` = 确认框里的「连这些一起移」，格子会空）。
+    func trashRejects(includeCollage: Bool = false) {
         guard !isRunning else {
             lastError = "正在处理中，先点“取消”再移动废片"
             return
         }
-        let rejects = trashableRejects
+        // 真移之前现取一次拼图在用的（拼图工程先挂到这一场）：菜单上的张数是之前推过来的，这期间可能又排了一版。
+        refreshCollageInUse()
+        let rejects = includeCollage ? trashableRejectsIncludingCollage : trashableRejects
         let keptForClient = clientPickRejectCount
+        let keptForCollage = includeCollage ? 0 : collageProtectedRejectCount
+        let inCollage = includeCollage ? collageInUseIDs : []
         guard !rejects.isEmpty else {
-            if keptForClient > 0 { lastError = "废片都是客户选中的 (\(keptForClient) 张)，没有要移的" }
+            if keptForCollage > 0 {
+                let client = keptForClient > 0 ? "客户选中的 (\(keptForClient) 张) 或" : ""
+                lastError = "废片都是" + client + "拼图 / 印样 / 方案里用到的 (\(keptForCollage) 张)，默认不移" +
+                    " —— 要连拼图里的一起移，在确认框里点「连这些一起移」"
+            } else if keptForClient > 0 {
+                lastError = "废片都是客户选中的 (\(keptForClient) 张)，没有要移的"
+            }
             return
         }
         // 照片文件夹不在了就别开工：一张也移不动，却会把这些 id 从结果里抹掉。
@@ -3229,9 +3271,14 @@ final class BatchStore: ObservableObject {
                 if flag.isSet {
                     self.progressText = "已取消: \(trashed.count) 张已移到废纸篓 (可恢复)，其余未动"
                 } else if failedIds.isEmpty {
-                    self.progressText = "已把 \(trashed.count) 张废片移到废纸篓 (可恢复)" +
-                        (keptForClient > 0 ? "；客户选中的 \(keptForClient) 张废片没动" : "") +
-                        (keptShared > 0 ? "；\(keptShared) 个 .xmp 同名的另一张照片还在用，留着没移" : "")
+                    // 一段一段拼：一长串 + 和三元在 CI 的 Xcode 16 上类型检查会慢。
+                    let hollowed = trashed.intersection(inCollage).count
+                    var parts = ["已把 \(trashed.count) 张废片移到废纸篓 (可恢复)"]
+                    if keptForClient > 0 { parts.append("客户选中的 \(keptForClient) 张废片没动") }
+                    if keptForCollage > 0 { parts.append("拼图 / 印样 / 方案里用到的 \(keptForCollage) 张没动") }
+                    if hollowed > 0 { parts.append("其中 \(hollowed) 张用在拼图里，那些格子会空着（从废纸篓「放回原处」就回来）") }
+                    if keptShared > 0 { parts.append("\(keptShared) 个 .xmp 同名的另一张照片还在用，留着没移") }
+                    self.progressText = parts.joined(separator: "；")
                 } else {
                     self.lastError = "移到废纸篓: \(trashed.count) 成功, \(failedIds.count) 失败 (\(failedIds.prefix(3).joined(separator: ", ")))"
                 }
