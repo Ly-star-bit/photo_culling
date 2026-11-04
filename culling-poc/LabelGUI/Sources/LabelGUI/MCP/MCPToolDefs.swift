@@ -197,7 +197,7 @@ enum MCPToolDefs {
      "annotations":"$READ"},
 
     {"name":"collage_get_state","title":"看 app 里的拼图",
-     "description":"看 app 里当前拼图工程的状态（读的是 app 内存，含还没存盘的改动）：模式、页码和页数、画布尺寸 canvas、模板、样式、单独调过的样式项 style_fields、色调、标题/副标题/刊头/期号、托盘张数和每张照片的 id、像素尺寸 tray_photos、每个格子（path、照片 id、文字块数、在画布上的位置 rect）、这一页版式的语法 layout（可以改了发给 collage_set_layout）、选中的格子、撤销深度（最上面那一步是不是 AI 做的）、存过的方案（variants：id、名字、current = 就是现在这一版）、是否还在算、digest（拼图写工具的 if_digest 就填它；存方案不改它），后面跟一张 app 当前画面的预览图。session 不填就是 app 当前打开的那一场；填了别的场次回 session_not_open。和用户切到拼图页一样，会先把这一场的拼图工程接上（托盘里照片的判决等信息按批量页刷新），所以可能顺带存一次 collage.json。",
+     "description":"看 app 里当前拼图工程的状态（读的是 app 内存，含还没存盘的改动）：模式、页码和页数、画布尺寸 canvas、模板、样式、单独调过的样式项 style_fields、色调、标题/副标题/刊头/期号、托盘张数和每张照片的 id、像素尺寸 tray_photos（客户选中的照片带 client_pick:true，批量页导入的客户选择）、相册设了目标跨页数时的 album_target（spreads、min_per_spread、max_per_spread）、每个格子（path、照片 id、文字块数、在画布上的位置 rect）、这一页版式的语法 layout（可以改了发给 collage_set_layout）、选中的格子、撤销深度（最上面那一步是不是 AI 做的）、存过的方案（variants：id、名字、current = 就是现在这一版）、是否还在算、digest（拼图写工具的 if_digest 就填它；存方案不改它），后面跟一张 app 当前画面的预览图。session 不填就是 app 当前打开的那一场；填了别的场次回 session_not_open。和用户切到拼图页一样，会先把这一场的拼图工程接上（托盘里照片的判决等信息按批量页刷新），所以可能顺带存一次 collage.json。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "include_preview":{"type":"boolean","default":true,"description":"要不要带 app 当前画面的预览图"},
