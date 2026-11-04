@@ -1,6 +1,7 @@
 import Foundation
 
-/// `--ux-selftest` 里的几组纯函数用例：EXIF 拍摄参数（快门 0 / 极小正数不崩）、水印页导入的 RAW+JPG 配对。
+/// `--ux-selftest` 里的几组纯函数用例：EXIF 拍摄参数（快门 0 / 极小正数不崩）、网格多选（数字键、剪选中）、
+/// 水印页导入的 RAW+JPG 配对。
 /// 每条打 PASS / FAIL 一行，返回失败条数（main.swift 加到总数上）。
 enum GridExifImportSelfTest {
     final class Tally {
@@ -16,6 +17,7 @@ enum GridExifImportSelfTest {
     static func run() -> Int {
         let tally = Tally()
         exifCases(tally)
+        gridSelectionCases(tally)
         watermarkCases(tally)
         return tally.failed
     }
@@ -68,6 +70,55 @@ enum GridExifImportSelfTest {
         }
         let intOK: Bool = ImageLoader.positiveInt(0) == nil && ImageLoader.positiveInt(50) == 50
         t.check(intOK, "EXIF 35mm 等效焦距 0 = 未知，当没有（回退到实际焦距）")
+    }
+
+    // MARK: - 网格多选（S21）
+
+    private static func gridSelectionCases(_ t: Tally) {
+        typealias Targets = GridSelectionRules.DigitTargets
+        // (说明, 选中, 网格里看得见的（顺序）, 焦点, 期望)
+        let rows: [(String, Set<String>, [String], String?, Targets)] = [
+            ("没有选中：改焦点那张，改完 keepPlace", [], ["a", "b", "c"], "b",
+             Targets(ids: ["b"], fromSelection: false, clearSelection: false)),
+            ("⌘点了三张：按网格顺序改这三张，改完清掉选中", ["c", "a", "d"], ["a", "b", "c", "d"], "b",
+             Targets(ids: ["a", "c", "d"], fromSelection: true, clearSelection: true)),
+            ("选中里有两张被筛掉了：只改还看得见的那张", ["a", "x", "y"], ["a", "b"], "b",
+             Targets(ids: ["a"], fromSelection: true, clearSelection: true)),
+            ("选中的全被筛掉（看不见）：改焦点那张，旧选中也清掉", ["x", "y"], ["a", "b"], "b",
+             Targets(ids: ["b"], fromSelection: false, clearSelection: true)),
+            ("选中的全看不见、也没有焦点：什么都不改，旧选中清掉", ["x"], ["a"], nil,
+             Targets(ids: [], fromSelection: false, clearSelection: true)),
+            ("没有选中也没有焦点：什么都不改", [], ["a"], nil,
+             Targets(ids: [], fromSelection: false, clearSelection: false)),
+        ]
+        for (name, selected, visible, focused, want) in rows {
+            let got = GridSelectionRules.digitTargets(selected: selected, visible: visible, focused: focused)
+            t.check(got == want, "多选 数字键 " + name, "得到 \(got)")
+        }
+        // 情形 1（审查报告）：⌘点 3 张按 1、清掉选中，再方向键走到 u1 按 3 —— 改的只是 u1。
+        let first = GridSelectionRules.digitTargets(selected: ["p1", "p2", "p3"], visible: ["p1", "p2", "p3", "u1"], focused: "u1")
+        let afterClear: Set<String> = first.clearSelection ? [] : ["p1", "p2", "p3"]
+        let second = GridSelectionRules.digitTargets(selected: afterClear, visible: ["p1", "p2", "p3", "u1"], focused: "u1")
+        t.check(second.ids == ["u1"], "多选 按完数字键清掉选中：接着方向键 + 数字改的是焦点那张，不是早先那几张",
+                "得到 \(second.ids)")
+
+        let pruneRows: [(String, Set<String>, [String], Set<String>)] = [
+            ("⌘A 后切到「废片」筛选：精选、可用的选中剪掉", ["p1", "u1", "r1", "r2"], ["r1", "r2"], ["r1", "r2"]),
+            ("换章（[ ] / 时间轴）：上一章的选中剪掉", ["c1a", "c1b"], ["c2a", "c2b"], []),
+            ("收起单张区 / 叠起定完的场：藏起来的剪掉", ["s1", "t1"], ["t1", "t2"], ["t1"]),
+            ("展开（看得见的只多不少）：选中不变", ["t1"], ["t1", "t2", "s1"], ["t1"]),
+            ("没有选中：还是空", [], ["a"], []),
+        ]
+        for (name, selected, visible, want) in pruneRows {
+            let got = GridSelectionRules.pruned(selected, visible: visible)
+            t.check(got == want, "多选 剪选中 " + name, "得到 \(got.sorted())")
+        }
+
+        let many = GridSelectionRules.changedNotice(count: 3, verdict: .reject) ?? "nil"
+        t.check(many == "已改 3 张 → 废片 · ⌘Z 撤销", "多选 改了多张提示「已改 N 张」", "得到 \(many)")
+        let restore = GridSelectionRules.changedNotice(count: 2, verdict: nil) ?? "nil"
+        t.check(restore == "已改 2 张 → 恢复自动 · ⌘Z 撤销", "多选 按 0 恢复自动也提示", "得到 \(restore)")
+        t.check(GridSelectionRules.changedNotice(count: 1, verdict: .pick) == nil, "多选 只改一张不提示")
     }
 
     // MARK: - 水印页导入的 RAW+JPG 配对（S26a）

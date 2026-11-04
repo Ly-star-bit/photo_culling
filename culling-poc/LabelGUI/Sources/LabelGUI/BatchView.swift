@@ -234,6 +234,8 @@ struct BatchView: View {
             if let focused = focusedID, !live.contains(focused) { focusedID = nil }
             if let inspected = inspectedID, !live.contains(inspected) { inspectedID = nil }
         }
+        // 筛选、分组方式、单张区、场的展开收起、换章（含 [ ] 和时间轴）一变，看不见的选中就剪掉。
+        .onChange(of: selectionScope) { pruneSelectionToVisible() }
         .sheet(isPresented: $showJPEGSheet) { jpegExportSheet }
         .sheet(isPresented: $showISOSheet) { isoExportSheet }
         .sheet(isPresented: $showHighlightsSheet) { highlightsSheet }
@@ -930,11 +932,14 @@ struct BatchView: View {
             }
             // 只认按下：现在改判后焦点会挪到下一张，按住 3 的按键重复会一张接一张往下废。
             .onKeyPress(characters: .init(charactersIn: "1230"), phases: .down) { press in
-                // A digit hits the whole ⌘/⇧ selection when there is one —
+                // A digit hits the ⌘/⇧ selection when there is one —
                 // "select five, press 3" used to reject only the focused photo.
-                let targets: [String] = !selectedIDs.isEmpty ? Array(selectedIDs)
-                    : (focusedID.map { [$0] } ?? [])
-                guard !targets.isEmpty else { return .ignored }
+                // 只改选中里还看得见的，改完清掉选中（和批量栏一样）：以前不清，接着用方向键走到别的照片
+                // 再按数字，改的还是早先那几张（GridSelectionRules.swift）。
+                let before = visibleItems.map(\.id)
+                let pick = GridSelectionRules.digitTargets(selected: selectedIDs, visible: before, focused: focusedID)
+                if pick.clearSelection { selectedIDs.removeAll() }
+                guard !pick.ids.isEmpty else { return .ignored }
                 let verdict: Verdict?
                 switch press.characters {
                 case "1": verdict = .pick
@@ -942,12 +947,14 @@ struct BatchView: View {
                 case "3": verdict = .reject
                 default: verdict = nil
                 }
-                let before = visibleItems.map(\.id)
                 withAnimation(.easeInOut(duration: 0.2)) {
-                    store.setOverrideBatch(targets, verdict)
+                    store.setOverrideBatch(pick.ids, verdict)
                 }
-                if selectedIDs.isEmpty, let focused = focusedID {
+                if !pick.fromSelection, let focused = focusedID {
                     keepPlace(of: focused, before: before, proxy: proxy)
+                }
+                if pick.fromSelection, let text = GridSelectionRules.changedNotice(count: pick.ids.count, verdict: verdict) {
+                    showGridToast(text, verdict: verdict)
                 }
                 return .handled
             }
@@ -959,7 +966,56 @@ struct BatchView: View {
                 if let id = focusedID { DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) } }
                 return .handled
             }
+            .overlay(alignment: .bottom) { gridToastView }
         }
+    }
+
+    // MARK: 网格多选：数字键改了多张的提示、筛选变了剪选中（规则见 GridSelectionRules.swift）
+
+    /// 数字键一次改了多张时，网格底部闪一下「已改 N 张 → 废片」（和审片的提示同一个样子）。
+    @State private var gridToast: (text: String, symbol: String, color: Color, token: Int)?
+
+    @ViewBuilder
+    private var gridToastView: some View {
+        if let toast = gridToast {
+            Label(toast.text, systemImage: toast.symbol)
+                .font(.callout.bold())
+                .padding(.horizontal, 14).padding(.vertical, 7)
+                .background(Color.black.opacity(0.7), in: Capsule())
+                .overlay(Capsule().stroke(toast.color.opacity(0.8), lineWidth: 1.5))
+                .foregroundStyle(toast.color)
+                .padding(.bottom, 16)
+                .transition(.opacity)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func showGridToast(_ text: String, verdict: Verdict?) {
+        let token = (gridToast?.token ?? 0) + 1
+        let symbol: String = verdict?.symbol ?? "arrow.uturn.backward"
+        let color: Color = verdict?.color ?? .white
+        withAnimation(.easeOut(duration: 0.12)) { gridToast = (text, symbol, color, token) }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(1600))
+            guard gridToast?.token == token else { return }
+            withAnimation(.easeIn(duration: 0.25)) { gridToast = nil }
+        }
+    }
+
+    /// 决定网格里看得见哪些照片的状态：判决筛选、客户选中、理由 chip、临界、章节（含 [ ] 和时间轴换章）、
+    /// 按判决 / 按分组、只看待处理、单张区展开、场的展开收起。
+    private var selectionScope: GridSelectionScope {
+        GridSelectionScope(verdictFilter: store.verdictFilter, clientPickFilter: store.clientPickFilter,
+                           reasonFilter: store.reasonFilter, borderlineFilter: store.borderlineFilter,
+                           chapterFilter: store.activeChapterFilter, gridMode: gridMode,
+                           pendingTakesOnly: pendingTakesOnly, showSingles: showSingles, expandedTakes: expandedTakes)
+    }
+
+    /// 看不见了的选中剪掉：留着的话顶栏还写「已选 N 张」，数字键、批量栏、拼图都会改到看不见的照片。
+    private func pruneSelectionToVisible() {
+        guard !selectedIDs.isEmpty else { return }
+        let kept = GridSelectionRules.pruned(selectedIDs, visible: visibleItems.map(\.id))
+        if kept != selectedIDs { selectedIDs = kept }
     }
 
     /// Freeze the current grid order, then open — see `pagingOrder`.
@@ -2331,7 +2387,7 @@ struct ShortcutsPanel: View {
             ("双击 / 空格 / ⏎", "打开大图"),
             ("← → ↑ ↓", "移动"),
             ("[  ]", "上一章 / 下一章"),
-            ("1  2  3  0", "精选 · 可用 · 废片 · 恢复自动（选了多张就作用于全部）"),
+            ("1  2  3  0", "精选 · 可用 · 废片 · 恢复自动（选了多张就作用于选中的，改完取消选择）"),
             ("⌘点  ⇧点  ⌘A", "多选 · 连选 · 全选"),
             ("⌘⏎", "保留选中，同场其余废片（选了连拍里的照片时）"),
             ("C  D  F", "连拍挑选 · 跳到下一个待处理的场（切到按分组）· 审片"),
