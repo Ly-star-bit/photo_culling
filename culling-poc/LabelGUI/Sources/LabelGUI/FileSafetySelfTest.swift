@@ -12,7 +12,8 @@ import UniformTypeIdentifiers
 ///   - 废片移到废纸篓默认跳过拼图页、印样帧（放不下的也算）、存好的方案里用到的，只在托盘里的照常移
 ///     （和 app 同一个 AppModel.make 接线；只算要移哪些，不真的往废纸篓里放）。
 ///   - 高 ISO RAW 复制：子文件夹里同名的另存 -2（大小不同、大小相同都不互相顶掉），只复制 RAW，重跑不重复，
-///     旧版中断留下的半截文件不删、点名。
+///     旧版中断留下的半截文件不删、点名；同一块 APFS 盘上是克隆（APFS 的内容 id 和原片一样）；克隆不了的流式复制，
+///     开工前查剩余空间（不够就一个都不复制、已经复制好的不算），复制到一半盘满了就停、点名没复制的。
 /// 只写数据目录；退出前删掉造出来的照片文件夹。
 @MainActor
 enum FileSafetySelfTest {
@@ -39,6 +40,7 @@ enum FileSafetySelfTest {
         lightroomFormats(root.appendingPathComponent("lr"))
         collageGuard(root.appendingPathComponent("collage"))
         highISO(root.appendingPathComponent("iso"))
+        highISOSpace(root.appendingPathComponent("iso-space"))
         try? FileManager.default.removeItem(at: root)
         print(failures == 0 ? "文件安全自检：全部通过" : "文件安全自检：\(failures) 条失败")
         exit(failures == 0 ? 0 : 1)
@@ -409,12 +411,99 @@ extension FileSafetySelfTest {
         check(text1.contains("已复制 5 个 RAW") && text1.contains("另存为") && text1.contains("半截")
               && text1.contains("1 张只有 JPG"), "完成提示：5 个、点名另存和半截、JPG 没复制", text1)
         check(store.lastError == nil, "没有失败", store.lastError ?? "")
+        // 「高ISO降噪/」和原片在同一块盘上（数据目录是系统盘上的临时目录）：每个副本都是克隆 —— 和以前 copyItem 一样不多占空间。
+        if supportsCloning(dir) {
+            let sources = store.highISOMatches(minISO: 3200, keepersOnly: false).raws.map { URL(fileURLWithPath: $0.rawPath) }
+            let sourceIDs = Set(sources.compactMap(contentID))
+            let copyIDs = first.filter { $0 != "Y.ARW" }.map { contentID(dest.appendingPathComponent($0)) }
+            check(sourceIDs.count == 5 && copyIDs.count == 5 && Set(copyIDs.compactMap { $0 }) == sourceIDs,
+                  "同一块 APFS 盘上：5 个副本都是原片的克隆（APFS 内容 id 一样，共用数据块）", "\(sourceIDs) / \(copyIDs)")
+        } else {
+            print("SKIP 这块盘不支持克隆，不验克隆")
+        }
 
         store.exportHighISORaws(minISO: 3200, keepersOnly: false)
         wait(store)
         check(listing() == want, "重跑一遍：一个文件没多、没少", listing().joined(separator: " "))
         check(store.progressText.contains("已复制 0 个 RAW") && store.progressText.contains("5 个已存在跳过"),
               "重跑：5 个已存在跳过", store.progressText)
+    }
+
+    /// 这块盘能不能克隆（APFS）。
+    static func supportsCloning(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.volumeSupportsFileCloningKey]))?.volumeSupportsFileCloning == true
+    }
+
+    /// APFS 给文件内容的 id：只有克隆和它的原件（都没改过）才一样。
+    static func contentID(_ url: URL) -> Int64? {
+        (try? url.resourceValues(forKeys: [.fileContentIdentifierKey]))?.fileContentIdentifier
+    }
+
+    fileprivate static func highISOSpace(_ dir: URL) {
+        print("== 高 ISO RAW：克隆不了时流式复制、开工前查空间、盘满了就停")
+        let fm = FileManager.default
+        let store = makeShoot(dir, (1...4).map { i in
+            Fake(id: "Q\(i)", raw: "Q\(i).ARW", iso: 6400, content: Data(repeating: UInt8(0x50 + i), count: 2000 + i * 100))
+        })
+        let dest = dir.appendingPathComponent(ImageLoader.denoiseSubfolder)
+        func listing() -> [String] {
+            ((try? fm.contentsOfDirectory(atPath: dest.path)) ?? []).sorted()
+        }
+        let sources = store.highISOMatches(minISO: 3200, keepersOnly: false).raws.map { URL(fileURLWithPath: $0.rawPath) }
+        let names = sources.map(\.lastPathComponent)
+        check(names.count == 4, "4 张高 ISO RAW", names.joined(separator: " "))
+        guard names.count == 4 else { return }
+        defer { HighISOCopier.testHooks = HighISOCopier.TestHooks() }
+        func export() {
+            store.exportHighISORaws(minISO: 3200, keepersOnly: false)
+            wait(store)
+        }
+
+        // 克隆不了（像外接的 exFAT 盘）、只剩 1 MB：一个都不复制，连「高ISO降噪/」都不建。
+        HighISOCopier.testHooks = HighISOCopier.TestHooks(noClone: true, freeBytes: 1 << 20)
+        export()
+        let refusal = store.lastError ?? ""
+        check(refusal.contains("没复制") && refusal.contains("4 个要实打实复制") && refusal.contains("只剩")
+              && !fm.fileExists(atPath: dest.path), "空间不够：不开工、不建文件夹，说要多少、剩多少", refusal)
+
+        // 克隆不了、空间够：流式复制（.part + 大小 + SHA 校验），出来的是独立的副本。
+        HighISOCopier.testHooks = HighISOCopier.TestHooks(noClone: true)
+        export()
+        let same = sources.allSatisfy { (try? Data(contentsOf: $0)) == (try? Data(contentsOf: dest.appendingPathComponent($0.lastPathComponent))) }
+        check(store.lastError == nil && listing() == names.sorted() && same,
+              "克隆不了：4 个都流式复制了、内容一样、没有 .part", "\(listing()) \(store.lastError ?? "")")
+        if supportsCloning(dir) {
+            check(sources.allSatisfy { contentID($0) != contentID(dest.appendingPathComponent($0.lastPathComponent)) },
+                  "流式复制出来的不是克隆（走的确实是跨卷那条）")
+        }
+
+        // 盘紧的时候重跑：已经在的、一样大的不算要复制的，照常跑完、全部跳过（不被预检误拦）。
+        HighISOCopier.testHooks = HighISOCopier.TestHooks(noClone: true, freeBytes: 1 << 20)
+        export()
+        check(store.lastError == nil && store.progressText.contains("4 个已存在跳过"),
+              "只剩 1 MB 时重跑：复制好的不算进预检，4 个已存在跳过", store.lastError ?? store.progressText)
+
+        // 复制到第 2 个盘满了：停下，后面的不再一个个写到满再删，点名没复制的。
+        try? fm.removeItem(at: dest)
+        HighISOCopier.testHooks = HighISOCopier.TestHooks(diskFullNames: [names[1]])
+        export()
+        let full = store.lastError ?? ""
+        check(listing() == [names[0]], "第 2 个盘满了：只落地第 1 个，后面的没试、没有 .part", listing().joined(separator: " "))
+        check(full.contains("目标盘满了") && full.contains("已复制 1 个") && full.contains("3 个没复制")
+              && full.contains(names[1]) && full.contains(names[3]), "盘满的提示：已复制几个、点名没复制的 3 个", full)
+
+        // 腾出空间再点（这次能克隆，假装只剩 1 MB）：克隆不占空间、不拦；剩下 3 个是克隆，第 1 个跳过。
+        guard supportsCloning(dir) else {
+            print("SKIP 这块盘不支持克隆，不验「克隆不算进预检」")
+            return
+        }
+        HighISOCopier.testHooks = HighISOCopier.TestHooks(freeBytes: 1 << 20)
+        export()
+        let text = store.progressText
+        check(store.lastError == nil && listing() == names.sorted() && text.contains("已复制 3 个") && text.contains("1 个已存在跳过"),
+              "再点一次：剩下的 3 个复制了、第 1 个跳过；能克隆的不算进预检（只剩 1 MB 也不拦）", store.lastError ?? text)
+        check(sources.dropFirst().allSatisfy { contentID($0) == contentID(dest.appendingPathComponent($0.lastPathComponent)) },
+              "这 3 个是克隆")
     }
 }
 

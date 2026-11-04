@@ -4583,7 +4583,8 @@ final class BatchStore: ObservableObject {
     /// every photo at/above `minISO` into "<拍摄文件夹>/高ISO降噪". That subfolder
     /// is excluded from analysis scans, so re-running 开始分析 won't double-count.
     /// 平铺，同名不同内容的另存 -2（不同子文件夹里同名的 RAW 不再互相顶掉）；一模一样的跳过；目标里的文件一个不删
-    /// （见 HighISOCopier）。只复制 RAW 本身。
+    /// （见 HighISOCopier）。只复制 RAW 本身。同一块 APFS 盘上是克隆、不多占空间；要实打实复制的，开工前先查剩余空间，
+    /// 不够就一个都不复制；复制到一半盘满了就停，不再一个个试，点名没复制的。
     func exportHighISORaws(minISO: Int, keepersOnly: Bool) {
         guard !isRunning, let photoDir else { return }
         // 存储卡上（审查 S07）：「高ISO降噪/」就在卡上。
@@ -4611,6 +4612,16 @@ final class BatchStore: ObservableObject {
             var renamed: [String] = []
             var partialLeftovers = 0
             var failed: [String] = []
+            var stoppedFull: [String] = []   // 盘满的那个 + 后面没试的
+            // 空间预检在建文件夹之前：不够就什么都不留。
+            let need = HighISOCopier.bytesToCopy(sources, into: destDir)
+            if let why = HighISOCopier.spaceRefusal(need, near: destDir) {
+                await MainActor.run { [weak self] in
+                    self?.lastError = why
+                    self?.isRunning = false
+                }
+                return
+            }
             do {
                 try fm.createDirectory(at: destDir, withIntermediateDirectories: true)
             } catch {
@@ -4630,6 +4641,8 @@ final class BatchStore: ObservableObject {
                     if partialLeftover { partialLeftovers += 1 }
                 case .existed:
                     existed += 1  // 上次复制的、一模一样：跳过
+                case .diskFull(let name):
+                    stoppedFull = [name] + sources[(index + 1)...].map(\.lastPathComponent)
                 case .failed(let why):
                     failed.append(why)
                 case .cancelled:
@@ -4640,6 +4653,7 @@ final class BatchStore: ObservableObject {
                     self?.progressText = "复制 RAW \(done)/\(total)..."
                     self?.progressFraction = Double(done) / Double(total)
                 }
+                if !stoppedFull.isEmpty { break }   // 盘满了：后面的不再一个个写到满、再删掉
             }
 
             let copiedCount = copied
@@ -4647,6 +4661,7 @@ final class BatchStore: ObservableObject {
             let renamedNames = renamed
             let partialCount = partialLeftovers
             let summaryFailed = failed
+            let notCopied = stoppedFull
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
@@ -4662,7 +4677,12 @@ final class BatchStore: ObservableObject {
                     parts.append("其中 \(partialCount) 个原名的文件是旧版复制中断留下的半截，没删，核对后可以删掉")
                 }
                 if jpegOnly > 0 { parts.append("\(jpegOnly) 张只有 JPG 未复制") }
-                if summaryFailed.isEmpty {
+                if !notCopied.isEmpty {
+                    let shown = notCopied.prefix(3).joined(separator: ", ") + (notCopied.count > 3 ? "…" : "")
+                    let others = summaryFailed.isEmpty ? "" : "，另 \(summaryFailed.count) 个失败 (\(summaryFailed.prefix(3).joined(separator: ", ")))"
+                    self.lastError = "高ISO RAW: 目标盘满了，停下了 —— 已复制 \(copiedCount) 个，\(notCopied.count) 个没复制 (\(shown))"
+                        + others + "。腾出空间后再点一次，复制好的会跳过"
+                } else if summaryFailed.isEmpty {
                     self.progressText = parts.joined(separator: " · ")
                     AppRuntime.revealInFinder([destDir])
                 } else {
