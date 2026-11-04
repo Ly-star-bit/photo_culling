@@ -553,6 +553,8 @@ final class WatermarkStore: ObservableObject {
             let completed = done
             let overNames = overLimit
             let delivered = written.sorted().map { (file: jobs[$0].dest, source: jobs[$0].src) }
+            // 取消按写文件那段算：下面记交付对照那一下文件都已经写完了，这时点「取消」不该报成「导出已取消」。
+            let cancelled = await MainActor.run { [weak self] in self?.exportCancelled ?? false }
             // 记交付对照在收尾之前（还算「在导」，等它记完再报完成）：比对要 stat 这一场的照片，批量页放到后台做，
             // 主线程不等它（场次在掉线的网络盘上时以前会转彩球）。
             let ledger: DeliveryLedger.Outcome? = delivered.isEmpty ? nil : await Task { @MainActor [weak self] in
@@ -562,11 +564,11 @@ final class WatermarkStore: ObservableObject {
                 guard let self else { return }
                 self.progressFraction = nil
                 self.isExporting = false
+                self.exportCancelled = false
                 self.lastDelivery = ledger
                 let succeeded = completed - failed.count
-                if self.exportCancelled {
+                if cancelled {
                     // 已经写出的文件保留（撤销它们比留着更意外）。
-                    self.exportCancelled = false
                     self.progressText = "导出已取消 (已写出 \(succeeded)/\(total) 张，保留在输出目录)"
                 } else if failed.isEmpty {
                     let kept = renamedCount > 0 ? "（\(renamedCount) 张目标里已有同名，另存为 -2、-3…，旧文件没动）" : ""

@@ -145,6 +145,18 @@ enum DeliveryLedgerSelfTest {
         let reported: Bool = record.map { watermark.lastDelivery == .recorded($0) } ?? false
         check(reported && watermark.lastError == nil, "　…… 水印页拿到「记下了」，没有报错", watermark.lastError ?? "")
 
+        // 记交付对照那一下（还算在导）点了「取消」：文件都写完了，照样报导出完成、照样记下。
+        let wired = watermark.onDelivered
+        watermark.onDelivered = { folder, files in
+            watermark.cancelExport()
+            return await wired?(folder, files) ?? .nothingMatched
+        }
+        let finished = export()
+        let recordedAnyway: Bool = batch.deliveryRecords.count == 2
+        check(finished && watermark.progressText.hasPrefix("导出完成") && recordedAnyway,
+              "记交付对照时点「取消」：文件都已写完，照样报「导出完成」、照样记下", watermark.progressText)
+        watermark.onDelivered = wired
+
         try? Data("not json".utf8).write(to: ledger)
         check(export(), "exports.json 写坏了再导一次", watermark.lastError ?? "")
         let sessionDir = ledger.deletingLastPathComponent()
