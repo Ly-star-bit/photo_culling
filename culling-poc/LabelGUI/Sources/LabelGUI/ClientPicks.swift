@@ -210,22 +210,150 @@ enum ClientReply {
                 continue
             }
             let raw = originals.count == lines.count ? originals[index] : line
+            if let marked = markedNote(line, original: raw, lookup: lookup, isHead: isHead) {
+                words.append(marked)
+                continue
+            }
             if let split = noteSplit(line, original: raw, lookup: lookup, isHead: isHead) {
                 words.append(Word(token: split.head, note: split.note))
                 continue
             }
-            words += tokens(line).map { Word(token: $0) }
+            // 一行好几张、开头那张带着备注（「7207 去路人，7208 瘦脸」）：按句读后面紧跟的照片切成几段，各带各的备注。
+            // 开头那张没带备注的（「DSCF7207, DSCF7208 都要」）不切，照旧按分隔符切、不带备注。
+            if let parts = photoSegments(line, original: raw, isHead: isHead), parts.count >= 2,
+               let first = noteSplit(parts[0].half, original: parts[0].raw, lookup: lookup, isHead: isHead) {
+                words.append(Word(token: first.head, note: first.note))
+                for part in parts.dropFirst() {
+                    if let split = noteSplit(part.half, original: part.raw, lookup: lookup, isHead: isHead) {
+                        words.append(Word(token: split.head, note: split.note))
+                    } else {
+                        words += plainWords(part.half, lookup: lookup, isHead: isHead)
+                    }
+                }
+                continue
+            }
+            words += plainWords(line, lookup: lookup, isHead: isHead)
         }
         return words
     }
 
-    /// 备注前面去掉的：空白、逗号、冒号、顿号这些（括号、引号留着，是备注自己的）。
+    /// 确认表复制出来的那种行：「DSCF7207 备注：去路人」（一个像照片的词、空白、记号）。记号后面整段原样算备注，一个字也
+    /// 不拿来认照片 —— 不等开头那张认出来才护着：开头那张不在这一场了（导出确认表以后移进了废纸篓）、重名的，只交开头那个词
+    /// 去认（进「没认出」/「（重名）」），备注不要；以前退回按分隔符切，备注「修 3 处」里的 3、「和 DSCF7208 一样」里的
+    /// DSCF7208 被当成要的照片。记号前面不是一个像照片的词（这一场的文件名，或带数字的一个词）的不算这个格式，
+    /// 照旧按普通文字认（「选好了 备注：7207去路人」）。
+    private static func markedNote(_ line: String, original: String, lookup: Lookup,
+                                   isHead: (String) -> Bool) -> Word? {
+        guard let mark = line.range(of: #"\s+备注[:：]"#, options: .regularExpression) else { return nil }
+        let headText = String(line[..<mark.lowerBound])
+        guard let head = clean(headText) else { return nil }
+        let oneWord = hasDigit(head) && tokens(headText).count == 1
+        guard lookup.byFilename(head) != nil || oneWord else { return nil }
+        guard isHead(head) else { return Word(token: head) }
+        let scalars = Array(line.unicodeScalars)
+        let source = Array(original.unicodeScalars)
+        let raw = source.count == scalars.count ? source : scalars
+        let offset = line.unicodeScalars.distance(from: line.unicodeScalars.startIndex, to: mark.upperBound)
+        let noteText = String(String.UnicodeScalarView(raw[min(offset, raw.count)...]))
+        let note = noteText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return Word(token: head, note: note.isEmpty ? nil : note)
+    }
+
+    /// 按分隔符切成词。紧贴着汉字写的照片（「7208瘦脸」）拆成这张照片和它的备注 —— 以前整个词进「没认出」；
+    /// 这一场的文件名本身带汉字的（「婚礼001.JPG」）不拆。
+    private static func plainWords(_ text: String, lookup: Lookup, isHead: (String) -> Bool) -> [Word] {
+        tokens(text).map { token in
+            guard lookup.byFilename(token) == nil, token.unicodeScalars.contains(where: { !$0.isASCII }),
+                  let split = noteSplit(token, original: token, lookup: lookup, isHead: isHead) else {
+                return Word(token: token)
+            }
+            return Word(token: split.head, note: split.note)
+        }
+    }
+
+    /// 一行里在句读（逗号、顿号、分号、句号、叹号、问号）后面紧跟着又一张照片（全场唯一的文件名 / 文件号）的地方切成几段，
+    /// 分隔用的句读不要；`half` 是转过半角的、`raw` 是同一段原文。一刀都切不出 = nil。
+    private static func photoSegments(_ line: String, original: String,
+                                      isHead: (String) -> Bool) -> [(half: String, raw: String)]? {
+        let scalars = Array(line.unicodeScalars)
+        let source = Array(original.unicodeScalars)
+        let raw = source.count == scalars.count ? source : scalars
+        var bounds: [(end: Int, next: Int)] = []
+        for (i, s) in scalars.enumerated() where clauseBreaks.contains(s) {
+            var start = i + 1
+            while start < scalars.count, CharacterSet.whitespaces.contains(scalars[start]) { start += 1 }
+            var end = start
+            while end < scalars.count, !clauseBreaks.contains(scalars[end]) { end += 1 }
+            guard end > start, startsWithHead(Array(scalars[start..<end]), isHead: isHead) else { continue }
+            bounds.append((i, start))
+        }
+        guard !bounds.isEmpty else { return nil }
+        func text(_ part: ArraySlice<Unicode.Scalar>) -> String { String(String.UnicodeScalarView(part)) }
+        var parts: [(half: String, raw: String)] = []
+        var start = 0
+        for bound in bounds {
+            parts.append((text(scalars[start..<bound.end]), text(raw[start..<bound.end])))
+            start = bound.next
+        }
+        parts.append((text(scalars[start...]), text(raw[start...])))
+        return parts
+    }
+
+    /// 切段用的句读（转过半角以后的：全角逗号、分号、叹号、问号已经是半角的了）。冒号不算（「DSCF7207：瘦脸」）。
+    private static let clauseBreaks = CharacterSet(charactersIn: ",，、;；。!！?？")
+
+    /// 开头那个词可能在哪儿结束：头几个分隔符处，和字母数字后面紧跟汉字的地方（「7207去路人」「DSCF7207瘦脸」）。
+    private static func headCuts(_ scalars: [Unicode.Scalar]) -> [Int] {
+        var cuts: [Int] = []
+        for (i, s) in scalars.enumerated() where i > 0 && !separators.contains(scalars[i - 1]) {
+            let boundary = separators.contains(s) || (!s.isASCII && scalars[i - 1].isASCII)
+            guard boundary else { continue }
+            cuts.append(i)
+            if cuts.count >= 4 { break }
+        }
+        return cuts
+    }
+
+    /// 这一段开头是不是这一场的一张照片：整段就是，或者在 headCuts 切下来的开头那段是。
+    private static func startsWithHead(_ scalars: [Unicode.Scalar], isHead: (String) -> Bool) -> Bool {
+        let whole = String(String.UnicodeScalarView(scalars))
+        if let head = clean(whole), isHead(head) { return true }
+        return headCuts(scalars).contains { cut in
+            clean(String(String.UnicodeScalarView(scalars[..<cut]))).map(isHead) ?? false
+        }
+    }
+
+    /// 一个词在 ASCII 和非 ASCII 交界处切开（「7208瘦脸」→ 7208、瘦脸；「去路人7208」→ 去路人、7208）。
+    private static func scriptRuns(_ word: String) -> [String] {
+        var runs: [String] = []
+        var current = String.UnicodeScalarView()
+        for s in word.unicodeScalars {
+            if let last = current.last, last.isASCII != s.isASCII {
+                runs.append(String(current))
+                current = String.UnicodeScalarView()
+            }
+            current.append(s)
+        }
+        if !current.isEmpty { runs.append(String(current)) }
+        return runs
+    }
+
+    /// 备注里的这个词还认得出照片吗：它本身、或者它在 ASCII 和汉字交界处切开的每一段（「7208瘦脸」里的 7208，
+    /// 和切开头用的同一条规则）是文件名、全场唯一的文件号、范围。
+    private static func mentionsPhoto(_ word: String, lookup: Lookup) -> Bool {
+        let pieces = [word] + scriptRuns(word).compactMap(clean)
+        return pieces.contains { lookup.nameLike($0) || isRange(Substring($0)) }
+    }
+
+    /// 看开头那张后面还有没有话、是不是「备注」打头时两头去掉的：空白、逗号、冒号、顿号、- ~ 这些。备注本身从哪儿开始
+    /// 另看 noteStart（客户写在最前面的 - ~ 留着）。
     private static let noteLead = CharacterSet.whitespaces.union(CharacterSet(charactersIn: ",，、;；:：|-—~～"))
 
     /// 一行开头是这一场的一张照片（文件名，或全场唯一的 ≥3 位文件号），后面跟着的是不是备注：是就返回开头那个词和备注原话。
     /// - 后面以「备注」打头（确认表复制出来的「DSCF7207 备注：去路人」）：整段原样算备注，里面再有文件名、数字都不认。
     /// - 别的写法（「7207 去路人」「DSCF7207：瘦脸」「DSCF7207 修 3 处」）：后面还认得出照片的就不是备注，整行照旧按
-    ///   分隔符切 —— 有文件名、全场唯一的文件号、范围，或者全是数字、两个以上数字（「DSCF7207 12 35」「7207、35、78 都要」）。
+    ///   分隔符切 —— 有文件名、全场唯一的文件号、范围（紧贴着汉字写的「7208瘦脸」也算，见 mentionsPhoto），
+    ///   或者全是数字、两个以上数字（「DSCF7207 12 35」「7207、35、78 都要」）。
     ///   只夹着一个小数字的（「修 3 处」）算备注：以前那个 3 会被当成表上第 3 张认进来。
     private static func noteSplit(_ line: String, original: String, lookup: Lookup,
                                   isHead: (String) -> Bool) -> (head: String, note: String)? {
@@ -234,37 +362,56 @@ enum ClientReply {
         let raw = source.count == scalars.count ? source : scalars
         // 开头那个词可能带空格（「IMG 0001.JPG 黑白」）：在头几个分隔符处切，长的先试。中文紧贴着文件名打的
         // （「7207去路人」「DSCF7207瘦脸」）在字母数字和汉字交界处也切一刀。
-        var cuts: [Int] = []
-        for (i, s) in scalars.enumerated() where i > 0 && !separators.contains(scalars[i - 1]) {
-            let boundary = separators.contains(s) || (!s.isASCII && scalars[i - 1].isASCII)
-            guard boundary else { continue }
-            cuts.append(i)
-            if cuts.count >= 4 { break }
-        }
-        for cut in cuts.reversed() {
+        for cut in headCuts(scalars).reversed() {
             let headText = String(String.UnicodeScalarView(scalars[..<cut]))
             guard let head = clean(headText), isHead(head) else { continue }
             let restText = String(String.UnicodeScalarView(scalars[cut...]))
             let rest = restText.trimmingCharacters(in: noteLead)
             guard !rest.isEmpty else { return nil }
-            let rawRest = String(String.UnicodeScalarView(raw[cut...]))
-            let spoken = rawRest.trimmingCharacters(in: .whitespaces)
-            var note = String(spoken.drop { $0.unicodeScalars.allSatisfy(noteLead.contains) })
+            // 备注从哪儿开始（在转过半角的这一行上数，原文同一个位置）：前面的分隔去掉，客户自己写的字一个不动。
+            var start = noteStart(scalars, from: cut)
             if rest.hasPrefix("备注") {
-                note = String(note.dropFirst(2).drop { $0.unicodeScalars.allSatisfy(noteLead.contains) })
+                // 只去掉记号自己：「备注」、后面至多一个冒号、空白（「备注：-1档」的 - 是客户写的）。
+                start = cut
+                while start < scalars.count, noteLead.contains(scalars[start]) { start += 1 }
+                start += 2
+                if start < scalars.count, scalars[start] == ":" || scalars[start] == "：" { start += 1 }
+                while start < scalars.count, CharacterSet.whitespaces.contains(scalars[start]) { start += 1 }
             } else {
                 // 「第 12 张」「35 号」明说是第几张的：照旧当要的照片（「DSCF7207 第12张 谢谢」）。
                 if restText.range(of: #"第\s*[0-9]+|[0-9]+\s*[张張号號]"#, options: .regularExpression) != nil { return nil }
                 let words = tokens(restText)
-                if words.contains(where: { lookup.nameLike($0) || isRange(Substring($0)) }) { return nil }
+                if words.contains(where: { mentionsPhoto($0, lookup: lookup) }) { return nil }
                 let numbers = words.filter { isDigits(Substring($0)) }.count
                 if numbers >= 2 || (!words.isEmpty && numbers == words.count) { return nil }
             }
+            let note = String(String.UnicodeScalarView(raw[min(start, raw.count)...]))
             let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmedNote.isEmpty ? nil : (head, trimmedNote)
         }
         return nil
     }
+
+    /// 备注前面跳过的分隔：空白、逗号、冒号、顿号这些；- ~ — 只在后面跟着空白（或到头）时才算分隔（「DSCF7207 - 去路人」），
+    /// 紧贴着字的是客户写的（「7207 -0.5EV」「DSCF7207：-1档」），以前一起剥掉，负号丢了意思正好反过来。
+    private static func noteStart(_ scalars: [Unicode.Scalar], from cut: Int) -> Int {
+        var i = cut
+        while i < scalars.count {
+            if noteSeparators.contains(scalars[i]) {
+                i += 1
+                continue
+            }
+            guard noteDashes.contains(scalars[i]) else { break }
+            var j = i
+            while j < scalars.count, noteDashes.contains(scalars[j]) { j += 1 }
+            guard j == scalars.count || CharacterSet.whitespaces.contains(scalars[j]) else { break }
+            i = j
+        }
+        return i
+    }
+
+    private static let noteSeparators = CharacterSet.whitespaces.union(CharacterSet(charactersIn: ",，、;；:：|"))
+    private static let noteDashes = CharacterSet(charactersIn: "-—–~～－")
 
     /// splitHeader 在没转半角的原文上切同一刀（halfwidth 一个字符换一个字符，位置对得上）：备注要客户的原话。
     /// 对不上（不该发生）就用转过半角的 `rest`。
@@ -308,8 +455,10 @@ enum ClientReply {
     /// 这一场的文件名（微信回「12，35」换行「DSCF7207，DSCF7208」，第一行是客户要的编号，不是表头）；
     /// 至少有一列一半以上的格子是文件名或全场唯一的文件号。不像表格就返回 nil，按普通文字切。
     /// 别的列里的格子：本身就是文件名 / 文件号的照认；带数字又认不出的列进「没认出」，一个都不悄悄扔。
+    /// `text` 是没转半角的原文：只有半角逗号分列（导出的 CSV 用的是它），中文聊天打的「，」不算 —— 以前转过半角再切，
+    /// 「你好，选好了」换行「DSCF7207，去路人」整段当成表格、按行写的备注全丢。每一格再转半角去认（全角数字、字母照认）。
     private static func table(_ text: String, lookup: Lookup) -> Table? {
-        let rows = CSV.parseRows(text).map { $0.map { $0.trimmingCharacters(in: .whitespaces) } }
+        let rows = CSV.parseRows(text).map { $0.map { halfwidth($0).trimmingCharacters(in: .whitespaces) } }
         guard rows.count >= 2, let head = rows.first, head.count >= 2,
               !head.contains(where: { hasDigit($0) || lookup.byFilename($0) != nil }) else { return nil }
         let body = rows.dropFirst()
@@ -385,11 +534,12 @@ enum ClientReply {
             return true
         }
 
-        let parsed = table(rest, lookup: lookup)
+        let spoken = originalRest(text, half: half, rest: rest)
+        let parsed = table(spoken, lookup: lookup)
         r.tableColumns = parsed?.columns
         r.tableDropped = Set(parsed?.dropped ?? []).count
         let words = parsed.map { $0.tokens.map { Word(token: $0) } }
-            ?? lineTokens(rest, original: originalRest(text, half: half, rest: rest), lookup: lookup, isHead: uniqueHead)
+            ?? lineTokens(rest, original: spoken, lookup: lookup, isHead: uniqueHead)
         for word in words {
             let token = word.token
             pendingNote = word.note
@@ -606,6 +756,9 @@ enum OriginalsCopier {
         var keptSidecar = false
         var failed: [String] = []
         var cancelled = false
+        /// 原图在目标里实际的文件名（这次复制成了、或者目标里本来就有一模一样的）：同名不同内容另存的是带 -2 的名字。
+        /// 原图没落地（失败、取消）= nil。精修要求.csv 按它写。
+        var landedName: String?
         /// 这一张因为目标那边写不进去而失败的原因（盘满、没权限、不支持、写完校验对不上）。原片读不出来、
         /// 目标里刚冒出同名的别的文件不算：那不说明后面的也会失败（FailureStreak 只数这一种）。
         var targetFailure: String?
@@ -678,9 +831,11 @@ enum OriginalsCopier {
         var plan = images.map { ($0, renamed($0, suffix: suffix, in: dest)) }
         let xmp = images[0].deletingPathExtension().appendingPathExtension("xmp")
         if fm.fileExists(atPath: xmp.path) { plan.append((xmp, renamed(xmp, suffix: suffix, in: dest))) }
+        let main = plan[0]
         for (src, target) in plan {
             if identical.contains(src) {
                 result.skipped += 1
+                if src == main.0 { result.landedName = main.1.lastPathComponent }
                 continue
             }
             if fm.fileExists(atPath: target.path) {
@@ -702,8 +857,10 @@ enum OriginalsCopier {
                                              originalName: src.lastPathComponent, shot: shot.id)
                 _ = try CardImporter.copyOne(copy, into: dest, cancel: cancel, onBytes: { _ in })
                 result.copied += 1
+                if src == main.0 { result.landedName = target.lastPathComponent }
             } catch CardImporter.ImportError.cancelled {
                 result.cancelled = true
+                result.landedName = nil
                 return result
             } catch let error as CardImporter.ImportError {
                 let why = reason(error)
@@ -859,12 +1016,11 @@ extension BatchStore {
         progressText = "已清除客户选中 \(n) 张\(noted) · ⌘Z 撤销"
     }
 
-    /// 这几张里带客户备注的，按给的顺序：精修要求.csv 的行（文件名 = 原片的名字）。
-    func retouchRows(_ ids: [String]) -> [OriginalsCopier.RetouchRow] {
-        let byID = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        return ids.compactMap { id -> OriginalsCopier.RetouchRow? in
-            guard let note = clientNotes[id], !note.isEmpty, let item = byID[id] else { return nil }
-            return OriginalsCopier.RetouchRow(file: URL(fileURLWithPath: item.rawPath).lastPathComponent, note: note)
+    /// 这几张里带客户备注的，按给的顺序（照片 id、备注）。精修要求.csv 的行等复制完按实际落地的文件名排（OriginalsCopier.retouchRows）。
+    func retouchNotes(_ ids: [String]) -> [OriginalsCopier.NotedShot] {
+        ids.compactMap { id -> OriginalsCopier.NotedShot? in
+            guard let note = clientNotes[id], !note.isEmpty else { return nil }
+            return OriginalsCopier.NotedShot(id: id, note: note)
         }
     }
 
@@ -947,8 +1103,9 @@ extension BatchStore {
         if let data = try? JSONEncoder().encode(["dest": dest.path]) {
             try? data.write(to: copyDestinationPath, options: .atomic)
         }
-        // 客户写了修图要求的：先在目标里写一份「精修要求.csv」（不覆盖），完了状态栏上说一声。
-        let retouch = OriginalsCopier.writeRetouchNotes(retouchRows(shots.map(\.id)), to: dest)
+        // 客户写了修图要求的：复制完按实际落地的文件名在目标里写「精修要求.csv」（不覆盖），状态栏上说一声。
+        // 备注按点「复制」这一刻的记下来。
+        let noted = retouchNotes(shots.map(\.id))
         isRunning = true
         lastError = nil
         let flag = freshCancelFlag()
@@ -959,10 +1116,13 @@ extension BatchStore {
             var copied = 0, skipped = 0, renamed = 0, keptSidecars = 0, done = 0
             var failed: [String] = []
             var streak = OriginalsCopier.FailureStreak()
+            /// 照片 id → 原图在目标里实际的文件名（复制成了、或目标里已经有一模一样的）。
+            var landed: [String: String] = [:]
             for shot in shots {
                 if flag.isSet { break }
                 let r = OriginalsCopier.copy(shot, to: dest, cancel: flag)
                 if r.cancelled { break }
+                if let name = r.landedName { landed[shot.id] = name }
                 copied += r.copied
                 skipped += r.skipped
                 if r.renamed && r.copied > 0 { renamed += 1 }
@@ -984,10 +1144,15 @@ extension BatchStore {
                                                   keptSidecars: keptSidecars, folder: dest.lastPathComponent,
                                                   cancelled: flag.isSet, stopped: stopped)
             let failures = failed
+            let landedNames = landed
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
                 self.isRunning = false
+                // 精修要求.csv 跟着实际复制结果写：另存成 -2 的写 -2 的名字，取消、失败、停下没轮到的不写。
+                let plan = OriginalsCopier.retouchRows(noted, landed: landedNames)
+                let retouch = OriginalsCopier.retouchNote(OriginalsCopier.writeRetouchNotes(plan.rows, to: dest),
+                                                          missing: plan.missing)
                 self.progressText = summary + (retouch.map { " · " + $0 } ?? "")
                 if let stopNote {
                     self.lastError = "复制原片: " + stopNote
@@ -1018,6 +1183,27 @@ extension OriginalsCopier {
     }
 
     static let retouchFileName = "精修要求"
+
+    /// 带客户备注的一张（点「复制」那一刻记下的照片 id 和备注）。
+    struct NotedShot: Sendable, Equatable {
+        let id: String
+        let note: String
+    }
+
+    /// 精修要求.csv 的行：只写原图真的在目标里的（`landed` = 照片 id → 目标里实际的文件名，同名不同内容另存的就是带 -2 的
+    /// 名字），按给的顺序。以前复制之前就按原片文件名写好：另存成 -2 的那一行指着目标里别的照片（上一单的同名文件），
+    /// 取消、失败的也照样列着。`missing` = 带备注、可是没复制成（失败、取消、停下没轮到）的张数。
+    static func retouchRows(_ noted: [NotedShot], landed: [String: String]) -> (rows: [RetouchRow], missing: Int) {
+        let rows = noted.compactMap { shot in landed[shot.id].map { RetouchRow(file: $0, note: shot.note) } }
+        return (rows, noted.count - rows.count)
+    }
+
+    /// 状态栏上那一句：写 CSV 的结果（writeRetouchNotes），再说带备注却没复制成、没写进去的几张。
+    static func retouchNote(_ written: String?, missing: Int) -> String? {
+        guard missing > 0 else { return written }
+        let skipped = "带备注的 \(missing) 张没复制成，没写进\(retouchFileName).csv"
+        return written.map { $0 + "；" + skipped } ?? skipped
+    }
 
     /// 精修要求.csv 的内容：表头「文件名,备注」、一张一行；UTF-8 带 BOM（Excel 直接双击打开中文不乱码）。
     static func retouchCSV(_ rows: [RetouchRow]) -> Data {

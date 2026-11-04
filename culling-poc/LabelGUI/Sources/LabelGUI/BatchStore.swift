@@ -3743,8 +3743,10 @@ final class BatchStore: ObservableObject {
             let html = ProofSheetPage.html(title: title, sheetID: sheetID, count: shown.count,
                                            date: dateString, cells: cells, quota: quota)
             let cancelled = flag.isSet
+            // 带水印却一张都没画上（多半是只开了 EXIF 文字、原片全都读不到）：不写一张空的确认表、不记表。
+            let nothingMarked = watermark != nil && shown.isEmpty
             var writeError: String?
-            if !cancelled {
+            if !cancelled && !nothingMarked {
                 do { try html.write(to: url, atomically: true, encoding: .utf8) }
                 catch { writeError = error.localizedDescription }
             }
@@ -3752,12 +3754,16 @@ final class BatchStore: ObservableObject {
             let bytes = Int64(html.utf8.count)
             let sheet = ProofSheet(id: sheetID, date: Date(), scope: scope, ids: shown,
                                    lists: ProofSheet.lists(quota: quota))
+            let skipReason = watermark?.skipReason ?? ""
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
                 self.isRunning = false
                 if cancelled {
                     self.progressText = "已取消导出选片确认表"
+                } else if nothingMarked {
+                    self.progressText = "选片确认表没导出（带水印）"
+                    self.lastError = "选片确认表没导出：\(total) 张都没画上水印（\(skipReason)）"
                 } else if let failure {
                     self.lastError = "联系表导出失败: \(failure)"
                 } else {
@@ -3767,7 +3773,7 @@ final class BatchStore: ObservableObject {
                     if bytes > ProofSheetPage.largeBytes { self.lastError = ProofSheetPage.largeNote(bytes) }
                     // 带水印时少了的（预览读不出来、水印画不上）说出来：不悄悄少几张。
                     if watermark != nil, sheet.ids.count < total {
-                        let missing = "有 \(total - sheet.ids.count) 张没放进确认表（预览读不出来或水印画不上）"
+                        let missing = "有 \(total - sheet.ids.count) 张没放进确认表（\(skipReason)）"
                         self.lastError = [self.lastError, missing].compactMap { $0 }.joined(separator: "；")
                     }
                 }

@@ -41,6 +41,8 @@ struct ProofWatermark: @unchecked Sendable {
 
     /// 在一张小样上画（不改 `image`，返回新的一张；画不上 = nil）。`original` = 原片路径：水印页的像素边距是按原片给的，
     /// 按「小样长边 / 原片长边」缩；文字模板（{model} 这些）的 EXIF 也从原片读（1024 预览不一定带 EXIF）。都只读文件头。
+    /// 真画上了东西才算画上：只开了 EXIF 文字模板、原片读不到（外接盘没插）或者没有 EXIF 时模板填出来是空的，一个字都不画；
+    /// 签名比画面还大被跳过的也一样 —— 都返回 nil（这张不放进确认表），以前照样把干净的小样交回去、状态栏还写「带水印」。
     func apply(to image: CGImage, original: String) -> CGImage? {
         let source = original.isEmpty ? nil : CGImageSourceCreateWithURL(URL(fileURLWithPath: original) as CFURL, nil)
         let full = source.flatMap { WatermarkEngine.uprightSize(of: $0) }
@@ -49,7 +51,31 @@ struct ProofWatermark: @unchecked Sendable {
         let scale = CGFloat(baseLong) / CGFloat(max(fullLong, baseLong))
         let needsTags = config.exifText.enabled && config.exifText.customText.isEmpty
         let tags = WatermarkEngine.ExifTags(source: needsTags ? source : nil)
-        return WatermarkEngine.compose(base: image, signature: signature, config: config, tags: tags, scale: scale)?.image
+        let text = drawsText(tags)
+        if signature == nil && !text { return nil }
+        guard let composed = WatermarkEngine.compose(base: image, signature: signature, config: config, tags: tags,
+                                                     scale: scale) else { return nil }
+        guard text || !composed.signatureSkipped else { return nil }
+        return composed.image
+    }
+
+    /// 文字会不会画出来：自定义文字不是空的，或者模板按这张的 EXIF 填出来不是空的（和 WatermarkEngine.layoutExifText 同一个判断）。
+    func drawsText(_ tags: WatermarkEngine.ExifTags) -> Bool {
+        guard config.exifText.enabled else { return false }
+        let custom = config.exifText.customText
+        let text = custom.isEmpty ? tags.fillStripMissing(template: config.exifText.template) : custom
+        return !text.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// 只靠 EXIF 文字模板（没签名、没写自定义文字）：画什么要看每张原片里的相机参数，原片读不到、没有 EXIF 的画不上。
+    var needsOriginalEXIF: Bool { signature == nil && config.exifText.enabled && config.exifText.customText.isEmpty }
+
+    /// 有几张画不上水印时状态栏上说的原因。
+    var skipReason: String {
+        needsOriginalEXIF
+            ? "水印只开了 EXIF 参数文字，要读原片里的相机参数：原片读不到（外接盘没插？）或没有 EXIF 的画不上 —— " +
+              "插上原片所在的盘，或在水印页写一句自定义文字 / 选签名"
+            : "预览读不出来或水印画不上"
     }
 }
 

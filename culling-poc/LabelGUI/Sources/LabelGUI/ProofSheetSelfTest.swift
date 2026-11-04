@@ -34,6 +34,227 @@ enum ProofSheetSelfTest {
     /// 后面加的检查（同一个 --proof-selftest 里跑）。
     private static func extraChecks() {
         watermarkChecks()
+        multiPhotoLines()
+        markerChecks()
+        leadingSignChecks()
+        greetingChecks()
+        blankWatermarkChecks()
+        retouchLandedChecks()
+    }
+
+    // MARK: 精修要求.csv 按实际落地的文件名写（审查：另存 -2 的指到目标里别的照片、取消了也照样列着）
+
+    private static func retouchLandedChecks() {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("proof-retouch-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: dir) }
+        let shoot = dir.appendingPathComponent("shoot")
+        let dest = dir.appendingPathComponent("精修")
+        try? fm.createDirectory(at: shoot, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: dest, withIntermediateDirectories: true)
+        let mine = shoot.appendingPathComponent("DSCF7207.RAF")
+        let other = shoot.appendingPathComponent("DSCF7208.RAF")
+        try? Data("这一单的 7207".utf8).write(to: mine)
+        try? Data("这一单的 7208".utf8).write(to: other)
+        // 精修文件夹是几单共用的：里面已经有上一单的 DSCF7207.RAF（机身计数器重复）。
+        try? Data("上一单的 7207".utf8).write(to: dest.appendingPathComponent("DSCF7207.RAF"))
+        func shot(_ id: String, _ url: URL) -> OriginalsCopier.Shot {
+            OriginalsCopier.Shot(id: id, rawPath: url.path, decodePath: url.path)
+        }
+        let first = OriginalsCopier.copy(shot("DSCF7207", mine), to: dest, cancel: AnalysisEngine.CancelFlag())
+        check(first.landedName == "DSCF7207-2.RAF" && first.renamed && first.copied == 1,
+              "目标里有同名不同内容的：另存 -2，landedName 是「DSCF7207-2.RAF」", "\(first)")
+        let again = OriginalsCopier.copy(shot("DSCF7207", mine), to: dest, cancel: AnalysisEngine.CancelFlag())
+        check(again.landedName == "DSCF7207-2.RAF" && again.copied == 0 && again.skipped == 1,
+              "再复制一次（目标里 -2 那张一模一样）：跳过，landedName 还是 -2 的名字", "\(again)")
+        let stop = AnalysisEngine.CancelFlag()
+        stop.set()
+        let cancelled = OriginalsCopier.copy(shot("DSCF7208", other), to: dest, cancel: stop)
+        check(cancelled.cancelled && cancelled.landedName == nil && !fm.fileExists(atPath: dest.appendingPathComponent("DSCF7208.RAF").path),
+              "复制时取消：没落地，landedName = nil", "\(cancelled)")
+        let gone = OriginalsCopier.copy(shot("DSCF7209", shoot.appendingPathComponent("DSCF7209.RAF")), to: dest,
+                                        cancel: AnalysisEngine.CancelFlag())
+        check(gone.landedName == nil && !gone.failed.isEmpty, "原片读不出来：landedName = nil", "\(gone)")
+
+        let noted = [OriginalsCopier.NotedShot(id: "DSCF7207", note: "去路人"),
+                     OriginalsCopier.NotedShot(id: "DSCF7208", note: "瘦脸"),
+                     OriginalsCopier.NotedShot(id: "DSCF7210", note: "黑白")]
+        let plan = OriginalsCopier.retouchRows(noted, landed: ["DSCF7207": "DSCF7207-2.RAF", "DSCF7210": "DSCF7210.RAF"])
+        let wantRows = [OriginalsCopier.RetouchRow(file: "DSCF7207-2.RAF", note: "去路人"),
+                        OriginalsCopier.RetouchRow(file: "DSCF7210.RAF", note: "黑白")]
+        check(plan.rows == wantRows && plan.missing == 1,
+              "精修要求.csv 只写落了地的、用实际文件名（-2），取消 / 没复制成的不写", "\(plan)")
+        let note = OriginalsCopier.retouchNote("写了 精修要求.csv（2 张的客户备注）", missing: plan.missing) ?? ""
+        check(note == "写了 精修要求.csv（2 张的客户备注）；带备注的 1 张没复制成，没写进精修要求.csv",
+              "状态栏说几张带备注的没写进去", note)
+        check(OriginalsCopier.retouchNote(nil, missing: 3) == "带备注的 3 张没复制成，没写进精修要求.csv"
+              && OriginalsCopier.retouchNote(nil, missing: 0) == nil, "一张都没复制成：只说没写进去；没有备注：不说")
+    }
+
+    // MARK: 水印画不上东西就不放（审查：只开 EXIF 模板文字、原片读不到时报「带水印」却是干净的图）
+
+    private static func blankWatermarkChecks() {
+        var template = WatermarkEngine.Config()
+        template.signatureEnabled = false
+        template.exifText.enabled = true
+        template.exifText.customText = ""
+        guard let mark = ProofWatermark.make(config: template, signature: nil),
+              let base = solid(800, 533, gray: 100.0 / 255) else {
+            check(false, "只有 EXIF 模板文字也做得出角标")
+            return
+        }
+        check(mark.needsOriginalEXIF && mark.skipReason.contains("原片"), "只有 EXIF 模板文字：标出来要读原片", mark.skipReason)
+        check(mark.apply(to: base, original: "") == nil, "模板文字、没给原片：画不上 = nil（不交回干净的小样）")
+        check(mark.apply(to: base, original: "/nonexistent/proof-selftest/DSCF7207.RAF") == nil,
+              "模板文字、原片读不到（外接盘没插）：nil")
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("proof-blank-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let bare = dir.appendingPathComponent("bare.jpg")
+        let tagged = dir.appendingPathComponent("tagged.jpg")
+        let preview = dir.appendingPathComponent("preview.jpg")
+        guard let big = solid(1200, 800, gray: 0.4), writeJPEG(big, to: bare), writeJPEG(big, to: preview),
+              let dest = CGImageDestinationCreateWithURL(tagged as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
+            check(false, "造得出原片")
+            return
+        }
+        let tiff: [CFString: Any] = [kCGImagePropertyTIFFMake: "FUJIFILM", kCGImagePropertyTIFFModel: "X-T50"]
+        CGImageDestinationAddImage(dest, big, [kCGImagePropertyTIFFDictionary: tiff] as CFDictionary)
+        check(CGImageDestinationFinalize(dest), "写得出带机身型号的原片")
+        check(mark.apply(to: base, original: bare.path) == nil, "模板文字、原片在但没有 EXIF：nil")
+        if let drawn = mark.apply(to: base, original: tagged.path) {
+            check(changed(pixels(base), pixels(drawn), width: 800, height: 533) != nil, "原片有机身型号：照样画上「FUJIFILM X-T50」")
+        } else {
+            check(false, "原片有机身型号：照样画上")
+        }
+        check(BatchStore.contactSheetJPEG(path: preview.path, watermark: mark, original: "") == nil,
+              "确认表里那一张：画不上就不放（contactSheetJPEG = nil）")
+        var literal = template
+        literal.exifText.template = "小何摄影"
+        check(ProofWatermark.make(config: literal, signature: nil)?.apply(to: base, original: "") != nil,
+              "模板里只有字、没有占位符：不用原片也画得上")
+        // 签名比画面还高（被跳过）、又没开文字：一样什么都没画。
+        var sigOnly = WatermarkEngine.Config()
+        sigOnly.exifText.enabled = false
+        if let tall = whiteSignature(10, 2000), let skipped = ProofWatermark.make(config: sigOnly, signature: tall) {
+            check(!skipped.needsOriginalEXIF && skipped.apply(to: base, original: "") == nil, "签名太高被跳过、没开文字：nil")
+        } else {
+            check(false, "造得出很高的签名")
+        }
+    }
+
+    // MARK: 寒暄行带全角逗号不当成 CSV（审查：按行写的备注全丢）
+
+    private static func greetingChecks() {
+        let all = items()
+        func resolve(_ text: String) -> ClientReply.Resolution { ClientReply.resolve(text, items: all, sheets: [bigSheet]) }
+        func detail(_ r: ClientReply.Resolution) -> String {
+            "认出 \(r.ids) · 备注 \(r.notes) · 表格列 \(r.tableColumns ?? []) · 没认出 \(r.unknown)"
+        }
+        let hello = resolve("你好，选好了\nDSCF7207，去路人\nDSCF7210，黑白")
+        check(hello.ids == ["DSCF7207", "DSCF7210"] && hello.notes == ["DSCF7207": "去路人", "DSCF7210": "黑白"]
+              && hello.tableColumns == nil, "「你好，选好了」开头、一行一张带要求：按行认、备注都在（不当成表格）", detail(hello))
+        let three = resolve("你好，选好了，谢谢\nDSCF7207，去路人，瘦脸\nDSCF7210，黑白，亮一点")
+        check(three.ids == ["DSCF7207", "DSCF7210"] && three.notes == ["DSCF7207": "去路人，瘦脸", "DSCF7210": "黑白，亮一点"]
+              && three.tableColumns == nil, "寒暄两个逗号、每行三段：照样按行认、备注原样", detail(three))
+        let csv = resolve("文件名,备注\nＤＳＣＦ７２０７,瘦脸\nDSCF7208,黑白\n")
+        check(csv.ids == ["DSCF7207", "DSCF7208"] && csv.notes.isEmpty && csv.tableColumns == ["文件名"],
+              "真的 CSV（半角逗号）照旧当表格认，全角的文件名格子也认", detail(csv))
+    }
+
+    // MARK: 备注开头客户自己写的 - ~ 留着（审查：「-1档」读回成「1档」）
+
+    private static func leadingSignChecks() {
+        let all = items()
+        let header = "\(ProofSheetPage.header) \(bigSheet.id)\n"
+        func expect(_ text: String, note: String, _ name: String) {
+            let r = ClientReply.resolve(text, items: all, sheets: [bigSheet])
+            check(r.ids == ["DSCF7207"] && r.notes == ["DSCF7207": note], name,
+                  "认出 \(r.ids) · 备注 \(r.notes) · 没认出 \(r.unknown)")
+        }
+        expect(header + "DSCF7207 \(ProofSheetPage.noteMarker)-1档曝光\n", note: "-1档曝光", "「备注：-1档曝光」的负号留着")
+        expect("DSCF7207备注：-1档", note: "-1档", "紧贴着写的「备注：」也只去掉记号自己")
+        expect("DSCF7207 备注 ~0.5EV", note: "~0.5EV", "「备注」后面没冒号：~ 留着")
+        expect("7207 -0.5EV", note: "-0.5EV", "微信写法「7207 -0.5EV」：负号留着")
+        expect("DSCF7207：-1档", note: "-1档", "「文件名：-1档」：冒号去掉、负号留着")
+        expect("DSCF7207 - 去路人", note: "去路人", "「DSCF7207 - 去路人」：两边带空格的 - 还是分隔")
+        expect("DSCF7207 —— 黑白", note: "黑白", "「——」后面跟空格也是分隔")
+
+        // 来回一趟：页面上写「-1档曝光」，复制出来再导入还是「-1档曝光」。
+        let html = page(quota: nil)
+        guard let ctx = context(html: html) else { return }
+        ctx.evaluateScript("__cells[0].onclick(); __click('nb1'); __byId['note-text'].value = '-1档曝光'; __byId['note-save'].onclick(); __byId['copy'].onclick();")
+        let copied = eval(ctx, "__byId['out'].value")
+        let r = ClientReply.resolve(copied, items: items(), sheets: [sheet(quota: nil)])
+        check(r.ids == [names[0]] && r.notes == [names[0]: "-1档曝光"], "页面写「-1档曝光」复制再导入：还是「-1档曝光」",
+              copied.debugDescription + " → \(r.notes)")
+    }
+
+    // MARK: 「备注：」记号：开头那张认不出也不拿备注去认照片（审查）
+
+    private static func markerChecks() {
+        let header = "\(ProofSheetPage.header) \(bigSheet.id)\n"
+        // 同名的两张（不同子文件夹）：开头那个词重名。
+        func at(_ id: String, _ file: String) -> BatchItem {
+            let path = "/nonexistent/proof-selftest/" + file
+            return BatchItem(
+                id: id, previewPath: "", rawPath: path, decodePath: path, sharpness: 0, worstClipPct: 0,
+                eyeClosed: nil, faceQuality: nil, faceCount: 0, faceBbox: nil, faceAreaPct: nil, faces: [],
+                burstGroup: 0, expressionScore: nil, vlmReject: false, vlmCompositionIssues: [], vlmReason: nil,
+                appealClosedEyes: nil, appealSubjectSharp: nil, appealIntentionalExposure: nil, appealReason: nil,
+                exif: nil, horizonDeg: nil)
+        }
+        let all = items() + [at("仪式_DSCF7301", "仪式/DSCF7301.JPG"), at("晚宴_DSCF7301", "晚宴/DSCF7301.JPG")]
+        func resolve(_ text: String) -> ClientReply.Resolution {
+            ClientReply.resolve(text, items: all, sheets: [bigSheet])
+        }
+        func detail(_ r: ClientReply.Resolution) -> String {
+            "认出 \(r.ids.joined(separator: " ")) · 备注 \(r.notes) · 没认出 \(r.unknown)"
+        }
+        let gone = resolve(header + "DSCF9999 \(ProofSheetPage.noteMarker)修 3 处\nDSCF7210\n")
+        check(gone.ids == ["DSCF7210"] && gone.notes.isEmpty && gone.unknown == ["DSCF9999"],
+              "开头那张不在这一场（移进了废纸篓）：只报它没认出，备注「修 3 处」不把表上第 3 张认进来", detail(gone))
+        let named = resolve(header + "DSCF9999 \(ProofSheetPage.noteMarker)和 DSCF7208 一样的调色\n")
+        check(named.ids.isEmpty && named.unknown == ["DSCF9999"],
+              "开头那张不在这一场：备注里的 DSCF7208 也不认", detail(named))
+        let twin = resolve(header + "DSCF7301 \(ProofSheetPage.noteMarker)修 3 处\n")
+        check(twin.ids.isEmpty && twin.notes.isEmpty && twin.unknown == ["DSCF7301（重名）"],
+              "开头那个词重名：只报（重名），备注里的 3 不认", detail(twin))
+        let kept = resolve(header + "晚宴_DSCF7301 \(ProofSheetPage.noteMarker)修 3 处，和 7208 一样\n")
+        check(kept.ids == ["晚宴_DSCF7301"] && kept.notes == ["晚宴_DSCF7301": "修 3 处，和 7208 一样"],
+              "页面复制的是照片 id：重名的照片用 id 照样认、备注原样", detail(kept))
+        let chat = resolve("选好了 \(ProofSheetPage.noteMarker)7207去路人")
+        check(chat.ids == ["DSCF7207"] && chat.notes == ["DSCF7207": "去路人"],
+              "记号前面不是照片（「选好了 备注：…」）：照旧按普通文字认", detail(chat))
+    }
+
+    // MARK: 一行好几张照片（审查：第二张被吞进第一张的备注）
+
+    private static func multiPhotoLines() {
+        let all = items()
+        func expect(_ text: String, ids: [String], notes: [String: String], _ name: String) {
+            let r = ClientReply.resolve(text, items: all, sheets: [bigSheet])
+            let ok = r.ids == ids && r.notes == notes
+            check(ok, name, "认出 \(r.ids.joined(separator: " ")) · 备注 \(r.notes) · 没认出 \(r.unknown)")
+        }
+        expect("7207去路人，7208瘦脸，7215调亮", ids: ["DSCF7207", "DSCF7208", "DSCF7215"],
+               notes: ["DSCF7207": "去路人", "DSCF7208": "瘦脸", "DSCF7215": "调亮"],
+               "「7207去路人，7208瘦脸，7215调亮」：三张都认、各带各的备注（以前 7208、7215 被吞进 7207 的备注）")
+        expect("7207 去路人，7208 瘦脸", ids: ["DSCF7207", "DSCF7208"], notes: ["DSCF7207": "去路人", "DSCF7208": "瘦脸"],
+               "「7207 去路人，7208 瘦脸」：两张各带各的备注")
+        expect("7207 去路人，7208瘦脸", ids: ["DSCF7207", "DSCF7208"], notes: ["DSCF7207": "去路人", "DSCF7208": "瘦脸"],
+               "第二张紧贴着汉字也切得开")
+        expect("7207 去路人，背景虚一点，7208 瘦脸", ids: ["DSCF7207", "DSCF7208"],
+               notes: ["DSCF7207": "去路人，背景虚一点", "DSCF7208": "瘦脸"], "备注里的逗号不切（后面不是照片），原样留着")
+        expect("DSCF7207瘦脸 DSCF7208", ids: ["DSCF7207", "DSCF7208"], notes: ["DSCF7207": "瘦脸"],
+               "没有句读：紧贴着汉字的「DSCF7207瘦脸」拆成照片 + 备注，后面那张照认")
+        expect("7207、7208 瘦脸", ids: ["DSCF7207", "DSCF7208"], notes: [:],
+               "开头那张没带备注（「7207、7208 …」）：不切段、不带备注（和「DSCF7207, DSCF7208 都要」一样）")
+        let glued = ClientReply.resolve("7207 去路人还有7208瘦脸", items: all, sheets: [bigSheet])
+        let visible = glued.ids.contains("DSCF7208") || glued.unknown.contains { $0.contains("7208") }
+        check(visible && glued.notes["DSCF7207"]?.contains("7208") != true,
+              "「…还有7208瘦脸」：7208 不悄悄进 7207 的备注（认出来或者列在没认出里）",
+              "认出 \(glued.ids) · 备注 \(glued.notes) · 没认出 \(glued.unknown)")
     }
 
     // MARK: 确认表水印（只画在内存里的 800px 小样上）
