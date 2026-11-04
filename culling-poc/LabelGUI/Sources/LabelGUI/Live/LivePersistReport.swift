@@ -65,9 +65,23 @@ extension LiveHandlers {
         return PersistReport(persisted: false, warnings: warnings)
     }
 
-    /// 拼图这边：CollageStore.projectSaveProblem（flushSaves 之后读）。
-    static func collagePersistReport(_ problem: String?) -> PersistReport {
+    /// 拼图这边，写工具回复里用的：flushSaves 之后读这一场现在没存上的原因，分清是写失败还是原件读坏了先不存。
+    static func collagePersistReport(_ collage: CollageStore) -> PersistReport {
+        collagePersistReport(collage.projectSaveProblem, refused: collage.projectSaveIsRefused)
+    }
+
+    /// 拼图这边：CollageStore.projectSaveProblem（flushSaves 之后读）。`refused` = 原件读不出来 / 解不开又挪不开，这次打开
+    /// 期间 app 不存它（CollageStore.projectSaveIsRefused）：腾空间、再改一下都存不上，得修好或移走那个文件再重新打开这一场
+    /// （同一场再挂一次不会重读，要切到别的场次再切回来）—— 和判决那边 refused 的说法一样另说（审查 S01b 跟进）。
+    static func collagePersistReport(_ problem: String?, refused: Bool = false) -> PersistReport {
         guard let problem else { return PersistReport(persisted: true, warnings: []) }
+        if refused {
+            let warning = MCPReadModel.warning(
+                "save_failed",
+                "改动在 app 里已经生效，但这一场的拼图工程原件读不出来（或解不开又挪不开），为免覆盖 app 这一场先不存拼图（现在只在内存里）：选片工具说「\(problem)」",
+                hint: "照原话告诉用户：看拼图页底下的提示，修好或移走那个拼图工程文件，再切到别的场次、切回这一场重新打开；在那之前拼图上的改动都不会存盘，重新打开时这些改动也不会留下")
+            return PersistReport(persisted: false, warnings: [warning])
+        }
         let warning = MCPReadModel.warning(
             "save_failed", "改动在 app 里已经生效，但拼图工程没存上盘，现在只在内存里：选片工具说「\(problem)」",
             hint: "照原话告诉用户：先腾出磁盘空间（或者看拼图页底下的提示）；之后拼图上随便改一下 app 会整份再存一次")

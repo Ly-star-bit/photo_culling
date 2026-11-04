@@ -4078,6 +4078,10 @@ final class CollageStore: ObservableObject {
         return projectWriteResult.failure(for: url)
     }
 
+    /// projectSaveProblem 是不是「原件读坏了、这次打开期间不存盘」（不是写失败）：腾空间、再改一下都存不上，
+    /// 实时桥的 save_failed 要换一种说法（LiveHandlers.collagePersistReport）。
+    var projectSaveIsRefused: Bool { projectSaveRefused != nil }
+
     /// 还没到点的那一次现在写；已经交给后台在写的，等它写完再回来（换场次、退出、实时桥回复之前盘上要是最新的）。
     private func flushProjectSave() {
         guard projectSaveTask != nil else {

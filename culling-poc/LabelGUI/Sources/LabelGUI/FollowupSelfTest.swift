@@ -4,11 +4,14 @@ import Foundation
 /// 不要照片、不跑分析、不开界面：照 FileSafetySelfTest 在数据目录里造几场假的拍摄（小文件 + 手写的 manifest / layer1），逐条断言、
 /// 打 PASS / FAIL：
 ///   - S01b 判决、客户选中、拼图写盘失败时，实时桥写工具的结果 persisted:false + save_failed，「已存盘」只在真存上时说
-///     （场次目录 chmod 只读模拟盘满；后台那次拼图保存失败也算得上，不等 lastError 那一拍）。
+///     （场次目录 chmod 只读模拟盘满；后台那次拼图保存失败也算得上，不等 lastError 那一拍；拼图原件读不出来、这一场先不存时
+///     hint 另一种说法，不叫用户腾空间）。
 ///   - F19 水印页「导入选片结果」菜单：精选 / 精选 + 可用 / 客户选中（客户选中的废片也带，RAW+JPG 用 JPG）。
 ///   - 水印 EXIF 文字的快门：0、负数、非有限、非规格化的极小正数（1/t = inf）不崩、不填；≥1s 照旧 %g。
-///   - S15「复制原片到…」连续 3 张写不进目标就停、说清楚原因和怎么办（不支持 → NAS / exFAT），英文 strerror 换成中文。
-///   - M01 近似重复去重：拍摄时刻完全一样、一张 RAW 一张 JPG（分卡存、分文件夹放的同一帧）时，RAW 不判「连拍重复」。
+///   - S15「复制原片到…」连续 3 张写不进目标就停、说清楚原因和怎么办（不支持 → NAS / exFAT），英文 strerror 换成中文；
+///     照片写不进、旁边的 .xmp 写得进（盘满）也照样停，.xmp 不单独过去。
+///   - M01 近似重复去重：拍摄时刻完全一样、一张 RAW 一张 JPG（分卡存、分文件夹放的同一帧）时，RAW 不判「连拍重复」；
+///     场里只剩这一对时按一帧算、不提精选，接受全部推荐也不把 RAW 钉成废片。
 ///   - MCP cull_get_photos 的 exif：老 manifest 里存的 shutter_sec / aperture / focal_35 = 0 不报（和 summary 一样）。
 /// 只写数据目录；改过的权限全部改回来，退出前删掉造出来的照片文件夹。
 @MainActor
@@ -185,19 +188,62 @@ enum FollowupSelfTest {
         let nowReport = LiveHandlers.collagePersistReport(now)
         check(now?.hasPrefix("拼图项目保存失败") == true && !nowReport.persisted && codes(nowReport.warnings) == ["save_failed"],
               "拼图写不上（flushSaves 当场写）：回失败原因、persisted false + save_failed", now ?? "nil")
+        let liveReport = LiveHandlers.collagePersistReport(collage)
+        let writeHint = (liveReport.warnings.first?["hint"] as? String) ?? ""
+        check(!collage.projectSaveIsRefused && !liveReport.persisted && writeHint.contains("腾出磁盘空间") && writeHint.contains("整份再存"),
+              "拼图写失败（不是拒存）：写工具那一路的 hint 照旧叫用户腾出磁盘空间、之后改一下会整份再存", writeHint)
 
-        // 后台那一次：改完等防抖的 1 s 过去、存盘队列上写失败；之后 flushSaves 没有排着的，也要报出来
+        // 后台那一次。先能写时存一次，把记下的结果清回「成功」：不然下面读到的还是上面当场写那次的失败，后台那次跑没跑、
+        // 记没记都测不出来（以前这一条永远绿）
+        unlock(session)
+        touch()
+        let cleared = collage.flushSaves()
+        check(cleared == nil, "拼图后台那一步之前：能写时存一次，记下的结果回到成功", cleared ?? "")
+        lock(session)
+        // 改完不 flush，等防抖的 1 s 过去、存盘队列上写失败：lastError 是后台那次的 Task 晚一拍设上的，等到它才说明真是后台写的
         collage.lastError = nil
         touch()
-        FileSafetySelfTest.waitUntil(1.8) { false }
+        let ranInBackground = FileSafetySelfTest.waitUntil(5) { collage.lastError?.hasPrefix("拼图项目保存失败") == true }
+        check(ranInBackground, "拼图后台保存：防抖那一次真在存盘队列上写了、失败了（lastError 由它设上）", collage.lastError ?? "nil")
+        // 再清掉 lastError：flushSaves（没有排着的）回的失败原因得来自存盘队列上记下的结果，不靠 lastError
+        collage.lastError = nil
         let late = collage.flushSaves()
-        check(late?.hasPrefix("拼图项目保存失败") == true, "拼图后台保存失败：flushSaves（没有排着的）照样回失败原因", late ?? "nil")
+        check(late?.hasPrefix("拼图项目保存失败") == true, "拼图后台保存失败：flushSaves（没有排着的）照样回失败原因，不靠 lastError",
+              late ?? "nil")
 
         unlock(session)
         touch()
         let back = collage.flushSaves()
         check(back == nil && LiveHandlers.collagePersistReport(back).persisted,
               "拼图腾出空间后再改一下：flushSaves 回 nil、persisted true（lastError 不清也不影响）", back ?? "")
+
+        // 拼图工程原件读不出来（S02b：这次打开期间不存盘）：腾空间、再改一下都存不上，save_failed 另一种说法
+        let fm = FileManager.default
+        let refusedDir = photoDir.deletingLastPathComponent().appendingPathComponent("collage-refused")
+        try? fm.createDirectory(at: refusedDir, withIntermediateDirectories: true)
+        let refusedFile = refusedDir.appendingPathComponent("collage.json")
+        let original = Data("{\"pages\":[]}".utf8)
+        try? original.write(to: refusedFile)
+        setMode(refusedFile, 0o000)
+        locked.append(refusedFile)
+        let refusedStore = CollageStore(dataDir: appDataDir)
+        refusedStore.attach(sessionDir: refusedDir, photoDir: refusedDir, batch: nil)
+        var refusedStyle = refusedStore.project.style
+        refusedStyle.gutter += 0.002
+        refusedStore.setStyle(refusedStyle, coalesce: false)
+        let refusedProblem = refusedStore.flushSaves()
+        let refused = LiveHandlers.collagePersistReport(refusedStore)
+        let refusedHint = (refused.warnings.first?["hint"] as? String) ?? ""
+        let refusedText = messages(refused.warnings)
+        let refusedOK: Bool = refusedProblem != nil && refusedStore.projectSaveIsRefused && !refused.persisted
+            && codes(refused.warnings) == ["save_failed"] && refusedText.contains("读不出来")
+        check(refusedOK, "拼图工程原件读不出来、这一场先不存：写工具 persisted false + save_failed，原话说是原件读不出来",
+              "\(refusedProblem ?? "nil") · \(refusedText)")
+        check(!refusedHint.contains("腾出磁盘空间") && !refusedHint.contains("整份再存") && refusedHint.contains("修好或移走")
+              && refusedHint.contains("切回这一场") && refusedHint.contains("不会存盘"),
+              "拼图拒存时的 hint：不叫用户腾空间、不说改一下就会存上，叫修好或移走那个文件、切走再切回来重新打开", refusedHint)
+        unlock(refusedFile)
+        check((try? Data(contentsOf: refusedFile)) == original, "拼图拒存：原件一个字没动")
     }
 
     // MARK: - F19 水印页按客户选中导入
@@ -272,9 +318,12 @@ enum FollowupSelfTest {
     static func originalsStop(_ dir: URL) {
         print("— S15 复制原片到…：连续 3 张写不进目标就停，原因和下一步说清楚")
         typealias Streak = OriginalsCopier.FailureStreak
-        func shot(copied: Int = 0, skipped: Int = 0, target: String? = nil, failed: Bool = false) -> OriginalsCopier.ShotResult {
+        /// copiedImages 不给 = copied 全是照片文件（RAW / JPG）；给 0 = 复制成的只是旁边的 .xmp。
+        func shot(copied: Int = 0, copiedImages: Int? = nil, skipped: Int = 0, target: String? = nil,
+                  failed: Bool = false) -> OriginalsCopier.ShotResult {
             var r = OriginalsCopier.ShotResult()
             r.copied = copied
+            r.copiedImages = copiedImages ?? copied
             r.skipped = skipped
             r.targetFailure = target
             if failed || target != nil { r.failed = ["x：" + (target ?? "原片读不出来")] }
@@ -299,6 +348,9 @@ enum FollowupSelfTest {
             ("只是原片读不出来（原片挪走了）不算目标的问题", [shot(failed: true), shot(failed: true), shot(failed: true),
                                              shot(failed: true)], nil),
             ("RAW 复制成了、JPG 没写进去：这张不算失败", [shot(copied: 1, target: full), shot(target: full), shot(target: full)], nil),
+            ("RAW 盘满、旁边几 KB 的 .xmp 写进去了：不算复制成，连续 3 张照样停",
+             [shot(copied: 1, copiedImages: 0, target: full), shot(copied: 1, copiedImages: 0, target: full),
+              shot(copied: 1, copiedImages: 0, target: full), shot(copied: 1, copiedImages: 0, target: full)], 3),
         ]
         for (name, results, want) in rows {
             let got = run(results)
@@ -343,6 +395,69 @@ enum FollowupSelfTest {
         let copied = (try? FileManager.default.contentsOfDirectory(atPath: dest.path))?.filter { !$0.hasPrefix(".") } ?? []
         check(store.lastError == nil && copied.count == 6 && store.progressText.hasPrefix("复制原片完成: 6 张"),
               "改回能写以后再复制：6 张全部复制、没有报错", "\(store.lastError ?? "nil") · \(store.progressText) · \(copied.count)")
+        originalsSidecarStop(dir.appendingPathComponent("xmp"))
+    }
+
+    /// 照片写不进目标、旁边的 .xmp 写得进（盘满时 RAW 写到一半失败、.part 删掉空间退回来，几 KB 的 .xmp 总写得进）：
+    /// .xmp 不单独复制过去（不留孤立的 .xmp），也不把连续失败的计数清零。模拟：目标里先放一个删不掉的「.<原图>.part」目录，
+    /// copyOne 清旧 .part 那一步就失败（算目标那边写不进），.xmp 自己的 .part 不受影响。
+    static func originalsSidecarStop(_ dir: URL) {
+        typealias Fake = FileSafetySelfTest.Fake
+        let fm = FileManager.default
+        let store = FileSafetySelfTest.makeShoot(dir.appendingPathComponent("shoot"),
+                                                 (1...4).map { Fake(id: "X\($0)", raw: "X\($0).RAF") })
+        var shots: [String: OriginalsCopier.Shot] = [:]
+        for item in store.items {
+            let xmp = URL(fileURLWithPath: item.rawPath).deletingPathExtension().appendingPathExtension("xmp")
+            try? Data("<x:xmpmeta id=\"\(item.id)\"/>".utf8).write(to: xmp)
+            shots[item.id] = OriginalsCopier.Shot(id: item.id, rawPath: item.rawPath, decodePath: item.decodePath)
+        }
+        func listing(_ url: URL) -> [String] {
+            ((try? fm.contentsOfDirectory(atPath: url.path)) ?? []).filter { !$0.hasPrefix(".") }.sorted()
+        }
+        // 正常的一张：RAW + .xmp 复制了 2 个文件，照片本体 1 个
+        let plain = dir.appendingPathComponent("plain")
+        try? fm.createDirectory(at: plain, withIntermediateDirectories: true)
+        if let x4 = shots["X4"] {
+            let r = OriginalsCopier.copy(x4, to: plain, cancel: AnalysisEngine.CancelFlag())
+            check(r.copied == 2 && r.copiedImages == 1 && r.targetFailure == nil && listing(plain) == ["X4.RAF", "X4.xmp"],
+                  "复制原片 RAW + 旁边的 .xmp：复制 2 个文件，照片本体算 1 个", "copied \(r.copied) · 照片 \(r.copiedImages) · \(listing(plain))")
+        }
+
+        let dest = dir.appendingPathComponent("dest")
+        try? fm.createDirectory(at: dest, withIntermediateDirectories: true)
+        var traps: [URL] = []
+        for name in ["X1.RAF", "X2.RAF", "X3.RAF"] {
+            let part = dest.appendingPathComponent("." + name + ".part")
+            try? fm.createDirectory(at: part, withIntermediateDirectories: true)
+            try? Data("held".utf8).write(to: part.appendingPathComponent("held"))
+            lock(part)
+            traps.append(part)
+        }
+        if let x1 = shots["X1"] {
+            let r = OriginalsCopier.copy(x1, to: dest, cancel: AnalysisEngine.CancelFlag())
+            check(r.copied == 0 && r.copiedImages == 0 && r.targetFailure != nil && r.landedName == nil && listing(dest).isEmpty,
+                  "复制原片 RAW 写不进目标：旁边的 .xmp 不单独复制过去（目标里不留孤立的 .xmp）、这一张算目标那边失败",
+                  "copied \(r.copied) · 照片 \(r.copiedImages) · \(r.targetFailure ?? "nil") · \(listing(dest))")
+        }
+        let ids = store.items.map(\.id)
+        store.copyOriginals(ids, to: dest)
+        FileSafetySelfTest.wait(store)
+        let error = store.lastError ?? ""
+        let stoppedOK: Bool = error.contains("连续 3 张都没复制成") && error.contains("后面 1 张没再试")
+            && store.progressText.hasPrefix("复制原片停下了: 3 张 · 复制了 0 个文件") && listing(dest).isEmpty
+        check(stoppedOK, "复制原片 照片写不进、.xmp 写得进：连续 3 张照样停，目标里没留下孤立的 .xmp",
+              "\(error) · \(store.progressText) · \(listing(dest))")
+        for part in traps {
+            unlock(part)
+            try? fm.removeItem(at: part)
+        }
+        store.copyOriginals(ids, to: dest)
+        FileSafetySelfTest.wait(store)
+        let all = listing(dest)
+        check(store.lastError == nil && all.count == 8 && all.filter { $0.hasSuffix(".xmp") }.count == 4
+              && store.progressText.hasPrefix("复制原片完成: 4 张 · 复制了 8 个文件"),
+              "复制原片 能写以后再复制：4 张 RAW 和各自的 .xmp 都过去了", "\(store.lastError ?? "nil") · \(store.progressText) · \(all)")
     }
 
     // MARK: - M01 去重不把分开放的同一帧 RAW 判成「连拍重复」
@@ -441,7 +556,21 @@ enum FollowupSelfTest {
         }
         check(verdict("T1") != .reject && verdict("G1") != .reject, "护着的 RAW 不是废片（移到废纸篓不会动它）",
               "T1 \(verdict("T1").map(\.rawValue) ?? "—") · G1 \(verdict("G1").map(\.rawValue) ?? "—")")
+        // 精选按帧数对手：单帧的场里只剩同一帧的 RAW + JPG，两张都不提成精选（以前 JPG 会被提成一张没有对手的精选）
+        check(verdict("T1") == .usable && verdict("T1_2") == .usable,
+              "单帧的场只剩分卡存的同一帧：RAW、JPG 都是可用，没有提出一张没对手的精选",
+              "T1 \(verdict("T1").map(\.rawValue) ?? "—") · T1_2 \(verdict("T1_2").map(\.rawValue) ?? "—")")
+        check(verdict("G2") == .pick, "对照 同一帧的 RAW 旁边还有另一帧：照常在场里提精选（赢的是另一帧）",
+              "G2 \(verdict("G2").map(\.rawValue) ?? "—")")
+        // 接受全部推荐：没有精选的那一场不动，护着的 RAW 不会被钉成废片
+        store.acceptAllRecommendations()
+        check(verdict("T1") != .reject && verdict("T1_2") != .reject, "接受全部推荐以后：单帧场的 RAW、JPG 都不是废片",
+              "T1 \(verdict("T1").map(\.rawValue) ?? "—") · T1_2 \(verdict("T1_2").map(\.rawValue) ?? "—")")
+        store.undoLastOverride()
         store.rejectBurstDuplicates = false
+        check(verdict("T1") == .usable && verdict("T1_2") == .usable,
+              "关掉去重也一样：单帧场里的同一帧 RAW + JPG 都是可用，不提精选",
+              "T1 \(verdict("T1").map(\.rawValue) ?? "—") · T1_2 \(verdict("T1_2").map(\.rawValue) ?? "—")")
         check(!dup("J1") && !dup("S1"), "关掉去重：连拍重复整组回来")
     }
 

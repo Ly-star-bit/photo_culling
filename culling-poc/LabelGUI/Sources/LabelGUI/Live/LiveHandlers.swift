@@ -688,7 +688,7 @@ extension LiveHandlers {
         out["page"] = collage.project.pages.isEmpty ? 0 : collage.pageIndex + 1
         out["undo"] = undo
         // 存上盘没有（审查 S01b）：改了的那几条路在这之前都 flushSaves 过，这里读的是那次写的结果
-        let saved = collagePersistReport(collage.projectSaveProblem)
+        let saved = collagePersistReport(collage)
         out["persisted"] = saved.persisted
         let (info, notVisible) = liveInfo(req, live: live, model: model, notice: notice, persisted: saved.persisted)
         out["live"] = info
