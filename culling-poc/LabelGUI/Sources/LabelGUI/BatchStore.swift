@@ -1159,11 +1159,13 @@ final class BatchStore: ObservableObject {
             keys.formUnion(state.sharedSidecar ?? [])
         }
         guard keys.contains(where: { !itemIDs.contains($0) }) else { return }
-        // 照片以 manifest 为准：没有 layer1 结果的那几行也是照片，它们的键不算孤儿。
+        // 照片以 manifest 为准：没有 layer1 结果的那几行、这一次没分析成的（photos_without_results：取消时没轮到、
+        // 解码失败）也是照片 —— 它们的键不算孤儿，它们的路径也算候选（不然那张的旧键会被挪到同一个位置上的别的文件）。
         let manifestURL = sessionDir.appendingPathComponent("manifest.json")
         guard let data = try? Data(contentsOf: manifestURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let rows = json["photos"] as? [[String: Any]] else { return }
+              let analyzed = json["photos"] as? [[String: Any]] else { return }
+        let rows = analyzed + (json[ImageLoader.PreviousIDs.idOnlyKey] as? [[String: Any]] ?? [])
         let photoIDs = Set(rows.compactMap { $0["id"] as? String })
         let orphans = keys.subtracting(photoIDs)
         guard !orphans.isEmpty else { return }

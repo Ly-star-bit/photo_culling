@@ -448,6 +448,21 @@ def run_all():
     with open(os.path.join(s.session, "overrides.json"), "rb") as f:
         check(f.read() == before, "再打开一次什么也不改（overrides.json 一个字节没动）")
 
+    print("I2. 这一次解不开的那张（只在 photos_without_results 里）不算孤儿：它的改判不挪给同一个位置上的 PNG")
+    s2 = Shoot("shoot_i2")
+    s2.put("仪式/IMG_0009.JPG"); s2.put("晚宴/IMG_0009.JPG"); s2.put("仪式/IMG_0009.PNG", "png")
+    expect_run(s2.analyze(), 3, 0, "第一次")
+    expect_ids(s2, {"仪式/IMG_0009.JPG": "仪式_IMG_0009", "晚宴/IMG_0009.JPG": "晚宴_IMG_0009",
+                    "仪式/IMG_0009.PNG": "IMG_0009_png"}, "第一次")
+    s2.write("overrides.json", {"仪式_IMG_0009": "精选"})
+    put_junk(s2.root, "仪式/IMG_0009.JPG")
+    res = s2.analyze()
+    check(res["failed"] == ["仪式_IMG_0009"], f"解不开的是 仪式_IMG_0009（实际 {res['failed']}）")
+    s2.verdicts()
+    with open(os.path.join(s2.session, "overrides.json")) as f:
+        got = json.load(f)
+    check(got == {"仪式_IMG_0009": "精选"}, f"改判还挂在 仪式_IMG_0009 上，没挪给 IMG_0009_png（实际 {got}）")
+
 # 中途抛异常（比如分析失败、manifest 没写出来）也要删工作目录：它在 .build 底下，CI 会把 .build 整个缓存起来。
 try:
     run_all()
