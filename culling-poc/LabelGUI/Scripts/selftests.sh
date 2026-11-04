@@ -6,7 +6,7 @@
 #   --minimal / --mask / --album / --fashion / --newspaper-selftest   不给照片文件夹时只验合成数据
 #   --delivery-selftest  交付环节的数据安全：XMP 归属 / 合并、同名另存 -2、截断 JPEG、同一个文件、两条去 GPS
 #                        （端到端的命令行出口在 Scripts/delivery_regression.py）
-#   --diag-selftest      诊断：状态栏提示历史、逐张失败的原因、文件夹没权限
+#   --diag-selftest      诊断：状态栏提示历史、日志轮转、诊断包里没有照片和客户原话、逐张失败的原因、文件夹没权限
 #                        （端到端的命令行出口在 Scripts/diag_regression.py）
 #
 # 为什么每条都要临时数据目录：main.swift 在分派之前就建数据目录、往里写内置字体；ux / timeline / swiss 不查

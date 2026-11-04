@@ -5,7 +5,7 @@ import SwiftUI
 //
 // 三个 tab 的状态栏以前都是 `Text(error).lineLimit(1).help(error)`：选不中、复制不了，下一次操作把 lastError 置空就
 // 再也找不回来。现在 BatchStore / CollageStore / WatermarkStore 的 lastError 一被设上（didSet）就记一条进这里
-// （最近 20 条，新的在前，三个 tab 一起）。状态栏那一行点一下弹出全文：可选中、带「复制」，
+// （最近 20 条，新的在前，三个 tab 一起），同时写进持久日志（AppLog）。状态栏那一行点一下弹出全文：可选中、带「复制」，
 // 下面是最近的历史。lastError 本身还是 String?（实时桥 app_says 读它），这里只是旁边多记一份。
 // 里面混着不是错误的提醒（压不到体积上限、XMP 原样保留、预览被清理……），所以每条按字面分「错误 / 提醒」两级。
 
@@ -18,6 +18,14 @@ final class ErrorHistory: ObservableObject {
         case batch = "批量"
         case collage = "拼图"
         case watermark = "水印"
+
+        var logCategory: String {
+            switch self {
+            case .batch: return "batch"
+            case .collage: return "collage"
+            case .watermark: return "watermark"
+            }
+        }
     }
 
     enum Level: String, Sendable {
@@ -49,6 +57,7 @@ final class ErrorHistory: ObservableObject {
             entries.insert(Entry(date: Date(), source: source, level: level, text: text), at: 0)
             if entries.count > Self.capacity { entries.removeLast(entries.count - Self.capacity) }
         }
+        AppLog.write(source.logCategory, level == .error ? .error : .notice, text)
     }
 
     /// 自检用。
@@ -64,7 +73,7 @@ final class ErrorHistory: ObservableObject {
         "不存在", "解不开", "盘满", "断开", "不支持", "拒绝", "被拦", "超时",
     ]
 
-    /// 「全部复制」的纯文字：一条一段，带时间、tab、级别。
+    /// 复制 / 诊断包里的纯文字：一条一段，带时间、tab、级别。
     func plainText(_ list: [Entry]? = nil) -> String {
         let shown = list ?? entries
         guard !shown.isEmpty else { return "（这次打开以后还没有提示）" }
@@ -84,7 +93,7 @@ final class ErrorHistory: ObservableObject {
     }
 }
 
-/// 提示历史里的时间（不跟着系统地区变：DateFormatter 一律 en_US_POSIX）。
+/// 提示历史、诊断包里的时间（不跟着系统地区变：DateFormatter 一律 en_US_POSIX）。
 enum DiagFormat {
     static let stamp: DateFormatter = {
         let f = DateFormatter()
@@ -177,6 +186,13 @@ struct ErrorHistoryPanel: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(height: 210)
+            Divider()
+            HStack {
+                Button("导出诊断信息…") { Diagnostics.exportInteractively() }
+                    .help("把版本、系统、最近的日志和这些提示打成一个 zip（不含照片、预览图、客户回复原文），发给开发者")
+                Spacer()
+                Text("「帮助」菜单里也有").font(.caption).foregroundStyle(.tertiary)
+            }
         }
         .padding(14)
         .frame(width: 480)

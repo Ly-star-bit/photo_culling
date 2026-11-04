@@ -707,7 +707,12 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--export-jpeg"),
     }
 }
 
-// 诊断这一组的自检（状态栏提示历史、逐张失败的原因、文件夹没权限）：
+// 诊断包（和「帮助 › 导出诊断信息…」同一个 zip，见 Diagnostics/Diagnostics.swift）：
+// LABELGUI_DATA_DIR=<临时> LabelGUI --diag-export <out.zip> [--crash-dir <目录>]。只读数据目录、只写 out.zip。
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--diag-export"), CommandLine.arguments.count > flagIndex + 1 {
+    MainActor.assumeIsolated { DiagnosticsCLI.run(flagIndex: flagIndex) }
+}
+// 诊断这一组的自检（状态栏提示历史、持久日志轮转、诊断包里没有照片和客户原话、失败原因、文件夹权限）：
 // LABELGUI_DATA_DIR=<临时> LabelGUI --diag-selftest [<photo_dir>]（见 Diagnostics/DiagnosticsSelfTest.swift）。
 if CommandLine.arguments.contains("--diag-selftest") {
     MainActor.assumeIsolated { DiagnosticsSelfTest.run() }
@@ -732,6 +737,8 @@ struct LabelGUIApp: App {
             bridge: .gui
         )
         _model = StateObject(wrappedValue: model)
+        // 「帮助 › 导出诊断信息…」要的界面状态（当前场次几张、AI 实时开没开，见 Diagnostics/Diagnostics.swift）。
+        Diagnostics.model = model
     }
 
     var body: some Scene {
@@ -755,8 +762,8 @@ struct LabelGUIApp: App {
                     model.setLiveBridge(on)
                 }
             }
-            // 系统默认的「帮助」只有一项、点了说「帮助不可用」（没有帮助手册）。换成：快捷键一览、使用说明（审查 D03，
-            // 见 Diagnostics/Diagnostics.swift）。
+            // 系统默认的「帮助」只有一项、点了说「帮助不可用」（没有帮助手册）。换成：快捷键一览、使用说明、导出 / 复制诊断信息、
+            // 日志文件夹（审查 D03，见 Diagnostics/Diagnostics.swift）。
             CommandGroup(replacing: .help) {
                 HelpMenuItems()
             }
@@ -772,4 +779,7 @@ struct LabelGUIApp: App {
 
 // 不开界面的最后一道闸：LABELGUI_NO_GUI=1，或者父进程不是 launchd 而且 stdin 不是终端（LABELGUI_ALLOW_GUI=1 绕过）→ 退出。
 NoGUIGate.last()
+// 只有开界面这一条路落盘日志（数据目录 logs/app.log，轮转，见 Diagnostics/AppLog.swift）：--mcp 对数据目录只读，
+// 无头命令照旧打印到终端。第一行记版本、系统、机型、剩余空间。
+Diagnostics.startGUILog(dataDir: appDataDir)
 LabelGUIApp.main()

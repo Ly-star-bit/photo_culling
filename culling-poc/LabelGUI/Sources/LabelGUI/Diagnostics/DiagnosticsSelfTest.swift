@@ -5,6 +5,9 @@ import UniformTypeIdentifiers
 
 /// 诊断这一组的无头自检（审查 D03）：LABELGUI_DATA_DIR=<临时> LabelGUI --diag-selftest [<photo_dir>] [--out <目录>]
 ///   A 状态栏提示的历史：20 条环形、新的在前、连着一样的只记次数、分级；三个 store 的 lastError 一设上就记、类型还是 String?
+///   B 持久日志：一条一行、换行折掉、轮转（个数、大小）、提示历史跟着进日志
+///   C 诊断包：zip 里有说明 / 诊断信息 / 提示 / 日志 / 场次概况 / 目录结构 / 崩溃报告（只要最近的、选片工具的），
+///     没有照片、预览图（连名字都没有）、bookmark、客户备注原文、场次文件夹名、家目录
 ///   D 失败原因：盘不支持废纸篓、没权限、只读盘、盘满、EPERM；原因汇总；废纸篓移走一半；不限体积那条路逐字节和以前一样、
 ///     写不进去报「没有权限」；writeJPEG 原片不在 / 解不开；水印页拿到真原因
 ///   E 文件夹权限：chmod 000 的照片文件夹分析时报「没有权限读这个文件夹 … 系统设置 › 隐私与安全性 › 文件与文件夹」，
@@ -13,7 +16,7 @@ import UniformTypeIdentifiers
 enum DiagnosticsSelfTest {
     @MainActor
     static func run() -> Never {
-        CollageCLI.requireIsolatedDataDir("--diag-selftest", "会在数据目录里建临时文件夹")
+        CollageCLI.requireIsolatedDataDir("--diag-selftest", "会在数据目录里建 logs/、假的场次和临时文件夹")
         let fm = FileManager.default
         let work = appDataDir.appendingPathComponent("diag-selftest", isDirectory: true)
         try? fm.removeItem(at: work)
@@ -21,6 +24,8 @@ enum DiagnosticsSelfTest {
         let check = Check()
 
         historyChecks(work, check)
+        logChecks(work, check)
+        bundleChecks(work, check)
         reasonChecks(work, check)
         permissionChecks(work, check)
         if let i = CommandLine.arguments.firstIndex(of: "--out"), CommandLine.arguments.count > i + 1 {
@@ -28,6 +33,7 @@ enum DiagnosticsSelfTest {
         }
 
         check.unlockAll()
+        AppLog.uninstallFileLog()
         try? fm.removeItem(at: work)
         let failures = check.failures
         print(failures.isEmpty ? "诊断自检全部通过" : "诊断自检 \(failures.count) 项失败：\(failures.joined(separator: "；"))")
@@ -105,6 +111,135 @@ enum DiagnosticsSelfTest {
         check(batch.lastError == nil && collage.lastError == "拼图页的一条：导出失败", "lastError 照旧是 String?、设 nil 不记")
         let plain = history.plainText()
         check(plain.contains("批量 · 错误") && plain.contains("批量页的一条"), "全部复制的文字带页面、级别、原文", plain)
+    }
+
+    // MARK: B 持久日志
+
+    @MainActor
+    private static func logChecks(_ work: URL, _ check: Check) {
+        print("B. 持久日志")
+        let fm = FileManager.default
+        AppLog.uninstallFileLog()
+        let logData = work.appendingPathComponent("log-data", isDirectory: true)
+        let dir = AppLog.installFileLog(dataDir: logData, role: "自检", maxBytes: 4096, keep: 3)
+        check(dir?.lastPathComponent == "logs" && fm.fileExists(atPath: dir?.path ?? "/nonexistent"), "装上：数据目录 logs/")
+        guard let dir else { return }
+        AppLog.error("test", "第一行\n第二行")
+        AppLog.flush()
+        let text = (try? String(contentsOf: dir.appendingPathComponent("app.log"), encoding: .utf8)) ?? ""
+        let pid = ProcessInfo.processInfo.processIdentifier
+        check(text.contains(" 自检[\(pid)] error test: 第一行 ⏎ 第二行\n"), "一条一行：时间、进程、级别、分类，换行折成 ⏎", text)
+        let filler = String(repeating: "x", count: 90)
+        for i in 0..<200 { AppLog.info("test", "\(i) \(filler)") }
+        AppLog.flush()
+        let files = AppLog.logFiles(in: dir)
+        let names = files.map(\.lastPathComponent)
+        check(names == ["app.log", "app.1.log", "app.2.log"], "超过上限轮转、最多留 3 份", "\(names)")
+        let sizes = files.map { (try? fm.attributesOfItem(atPath: $0.path)[.size] as? Int) ?? -1 }
+        check(sizes.allSatisfy { $0 > 0 && $0 <= 4096 }, "每份不超过上限", "\(sizes)")
+        let newest = (try? String(contentsOf: files[0], encoding: .utf8)) ?? ""
+        check(newest.contains("199 \(filler)"), "最新的一行在 app.log")
+        ErrorHistory.shared.record("提示也进日志：盘满了", source: .collage)
+        AppLog.flush()
+        let after = (try? String(contentsOf: files[0], encoding: .utf8)) ?? ""
+        check(after.contains("error collage: 提示也进日志：盘满了"), "状态栏提示跟着进日志（分类 = 页面）", after.suffix(200).description)
+        AppLog.uninstallFileLog()
+        check(AppLog.logsDir == nil, "卸下以后只进 os.Logger")
+    }
+
+    // MARK: C 诊断包
+
+    @MainActor
+    private static func bundleChecks(_ work: URL, _ check: Check) {
+        print("C. 诊断包")
+        let fm = FileManager.default
+        let home = NSHomeDirectory()
+        let data = work.appendingPathComponent("bundle-data", isDirectory: true)
+        let clientFolder = "/Volumes/T7/客户张三婚礼"
+        let desktopFolder = home + "/Desktop/王五订婚"
+        let key1 = BatchStore.sessionKey(for: URL(fileURLWithPath: clientFolder))
+        let key2 = BatchStore.sessionKey(for: URL(fileURLWithPath: desktopFolder))
+        let bookmark = "Ym9va21hcmstc2VjcmV0LWJ5dGVz"
+        let sessions = """
+            [{"key":"\(key1)","path":"\(clientFolder)","name":"客户张三婚礼","lastAnalyzed":"2026-11-01","photoCount":3,"bookmark":"\(bookmark)"},
+             {"key":"\(key2)","path":"\(desktopFolder)","name":"王五订婚","lastAnalyzed":"2026-11-02","photoCount":5}]
+            """
+        let session1 = data.appendingPathComponent("sessions/\(key1)", isDirectory: true)
+        let previews = session1.appendingPathComponent("previews", isDirectory: true)
+        try? fm.createDirectory(at: previews, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: data.appendingPathComponent("logs"), withIntermediateDirectories: true)
+        func put(_ url: URL, _ text: String) { try? text.write(to: url, atomically: true, encoding: .utf8) }
+        put(data.appendingPathComponent("sessions.json"), sessions)
+        put(session1.appendingPathComponent("manifest.json"), "{\"photos\":[{\"id\":\"DSCF0001\",\"raw_path\":\"\(clientFolder)/DSCF0001.RAF\"}]}")
+        put(session1.appendingPathComponent("client_notes.json"), "{\"DSCF0001\":\"客户原话：去路人，脸修瘦一点\"}")
+        put(previews.appendingPathComponent("DSCF0001.jpg"), "不是真的预览图")
+        put(session1.appendingPathComponent("collage-thumb-DSCF0002.png"), "不是真的图")
+        put(data.appendingPathComponent("logs/app.log"),
+            "2026-11-04 10:00:00.000 -0800 GUI[1] error batch: 照片文件夹「客户张三婚礼」不存在 ⏎ \(clientFolder)/DSCF0001.RAF\n"
+                + "2026-11-04 10:00:01.000 -0800 GUI[1] notice app: 启动：数据目录：\(home)/Library/Application Support/选片工具\n")
+        put(data.appendingPathComponent("logs/app.1.log"), "2026-11-03 09:00:00.000 -0800 GUI[1] notice app: 更早的一份\n")
+        let crash = work.appendingPathComponent("crash", isDirectory: true)
+        try? fm.createDirectory(at: crash, withIntermediateDirectories: true)
+        put(crash.appendingPathComponent("LabelGUI-2026-11-03-101010.ips"), "{\"procPath\":\"\(home)/Applications/选片工具.app\"}")
+        put(crash.appendingPathComponent("Safari-2026-11-03-101010.ips"), "别的程序的")
+        let old = crash.appendingPathComponent("LabelGUI-2026-08-01-101010.ips")
+        put(old, "太旧了")
+        try? fm.setAttributes([.modificationDate: Date().addingTimeInterval(-60 * 86_400)], ofItemAtPath: old.path)
+
+        let history = "[2026-11-04 10:00:00] 批量 · 错误\n照片文件夹「王五订婚」不存在（\(desktopFolder)）"
+        let zip = work.appendingPathComponent("出来的/诊断.zip")
+        let report: DiagnosticsBundle.Report
+        do {
+            report = try DiagnosticsBundle.write(dataDir: data, to: zip, context: ["当前场次：\(clientFolder)（key \(key1)）· 3 张"],
+                                                 history: history, crashDir: crash)
+        } catch {
+            check(false, "打包", Diagnostics.describeIO(error))
+            return
+        }
+        check(fm.fileExists(atPath: zip.path), "zip 写到指定的地方（目录不存在先建）")
+        let unpacked = work.appendingPathComponent("unpacked", isDirectory: true)
+        let ditto = Process()
+        ditto.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        ditto.arguments = ["-x", "-k", zip.path, unpacked.path]
+        try? ditto.run()
+        ditto.waitUntilExit()
+        let base = unpacked.standardizedFileURL.path + "/"
+        var files: [String: String] = [:]
+        if let e = fm.enumerator(at: unpacked, includingPropertiesForKeys: [.isRegularFileKey]) {
+            for case let url as URL in e where (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true {
+                let rel = String(url.standardizedFileURL.path.dropFirst(base.count))
+                files[rel] = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            }
+        }
+        let names = files.keys.sorted()
+        check(names == report.entries, "报告列的文件就是 zip 里的", "\(names) vs \(report.entries)")
+        let folder = names.first.map { String($0.split(separator: "/").first ?? "") } ?? ""
+        check(folder.hasPrefix("xuanpian-diagnostics-"), "最外层一个「xuanpian-diagnostics-时间」文件夹", folder)
+        let want = ["README.txt", "info.txt", "recent-messages.txt", "sessions.txt", "data-dir.txt", "logs/app.log", "logs/app.1.log",
+                    "crash-reports/LabelGUI-2026-11-03-101010.ips"]
+        let missing = want.filter { files[folder + "/" + $0] == nil }
+        check(missing.isEmpty, "说明、诊断信息、提示、场次概况、目录结构、日志、最近的崩溃报告都在", "缺 \(missing)")
+        check(names.count == want.count, "别的程序的、30 天以前的崩溃报告不要，场次 JSON、sessions.json 不放", "\(names)")
+        let images = names.filter { DiagnosticsBundle.imageExtensions.contains(URL(fileURLWithPath: $0).pathExtension.lowercased()) }
+        check(images.isEmpty, "没有照片、预览图", "\(images)")
+        let all = files.values.joined(separator: "\n")
+        let banned = ["客户张三婚礼", "王五订婚", "客户原话", "去路人", bookmark, home + "/", "DSCF0001.jpg", "collage-thumb-DSCF0002"]
+        let leaked = banned.filter { all.contains($0) }
+        check(leaked.isEmpty, "没有客户原话、bookmark、场次文件夹名、家目录、预览图的名字", "漏了 \(leaked)")
+        let log = files[folder + "/logs/app.log"] ?? ""
+        check(log.contains("照片文件夹「<场次 1>」不存在 ⏎ <场次 1>/DSCF0001.RAF") && log.contains("~/Library/Application Support/选片工具"),
+              "日志里的路径、「文件夹名」换成代号，家目录换成 ~", log)
+        let hint = files[folder + "/recent-messages.txt"] ?? ""
+        check(hint.contains("「<场次 2>」不存在（<场次 2>）"), "提示里的也换掉", hint)
+        let tree = files[folder + "/data-dir.txt"] ?? ""
+        check(tree.contains("sessions/\(key1)/manifest.json") && tree.contains("sessions/\(key1)/previews/  （1 个文件")
+              && tree.contains("另有 1 张图片"), "目录结构：JSON 列名字和大小，预览目录只说个数，图片不列名字", tree)
+        let summary = files[folder + "/sessions.txt"] ?? ""
+        check(summary.contains("<场次 1>  key \(key1) · 3 张") && summary.contains("<场次 2>  key \(key2) · 5 张"),
+              "场次概况：代号、key、张数", summary)
+        let info = files[folder + "/info.txt"] ?? ""
+        check(info.contains("macOS：") && info.contains("机型：") && info.contains("当前场次：<场次 1>（key \(key1)）"),
+              "诊断信息：系统、机型、界面状态（路径换成代号）", info)
     }
 
     // MARK: D 失败原因
