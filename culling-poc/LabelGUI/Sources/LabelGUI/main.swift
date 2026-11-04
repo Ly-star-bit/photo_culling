@@ -532,6 +532,12 @@ if CommandLine.arguments.contains("--timeline-selftest") {
     MainActor.assumeIsolated { ChapterTimelineSelfTest.run(seed: seed, onlyTrial: trial.map { Int($0) }) }
 }
 
+// 交付环节数据安全自检（XMP 归属 / 合并、同名另存、截断 JPEG、同一个文件、两条去 GPS）：
+// LABELGUI_DATA_DIR=<临时> LabelGUI --delivery-selftest（见 DeliverySelfTest.swift；端到端在 Scripts/delivery_regression.py）。
+if CommandLine.arguments.contains("--delivery-selftest") {
+    MainActor.assumeIsolated { DeliverySelfTest.run() }
+}
+
 // 批量页 / 连拍挑选离屏快照：LabelGUI --batch-ui|--compare-ui <photo_dir> <out.png> [...]（见 UISnapshot.swift）。
 for flag in ["--batch-ui", "--compare-ui"] {
     if let flagIndex = CommandLine.arguments.firstIndex(of: flag),
