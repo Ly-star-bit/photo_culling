@@ -23,14 +23,31 @@ enum ExportFolderGuard {
 
     /// 水印页要查的拍摄文件夹：批量页开着的那一场（WatermarkView 传 batchStore.photoDir）+ 每张照片所在的文件夹
     /// （水印页的照片能从任意文件夹 ⌘O、拖进来，不一定属于哪一场）。按出现的顺序、去重。
+    /// 照片所在的文件夹是 app 自己的输出文件夹（路径里有「导出JPG」「水印导出」这些分析跳过的名字）时，拍摄文件夹是
+    /// 最上面那一段的上一级（S/导出JPG/精华、S/水印导出、S/导出JPG/水印导出 → S）：这些文件夹分析时根本不扫，
+    /// 当成拍摄文件夹会把 S/导出JPG/带水印 误拦下、还说「拍摄文件夹「导出JPG」」；改成 S 以后 S/交付 照样挡住。
+    /// 批量页那一场原样查，不推。
     static func watermarkShoots(batch: URL?, photos: [URL]) -> [URL] {
         var dirs: [URL] = []
         var seen = Set<String>()
-        for dir in (batch.map { [$0] } ?? []) + photos.map({ $0.deletingLastPathComponent() })
+        for dir in (batch.map { [$0] } ?? []) + photos.map({ photoShootRoot($0.deletingLastPathComponent()) })
         where seen.insert(dir.standardizedFileURL.path).inserted {
             dirs.append(dir)
         }
         return dirs
+    }
+
+    /// 照片所在的文件夹往上推到拍摄文件夹：路径里最上面那一段分析跳过的子文件夹名（ImageLoader.excludedSubfolders，
+    /// 和 listPhotos 一样按原名比）的上一级；没有就是它自己。
+    private static func photoShootRoot(_ dir: URL) -> URL {
+        var url = URL(fileURLWithPath: dir.path, isDirectory: true).standardizedFileURL
+        var root = url
+        while true {
+            let parent = url.deletingLastPathComponent().standardizedFileURL
+            if ImageLoader.excludedSubfolders.contains(url.lastPathComponent) { root = parent }
+            guard parent.path != url.path, url.path != "/" else { return root }
+            url = parent
+        }
     }
 
     /// 拦下时那句话，照导出 JPG 的写（那边多一句「勾了覆盖……」，这两处没有覆盖选项）。

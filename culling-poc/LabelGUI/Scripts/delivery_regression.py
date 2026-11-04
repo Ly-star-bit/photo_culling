@@ -7,7 +7,8 @@ Scripts/selftests.sh 里跑）；这里验它们在命令行出口上确实接�
    指向原片的符号链接 → 原片逐字节不变，而且也认得出是同一个文件（退出码 1，链接本身不被换掉）。
 2. --watermark-batch 输出目录在拍摄文件夹里面（照片目录本身、里面还没建的「交付」、--session 那一场里面）、文件名模板
    {原名}（先写好 watermark/state.json）→ 退出码 1、报「不能导出到拍摄文件夹」、照片目录一个文件都不多、子目录不建（审查 S11）；
-   导进照片目录里的「水印导出/」（分析跳过）照常、原片不变，再导一次全是 -2；
+   导进照片目录里的「水印导出/」（分析跳过）照常、原片不变，再导一次全是 -2；照片来自「导出JPG/」（分析跳过）时
+   拍摄文件夹按外面那一场算：输出「导出JPG/带水印」照常导（退出码 0），输出那一场的「交付」照样拦、点名那一场；
    没有任何水印内容（不带 --exif / --signature）→ 退出码 1，而且是因为「没有任何水印内容」（不是别的原因）。
 3. --export-xmp：原图旁边已有 LR 写的 sidecar → 只改星级 / 色标，调色、关键字按解析后的字段逐个不变；
    自己写的（x:xmptk="选片工具"）和以前 culling-poc 写的 → 整份重写成现在的模板；读不全的（rdf:resource）、
@@ -307,6 +308,23 @@ def batch_section():
     new = sorted(set(os.listdir(wm)) - set(first)) if os.path.isdir(wm) else []
     check(r.returncode == 0 and new == ["P3-2.jpg", "p1-2.jpg", "p2-2.jpg"], f"再导一次：全是 -2（{new}）")
     check("另存为 -2" in r.stdout, f"说了「目标里已有同名，另存为 -2」：{r.stdout.strip().splitlines()[:1]}")
+    # 照片来自「导出JPG/」（分析跳过）：拍摄文件夹按外面那一场算 —— 旁边的「导出JPG/带水印」照常导，那一场的「交付」照样拦
+    exp = os.path.join(d, "导出JPG")
+    os.makedirs(exp)
+    for i, name in enumerate(("e1.jpg", "e2.jpg")):
+        make_jpeg(os.path.join(exp, name), seed=20 + i)
+    exp_before = tree(exp)
+    beside = os.path.join(exp, "带水印")
+    r = run(["--watermark-batch", exp, beside, "--exif", "--session", d], data)
+    got = sorted(os.listdir(beside)) if os.path.isdir(beside) else []
+    check(r.returncode == 0 and got == ["e1.jpg", "e2.jpg"],
+          f"照片在「导出JPG/」、输出「导出JPG/带水印」（分析不扫）：退出码 {r.returncode}（要 0）、写出 {got}"
+          f"（{(r.stdout + r.stderr).strip()[-160:]!r}）")
+    r = run(["--watermark-batch", exp, os.path.join(d, "交付"), "--exif"], data)
+    check(r.returncode == 1 and f"{refuse}「batch」" in r.stdout and not os.path.exists(os.path.join(d, "交付")),
+          f"照片在「导出JPG/」、输出那一场的「交付」：退出码 {r.returncode}（要 1）、点名「batch」（不是「导出JPG」）、没建目录"
+          f"（{r.stdout.strip()[-120:]!r}）")
+    check(tree(exp) == exp_before, "　…… 「导出JPG/」里的照片逐字节不变、这一层没多文件")
     check(tree(d) == before, "原片（和旁边的 notes.txt）逐字节不变、照片目录这一层没多文件")
 
 
