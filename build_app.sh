@@ -68,7 +68,15 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSRemovableVolumesUsageDescription</key>
-    <string>插上相机存储卡时读取卡上的照片，问你要不要导入到「图片」文件夹。只读，不会改动卡上的文件。</string>
+    <string>读取存储卡和外接硬盘上的照片：插卡时问你要不要导入；拍摄文件夹放在外接硬盘上时，用来分析、写 XMP、导出。存储卡上的文件只读，不会改动。</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>读取放在桌面上的拍摄文件夹，用来分析、写 XMP、导出。</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>读取放在「文稿」里的拍摄文件夹，用来分析、写 XMP、导出。</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>读取放在「下载」里的拍摄文件夹，用来分析、写 XMP、导出。</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>读取放在网络盘（NAS、共享文件夹）上的拍摄文件夹，用来分析、写 XMP、导出。</string>
 </dict>
 </plist>
 PLIST
