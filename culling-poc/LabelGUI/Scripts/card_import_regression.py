@@ -466,6 +466,109 @@ pairs_m3 = {"DSC00009.ARW": cam1_raw, "DSC00009.JPG": cam1_jpg, "DSC00009_2.ARW"
 check(all(sha(os.path.join(d3, k)) == sha(os.path.join(v, "DCIM/100MSDCF/" + k.replace("_2", ""))) for k, v in pairs_m3.items()),
       "机身 1 的 JPG 配机身 1 的 RAW、机身 2 的配机身 2 的（逐字节核对）")
 
+# ---------- 导到哪：导入根目录可以改（外接盘），盘不在时明说、绝不落回系统盘 ----------
+TODAY = time.strftime("%Y%m%d")
+rcard = mkcard("card_r", {"DCIM/100CANON/IMG_0001.CR3": rand(400_000), "DCIM/100CANON/IMG_0001.JPG": rand(100_000)})
+RFILES = ["IMG_0001.CR3", "IMG_0001.JPG"]
+
+
+def ingest_to(data, *extra):
+    return run_card_env(rcard, data, None, {}, *extra)
+
+
+print("R1. 记住的导入根目录：照旧在里面按今天建 yyyyMMdd")
+root1 = os.path.join(WORK, "root_r1")
+os.makedirs(root1)
+r = ingest_to(os.path.join(WORK, "data_r1"), "--dest-root", root1)
+check(r.returncode == 0 and listing(os.path.join(root1, TODAY)) == RFILES, f"导进了 root_r1/{TODAY}（{listing(os.path.join(root1, TODAY))}）")
+
+print("R2. 外接盘没插上 / 文件夹没了 / 没给目标：不导、明说，不往别处落")
+r = ingest_to(os.path.join(WORK, "data_r2"), "--dest-root", "/Volumes/NoSuchDisk_K/照片")
+check(r.returncode == 3 and "「NoSuchDisk_K」" in r.stdout and "没插上" in r.stdout, "盘没插上：说出盘名、退出码 3")
+check(not os.path.exists("/Volumes/NoSuchDisk_K"), "没在 /Volumes 下建出文件夹")
+gone = os.path.join(WORK, "root_gone")
+r = ingest_to(os.path.join(WORK, "data_r2"), "--dest-root", gone)
+check(r.returncode == 3 and "不在了" in r.stdout and not os.path.exists(gone), "文件夹没了：说「不在了」、没重新建出来")
+r = ingest_to(os.path.join(WORK, "data_r2"), "--use-saved-settings")
+check(r.returncode == 2, "没记导入位置（= 图片）又没给 --dest：拒绝跑，退出码 2")
+
+print("R3. 记住的位置跟着书签走：根目录改了名照样找得到")
+root3 = os.path.join(WORK, "root_r3")
+os.makedirs(root3)
+data_r3 = os.path.join(WORK, "data_r3")
+r = ingest_to(data_r3, "--dest-root", root3, "--save-settings", "--plan-only")
+saved = json.load(open(os.path.join(data_r3, "card_import_settings.json")))
+check(r.returncode == 0 and saved["root"]["path"].endswith("root_r3") and saved["root"].get("bookmark"), "设置里记了路径和书签")
+os.rename(root3, root3 + "_改名")
+r = ingest_to(data_r3, "--use-saved-settings")
+check(r.returncode == 0 and listing(os.path.join(root3 + "_改名", TODAY)) == RFILES, "导进了改名后的文件夹")
+check(not os.path.exists(root3), "没在旧路径上重新建出文件夹")
+
+print("R4. 路径上有文件夹、但不在记住的那块盘上（/Volumes/T7 没挂时系统盘上同名的空文件夹）：不算，不导")
+root4 = os.path.join(WORK, "root_r4")
+os.makedirs(root4)
+data_r4 = os.path.join(WORK, "data_r4")
+ingest_to(data_r4, "--dest-root", root4, "--save-settings", "--plan-only")
+settings_path = os.path.join(data_r4, "card_import_settings.json")
+saved = json.load(open(settings_path))
+saved["root"]["volumeUUID"] = "00000000-0000-0000-0000-00000000C0DE"
+saved["root"]["volumeName"] = "T7"
+json.dump(saved, open(settings_path, "w"))
+r = ingest_to(data_r4, "--use-saved-settings")
+check(r.returncode == 3 and "「T7」" in r.stdout and "没插上" in r.stdout, "说「T7」没插上、退出码 3")
+check(listing(root4) == [], f"那个文件夹里什么都没写（{listing(root4)}）")
+
+print("R5. 这次导进一个已有的文件夹（追加到已有场次）：不建日期子文件夹；文件夹不在就不导")
+exist5 = os.path.join(WORK, "已有场次_r5")
+os.makedirs(exist5)
+open(os.path.join(exist5, "DSC_0001.JPG"), "wb").write(rand(5000))
+r = ingest_to(os.path.join(WORK, "data_r5"), "--into-existing", exist5)
+check(r.returncode == 0 and listing(exist5) == sorted(RFILES + ["DSC_0001.JPG"]), f"直接放进已有文件夹（{listing(exist5)}）")
+r = ingest_to(os.path.join(WORK, "data_r5b"), "--into-existing", os.path.join(WORK, "没有这个"))
+check(r.returncode == 3 and not os.path.exists(os.path.join(WORK, "没有这个")), "不在的文件夹：不导、不建")
+
+print("R6. 确认之后导入根目录被拔掉（挪走）：停下、不在原路径上重建（不会落到系统盘）")
+root6 = os.path.join(WORK, "root_r6")
+os.makedirs(root6)
+r = ingest_to(os.path.join(WORK, "data_r6"), "--dest-root", root6, "--rename-after-plan", root6)
+check(r.returncode != 0 and "不见了" in r.stdout, "说导入位置不见了")
+check(not os.path.exists(root6) and listing(root6 + ".moved") == [], "原路径没重建，挪走的那个里也没写东西")
+
+print("R7. 以前导到的文件夹在一块现在没插上的盘上：说「盘没插上」，不说「文件夹不在了」")
+small = rand(50_000)
+c7 = mkcard("card_r7", {"DCIM/100CANON/IMG_0700.JPG": small})
+fp = hashlib.sha256(small).hexdigest()[:32]
+data_r7 = os.path.join(WORK, "data_r7")
+os.makedirs(data_r7)
+json.dump({"version": 1, "entries": {f"IMG_0700.JPG|{len(small)}|{fp}":
+          {"dest": "/Volumes/NoSuchDisk_K/照片/20261001/IMG_0700.JPG", "at": "2026-10-01T09:30:00Z"}}},
+          open(os.path.join(data_r7, "import_ledger.json"), "w"))
+r = run_card(c7, data_r7, os.path.join(WORK, "dest_r7"), "--plan-only")
+check("以前导入过 1 张" in r.stdout and "「NoSuchDisk_K」没插上" in r.stdout and "已经不在了" not in r.stdout,
+      "以前导入过 1 张、那块盘没插上")
+
+print("R8. 真的 exFAT 盘（只在 CI 里跑：CARD_REGRESSION_EXFAT=1；别在自己电脑上挂映像）")
+if os.environ.get("CARD_REGRESSION_EXFAT") != "1":
+    print("  (跳过：没设 CARD_REGRESSION_EXFAT=1)")
+else:
+    img = os.path.join(WORK, "exfat.dmg")
+    mnt = os.path.join(WORK, "exfat_mnt")
+    os.makedirs(mnt)
+    # 映像里不放 DCIM（插卡检测要根目录有 DCIM 才当成存储卡）；-nobrowse 不在访达里出现。
+    subprocess.run(["hdiutil", "create", "-size", "64m", "-fs", "ExFAT", "-volname", "KEXFAT", img],
+                   check=True, capture_output=True)
+    subprocess.run(["hdiutil", "attach", img, "-nobrowse", "-mountpoint", mnt], check=True, capture_output=True)
+    try:
+        r = ingest_to(os.path.join(WORK, "data_r8"), "--dest-root", mnt, "--plan-only")
+        check(r.returncode == 0 and "空间够" in r.stdout, "exFAT 上空间查得出来（不是 0、不是查不到）")
+        r = ingest_to(os.path.join(WORK, "data_r8"), "--dest-root", mnt)
+        got = os.path.join(mnt, TODAY)
+        check(r.returncode == 0 and listing(got) == RFILES, f"exFAT 上照样全导进来（{listing(got)}）")
+        check(all(sha(os.path.join(got, f)) == sha(os.path.join(rcard, "DCIM/100CANON", f)) for f in RFILES), "内容逐字节一致")
+        check(hidden(got) == [] or all(f.startswith("._") for f in hidden(got)), f"没有残留的 .part（{hidden(got)}）")
+    finally:
+        subprocess.run(["hdiutil", "detach", mnt, "-force"], capture_output=True)
+
 print("F. 存储卡从头到尾没被动过")
 check(tree(CARD) == card_before, "卡上每个文件的大小 / 修改时间 / SHA-256 都和开始时一样")
 

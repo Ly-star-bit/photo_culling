@@ -66,6 +66,9 @@ enum CardImporter {
         let source: URL
         let sourceName: String
         let destination: URL
+        /// 必须已经在的那一级（外接盘上的导入根目录 / 「导进已有的文件夹」）：导的时候不在了就停，
+        /// 不顺着建一串目录（盘没挂上时会建到系统盘上去）。nil = 「图片」那条老路。
+        let mustExist: URL?
         let copies: [Copy]
         /// 目标里已经有、整份逐字节一样的 —— 记进账本，不再复制。
         let alreadyThere: [(key: String, path: String)]
@@ -77,6 +80,8 @@ enum CardImporter {
         /// 以前导入到了哪些文件夹（给提示用），和最常见的那个还在不在。
         let previousFolders: [String]
         let previousFolderGone: Bool
+        /// 以前导到的文件夹在一块现在没插上的盘上（/Volumes/<名字>）：那不是「文件夹没了」，是盘没插。
+        let previousVolumeOffline: String?
         /// 目标里已经有、内容一模一样的（张）。
         let skippedInDest: Int
         /// 和目标里别的照片重名、整组改了名的（张）。
@@ -337,7 +342,7 @@ enum CardImporter {
     }
 
     /// `progress`：要整份比对目标里的同名文件时说一声（重导进同一个文件夹时可能要读很久）。
-    static func plan(source: URL, destination: URL, ledger: Ledger, includeImported: Bool,
+    static func plan(source: URL, destination: URL, mustExist: URL? = nil, ledger: Ledger, includeImported: Bool,
                      cancel: AnalysisEngine.CancelFlag? = nil,
                      progress: ((String) -> Void)? = nil) throws -> Plan {
         let fm = FileManager.default
@@ -577,12 +582,17 @@ enum CardImporter {
         }
 
         let folders = previousFolders.sorted { $0.value > $1.value }.map(\.key)
+        // 以前导到的那个文件夹不在：盘没插上（/Volumes/<名字> 没挂）和文件夹真没了，说法不一样。
+        let previousMissing = folders.first.map { !isDirectory(URL(fileURLWithPath: $0)) } ?? false
+        let previousOffline = previousMissing ? folders.first.flatMap(offlineVolumeName(for:)) : nil
         return Plan(source: source, sourceName: source.lastPathComponent, destination: destination,
+                    mustExist: mustExist,
                     copies: copies, alreadyThere: alreadyThere,
                     cardShots: groups.count, cardFiles: files.count,
                     skippedImported: skippedImported,
                     previousFolders: folders,
-                    previousFolderGone: folders.first.map { !isDirectory(URL(fileURLWithPath: $0)) } ?? false,
+                    previousFolderGone: previousMissing && previousOffline == nil,
+                    previousVolumeOffline: previousOffline,
                     skippedInDest: skippedInDest, renamedShots: renamedShots,
                     renamedWithPair: renamedWithPair, renamedExample: renamedExample,
                     unconfirmedHalves: unconfirmedHalves, pairedShots: pairedShots, videoCount: videos,
@@ -610,6 +620,11 @@ enum CardImporter {
             return done
         }
 
+        // 外接盘上的导入位置 / 选的已有文件夹，确认之后被拔掉、删掉了：不导（往上找存在的那一级会落到系统盘）。
+        if let must = plan.mustExist, !isDirectory(must) {
+            outcome.aborted = "导入位置 \(displayPath(must)) 不见了（盘拔掉了？），没导"
+            return finish()
+        }
         if let free = freeBytes(near: plan.destination), free < plan.totalBytes + spaceMargin {
             outcome.aborted = "空间不够：要 \(BatchStore.sizeText(plan.totalBytes))，只剩 \(BatchStore.sizeText(free))"
             return finish()
@@ -620,7 +635,12 @@ enum CardImporter {
             return finish()
         }
         do {
-            try fm.createDirectory(at: plan.destination, withIntermediateDirectories: true)
+            if plan.mustExist == nil {
+                try fm.createDirectory(at: plan.destination, withIntermediateDirectories: true)
+            } else if !isDirectory(plan.destination) {
+                // 只在已经在的那一级下面建一层（yyyyMMdd），不连上级一起建。
+                try fm.createDirectory(at: plan.destination, withIntermediateDirectories: false)
+            }
         } catch {
             outcome.aborted = "建不了目标文件夹 \(displayPath(plan.destination))：\(describe(error))"
             return finish()
@@ -958,10 +978,20 @@ enum CardImporter {
     }
 
     /// 目标所在的盘还剩多少（目标还不存在就往上找存在的那一级）。
+    /// 「重要用途可用」只有 APFS 算得准：exFAT / FAT / SMB 这些外接盘上常是 nil（会当成够）或 0（会永远不够），
+    /// 那时退回普通的「可用」，再不行问 statfs。
     static func freeBytes(near url: URL) -> Int64? {
         let probe = existingAncestor(of: url)
-        guard let v = try? probe.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]) else { return nil }
-        return v.volumeAvailableCapacityForImportantUsage
+        let v = try? probe.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
+        if let important = v?.volumeAvailableCapacityForImportantUsage, important > 0 { return important }
+        if let plain = v?.volumeAvailableCapacity { return Int64(plain) }
+        var fs = statfs()
+        if statfs(probe.path, &fs) == 0 {
+            let blocks = Int64(fs.f_bavail)
+            let blockSize = Int64(fs.f_bsize)
+            return blocks * blockSize
+        }
+        return v?.volumeAvailableCapacityForImportantUsage
     }
 
     /// 自己或往上第一个存在的那一级。
@@ -1084,6 +1114,7 @@ extension BatchStore {
             let fresh: CardImporter.Plan
             do {
                 fresh = try CardImporter.plan(source: plan.source, destination: plan.destination,
+                                              mustExist: plan.mustExist,
                                               ledger: CardImporter.Ledger.load(from: ledgerURL),
                                               includeImported: plan.includeImported, cancel: flag)
             } catch {
@@ -1159,7 +1190,9 @@ extension BatchStore {
     /// 要分析就分析。还有卡排着队就先不开（开了也不能分析，分析的请求会丢 —— 审查发现）。用户在忙就
     /// 什么都不做，横幅留着等他点。
     func openFinishedImportIfReady(userBusy: Bool) {
-        guard finishedImport != nil, queuedCardImports == 0, !isRunning, !userBusy else { return }
+        // 确认框里正开着选文件夹的面板（换导入位置）：也算在忙，横幅留着（BatchView 的 modalPanelOpen 管不到那个面板）。
+        guard finishedImport != nil, queuedCardImports == 0, !isRunning, !userBusy,
+              !CardImportCenter.pickingFolder else { return }
         openFinishedImport()
     }
 
@@ -1167,6 +1200,12 @@ extension BatchStore {
     func openFinishedImport() {
         guard let done = finishedImport, !isRunning else { return }
         finishedImport = nil
+        // 导到外接盘上、还没打开盘就拔了：别打开一个空场次，说一声（照片在那块盘上，插回去用「选择文件夹…」打开）。
+        if !CardImporter.directoryExists(done.folder) {
+            addImportNotice("\(done.shots) 张导到了 \(CardImporter.displayPath(done.folder))，那里现在打不开（盘拔掉了？）—— " +
+                            "插回去以后用文件夹菜单「选择文件夹…」打开")
+            return
+        }
         switchSession(to: done.folder)
         if done.analyze { runAnalysis() }
     }
@@ -1188,7 +1227,9 @@ private final class ImportLiveBox: @unchecked Sendable {
 
 /// LABELGUI_DATA_DIR=<临时> LabelGUI --ingest <card_dir> --dest <dir> [--reimport] [--plan-only] [--cancel-after N]
 ///   [--cancel-at-bytes B] [--via-store [--no-analyze]] [--ledger-cap N] [--plant-after-plan 文件名]
-///   [--plant-symlink-after-plan 文件名] [--plant-symlink-mid 文件名]
+///   [--plant-symlink-after-plan 文件名] [--plant-symlink-mid 文件名] [--rename-after-plan 路径]
+///   （--dest 也可以换成 --dest-root <根目录> / --into-existing <已有文件夹> / --use-saved-settings，
+///    配 --save-settings 把 --dest-root 记进数据目录 —— 走界面那套「导到哪」，见 CardImportDestinations.swift）
 /// 账本在 LABELGUI_DATA_DIR 里；必须给 --dest —— 测试不往真的「图片」文件夹里写。
 /// --cancel-after N：复制完 N 个文件就取消；--cancel-at-bytes B：复制到第 B 字节（文件中间）就取消
 /// —— 验证 .part 清干净、账本只记了导完的。--plant-after-plan：计划做完、复制之前往目标里放一个同名文件
@@ -1205,17 +1246,38 @@ enum CardImportCLI {
             print("--ingest 会写导入账本：先设 LABELGUI_DATA_DIR=<临时目录> 再跑（不能碰真实数据）")
             exit(2)
         }
-        guard let destPath = option("--dest") else {
-            print("--ingest 必须给 --dest <目标文件夹>（测试不往真的「图片」里写）")
+        // 导到哪：--dest 直接给目标文件夹（老用法）；或者走界面那套 —— --dest-root 导入根目录（按今天建 yyyyMMdd）、
+        // --into-existing 导进已有的文件夹、--use-saved-settings 用数据目录里记住的根目录（--save-settings 先记下）。
+        // 哪个都没给（或记住的是「图片」）就拒绝：测试不往真的「图片」里写。
+        var settings = args.contains("--use-saved-settings") ? CardImporter.DestinationSettings.load(from: appDataDir)
+            : CardImporter.DestinationSettings()
+        if let root = option("--dest-root") {
+            settings.root = CardImporter.savedFolder(for: URL(fileURLWithPath: root))
+        }
+        if args.contains("--save-settings") { settings.save(to: appDataDir) }
+        let target: CardImporter.Target
+        if let destPath = option("--dest") {
+            target = CardImporter.Target(destination: URL(fileURLWithPath: destPath).standardizedFileURL,
+                                         mustExist: nil, appending: false, issue: nil)
+        } else if let existing = option("--into-existing") {
+            target = CardImporter.target(settings: settings, choice: .existing(URL(fileURLWithPath: existing)))
+        } else if settings.root != nil {
+            target = CardImporter.target(settings: settings, choice: .saved)
+        } else {
+            print("--ingest 必须给 --dest <目标文件夹>（或 --dest-root / --into-existing；测试不往真的「图片」里写）")
             exit(2)
         }
+        if let issue = target.issue {
+            print("导入位置有问题：\(issue)")
+            exit(3)
+        }
         let card = URL(fileURLWithPath: args[flagIndex + 1]).standardizedFileURL
-        let dest = URL(fileURLWithPath: destPath).standardizedFileURL
+        let dest = target.destination
         if let cap = option("--ledger-cap").flatMap(Int.init) { CardImporter.Ledger.cap = cap }
         let ledgerURL = appDataDir.appendingPathComponent(CardImporter.ledgerFileName)
         let plan: CardImporter.Plan
         do {
-            plan = try CardImporter.plan(source: card, destination: dest,
+            plan = try CardImporter.plan(source: card, destination: dest, mustExist: target.mustExist,
                                          ledger: CardImporter.Ledger.load(from: ledgerURL),
                                          includeImported: args.contains("--reimport"))
         } catch {
@@ -1242,6 +1304,11 @@ enum CardImportCLI {
         }
         if let planted = option("--plant-symlink-after-plan") { plantSymlink(planted) }
         var midSymlink = option("--plant-symlink-mid")
+        // --rename-after-plan 路径：计划做完、复制之前把它挪走（模拟确认之后外接盘被拔掉）—— 验证不导、
+        // 也不在原来的路径上重新建出文件夹（那会落到系统盘上）。
+        if let path = option("--rename-after-plan") {
+            try? FileManager.default.moveItem(atPath: path, toPath: path + ".moved")
+        }
 
         // --via-store：走界面同一条路 —— BatchStore.importFromCard（重做计划 → 复制）→ 像 BatchView 闲着时那样
         // 打开目标文件夹 → 自动开始分析，等全部跑完再打印。
@@ -1292,7 +1359,8 @@ enum CardImportCLI {
         lines.append(plan.copies.isEmpty ? "要导入：没有" : "要导入：\(plan.summaryLine)")
         lines.append("跳过：以前导入过 \(plan.skippedImported) 张 · 目标里已有 \(plan.skippedInDest) 张 · 改名 \(plan.renamedShots) 张" +
                      (plan.previousFolders.isEmpty ? "" : " · 以前导到 \(plan.previousFolders.map { URL(fileURLWithPath: $0).lastPathComponent }.joined(separator: "、"))") +
-                     (plan.previousFolderGone ? "（那个文件夹已经不在了）" : ""))
+                     (plan.previousFolderGone ? "（那个文件夹已经不在了）" : "") +
+                     (plan.previousVolumeOffline.map { "（那块盘「\($0)」没插上）" } ?? ""))
         if plan.pairedShots > 0 || plan.unconfirmedHalves > 0 {
             lines.append("RAW/JPG 配对：补成一对 \(plan.pairedShots) 张 · 认不准没配 \(plan.unconfirmedHalves) 张")
         }
@@ -1302,6 +1370,7 @@ enum CardImportCLI {
         if let other = plan.otherFilesText { lines.append("其他文件：\(other)") }
         if let problems = plan.scanProblemText { lines.append("读不出来：\(problems)") }
         lines.append("目标：\(CardImporter.displayPath(plan.destination))（原有 \(plan.existingInDest) 个文件）· 空间\(plan.enoughSpace ? "够" : "不够")")
+        if let must = plan.mustExist { lines.append("必须已经在：\(must.path)") }
         return lines.joined(separator: "\n")
     }
 }
