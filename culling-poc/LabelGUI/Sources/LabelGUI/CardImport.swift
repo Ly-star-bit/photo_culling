@@ -1502,11 +1502,20 @@ extension BatchStore {
         if done.analyze { runAnalysis() }
     }
 
-    /// 导入的提醒攒着（几张卡各有问题时都留着），最多 3 条，用户点掉才没。
+    /// 导入的提醒攒着（几张卡各有问题时都留着），最多 3 条，用户点掉才没。超了先扔最早的纯信息（改名导入了、
+    /// 还没打开……），带「先别格式化」的问题提醒最后才扔 —— 不然后面几张卡各留一句「改名导入了」，就把前面那句
+    /// 「备份没写全…先别格式化」挤掉了（审查发现）。
     func addImportNotice(_ text: String) {
         var lines = importNotice.map { $0.components(separatedBy: "\n") } ?? []
         lines.append(text)
-        importNotice = lines.suffix(3).joined(separator: "\n")
+        while lines.count > 3 {
+            if let info = lines.firstIndex(where: { !$0.contains("先别格式化") }) {
+                lines.remove(at: info)
+            } else {
+                lines.removeFirst()
+            }
+        }
+        importNotice = lines.joined(separator: "\n")
     }
 }
 
@@ -1518,7 +1527,7 @@ private final class ImportLiveBox: @unchecked Sendable {
 // MARK: - 无头测试
 
 /// LABELGUI_DATA_DIR=<临时> LabelGUI --ingest <card_dir> --dest <dir> [--reimport] [--plan-only] [--cancel-after N]
-///   [--cancel-at-bytes B] [--via-store [--no-analyze]] [--ledger-cap N] [--plant-after-plan 文件名]
+///   [--cancel-at-bytes B] [--via-store [--no-analyze] [--preload-notice 文字]…] [--ledger-cap N] [--plant-after-plan 文件名]
 ///   [--plant-symlink-after-plan 文件名] [--plant-symlink-mid 文件名] [--rename-after-plan 路径]
 ///   （--dest 也可以换成 --dest-root <根目录> / --into-existing <已有文件夹> / --use-saved-settings，
 ///    配 --save-settings 把 --dest-root 记进数据目录 —— 走界面那套「导到哪」，见 CardImportDestinations.swift）
@@ -1622,6 +1631,10 @@ enum CardImportCLI {
             MainActor.assumeIsolated {
                 let store = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
                 let before = store.photoDir?.path ?? "-"
+                // --preload-notice 文字（可以给几次）：开始前横幅上已经攒着的提醒（测 3 条上限先扔哪条）。
+                for (i, arg) in args.enumerated() where arg == "--preload-notice" && i + 1 < args.count {
+                    store.addImportNotice(args[i + 1])
+                }
                 store.importFromCard(plan, analyzeAfter: !args.contains("--no-analyze"))
                 let deadline = Date().addingTimeInterval(900)
                 // 像 BatchView 那样：每导完一张的那一刻看要不要打开。

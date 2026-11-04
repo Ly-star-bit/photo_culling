@@ -452,6 +452,20 @@ r = run_card(card_ns_b, os.path.join(WORK, "data_m2"), d2)
 check(listing(d2) == ["DSC00005.ARW", "DSC00005_2.JPG"], f"序列号读不到 → 改名、不硬配（{listing(d2)}）")
 check(describe_count(r.stdout, "认不准没配") == 1, "计划里数出 1 张认不准没配")
 
+print("M2b. 只改了名的提醒不挤掉前面「先别格式化」那条：横幅最多 3 条，超了先扔纯信息的")
+d_m2b = os.path.join(WORK, "dest_m2b")
+os.makedirs(d_m2b)
+open(os.path.join(d_m2b, "DSC00001.JPG"), "wb").write(rand(70_000))          # 目标里同名的别的照片 → 改名
+card_m2b = mkcard("card_m2b", {"DCIM/100MSDCF/DSC00001.JPG": rand(80_000)})
+problem = "存储卡「CARD1」：备份没写全：3 个文件没备份到 T7 › 备份（备份盘满了） —— 先别格式化存储卡"
+info_old = "12 张导到了 ~/A/20261103，还没打开、没分析 —— 用文件夹菜单「选择文件夹…」打开它"
+info_new = "存储卡「CARD3」：2 张和目标里别的照片重名，改名导入了（如 IMG_0001_2）"
+r = run_card(card_m2b, os.path.join(WORK, "data_m2b"), d_m2b, "--via-store", "--no-analyze",
+             "--preload-notice", problem, "--preload-notice", info_old, "--preload-notice", info_new)
+check("改名导入了（如 DSC00001_2）" in r.stdout and problem in r.stdout,
+      "这张卡的改名提醒进来了，前面那条「先别格式化」还在")
+check(info_old not in r.stdout and info_new in r.stdout, "挤掉的是最早的纯信息那条")
+
 print("M3. 两台同号机身（防的就是把它们拼成一张）：各自的 JPG 找到各自的 RAW")
 d3 = os.path.join(WORK, "dest_m3")
 data_m3 = os.path.join(WORK, "data_m3")
