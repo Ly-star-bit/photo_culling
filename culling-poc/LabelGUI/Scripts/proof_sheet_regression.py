@@ -12,7 +12,7 @@
 2. --client-import：确认表复制格式「文件名 备注：…」、微信写法「7208 黑白」都读回备注，「修 3 处」不把第 3 张认进来；
    预览说带备注、超出套餐；--apply 存 client_notes.json，--undo 选中和备注一起回去；--clear 连备注一起清、能撤销。
 3. --copy-originals：目标里写「精修要求.csv」（BOM、表头、转义）；再复制一次一模一样不再写；备注改了另存
-   「精修要求-2.csv」，原来那份不动。
+   「精修要求-2.csv」，原来那份不动；CSV 按实际复制结果写（同名不同内容另存 -2 的写 -2 的名字，没复制成的不写）。
 4. --proof-sheet --with-watermark --signature：每张图都变了、张数和顺序不变、预览文件一个字节没动；
    没签名也没文字时不导（不悄悄导出不带水印的）；打印每张平均体积（bytesPerPhoto 的依据）。
 5. 水印页只开了 EXIF 参数文字（默认模板）：原片没有 EXIF、外接盘没插时一张都画不上 → 不导、不记表、不报「带水印」；
@@ -235,6 +235,7 @@ def run(binary, work):
     c = lg("--copy-originals", photos, "--dest", dest, "--scope", "client")
     check("写了 精修要求-2.csv" in c.stdout and "没覆盖" in c.stdout, "备注改了：另存精修要求-2.csv", c.stdout)
     check(open(csv_path, "rb").read() == first_csv, "原来那份精修要求.csv 一个字节没动")
+    retouch_landed(lg, work, photos, picks, n2)
 
     # 清除客户选中：备注一起清，⌘Z 一起回来。
     r = lg("--client-import", photos, "--clear", "--apply", "--undo")
@@ -291,6 +292,33 @@ def watermark(lg, work, photos, session, ids, picks, preview_hash, page_a):
         return sum(len(c[1]) for c in cs) // max(1, len(cs))
     print("体积: 每张平均 base64 {} 字节（不带水印）· {}（签名角标）· {}（文字角标）".format(
         avg(plain), avg(marked), avg(cells(page_d))))
+
+
+def retouch_landed(lg, work, photos, picks, n2):
+    """精修要求.csv 跟着实际复制结果写：精修文件夹几单共用、里面已经有上一单同名不同内容的照片 → 这张另存 -2，CSV 写 -2 的名字
+    （以前写原名，指着上一单那张）；原片没复制成的那张不写进去，状态栏说一声。客户备注这时是 picks[0]=换成调亮一点、
+    n2=修 3 处、picks[4]=黑白。"""
+    shared = os.path.join(work, "待精修")
+    os.makedirs(shared)
+    theirs = os.path.join(shared, picks[0] + ".JPG")
+    with open(theirs, "wb") as f:
+        f.write(b"last order's DSCF photo")
+    original = os.path.join(photos, picks[4] + ".JPG")
+    aside = os.path.join(work, picks[4] + ".aside")
+    os.rename(original, aside)  # 这一张复制不成（原片读不到）
+    try:
+        c = lg("--copy-originals", photos, "--dest", shared, "--scope", "client", ok=False)
+    finally:
+        os.rename(aside, original)
+    path = os.path.join(shared, "精修要求.csv")
+    text = open(path, "rb").read().decode("utf-8", "replace") if os.path.exists(path) else ""
+    check(picks[0] + "-2.JPG,换成调亮一点\r\n" in text and "\n" + picks[0] + ".JPG," not in text,
+          "另存成 -2 的照片：精修要求.csv 写 -2 的名字（不指着上一单那张）", text + c.stdout)
+    check(os.path.exists(os.path.join(shared, picks[0] + "-2.JPG")) and open(theirs, "rb").read() == b"last order's DSCF photo",
+          "上一单的同名照片一个字节没动，这一单的另存 -2")
+    check(n2 + ".JPG,修 3 处\r\n" in text, "正常复制的照常写原名", text)
+    check(picks[4] not in text and "带备注的 1 张没复制成，没写进精修要求.csv" in c.stdout,
+          "原片没复制成的不写进 CSV，状态栏说一声", text + c.stdout)
 
 
 def blank_watermark(lg, work, data, photos, session):

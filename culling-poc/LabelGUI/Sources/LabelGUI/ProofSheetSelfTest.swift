@@ -39,6 +39,56 @@ enum ProofSheetSelfTest {
         leadingSignChecks()
         greetingChecks()
         blankWatermarkChecks()
+        retouchLandedChecks()
+    }
+
+    // MARK: 精修要求.csv 按实际落地的文件名写（审查：另存 -2 的指到目标里别的照片、取消了也照样列着）
+
+    private static func retouchLandedChecks() {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("proof-retouch-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: dir) }
+        let shoot = dir.appendingPathComponent("shoot")
+        let dest = dir.appendingPathComponent("精修")
+        try? fm.createDirectory(at: shoot, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: dest, withIntermediateDirectories: true)
+        let mine = shoot.appendingPathComponent("DSCF7207.RAF")
+        let other = shoot.appendingPathComponent("DSCF7208.RAF")
+        try? Data("这一单的 7207".utf8).write(to: mine)
+        try? Data("这一单的 7208".utf8).write(to: other)
+        // 精修文件夹是几单共用的：里面已经有上一单的 DSCF7207.RAF（机身计数器重复）。
+        try? Data("上一单的 7207".utf8).write(to: dest.appendingPathComponent("DSCF7207.RAF"))
+        func shot(_ id: String, _ url: URL) -> OriginalsCopier.Shot {
+            OriginalsCopier.Shot(id: id, rawPath: url.path, decodePath: url.path)
+        }
+        let first = OriginalsCopier.copy(shot("DSCF7207", mine), to: dest, cancel: AnalysisEngine.CancelFlag())
+        check(first.landedName == "DSCF7207-2.RAF" && first.renamed && first.copied == 1,
+              "目标里有同名不同内容的：另存 -2，landedName 是「DSCF7207-2.RAF」", "\(first)")
+        let again = OriginalsCopier.copy(shot("DSCF7207", mine), to: dest, cancel: AnalysisEngine.CancelFlag())
+        check(again.landedName == "DSCF7207-2.RAF" && again.copied == 0 && again.skipped == 1,
+              "再复制一次（目标里 -2 那张一模一样）：跳过，landedName 还是 -2 的名字", "\(again)")
+        let stop = AnalysisEngine.CancelFlag()
+        stop.set()
+        let cancelled = OriginalsCopier.copy(shot("DSCF7208", other), to: dest, cancel: stop)
+        check(cancelled.cancelled && cancelled.landedName == nil && !fm.fileExists(atPath: dest.appendingPathComponent("DSCF7208.RAF").path),
+              "复制时取消：没落地，landedName = nil", "\(cancelled)")
+        let gone = OriginalsCopier.copy(shot("DSCF7209", shoot.appendingPathComponent("DSCF7209.RAF")), to: dest,
+                                        cancel: AnalysisEngine.CancelFlag())
+        check(gone.landedName == nil && !gone.failed.isEmpty, "原片读不出来：landedName = nil", "\(gone)")
+
+        let noted = [OriginalsCopier.NotedShot(id: "DSCF7207", note: "去路人"),
+                     OriginalsCopier.NotedShot(id: "DSCF7208", note: "瘦脸"),
+                     OriginalsCopier.NotedShot(id: "DSCF7210", note: "黑白")]
+        let plan = OriginalsCopier.retouchRows(noted, landed: ["DSCF7207": "DSCF7207-2.RAF", "DSCF7210": "DSCF7210.RAF"])
+        let wantRows = [OriginalsCopier.RetouchRow(file: "DSCF7207-2.RAF", note: "去路人"),
+                        OriginalsCopier.RetouchRow(file: "DSCF7210.RAF", note: "黑白")]
+        check(plan.rows == wantRows && plan.missing == 1,
+              "精修要求.csv 只写落了地的、用实际文件名（-2），取消 / 没复制成的不写", "\(plan)")
+        let note = OriginalsCopier.retouchNote("写了 精修要求.csv（2 张的客户备注）", missing: plan.missing) ?? ""
+        check(note == "写了 精修要求.csv（2 张的客户备注）；带备注的 1 张没复制成，没写进精修要求.csv",
+              "状态栏说几张带备注的没写进去", note)
+        check(OriginalsCopier.retouchNote(nil, missing: 3) == "带备注的 3 张没复制成，没写进精修要求.csv"
+              && OriginalsCopier.retouchNote(nil, missing: 0) == nil, "一张都没复制成：只说没写进去；没有备注：不说")
     }
 
     // MARK: 水印画不上东西就不放（审查：只开 EXIF 模板文字、原片读不到时报「带水印」却是干净的图）

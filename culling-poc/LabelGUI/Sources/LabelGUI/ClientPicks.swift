@@ -717,6 +717,9 @@ enum OriginalsCopier {
         var keptSidecar = false
         var failed: [String] = []
         var cancelled = false
+        /// 原图在目标里实际的文件名（这次复制成了、或者目标里本来就有一模一样的）：同名不同内容另存的是带 -2 的名字。
+        /// 原图没落地（失败、取消）= nil。精修要求.csv 按它写。
+        var landedName: String?
         /// 这一张因为目标那边写不进去而失败的原因（盘满、没权限、不支持、写完校验对不上）。原片读不出来、
         /// 目标里刚冒出同名的别的文件不算：那不说明后面的也会失败（FailureStreak 只数这一种）。
         var targetFailure: String?
@@ -789,9 +792,11 @@ enum OriginalsCopier {
         var plan = images.map { ($0, renamed($0, suffix: suffix, in: dest)) }
         let xmp = images[0].deletingPathExtension().appendingPathExtension("xmp")
         if fm.fileExists(atPath: xmp.path) { plan.append((xmp, renamed(xmp, suffix: suffix, in: dest))) }
+        let main = plan[0]
         for (src, target) in plan {
             if identical.contains(src) {
                 result.skipped += 1
+                if src == main.0 { result.landedName = main.1.lastPathComponent }
                 continue
             }
             if fm.fileExists(atPath: target.path) {
@@ -813,8 +818,10 @@ enum OriginalsCopier {
                                              originalName: src.lastPathComponent, shot: shot.id)
                 _ = try CardImporter.copyOne(copy, into: dest, cancel: cancel, onBytes: { _ in })
                 result.copied += 1
+                if src == main.0 { result.landedName = target.lastPathComponent }
             } catch CardImporter.ImportError.cancelled {
                 result.cancelled = true
+                result.landedName = nil
                 return result
             } catch let error as CardImporter.ImportError {
                 let why = reason(error)
@@ -970,12 +977,11 @@ extension BatchStore {
         progressText = "已清除客户选中 \(n) 张\(noted) · ⌘Z 撤销"
     }
 
-    /// 这几张里带客户备注的，按给的顺序：精修要求.csv 的行（文件名 = 原片的名字）。
-    func retouchRows(_ ids: [String]) -> [OriginalsCopier.RetouchRow] {
-        let byID = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        return ids.compactMap { id -> OriginalsCopier.RetouchRow? in
-            guard let note = clientNotes[id], !note.isEmpty, let item = byID[id] else { return nil }
-            return OriginalsCopier.RetouchRow(file: URL(fileURLWithPath: item.rawPath).lastPathComponent, note: note)
+    /// 这几张里带客户备注的，按给的顺序（照片 id、备注）。精修要求.csv 的行等复制完按实际落地的文件名排（OriginalsCopier.retouchRows）。
+    func retouchNotes(_ ids: [String]) -> [OriginalsCopier.NotedShot] {
+        ids.compactMap { id -> OriginalsCopier.NotedShot? in
+            guard let note = clientNotes[id], !note.isEmpty else { return nil }
+            return OriginalsCopier.NotedShot(id: id, note: note)
         }
     }
 
@@ -1058,8 +1064,9 @@ extension BatchStore {
         if let data = try? JSONEncoder().encode(["dest": dest.path]) {
             try? data.write(to: copyDestinationPath, options: .atomic)
         }
-        // 客户写了修图要求的：先在目标里写一份「精修要求.csv」（不覆盖），完了状态栏上说一声。
-        let retouch = OriginalsCopier.writeRetouchNotes(retouchRows(shots.map(\.id)), to: dest)
+        // 客户写了修图要求的：复制完按实际落地的文件名在目标里写「精修要求.csv」（不覆盖），状态栏上说一声。
+        // 备注按点「复制」这一刻的记下来。
+        let noted = retouchNotes(shots.map(\.id))
         isRunning = true
         lastError = nil
         let flag = freshCancelFlag()
@@ -1070,10 +1077,13 @@ extension BatchStore {
             var copied = 0, skipped = 0, renamed = 0, keptSidecars = 0, done = 0
             var failed: [String] = []
             var streak = OriginalsCopier.FailureStreak()
+            /// 照片 id → 原图在目标里实际的文件名（复制成了、或目标里已经有一模一样的）。
+            var landed: [String: String] = [:]
             for shot in shots {
                 if flag.isSet { break }
                 let r = OriginalsCopier.copy(shot, to: dest, cancel: flag)
                 if r.cancelled { break }
+                if let name = r.landedName { landed[shot.id] = name }
                 copied += r.copied
                 skipped += r.skipped
                 if r.renamed && r.copied > 0 { renamed += 1 }
@@ -1095,10 +1105,15 @@ extension BatchStore {
                                                   keptSidecars: keptSidecars, folder: dest.lastPathComponent,
                                                   cancelled: flag.isSet, stopped: stopped)
             let failures = failed
+            let landedNames = landed
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
                 self.isRunning = false
+                // 精修要求.csv 跟着实际复制结果写：另存成 -2 的写 -2 的名字，取消、失败、停下没轮到的不写。
+                let plan = OriginalsCopier.retouchRows(noted, landed: landedNames)
+                let retouch = OriginalsCopier.retouchNote(OriginalsCopier.writeRetouchNotes(plan.rows, to: dest),
+                                                          missing: plan.missing)
                 self.progressText = summary + (retouch.map { " · " + $0 } ?? "")
                 if let stopNote {
                     self.lastError = "复制原片: " + stopNote
@@ -1129,6 +1144,27 @@ extension OriginalsCopier {
     }
 
     static let retouchFileName = "精修要求"
+
+    /// 带客户备注的一张（点「复制」那一刻记下的照片 id 和备注）。
+    struct NotedShot: Sendable, Equatable {
+        let id: String
+        let note: String
+    }
+
+    /// 精修要求.csv 的行：只写原图真的在目标里的（`landed` = 照片 id → 目标里实际的文件名，同名不同内容另存的就是带 -2 的
+    /// 名字），按给的顺序。以前复制之前就按原片文件名写好：另存成 -2 的那一行指着目标里别的照片（上一单的同名文件），
+    /// 取消、失败的也照样列着。`missing` = 带备注、可是没复制成（失败、取消、停下没轮到）的张数。
+    static func retouchRows(_ noted: [NotedShot], landed: [String: String]) -> (rows: [RetouchRow], missing: Int) {
+        let rows = noted.compactMap { shot in landed[shot.id].map { RetouchRow(file: $0, note: shot.note) } }
+        return (rows, noted.count - rows.count)
+    }
+
+    /// 状态栏上那一句：写 CSV 的结果（writeRetouchNotes），再说带备注却没复制成、没写进去的几张。
+    static func retouchNote(_ written: String?, missing: Int) -> String? {
+        guard missing > 0 else { return written }
+        let skipped = "带备注的 \(missing) 张没复制成，没写进\(retouchFileName).csv"
+        return written.map { $0 + "；" + skipped } ?? skipped
+    }
 
     /// 精修要求.csv 的内容：表头「文件名,备注」、一张一行；UTF-8 带 BOM（Excel 直接双击打开中文不乱码）。
     static func retouchCSV(_ rows: [RetouchRow]) -> Data {
