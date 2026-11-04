@@ -7,6 +7,7 @@ import Foundation
 ///     （场次目录 chmod 只读模拟盘满；后台那次拼图保存失败也算得上，不等 lastError 那一拍）。
 ///   - F19 水印页「导入选片结果」菜单：精选 / 精选 + 可用 / 客户选中（客户选中的废片也带，RAW+JPG 用 JPG）。
 ///   - 水印 EXIF 文字的快门：0、负数、非有限、非规格化的极小正数（1/t = inf）不崩、不填；≥1s 照旧 %g。
+///   - S15「复制原片到…」连续 3 张写不进目标就停、说清楚原因和怎么办（不支持 → NAS / exFAT），英文 strerror 换成中文。
 /// 只写数据目录；改过的权限全部改回来，退出前删掉造出来的照片文件夹。
 @MainActor
 enum FollowupSelfTest {
@@ -34,6 +35,7 @@ enum FollowupSelfTest {
         persistReport(root.appendingPathComponent("persist"))
         watermarkImport(root.appendingPathComponent("wm"))
         watermarkShutter()
+        originalsStop(root.appendingPathComponent("copy"))
         unlockAll()
         try? FileManager.default.removeItem(at: root)
         print(failures == 0 ? "跟进小修自检：全部通过（\(total) 条）" : "跟进小修自检：\(failures) / \(total) 条失败")
@@ -252,5 +254,79 @@ enum FollowupSelfTest {
         tags.values["shutter"] = WatermarkEngine.ExifTags.shutterValue(1.0 / 250)
         let filled = tags.fill(template: "{shutter}s · ISO {iso}")
         check(filled == "1/250s · ISO {iso}", "模板 {shutter}s 填出 1/250s，找不到的 {iso} 原样留着", filled)
+    }
+
+    // MARK: - S15 复制原片：连续失败就停、中文提示
+
+    static func originalsStop(_ dir: URL) {
+        print("— S15 复制原片到…：连续 3 张写不进目标就停，原因和下一步说清楚")
+        typealias Streak = OriginalsCopier.FailureStreak
+        func shot(copied: Int = 0, skipped: Int = 0, target: String? = nil, failed: Bool = false) -> OriginalsCopier.ShotResult {
+            var r = OriginalsCopier.ShotResult()
+            r.copied = copied
+            r.skipped = skipped
+            r.targetFailure = target
+            if failed || target != nil { r.failed = ["x：" + (target ?? "原片读不出来")] }
+            return r
+        }
+        func run(_ results: [OriginalsCopier.ShotResult]) -> (stopAt: Int?, why: String?) {
+            var streak = Streak()
+            for (i, r) in results.enumerated() {
+                streak.record(r)
+                if streak.shouldStop { return (i + 1, streak.lastReason) }
+            }
+            return (nil, nil)
+        }
+        let full = "目标盘满了"
+        // (说明, 每张的结果, 期望第几张停 / nil = 不停)
+        let rows: [(String, [OriginalsCopier.ShotResult], Int?)] = [
+            ("连续 3 张写不进目标 → 第 3 张停", [shot(target: full), shot(target: full), shot(target: full), shot(copied: 1)], 3),
+            ("中间复制成了一张 → 重新数", [shot(target: full), shot(target: full), shot(copied: 2), shot(target: full),
+                                     shot(target: full)], nil),
+            ("目标里一模一样跳过的不打断、也不算", [shot(target: full), shot(skipped: 2), shot(target: full), shot(skipped: 1),
+                                        shot(target: full)], 5),
+            ("只是原片读不出来（原片挪走了）不算目标的问题", [shot(failed: true), shot(failed: true), shot(failed: true),
+                                             shot(failed: true)], nil),
+            ("RAW 复制成了、JPG 没写进去：这张不算失败", [shot(copied: 1, target: full), shot(target: full), shot(target: full)], nil),
+        ]
+        for (name, results, want) in rows {
+            let got = run(results)
+            check(got.stopAt == want, "复制原片 连续失败 " + name, "第 \(got.stopAt.map(String.init) ?? "—") 张停")
+        }
+
+        // 原因 → 下一步；英文 strerror 换成中文
+        let notSupported = CardImporter.describe(CardImporter.errnoError(ENOTSUP))
+        let nasHint = OriginalsCopier.stopHint("写不进目标文件夹：" + notSupported)
+        check(nasHint.contains("NAS") && nasHint.contains("exFAT"), "不支持（ENOTSUP）→ 提示多半是 NAS 共享 / exFAT 盘、换本机文件夹", nasHint)
+        check(OriginalsCopier.stopHint(full).contains("腾出空间"), "盘满 → 腾出空间或换一块盘")
+        check(OriginalsCopier.stopHint("写不进目标文件夹：没有权限").contains("换一个文件夹"), "没有权限 → 换一个文件夹")
+        let english = String(cString: strerror(ENOTSUP))
+        let zh = OriginalsCopier.localized(english)
+        check(zh == notSupported, "英文 strerror「\(english)」换成中文", zh)
+        check(OriginalsCopier.localized(String(cString: strerror(EACCES))) == "没有权限" && OriginalsCopier.localized("别的原因") == "别的原因",
+              "没有权限也换成中文，认不出的原样留着")
+
+        // 端到端：目标文件夹只读（每张都在建 .part 时失败）→ 6 张里试了 3 张就停，状态栏说清楚；改回来再复制全部成功
+        typealias Fake = FileSafetySelfTest.Fake
+        let fakes = (1...6).map { Fake(id: "C\($0)", raw: "C\($0).JPG") }
+        let store = FileSafetySelfTest.makeShoot(dir.appendingPathComponent("shoot"), fakes)
+        let dest = dir.appendingPathComponent("dest")
+        try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+        lock(dest)
+        let ids = store.items.map(\.id)
+        store.copyOriginals(ids, to: dest)
+        FileSafetySelfTest.wait(store)
+        let error = store.lastError ?? ""
+        let listing = (try? FileManager.default.contentsOfDirectory(atPath: dest.path)) ?? []
+        let stoppedOK: Bool = error.contains("连续 3 张都没复制成") && error.contains("后面 3 张没再试")
+            && store.progressText.hasPrefix("复制原片停下了: 3 张 · 复制了 0 个文件") && listing.isEmpty
+        check(stoppedOK, "目标只读：试了 3 张就停，状态栏说「连续 3 张都没复制成…后面 3 张没再试」，目标里什么都没留下",
+              "\(error) · \(store.progressText) · \(listing)")
+        unlock(dest)
+        store.copyOriginals(ids, to: dest)
+        FileSafetySelfTest.wait(store)
+        let copied = (try? FileManager.default.contentsOfDirectory(atPath: dest.path))?.filter { !$0.hasPrefix(".") } ?? []
+        check(store.lastError == nil && copied.count == 6 && store.progressText.hasPrefix("复制原片完成: 6 张"),
+              "改回能写以后再复制：6 张全部复制、没有报错", "\(store.lastError ?? "nil") · \(store.progressText) · \(copied.count)")
     }
 }
