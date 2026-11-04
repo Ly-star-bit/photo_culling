@@ -130,6 +130,7 @@ enum WatermarkBatchCLI {
         let batch = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         batch.switchSession(to: option("--session").map { URL(fileURLWithPath: $0) } ?? dir)
         store.recordDeliveries(into: batch)
+        store.cardRefusal = { [weak batch] in batch?.cardDestinationRefusal($0) }
         let ledgerBefore = batch.deliveryRecords.last
         // 同界面：批量页这一场、每张照片所在的文件夹都不让写进去（审查 S11），最近场次只提醒
         store.exportAll(shootDir: batch.photoDir, sessions: batch.recentSessions)

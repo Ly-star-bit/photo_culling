@@ -500,7 +500,35 @@ extension SessionMoveSelfTest {
         try? JSONEncoder().encode(["dest": card.appendingPathComponent("DCIM/精修").path]).write(to: record)
         check(batch.lastCopyDestination != nil && batch.copyPanelStartFolder == pictures,
               "上次记的复制目标在卡上：面板不从那儿开", batch.copyPanelStartFolder?.path ?? "nil")
+        // 水印页（AppModel.make 接上的卡闸）：输出目录在卡上不导；在卡上的拍摄文件夹里面也不给「导出到 水印导出/」（它也在卡上）。
+        let wm = model.watermark
+        wm.config.frame.enabled = true
+        wm.addPhotos([dcim.appendingPathComponent("IMG_0001.JPG")])
+        for target in [card.appendingPathComponent("水印"), dcim.appendingPathComponent("成品")] {
+            wm.outputDir = target
+            wm.exportAll(shootDir: batch.photoDir, sessions: [])
+            let name = String(target.path.dropFirst(cardPath.count))
+            check(!wm.isExporting && (wm.lastError ?? "").contains("存储卡") && wm.folderRefusal == nil
+                  && !fm.fileExists(atPath: target.path),
+                  "水印导出到卡上的「\(name)」：不导、不建，不给「导出到 水印导出/」", wm.lastError ?? "nil")
+        }
+        let wmOff = off.appendingPathComponent("水印")
+        wm.outputDir = wmOff
+        for target in [card.appendingPathComponent("水印"), dcim.appendingPathComponent("成品")] {
+            wm.chooseOutputDir(target, shootDir: batch.photoDir, sessions: [])
+            let name = String(target.path.dropFirst(cardPath.count))
+            check(wm.outputDir == wmOff && (wm.lastError ?? "").contains("存储卡") && wm.folderRefusal == nil,
+                  "水印页输出目录选到卡上的「\(name)」：不换，不给「改用 水印导出/」", wm.lastError ?? "nil")
+        }
         check(cardListing() == before, "卡上一个文件都没多、没少", "\(cardListing())")
+        wm.chooseOutputDir(wmOff, shootDir: batch.photoDir, sessions: [])
+        check(wm.outputDir == wmOff && wm.lastError == nil, "　…… 再选卡外的目录：换上，卡上那句收掉", wm.lastError ?? "")
+        wm.exportAll(shootDir: batch.photoDir, sessions: [])
+        let wmStarted = wm.isExporting
+        FileSafetySelfTest.waitUntil(60) { !wm.isExporting }
+        let wmWritten = (try? fm.contentsOfDirectory(atPath: wmOff.path)) ?? []
+        check(wmStarted && wmWritten.contains { $0.lowercased().hasSuffix(".jpg") },
+              "水印导出到卡外照常导", "\(wmWritten) \(wm.lastError ?? "")")
         let offCopy = off.appendingPathComponent("精修")
         batch.copyOriginals(["IMG_0001"], to: offCopy)
         FileSafetySelfTest.wait(batch)
@@ -545,5 +573,18 @@ extension SessionMoveSelfTest {
         check(batch.switchSession(to: backup) && !batch.isCardSession, "外置 SSD 上备份的 DCIM：不当卡")
         check(batch.switchSession(to: dcim) && batch.isCardSession, "切回卡上那一场：又认出是卡")
         check(batch.switchSession(to: work) && !batch.isCardSession, "切到别的场次：卡的标记跟着清掉")
+
+        // 水印页的「导出到 水印导出/」是在别的场次拦下的（照片所在的卡上文件夹），之后批量页换到卡上那一场再点：不换、不导。
+        wm.outputDir = dcim.appendingPathComponent("成品")
+        wm.exportAll(shootDir: batch.photoDir, sessions: [])
+        let offered = wm.folderRefusal?.safeFolder
+        check(!wm.isExporting && offered.map { under($0.path, card) } == true,
+              "前提：不是卡上那一场时，卡上照片文件夹里的输出目录照旧给「导出到 水印导出/」", offered?.path ?? "nil")
+        check(batch.switchSession(to: dcim) && batch.isCardSession, "　…… 批量页换到卡上那一场")
+        wm.useSafeOutputDir(shootDir: batch.photoDir, sessions: [])
+        check(!wm.isExporting && wm.outputDir == dcim.appendingPathComponent("成品")
+              && (wm.lastError ?? "").contains("存储卡") && wm.folderRefusal == nil && cardListing() == before,
+              "　…… 再点「导出到 水印导出/」：不换到卡上、不导，卡上一个文件没多", "\(wm.lastError ?? "nil") \(cardListing())")
+        wm.clearPhotos()
     }
 }

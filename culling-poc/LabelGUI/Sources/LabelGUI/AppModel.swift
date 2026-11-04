@@ -66,6 +66,8 @@ final class AppModel: ObservableObject {
         let watermark = WatermarkStore(dataDir: dataDir)
         // 水印页导出的文件名记进当前场次的交付对照（DeliveryLedger.swift）。
         watermark.recordDeliveries(into: batch)
+        // 批量页这一场开在存储卡上时，水印副本也不写到卡上（审查 S07）。
+        watermark.cardRefusal = { [weak batch] in batch?.cardDestinationRefusal($0) }
         let collage = CollageStore(dataDir: dataDir)
         let model = AppModel(batch: batch, labels: labels, cardCenter: cardCenter,
                              watermark: watermark, collage: collage)

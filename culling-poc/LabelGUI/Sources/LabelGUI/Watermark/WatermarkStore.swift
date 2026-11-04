@@ -419,12 +419,29 @@ final class WatermarkStore: ObservableObject {
     }
     @Published private(set) var folderRefusal: FolderRefusal?
 
+    /// 批量页这一场开在存储卡上时（审查 S07），目录在卡上就给那一句（AppModel.make、无头 --watermark-batch 接
+    /// BatchStore.cardDestinationRefusal）；nil = 照常导。没接 = 不查。
+    var cardRefusal: (@MainActor (URL) -> String?)?
+    /// 上一次因为在卡上拦下时写进 lastError 的那句：换成了别的目录时收掉（和 folderRefusal 那句一样）。
+    private var cardRefusalShown: String?
+
+    /// 目录在卡上：拦下（lastError，不给「导出到 / 改用 水印导出/」—— 拍摄文件夹在卡上，它也在卡上），返回 true。
+    private func refuseOnCard(_ folder: URL) -> Bool {
+        guard let why = cardRefusal?(folder) else { return false }
+        folderRefusal = nil
+        lastError = why
+        cardRefusalShown = why
+        return true
+    }
+
     /// 输出目录落在拍摄文件夹里面、会被分析扫到：拦下（lastError + folderRefusal），返回 true。拍摄文件夹 = 批量页开着的
     /// 那一场（`shootDir`）+ 每张照片所在的文件夹（水印页的照片能从任意文件夹导入）。
     private func refuseInsideShoot(_ folder: URL, shootDir: URL?, export: Bool) -> Bool {
         let shoots = ExportFolderGuard.watermarkShoots(batch: shootDir, photos: photos)
         guard let hit = ExportFolderGuard.blockingShoot(folder, among: shoots) else { return false }
         let safe = hit.appendingPathComponent(ExportFolderGuard.watermarkSubfolder)
+        // 建议的「水印导出/」在卡上：不建议（按钮不出来），说卡上不写
+        if refuseOnCard(safe) { return true }
         let message = ExportFolderGuard.refusal(shoot: hit, what: "水印副本",
                                                 fix: "用「导出到 \(ExportFolderGuard.watermarkSubfolder)/」")
         lastError = message
@@ -436,7 +453,11 @@ final class WatermarkStore: ObservableObject {
     /// 给「改用 水印导出/」；在最近哪一场的拍摄文件夹里只提醒。`shootDir` = batchStore.photoDir，`sessions` = 最近场次。
     func chooseOutputDir(_ url: URL, shootDir: URL?, sessions: [BatchStore.SessionEntry]) {
         if let old = folderRefusal, lastError == old.message { lastError = nil }
+        if let old = cardRefusalShown, lastError == old { lastError = nil }
         folderRefusal = nil
+        cardRefusalShown = nil
+        // 卡上一场选到卡上（审查 S07）：不换
+        if refuseOnCard(url) { return }
         if refuseInsideShoot(url, shootDir: shootDir, export: false) { return }
         outputDir = url
         if let note = ExportFolderGuard.sessionReminder(url, sessions: sessions, what: "水印副本") { setNotice(note) }
@@ -445,6 +466,8 @@ final class WatermarkStore: ObservableObject {
     /// 状态栏「导出到 水印导出/」：输出目录换成拦下时建议的「<拍摄文件夹>/水印导出/」，是点导出时拦下的就接着导。
     func useSafeOutputDir(shootDir: URL?, sessions: [BatchStore.SessionEntry]) {
         guard let refusal = folderRefusal else { return }
+        // 拦下以后批量页换到了卡上的一场、建议的目录在卡上（审查 S07）：不换过去
+        if refuseOnCard(refusal.safeFolder) { return }
         folderRefusal = nil
         if lastError == refusal.message { lastError = nil }
         outputDir = refusal.safeFolder
@@ -464,6 +487,8 @@ final class WatermarkStore: ObservableObject {
             return
         }
         folderRefusal = nil
+        // 批量页这一场开在存储卡上、输出目录也在卡上（审查 S07）：建目录之前就拦，卡上的东西一个不动
+        if refuseOnCard(outputDir) { return }
         if refuseInsideShoot(outputDir, shootDir: shootDir, export: true) { return }
         let folderReminder = ExportFolderGuard.sessionReminder(outputDir, sessions: sessions, what: "水印副本")
         // 目标文件名在批次内去重：a.jpg + a.png、或两个子文件夹里的同名照片会算出
