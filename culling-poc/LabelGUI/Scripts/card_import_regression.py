@@ -604,11 +604,13 @@ print("R8. 真的 exFAT 盘（只在 CI 里跑：CARD_REGRESSION_EXFAT=1；别�
 if os.environ.get("CARD_REGRESSION_EXFAT") != "1":
     print("  (跳过：没设 CARD_REGRESSION_EXFAT=1)")
 else:
-    img = os.path.join(WORK, "exfat.dmg")
+    img = os.path.join(WORK, "exfat.sparseimage")
     mnt = os.path.join(WORK, "exfat_mnt")
     os.makedirs(mnt)
     # 映像里不放 DCIM（插卡检测要根目录有 DCIM 才当成存储卡）；-nobrowse 不在访达里出现。
-    subprocess.run(["hdiutil", "create", "-size", "64m", "-fs", "ExFAT", "-volname", "KEXFAT", img],
+    # 要比 1 GB 余量大（导完那块盘至少还得剩 1 GB：64 MB 的映像永远「空间不够」，这一段从来跑不通 —— 审查发现）；
+    # SPARSE 只占实际写进去的那点地方。文件名得带 .sparseimage，不带的话 hdiutil 自己补上，attach 就找不到了。
+    subprocess.run(["hdiutil", "create", "-size", "2g", "-type", "SPARSE", "-fs", "ExFAT", "-volname", "KEXFAT", img],
                    check=True, capture_output=True)
     subprocess.run(["hdiutil", "attach", img, "-nobrowse", "-mountpoint", mnt], check=True, capture_output=True)
     try:

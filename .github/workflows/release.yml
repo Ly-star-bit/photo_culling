@@ -75,6 +75,8 @@ jobs:
       # 存储卡导入回归：随机字节造一张假卡跑 --ingest 的各种情况 —— 卡上文件前后逐字节不变、目标里
       # 绝不覆盖（同名不同内容整组改名）、复制后校验、取消不留半截、再插只导新的。
       - name: 存储卡导入回归 (--ingest)
+        env:
+          CARD_REGRESSION_EXFAT: "1"
         run: python3 culling-poc/LabelGUI/Scripts/card_import_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
 
       # 不要照片的进程内自检：网格改判后的焦点、时间轴不出界、五种杂志风和人物挡字的版式规则……每条都在新的临时
