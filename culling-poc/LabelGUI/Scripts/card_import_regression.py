@@ -447,11 +447,11 @@ check("改名导入了" not in r.stdout and "导入提醒" not in r.stdout, "导
 r = run_card(card_b, data_m, d, "--reimport")
 check("要导入：没有" in r.stdout and "目标里已有 2 张" in r.stdout, "再导一次卡 B（勾重导）：都认出来、不多出 _2")
 
-print("M2. 反例：同号不同时间 → 照旧改名；序列号读不到 → 照旧改名（认不准，确认框照实说）；摘要、提醒都说改了名")
+print("M2. 反例：目标里已经有同名的别的 JPG（同类）→ 照旧改名；序列号读不到 → 照旧改名（认不准，确认框照实说）；摘要、提醒都说改了名")
 card_c = mkcard("card_m_c", {"DCIM/100MSDCF/DSC00001.JPG": fake_jpg("ILCE-7M4", "2026:10:02 18:00:00", "123", CAM1)})
 r = run_card(card_c, data_m, d)
 check("DSC00001_2.JPG" in listing(d) and sha(os.path.join(d, "DSC00001_2.JPG")) == sha(os.path.join(card_c, "DCIM/100MSDCF/DSC00001.JPG")),
-      f"时间不一样的那张改名 DSC00001_2.JPG（{listing(d)}）")
+      f"目标里已有同名的别的 JPG → 改名 DSC00001_2.JPG（{listing(d)}）")
 check(sha(os.path.join(d, "DSC00001.JPG")) == sha(os.path.join(card_b, "DCIM/100MSDCF/DSC00001.JPG")), "原来那对没被动")
 check("改名导入了（如 DSC00001_2）" in r.stdout, "导完的摘要里说了改名")
 notice = [l for l in r.stdout.splitlines() if l.startswith("导入提醒：")]
@@ -463,6 +463,21 @@ run_card(card_ns_a, os.path.join(WORK, "data_m2"), d2)
 r = run_card(card_ns_b, os.path.join(WORK, "data_m2"), d2)
 check(listing(d2) == ["DSC00005.ARW", "DSC00005_2.JPG"], f"序列号读不到 → 改名、不硬配（{listing(d2)}）")
 check(describe_count(r.stdout, "认不准没配") == 1, "计划里数出 1 张认不准没配")
+
+print("M2t. 反例：目标里只有 RAW，同型号、同机身序列号的 JPG 只差拍摄时间 / 只差 SubSec（同号机身转了一圈、格式化后编号重置）→ 不配、改名")
+d_t = os.path.join(WORK, "dest_m2t")
+data_t = os.path.join(WORK, "data_m2t")
+raw_t = mkcard("card_m2t_r", {"DCIM/100MSDCF/DSC00007.ARW": fake_arw("ILCE-7M4", T1, "123", CAM1),
+                              "DCIM/100MSDCF/DSC00008.ARW": fake_arw("ILCE-7M4", T1, "123", CAM1)})
+jpg_t = mkcard("card_m2t_j", {"DCIM/100MSDCF/DSC00007.JPG": fake_jpg("ILCE-7M4", "2026:10:02 18:00:00", "123", CAM1),
+                              "DCIM/100MSDCF/DSC00008.JPG": fake_jpg("ILCE-7M4", T1, "124", CAM1)})
+run_card(raw_t, data_t, d_t)
+r = run_card(jpg_t, data_t, d_t, "--plan-only")
+check(describe_count(r.stdout, "补成一对") == 0 and describe_count(r.stdout, "认不准没配") == 0 and "改名 2 张" in r.stdout,
+      "计划：补成一对 0 张（文件头都读得到、只是时间 / SubSec 对不上，不算认不准）、改名 2 张")
+r = run_card(jpg_t, data_t, d_t)
+check(listing(d_t) == ["DSC00007.ARW", "DSC00007_2.JPG", "DSC00008.ARW", "DSC00008_2.JPG"],
+      f"只差时间的、只差 SubSec 的都改名导入，没和 RAW 拼成一张（{listing(d_t)}）")
 
 print("M2b. 只改了名的提醒不挤掉前面「先别格式化」那条：横幅最多 3 条，超了先扔纯信息的")
 d_m2b = os.path.join(WORK, "dest_m2b")
