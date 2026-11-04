@@ -12,6 +12,7 @@ import ImageIO
 ///   - 从菜单点 / 重开 app：书签跟到新位置，照片路径改过去。
 ///   - 「重新定位文件夹…」：跨卷拷过去、原来的删了（书签解析不到）—— 指给它新位置以后 key 不变、路径改过去；
 ///     选错文件夹（一张这一场的照片都没有）不换书签。
+///   - 导卡选日期文件夹：yyyyMMdd 被改了名 / 挪走的那一场占着（key 是原路径的哈希）就换成 yyyyMMdd-2。
 ///   - 实时桥（followBookmark: false）不跟书签、不认回、不改路径。
 ///   - 存储卡：判断表（DCIM 在卷根 + 可移除 / 可推出才算；外置 SSD、系统盘、网络卷不算；读不出来按「可能是」），
 ///     真读一个系统盘上的 DCIM 文件夹不算卡；编的卷属性（CardImporter.volumeFactsOverride，不挂真的卡 —— hdiutil 挂的映像
@@ -55,6 +56,7 @@ enum SessionMoveSelfTest {
         unmatchedNotClaimed(root.appendingPathComponent("unmatched"), batch: model.batch)
         idOnlyRowsFollow(root.appendingPathComponent("idonly"), batch: model.batch)
         newFolderAtOldPath(root.appendingPathComponent("old-path"), batch: model.batch)
+        dayFolderAvoidsMovedSession(root.appendingPathComponent("import-day"), batch: model.batch)
         relocate(root.appendingPathComponent("relocate"), batch: model.batch)
         liveBridgeDoesNotFollow(root.appendingPathComponent("live"), batch: model.batch)
         liveBridgeAfterGUIRebase(root.appendingPathComponent("live-after-gui"), batch: model.batch)
@@ -340,6 +342,53 @@ enum SessionMoveSelfTest {
         check(sameDir(batch.photoDir, q) && error.contains("另一个文件夹") && error.contains("20261104 张三") && error.contains("改个名"),
               "打开的是挪走的那一场，红条说原路径现在是另一个文件夹、要改名再开", error)
         check(manifestAt(key(p), q), "原来那一场的 manifest 没被改到新文件夹上")
+    }
+
+    /// 导卡选日期文件夹（CardImporter.target → dayFolder）：yyyyMMdd 这个名字被改了名 / 挪走的那一场占着（key 是原路径的
+    /// 哈希）就换成 yyyyMMdd-2，新卡导进一个干净的新场次；同一天接着导、文件夹还是那一场的照旧导进去。
+    private static func dayFolderAvoidsMovedSession(_ root: URL, batch: BatchStore) {
+        print("== 导卡选日期文件夹：名字被挪走的那一场占着就换成 -2")
+        let fm = FileManager.default
+        try? fm.createDirectory(at: root, withIntermediateDirectories: true)
+        let now = Date()
+        let day = CardImporter.dayFormatter.string(from: now)
+        var settings = CardImporter.DestinationSettings()
+        settings.root = CardImporter.savedFolder(for: root)
+        func destination(_ choice: CardImporter.DestinationChoice = .saved) -> CardImporter.Target {
+            CardImporter.target(settings: settings, choice: choice, now: now, dataDir: appDataDir)
+        }
+        func named(_ target: CardImporter.Target, _ name: String) -> Bool {
+            target.destination.lastPathComponent == name && sameDir(target.destination.deletingLastPathComponent(), root)
+        }
+        let p = root.appendingPathComponent(day)
+        let q = root.appendingPathComponent(day + " 张三")
+        let p2 = root.appendingPathComponent(day + "-2")
+        let first = destination()
+        check(named(first, day) && first.issue == nil, "还没有场次：导进 \(day)", first.destination.path)
+        FileSafetySelfTest.writeShoot(p, shoot(p))
+        check(batch.switchSession(to: p) && batch.items.count == 3, "第一张卡导进 \(day)、分析过")
+        check(named(destination(), day), "同一天再导、文件夹还是那一场的：照旧导进 \(day)（追加）", destination().destination.path)
+        try? fm.moveItem(at: p, to: q)
+        check(named(destination(), day + "-2"), "那一场改了名、还没重新打开过（manifest 还记着原路径，原路径不在了）：换成 \(day)-2",
+              destination().destination.path)
+        check(batch.switchSession(to: q) && batch.sessionDir.lastPathComponent == key(p) && manifestAt(key(p), q),
+              "从改了名的文件夹打开：认回，manifest 改到新名字")
+        check(named(destination(), day + "-2"), "manifest 记的照片文件夹在别处：换成 \(day)-2", destination().destination.path)
+        try? fm.createDirectory(at: p, withIntermediateDirectories: true)
+        check(named(destination(), day + "-2"), "原路径上又有了一个文件夹（不是那一场的）：照样换成 \(day)-2",
+              destination().destination.path)
+        let existing = destination(.existing(p))
+        check(existing.destination.lastPathComponent == day && existing.appending,
+              "「这次导进一个已有的文件夹…」选的就是原路径：不改名（用户自己选的）", existing.destination.path)
+        FileSafetySelfTest.writeShoot(p2, [Fake(id: "DSCF7001", raw: "DSCF7001.JPG", jpeg: true)])
+        check(batch.switchSession(to: p2) && batch.items.count == 1, "第二张卡导进 \(day)-2、分析过")
+        check(named(destination(), day + "-2"), "同一天第三张卡：\(day)-2 是它自己那一场的，照旧导进去（追加）",
+              destination().destination.path)
+        try? fm.moveItem(at: p2, to: root.appendingPathComponent(day + "-2 李四"))
+        check(named(destination(), day + "-3"), "\(day)-2 也被挪走的那一场占着：换成 \(day)-3", destination().destination.path)
+        check(!CardImporter.nameTakenByMovedSession(root.appendingPathComponent("从没分析过"),
+                                                    sessionsDir: appDataDir.appendingPathComponent("sessions")),
+              "从没分析过的名字（没有 manifest）：不算占着")
     }
 
     // MARK: - 拷贝出来的副本
