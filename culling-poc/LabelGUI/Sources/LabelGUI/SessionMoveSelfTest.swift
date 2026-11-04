@@ -56,6 +56,7 @@ enum SessionMoveSelfTest {
         idOnlyRowsFollow(root.appendingPathComponent("idonly"), batch: model.batch)
         relocate(root.appendingPathComponent("relocate"), batch: model.batch)
         liveBridgeDoesNotFollow(root.appendingPathComponent("live"), batch: model.batch)
+        liveBridgeAfterGUIRebase(root.appendingPathComponent("live-after-gui"), batch: model.batch)
         cardTable(root.appendingPathComponent("card-table"))
         cardSession(root.appendingPathComponent("card"), model: model)
         try? FileManager.default.removeItem(at: root)
@@ -576,6 +577,77 @@ enum SessionMoveSelfTest {
     }
 
     // MARK: - 实时桥
+
+    /// 子线程上跑完的结果放这里，主线程转 run loop 等它（PreviewJob.run 是 async）。
+    private final class ResultBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [String: Any]?
+        var value: [String: Any]? {
+            get { lock.lock(); defer { lock.unlock() }; return stored }
+            set { lock.lock(); stored = newValue; lock.unlock() }
+        }
+    }
+
+    private static func runPreview(_ job: PreviewJob) -> [String: Any] {
+        let box = ResultBox()
+        let sendable = LiveBox(job)
+        Task.detached { box.value = await sendable.value.run() }
+        FileSafetySelfTest.waitUntil(20) { box.value != nil }
+        return box.value ?? [:]
+    }
+
+    /// 先在 GUI 里打开挪了的文件夹（书签跟过去、manifest 的照片路径改到新位置，新位置当成受保护的：桌面、外置盘），切到
+    /// 别的场次，实时桥再按登记的旧路径打开：照片文件夹还是旧路径（不受保护），可要读的原图在新位置 —— 预览要按受保护处理、
+    /// 一次都不碰原图；app_open_session 按 manifest 的 photo_dir 也认得出挪进了受保护位置。
+    private static func liveBridgeAfterGUIRebase(_ root: URL, batch: BatchStore) {
+        print("== GUI 先打开挪了的文件夹、实时桥再按旧路径打开：要读的原图在受保护位置，不读")
+        let fm = FileManager.default
+        let k = root.appendingPathComponent("挪前")
+        let m = root.appendingPathComponent("挪进受保护位置")
+        let other = root.appendingPathComponent("别的场次")
+        FileSafetySelfTest.writeShoot(k, shoot(k))
+        FileSafetySelfTest.writeShoot(other, [Fake(id: "OTHER", raw: "OTHER.JPG", jpeg: true)])
+        let previews = appDataDir.appendingPathComponent("sessions/\(key(k))/previews")
+        try? fm.createDirectory(at: previews, withIntermediateDirectories: true)
+        for id in ["DSCF0001", "DSCF0002", "IMG_0003"] {
+            try? FileSafetySelfTest.tinyJPEG().write(to: previews.appendingPathComponent(id + ".jpg"))
+        }
+        check(batch.switchSession(to: k) && batch.items.count == 3, "打开原来的文件夹")
+        try? fm.moveItem(at: k, to: m)
+        check(batch.switchSession(to: k) && pathsUnder(batch, m), "GUI 从菜单点：书签跟到新位置，照片路径改过去")
+        check(batch.switchSession(to: other), "切到别的场次")
+        check(batch.switchSession(to: k, followBookmark: false) && batch.photoDir?.path == k.path,
+              "实时桥按登记的路径打开：照片文件夹停在旧路径上")
+        // 新位置本身和它下面的都算受保护（under 只认「下面的」，文件夹本身补一个 /）。
+        let isProtected: (String) -> Bool = { under($0.hasSuffix("/") ? $0 : $0 + "/", m) }
+        let folder = batch.photoDir?.path ?? ""
+        let items = batch.items
+        check(!isProtected(folder) && items.count == 3 && items.allSatisfy { isProtected($0.decodePath) },
+              "照片文件夹（旧路径）不受保护，可网格里的原图路径都在受保护的新位置", items.map(\.decodePath).joined(separator: ", "))
+        let protected = LiveHandlers.previewReadsProtected(folder: folder, items: items, isProtected: isProtected)
+        check(protected, "cull.preview 按要读的照片路径判：受保护")
+        let recorded = LiveHandlers.recordedPhotoDir(dataDir: appDataDir, key: key(k))
+        check(recorded.map(isProtected) == true, "app_open_session 读 manifest 的 photo_dir：在受保护的新位置（回 protected_location）",
+              recorded ?? "nil")
+        check(LiveHandlers.recordedPhotoDir(dataDir: appDataDir, key: key(other)).map(isProtected) == false,
+              "没挪过的场次：photo_dir 不受保护，照常打开")
+
+        let opensBefore = LiveImages.originalOpens.snapshot.count
+        let big = runPreview(PreviewJob(items: [items[0]], face: false, edge: 2048, protected: protected,
+                                        budget: 600 * 1024, gone: LiveFlag()))
+        let bigImage = (big["images"] as? [[String: Any]])?.first ?? [:]
+        let bigWarnings = (big["warnings"] as? [[String: Any]] ?? []).compactMap { $0["code"] as? String }
+        check(bigImage["source"] as? String == "preview" && bigWarnings.contains("protected_location"),
+              "max_edge 2048：给 1024 预览、warning protected_location", "\(bigImage["source"] ?? "nil") \(bigWarnings)")
+        let face = runPreview(PreviewJob(items: [items[1]], face: true, edge: 1024, protected: protected,
+                                         budget: 600 * 1024, gone: LiveFlag()))
+        let faceImage = (face["images"] as? [[String: Any]])?.first
+        let faceFailed = ((face["failed"] as? [[String: Any]])?.first?["reason"] as? String) ?? ""
+        let faceOK = faceImage?["source"] as? String == "preview" || faceFailed.contains("受保护位置")
+        check(faceOK, "crop=face：在预览上裁（或者说受保护位置不读原图）", "\(face)")
+        check(LiveImages.originalOpens.snapshot.count == opensBefore, "一次都没去打开原图（originalOpens 没多记）",
+              "\(LiveImages.originalOpens.snapshot.recent.suffix(2))")
+    }
 
     private static func liveBridgeDoesNotFollow(_ root: URL, batch: BatchStore) {
         print("== 实时桥（followBookmark: false）不跟书签、不认回、不改路径")

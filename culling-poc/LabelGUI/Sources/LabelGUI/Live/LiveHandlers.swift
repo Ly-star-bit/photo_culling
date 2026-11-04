@@ -93,9 +93,10 @@ enum LiveHandlers {
                             ["hint": "id 是文件名去掉扩展名；先 cull_list_photos 看有哪些"])
         }
         let folder = batch.photoDir?.path ?? ""
+        let protected = previewReadsProtected(folder: folder, items: items) { isProtectedFolder($0, live: live) }
         let job = PreviewJob(items: items, face: req.params["crop"] as? String == "face",
                              edge: LiveWire.int(req.params["max_edge"]) ?? LiveImages.defaultEdge(count: items.count),
-                             protected: isProtectedFolder(folder, live: live),
+                             protected: protected,
                              budget: min(max(LiveWire.int(req.params["budget_kb"]) ?? 600, 1), 20_000) * 1024,
                              gone: req.clientGone)
         // 第 2 步（离开主线程）：解码、裁切、缩放、编码、base64
@@ -111,6 +112,23 @@ enum LiveHandlers {
                             ["hint": "请用户在 app 里点「重新分析」补回预览", "failed": out["failed"] ?? []])
         }
         return .result(out)
+    }
+
+    /// cull.preview 按不按受保护处理（§10.3 不读原图）：照片文件夹之外，每张要出图的照片自己的 decode_path / raw_path
+    /// 也按字符串看一遍，任一受保护就算。GUI 跟着书签打开过挪了的文件夹、「重新定位」过（或者挪了以后点过「重新分析」）的
+    /// 场次，manifest 里的照片路径已经在新位置（桌面、外置盘），实时桥按登记的旧路径打开时 photoDir 还停在旧路径上 ——
+    /// 只看 photoDir 会替 AI 去读受保护位置的原图（§10.4）。只比字符串，不碰文件系统。
+    static func previewReadsProtected(folder: String, items: [BatchItem], isProtected: (String) -> Bool) -> Bool {
+        if isProtected(folder) { return true }
+        return items.contains { isProtected($0.decodePath) || isProtected($0.rawPath) }
+    }
+
+    /// 这一场 manifest 记的拍摄文件夹（photo_dir）：只读数据目录里的 JSON，不碰照片文件夹。读不出来 = nil。
+    static func recordedPhotoDir(dataDir: URL, key: String) -> String? {
+        let url = dataDir.appendingPathComponent("sessions").appendingPathComponent(key).appendingPathComponent("manifest.json")
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return json["photo_dir"] as? String
     }
 
     /// 照片文件夹是不是受保护位置（§10.4 第 4 条的纯字符串函数，app 一侧是权威判断）。测试宿主另认
@@ -776,6 +794,14 @@ extension LiveHandlers {
             return .failure("protected_location",
                             "「\(entry.path)」在系统隐私保护的位置（桌面 / 文稿 / 下载 / iCloud 云盘 / 外置盘或网络卷）。让 app 为 AI 去读它可能弹出系统授权框，AI 不会替你点。",
                             ["hint": "请用户自己在 app 侧栏「最近场次」里点开它", "folder": entry.path])
+        }
+        // 登记的路径不受保护，可这一场的照片已经挪进了受保护位置：GUI 跟着书签打开过、「重新定位」过（或者挪了以后重新分析过），
+        // manifest 记的拍摄文件夹和照片路径都改到了那里，app 打开以后读的就是那里的原图。按 manifest 的 photo_dir 再判一次
+        // （只读数据目录里的 JSON，不碰照片文件夹）。
+        if let recorded = recordedPhotoDir(dataDir: batch.dataDir, key: entry.key), isProtectedFolder(recorded, live: live) {
+            return .failure("protected_location",
+                            "「\(entry.path)」这一场的照片已经挪到「\(recorded)」，在系统隐私保护的位置（桌面 / 文稿 / 下载 / iCloud 云盘 / 外置盘或网络卷）。让 app 为 AI 去读它可能弹出系统授权框，AI 不会替你点。",
+                            ["hint": "请用户自己在 app 侧栏「最近场次」里点开它", "folder": recorded])
         }
         if let stop = await begin(req, Gate(scope: .session, session: false, analysis: true), live: live, model: model) {
             return stop
