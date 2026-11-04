@@ -10,6 +10,8 @@ import UniformTypeIdentifiers
 ///   - DNG / JPG 写完提醒 LR 不读旁边的 .xmp。
 ///   - 废片移到废纸篓默认跳过拼图页、印样帧（放不下的也算）、存好的方案里用到的，只在托盘里的照常移
 ///     （和 app 同一个 AppModel.make 接线；只算要移哪些，不真的往废纸篓里放）。
+///   - 高 ISO RAW 复制：子文件夹里同名的另存 -2（大小不同、大小相同都不互相顶掉），只复制 RAW，重跑不重复，
+///     旧版中断留下的半截文件不删、点名。
 /// 只写数据目录；退出前删掉造出来的照片文件夹。
 @MainActor
 enum FileSafetySelfTest {
@@ -36,6 +38,7 @@ enum FileSafetySelfTest {
         sharedSidecar(root.appendingPathComponent("shared"))
         lightroomFormats(root.appendingPathComponent("lr"))
         collageGuard(root.appendingPathComponent("collage"))
+        highISO(root.appendingPathComponent("iso"))
         try? FileManager.default.removeItem(at: root)
         print(failures == 0 ? "文件安全自检：全部通过" : "文件安全自检：\(failures) 条失败")
         exit(failures == 0 ? 0 : 1)
@@ -337,6 +340,55 @@ extension FileSafetySelfTest {
         check(batch.collageInUseIDs == ["a", "b", "c"], "放不下的印样帧也算（改大容量还会画出来）",
               "\(batch.collageInUseIDs.sorted())")
         check(Set(batch.trashableRejects.map(\.id)) == ["d", "f"], "印样帧里的 c 也默认不移了")
+    }
+}
+
+extension FileSafetySelfTest {
+    // MARK: - S10 高 ISO RAW 复制
+
+    fileprivate static func highISO(_ dir: URL) {
+        print("== 高 ISO RAW 复制到 高ISO降噪/")
+        let a = Data(repeating: 0x41, count: 3000)
+        let b = Data(repeating: 0x42, count: 3200)      // 压缩 RAW：同名、大小不同
+        let c = Data(repeating: 0x43, count: 3000)      // 无压缩 RAW：同名、大小一样、内容不同
+        let y = Data((0..<4000).map { UInt8($0 % 251) })
+        let store = makeShoot(dir, [
+            Fake(id: "one/DSC_0001", raw: "one/DSC_0001.ARW", iso: 6400, content: a),
+            Fake(id: "two/DSC_0001", raw: "two/DSC_0001.ARW", iso: 6400, content: b),
+            Fake(id: "three/DSC_0001", raw: "three/DSC_0001.ARW", iso: 6400, content: c),
+            Fake(id: "X", raw: "four/X.ARW", decode: "four/X.JPG", iso: 6400),
+            Fake(id: "J", raw: "four/J.JPG", iso: 6400),
+            Fake(id: "L", raw: "four/L.ARW", iso: 200),
+            Fake(id: "Y", raw: "four/Y.ARW", iso: 6400, content: y),
+        ])
+        let fm = FileManager.default
+        let dest = dir.appendingPathComponent(ImageLoader.denoiseSubfolder)
+        // 旧版复制到一半断掉留下的半截（正式文件名、原片开头的 1500 字节）。
+        try? fm.createDirectory(at: dest, withIntermediateDirectories: true)
+        try? y.prefix(1500).write(to: dest.appendingPathComponent("Y.ARW"))
+        func listing() -> [String] {
+            ((try? fm.contentsOfDirectory(atPath: dest.path)) ?? []).sorted()
+        }
+        func bytes(_ name: String) -> Data? { try? Data(contentsOf: dest.appendingPathComponent(name)) }
+
+        store.exportHighISORaws(minISO: 3200, keepersOnly: false)
+        wait(store)
+        let first = listing()
+        let want = ["DSC_0001-2.ARW", "DSC_0001-3.ARW", "DSC_0001.ARW", "X.ARW", "Y-2.ARW", "Y.ARW"]
+        check(first == want, "同名的三张都在（另存 -2、-3），只有 RAW、没有 .part", first.joined(separator: " "))
+        let dsc = Set(["DSC_0001.ARW", "DSC_0001-2.ARW", "DSC_0001-3.ARW"].compactMap(bytes))
+        check(dsc == [a, b, c], "三个子文件夹的 DSC_0001 内容各是各的（大小不同、大小一样都没顶掉）")
+        check(bytes("Y.ARW") == y.prefix(1500) && bytes("Y-2.ARW") == y, "旧版的半截没删，完整的另存 Y-2")
+        let text1 = store.progressText
+        check(text1.contains("已复制 5 个 RAW") && text1.contains("另存为") && text1.contains("半截")
+              && text1.contains("1 张只有 JPG"), "完成提示：5 个、点名另存和半截、JPG 没复制", text1)
+        check(store.lastError == nil, "没有失败", store.lastError ?? "")
+
+        store.exportHighISORaws(minISO: 3200, keepersOnly: false)
+        wait(store)
+        check(listing() == want, "重跑一遍：一个文件没多、没少", listing().joined(separator: " "))
+        check(store.progressText.contains("已复制 0 个 RAW") && store.progressText.contains("5 个已存在跳过"),
+              "重跑：5 个已存在跳过", store.progressText)
     }
 }
 

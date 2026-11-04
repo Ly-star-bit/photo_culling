@@ -3584,6 +3584,8 @@ final class BatchStore: ObservableObject {
     /// COPIES (never moves — the session's paths must stay valid) the RAW of
     /// every photo at/above `minISO` into "<拍摄文件夹>/高ISO降噪". That subfolder
     /// is excluded from analysis scans, so re-running 开始分析 won't double-count.
+    /// 平铺，同名不同内容的另存 -2（不同子文件夹里同名的 RAW 不再互相顶掉）；一模一样的跳过；目标里的文件一个不删
+    /// （见 HighISOCopier）。只复制 RAW 本身。
     func exportHighISORaws(minISO: Int, keepersOnly: Bool) {
         guard !isRunning, let photoDir else { return }
         let (raws, jpegOnly) = highISOMatches(minISO: minISO, keepersOnly: keepersOnly)
@@ -3603,36 +3605,11 @@ final class BatchStore: ObservableObject {
         Task.detached { [weak self] in
             let fm = FileManager.default
             var copied = 0, existed = 0
+            var renamed: [String] = []
+            var partialLeftovers = 0
             var failed: [String] = []
             do {
                 try fm.createDirectory(at: destDir, withIntermediateDirectories: true)
-                func size(_ url: URL) -> Int? {
-                    ((try? fm.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.intValue
-                }
-                for (index, src) in sources.enumerated() {
-                    if flag.isSet { break }
-                    let dest = destDir.appendingPathComponent(src.lastPathComponent)
-                    if fm.fileExists(atPath: dest.path), let s = size(src), size(dest) == s {
-                        existed += 1  // complete copy from a previous run: skip
-                    } else {
-                        do {
-                            // Size mismatch = a copy interrupted mid-file last
-                            // time; replace it instead of trusting it forever.
-                            if fm.fileExists(atPath: dest.path) {
-                                try fm.removeItem(at: dest)
-                            }
-                            try fm.copyItem(at: src, to: dest)
-                            copied += 1
-                        } catch {
-                            failed.append(src.lastPathComponent)
-                        }
-                    }
-                    let done = index + 1
-                    await MainActor.run { [weak self] in
-                        self?.progressText = "复制 RAW \(done)/\(total)..."
-                        self?.progressFraction = Double(done) / Double(total)
-                    }
-                }
             } catch {
                 await MainActor.run { [weak self] in
                     self?.lastError = "创建 \(ImageLoader.denoiseSubfolder) 文件夹失败: \(error.localizedDescription)"
@@ -3640,9 +3617,32 @@ final class BatchStore: ObservableObject {
                 }
                 return
             }
+            for (index, src) in sources.enumerated() {
+                if flag.isSet { break }
+                let (outcome, partialLeftover) = HighISOCopier.copy(src, to: destDir, cancel: flag)
+                switch outcome {
+                case .copied(let name, let wasRenamed):
+                    copied += 1
+                    if wasRenamed { renamed.append(name) }
+                    if partialLeftover { partialLeftovers += 1 }
+                case .existed:
+                    existed += 1  // 上次复制的、一模一样：跳过
+                case .failed(let why):
+                    failed.append(why)
+                case .cancelled:
+                    break      // flag 已经立起来，下一轮就停
+                }
+                let done = index + 1
+                await MainActor.run { [weak self] in
+                    self?.progressText = "复制 RAW \(done)/\(total)..."
+                    self?.progressFraction = Double(done) / Double(total)
+                }
+            }
 
             let copiedCount = copied
             let existedCount = existed
+            let renamedNames = renamed
+            let partialCount = partialLeftovers
             let summaryFailed = failed
             await MainActor.run { [weak self] in
                 guard let self else { return }
@@ -3650,6 +3650,14 @@ final class BatchStore: ObservableObject {
                 self.isRunning = false
                 var parts = [(flag.isSet ? "已取消: 已复制 " : "已复制 ") + "\(copiedCount) 个 RAW → \(ImageLoader.denoiseSubfolder)/"]
                 if existedCount > 0 { parts.append("\(existedCount) 个已存在跳过") }
+                if !renamedNames.isEmpty {
+                    let shown = renamedNames.prefix(3).joined(separator: ", ") + (renamedNames.count > 3 ? "…" : "")
+                    parts.append("\(renamedNames.count) 个和文件夹里的同名文件内容不一样，另存为 \(shown)" +
+                                 "（多半是不同子文件夹里同名的 RAW）")
+                }
+                if partialCount > 0 {
+                    parts.append("其中 \(partialCount) 个原名的文件是旧版复制中断留下的半截，没删，核对后可以删掉")
+                }
                 if jpegOnly > 0 { parts.append("\(jpegOnly) 张只有 JPG 未复制") }
                 if summaryFailed.isEmpty {
                     self.progressText = parts.joined(separator: " · ")
