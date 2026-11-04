@@ -716,9 +716,11 @@ final class BatchStore: ObservableObject {
     /// 「废片移到废纸篓」默认真会移的张数：废片里去掉客户选中的（客户点名要精修的照片不扔）、拼图里在用的
     /// （不挖空拼图页、印样帧、存好的方案，见 collageInUseIDs）。
     var trashableRejectCount: Int { verdictCounts.reject - clientPickRejectCount - collageProtectedRejectCount }
-    /// 「废片移到废纸篓」默认要移的那些照片（和上面的张数是同一个条件）。
+    /// 「废片移到废纸篓」默认要移的那些照片（和上面的张数是同一个条件）。拼图工程这次没读进来（collageInUseUnknown）：
+    /// 说不清哪些在拼图里用，默认一张都不移。
     var trashableRejects: [BatchItem] {
-        items.filter { $0.verdict == .reject && !clientPicks.contains($0.id) && !collageInUseIDs.contains($0.id) }
+        guard collageInUseUnknown == nil else { return [] }
+        return items.filter { $0.verdict == .reject && !clientPicks.contains($0.id) && !collageInUseIDs.contains($0.id) }
     }
     /// 确认框里点「连这些一起移」时要移的：拼图里在用的也算上，客户选中的照样不动。
     var trashableRejectsIncludingCollage: [BatchItem] {
@@ -730,20 +732,30 @@ final class BatchStore: ObservableObject {
     /// 拼图各页（格子、图层、印样帧）和方案栏各方案用到的照片 id。AppModel 从内存里的 CollageStore 推过来（不读防抖
     /// 保存的 collage.json）；没接（--verdicts、--client-import 这类只开批量页的无头入口）= 空。只在托盘里的不算。
     @Published private(set) var collageInUseIDs: Set<String> = []
+    /// 拼图工程这次没读进来（读不出来、解不开：原件还在盘上或挪成了 .corrupt，内存里是空工程）的原因：说不清哪些照片在拼图里
+    /// 用，「废片移到废纸篓」默认一张都不移，确认框里只给「连这些一起移」（审查跟进：以前拿到的是空工程，一张都不拦）。
+    /// nil = 读进来了，或者没接拼图（只开批量页的无头入口）。
+    @Published private(set) var collageInUseUnknown: String?
     /// 现取一次（先让拼图工程挂到这一场再读）：AppModel 设。点「废片移到废纸篓」和真移之前走 refreshCollageInUse()。
-    var collageInUseSource: (() -> Set<String>)?
+    var collageInUseSource: (() -> (ids: Set<String>, unknown: String?))?
 
-    func setCollageInUse(_ ids: Set<String>) {
+    func setCollageInUse(_ ids: Set<String>, unknown: String?) {
         if ids != collageInUseIDs { collageInUseIDs = ids }
+        if unknown != collageInUseUnknown { collageInUseUnknown = unknown }
     }
 
     func refreshCollageInUse() {
-        if let source = collageInUseSource { setCollageInUse(source()) }
+        if let source = collageInUseSource {
+            let state = source()
+            setCollageInUse(state.ids, unknown: state.unknown)
+        }
     }
 
     /// 废片里客户没选中、但拼图里在用的张数：默认不移，确认框里可以选「连这些一起移」。只查拼图那一份 id，不扫整场。
+    /// 拼图工程没读进来时是客户没选中的全部废片（哪张在用说不清）。
     var collageProtectedRejectCount: Int {
-        collageInUseIDs.reduce(0) { n, id in
+        if collageInUseUnknown != nil { return verdictCounts.reject - clientPickRejectCount }
+        return collageInUseIDs.reduce(0) { n, id in
             guard let item = item(withID: id), item.verdict == .reject, !clientPicks.contains(id) else { return n }
             return n + 1
         }
@@ -4226,6 +4238,12 @@ final class BatchStore: ObservableObject {
         }
         // 真移之前现取一次拼图在用的（拼图工程先挂到这一场）：菜单上的张数是之前推过来的，这期间可能又排了一版。
         refreshCollageInUse()
+        // 拼图工程这次没读进来：说不清哪些废片在拼图里用，默认一张都不移（确认框里点「连这些一起移」才移）。
+        if !includeCollage, let unknown = collageInUseUnknown {
+            lastError = "拼图工程没读进来（\(unknown)），说不清哪些废片用在拼图 / 印样 / 方案里，默认一张都不移" +
+                " —— 修好拼图工程后重新打开这一场；确定不要了的话，在确认框里点「连这些一起移」（拼图里用到的格子会空）"
+            return
+        }
         let rejects = includeCollage ? trashableRejectsIncludingCollage : trashableRejects
         let keptForClient = clientPickRejectCount
         let keptForCollage = includeCollage ? 0 : collageProtectedRejectCount

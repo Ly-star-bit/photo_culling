@@ -253,6 +253,9 @@ final class CollageStore: ObservableObject {
     private var projectURL: URL?
     /// 这个工程的原件读不出来、或者解不开又挪不开（审查 S02b）：这次 attach 期间不存盘，免得拿空工程把它盖掉。
     private var projectSaveRefused: String?
+    /// 这次 attach 时工程没读进来（读不出来、解不开 —— 原件还在原处或挪成了 .corrupt，内存里是空工程）：说不清哪些照片
+    /// 用在拼图里，批量页「废片移到废纸篓」默认一张都不移（AppModel.collageInUseSource 带过去）。nil = 读进来了 / 新工程。
+    private(set) var projectLoadProblem: String?
     /// 这次 attach 以后第一次保存前留过 <工程>.bak 没有（照 LabelStore 的 backedUpSinceLoad）。
     private var projectBackedUp = false
     /// 最近一次写 collage.json 的结果（实时桥的写工具回 persisted，审查 S01b）：存盘队列上写完当场记下。
@@ -505,6 +508,7 @@ final class CollageStore: ObservableObject {
         loaded.canvas = defaultCanvas
         loaded.style = defaultStyle
         projectSaveRefused = nil
+        projectLoadProblem = nil
         projectBackedUp = false
         projectWriteResult.reset()
         // 以前读不出、解不开都悄悄换成空工程，用户（或 AI）随便动一下，1 秒后就把整本相册和所有方案盖掉（审查 S02b）。
@@ -519,12 +523,15 @@ final class CollageStore: ObservableObject {
             loaded = decoded
         case .corrupt(let moved?):
             lastError = "拼图工程 \(file) 解不开（被手改过或写坏了），原件已挪成 \(moved.lastPathComponent)，这里先从空的开始"
+            projectLoadProblem = "\(file) 解不开，原件挪成了 \(moved.lastPathComponent)"
         case .corrupt(nil):
             projectSaveRefused = "拼图工程 \(file) 解不开、也挪不开：为免覆盖，这一场的拼图先不存盘（修好或移走它再打开这一场）"
             lastError = projectSaveRefused
+            projectLoadProblem = "\(file) 解不开、也挪不开"
         case .unreadable(let why):
             projectSaveRefused = "拼图工程 \(file) 读不出来（\(why)）：为免覆盖，这一场的拼图先不存盘（重新打开这一场再读一次）"
             lastError = projectSaveRefused
+            projectLoadProblem = "\(file) 读不出来（\(why)）"
         }
         project = loaded
         pageIndex = min(pageIndex, max(0, project.pages.count - 1))

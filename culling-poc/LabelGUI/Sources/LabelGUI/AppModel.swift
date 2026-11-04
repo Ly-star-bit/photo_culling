@@ -81,17 +81,18 @@ final class AppModel: ObservableObject {
         // 「废片移到废纸篓」默认不动拼图各页、印样帧、方案里用到的照片：读内存里的拼图工程（collage.json 是防抖保存的，
         // 读盘可能是旧的）。菜单上的张数跟着工程变（攒 0.3 s 再算再推：拖动时不每帧算）；点菜单、真移之前再现取一次，
         // 那时先让拼图挂到这一场（换场次的那一下工程还是上一场的）。
+        // 工程这次没读进来（读不出来、解不开，内存里是空的）：带上原因，批量页默认一张都不移（说不清哪些在拼图里用）。
         batch.collageInUseSource = { [weak model] in
-            guard let model else { return [] }
+            guard let model else { return (ids: [], unknown: nil) }
             model.ensureCollageAttached()
-            return model.collage.project.photoIDsInUseIncludingVariants
+            return (ids: model.collage.project.photoIDsInUseIncludingVariants, unknown: model.collage.projectLoadProblem)
         }
+        // 不 removeDuplicates：换到另一场空工程时 id 一样是空的，「没读进来」却变了；setCollageInUse 自己只在变了时才设。
         model.collageInUseWatch = collage.$project
             .debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)
             .map(\.photoIDsInUseIncludingVariants)
-            .removeDuplicates()
-            .sink { [weak batch] ids in
-                MainActor.assumeIsolated { batch?.setCollageInUse(ids) }
+            .sink { [weak batch, weak collage] ids in
+                MainActor.assumeIsolated { batch?.setCollageInUse(ids, unknown: collage?.projectLoadProblem) }
             }
         // store 都建好了：写锁文件那一行、设置开着才开 socket（§9.2.1 第 3–5 步）
         model.live = live

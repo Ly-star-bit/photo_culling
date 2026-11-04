@@ -334,4 +334,76 @@ extension PersistSelfTestHarness {
         check(after.problem == nil && diskIndex()?.unknown.isEmpty == true && after.entries.count == 3,
               "重新打开那两个文件夹以后：索引里没有读不懂的了，MCP 不再报（\(after.problem ?? "nil")）")
     }
+
+    // MARK: - 拼图工程没读进来时「废片移到废纸篓」
+
+    func collageUnknownBlocksTrash() {
+        print("— 拼图工程没读进来（解不开 / 读不出来）：「废片移到废纸篓」默认一张都不移，「连这些一起移」照样能移")
+        freshIndex()
+        typealias Fake = FileSafetySelfTest.Fake
+        let ids = ["a", "b", "c"]
+        let dir = dataDir.appendingPathComponent("photos/collage-unknown", isDirectory: true)
+        let otherDir = dataDir.appendingPathComponent("photos/collage-unknown-other", isDirectory: true)
+        FileSafetySelfTest.writeShoot(dir, ids.map { Fake(id: $0, raw: $0 + ".JPG", jpeg: true) })
+        FileSafetySelfTest.writeShoot(otherDir, [Fake(id: "x", raw: "x.JPG", jpeg: true)])
+        let session = dataDir.appendingPathComponent("sessions/" + BatchStore.sessionKey(for: dir))
+        let collageURL = session.appendingPathComponent("collage.json")
+        let garbage = Data("{\"pages\": [{\"id\": ".utf8)
+        try? garbage.write(to: collageURL)
+        // 和 app 同一套接线（AppModel.make），不开实时桥。
+        let model = AppModel.make(dataDir: dataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: dataDir), bridge: .none)
+        let batch = model.batch
+        batch.switchSession(to: dir)
+        model.ensureCollageAttached()
+        for id in ids { batch.setOverride(id, .reject) }
+        batch.refreshCollageInUse()
+        let unknown = batch.collageInUseUnknown ?? ""
+        let blocked: Bool = batch.trashableRejects.isEmpty && batch.trashableRejectCount == 0 && batch.collageProtectedRejectCount == 3
+        check(unknown.contains("解不开") && blocked,
+              "collage.json 解不开（内存里是空工程）：默认要移的 0 张，3 张废片都先不移：\(unknown)")
+        check(batch.trashableRejectsIncludingCollage.count == 3, "确认框里「连这些一起移」照样是这 3 张")
+        // 万一闸失效：原片先删掉，trashRejects 一张都移不动，不会真的往废纸篓里放东西。
+        for id in ids { try? fm.removeItem(at: dir.appendingPathComponent(id + ".JPG")) }
+        batch.trashRejects()
+        let refusedNow: Bool = !batch.isRunning && (batch.lastError ?? "").contains("拼图工程没读进来")
+        FileSafetySelfTest.wait(batch)
+        check(refusedNow && batch.items.count == 3, "点「移到废纸篓」：一张都不移，状态栏说拼图工程没读进来：\(batch.lastError ?? "nil")")
+
+        // 重新打开（这回读得进来：离开时存了一份新的空工程）：照常按拼图里用到的算。拼图跟着批量页挂到别的场次（app 里是
+        // photoDirWatch 下一拍做的，这里同步做一次），切回来才重新读。
+        batch.switchSession(to: otherDir)
+        model.ensureCollageAttached()
+        batch.switchSession(to: dir)
+        batch.refreshCollageInUse()
+        check(batch.collageInUseUnknown == nil && batch.trashableRejectCount == 3,
+              "重新打开、工程读得进来：照常（3 张都能移）" +
+              "：\(batch.collageInUseUnknown ?? "nil") / \(batch.trashableRejectCount) / \(batch.items.count) / \(batch.verdictCounts.reject)")
+
+        // 防抖推过来的那一路也带上原因（菜单上的张数）：再写坏、切走切回，不手动刷新
+        try? garbage.write(to: collageURL)
+        batch.switchSession(to: otherDir)
+        model.ensureCollageAttached()
+        batch.switchSession(to: dir)
+        let pushed = FileSafetySelfTest.waitUntil(10) { batch.collageInUseUnknown != nil }
+        check(pushed && batch.trashableRejectCount == 0, "不手动刷新：拼图那边推过来的也说工程没读进来，菜单上要移的是 0 张")
+
+        // 读不出来（权限）：原件还在原处，同样不移
+        if chmodBlocks {
+            let lockedDir = dataDir.appendingPathComponent("photos/collage-locked", isDirectory: true)
+            FileSafetySelfTest.writeShoot(lockedDir, ids.map { Fake(id: $0, raw: $0 + ".JPG", jpeg: true) })
+            let lockedURL = dataDir.appendingPathComponent("sessions/" + BatchStore.sessionKey(for: lockedDir))
+                .appendingPathComponent("collage.json")
+            try? Data("{\"pages\":[]}".utf8).write(to: lockedURL)
+            setMode(lockedURL, 0o000)
+            defer { setMode(lockedURL, 0o644) }
+            batch.switchSession(to: lockedDir)
+            for id in ids { batch.setOverride(id, .reject) }
+            batch.refreshCollageInUse()
+            check((batch.collageInUseUnknown ?? "").contains("读不出来") && batch.trashableRejects.isEmpty,
+                  "collage.json 读不出来：同样默认一张都不移：\(batch.collageInUseUnknown ?? "nil")")
+        } else {
+            print("SKIP root 跑时 chmod 000 挡不住读，读不出来那一段测不了")
+        }
+        batch.switchSession(to: otherDir)
+    }
 }
