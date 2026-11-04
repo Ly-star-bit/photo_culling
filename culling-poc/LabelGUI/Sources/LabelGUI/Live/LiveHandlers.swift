@@ -845,6 +845,14 @@ extension LiveHandlers {
                 return .failure("save_failed", "app 里这一场还有改动没存上（\(unsaved)），这次没有切场次",
                                 ["executed": false, "hint": "照原话告诉用户：先腾出磁盘空间、点批量页顶上红条的「重试」，存上以后再切"])
             }
+            // 拼图工程写不上（盘满）：批量页红条不管它，switchSession 离开前再整份写了一次还是失败、拦下了（persistBeforeLeaving）。
+            // 原件读坏了那一种上面带 confirm 已经放行，到不了这里。
+            let collage = model.collage
+            if !batch.isRunning, let why = collage.projectSaveProblem, !collage.projectSaveIsRefused {
+                return .failure("save_failed", "app 里这一场的拼图没存上（\(why)），这次没有切场次：切过去拼图改动就没了",
+                                ["executed": false,
+                                 "hint": "照原话告诉用户：先腾出磁盘空间（看拼图页底下的提示），之后再调一次 app_open_session —— app 切之前会先整份再存一次，存上了才切"])
+            }
             return .failure("invalid_state", "选片工具没切场次：\(batch.lastError ?? "正在处理中")", ["executed": false])
         }
         model.ensureCollageAttached()

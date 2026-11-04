@@ -91,6 +91,8 @@ final class AppModel: ObservableObject {
         }
         // 拼图原件读不出来、这次打开以后又改过：批量页切场次前和判决那边一起问（BatchStore.persistBeforeLeaving）。
         batch.collageHasRefusedEdits = { [weak collage] in collage?.hasRefusedEdits == true }
+        // 拼图写失败（盘满）、离开前再写一次也写不上：批量页切场次 / 移除 / 清历史一样拦下（不然相册改动切走就丢）。
+        batch.collageUnsavedWrite = { [weak collage] in collage?.projectUnsavedForLeaving() }
         // 不 removeDuplicates：换到另一场空工程时 id 一样是空的，「没读进来」却变了；setCollageInUse 自己只在变了时才设。
         model.collageInUseWatch = collage.$project
             .debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)

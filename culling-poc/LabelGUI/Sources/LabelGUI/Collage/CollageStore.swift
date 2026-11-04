@@ -4092,6 +4092,17 @@ final class CollageStore: ObservableObject {
         return projectWriteResult.failure(for: url)
     }
 
+    /// 切场次、移除当前这一场、清历史记录之前（BatchStore.persistBeforeLeaving，AppModel 接到 collageUnsavedWrite）：
+    /// 和 projectUnsavedForQuit 一样，还没到点的现在写，上次写失败（盘满）的再整份写一次；还写不上就回原因，批量页拦下不切 ——
+    /// 不然 attach 换上新场次的工程，内存里没存上的相册当场就没了。原件读坏了、这一场不存的不在这里算（那一路先问一句，
+    /// 见 hasRefusedEdits / refusedUnsavedLabels）。
+    func projectUnsavedForLeaving() -> String? {
+        flushSaves()
+        guard projectSaveRefused == nil, let url = projectURL, projectWriteResult.failure(for: url) != nil else { return nil }
+        saveProject(inBackground: false)
+        return projectWriteResult.failure(for: url)
+    }
+
     /// 还没到点的那一次现在写；已经交给后台在写的，等它写完再回来（换场次、退出、实时桥回复之前盘上要是最新的）。
     private func flushProjectSave() {
         guard projectSaveTask != nil else {

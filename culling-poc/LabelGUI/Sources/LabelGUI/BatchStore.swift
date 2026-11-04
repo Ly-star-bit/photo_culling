@@ -2133,6 +2133,9 @@ final class BatchStore: ObservableObject {
     var refusedUnsaved: [PersistFile] { PersistFile.allCases.filter(refusedDirty.contains) }
     /// 拼图那边一样「原件读不出来、这次打开以后又改过」（AppModel 接 CollageStore.hasRefusedEdits；没接 = 没有）。
     var collageHasRefusedEdits: (() -> Bool)?
+    /// 拼图工程写失败（盘满）、离开前再整份写一次也写不上：回原因（AppModel 接 CollageStore.projectUnsavedForLeaving；
+    /// 没接 = 没有）。nil = 拼图盘上是最新的，或者是原件读坏了那一种（走 collageHasRefusedEdits 先问）。
+    var collageUnsavedWrite: (() -> String?)?
     /// 离开这一场前要问的「只在内存里」的几样：批量页这几份，加上拼图。
     var refusedUnsavedLabels: [String] {
         var labels = refusedUnsaved.map(\.label)
@@ -2167,6 +2170,12 @@ final class BatchStore: ObservableObject {
                 lastError = "这一场还有改动没存上：先腾出磁盘空间、点顶上红条的「重试」，存上以后再\(action)"
                 return false
             }
+        }
+        // 拼图工程写失败（盘满）：批量页这几份没事、红条不出来，可切过去 attach 就换上新场次的工程，相册改动全丢 ——
+        // 离开前再整份写一次，还写不上一样拦下（⌘Q 那一路是 projectUnsavedForQuit 问）。
+        if let why = collageUnsavedWrite?() {
+            lastError = "拼图没存上（\(why)）：先腾出磁盘空间，存上以后再\(action)（到时候会先整份再存一次）"
+            return false
         }
         let labels = refusedUnsavedLabels
         guard !labels.isEmpty else { return true }

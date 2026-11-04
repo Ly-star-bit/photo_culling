@@ -3173,6 +3173,8 @@ __attribute__((constructor)) static void init(void) {
         marks[mid] = {"op_id": "fake-op-0001", "tool": "cull_set_verdicts", "at": "2026-11-01T00:00:00Z", "previous": None,
                       "ai_verdict": "精选"}
         json.dump(marks, open(ai_path, "w"), ensure_ascii=False)
+        # 下面「拼图写不上时切场次」要切过去的那一场：先登记在「最近场次」里（§10.4），宿主起来之前写
+        register_sessions(mdata, [EMPTY_PHOTOS])
         hm2 = Host("G-m2", data=mdata, args=("--no-view",))
         envm = hm2.env()
         r_k, r_f = m_row(mid2), m_row(mid)
@@ -3248,6 +3250,27 @@ __attribute__((constructor)) static void init(void) {
             check(sf_ok.get("persisted") is True and "save_failed" not in warn_codes(sf_ok) and disk_ov.get(keep_id) == "精选"
                   and keep_id in disk_cp and sf_ct2.get("persisted") is True and "save_failed" not in warn_codes(sf_ct2),
                   "改回能写以后：下一次改判 persisted true、overrides.json 里是精选，之前没存上的客户选中一起补进 client_picks.json，拼图 persisted true")
+            # 拼图写不上（盘满）时切场次（最终审查）：批量页这几份都存上了、只有 collage.json 写不进去 —— app_open_session 带
+            # confirm 也不切、回 save_failed（以前照切，拼图换成新场次的工程，改动丢了还回 opened:true）；改回能写以后、没再改拼图，
+            # 再调一次：切之前整份再存一次，存上了才切
+            cl_title = "leave-unsaved-" + uuid.uuid4().hex[:6]
+            cj_path = os.path.join(msess, "collage.json")
+            os.chmod(msess, 0o555)
+            try:
+                cl_ct = mw("collage_set_text", {"title": cl_title})
+                _, cl_o, _ = mcp_full(envm, "app_open_session", {"session": EMPTY_KEY, "confirm": True})
+                cl_s = state(hm2)
+            finally:
+                os.chmod(msess, 0o755)
+            cl_before = open(cj_path, encoding="utf-8").read() if os.path.exists(cj_path) else ""
+            cl_msg = ((cl_o or {}).get("error") or {}).get("message") or ""
+            check(cl_ct.get("persisted") is False and err_code(cl_o) == "save_failed" and edata(cl_o).get("executed") is False
+                  and "拼图" in cl_msg and cl_s.get("session") == KEY and cl_title not in cl_before,
+                  f"拼图写不上：app_open_session 带 confirm 也不切、回 save_failed（executed false、说是拼图），还在这一场（{err_code(cl_o)}：{cl_msg}）")
+            _, cl_o2, _ = mcp_full(envm, "app_open_session", {"session": EMPTY_KEY, "confirm": True})
+            cl_after = open(cj_path, encoding="utf-8").read() if os.path.exists(cj_path) else ""
+            check((cl_o2 or {}).get("opened") is True and state(hm2).get("session") == EMPTY_KEY and cl_title in cl_after,
+                  f"改回能写以后、没再改拼图：再调 app_open_session，切之前整份再存了一次（collage.json 里有那句标题），切过去了（{err_code(cl_o2)}）")
         hm2.term()
 
         # ---------- 第 16 条 旧版 app 少一个写方法：只有那个工具回 app_version_mismatch
