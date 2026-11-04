@@ -1230,6 +1230,15 @@ final class BatchStore: ObservableObject {
         // 判决、客户选中、对时还有没存上的（盘满了）：再写一次，还不行就不切（审查 S01）。
         guard persistBeforeLeaving("切场次") else { return false }
         let resolved = restoreAccess(to: folder, followBookmark: followBookmark)
+        // 给的文件夹自己在，书签却把它带到了另一个文件夹（审查）：这一场认回 / 重新定位以后登记的还是原路径、书签指着新位置，
+        // 原路径上后来又有了一个新文件夹（同一天第二次导卡、建了同名文件夹）。key 是原路径的哈希，按原路径打开都会认成原来
+        // 那一场 —— 照旧打开它，但说清楚，别让人以为新文件夹已经打开、分析过了。按设备号 + inode 比（同一个文件夹换了写法、
+        // 经过符号链接的不算）。
+        var carriedAway: URL?
+        if followBookmark, resolved.path != folder.path, let given = SessionLocation.identity(folder.path),
+           let target = SessionLocation.identity(resolved.path), given != target {
+            carriedAway = resolved
+        }
         // 认回挪了的文件夹（审查 S04 第一步）：这个路径还没有分析结果，「最近场次」里却有一条的书签解析到的就是它（同卷改名 /
         // 挪动、卷名变「T7 1」以后从「选择文件夹…」或拖进来打开的）—— 沿用那一条的 key 和 path，和从菜单点一个改了名的
         // 文件夹同一个样子，不再开一个空场次整场重分析。实时桥（followBookmark: false）不认：它就是要只按字符串走。
@@ -1286,6 +1295,10 @@ final class BatchStore: ObservableObject {
             lastError = "这一场的照片文件夹挪过（原来在 \(CardImporter.displayPath(URL(fileURLWithPath: r.from)))），" +
                         "可 manifest.json 里的 \(r.unmatched) 张照片路径都对不上原来记的文件夹，没改过来：" +
                         "先别移废片、写 XMP（会按旧位置找）"
+        } else if let carriedAway {
+            lastError = "「\(CardImporter.displayPath(folder))」现在是另一个文件夹：原来在这里的那一场已经改名 / 挪到了 " +
+                        "\(CardImporter.displayPath(carriedAway))，打开的是那一场（判决、人工改判都在）。" +
+                        "要分析新的这个文件夹，先在访达里给它改个名再打开 —— 按原来的名字打开都会认成原来那一场"
         } else if previewsPruned {
             lastError = "这一场的预览图已清理省空间（掉出了最近 15 场，或者从「移除历史记录」里移除过），判决和人工改判都还在。" +
                         "点「重新分析」补回预览：没变的照片只重做预览，人工改判不会动"

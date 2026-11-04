@@ -54,6 +54,7 @@ enum SessionMoveSelfTest {
         reopenFromMenu(root.appendingPathComponent("menu"), batch: model.batch)
         unmatchedNotClaimed(root.appendingPathComponent("unmatched"), batch: model.batch)
         idOnlyRowsFollow(root.appendingPathComponent("idonly"), batch: model.batch)
+        newFolderAtOldPath(root.appendingPathComponent("old-path"), batch: model.batch)
         relocate(root.appendingPathComponent("relocate"), batch: model.batch)
         liveBridgeDoesNotFollow(root.appendingPathComponent("live"), batch: model.batch)
         liveBridgeAfterGUIRebase(root.appendingPathComponent("live-after-gui"), batch: model.batch)
@@ -316,6 +317,29 @@ enum SessionMoveSelfTest {
         let sidecars = ["DSCF0001", "DSCF0002", "第二机位/IMG_0003"].map { b.appendingPathComponent($0 + ".xmp").path }
         check(sidecars.allSatisfy(fm.fileExists(atPath:)) && !fm.fileExists(atPath: a.path),
               "写 XMP：3 个 .xmp 都写在新位置，原来的位置没被建回来", batch.lastError ?? "")
+    }
+
+    /// 认回以后这一条登记的是原路径、书签指着新位置；原路径上又有了新文件夹（同一天第二次导卡）：照旧打开原来那一场，
+    /// 但说清楚新文件夹没打开、要改名再开。
+    private static func newFolderAtOldPath(_ root: URL, batch: BatchStore) {
+        print("== 原路径上又有了新文件夹：打开的是挪走的那一场，说清楚")
+        let fm = FileManager.default
+        let p = root.appendingPathComponent("20261104")
+        let q = root.appendingPathComponent("20261104 张三")
+        FileSafetySelfTest.writeShoot(p, shoot(p))
+        check(batch.switchSession(to: p) && batch.items.count == 3, "打开导卡建的文件夹")
+        try? fm.moveItem(at: p, to: q)
+        check(batch.switchSession(to: q) && batch.sessionDir.lastPathComponent == key(p), "改名以后从「选择文件夹…」打开：认回")
+        check(batch.switchSession(to: p) && !(batch.lastError ?? "").contains("另一个文件夹"),
+              "原路径上没有东西时从菜单点：照常跟书签，不说「另一个文件夹」", batch.lastError ?? "")
+        // 第二张卡导到同一个日期文件夹。
+        try? fm.createDirectory(at: p, withIntermediateDirectories: true)
+        try? Data(repeating: 0x45, count: 800).write(to: p.appendingPathComponent("DSCF9001.JPG"))
+        check(batch.switchSession(to: p), "打开原路径上的新文件夹")
+        let error = batch.lastError ?? ""
+        check(sameDir(batch.photoDir, q) && error.contains("另一个文件夹") && error.contains("20261104 张三") && error.contains("改个名"),
+              "打开的是挪走的那一场，红条说原路径现在是另一个文件夹、要改名再开", error)
+        check(manifestAt(key(p), q), "原来那一场的 manifest 没被改到新文件夹上")
     }
 
     // MARK: - 拷贝出来的副本
