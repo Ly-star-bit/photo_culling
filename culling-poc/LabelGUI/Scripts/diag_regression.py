@@ -6,6 +6,11 @@
 1. --diag-export：造一个数据目录（sessions.json 带客户名的场次文件夹和 bookmark、场次 JSON、客户备注、预览图、带路径的日志）
    和一个崩溃报告目录 → zip 里有说明 / 诊断信息 / 提示 / 场次概况 / 目录结构 / 日志 / 最近的崩溃报告；没有图片文件、
    没有客户原话、bookmark、场次文件夹名、家目录；日志里的路径换成了 <场次 N>。
+1b. --diag-export 的目标已经有东西（文件夹、带结尾斜杠、名字以 .zip 结尾的文件夹、数据目录本身、「.」、已有的文件）→ 退出码 2，
+   一个字节都不动；不以 .zip 结尾的新名字也拒绝；还没有的 .zip 照常写。
+1c. --diag-export 打码不只认 sessions.json：认回过的场次（manifest 里是新位置、卷名也变了）、掉出最近场次的旧场次、
+   只在「」里出现过的没登记文件夹（隐私权限拦下）、日志里只出现过一次的路径、数据目录里带客户名的文件夹 → zip 里哪个文件
+   都没有客户名、盘名、家目录；照片文件名、盘的代号还看得出来。
 2. --analyze 一个 chmod 000 的照片文件夹 → 退出码 1，说「没有权限读这个文件夹」并点名「系统设置 › 隐私与安全性 › 文件与文件夹」，
    不说「没有支持的图片文件」；空文件夹的对照组照旧说「没有支持的图片文件」。
 3. --export-xmp：照片文件夹 chmod 555（写不进 .xmp）→ 「N 个失败 … ；原因：没有权限」，一个 .xmp 都没写出来。
@@ -178,6 +183,109 @@ def section_export():
           "目录结构：文件只列名字和大小，预览目录只说个数")
 
 
+def tree_snapshot(root):
+    """目录里每个文件的相对路径 → 内容（比对「一个字节都没动」）。"""
+    out = {}
+    for d, _, files in os.walk(root):
+        for n in files:
+            p = os.path.join(d, n)
+            out[os.path.relpath(p, root)] = open(p, "rb").read()
+    return out
+
+
+def section_export_target():
+    print("1b. --diag-export 的目标已经有东西：退出码 2，一个字节都不动（以前会把给的文件夹整个递归删掉）")
+    data = fresh_data("diag-target")
+    with open(os.path.join(data, "sessions.json"), "w") as f:
+        f.write("[]")
+    # 已有的文件夹（里面有东西）：照原样、带结尾斜杠、就是数据目录本身、当前目录「.」
+    folder = os.path.join(WORK, "已有的文件夹")
+    os.makedirs(os.path.join(folder, "子文件夹"))
+    for rel, text in (("别删我.txt", "里面的东西"), ("子文件夹/也别删.json", "{}")):
+        with open(os.path.join(folder, rel), "w") as f:
+            f.write(text)
+    zipdir = os.path.join(WORK, "名字像 zip 的文件夹.zip")
+    os.makedirs(zipdir)
+    with open(os.path.join(zipdir, "别删我.txt"), "w") as f:
+        f.write("名字以 .zip 结尾的文件夹")
+    before_folder, before_zipdir, before_data = tree_snapshot(folder), tree_snapshot(zipdir), tree_snapshot(data)
+    for label, target in (("已有的文件夹", folder), ("结尾带斜杠", folder + "/"), ("名字以 .zip 结尾的文件夹", zipdir),
+                          ("数据目录本身", data), ("当前目录「.」", ".")):
+        r = run(["--diag-export", target], data)
+        check(r.returncode == 2 and "不覆盖" in r.stdout, f"{label}：退出码 2、说不覆盖（{r.returncode}：{r.stdout.strip()[-200:]!r}）")
+    check(os.path.isdir(folder) and tree_snapshot(folder) == before_folder, "已有的文件夹和里面的文件逐字节没变")
+    check(os.path.isdir(zipdir) and tree_snapshot(zipdir) == before_zipdir, "名字以 .zip 结尾的文件夹没变")
+    # 数据目录：启动时 app 自己会往里放 fonts/（和打包无关），原来的文件一个都不能少、不能变
+    after_data = tree_snapshot(data) if os.path.isdir(data) else {}
+    check(all(after_data.get(k) == v for k, v in before_data.items()), "数据目录本身：原来的文件都在、逐字节没变")
+    work_zips = [n for n in os.listdir(WORK) if n.lower().endswith(".zip") and n not in ("诊断.zip", os.path.basename(zipdir))]
+    check(not work_zips, f"当前目录里没多出 zip：{work_zips}")
+    # 已有的文件：不覆盖
+    existing = os.path.join(WORK, "已有的.zip")
+    with open(existing, "wb") as f:
+        f.write(b"original bytes, not a diagnostics zip")
+    r = run(["--diag-export", existing], data)
+    check(r.returncode == 2 and open(existing, "rb").read() == b"original bytes, not a diagnostics zip",
+          f"已有的文件：退出码 2、逐字节没变（{r.returncode}）")
+    # 不以 .zip 结尾的新名字：拒绝（多半是想给一个文件夹）
+    for name in ("out.txt", "新文件夹"):
+        target = os.path.join(WORK, name)
+        r = run(["--diag-export", target], data)
+        check(r.returncode == 2 and not os.path.exists(target), f"「{name}」不是 .zip：退出码 2、什么都没写（{r.returncode}）")
+    # 对照组：还没有的 .zip 照常写
+    fresh = os.path.join(WORK, "新的诊断.zip")
+    r = run(["--diag-export", fresh], data)
+    check(r.returncode == 0 and zipfile.is_zipfile(fresh), f"还没有的 .zip：照常写出（{r.returncode}）")
+
+
+def section_export_unregistered():
+    print("1c. --diag-export：没登记的客户名文件夹、认回过的场次、掉出最近场次的旧场次、日志里随便哪条路径 → zip 里哪个文件都没有客户名")
+    data = fresh_data("diag-unreg")
+    home = os.path.expanduser("~")
+    old = "/Volumes/T7/客户周九婚礼"                       # sessions.json 里钉着的旧路径
+    new = "/Volumes/T7 1/交付/周九婚礼-已交付"            # 认回以后的新位置（卷名变了、挪进一层，manifest 改到这里）
+    gone = os.path.join(home, "Desktop", "吴十订婚")       # 掉出最近场次：只剩 manifest
+    k1, k3 = session_key(old), session_key(gone)
+    json.dump([{"key": k1, "path": old, "name": "周九婚礼-已交付", "lastAnalyzed": "2026-11-01", "photoCount": 2}],
+              open(os.path.join(data, "sessions.json"), "w"), ensure_ascii=False)
+    for key, photo_dir in ((k1, new), (k3, gone)):
+        os.makedirs(os.path.join(data, "sessions", key))
+        json.dump({"photo_dir": photo_dir, "photos": []}, open(os.path.join(data, "sessions", key, "manifest.json"), "w"),
+                  ensure_ascii=False)
+    # 数据目录里一个名字带客户名的文件夹（目录结构那一份也要打码）
+    os.makedirs(os.path.join(data, "导出草稿", "郑十一写真"))
+    os.makedirs(os.path.join(data, "logs"))
+    lines = [
+        f"列照片时跳过读不了的 {new}/锁着的第二机位：没有权限",
+        "分析失败: 没有权限读这个文件夹「郑十一写真」：到 系统设置 › 隐私与安全性 › 文件与文件夹 › 选片工具",
+        f"照片文件夹「吴十订婚」不存在 (被删除、改名或硬盘未挂载) ⏎ {gone}/DSCF0002.JPG",
+        "导出到 /Volumes/客户王的移动硬盘/陈十二婚礼/精选：写入「DSCF0003.jpg」失败",
+        "「冯十三挑错的」里找不到「周九婚礼-已交付」的照片",
+        f"导出诊断信息 → {home}/Desktop/发给开发者/选片工具诊断-20261104-101010.zip（7 个文件）",
+    ]
+    with open(os.path.join(data, "logs", "app.log"), "w") as f:
+        for i, line in enumerate(lines):
+            f.write(f"2026-11-04 10:00:0{i}.000 -0800 GUI[1] error batch: {line}\n")
+    out = os.path.join(WORK, "诊断-没登记.zip")
+    r = run(["--diag-export", out], data)
+    if not check(r.returncode == 0 and os.path.isfile(out), f"退出码 0、写出 zip（{r.returncode}：{(r.stdout + r.stderr)[-300:]!r}）"):
+        return
+    with zipfile.ZipFile(out) as z:
+        texts = {n: z.read(n).decode("utf-8", "replace") for n in z.namelist() if not n.endswith("/")}
+    banned = ["周九", "已交付", "吴十订婚", "郑十一写真", "客户王的移动硬盘", "陈十二婚礼", "冯十三挑错", "锁着的第二机位",
+              "发给开发者", "导出草稿", "T7 1", "/Volumes/T7", home + "/"]
+    leaks = [f"{n.split('/', 1)[-1]}：{w}" for n, t in texts.items() for w in banned if w in t]
+    check(not leaks, f"zip 里哪个文件都没有客户名、盘名、家目录：漏了 {leaks}")
+    log = next((t for n, t in texts.items() if n.endswith("logs/app.log")), "")
+    check("/DSCF0002.JPG" in log and "「DSCF0003.jpg」" in log and "/Volumes/<盘 " in log and "<场次 1>" in log
+          and "选片工具诊断-20261104-101010.zip" in log,
+          f"打码以后照片文件名、盘的位置（代号）、认回的场次代号还看得出来：{log[-500:]!r}")
+    check("~/Desktop/" in log, "桌面这种系统文件夹照原样（只换家目录）")
+    summary = next((t for n, t in texts.items() if n.endswith("sessions.txt")), "")
+    check("「数据目录结构」里的 sessions/<key>" in summary and f"<场次 1>  key {k1}" in summary,
+          f"自己的说明文字不误伤，认回的场次照样是 <场次 1>：{summary!r}")
+
+
 def section_analyze():
     print("2. --analyze 读不了的照片文件夹：说没有权限、点名系统设置")
     if IS_ROOT:
@@ -236,6 +344,8 @@ def section_jpeg():
 
 try:
     section_export()
+    section_export_target()
+    section_export_unregistered()
     section_analyze()
     section_xmp()
     section_jpeg()

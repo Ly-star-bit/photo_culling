@@ -270,8 +270,12 @@ final class LiveServer: @unchecked Sendable {
         }
     }
 
+    /// stderr 一份（终端、--live-host 测试看得到）；再进持久日志（审查 D03）：从访达启动的 GUI 进程 stderr 接在
+    /// /dev/null 上，桥为什么没开、锁丢过、socket 重绑这些以前一行都留不下。AppLog 不往 stderr 写，没装文件日志
+    /// （无头、测试宿主）时只进 os.Logger。LiveServer 只在 GUI / 测试宿主里跑，--mcp 进程不走这里。
     static func log(_ text: String) {
         MCPLog.stderr("[live \(getpid())] \(text)\n")
+        AppLog.write("live", .notice, text)
     }
 
     // MARK: - 启动（AppModel.make 里两步：建 store 之前 prepare 拿锁，建好以后 attach 开桥）
