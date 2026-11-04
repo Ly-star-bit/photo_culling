@@ -90,7 +90,9 @@ enum ImageLoader {
     /// Recursive: wedding shoots routinely arrive as 仪式/晚宴/花絮 subfolders.
     /// RAW+JPEG pairing happens per-directory — same stem in different folders is
     /// two different shots, not a pair.
-    static func listPhotos(in directory: URL) -> [PhotoFile] {
+    /// previous：上一次分析给每张照片起的 id（AnalysisEngine 从旧 manifest 建，见 PhotoIDMemory.swift）——
+    /// 认得出来的照片沿用旧 id，只给新来的起名。
+    static func listPhotos(in directory: URL, previous: PreviousIDs = PreviousIDs()) -> [PhotoFile] {
         let fm = FileManager.default
         var images: [URL] = []
         // 不用 .skipsHiddenFiles：它也会跳过带「隐藏」标记的文件 —— FAT 卡上的隐藏属性（尼康等的「隐藏图像」）
@@ -173,19 +175,27 @@ enum ImageLoader {
             return id
         }
 
-        let paired = keys.map { key -> PhotoFile in
+        // 第一遍：上一次分析过的照片沿用上一次的 id（按相对拍摄根目录的路径认），先全部占进 usedIDs，
+        // 第二遍再给新来的起名。撞名状态变了（后加了同名子文件夹、移走了同名的一张）没动过的照片 id 也不变；
+        // 根目录新来的同名文件算出来的裸 stem 也抢不走旧 id（它拿 _2）。
+        let kept = previous.match(pairs: keys.map { [jpegByKey[$0], rawByKey[$0]].compactMap { $0 } },
+                                  extras: extras, root: directory)
+        for id in kept.pairs + kept.extras { if let id { usedIDs.insert(id) } }
+
+        let paired = keys.enumerated().map { i, key -> PhotoFile in
             let keyURL = URL(fileURLWithPath: key)
             let bareStem = keyURL.lastPathComponent
             let candidate = stemCounts[bareStem]! > 1 ? pathScopedID(keyURL) : bareStem
             let raw = rawByKey[key]
             let jpeg = jpegByKey[key]
             return PhotoFile(
-                stem: claim(candidate),
+                stem: kept.pairs[i] ?? claim(candidate),
                 primaryURL: raw ?? jpeg!,
                 decodeURL: jpeg ?? raw!
             )
         }
-        let extraFiles = extras.map { url -> PhotoFile in
+        let extraFiles = extras.enumerated().map { j, url -> PhotoFile in
+            if let old = kept.extras[j] { return PhotoFile(stem: old, primaryURL: url, decodeURL: url) }
             let ext = url.pathExtension.lowercased()
             let bare = "\(url.deletingPathExtension().lastPathComponent)_\(ext)"
             // Only reach for the path-scoped form when the cheap one is taken —

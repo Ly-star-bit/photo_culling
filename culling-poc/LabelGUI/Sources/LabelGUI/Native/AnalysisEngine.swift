@@ -108,7 +108,12 @@ enum AnalysisEngine {
             throw NSError(domain: "AnalysisEngine", code: 2,
                           userInfo: [NSLocalizedDescriptionKey: "照片文件夹不存在或无法访问: \(photoDir.path) (被删除、改名或所在硬盘未挂载)"])
         }
-        let photos = ImageLoader.listPhotos(in: photoDir)
+        // 上一次的 manifest 不管哪个引擎、哪个分析版本写的都读：listPhotos 按它沿用上一次的 id（PhotoIDMemory.swift）。
+        // 下面增量复用的门控只管分析数值能不能直接用；id 不跟着它走 —— 版本一升整场重分析，id 也得原样留着。
+        let oldManifest = (try? Data(contentsOf: dataDir.appendingPathComponent("manifest.json")))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let previousIDs = ImageLoader.PreviousIDs(manifest: oldManifest, photoDir: photoDir)
+        let photos = ImageLoader.listPhotos(in: photoDir, previous: previousIDs)
         guard !photos.isEmpty else {
             throw NSError(domain: "AnalysisEngine", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "这个文件夹 (含子文件夹) 里没有支持的图片文件 (RAW/JPG/PNG/HEIC/TIFF)"])
