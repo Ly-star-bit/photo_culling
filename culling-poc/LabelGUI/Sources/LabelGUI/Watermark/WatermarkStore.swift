@@ -404,7 +404,7 @@ final class WatermarkStore: ObservableObject {
 
     /// 导出写完（含取消前已经写出的）：输出目录、[(写出去的文件, 原图)]，按导出顺序。批量页接上以后记进当前场次的
     /// 交付对照（DeliveryLedger.swift 的 recordDeliveries），返回记没记下；没接 = 不记。
-    var onDelivered: (@MainActor (URL, [(file: URL, source: URL)]) -> DeliveryLedger.Outcome)?
+    var onDelivered: (@MainActor (URL, [(file: URL, source: URL)]) async -> DeliveryLedger.Outcome)?
     /// 上一次导出记交付对照的结果（nil = 一张都没写出去、或者没接批量页）。没记进去的那一句也并进 lastError，
     /// 水印页的状态栏看得到（批量页的 lastError 在别的页面上，还会被切场次清掉）。无头 --watermark-batch 按它分「没对上」和「写失败」。
     private(set) var lastDelivery: DeliveryLedger.Outcome?
@@ -553,11 +553,15 @@ final class WatermarkStore: ObservableObject {
             let completed = done
             let overNames = overLimit
             let delivered = written.sorted().map { (file: jobs[$0].dest, source: jobs[$0].src) }
+            // 记交付对照在收尾之前（还算「在导」，等它记完再报完成）：比对要 stat 这一场的照片，批量页放到后台做，
+            // 主线程不等它（场次在掉线的网络盘上时以前会转彩球）。
+            let ledger: DeliveryLedger.Outcome? = delivered.isEmpty ? nil : await Task { @MainActor [weak self] in
+                await self?.onDelivered?(outputDir, delivered)
+            }.value
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
                 self.isExporting = false
-                let ledger = delivered.isEmpty ? nil : self.onDelivered?(outputDir, delivered)
                 self.lastDelivery = ledger
                 let succeeded = completed - failed.count
                 if self.exportCancelled {

@@ -189,6 +189,46 @@ enum DeliveryLedger {
         var st = stat()
         return stat(path, &st) == 0 ? "\(st.st_dev):\(st.st_ino)" : nil
     }
+
+    /// 这一场的一张照片（在主线程上从 BatchItem 抄出来，交给后台比对）。
+    struct SessionPhoto {
+        let id: String
+        let rawPath: String
+        let decodePath: String
+    }
+
+    /// 水印页写出去的（交付文件名, 原图路径）→ 这一场的哪一张：原图按文件本身（设备号 + inode）对。会 stat，放在后台跑 ——
+    /// 场次在掉线的网络盘上时 stat 一次就可能卡几秒（refreshSessionAvailability 也为这个放到后台）。
+    /// 先按文件名（去掉扩展名、不分大小写）挑候选，只 stat 写出去的那几张原图和名字对得上的场次照片：水印页导的照片和
+    /// 这一场没关系时，一张场次照片都不 stat。代价：经过改了名的链接才指到这一场的原图认不出（不记，和对不上一样，不猜）。
+    /// 同一个文件对上好几张时认场次里靠前的那张（和以前整场建表时一样）。`statFile` 只给自检数 stat 了哪些路径。
+    static func matchByFile(_ sources: [(file: String, source: String)], photos: [SessionPhoto],
+                            statFile: (String) -> String? = DeliveryLedger.fileID) -> [DeliveryRecord.File] {
+        func stem(_ path: String) -> String {
+            URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent.lowercased()
+        }
+        var byStem: [String: [Int]] = [:]
+        for (index, photo) in photos.enumerated() {
+            for name in Set([stem(photo.rawPath), stem(photo.decodePath)]) { byStem[name, default: []].append(index) }
+        }
+        var ids: [String: String?] = [:]
+        func id(_ path: String) -> String? {
+            if let known = ids[path] { return known }
+            let found = statFile(path)
+            ids[path] = .some(found)
+            return found
+        }
+        return sources.compactMap { pair -> DeliveryRecord.File? in
+            guard let candidates = byStem[stem(pair.source)], let key = id(pair.source) else { return nil }
+            for index in candidates {
+                let photo = photos[index]
+                if id(photo.rawPath) == key || id(photo.decodePath) == key {
+                    return DeliveryRecord.File(file: pair.file, id: photo.id, original: photo.rawPath)
+                }
+            }
+            return nil
+        }
+    }
 }
 
 // MARK: - BatchStore：读写这一场的交付对照
@@ -204,9 +244,9 @@ extension BatchStore {
     /// 那一句也放在返回的 .failed 里（水印页拿它报在自己的状态栏上）。
     @discardableResult
     func recordDelivery(_ kind: DeliveryRecord.Kind, folder: URL, files: [DeliveryRecord.File],
-                        into ledger: URL) -> DeliveryLedger.Outcome {
+                        into ledger: URL, session: String? = nil) -> DeliveryLedger.Outcome {
         guard !files.isEmpty else { return .nothingMatched }
-        let name = photoDir.map { "「\($0.lastPathComponent)」" } ?? ""
+        let name = session ?? photoDir.map { "「\($0.lastPathComponent)」" } ?? ""
         let record = DeliveryRecord(kind: kind, folder: folder, files: files)
         let problem: String
         switch DeliveryLedger.append(record, to: ledger) {
@@ -228,19 +268,18 @@ extension BatchStore {
 
     /// 水印页导出写完：原图按文件本身（设备号 + inode）对回这一场的照片，对上的记一笔。水印页的照片不一定是这一场的
     /// （拖进来的外部照片、切了场次）：对不上的不记，不按文件名猜 —— 别的日子同名的 DSCF7207 不能认成这一场的。
-    func recordWatermarkDelivery(folder: URL, files: [(file: URL, source: URL)]) -> DeliveryLedger.Outcome {
-        guard photoDir != nil, !items.isEmpty, !files.isEmpty else { return .nothingMatched }
-        var byFile: [String: BatchItem] = [:]
-        for item in items {
-            for path in Set([item.rawPath, item.decodePath]) {
-                if let key = DeliveryLedger.fileID(path), byFile[key] == nil { byFile[key] = item }
-            }
-        }
-        let entries = files.compactMap { pair -> DeliveryRecord.File? in
-            guard let key = DeliveryLedger.fileID(pair.source.path), let item = byFile[key] else { return nil }
-            return DeliveryRecord.File(file: pair.file.lastPathComponent, id: item.id, original: item.rawPath)
-        }
-        return recordDelivery(.watermark, folder: folder, files: entries, into: deliveryLedgerPath)
+    /// 比对在后台（DeliveryLedger.matchByFile 要 stat，场次可能在网络盘上）；开始时拿住这一场的 exports.json 和名字，
+    /// 中途切了场次也记进导出时开着的那一场。
+    func recordWatermarkDelivery(folder: URL, files: [(file: URL, source: URL)]) async -> DeliveryLedger.Outcome {
+        guard let dir = photoDir, !items.isEmpty, !files.isEmpty else { return .nothingMatched }
+        let photos = items.map { DeliveryLedger.SessionPhoto(id: $0.id, rawPath: $0.rawPath, decodePath: $0.decodePath) }
+        let sources = files.map { (file: $0.file.lastPathComponent, source: $0.source.path) }
+        let ledger = deliveryLedgerPath
+        let session = "「\(dir.lastPathComponent)」"
+        let entries = await Task.detached(priority: .utility) {
+            DeliveryLedger.matchByFile(sources, photos: photos)
+        }.value
+        return recordDelivery(.watermark, folder: folder, files: entries, into: ledger, session: session)
     }
 }
 
@@ -248,7 +287,8 @@ extension WatermarkStore {
     /// 水印页导出写完交给批量页，记进当前场次的交付对照（AppModel 和无头 --watermark-batch 接上）。
     func recordDeliveries(into batch: BatchStore) {
         onDelivered = { [weak batch] folder, files in
-            batch?.recordWatermarkDelivery(folder: folder, files: files) ?? .nothingMatched
+            guard let batch else { return .nothingMatched }
+            return await batch.recordWatermarkDelivery(folder: folder, files: files)
         }
     }
 }

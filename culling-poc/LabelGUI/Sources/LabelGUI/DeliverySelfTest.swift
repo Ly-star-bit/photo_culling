@@ -51,6 +51,8 @@ enum DeliverySelfTest {
         ExportFolderSelfTest.run(work.appendingPathComponent("folder")) { t.check($0, $1, $2) }
         print("== 去 GPS（BatchStore.writeJPEG、WatermarkEngine.export）")
         gpsCases(work.appendingPathComponent("gps"), t)
+        print("== 交付对照（DeliveryLedger，见 DeliveryLedgerSelfTest.swift）")
+        DeliveryLedgerSelfTest.run(work.appendingPathComponent("ledger")) { t.check($0, $1, $2) }
         try? fm.removeItem(at: work)
         print(t.failures == 0 ? "== 全部通过" : "== \(t.failures) 条没过")
         exit(t.failures == 0 ? 0 : 1)
