@@ -96,7 +96,8 @@ jobs:
         run: python3 -I culling-poc/LabelGUI/Scripts/native_analysis_smoke.py culling-poc/LabelGUI/.build/release/LabelGUI
 
       # 交付回归（端到端，纯函数那一半是上面「自检」里的 --delivery-selftest）：水印输出路径就是原片（同路径 / 大小写 / 硬链接）
-      # 被拒、原片不变；水印批量输出到照片目录全部另存 -2；写 XMP 时 LR 的 sidecar 只改星级色标、调色关键字按字段不变，
+      # 被拒、原片不变；水印批量输出到拍摄文件夹里面（照片目录本身、里面还没建的子目录、--session 那一场里面）退出码 1、
+      # 一个文件不多，导进「水印导出/」照常、再导一次全是 -2；写 XMP 时 LR 的 sidecar 只改星级色标、调色关键字按字段不变，
       # 自己的整份重写，读不全 / 读不了的不碰；精华 Top N 和水印去 GPS（对照组 GPS 还在）。合成图、临时数据目录。
       - name: 交付回归 (--export-xmp / --export-jpeg / --watermark)
         timeout-minutes: 10
