@@ -102,6 +102,7 @@ enum WatermarkUISnapshot {
 
 /// LABELGUI_DATA_DIR=<临时目录> LabelGUI --watermark-batch <photo_dir> <out_dir> [--signature <sig.png>] [--exif] [--session <dir>]
 /// 走水印页「批量导出」同一个 exportAll（批内重名、目标里已有的都另存 -2，不覆盖），打印结果那一行和记下的交付对照。
+/// <out_dir> 在 <photo_dir> 或 --session 那一场的拍摄文件夹里面（分析会扫到的地方）就不导、退出码 1（审查 S11）。
 /// 无头参数：导完不弹访达。
 enum WatermarkBatchCLI {
     @MainActor
