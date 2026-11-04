@@ -387,31 +387,51 @@ TINY_JPEG = bytes.fromhex(
     "040001ffda000c03010002110311003f0028a28a00ffd9")
 
 
-def exif_tiff(model, when, subsec, serial):
-    """TIFF 块：IFD0（Make、Model、指向 EXIF）+ EXIF（DateTimeOriginal、SubSecTimeOriginal、BodySerialNumber）。"""
-    def asc(s):
-        return s.encode() + b"\0"
-    ifd0 = [(0x010F, asc("SONY")), (0x0110, asc(model))]
-    sub = [(tag, asc(v)) for tag, v in [(0x9003, when), (0x9291, subsec), (0xA431, serial)] if v is not None]
-    exif_off = 8 + 2 + 12 * (len(ifd0) + 1) + 4
+def exif_tiff(model, when, subsec, serial, pixels=b"", side=0):
+    """TIFF 块：IFD0（Make、Model、指向 EXIF）+ EXIF（DateTimeOriginal、SubSecTimeOriginal、BodySerialNumber）。
+    给了 pixels（side×side 个字节）就是一张完整合法的基线 TIFF：IFD0 再带上 8 位灰度、不压缩的图像标签，
+    StripOffsets 指向块尾的 pixels。"""
+    def asc(v):
+        return 2, v.encode() + b"\0"
+
+    def num(typ, v):                                          # 3 = SHORT、4 = LONG，一个值、放在条目里
+        return typ, struct.pack("<H" if typ == 3 else "<I", v)
+    ifd0 = {0x010F: asc("SONY"), 0x0110: asc(model), 0x8769: num(4, 0)}
+    if pixels:
+        ifd0.update({0x00FE: num(4, 0), 0x0100: num(4, side), 0x0101: num(4, side), 0x0102: num(3, 8),
+                     0x0103: num(3, 1), 0x0106: num(3, 1), 0x0111: num(4, 0), 0x0115: num(3, 1),
+                     0x0116: num(4, side), 0x0117: num(4, len(pixels))})
+    sub = {tag: asc(v) for tag, v in [(0x9003, when), (0x9291, subsec), (0xA431, serial)] if v is not None}
+    exif_off = 8 + 2 + 12 * len(ifd0) + 4
     data_off = exif_off + 2 + 12 * len(sub) + 4
+    padded = lambda v: len(v) + len(v) % 2
+    blob_len = sum(padded(v) for _, v in list(ifd0.values()) + list(sub.values()) if len(v) > 4)
+    ifd0[0x8769] = num(4, exif_off)
+    if pixels:
+        ifd0[0x0111] = num(4, data_off + blob_len)
     blobs = bytearray()
 
-    def entry(tag, val):
-        if len(val) <= 4:
-            return struct.pack("<HHI", tag, 2, len(val)) + val.ljust(4, b"\0")
-        off = data_off + len(blobs)
-        blobs.extend(val + (b"\0" if len(val) % 2 else b""))
-        return struct.pack("<HHII", tag, 2, len(val), off)
-    head = struct.pack("<H", len(ifd0) + 1) + b"".join(entry(t, v) for t, v in ifd0)
-    head += struct.pack("<HHII", 0x8769, 4, 1, exif_off) + struct.pack("<I", 0)
-    body = struct.pack("<H", len(sub)) + b"".join(entry(t, v) for t, v in sub) + struct.pack("<I", 0)
-    return b"II" + struct.pack("<HI", 42, 8) + head + body + bytes(blobs)
+    def ifd(entries):
+        out = struct.pack("<H", len(entries))
+        for tag in sorted(entries):
+            typ, val = entries[tag]
+            count = len(val) if typ == 2 else 1
+            if len(val) <= 4:
+                out += struct.pack("<HHI", tag, typ, count) + val.ljust(4, b"\0")
+            else:
+                out += struct.pack("<HHII", tag, typ, count, data_off + len(blobs))
+                blobs.extend(val + b"\0" * (len(val) % 2))
+        return out + struct.pack("<I", 0)
+    head = ifd(ifd0) + ifd(sub)
+    return b"II" + struct.pack("<HI", 42, 8) + head + bytes(blobs) + pixels
 
 
-def fake_arw(model, when, subsec, serial, size=300_000):
-    t = exif_tiff(model, when, subsec, serial)
-    return t + os.urandom(size - len(t))
+def fake_arw(model, when, subsec, serial, side=64):
+    """伪 RAW：一张完整合法的小 TIFF（64×64 灰度，像素随机 —— 每个文件内容都不一样）+ 上面那段 EXIF，后面不再接随机字节。
+    以前是 TIFF 头 + EXIF + 30 万随机字节、没有图像标签：ImageIO 把它认成 Sony RAW（com.sony.arw-raw-image），
+    读不读得出文件头要看那个系统的 RAW 插件（本机 macOS 26 读得出，CI 的 macOS 15 没验过）。这样的小 TIFF 本机
+    认成 public.tiff、走普通的 TIFF 读取器；换个系统就算认成 RAW，拿到的也是一份结构完整的文件。"""
+    return exif_tiff(model, when, subsec, serial, pixels=os.urandom(side * side), side=side)
 
 
 def fake_jpg(model, when, subsec, serial, size=120_000):
@@ -427,6 +447,48 @@ def describe_count(stdout, label):
 
 T1, T2 = "2026:10:01 09:30:00", "2026:10:01 09:31:07"
 CAM1, CAM2 = "4012345", "4099999"
+
+
+def raw_header_readable():
+    """这台机器的 ImageIO 读不读得出伪 RAW 的文件头 —— 用 sips 问（也是 ImageIO），跟导卡代码无关。"""
+    probe = os.path.join(WORK, "probe_header.ARW")
+    with open(probe, "wb") as f:
+        f.write(fake_arw("ILCE-7M4", T1, "123", CAM1))
+    try:
+        out = subprocess.run(["/usr/bin/sips", "-g", "format", "-g", "make", "-g", "model", probe],
+                             capture_output=True, text=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError) as e:
+        out = f"sips 跑不了：{e}"
+    finally:
+        os.remove(probe)
+    shown = " · ".join(line.strip() for line in out.splitlines()[1:]) or out.strip()
+    return "model: ILCE-7M4" in out, shown
+
+
+# 读不出 = 这台机器 ImageIO 的事（导卡代码读不出文件头时走「改名、不硬配」那条安全的路）：M1 / M2 / M2t / M3 里
+# 要靠 RAW 文件头配对的断言只打 SKIP、不算失败，另打一条 ::warning::（CI 摘要页看得到）。读得出、导卡却没配上 ——
+# 那是导卡代码的毛病，照常算失败。
+RAW_HEADER_OK, raw_probe = raw_header_readable()
+print(f"（ImageIO 读伪 RAW 的文件头：{'读得出' if RAW_HEADER_OK else '读不出'} —— sips：{raw_probe}）")
+if not RAW_HEADER_OK:
+    print("::warning::存储卡导入回归：这台机器的 ImageIO 读不出伪 RAW 的文件头，M1/M2/M2t/M3 里靠 RAW 文件头配对的断言跳过了")
+raw_skipped = []
+
+
+def check_raw(cond, msg):
+    """要从 RAW 文件头读出身份才成立的断言：ImageIO 读不出伪 RAW 时只打 SKIP。"""
+    if RAW_HEADER_OK:
+        check(cond, msg)
+        return
+    print(("  ok   " if cond else "  SKIP ") + msg + "（要读 RAW 文件头，这台机器的 ImageIO 读不出）")
+    if not cond:
+        raw_skipped.append(msg)
+
+
+def same_bytes(a, b):
+    return os.path.isfile(a) and os.path.isfile(b) and sha(a) == sha(b)
+
+
 print("M1. RAW、JPG 分卡存：卡 A 只有 RAW、卡 B 只有同名 JPG，文件头一致 → 补成一对、不改名；旁边 LR 的 .xmp 不挡")
 card_a = mkcard("card_m_a", {"DCIM/100MSDCF/DSC00001.ARW": fake_arw("ILCE-7M4", T1, "123", CAM1),
                              "DCIM/100MSDCF/DSC00002.ARW": fake_arw("ILCE-7M4", T2, "045", CAM1)})
@@ -438,22 +500,22 @@ r = run_card(card_a, data_m, d)
 check(r.returncode == 0 and listing(d) == ["DSC00001.ARW", "DSC00002.ARW"], f"卡 A 的 RAW 导进来了（{listing(d)}）")
 open(os.path.join(d, "DSC00002.xmp"), "w").write("<x:xmpmeta/>")          # Lightroom 给 RAW 写的
 r = run_card(card_b, data_m, d, "--plan-only")
-check(describe_count(r.stdout, "补成一对") == 2 and "改名 0 张" in r.stdout, "计划：补成一对 2 张、改名 0 张")
+check_raw(describe_count(r.stdout, "补成一对") == 2 and "改名 0 张" in r.stdout, "计划：补成一对 2 张、改名 0 张")
 r = run_card(card_b, data_m, d)
-check(r.returncode == 0 and listing(d) == ["DSC00001.ARW", "DSC00001.JPG", "DSC00002.ARW", "DSC00002.JPG", "DSC00002.xmp"],
-      f"JPG 用原名补在 RAW 旁边（{listing(d)}）")
-check(sha(os.path.join(d, "DSC00001.JPG")) == sha(os.path.join(card_b, "DCIM/100MSDCF/DSC00001.JPG")), "补进来的就是卡 B 的 JPG")
-check("改名导入了" not in r.stdout and "导入提醒" not in r.stdout, "导完的摘要、提醒里都没有改名")
+check_raw(r.returncode == 0 and listing(d) == ["DSC00001.ARW", "DSC00001.JPG", "DSC00002.ARW", "DSC00002.JPG", "DSC00002.xmp"],
+          f"JPG 用原名补在 RAW 旁边（{listing(d)}）")
+check_raw(same_bytes(os.path.join(d, "DSC00001.JPG"), os.path.join(card_b, "DCIM/100MSDCF/DSC00001.JPG")), "补进来的就是卡 B 的 JPG")
+check_raw("改名导入了" not in r.stdout and "导入提醒" not in r.stdout, "导完的摘要、提醒里都没有改名")
 r = run_card(card_b, data_m, d, "--reimport")
-check("要导入：没有" in r.stdout and "目标里已有 2 张" in r.stdout, "再导一次卡 B（勾重导）：都认出来、不多出 _2")
+check_raw("要导入：没有" in r.stdout and "目标里已有 2 张" in r.stdout, "再导一次卡 B（勾重导）：都认出来、不多出 _2")
 
 print("M2. 反例：目标里已经有同名的别的 JPG（同类）→ 照旧改名；序列号读不到 → 照旧改名（认不准，确认框照实说）；摘要、提醒都说改了名")
 card_c = mkcard("card_m_c", {"DCIM/100MSDCF/DSC00001.JPG": fake_jpg("ILCE-7M4", "2026:10:02 18:00:00", "123", CAM1)})
 r = run_card(card_c, data_m, d)
-check("DSC00001_2.JPG" in listing(d) and sha(os.path.join(d, "DSC00001_2.JPG")) == sha(os.path.join(card_c, "DCIM/100MSDCF/DSC00001.JPG")),
-      f"目标里已有同名的别的 JPG → 改名 DSC00001_2.JPG（{listing(d)}）")
-check(sha(os.path.join(d, "DSC00001.JPG")) == sha(os.path.join(card_b, "DCIM/100MSDCF/DSC00001.JPG")), "原来那对没被动")
-check("改名导入了（如 DSC00001_2）" in r.stdout, "导完的摘要里说了改名")
+check_raw(same_bytes(os.path.join(d, "DSC00001_2.JPG"), os.path.join(card_c, "DCIM/100MSDCF/DSC00001.JPG")),
+          f"目标里已有同名的别的 JPG → 改名 DSC00001_2.JPG（{listing(d)}）")
+check_raw(same_bytes(os.path.join(d, "DSC00001.JPG"), os.path.join(card_b, "DCIM/100MSDCF/DSC00001.JPG")), "原来那对没被动")
+check_raw("改名导入了（如 DSC00001_2）" in r.stdout, "导完的摘要里说了改名")
 notice = [l for l in r.stdout.splitlines() if l.startswith("导入提醒：")]
 check(len(notice) == 1 and "改名导入了" in notice[0] and "先别格式化" not in notice[0], f"提醒里说了改名、没叫人先别格式化（{notice}）")
 d2 = os.path.join(WORK, "dest_m2")
@@ -473,8 +535,8 @@ jpg_t = mkcard("card_m2t_j", {"DCIM/100MSDCF/DSC00007.JPG": fake_jpg("ILCE-7M4",
                               "DCIM/100MSDCF/DSC00008.JPG": fake_jpg("ILCE-7M4", T1, "124", CAM1)})
 run_card(raw_t, data_t, d_t)
 r = run_card(jpg_t, data_t, d_t, "--plan-only")
-check(describe_count(r.stdout, "补成一对") == 0 and describe_count(r.stdout, "认不准没配") == 0 and "改名 2 张" in r.stdout,
-      "计划：补成一对 0 张（文件头都读得到、只是时间 / SubSec 对不上，不算认不准）、改名 2 张")
+check_raw(describe_count(r.stdout, "补成一对") == 0 and describe_count(r.stdout, "认不准没配") == 0 and "改名 2 张" in r.stdout,
+          "计划：补成一对 0 张（文件头都读得到、只是时间 / SubSec 对不上，不算认不准）、改名 2 张")
 r = run_card(jpg_t, data_t, d_t)
 check(listing(d_t) == ["DSC00007.ARW", "DSC00007_2.JPG", "DSC00008.ARW", "DSC00008_2.JPG"],
       f"只差时间的、只差 SubSec 的都改名导入，没和 RAW 拼成一张（{listing(d_t)}）")
@@ -502,10 +564,10 @@ cam1_jpg = mkcard("card_m3_j1", {"DCIM/100MSDCF/DSC00009.JPG": fake_jpg("ILCE-7M
 cam2_jpg = mkcard("card_m3_j2", {"DCIM/100MSDCF/DSC00009.JPG": fake_jpg("ILCE-7M4", T1, "500", CAM2)})
 for card in (cam1_raw, cam2_raw, cam2_jpg, cam1_jpg):
     run_card(card, data_m3, d3)
-check(listing(d3) == ["DSC00009.ARW", "DSC00009.JPG", "DSC00009_2.ARW", "DSC00009_2.JPG"], f"两对各归各（{listing(d3)}）")
+check_raw(listing(d3) == ["DSC00009.ARW", "DSC00009.JPG", "DSC00009_2.ARW", "DSC00009_2.JPG"], f"两对各归各（{listing(d3)}）")
 pairs_m3 = {"DSC00009.ARW": cam1_raw, "DSC00009.JPG": cam1_jpg, "DSC00009_2.ARW": cam2_raw, "DSC00009_2.JPG": cam2_jpg}
-check(all(sha(os.path.join(d3, k)) == sha(os.path.join(v, "DCIM/100MSDCF/" + k.replace("_2", ""))) for k, v in pairs_m3.items()),
-      "机身 1 的 JPG 配机身 1 的 RAW、机身 2 的配机身 2 的（逐字节核对）")
+check_raw(all(same_bytes(os.path.join(d3, k), os.path.join(v, "DCIM/100MSDCF/" + k.replace("_2", ""))) for k, v in pairs_m3.items()),
+          "机身 1 的 JPG 配机身 1 的 RAW、机身 2 的配机身 2 的（逐字节核对）")
 
 # ---------- 导到哪：导入根目录可以改（外接盘），盘不在时明说、绝不落回系统盘 ----------
 TODAY = time.strftime("%Y%m%d")
@@ -854,6 +916,8 @@ r = subprocess.run([BIN, "--ingest", CARD, "--dest", D1], env=env, capture_outpu
 check(r.returncode == 2, "没设 LABELGUI_DATA_DIR → 退出码 2")
 
 print()
+if raw_skipped:
+    print(f"（跳过 {len(raw_skipped)} 条要读 RAW 文件头的断言：这台机器的 ImageIO 读不出伪 RAW 的文件头）")
 print("存储卡导入回归全部通过" if not failures else f"存储卡导入回归 {len(failures)} 项失败")
 if CLEANUP and not failures:
     subprocess.run(["chmod", "-R", "u+rwX", WORK])   # chmod 000 的东西不放开 rmtree 删不掉
