@@ -526,7 +526,8 @@ struct CardImportSheet: View {
 
     private func spaceText(_ plan: CardImporter.Plan) -> String {
         let alsoBackup = plan.backup?.sameVolume == true
-        let bytes = plan.totalBytes + (alsoBackup ? plan.backup?.totalBytes ?? 0 : 0)
+        var bytes = plan.totalBytes
+        if alsoBackup, let backup = plan.backup { bytes += backup.totalBytes }
         let need = BatchStore.sizeText(bytes)
         let free = BatchStore.sizeText(plan.freeBytes ?? 0)
         let what = alsoBackup ? "（连同同一块盘上的备份）" : ""

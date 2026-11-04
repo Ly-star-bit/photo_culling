@@ -117,7 +117,8 @@ enum CardImporter {
         /// 导入位置那块盘够不够（备份在同一块盘上就连备份一起算）。
         var primaryEnoughSpace: Bool {
             guard let free = freeBytes else { return true }
-            let alsoBackup: Int64 = backup?.sameVolume == true ? backup?.totalBytes ?? 0 : 0
+            var alsoBackup: Int64 = 0
+            if let backup, backup.sameVolume { alsoBackup = backup.totalBytes }
             let need = totalBytes + alsoBackup
             return free >= need + CardImporter.spaceMargin
         }
@@ -605,7 +606,8 @@ enum CardImporter {
             let baseStem = members[0].url.deletingPathExtension().lastPathComponent
             // 这张全是 RAW（true）或全是 JPG 这一类（false）时，目标里同主名的另一类可能是它的另一半。
             let kinds = Set(members.map { pairKind($0.ext) })
-            let memberKind: Bool? = kinds.count == 1 ? kinds.first ?? nil : nil
+            var memberKind: Bool?
+            if kinds.count == 1, let only = kinds.first { memberKind = only }
             var n = 1
             // backupDone：备份里已经有的成员；nil = 备份里这个名字被别的文件占着（主目标里已经有了、改不了名）。
             var chosen: (stem: String, missing: [CardFile], paired: Bool, backupDone: Set<String>?)?
@@ -1691,9 +1693,10 @@ enum CardImportCLI {
         if let backup = plan.backup {
             let space = plan.backupEnoughSpace ? "够" : "不够"
             let same = backup.sameVolume ? " · 和导入位置同一块盘" : ""
-            lines.append("备份：\(CardImporter.displayPath(backup.destination))（原有 \(backup.existingInBackup) 个文件）" +
-                         " · 要备份 \(backup.fileCount) 个文件（补备份 \(backup.fromPrimary.count) 个）" +
-                         " · 备份里已有 \(backup.alreadyBackedUp) 个 · 没法备份 \(backup.conflicts) 张 · 空间\(space)\(same)")
+            let place = "备份：\(CardImporter.displayPath(backup.destination))（原有 \(backup.existingInBackup) 个文件）"
+            let work = " · 要备份 \(backup.fileCount) 个文件（补备份 \(backup.fromPrimary.count) 个）"
+            let rest = " · 备份里已有 \(backup.alreadyBackedUp) 个 · 没法备份 \(backup.conflicts) 张 · 空间\(space)\(same)"
+            lines.append(place + work + rest)
         }
         return lines.joined(separator: "\n")
     }
