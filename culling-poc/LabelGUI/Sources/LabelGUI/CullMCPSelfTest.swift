@@ -113,9 +113,10 @@ enum CullMCPSelfTest {
         let r = store.resolveClientReply("要这几张：DSCF7208、7209 还有 9999，谢谢")
         let body = LiveHandlers.clientPicksBody(r, existing: store.clientPicks)
         let summary = body["summary"] as? [String] ?? []
-        check(r.ids == ["DSCF7208", "DSCF7209"] && r.unknown == ["9999"] && body["new_ids"] as? [String] == r.ids
-              && body["already_picked"] as? Int == 0 && body["existing_count"] as? Int == 0 && body["sheet"] is NSNull
-              && body["numbers_without_sheet"] as? Bool == true && summary.first == "认出 2 张 · 没认出 1 个：9999",
+        let recognized = r.ids == ["DSCF7208", "DSCF7209"] && r.unknown == ["9999"] && body["new_ids"] as? [String] == r.ids
+        let counted = body["already_picked"] as? Int == 0 && body["existing_count"] as? Int == 0
+        let noSheet = body["sheet"] is NSNull && body["numbers_without_sheet"] as? Bool == true
+        check(recognized && counted && noSheet && summary.first == "认出 2 张 · 没认出 1 个：9999",
               "认客户的原话：文件名 + 文件号认出 2 张，9999 列在没认出，预览第一行和导入框一样：\(body)")
         let pushes = store.overrideUndoPushes
         let depth = store.overrideUndoDepth
@@ -155,21 +156,25 @@ enum CullMCPSelfTest {
         store.applyAIOverrides([(id: a, verdict: .reject)], opID: "op-ai-0001", tool: "cull_set_verdicts")
         let disk = diskMarks(sessionDir)?[a] ?? [:]
         let row = MCPReadModel.row(store.item(withID: a)!, store, groupSizes: groupSizes)
-        check(store.isManual(a) && store.manualOverrideCount == 1 && store.aiOverrideCount == 1
-              && disk["op_id"] as? String == "op-ai-0001" && disk["tool"] as? String == "cull_set_verdicts"
-              && disk["ai_verdict"] as? String == Verdict.reject.rawValue && disk.keys.contains("previous") && disk["previous"] is NSNull
-              && (disk["at"] as? String).flatMap(ISO8601DateFormatter().date(from:)) != nil
-              && row["manual"] as? Bool == true && row["changed_by"] as? String == "ai",
-              "AI 改判：照样是人工改判（manual:true）、「其中 AI 1」，ai_overrides.json 记 {op_id, tool, at, previous:null, ai_verdict}，"
-              + "行上 changed_by ai：\(disk) \(row["changed_by"] ?? "nil")")
+        let manual = store.isManual(a) && store.manualOverrideCount == 1 && store.aiOverrideCount == 1
+        let source = disk["op_id"] as? String == "op-ai-0001" && disk["tool"] as? String == "cull_set_verdicts"
+        let verdictKeys = disk["ai_verdict"] as? String == Verdict.reject.rawValue && disk.keys.contains("previous")
+        let previousNull = disk["previous"] is NSNull
+        let atParsed = (disk["at"] as? String).flatMap(ISO8601DateFormatter().date(from:)) != nil
+        let rowOK = row["manual"] as? Bool == true && row["changed_by"] as? String == "ai"
+        let rowText = String(describing: row["changed_by"])
+        check(manual && source && verdictKeys && previousNull && atParsed && rowOK,
+              "AI 改判：照样是人工改判（manual:true）、「其中 AI 1」，ai_overrides.json 记 {op_id, tool, at, previous:null, ai_verdict}，行上 changed_by ai：\(disk) \(rowText)")
+        check(store.manualOverrideLabel == "人工改判 1（其中 AI 1）", "状态栏：\(store.manualOverrideLabel)")
         let detail = MCPReadModel.detail(store.item(withID: a)!, store, groupSizes: groupSizes)
         let ai = detail["ai_override"] as? [String: Any] ?? [:]
         check(ai["op_id"] as? String == "op-ai-0001" && ai["previous"] as? String == "auto" && ai["tool"] as? String == "cull_set_verdicts",
               "cull_get_photos 的 ai_override：op_id、tool、previous auto：\(ai)")
         store.setOverride(a, .reject)
         let userRow = MCPReadModel.row(store.item(withID: a)!, store, groupSizes: groupSizes)
-        check(store.aiOverrideCount == 0 && store.isManual(a) && diskMarks(sessionDir) == nil && userRow["changed_by"] as? String == "user",
-              "用户亲手按了一下（同一个判决）：不再算 AI 的，ai_overrides.json 删掉，changed_by user")
+        check(store.aiOverrideCount == 0 && store.isManual(a) && diskMarks(sessionDir) == nil && userRow["changed_by"] as? String == "user"
+              && store.manualOverrideLabel == "人工改判 1",
+              "用户亲手按了一下（同一个判决）：不再算 AI 的，ai_overrides.json 删掉，changed_by user，状态栏「人工改判 1」")
         store.undoLastOverride()
         check(store.aiOverride(a)?.opID == "op-ai-0001" && store.aiOverrideCount == 1 && diskMarks(sessionDir)?[a] != nil,
               "⌘Z 撤掉用户那一下：AI 的出处回来（内存和 ai_overrides.json）")

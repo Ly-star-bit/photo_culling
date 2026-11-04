@@ -865,8 +865,9 @@ extension LiveHandlers {
         var out: [String: Any] = ["changed": changed, "unchanged": unchanged, "missing_ids": missing]
         if mixed {
             // changes 的写法：changed 里的每张改成了什么（判决名 → id）
-            out["changed_to"] = Dictionary(grouping: writes, by: { $0.verdict.map(MCPReadModel.verdictName) ?? "auto" })
-                .mapValues { $0.map(\.id) }
+            var to: [String: [String]] = [:]
+            for w in writes { to[w.verdict.map(MCPReadModel.verdictName) ?? "auto", default: []].append(w.id) }
+            out["changed_to"] = to
         }
         out["session"] = currentKey(batch) ?? NSNull()
         out["verdict_counts"] = ["pick": counts.pick, "usable": counts.usable, "reject": counts.reject]

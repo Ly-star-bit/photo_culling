@@ -544,6 +544,12 @@ final class BatchStore: ObservableObject {
     var pendingTakeCount: Int { derived.pendingTakeCount }
     var manualOverrideCount: Int { derived.manualOverrideCount }
     var aiOverrideCount: Int { derived.aiOverrideCount }
+    /// 状态栏那一句：「人工改判 N」，其中有 AI 经实时桥改的再带「（其中 AI M）」。
+    var manualOverrideLabel: String {
+        let ai = aiOverrideCount
+        let tail = ai > 0 ? "（其中 AI \(ai)）" : ""
+        return "人工改判 \(manualOverrideCount)" + tail
+    }
     var pendingTakes: [Int] { derived.pendingTakes }
 
     /// 「待处理」的场：还留着 2 张以上没淘汰，而且其中还有没经你手的（自动判的）。
