@@ -595,7 +595,8 @@ enum CardImporter {
             }
             // 计划之后目标里冒出了同名文件（同一个文件夹刚导过另一张卡、别的程序写进来）：整张不导，
             // 也不覆盖 —— 只跳冲突的那一个会把 RAW 和 JPG 拆到两张不同的照片下（审查发现）。
-            if let clash = members.first(where: { fm.fileExists(atPath: $0.target.path) }) {
+            // 用 lstat 看（entryExists）：悬空的符号链接 fileExists 看不见，到改名那一步才撞上，就拆开了。
+            if let clash = members.first(where: { entryExists($0.target) }) {
                 let why = "目标里突然有了同名的 \(clash.target.lastPathComponent)，整张没导、没覆盖"
                 for m in members { outcome.failed.append(Failure(name: m.originalName, reason: why)) }
                 filesDone += members.count
@@ -751,10 +752,32 @@ enum CardImporter {
         if !attrs.isEmpty { try? fm.setAttributes(attrs, ofItemAtPath: part.path) }
 
         // RENAME_EXCL：目标已存在就失败 —— 原子的「绝不覆盖」。
-        if renamex_np(part.path, final.path, UInt32(RENAME_EXCL)) != 0 {
-            let code = errno
-            if code == EEXIST { throw ImportError.targetExists(final.lastPathComponent) }
-            throw ImportError.writeFailed(name, String(cString: strerror(code)))
+        // 不是每种卷都支持它：SMB / NFS 共享、部分 exFAT 盘（macOS 14 的 exfat 内核扩展实测过；15 以后换成
+        // FSKit，没实测）回 ENOTSUP。只在 ENOTSUP 时退回：lstat 看正式名字在不在，不在再普通 rename ——
+        // 这两步之间不是原子的，所以在这些非 APFS 卷上「绝不覆盖」降成了尽力而为（整张开始前、copyOne 开头
+        // 都已经查过同名，剩下的是几微秒的窗口）。用 lstat 不用 fileExists：fileExists 跟着符号链接走，
+        // 悬空的符号链接会被当成「不存在」然后被 rename 盖掉。EINVAL 不算「不支持」：macOS 上那是 flags
+        // 不合法或路径本身有问题，照常报错。
+        var renameCode: Int32 = 0
+        if pretendNoExclusiveRename {
+            renameCode = ENOTSUP
+        } else if renamex_np(part.path, final.path, UInt32(RENAME_EXCL)) != 0 {
+            renameCode = errno
+        }
+        if renameCode == ENOTSUP {
+            var existing = stat()
+            if lstat(final.path, &existing) == 0 { throw ImportError.targetExists(final.lastPathComponent) }
+            let probe = errno
+            // 连「在不在」都说不清（没权限、I/O 错）：不冒险改名。
+            if probe != ENOENT { throw ImportError.writeFailed(name, describe(errnoError(probe))) }
+            if rename(part.path, final.path) != 0 {
+                let code = errno
+                if code == ENOSPC { throw ImportError.diskFull(name) }
+                throw ImportError.writeFailed(name, describe(errnoError(code)))
+            }
+        } else if renameCode != 0 {
+            if renameCode == EEXIST { throw ImportError.targetExists(final.lastPathComponent) }
+            throw ImportError.writeFailed(name, String(cString: strerror(renameCode)))
         }
         finished = true
         guard let fp = try? fingerprint(final, size: copy.size) else { return nil }
@@ -773,6 +796,12 @@ enum CardImporter {
               parent.st_dev == root.st_dev, parent.st_ino == root.st_ino else {
             throw ImportError.unsafePath(url.path)
         }
+    }
+
+    /// 这个名字上有没有东西（lstat：符号链接本身也算，悬空的也算）。
+    static func entryExists(_ url: URL) -> Bool {
+        var st = stat()
+        return lstat(url.path, &st) == 0
     }
 
     /// a 在 b 里面（或就是 b）吗。两个都得存在。
@@ -811,6 +840,18 @@ enum CardImporter {
         return hasher.finalize()
     }
 
+    /// 系统调用的 errno 包成错误，交给 describe 出中文原因。
+    static func errnoError(_ code: Int32) -> Error {
+        NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+    }
+
+    /// 测试用：LABELGUI_TEST_NO_RENAME_EXCL=1 假装目标卷不支持 RENAME_EXCL（走 copyOne 的 ENOTSUP 退路）。
+    /// 只在设了 LABELGUI_DATA_DIR（隔离的测试数据目录）时生效，正常使用碰不到。
+    static let pretendNoExclusiveRename: Bool = {
+        let env = ProcessInfo.processInfo.environment
+        return env["LABELGUI_TEST_NO_RENAME_EXCL"] == "1" && !(env["LABELGUI_DATA_DIR"] ?? "").isEmpty
+    }()
+
     /// 错误里的 POSIX 错误码（Foundation 包了一层的也挖出来）。
     static func posixCode(_ error: Error) -> Int32? {
         let ns = error as NSError
@@ -835,6 +876,7 @@ enum CardImporter {
         case ENOENT?: return "文件不见了"
         case ENOSPC?: return "盘满了"
         case ENXIO?, ENODEV?: return "设备断开了"
+        case ENOTSUP?: return "这块盘 / 共享不支持这个操作"
         default: return (error as NSError).localizedDescription
         }
     }
@@ -1066,6 +1108,7 @@ private final class ImportLiveBox: @unchecked Sendable {
 
 /// LABELGUI_DATA_DIR=<临时> LabelGUI --ingest <card_dir> --dest <dir> [--reimport] [--plan-only] [--cancel-after N]
 ///   [--cancel-at-bytes B] [--via-store [--no-analyze]] [--ledger-cap N] [--plant-after-plan 文件名]
+///   [--plant-symlink-after-plan 文件名] [--plant-symlink-mid 文件名]
 /// 账本在 LABELGUI_DATA_DIR 里；必须给 --dest —— 测试不往真的「图片」文件夹里写。
 /// --cancel-after N：复制完 N 个文件就取消；--cancel-at-bytes B：复制到第 B 字节（文件中间）就取消
 /// —— 验证 .part 清干净、账本只记了导完的。--plant-after-plan：计划做完、复制之前往目标里放一个同名文件
@@ -1109,6 +1152,16 @@ enum CardImportCLI {
             try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
             try? Data("planted by test".utf8).write(to: dest.appendingPathComponent(planted))
         }
+        // 悬空的符号链接（fileExists 看不见它）：--plant-symlink-after-plan 计划做完就放（验证整张跳过）；
+        // --plant-symlink-mid 第一个文件复制完才放（整张检查已经过了，只剩改名那道闸 —— 配
+        // LABELGUI_TEST_NO_RENAME_EXCL=1 验证 RENAME_EXCL 的退路用 lstat 查、不会把它盖掉）。
+        func plantSymlink(_ name: String) {
+            try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+            try? FileManager.default.createSymbolicLink(atPath: dest.appendingPathComponent(name).path,
+                                                        withDestinationPath: "nowhere-planted-by-test")
+        }
+        if let planted = option("--plant-symlink-after-plan") { plantSymlink(planted) }
+        var midSymlink = option("--plant-symlink-mid")
 
         // --via-store：走界面同一条路 —— BatchStore.importFromCard（重做计划 → 复制）→ 像 BatchView 闲着时那样
         // 打开目标文件夹 → 自动开始分析，等全部跑完再打印。
@@ -1141,6 +1194,10 @@ enum CardImportCLI {
         let outcome = CardImporter.execute(plan, ledgerURL: ledgerURL, cancel: flag, progressInterval: 0) { files, bytes in
             if let n = cancelAfter, files >= n { flag.set() }
             if let b = cancelAtBytes, bytes >= b { flag.set() }
+            if files >= 1, let name = midSymlink {
+                midSymlink = nil
+                plantSymlink(name)
+            }
         }
         print(outcome.summary + "（\(outcome.copiedFiles) 个文件）")
         print(String(format: "elapsed=%.3f", outcome.elapsed))

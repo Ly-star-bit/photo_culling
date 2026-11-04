@@ -316,6 +316,46 @@ else:
     print("    " + r.stdout.strip().replace("\n", "\n    "))
     check(r.returncode == 0 and "排队自检通过" in r.stdout, "两种情形都导全了，分析在最后跑完")
 
+def run_card_env(card, data, dest, env_extra, *extra):
+    env = dict(os.environ, LABELGUI_DATA_DIR=data, **env_extra)
+    r = subprocess.run([BIN, "--ingest", card, *(["--dest", dest] if dest else []), *extra], env=env,
+                       capture_output=True, text=True, timeout=300)
+    print("    " + r.stdout.strip().replace("\n", "\n    "))
+    if r.stderr.strip():
+        print("    [stderr] " + r.stderr.strip()[:400])
+    return r
+
+
+def hidden(dest):
+    return [f for f in os.listdir(dest) if f.startswith(".")] if os.path.isdir(dest) else []
+
+
+NO_EXCL = {"LABELGUI_TEST_NO_RENAME_EXCL": "1"}
+print("K1. 目标卷不支持 RENAME_EXCL（SMB / NFS / 部分 exFAT 回 ENOTSUP）：退回 lstat + 普通改名，照样全导进来")
+k1_files = {"DCIM/100CANON/IMG_0001.CR3": rand(1 << 20), "DCIM/100CANON/IMG_0001.JPG": rand(300_000),
+            "DCIM/100CANON/IMG_0002.CR3": rand(1 << 20), "DCIM/100CANON/IMG_0002.JPG": rand(300_000)}
+c = mkcard("card_k1", k1_files)
+d = os.path.join(WORK, "dest_k1")
+r = run_card_env(c, os.path.join(WORK, "data_k1"), d, NO_EXCL)
+check(r.returncode == 0 and listing(d) == sorted(os.path.basename(k) for k in k1_files), f"4 个文件都导了（{listing(d)}）")
+check(all(sha(os.path.join(d, os.path.basename(k))) == hashlib.sha256(v).hexdigest() for k, v in k1_files.items()),
+      "内容和卡上逐字节一致")
+check(hidden(d) == [], f"没有残留的 .part（{hidden(d)}）")
+
+print("K2. 退路下，整张检查之后才冒出来的悬空符号链接：lstat 看得见，没被改名盖掉")
+d = os.path.join(WORK, "dest_k2")
+r = run_card_env(c, os.path.join(WORK, "data_k2"), d, NO_EXCL, "--plant-symlink-mid", "IMG_0001.JPG")
+link = os.path.join(d, "IMG_0001.JPG")
+check(os.path.islink(link) and os.readlink(link) == "nowhere-planted-by-test", "符号链接还是原来那个，没被盖掉")
+check(r.returncode != 0 and "没覆盖" in r.stdout, "IMG_0001.JPG 报「已经有、没覆盖」，退出码非 0")
+check(hidden(d) == [], f"没有残留的 .part（{hidden(d)}）")
+
+print("K3. 计划之后冒出悬空的符号链接：整张跳过（RAW 也不导，不拆开），链接没动")
+d = os.path.join(WORK, "dest_k3")
+r = run_card_env(c, os.path.join(WORK, "data_k3"), d, {}, "--plant-symlink-after-plan", "IMG_0002.JPG")
+check(listing(d) == ["IMG_0001.CR3", "IMG_0001.JPG", "IMG_0002.JPG"], f"IMG_0002 整张没导（{listing(d)}）")
+check(os.path.islink(os.path.join(d, "IMG_0002.JPG")), "符号链接还在")
+
 print("F. 存储卡从头到尾没被动过")
 check(tree(CARD) == card_before, "卡上每个文件的大小 / 修改时间 / SHA-256 都和开始时一样")
 
