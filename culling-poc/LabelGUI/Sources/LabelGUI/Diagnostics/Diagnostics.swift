@@ -148,10 +148,12 @@ enum Diagnostics {
         let crashDir = crashReportsDir
         Task.detached {
             do {
+                // 保存面板里点了「替换」也不删原来那个：换个名字「…-2.zip」，访达里选中真正写出来的那个。
                 let report = try DiagnosticsBundle.write(dataDir: dataDir, to: url, context: context, history: history,
-                                                         crashDir: crashDir)
-                AppLog.notice("diagnostics", "导出诊断信息 → \(url.path)（\(report.entries.count) 个文件）")
-                await MainActor.run { AppRuntime.revealInFinder([url]) }
+                                                         crashDir: crashDir, existing: .numbered)
+                let written = report.zip
+                AppLog.notice("diagnostics", "导出诊断信息 → \(written.path)（\(report.entries.count) 个文件）")
+                await MainActor.run { AppRuntime.revealInFinder([written]) }
             } catch {
                 let why = describeIO(error)
                 await MainActor.run { model?.batch.lastError = "导出诊断信息没成功：\(why)" }
@@ -263,10 +265,22 @@ enum DiagnosticsBundle {
         return f.string(from: date)
     }
 
-    /// 打一个 zip 到 `zip`（已有就换掉）。`crashDir`：系统的崩溃报告目录，只拿最近 30 天里最新 3 份选片工具的。
+    /// 目标位置已经有东西时怎么办：一律不删、不覆盖（审查：以前先 removeItem 再挪，传进来的是目录就整个递归删掉）。
+    enum ExistingTarget {
+        /// 报错（无头 --diag-export：先在入口拒绝，这里再挡一次）。
+        case refuse
+        /// 换一个名字「…-2.zip」「…-3.zip」（保存面板那一路：用户点了「替换」也不删原来那个）。
+        case numbered
+    }
+
+    /// 打一个 zip 到 `zip`。那里已经有文件或文件夹时一个字节都不动：`existing` = .refuse 报错，.numbered 换个名字，
+    /// 返回的 Report.zip 是真正写到的地方。`crashDir`：系统的崩溃报告目录，只拿最近 30 天里最新 3 份选片工具的。
     static func write(dataDir: URL, to zip: URL, context: [String], history: String, crashDir: URL?,
-                      now: Date = Date()) throws -> Report {
+                      existing: ExistingTarget = .refuse, now: Date = Date()) throws -> Report {
         let fm = FileManager.default
+        if existing == .refuse, let what = existingItem(at: zip) {
+            throw Failure(message: "\(zip.path) 已经\(what)，不覆盖：换一个还没有的 .zip 文件名")
+        }
         let root = fm.temporaryDirectory.appendingPathComponent("xuanpian-diag-\(UUID().uuidString)", isDirectory: true)
         let folderName = "xuanpian-diagnostics-\(fileStamp(now))"
         let stage = root.appendingPathComponent(folderName, isDirectory: true)
@@ -307,9 +321,43 @@ enum DiagnosticsBundle {
         // 别的解压工具（Windows、Python）会把中文名解成乱码。
         try runDitto(["-c", "-k", "--norsrc", "--noextattr", "--noqtn", "--noacl", "--keepParent", stage.path, tmpZip.path])
         try fm.createDirectory(at: zip.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if fm.fileExists(atPath: zip.path) { try fm.removeItem(at: zip) }
-        try fm.moveItem(at: tmpZip, to: zip)
-        return Report(zip: zip, entries: entries)
+        // 不先删：moveItem 遇到目标已经有东西（文件、文件夹、链接）就报错不动它；.numbered 换下一个名字再试。
+        var target = zip
+        var attempt = 1
+        while true {
+            if existingItem(at: target) == nil {
+                do {
+                    try fm.moveItem(at: tmpZip, to: target)
+                    return Report(zip: target, entries: entries)
+                } catch {
+                    // 查完到挪之间被别人占了：照下面一样处理；别的错照实报。
+                    guard existingItem(at: target) != nil else { throw error }
+                }
+            }
+            guard existing == .numbered, attempt < 100 else {
+                throw Failure(message: "\(target.path) 已经\(existingItem(at: target) ?? "有了")，不覆盖：换一个还没有的 .zip 文件名")
+            }
+            attempt += 1
+            target = numberedSibling(zip, attempt)
+        }
+    }
+
+    /// 这个位置已经有什么（文件夹 / 文件 / 链接）；没有 = nil。不跟符号链接（断了的链接也算有）。
+    nonisolated static func existingItem(at url: URL) -> String? {
+        var st = stat()
+        guard lstat(url.path, &st) == 0 else { return nil }
+        let kind = st.st_mode & S_IFMT
+        if kind == S_IFDIR { return "是一个文件夹" }
+        if kind == S_IFLNK { return "有一个符号链接" }
+        return "有这个文件"
+    }
+
+    /// 「诊断.zip」→「诊断-2.zip」。
+    nonisolated static func numberedSibling(_ url: URL, _ n: Int) -> URL {
+        let ext = url.pathExtension
+        let stem = url.deletingPathExtension().lastPathComponent
+        let name = ext.isEmpty ? "\(stem)-\(n)" : "\(stem)-\(n).\(ext)"
+        return url.deletingLastPathComponent().appendingPathComponent(name)
     }
 
     /// 诊断摘要（复制进剪贴板的那份）：系统、界面状态、给定的几条提示，同样换掉路径。
@@ -539,12 +587,23 @@ struct Redactor {
 
 /// LABELGUI_DATA_DIR=<临时> LabelGUI --diag-export <out.zip> [--crash-dir <目录>]：和「帮助 › 导出诊断信息…」同一个 zip，
 /// 打印 zip 里的文件。只读数据目录、只写 out.zip；要 LABELGUI_DATA_DIR（测试别把真实数据目录的日志打出来）。
+/// out.zip 必须是一个还没有的、以 .zip 结尾的文件名：给的是已有的文件夹 / 文件就退出码 2，什么都不动
+/// （以前会把那个文件夹整个递归删掉、原地换成 zip）。
 enum DiagnosticsCLI {
     @MainActor
     static func run(flagIndex: Int) -> Never {
         CollageCLI.requireIsolatedDataDir("--diag-export", "会把数据目录里的日志和场次概况打进 zip")
         let args = CommandLine.arguments
-        let out = URL(fileURLWithPath: args[flagIndex + 1])
+        let given = args[flagIndex + 1]
+        let out = URL(fileURLWithPath: given)
+        if let what = DiagnosticsBundle.existingItem(at: out) {
+            print("--diag-export：\(given) 已经\(what)，不覆盖、不往里写：给一个还没有的 .zip 文件名")
+            exit(2)
+        }
+        guard out.pathExtension.lowercased() == "zip", !given.hasSuffix("/") else {
+            print("--diag-export：\(given) 不是 .zip 文件名：给一个还没有的、以 .zip 结尾的文件名")
+            exit(2)
+        }
         let crashDir = args.firstIndex(of: "--crash-dir").flatMap { i in
             args.count > i + 1 ? URL(fileURLWithPath: args[i + 1], isDirectory: true) : nil
         }

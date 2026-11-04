@@ -6,6 +6,8 @@
 1. --diag-export：造一个数据目录（sessions.json 带客户名的场次文件夹和 bookmark、场次 JSON、客户备注、预览图、带路径的日志）
    和一个崩溃报告目录 → zip 里有说明 / 诊断信息 / 提示 / 场次概况 / 目录结构 / 日志 / 最近的崩溃报告；没有图片文件、
    没有客户原话、bookmark、场次文件夹名、家目录；日志里的路径换成了 <场次 N>。
+1b. --diag-export 的目标已经有东西（文件夹、带结尾斜杠、名字以 .zip 结尾的文件夹、数据目录本身、「.」、已有的文件）→ 退出码 2，
+   一个字节都不动；不以 .zip 结尾的新名字也拒绝；还没有的 .zip 照常写。
 2. --analyze 一个 chmod 000 的照片文件夹 → 退出码 1，说「没有权限读这个文件夹」并点名「系统设置 › 隐私与安全性 › 文件与文件夹」，
    不说「没有支持的图片文件」；空文件夹的对照组照旧说「没有支持的图片文件」。
 3. --export-xmp：照片文件夹 chmod 555（写不进 .xmp）→ 「N 个失败 … ；原因：没有权限」，一个 .xmp 都没写出来。
@@ -178,6 +180,61 @@ def section_export():
           "目录结构：文件只列名字和大小，预览目录只说个数")
 
 
+def tree_snapshot(root):
+    """目录里每个文件的相对路径 → 内容（比对「一个字节都没动」）。"""
+    out = {}
+    for d, _, files in os.walk(root):
+        for n in files:
+            p = os.path.join(d, n)
+            out[os.path.relpath(p, root)] = open(p, "rb").read()
+    return out
+
+
+def section_export_target():
+    print("1b. --diag-export 的目标已经有东西：退出码 2，一个字节都不动（以前会把给的文件夹整个递归删掉）")
+    data = fresh_data("diag-target")
+    with open(os.path.join(data, "sessions.json"), "w") as f:
+        f.write("[]")
+    # 已有的文件夹（里面有东西）：照原样、带结尾斜杠、就是数据目录本身、当前目录「.」
+    folder = os.path.join(WORK, "已有的文件夹")
+    os.makedirs(os.path.join(folder, "子文件夹"))
+    for rel, text in (("别删我.txt", "里面的东西"), ("子文件夹/也别删.json", "{}")):
+        with open(os.path.join(folder, rel), "w") as f:
+            f.write(text)
+    zipdir = os.path.join(WORK, "名字像 zip 的文件夹.zip")
+    os.makedirs(zipdir)
+    with open(os.path.join(zipdir, "别删我.txt"), "w") as f:
+        f.write("名字以 .zip 结尾的文件夹")
+    before_folder, before_zipdir, before_data = tree_snapshot(folder), tree_snapshot(zipdir), tree_snapshot(data)
+    for label, target in (("已有的文件夹", folder), ("结尾带斜杠", folder + "/"), ("名字以 .zip 结尾的文件夹", zipdir),
+                          ("数据目录本身", data), ("当前目录「.」", ".")):
+        r = run(["--diag-export", target], data)
+        check(r.returncode == 2 and "不覆盖" in r.stdout, f"{label}：退出码 2、说不覆盖（{r.returncode}：{r.stdout.strip()[-200:]!r}）")
+    check(os.path.isdir(folder) and tree_snapshot(folder) == before_folder, "已有的文件夹和里面的文件逐字节没变")
+    check(os.path.isdir(zipdir) and tree_snapshot(zipdir) == before_zipdir, "名字以 .zip 结尾的文件夹没变")
+    # 数据目录：启动时 app 自己会往里放 fonts/（和打包无关），原来的文件一个都不能少、不能变
+    after_data = tree_snapshot(data) if os.path.isdir(data) else {}
+    check(all(after_data.get(k) == v for k, v in before_data.items()), "数据目录本身：原来的文件都在、逐字节没变")
+    work_zips = [n for n in os.listdir(WORK) if n.lower().endswith(".zip") and n not in ("诊断.zip", os.path.basename(zipdir))]
+    check(not work_zips, f"当前目录里没多出 zip：{work_zips}")
+    # 已有的文件：不覆盖
+    existing = os.path.join(WORK, "已有的.zip")
+    with open(existing, "wb") as f:
+        f.write(b"original bytes, not a diagnostics zip")
+    r = run(["--diag-export", existing], data)
+    check(r.returncode == 2 and open(existing, "rb").read() == b"original bytes, not a diagnostics zip",
+          f"已有的文件：退出码 2、逐字节没变（{r.returncode}）")
+    # 不以 .zip 结尾的新名字：拒绝（多半是想给一个文件夹）
+    for name in ("out.txt", "新文件夹"):
+        target = os.path.join(WORK, name)
+        r = run(["--diag-export", target], data)
+        check(r.returncode == 2 and not os.path.exists(target), f"「{name}」不是 .zip：退出码 2、什么都没写（{r.returncode}）")
+    # 对照组：还没有的 .zip 照常写
+    fresh = os.path.join(WORK, "新的诊断.zip")
+    r = run(["--diag-export", fresh], data)
+    check(r.returncode == 0 and zipfile.is_zipfile(fresh), f"还没有的 .zip：照常写出（{r.returncode}）")
+
+
 def section_analyze():
     print("2. --analyze 读不了的照片文件夹：说没有权限、点名系统设置")
     if IS_ROOT:
@@ -236,6 +293,7 @@ def section_jpeg():
 
 try:
     section_export()
+    section_export_target()
     section_analyze()
     section_xmp()
     section_jpeg()

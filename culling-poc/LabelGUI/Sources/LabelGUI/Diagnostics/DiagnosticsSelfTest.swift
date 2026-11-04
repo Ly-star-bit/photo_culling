@@ -240,6 +240,48 @@ enum DiagnosticsSelfTest {
         let info = files[folder + "/info.txt"] ?? ""
         check(info.contains("macOS：") && info.contains("机型：") && info.contains("当前场次：<场次 1>（key \(key1)）"),
               "诊断信息：系统、机型、界面状态（路径换成代号）", info)
+        targetChecks(work, data: data, check)
+    }
+
+    /// 打包的目标位置已经有东西：一个字节都不动（以前先 removeItem 再挪：给的是文件夹就整个递归删掉）。
+    @MainActor
+    private static func targetChecks(_ work: URL, data: URL, _ check: Check) {
+        let fm = FileManager.default
+        let root = work.appendingPathComponent("目标已有", isDirectory: true)
+        let folder = root.appendingPathComponent("已有的文件夹.zip", isDirectory: true)
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let keep = folder.appendingPathComponent("别删我.txt")
+        try? Data("里面的东西".utf8).write(to: keep)
+        let file = root.appendingPathComponent("已有的.zip")
+        let original = Data("原来的 zip，不是这次打的".utf8)
+        try? original.write(to: file)
+        for (label, url) in [("已有的文件夹", folder), ("已有的文件", file)] {
+            do {
+                _ = try DiagnosticsBundle.write(dataDir: data, to: url, context: [], history: "", crashDir: nil)
+                check(false, "打包到\(label)：应该报错不动它")
+            } catch {
+                check(error.localizedDescription.contains("不覆盖"), "打包到\(label)：报「不覆盖」", error.localizedDescription)
+            }
+        }
+        let folderIntact = (try? Data(contentsOf: keep)) == Data("里面的东西".utf8)
+        check(folderIntact && fm.fileExists(atPath: folder.path), "已有的文件夹和里面的文件都还在")
+        check((try? Data(contentsOf: file)) == original, "已有的文件逐字节没变")
+        // 保存面板那一路（点了「替换」）：换个名字写，原来的不动。
+        do {
+            let report = try DiagnosticsBundle.write(dataDir: data, to: file, context: [], history: "", crashDir: nil,
+                                                     existing: .numbered)
+            let wrote = report.zip.lastPathComponent
+            check(wrote == "已有的-2.zip" && fm.fileExists(atPath: report.zip.path) && (try? Data(contentsOf: file)) == original,
+                  "保存面板那一路：写成「已有的-2.zip」，原来的逐字节没变", wrote)
+            let again = try DiagnosticsBundle.write(dataDir: data, to: folder, context: [], history: "", crashDir: nil,
+                                                    existing: .numbered)
+            let stillThere = (try? Data(contentsOf: keep)) == Data("里面的东西".utf8)
+            check(again.zip.lastPathComponent == "已有的文件夹-2.zip" && stillThere, "目标是文件夹也换名字、文件夹不动",
+                  again.zip.lastPathComponent)
+        } catch {
+            check(false, "保存面板那一路换名字写", error.localizedDescription)
+        }
+        try? fm.removeItem(at: root)
     }
 
     // MARK: D 失败原因
