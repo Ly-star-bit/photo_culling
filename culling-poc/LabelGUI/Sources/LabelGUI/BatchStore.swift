@@ -1816,6 +1816,7 @@ final class BatchStore: ObservableObject {
         lastError = nil
         // 走到这里的：没有挂着的（removeSession 先拦过），或者这一场刚被「全部清除」整份删掉 —— 没存上的也就不用存了。
         persistFailures = [:]
+        refusedDirty = []
         updatePersistError()
         loadReviewPosition()
         loadThresholds()
@@ -1959,6 +1960,10 @@ final class BatchStore: ObservableObject {
 
     /// 原件在、却读不出来（或者解不开又挪不开）的：这一场不写它 —— 拿内存里的空的去盖，原件就没了。重新打开这一场再读。
     private var persistRefused: Set<PersistFile> = []
+    /// 上面那几份里，这次打开以后又改过的（要写、被拒了）：改动只在内存里。常驻红条（persistError，点不掉），
+    /// 切场次、移除当前这一场、退出前问一句（不硬拦：提示里的办法就是重新打开这一场，拦死了用户就困在这一场里）。
+    /// 以前只有打开时那条橙色提醒，点掉以后接着改几百张，切走或退出时一声不响全丢。
+    private var refusedDirty: Set<PersistFile> = []
     /// 这次打开这一场以后已经备份过（<名字>.bak）的文件。
     private var backedUpPaths: Set<String> = []
 
@@ -2027,8 +2032,12 @@ final class BatchStore: ObservableObject {
     }
 
     private func attemptWrite(_ file: PersistFile) {
-        // 原件读不出来、挪不开的（S02）：不写，免得拿内存里的空的盖掉它。
-        guard !persistRefused.contains(file) else { return }
+        // 原件读不出来、挪不开的（S02）：不写，免得拿内存里的空的盖掉它；记下这一份有没存盘的改动（红条、离开前问）。
+        // 不记进 persistFailures：重试永远写不成，「重试」和切场次前的拦截就再也过不去了。
+        guard !persistRefused.contains(file) else {
+            refusedDirty.insert(file)
+            return
+        }
         do {
             // 场次目录被别的程序删了（访达里删、清理工具）：建回来再写，不然「文件不见了」永远重试不成、切不了场次。
             if !FileManager.default.fileExists(atPath: sessionDir.path) {
@@ -2048,14 +2057,26 @@ final class BatchStore: ObservableObject {
     }
 
     /// 红条上的「重试」、切场次之前、退出时：没写成的再写一遍。true = 都存上了（本来就没有挂着的也是 true）。
+    /// 原件读不出来、这次打开以后又改过的（refusedDirty）重试也写不上，算没存上：退出时（QuitCoordinator.finish）照样问。
     @discardableResult
     func retryPersist() -> Bool {
         for f in PersistFile.allCases where persistFailures[f] != nil {
             attemptWrite(f)
         }
         updatePersistError()
-        return persistFailures.isEmpty
+        return persistFailures.isEmpty && refusedDirty.isEmpty
     }
+
+    /// 红条上要不要「重试」：只有写失败（盘满）的才重试得上；原件读不出来、改动只在内存里的，重试没用。
+    var persistRetryable: Bool { !persistFailures.isEmpty }
+
+    /// 原件读不出来、这次打开以后又改过、改动只在内存里的那几份（实时桥切场次前要先问用户）。
+    var refusedUnsaved: [PersistFile] { PersistFile.allCases.filter(refusedDirty.contains) }
+
+    /// 离开这一场之前，原件读不出来、只在内存里的改动要不要丢：(动作「切场次」, 说明) → true = 丢掉、照常离开。
+    /// GUI 里弹框问（PersistLeaveAlert，无头不弹、直接放行）；自检换成假的；实时桥带了 confirm:true（AI 已经问过用户）时
+    /// 临时换成放行。
+    var confirmDiscardRefused: @MainActor (_ action: String, _ message: String) -> Bool = PersistLeaveAlert.ask
 
     /// 实时桥写工具的回复要说「存上没有」（审查 S01b）：这几份里现在还没存上的 —— 写失败（盘满，红条 persistError）、
     /// 原件读坏了这一场先不写（提醒在 dataNotice）。两样都空 = 盘上是最新的。
@@ -2064,23 +2085,50 @@ final class BatchStore: ObservableObject {
     }
 
     /// 离开这一场（切场次、移除当前这一场）之前：还有没存上的就再写一次，还写不上就拦住 —— 不然 switchSession 的
-    /// loadOverrides 从盘上读，内存里没存上的改判当场就没了。
+    /// loadOverrides 从盘上读，内存里没存上的改判当场就没了。原件读不出来、只在内存里的改动不拦（重试写不上，
+    /// 办法本来就是重新打开这一场），先问一句；用户点了「仍要…」才走，没点就留在这一场。
     private func persistBeforeLeaving(_ action: String) -> Bool {
-        guard !persistFailures.isEmpty, !retryPersist() else { return true }
-        lastError = "这一场还有改动没存上：先腾出磁盘空间、点顶上红条的「重试」，存上以后再\(action)"
-        return false
+        if !persistFailures.isEmpty {
+            retryPersist()
+            if !persistFailures.isEmpty {
+                lastError = "这一场还有改动没存上：先腾出磁盘空间、点顶上红条的「重试」，存上以后再\(action)"
+                return false
+            }
+        }
+        guard !refusedDirty.isEmpty else { return true }
+        let what = refusedUnsaved.map(\.label).joined(separator: "、")
+        let message = "\(sessionLabel)的\(what)原件读不出来，为免覆盖没有写盘：这次打开以后的这些改动只在内存里，" +
+                      "现在\(action)就没了（盘上的原件不受影响）。要留着改动，先别\(action)，修好或移走原件（在 \(sessionDir.path)）以后再说"
+        guard confirmDiscardRefused(action, message) else {
+            lastError = "没有\(action)：这一场的\(what)还有只在内存里的改动（原件读不出来，见顶上红条）"
+            return false
+        }
+        SessionFiles.log.notice("\(action, privacy: .public)：用户确认丢掉只在内存里的\(what, privacy: .public)改动")
+        refusedDirty = []
+        updatePersistError()
+        return true
     }
 
     private func updatePersistError() {
         let failed = PersistFile.allCases.filter { persistFailures[$0] != nil }
-        guard !failed.isEmpty else {
+        let refused = refusedUnsaved
+        guard !failed.isEmpty || !refused.isEmpty else {
             if persistError != nil { persistError = nil }
             return
         }
-        let reasons = Set(failed.compactMap { persistFailures[$0] }).sorted().joined(separator: "、")
-        let what = failed.map(\.label).joined(separator: "、")
-        let text = "\(sessionLabel)的\(what)没存上（\(reasons)）：改动还在，但只在内存里。" +
-                   "腾出磁盘空间后点「重试」；存上之前切不了场次，也先别退出"
+        var lines: [String] = []
+        if !failed.isEmpty {
+            let reasons = Set(failed.compactMap { persistFailures[$0] }).sorted().joined(separator: "、")
+            let what = failed.map(\.label).joined(separator: "、")
+            lines.append("\(sessionLabel)的\(what)没存上（\(reasons)）：改动还在，但只在内存里。" +
+                         "腾出磁盘空间后点「重试」；存上之前切不了场次，也先别退出")
+        }
+        if !refused.isEmpty {
+            let what = refused.map(\.label).joined(separator: "、")
+            lines.append("\(sessionLabel)的\(what)原件读不出来，为免覆盖这一场不写盘：这次打开以后的改动只在内存里，" +
+                         "切场次、退出就没了（会先问一句）。修好或移走原件（在 \(sessionDir.path)）后重新打开这一场，原件会读回来")
+        }
+        let text = lines.joined(separator: "\n")
         if persistError != text { persistError = text }
     }
 
@@ -2305,6 +2353,7 @@ final class BatchStore: ObservableObject {
     /// 就拿内存里那几条把原文件整份盖掉，accepted.json 也被 isEmpty 那支删掉（审查 S02）。
     private func loadOverrides() {
         persistRefused.remove(.overrides)
+        refusedDirty.remove(.overrides)
         backedUpPaths.subtract([overridesPath.path, acceptedPath.path])
         let stamp = SessionFiles.timestamp()
         switch SessionFiles.read([String: String].self, at: overridesPath, stamp: stamp) {
@@ -2409,6 +2458,7 @@ final class BatchStore: ObservableObject {
 
     private func loadClientPicks() {
         persistRefused.remove(.clientPicks)
+        refusedDirty.remove(.clientPicks)
         backedUpPaths.remove(clientPicksPath.path)
         var loaded: [String] = []
         defer { clientPicks = Set(loaded) }
@@ -3232,6 +3282,7 @@ final class BatchStore: ObservableObject {
 
     private func loadBodyOffsets() {
         persistRefused.remove(.bodyOffsets)
+        refusedDirty.remove(.bodyOffsets)
         backedUpPaths.remove(bodyOffsetsPath.path)
         var stored: [String: Int] = [:]
         switch SessionFiles.read([String: Int].self, at: bodyOffsetsPath) {
