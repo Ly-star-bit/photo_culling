@@ -98,6 +98,8 @@ enum MCPReadModel {
         out["verdict_counts"] = ["pick": counts.pick, "usable": counts.usable, "reject": counts.reject]
         out["reason_counts"] = s.reasonCounts
         out["manual_override_count"] = s.manualOverrideCount
+        // 其中 AI 经实时桥改的（照样算人工改判；阈值建议不拿它们当样本）
+        out["ai_override_count"] = s.aiOverrideCount
         out["client_pick_count"] = s.clientPickCount
         // 「XMP 过期」（状态栏那一句）：LR / C1 看的是 XMP，AI 改完判决它就过期了；没写过 XMP 时 stale_count 一直是 0
         let xmpStale = s.xmpStaleCount
@@ -292,9 +294,23 @@ enum MCPReadModel {
         r["faces"] = item.faceCount
         r["eyes_closed"] = item.faces.filter { $0.eyeClosed == true }.count
         r["manual"] = s.isManual(item.id)
+        if let by = changedBy(item.id, s) { r["changed_by"] = by }
         if s.clientPicks.contains(item.id) { r["client_pick"] = true }
         return r
     }
+
+    /// 人工改判是谁改的：AI 经实时桥改的（有出处）是 "ai"，其余是 "user"；不是人工改判 = nil（不带这个字段）。
+    static func changedBy(_ id: String, _ s: BatchStore) -> String? {
+        guard s.isManual(id) else { return nil }
+        return s.aiOverride(id) != nil ? "ai" : "user"
+    }
+
+    /// AI 改判的出处时间：带时区的 ISO 8601（这是一个时刻，不是照片的拍摄时间）。
+    static let instantFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.timeZone = TimeZone.current
+        return f
+    }()
 
     // MARK: - cull_get_photos
 
@@ -377,6 +393,11 @@ enum MCPReadModel {
         if !item.vlmRescued.isEmpty { d["vlm_rescued"] = item.vlmRescued }
         d["override"] = s.overrides[item.id].map { verdictName($0) } ?? NSNull()
         d["accepted_recommendation"] = s.overrides[item.id] != nil && !s.isManual(item.id)
+        if let mark = s.aiOverride(item.id) {
+            var ai: [String: Any] = ["op_id": mark.opID, "tool": mark.tool, "at": instantFormatter.string(from: mark.at)]
+            ai["previous"] = mark.previous.flatMap(Verdict.init(rawValue:)).map(verdictName) ?? "auto"
+            d["ai_override"] = ai
+        }
         d["client_pick"] = s.clientPicks.contains(item.id)
         return d
     }
@@ -498,6 +519,7 @@ enum MCPReadModel {
         let shown = members.prefix(memberCap)
         g["members"] = shown.map { m -> [String: Any] in
             var row: [String: Any] = ["id": m.id, "verdict": verdictName(m.verdict), "manual": s.isManual(m.id)]
+            if let by = changedBy(m.id, s) { row["changed_by"] = by }
             if let r = rank(m) {
                 row["rank"] = r
                 if r == 1 { recommended = m.id }

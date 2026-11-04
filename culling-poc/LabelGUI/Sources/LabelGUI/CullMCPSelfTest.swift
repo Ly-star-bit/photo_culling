@@ -42,6 +42,7 @@ enum CullMCPSelfTest {
         }
         xmpChecks(check, sessionDir: sessionDir)
         clientPickChecks(check, sessionDir: sessionDir)
+        provenanceChecks(check, sessionDir: sessionDir)
         for f in failures { print("FAIL " + f) }
         if failures.isEmpty {
             print("选片 MCP 自检：\(total) 条检查全部通过")
@@ -131,5 +132,98 @@ enum CullMCPSelfTest {
         let touched = store.undoLastOverride()
         check(store.clientPickCount == 0 && Set(touched) == Set(r.ids) && !FileManager.default.fileExists(atPath: file.path),
               "⌘Z：客户选中回到 0、动到的是那 2 张、client_picks.json 删掉：\(touched)")
+    }
+
+    // MARK: - 3. AI 改判的出处（ai_overrides.json）
+
+    static func diskMarks(_ sessionDir: URL) -> [String: [String: Any]]? {
+        let url = sessionDir.appendingPathComponent("ai_overrides.json")
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: [String: Any]]
+    }
+
+    /// AI 改判照样是人工改判（isManual、「人工改判 N」），另记出处；用户亲手改过就拿掉；⌘Z 连出处一起回去（撤掉用户盖过 AI 的
+    /// 那一步，出处回来；撤掉 AI 那一步，出处没了）；AI 改两次 previous 留最早的；重开还在；overrides.json 被别的改过、对不上就丢；
+    /// 定案 / 接受推荐 / 「只留这张」都算亲手改；阈值建议和「滑杆漏掉」不拿 AI 的当样本；MCP 行的 changed_by。
+    static func provenanceChecks(_ check: Check, sessionDir: URL) {
+        let store = open()
+        let ids = store.items.map(\.id).sorted()
+        guard ids.count >= 8 else { return }
+        let a = ids[0], b = ids[1], c = ids[2], d = ids[3]
+        let groupSizes = store.groupSizes
+        store.applyAIOverrides([(id: a, verdict: .reject)], opID: "op-ai-0001", tool: "cull_set_verdicts")
+        let disk = diskMarks(sessionDir)?[a] ?? [:]
+        let row = MCPReadModel.row(store.item(withID: a)!, store, groupSizes: groupSizes)
+        check(store.isManual(a) && store.manualOverrideCount == 1 && store.aiOverrideCount == 1
+              && disk["op_id"] as? String == "op-ai-0001" && disk["tool"] as? String == "cull_set_verdicts"
+              && disk["ai_verdict"] as? String == Verdict.reject.rawValue && disk.keys.contains("previous") && disk["previous"] is NSNull
+              && (disk["at"] as? String).flatMap(ISO8601DateFormatter().date(from:)) != nil
+              && row["manual"] as? Bool == true && row["changed_by"] as? String == "ai",
+              "AI 改判：照样是人工改判（manual:true）、「其中 AI 1」，ai_overrides.json 记 {op_id, tool, at, previous:null, ai_verdict}，"
+              + "行上 changed_by ai：\(disk) \(row["changed_by"] ?? "nil")")
+        let detail = MCPReadModel.detail(store.item(withID: a)!, store, groupSizes: groupSizes)
+        let ai = detail["ai_override"] as? [String: Any] ?? [:]
+        check(ai["op_id"] as? String == "op-ai-0001" && ai["previous"] as? String == "auto" && ai["tool"] as? String == "cull_set_verdicts",
+              "cull_get_photos 的 ai_override：op_id、tool、previous auto：\(ai)")
+        store.setOverride(a, .reject)
+        let userRow = MCPReadModel.row(store.item(withID: a)!, store, groupSizes: groupSizes)
+        check(store.aiOverrideCount == 0 && store.isManual(a) && diskMarks(sessionDir) == nil && userRow["changed_by"] as? String == "user",
+              "用户亲手按了一下（同一个判决）：不再算 AI 的，ai_overrides.json 删掉，changed_by user")
+        store.undoLastOverride()
+        check(store.aiOverride(a)?.opID == "op-ai-0001" && store.aiOverrideCount == 1 && diskMarks(sessionDir)?[a] != nil,
+              "⌘Z 撤掉用户那一下：AI 的出处回来（内存和 ai_overrides.json）")
+        store.undoLastOverride()
+        check(store.overrides[a] == nil && store.aiOverrides[a] == nil && store.aiOverrideCount == 0 && diskMarks(sessionDir) == nil,
+              "再 ⌘Z 撤掉 AI 那一步：判决回到自动，出处一起没了")
+        // AI 改两次：previous 留 AI 第一次动它之前的（用户先判的精选）
+        store.setOverride(b, .pick)
+        store.applyAIOverrides([(id: b, verdict: .usable)], opID: "op-ai-0002", tool: "cull_set_verdicts")
+        store.applyAIOverrides([(id: b, verdict: .reject)], opID: "op-ai-0003", tool: "cull_set_verdicts")
+        let mb = store.aiOverride(b)
+        check(mb?.opID == "op-ai-0003" && mb?.aiVerdict == Verdict.reject.rawValue && mb?.previous == Verdict.pick.rawValue,
+              "AI 改了两次：出处是最后一次的 op_id、ai_verdict，previous 是 AI 动手之前用户判的精选：\(String(describing: mb))")
+        store.applyAIOverrides([(id: c, verdict: .pick)], opID: "op-ai-0004", tool: "cull_set_verdicts")
+        store.applyAIOverrides([(id: c, verdict: nil)], opID: "op-ai-0005", tool: "cull_set_verdicts")
+        check(store.overrides[c] == nil && store.aiOverrides[c] == nil, "AI 恢复自动判决：没有判决可记，出处拿掉")
+        store.applyAIOverrides([(id: d, verdict: .pick)], opID: "op-ai-0006", tool: "cull_set_verdicts")
+        let reopened = open()
+        check(reopened.aiOverride(b)?.opID == "op-ai-0003" && reopened.aiOverride(d)?.opID == "op-ai-0006" && reopened.aiOverrideCount == 2
+              && reopened.manualOverrideCount == 2,
+              "重开这一场：两张 AI 改判的出处都读回来了（人工改判 2，其中 AI 2）")
+        // 老版本 app 打开过、把 d 改成了别的（它不认 ai_overrides.json）：读回来时对不上就丢
+        let overridesURL = sessionDir.appendingPathComponent("overrides.json")
+        let tampered: [String: String] = [b: Verdict.reject.rawValue, d: Verdict.usable.rawValue]
+        if let data = try? JSONEncoder().encode(tampered) { try? data.write(to: overridesURL, options: .atomic) }
+        let old = open()
+        check(old.aiOverride(b) != nil && old.aiOverride(d) == nil && old.isManual(d) && old.aiOverrideCount == 1,
+              "overrides.json 被老版本改过：d 的判决和记下的 AI 判决对不上 → 丢掉出处（照样是人工改判），b 对得上 → 留着")
+        // 定案（keepOnly）、分组行「接受推荐」（applyOverrides accepted）、连拍挑选的 ⏎（applyOverrides）都算亲手改
+        old.keepOnly([b], among: [b])
+        check(old.aiOverride(b) == nil, "连拍定案（keepOnly）：亲手定过的不再算 AI 的")
+        old.applyAIOverrides([(id: d, verdict: .reject)], opID: "op-ai-0007", tool: "cull_set_verdicts")
+        old.applyOverrides([d: .reject], accepted: true)
+        check(old.aiOverrides[d] == nil, "分组行「接受推荐」（applyOverrides）：不再算 AI 的")
+        old.setOverrideBatch(old.overrides.keys.sorted(), nil)
+        check(old.overrides.isEmpty && old.aiOverrideCount == 0, "全部恢复自动：没有改判、没有出处")
+        // 复盘统计：锐度线拉到 200（全场都是虚焦废片）→ AI 放行 3 张不出阈值建议；同样 3 张换成用户亲手放行 → 出建议
+        old.sharpnessThreshold = 200
+        let blurred = old.items.filter { $0.rejectReasons.contains("虚焦") }.map(\.id).sorted()
+        check(blurred.count >= 3, "锐度线 200：虚焦的废片至少 3 张（\(blurred.count)）")
+        let three = Array(blurred.prefix(3))
+        old.applyAIOverrides(three.map { (id: $0, verdict: Verdict.pick) }, opID: "op-ai-0008", tool: "cull_set_verdicts")
+        check(old.thresholdSuggestions.isEmpty && old.aiOverrideCount == 3,
+              "AI 放行 3 张虚焦：不出阈值建议（不是摄影师在纠正滑杆）：\(old.thresholdSuggestions.map(\.kind.rawValue))")
+        old.setOverrideBatch(three, .pick)
+        check(old.thresholdSuggestions.contains { $0.kind == .sharpness && $0.released == 3 } && old.aiOverrideCount == 0,
+              "同样 3 张用户亲手放行：出「锐度下限」建议：\(old.thresholdSuggestions.map(\.kind.rawValue))")
+        old.setOverrideBatch(three, nil)
+        old.sharpnessThreshold = 45
+        let clean = old.items.filter { $0.rejectReasons.isEmpty }.map(\.id).sorted()
+        old.applyAIOverrides(clean.prefix(2).map { (id: $0, verdict: Verdict.reject) }, opID: "op-ai-0009", tool: "cull_set_verdicts")
+        let aiOnly = old.manualRejectsWithoutReason
+        old.setOverride(clean[2], .reject)
+        check(aiOnly == 0 && old.manualRejectsWithoutReason == 1,
+              "「滑杆漏掉」：AI 废掉的 2 张不算（\(aiOnly)），用户亲手废的 1 张算（\(old.manualRejectsWithoutReason)）")
+        old.setOverrideBatch(old.overrides.keys.sorted(), nil)
     }
 }

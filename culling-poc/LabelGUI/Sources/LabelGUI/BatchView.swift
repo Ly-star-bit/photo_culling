@@ -546,7 +546,7 @@ struct BatchView: View {
                     .help("还留着 2 张以上没淘汰的场。点这里（或按 C）一组一组挑；按 D 在网格里跳到下一个")
                 }
                 if store.manualOverrideCount > 0 {
-                    Text("人工改判 \(store.manualOverrideCount)")
+                    Text("人工改判 \(store.manualOverrideCount)" + (store.aiOverrideCount > 0 ? "（其中 AI \(store.aiOverrideCount)）" : ""))
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if store.clientPickCount > 0 {

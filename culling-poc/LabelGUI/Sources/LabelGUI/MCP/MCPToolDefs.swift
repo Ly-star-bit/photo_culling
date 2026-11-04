@@ -149,7 +149,7 @@ enum MCPToolDefs {
      "annotations":"$READ"},
 
     {"name":"cull_list_photos","title":"列照片",
-     "description":"按条件列出 app 当前打开的那一场里的照片，每张一行精简数据：id、判决、废片理由、拍摄时间（已加机身对时偏移）、章节、场和场内名次、近似重复组、锐度、曝光裁切、人脸质量、人脸数和闭眼数、是否人工改判。条件之间是 AND。分页：结果里有 next_cursor，原样传回 cursor 就是下一页；翻页中间判决变了会带 session_changed:true。要完整细节（EXIF、每张脸）用 cull_get_photos；要看图用 cull_preview_photos。",
+     "description":"按条件列出 app 当前打开的那一场里的照片，每张一行精简数据：id、判决、废片理由、拍摄时间（已加机身对时偏移）、章节、场和场内名次、近似重复组、锐度、曝光裁切、人脸质量、人脸数和闭眼数、是否人工改判（manual；changed_by 是 ai = AI 用 cull_set_verdicts 改的、user = 用户亲手改的）。条件之间是 AND。分页：结果里有 next_cursor，原样传回 cursor 就是下一页；翻页中间判决变了会带 session_changed:true。要完整细节（EXIF、每张脸）用 cull_get_photos；要看图用 cull_preview_photos。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "verdict":{"type":"array","items":{"type":"string","enum":["pick","usable","reject"]},"uniqueItems":true,"description":"只列这些判决"},
@@ -166,7 +166,7 @@ enum MCPToolDefs {
      "annotations":"$READ"},
 
     {"name":"cull_get_photos","title":"照片详情",
-     "description":"app 当前打开的那一场里 1–20 张照片的完整分析：判决和理由；原图路径；相机、机身、序列号；拍摄时间（原始的和对时后的）；EXIF（快门、光圈、ISO、等效焦距、镜头）；锐度、曝光裁切、人脸质量；每张脸的位置（bbox = [x0,y0,x1,y1]，0–1 归一化，左上角为原点，按 EXIF 转正后的画面，四边各外扩了 15%）、是否闭眼、眼睛开合度、面积占比；章节、场、名次、近似重复组；VLM 复审和申诉结果（有的话）；人工改判和客户选片标记。不存在的 id 列在 missing_ids。",
+     "description":"app 当前打开的那一场里 1–20 张照片的完整分析：判决和理由；原图路径；相机、机身、序列号；拍摄时间（原始的和对时后的）；EXIF（快门、光圈、ISO、等效焦距、镜头）；锐度、曝光裁切、人脸质量；每张脸的位置（bbox = [x0,y0,x1,y1]，0–1 归一化，左上角为原点，按 EXIF 转正后的画面，四边各外扩了 15%）、是否闭眼、眼睛开合度、面积占比；章节、场、名次、近似重复组；VLM 复审和申诉结果（有的话）；人工改判（AI 改的另有 ai_override：哪一次 op_id、哪个工具、什么时候、AI 改之前是什么）和客户选片标记。不存在的 id 列在 missing_ids。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "ids":{"type":"array","items":{"type":"string","minLength":1,"maxLength":128},"minItems":1,"maxItems":20,"uniqueItems":true,"description":"照片 id（文件名去掉扩展名，比如 DSCF7208）"}},
@@ -217,7 +217,7 @@ enum MCPToolDefs {
      "annotations":"$DESTRUCTIVE"},
 
     {"name":"cull_set_verdicts","title":"改判",
-     "description":"在 app 里改判（= 网格里按 1/2/3/0）：pick 精选、usable 可用、reject 废片、auto 恢复自动判决。用户在窗口里当场看到；一次调用是一步撤销，用户按 ⌘Z 能撤，也可以 app_undo target=verdicts。已经是这个判决的照片不动（列在 unchanged）。连拍挑选开着时回 user_busy，app 正在分析时回 analysis_running。",
+     "description":"在 app 里改判（= 网格里按 1/2/3/0）：pick 精选、usable 可用、reject 废片、auto 恢复自动判决。用户在窗口里当场看到；一次调用是一步撤销，用户按 ⌘Z 能撤，也可以 app_undo target=verdicts。已经是这个判决的照片不动（列在 unchanged）。AI 改的判决和用户亲手改的一样钉住、算人工改判（manual:true），另外记下出处（cull_list_photos 的 changed_by 是 ai，重开 app 也在），阈值建议不拿它们当样本；用户之后亲手再改就算用户的。连拍挑选开着时回 user_busy，app 正在分析时回 analysis_running。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "ids":{"type":"array","items":{"type":"string","minLength":1,"maxLength":128},"minItems":1,"maxItems":500,"uniqueItems":true,"description":"照片 id（文件名去掉扩展名，比如 DSCF7208）"},

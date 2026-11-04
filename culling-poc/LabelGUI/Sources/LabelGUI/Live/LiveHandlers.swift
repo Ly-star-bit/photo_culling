@@ -837,8 +837,9 @@ extension LiveHandlers {
         let pushesBefore = batch.overrideUndoPushes
         var notice: String?
         if !changed.isEmpty {
-            // = 网格里按 1/2/3/0（一次只压一步撤销）；拼图托盘里的判决跟着刷（§9.5.2）。不调 keepPlace：用户的焦点不跟着跳
-            batch.setOverrideBatch(changed, target)
+            // = 网格里按 1/2/3/0（一次只压一步撤销），只是另记出处（ai_overrides.json：照样算人工改判，阈值建议不拿它当样本）；
+            // 拼图托盘里的判决跟着刷（§9.5.2）。不调 keepPlace：用户的焦点不跟着跳
+            batch.applyAIOverrides(changed.map { (id: $0, verdict: target) }, opID: req.opID ?? "", tool: "cull_set_verdicts")
             model.collage.refreshFromBatch()
             model.aiLog.recordWrite(.verdicts, op: req.opID ?? "", tool: "cull_set_verdicts", before: pushesBefore,
                                     after: batch.overrideUndoPushes, depth: batch.overrideUndoDepth)

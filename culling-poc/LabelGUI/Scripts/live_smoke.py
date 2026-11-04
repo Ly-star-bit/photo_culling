@@ -3034,7 +3034,55 @@ __attribute__((constructor)) static void init(void) {
               and (un_m["undone"].get("op_id") == op_m) and cp_disk() == disk0 and ov_m3.get("client_pick_count") == picks0
               and (ov_m3.get("xmp") or {}).get("stale_count") == n_m - 1 and sm5["verdict_undo"]["depth"] == sm1["verdict_undo"]["depth"],
               f"app_undo target=verdicts 撤掉 AI 的导入：动到的是 {mid}、{mid2}，client_picks.json、客户选中数、XMP 过期都回到导入之前")
+
+        # ---------- AI 改判的出处（ai_overrides.json，overrides.json 格式不动）：照样 manual:true，另有 changed_by ai、ai_override；
+        # 用户亲手按一下就算用户的；app_undo 连出处一起撤；重开宿主读回来，overrides.json 对不上的丢掉
+        ai_path = os.path.join(msess, "ai_overrides.json")
+
+        def ai_disk():
+            return json.load(open(ai_path)) if os.path.exists(ai_path) else {}
+
+        op_s = "m-s34-" + uuid.uuid4().hex[:12]
+        sv = mw("cull_set_verdicts", {"ids": [mid], "verdict": "reject", "op_id": op_s})
+        mk = ai_disk().get(mid) or {}
+        r_ai = m_row(mid)
+        ov_ai = m_ov()
+        check(sv.get("changed") == [mid] and mk.get("op_id") == op_s and mk.get("tool") == "cull_set_verdicts"
+              and mk.get("ai_verdict") == "废片" and "previous" in mk and mk["previous"] is None
+              and re.match(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", mk.get("at") or "") and json.load(open(os.path.join(msess, "overrides.json"))).get(mid) == "废片"
+              and r_ai.get("manual") is True and r_ai.get("changed_by") == "ai" and (r_ai.get("ai_override") or {}).get("op_id") == op_s
+              and r_ai["ai_override"].get("previous") == "auto" and r_ai["ai_override"].get("tool") == "cull_set_verdicts"
+              and ov_ai.get("ai_override_count") == (ov_m.get("ai_override_count") or 0) + 1
+              and ov_ai.get("manual_override_count") == (ov_m.get("manual_override_count") or 0) + 1,
+              f"AI 改判 {mid} → reject：ai_overrides.json 记 {{op_id, tool, at, previous:null, ai_verdict}}（{mk}），overrides.json 照旧；"
+              f"cull_get_photos manual:true、changed_by ai、ai_override；概览 ai_override_count +1、manual_override_count +1")
+        test_call(hm, "test.set_override", {"id": mid, "verdict": "reject"})
+        r_user = m_row(mid)
+        check(r_user.get("manual") is True and r_user.get("changed_by") == "user" and "ai_override" not in r_user
+              and mid not in ai_disk() and m_ov().get("ai_override_count") == (ov_m.get("ai_override_count") or 0),
+              "用户在网格里亲手按了同一个判决：算用户的（changed_by user、没有 ai_override），ai_overrides.json 里这一条拿掉")
+        sv2 = mw("cull_set_verdicts", {"ids": [mid2], "verdict": "pick"})
+        had = mid2 in ai_disk()
+        un_s = mw("app_undo", {"target": "verdicts"})
+        r_un = m_row(mid2)
+        check(sv2.get("changed") == [mid2] and had and un_s.get("ids") == [mid2] and mid2 not in ai_disk()
+              and r_un.get("manual") is False and "changed_by" not in r_un,
+              f"AI 改判 {mid2} → app_undo：判决回到自动，出处一起撤掉（ai_overrides.json 里没有了）")
+        op_k = "m-keep-" + uuid.uuid4().hex[:12]
+        mw("cull_set_verdicts", {"ids": [mid2], "verdict": "pick", "op_id": op_k})
         hm.term()
+        # 老版本 app 不认 ai_overrides.json：给 mid 塞一条和 overrides.json 对不上的（overrides 里是用户判的废片），重开就丢
+        marks = ai_disk()
+        marks[mid] = {"op_id": "fake-op-0001", "tool": "cull_set_verdicts", "at": "2026-11-01T00:00:00Z", "previous": None,
+                      "ai_verdict": "精选"}
+        json.dump(marks, open(ai_path, "w"), ensure_ascii=False)
+        hm2 = Host("G-m2", data=mdata, args=("--no-view",))
+        envm = hm2.env()
+        r_k, r_f = m_row(mid2), m_row(mid)
+        check((r_k.get("ai_override") or {}).get("op_id") == op_k and r_k.get("changed_by") == "ai"
+              and r_f.get("changed_by") == "user" and "ai_override" not in r_f,
+              "重开宿主：AI 改判的出处读回来了；对不上 overrides.json 的那一条（老版本 app 改过）丢掉，照样是用户的人工改判")
+        hm2.term()
 
         # ---------- 第 16 条 旧版 app 少一个写方法：只有那个工具回 app_version_mismatch
         hd = Host("G-drop", LABELGUI_LIVE_TEST_DROP_CAP="collage.run_kit", args=("--no-view",))
