@@ -108,3 +108,63 @@ enum SessionFiles {
         }
     }
 }
+
+// MARK: - sessions.json：一条一条解，坏的原样留着（审查 S02c）
+
+/// 「最近场次」的索引文件解出来的样子。以前整份用 JSONDecoder 解 [SessionEntry]，一条缺了 name 整份就当空的；
+/// 下一次打开有结果的场次，索引被整份覆盖成 1 条，紧接着 pruneOrphanedSessions 把别的场次的预览都删了。
+/// 现在一条一条解：解得开的进菜单，解不开的原样留在文件里（不进菜单），它们的场次也不清预览。
+struct SessionsIndexFile {
+    struct Unknown: Equatable {
+        /// 这一条原样的 JSON。
+        let raw: Data
+        /// 能认出来的场次 key（有 key 用 key；只有 path 就按 path 算，和 sessionKey 一样）：pruneOrphanedSessions 跳过它。
+        let key: String?
+    }
+
+    var entries: [BatchStore.SessionEntry] = []
+    var unknown: [Unknown] = []
+
+    var unknownKeys: Set<String> { Set(unknown.compactMap(\.key)) }
+
+    /// nil = 整份解不开（不是 JSON 数组：截断、零长度、手改坏了括号）。
+    static func decode(_ data: Data) -> SessionsIndexFile? {
+        guard let array = (try? JSONSerialization.jsonObject(with: data)) as? [Any] else { return nil }
+        var out = SessionsIndexFile()
+        let decoder = JSONDecoder()
+        for element in array {
+            // sortedKeys：同一条每次序列化出来一字不差（写回去、和盘上的比对都靠它）。
+            guard let raw = try? JSONSerialization.data(withJSONObject: element, options: [.fragmentsAllowed, .sortedKeys])
+            else { continue }
+            if let entry = try? decoder.decode(BatchStore.SessionEntry.self, from: raw) {
+                out.entries.append(entry)
+            } else {
+                out.unknown.append(Unknown(raw: raw, key: recoverKey(element)))
+            }
+        }
+        return out
+    }
+
+    private static func recoverKey(_ element: Any) -> String? {
+        guard let dict = element as? [String: Any] else { return nil }
+        if let key = dict["key"] as? String, !key.isEmpty { return key }
+        if let path = dict["path"] as? String, !path.isEmpty {
+            return BatchStore.sessionKey(for: URL(fileURLWithPath: path))
+        }
+        return nil
+    }
+
+    /// 写回去的样子：解得开的在前（JSONEncoder，和以前一样），读不懂的原样接在后面。没有读不懂的就和以前一字不差。
+    func encoded() throws -> Data {
+        let encoder = JSONEncoder()
+        guard !unknown.isEmpty else { return try encoder.encode(entries) }
+        let parts = try entries.map { try encoder.encode($0) } + unknown.map(\.raw)
+        var out = Data("[".utf8)
+        for (i, part) in parts.enumerated() {
+            if i > 0 { out.append(contentsOf: Array(",".utf8)) }
+            out.append(part)
+        }
+        out.append(contentsOf: Array("]".utf8))
+        return out
+    }
+}

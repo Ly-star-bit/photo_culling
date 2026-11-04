@@ -1025,44 +1025,116 @@ final class BatchStore: ObservableObject {
     /// Register a session written outside the GUI (the `--analyze` CLI path) so
     /// pruneOrphanedSessions treats it as live instead of clearing its previews
     /// the next time the app analyzes anything.
+    /// 读的时候和 app 一样一条一条解（SessionsIndexFile，审查 S02c：以前 `?? []` 再整份覆盖，一条坏了全没）：
+    /// 读不懂的那几条原样留着；整份解不开的先挪成 sessions.corrupt-<时间>.json；读不出来的不写。
     nonisolated static func registerSession(dataDir: URL, folder: URL, photoCount: Int) {
         let indexPath = dataDir.appendingPathComponent("sessions.json")
         let key = sessionKey(for: folder)
-        var entries = (try? Data(contentsOf: indexPath))
-            .flatMap { try? JSONDecoder().decode([SessionEntry].self, from: $0) } ?? []
-        entries.removeAll { $0.key == key }
-        entries.insert(SessionEntry(
+        func say(_ text: String) { FileHandle.standardError.write(Data((text + "\n").utf8)) }
+        var index = SessionsIndexFile()
+        if FileManager.default.fileExists(atPath: indexPath.path) {
+            guard let data = try? Data(contentsOf: indexPath) else {
+                say("sessions.json 读不出来：这一场没登记进「最近场次」（没改写它）")
+                return
+            }
+            if let decoded = SessionsIndexFile.decode(data) {
+                index = decoded
+            } else if let moved = SessionFiles.moveAside(indexPath) {
+                say("sessions.json 解不开，原件已挪成 \(moved.lastPathComponent)，重新建一份")
+            } else {
+                say("sessions.json 解不开、也挪不开：这一场没登记进「最近场次」（没改写它）")
+                return
+            }
+        }
+        index.entries.removeAll { $0.key == key }
+        index.unknown.removeAll { $0.key == key }
+        index.entries.insert(SessionEntry(
             key: key, path: folder.standardizedFileURL.path, name: folder.lastPathComponent,
             lastAnalyzed: ISO8601DateFormatter().string(from: Date()),
             photoCount: photoCount,
             bookmark: makeBookmark(for: folder)
         ), at: 0)
-        if let data = try? JSONEncoder().encode(Array(entries.prefix(15))) {
-            try? data.write(to: indexPath, options: .atomic)
-        }
+        index.entries = Array(index.entries.prefix(15))
+        if let data = try? index.encoded() { SessionFiles.writeLogged(data, to: indexPath) }
     }
 
+    /// sessions.json 这次启动没读全（整份解不开、读不出来）：哪些场次还在菜单里不知道，pruneOrphanedSessions 这次
+    /// 启动不跑 —— 跑了就是把它们全当成掉出了菜单，删掉十几场的预览（审查 S02c，最要紧的一条）。
+    private var pruneDisabled = false
+    /// sessions.json 在、却读不出来（或者解不开又挪不开）：这次启动不改写它。
+    private var sessionsIndexReadOnly = false
+    /// sessions.json 里读不懂的那几条：原样写回去，不进菜单，它们的场次也不清预览。
+    private var sessionsIndexUnknown: [SessionsIndexFile.Unknown] = []
+
     private func loadSessionsIndex() {
-        guard let data = try? Data(contentsOf: sessionsIndexPath),
-              let entries = try? JSONDecoder().decode([SessionEntry].self, from: data) else { return }
+        guard FileManager.default.fileExists(atPath: sessionsIndexPath.path) else { return }
+        let stillThere = "这次「最近场次」是空的（判决、拼图都还在各场次里，从「选择文件夹…」打开那个文件夹就回来），" +
+                         "这次启动不清旧场次的预览"
+        guard let data = try? Data(contentsOf: sessionsIndexPath) else {
+            pruneDisabled = true
+            sessionsIndexReadOnly = true
+            addDataNotice("「最近场次」的索引 sessions.json 读不出来：" + stillThere + "，也不改写它（文件在 \(dataDir.path)）")
+            return
+        }
+        guard let index = SessionsIndexFile.decode(data) else {
+            pruneDisabled = true
+            if let moved = SessionFiles.moveAside(sessionsIndexPath) {
+                addDataNotice("「最近场次」的索引 sessions.json 解不开（被手改过或写坏了），原件已挪成 \(moved.lastPathComponent)：" +
+                              stillThere + "（文件在 \(dataDir.path)）")
+            } else {
+                sessionsIndexReadOnly = true
+                addDataNotice("「最近场次」的索引 sessions.json 解不开、也挪不开：" + stillThere + "，也不改写它（文件在 \(dataDir.path)）")
+            }
+            return
+        }
         // 同样封顶 15：写入端一直在截断，读取端不截断的话，一个手改过的
         // sessions.json 就能让菜单无限长下去。
-        recentSessions = Array(entries.prefix(15))
+        recentSessions = Array(index.entries.prefix(15))
+        sessionsIndexUnknown = index.unknown
+        let recoverable = index.unknown.filter { $0.key != nil }.count
+        if recoverable > 0 {
+            addDataNotice("「最近场次」的索引 sessions.json 里有 \(recoverable) 条读不懂（可能被手改过），原样留在文件里：" +
+                          "这几场不进菜单、预览也不清，从「选择文件夹…」重新打开那个文件夹就回来")
+        }
         refreshSessionAvailability()
     }
 
     private func saveSessionsIndex() {
-        if let data = try? JSONEncoder().encode(recentSessions) {
-            try? data.write(to: sessionsIndexPath, options: .atomic)
+        guard !sessionsIndexReadOnly else { return }
+        let index = SessionsIndexFile(entries: recentSessions, unknown: sessionsIndexUnknown)
+        // 写不上只记日志：丢的是菜单里的一条，判决都在场次目录里（审查 S01）。
+        if let data = try? index.encoded() { SessionFiles.writeLogged(data, to: sessionsIndexPath) }
+    }
+
+    /// 写之前重读一遍盘上的、按 key 合进来（审查 S02c）：GUI 开着时命令行 --analyze 登记的那一场，不被这次整份覆盖、
+    /// 紧接着清掉预览。只在 touchSessionIndex 里合并（命令行那边是 registerSession 自己重读）：放进 saveSessionsIndex
+    /// 的话，「移除」「全部清除」刚从内存里删掉的又会从盘上合并回来。
+    private func mergeSessionsIndexFromDisk() {
+        guard !sessionsIndexReadOnly, let data = try? Data(contentsOf: sessionsIndexPath),
+              let disk = SessionsIndexFile.decode(data) else { return }
+        for unknown in disk.unknown where !sessionsIndexUnknown.contains(unknown) {
+            sessionsIndexUnknown.append(unknown)
         }
+        let known = Set(recentSessions.map(\.key))
+        let extra = disk.entries.filter { !known.contains($0.key) }
+        guard !extra.isEmpty else { return }
+        // 按最近一次打开 / 分析的时间排（内存里本来就是这个顺序；ISO 8601 的 UTC 时间按字符串比就对），一样的保持原顺序。
+        let merged = (recentSessions + extra).enumerated().sorted { a, b in
+            if a.element.lastAnalyzed != b.element.lastAnalyzed { return a.element.lastAnalyzed > b.element.lastAnalyzed }
+            return a.offset < b.offset
+        }
+        recentSessions = merged.map(\.element)
     }
 
     private func touchSessionIndex() {
         guard let folder = photoDir, !currentSessionPath.isEmpty else { return }
+        mergeSessionsIndexFromDisk()
         // The PINNED key/path from switchSession, never recomputed from the
         // resolved folder — see the comment there. `name` does follow the
         // resolved folder so a renamed shoot shows its new name in the menu.
         let key = currentSessionKey
+        // 读不懂的那一条（如果是这一场的）被下面这条新的取代。
+        sessionsIndexUnknown.removeAll { $0.key == key }
         // Fresh bookmark while we demonstrably have access; keep the old one if
         // creation fails (shouldn't, but a stale bookmark beats none).
         let bookmark = Self.makeBookmark(for: folder)
@@ -1085,8 +1157,11 @@ final class BatchStore: ObservableObject {
     /// 拼图工程、VLM 结果全跟着没了，一点提示都没有（第 16 场一分析，最早那场的选片就丢了）。
     /// 现在这些 KB 级的东西一律留着：菜单只是「最近」，不是「保留期限」；重新打开那个文件夹，
     /// 判决原样回来，点「重新分析」补回预览（分析结果没变的照片只重做预览，几秒钟）。
-    private func pruneOrphanedSessions() {
-        let keep = Set(recentSessions.map(\.key))
+    /// `force`：「全部清除」（用户在确认框里点过，掉出菜单的只清预览写在确认框里），sessions.json 没读全也照样清。
+    private func pruneOrphanedSessions(force: Bool = false) {
+        guard force || !pruneDisabled else { return }
+        // sessions.json 里读不懂、原样留着的那几条也算「还在」（审查 S02c）。
+        let keep = Set(recentSessions.map(\.key)).union(sessionsIndexUnknown.compactMap(\.key))
         let root = dataDir.appendingPathComponent("sessions")
         let fm = FileManager.default
         guard let dirs = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
@@ -1237,6 +1312,8 @@ final class BatchStore: ObservableObject {
         let count = recentSessions.count
         let listed = recentSessions.map(\.key)
         recentSessions = []
+        // sessions.json 里读不懂、原样留着的那几条也一起清出索引（它们不在菜单里，场次目录照下面只清预览）。
+        sessionsIndexUnknown = []
         saveSessionsIndex()
         resetToNoSession()
         // 用户在确认框里点过的「全部清除」：菜单里列着的这几场整份删，判决、人工改判、客户选中、拼图和方案一起
@@ -1246,7 +1323,7 @@ final class BatchStore: ObservableObject {
         for key in listed {
             try? FileManager.default.removeItem(at: dataDir.appendingPathComponent("sessions/\(key)"))
         }
-        pruneOrphanedSessions()
+        pruneOrphanedSessions(force: true)
         refreshSessionAvailability(force: true)
         progressText = "已清除 \(count) 条历史记录 (照片本身未动)"
     }

@@ -28,6 +28,7 @@ enum PersistSelfTest {
         t.corruptFilesKept()
         t.unreadableFileRefused()
         t.corruptCollageKept()
+        t.sessionsIndexTolerant()
         print("persist-selftest: \(t.passed) 通过 \(t.failed) 失败")
         exit(t.failed == 0 ? 0 : 1)
     }
@@ -303,5 +304,66 @@ final class PersistSelfTestHarness {
         let scratchAside = corruptCopies(of: "scratch.json", in: scratch.deletingLastPathComponent())
         check(scratchAside.count == 1 && third.lastError?.contains("scratch.json") == true,
               "没开文件夹时的 scratch.json（零长度）同样挪开、提示")
+    }
+
+    // MARK: - S02c sessions.json 读坏了
+
+    func diskIndex() -> SessionsIndexFile? {
+        read(dataDir.appendingPathComponent("sessions.json")).flatMap(SessionsIndexFile.decode)
+    }
+
+    func sessionsIndexTolerant() {
+        print("— S02c sessions.json：一条坏了只少那一条、原样留着、不清它的预览；整份坏了挪开、这次启动不清预览")
+        freshIndex()
+        let a = makeSession("s02c-a"), b = makeSession("s02c-b"), c = makeSession("s02c-c")
+        let indexURL = dataDir.appendingPathComponent("sessions.json")
+        func entry(_ s: Session, named: Bool) -> [String: Any] {
+            var e: [String: Any] = ["key": s.key, "path": s.folder.path, "lastAnalyzed": "2026-11-01T10:00:00Z", "photoCount": 21]
+            if named { e["name"] = s.folder.lastPathComponent }
+            return e
+        }
+        let list = [entry(a, named: true), entry(b, named: false), entry(c, named: true)]
+        try? JSONSerialization.data(withJSONObject: list).write(to: indexURL)
+
+        let store = newStore()  // init 打开第一场 a：登记、清掉不在菜单里的场次的预览
+        check(store.recentSessions.map(\.key) == [a.key, c.key], "解得开的两条进菜单，缺 name 的那条不进")
+        check(store.dataNotice?.contains("1 条读不懂") == true, "提示有一条读不懂：\(store.dataNotice ?? "nil")")
+        check(exists(b.dir.appendingPathComponent("previews")), "读不懂的那一条，它的场次预览没被清")
+        let kept = diskIndex()
+        check(kept?.unknown.count == 1 && kept?.unknown.first?.key == b.key && kept?.entries.count == 2,
+              "写回去的 sessions.json 里那一条原样留着")
+
+        // GUI 开着时命令行 --analyze 登记了一场：GUI 下一次写索引时合进来，不盖掉、不清它的预览
+        let d = makeSession("s02c-d")
+        BatchStore.registerSession(dataDir: dataDir, folder: d.folder, photoCount: 21)
+        check(diskIndex()?.unknown.first?.key == b.key, "命令行登记也留着读不懂的那一条")
+        store.switchSession(to: c.folder)
+        check(store.recentSessions.contains { $0.key == d.key } && exists(d.dir.appendingPathComponent("previews")),
+              "命令行登记的那一场合进菜单、预览没被清")
+        // 从文件夹重新打开读不懂的那一场：新的一条取代它
+        store.switchSession(to: b.folder)
+        let after = diskIndex()
+        check(after?.unknown.isEmpty == true && after?.entries.contains { $0.key == b.key } == true,
+              "重新打开那个文件夹：新的一条取代读不懂的那条")
+        // 移除不会被合并回来（合并只在登记时做，不在写索引时做）
+        if let entryD = store.recentSessions.first(where: { $0.key == d.key }) {
+            store.removeSession(entryD)
+            store.switchSession(to: a.folder)
+            check(!store.recentSessions.contains { $0.key == d.key } && diskIndex()?.entries.contains { $0.key == d.key } == false,
+                  "移除的那一场不会从盘上合并回来")
+        }
+
+        // 整份坏了
+        let garbage = Data("[{\"key\": \"".utf8)
+        try? garbage.write(to: indexURL)
+        fillCache(c)
+        let second = newStore()
+        let aside = corruptCopies(of: "sessions.json", in: dataDir)
+        check(second.recentSessions.isEmpty && aside.count == 1 && aside.first.flatMap(read) == garbage,
+              "整份解不开：原件挪成 \(aside.first?.lastPathComponent ?? "—")，菜单是空的")
+        check(second.dataNotice?.contains("sessions.json") == true, "提示索引坏了、判决都还在")
+        second.switchSession(to: a.folder)
+        check(exists(c.dir.appendingPathComponent("previews")), "这次启动不清别的场次的预览")
+        check(second.recentSessions.map(\.key) == [a.key], "新的索引从这一场开始")
     }
 }
