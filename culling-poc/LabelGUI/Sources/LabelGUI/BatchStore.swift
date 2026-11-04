@@ -1147,7 +1147,8 @@ final class BatchStore: ObservableObject {
     private var currentSessionPath = ""
 
     /// 最近一次 switchSession（返回 true 的那次）打开的不是给的那个文件夹，而是按原路径认出来的、已经改名 / 挪走了的那一场
-    /// （红条说了「现在是另一个文件夹」）：这里是那一场的照片现在在哪；nil = 打开的就是给的文件夹。调用方据此别接着
+    /// （红条说了「现在是另一个文件夹」；或者书签解析不到、给的文件夹里的照片对不上这一场，按 manifest 记的位置开的）：
+    /// 这里是那一场的照片现在（记）在哪；nil = 打开的就是给的文件夹。调用方据此别接着
     /// 「分析新文件夹」—— runAnalysis 分析的会是挪走的那一场（全部复用、红条被清掉），给的文件夹里新导进来的照片照样没人管（审查）。
     /// switchSession 返回 true 以后马上读才有意义。
     private(set) var lastSwitchOpenedElsewhere: URL?
@@ -1181,20 +1182,21 @@ final class BatchStore: ObservableObject {
     /// given URL when no bookmark exists or resolution fails.
     /// `followBookmark: false`（实时桥的 app_open_session）：不解析 bookmark，原样用给的路径 —— 文件夹被挪进
     /// 桌面 / 外置盘以后，bookmark 会把 app 带到那里去读，绕过 AI 那一侧只按字符串做的受保护位置检查（§10.4）。
-    private func restoreAccess(to folder: URL, followBookmark: Bool = true) -> URL {
+    /// `followed`：书签真的解析出来了（没书签、解析不到 = false，给的路径是原样退回来的 —— 那上面是什么没人核对过）。
+    private func restoreAccess(to folder: URL, followBookmark: Bool = true) -> (url: URL, followed: Bool) {
         accessedFolder?.stopAccessingSecurityScopedResource()
         accessedFolder = nil
         guard followBookmark, let bookmark = recentSessions
-            .first(where: { $0.key == Self.sessionKey(for: folder) })?.bookmark else { return folder }
+            .first(where: { $0.key == Self.sessionKey(for: folder) })?.bookmark else { return (folder, false) }
         var stale = false
         let resolved = (try? URL(resolvingBookmarkData: bookmark, options: .withSecurityScope,
                                  relativeTo: nil, bookmarkDataIsStale: &stale))
             ?? (try? URL(resolvingBookmarkData: bookmark, relativeTo: nil, bookmarkDataIsStale: &stale))
-        guard let resolved else { return folder }
+        guard let resolved else { return (folder, false) }
         if resolved.startAccessingSecurityScopedResource() {
             accessedFolder = resolved
         }
-        return resolved
+        return (resolved, true)
     }
 
     /// 认回挪了的文件夹（审查 S04 第一步）：`givenKey`（按新路径算的 key）下还没有分析结果时，看「最近场次」里哪一条的
@@ -1235,7 +1237,8 @@ final class BatchStore: ObservableObject {
         }
         // 判决、客户选中、对时还有没存上的（盘满了）：再写一次，还不行就不切（审查 S01）。
         guard persistBeforeLeaving("切场次") else { return false }
-        let resolved = restoreAccess(to: folder, followBookmark: followBookmark)
+        let access = restoreAccess(to: folder, followBookmark: followBookmark)
+        let resolved = access.url
         // 给的文件夹自己在，书签却把它带到了另一个文件夹（审查）：这一场认回 / 重新定位以后登记的还是原路径、书签指着新位置，
         // 原路径上后来又有了一个新文件夹（同一天第二次导卡、建了同名文件夹）。key 是原路径的哈希，按原路径打开都会认成原来
         // 那一场 —— 照旧打开它，但说清楚，别让人以为新文件夹已经打开、分析过了。按设备号 + inode 比（同一个文件夹换了写法、
@@ -1276,7 +1279,19 @@ final class BatchStore: ObservableObject {
         lastError = nil
         // 照片文件夹挪过（书签跟到了新位置、上面认回了旧场次、「重新定位文件夹…」）：manifest 里的照片路径先改到现在的位置
         // 再读 —— 不然移废片、写 XMP、导出都按旧路径走（审查 S04）。实时桥不跟书签，也不改。
-        let rebase = followBookmark ? SessionLocation.rebaseManifest(in: sessionDir, to: resolved) : (rebase: nil, failed: false)
+        // 书签解析不到（挪去的外接盘拔了）、也不是上面认回的：给的文件夹没人核对过，先抽查是不是这一场的照片再改（审查）。
+        let verifyRebase = !access.followed && moved == nil
+        let rebase = followBookmark ? SessionLocation.rebaseManifest(in: sessionDir, to: resolved, verify: verifyRebase)
+            : (rebase: nil, failed: false)
+        // 对不上（原路径上是新导的一张卡、同名不同片）：这一场不认它 —— 照片文件夹按 manifest 记的位置算（现在打不开），重新分析、
+        // 导出、移废片、写 XMP 都落不到给的文件夹里；touchSessionIndex 给打不开的位置建不了书签，原来指着那块盘的书签留着。
+        let refusedFrom: String? = rebase.rebase?.refused != nil ? rebase.rebase?.from : nil
+        if let refusedFrom {
+            let recorded = URL(fileURLWithPath: refusedFrom)
+            photoDir = recorded
+            cardSession = CardImporter.cardSession(for: recorded)
+            lastSwitchOpenedElsewhere = recorded
+        }
         loadReviewPosition()
         loadThresholds()
         loadOverrides()
@@ -1302,6 +1317,20 @@ final class BatchStore: ObservableObject {
             lastError = "这一场的照片文件夹挪过（原来在 \(CardImporter.displayPath(URL(fileURLWithPath: r.from)))），" +
                         "可 manifest.json 里的 \(r.unmatched) 张照片路径都对不上原来记的文件夹，没改过来：" +
                         "先别移废片、写 XMP（会按旧位置找）"
+        } else if let r = rebase.rebase, let check = r.refused {
+            // 书签解析不到、给的文件夹里的照片对不上这一场（上面 refusedFrom）：照片文件夹按记的位置算，说清楚为什么没认它。
+            let recorded = URL(fileURLWithPath: r.from)
+            let reachable = FileManager.default.fileExists(atPath: recorded.path)
+            let detail = check.found == 0 ? "按原来的子文件夹和文件名一张都没找到"
+                : "抽查了 \(check.sampled) 张，按原来的子文件夹和文件名找到 \(check.found) 张，只有 \(check.matched) 张是同一个文件"
+            let whereNow = reachable ? "，打开的是那里的这一场"
+                : "，现在打不开（盘没插上，或者删了、挪走了），下面是上次分析的缓存结果"
+            let next = reachable ? ""
+                : "盘插回去再打开这一场；照片挪到了别处的，用文件夹菜单「重新定位文件夹…」指给它。"
+            lastError = "「\(CardImporter.displayPath(folder))」里的不是这一场的照片（\(detail)），照片路径没改到这里：" +
+                        "这一场的照片记在 \(CardImporter.displayPath(recorded))\(whereNow)。" +
+                        "重新分析、移废片、写 XMP 都不会碰「\(folder.lastPathComponent)」里的照片。" + next +
+                        "要分析「\(folder.lastPathComponent)」，先在访达里给它改个名再打开"
         } else if let carriedAway {
             lastError = "「\(CardImporter.displayPath(folder))」现在是另一个文件夹：原来在这里的那一场已经改名 / 挪到了 " +
                         "\(CardImporter.displayPath(carriedAway))，打开的是那一场（判决、人工改判都在）。" +
@@ -1311,7 +1340,7 @@ final class BatchStore: ObservableObject {
                         "点「重新分析」补回预览：没变的照片只重做预览，人工改判不会动"
         }
         // 照片路径真的改过来了（或者不用改）才说「接上了」「已改到现在的位置」；只改了一部分的说没改的有几张。
-        let pathsFixed = !rebase.failed && !(rebase.rebase?.untouched ?? false)
+        let pathsFixed = !rebase.failed && !(rebase.rebase?.untouched ?? false) && refusedFrom == nil
         let unmatchedRows: Int = rebase.rebase?.unmatched ?? 0
         let leftOver: String = (pathsFixed && unmatchedRows > 0) ? "（另有 \(unmatchedRows) 张的路径不在原来记的文件夹下面，没改）" : ""
         noteUnfinishedAnalysis()  // 上次分析没跑完（崩溃、强退）：开跑时写的标记还在（QuitSafety.swift）

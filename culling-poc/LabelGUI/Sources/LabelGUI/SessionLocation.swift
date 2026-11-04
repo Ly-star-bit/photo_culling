@@ -76,6 +76,9 @@ enum SessionLocation {
         let rows: Int
         /// 有路径、却一条都换不过去的行（不在原来记的拍摄文件夹下面，换了写法也认不出来）。
         var unmatched = 0
+        /// 要先核对（verify）而 `folder` 里的照片对不上这一场（和「重新定位文件夹…」同一套抽查）：manifest 原样没动、一行没改，
+        /// 这里是抽查的结果。不能说「已改到现在的位置」，`folder` 也不是这一场的照片文件夹。
+        var refused: RelocationCheck? = nil
         /// 一行都没换过去：manifest 原样没动（photo_dir 也没改，下次打开再试）。不能说「已改到现在的位置」。
         var untouched: Bool { rows == 0 && unmatched > 0 }
     }
@@ -88,7 +91,12 @@ enum SessionLocation {
     /// photo_dir 已经是新位置，再也不会去改那些照片路径。
     /// 同一个文件夹换了写法（/tmp 和 /private/tmp、符号链接）、`folder` 不存在、没有 photo_dir 的不改，返回 nil。
     /// 写的方式和分析引擎一样（JSONSerialization、prettyPrinted + sortedKeys、atomic）。`failed` = 要改但写不进去。
-    static func rebaseManifest(in sessionDir: URL, to folder: URL) -> (rebase: ManifestRebase?, failed: Bool) {
+    /// `verify`：`folder` 没人核对过（书签解析不到、给的路径是原样退回来的 —— 挪去的外接盘拔了，原路径上又导了一张卡），先做
+    /// 和「重新定位文件夹…」同一套抽查（relocationCheck：按相对路径找、比大小 / 时间），大多数对得上才改（拷回原位置、改名又
+    /// 改回来的照常改）；对不上的 manifest 一字不动，返回 refused（审查：以前不核对就把照片路径改到原路径上那个无关的新文件夹，
+    /// 移废片、写 XMP 就作用到新卡里同名的照片上）。
+    static func rebaseManifest(in sessionDir: URL, to folder: URL,
+                               verify: Bool = false) -> (rebase: ManifestRebase?, failed: Bool) {
         let url = sessionDir.appendingPathComponent("manifest.json")
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDir), isDir.boolValue,
@@ -99,6 +107,13 @@ enum SessionLocation {
         let new = folder.path
         guard old != new else { return (nil, false) }
         if let a = identity(old), let b = identity(new), a == b { return (nil, false) }
+        if verify {
+            let check = relocationCheck(sessionDir: sessionDir, under: folder) ?? RelocationCheck()
+            guard check.accepted else {
+                SessionFiles.log.error("书签解析不到，\(new, privacy: .public) 里的照片对不上这一场（抽查 \(check.sampled) 张、找到 \(check.found) 张、同一个 \(check.matched) 张），manifest 没改")
+                return (ManifestRebase(from: old, rows: 0, refused: check), false)
+            }
+        }
         let relativizer = Self.relativizer(forRoot: old)
         func moved(_ path: String) -> String? {
             let rel = relativizer.relative(path)

@@ -992,6 +992,25 @@ check("分析" not in line.split(" · ", 2)[-1], f"没接着分析改了名的�
 check("2 张导到了" in notice and "改个名" in notice and "选择文件夹" in notice, f"导入横幅说新导的这批没打开、怎么打开（{notice}）")
 check(q_session and manifests_l(data_l).get(q_session[0]) == q_before, "改了名的那一场的 manifest 一字没动（新卡的照片没混进去）")
 
+print("L4. 改了名的那一场所在的盘拔了（书签解析不到）、原路径上是另一张卡的同名照片：启动重开、导完自动打开都不把那一场的照片路径改回原路径，也不接着分析")
+stash_l = os.path.join(WORK, "unplugged_l")
+shutil.copytree(q_l, stash_l)              # 盘上的东西拷一份留着，再删掉（改名不行：书签跟着改名走）
+shutil.rmtree(q_l)
+card_le = mkcard("card_le", {"DCIM/100CANON/IMG_0009.BMP": bmp_l(300, 200)})
+r = run_card_env(card_le, data_l, None, {}, "--into-existing", p_l, "--via-store")
+folder, line = opened_l(r.stdout)
+err = next((l for l in r.stdout.splitlines() if l.startswith("lastError：")), "")
+notice = next((l for l in r.stdout.splitlines() if l.startswith("导入提醒：")), "")
+after = manifests_l(data_l)
+check(r.returncode == 0 and listing(p_l) == LNAMES + ["IMG_0009.BMP"], f"照片导进了选的 {TODAY}（{listing(p_l)}）")
+check(q_session and after.get(q_session[0]) == q_before, "那一场的 manifest 一字没动（照片路径没被改到原路径上那张卡的同名照片上）")
+check(not any(d.rstrip("/").endswith("/" + TODAY) for d, _ in after.values()),
+      f"没有哪一场的照片文件夹记成原路径（原路径上的新卡没被当成那一场分析，{sorted(d for d, _ in after.values())}）")
+check(folder.endswith("/" + TODAY + " 张三") and "已改到" not in r.stdout and "分析" not in line.split(" · ", 2)[-1],
+      f"打开的是记在拔掉的盘上的那一场，不说「照片路径已改到现在的位置」，没接着分析（{line}）")
+check("不是这一场的照片" in err and "重新定位文件夹" in err, f"红条说原路径上的不是这一场的照片、照片路径没改（{err}）")
+check("改个名" in notice, f"导入横幅说新导的这批没打开、要先改名（{notice}）")
+
 print("F. 存储卡从头到尾没被动过")
 check(tree(CARD) == card_before, "卡上每个文件的大小 / 修改时间 / SHA-256 都和开始时一样")
 

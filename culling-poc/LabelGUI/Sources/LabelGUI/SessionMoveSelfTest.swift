@@ -12,6 +12,8 @@ import ImageIO
 ///   - 从菜单点 / 重开 app：书签跟到新位置，照片路径改过去。
 ///   - 「重新定位文件夹…」：跨卷拷过去、原来的删了（书签解析不到）—— 指给它新位置以后 key 不变、路径改过去；
 ///     选错文件夹（一张这一场的照片都没有）不换书签。
+///   - 书签解析不到（重新定位到的外接盘拔了）、原路径上又有同名不同片的文件夹：从菜单点、导卡自动打开、重开 app 都先抽查，
+///     对不上不改 manifest、不换书签；照片拷回原路径的照常改过去。
 ///   - 导卡选日期文件夹：yyyyMMdd 被改了名 / 挪走的那一场占着（key 是原路径的哈希）就换成 yyyyMMdd-2。
 ///   - 实时桥（followBookmark: false）不跟书签、不认回、不改路径。
 ///   - 存储卡：判断表（DCIM 在卷根 + 可移除 / 可推出才算；外置 SSD、系统盘、网络卷不算；读不出来按「可能是」），
@@ -57,6 +59,7 @@ enum SessionMoveSelfTest {
         idOnlyRowsFollow(root.appendingPathComponent("idonly"), batch: model.batch)
         newFolderAtOldPath(root.appendingPathComponent("old-path"), batch: model.batch)
         dayFolderAvoidsMovedSession(root.appendingPathComponent("import-day"), batch: model.batch)
+        unresolvedBookmarkAtOldPath(root.appendingPathComponent("unplugged"), batch: model.batch)
         relocate(root.appendingPathComponent("relocate"), batch: model.batch)
         liveBridgeDoesNotFollow(root.appendingPathComponent("live"), batch: model.batch)
         liveBridgeAfterGUIRebase(root.appendingPathComponent("live-after-gui"), batch: model.batch)
@@ -360,6 +363,82 @@ enum SessionMoveSelfTest {
         check(!batch.items.contains { under($0.rawPath, p) } && manifestAt(key(p), q),
               "新导的照片没混进挪走的那一场，manifest 还指着挪走的位置")
         batch.importNotice = nil
+    }
+
+    /// 书签解析不到（重新定位到的外接盘拔了）、原路径上又有了一个文件夹（同一天又导了一张卡、同名不同片）：以前 rebaseManifest
+    /// 不核对就把 manifest 改回原路径，移废片、写 XMP 就作用到新卡里同名的照片上，书签也被换成原路径（盘插回去也认不回来）。
+    /// 现在先抽查：对不上的 manifest、书签都不动，照片文件夹按记的位置算；原路径上真是这一场的照片（拷回来了）照常改过去。
+    private static func unresolvedBookmarkAtOldPath(_ root: URL, batch: BatchStore) {
+        print("== 书签解析不到、原路径上又有文件夹：先核对，对不上不改回原路径")
+        let fm = FileManager.default
+        let p = root.appendingPathComponent("20261104")
+        let r = root.appendingPathComponent("T7 上的婚礼A")
+        let unplugged = root.appendingPathComponent("拔下来的 T7 上的")
+        FileSafetySelfTest.writeShoot(p, shoot(p))
+        stampLayer1(p)
+        check(batch.switchSession(to: p) && batch.items.count == 3, "打开原来的文件夹")
+        batch.setOverride("DSCF0002", .reject)
+        try? fm.copyItem(at: p, to: r)
+        try? fm.removeItem(at: p)
+        guard let row = entry(batch, key(p)) else {
+            check(false, "最近场次里有这一场")
+            return
+        }
+        check(batch.relocateSession(row, to: r) && manifestAt(key(p), r), "重新定位到外接盘上：manifest 改到那里", batch.lastError ?? "")
+        // 盘拔了：那个位置不在了（删掉之前拷一份当盘上的东西；改名不行 —— 书签跟着改名走），书签解析不到。
+        try? fm.copyItem(at: r, to: unplugged)
+        try? fm.removeItem(at: r)
+        let bookmark = entry(batch, key(p))?.bookmark
+        check(bookmark != nil && bookmark.flatMap(SessionLocation.resolveQuietly) == nil, "盘拔了：书签解析不到")
+        let recordedDir = manifestPhotoDir(key(p))
+        // 同一天又导了一张卡：原路径上建出一个新文件夹，同名、大小不一样（相机计数器转了一圈 / 第二机位）。
+        for (i, rel) in ["DSCF0001.JPG", "DSCF0002.JPG", "第二机位/IMG_0003.JPG"].enumerated() {
+            let url = p.appendingPathComponent(rel)
+            try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Data(repeating: 0x46, count: 1500 + i).write(to: url)
+        }
+        func refusedHere(_ store: BatchStore, _ how: String) {
+            let error = store.lastError ?? ""
+            check(manifestPhotoDir(key(p)) == recordedDir, "\(how)：manifest 还指着外接盘上的位置，没被改回原路径",
+                  manifestPhotoDir(key(p)) ?? "nil")
+            check(!store.progressText.contains("已改到"), "\(how)：状态栏不说「照片路径已改到现在的位置」", store.progressText)
+            check(error.contains("不是这一场的照片") && error.contains("只有 0 张") && error.contains("重新定位文件夹"),
+                  "\(how)：红条说原路径上的不是这一场的照片、路径没改、怎么办", error)
+            let outside = !store.items.contains { under($0.rawPath, p) || under($0.decodePath, p) }
+            check(!sameDir(store.photoDir, p) && store.items.count == 3 && outside,
+                  "\(how)：照片文件夹不算原路径上那个，网格里的照片路径一张都不在那里",
+                  store.items.map(\.rawPath).joined(separator: ", "))
+            check(entry(store, key(p))?.bookmark == bookmark, "\(how)：书签没被换成原路径上的新文件夹（盘插回去还认得出）")
+        }
+        batch.progressText = ""
+        check(batch.switchSession(to: URL(fileURLWithPath: row.path)), "从菜单点这一场（传的是原路径）")
+        refusedHere(batch, "从菜单点")
+        check(batch.overrides["DSCF0002"] == .reject, "　…… 人工改判还在")
+        check(batch.lastSwitchOpenedElsewhere?.path == recordedDir, "　…… switchSession 交出打开的是记在别处的那一场")
+        // 导卡自动打开（「这次导进一个已有的文件夹…」选了原路径）：同样不改，也不接着分析。
+        batch.importNotice = nil
+        batch.progressText = ""
+        batch.finishedImport = CardImporter.FinishedImport(folder: p, analyze: true, shots: 3)
+        batch.openFinishedImport()
+        let analyzing = batch.isRunning
+        FileSafetySelfTest.wait(batch)
+        refusedHere(batch, "导卡自动打开")
+        check(!analyzing && (batch.importNotice ?? "").contains("改个名"), "　…… 没接着分析，横幅说要先改名",
+              batch.importNotice ?? "")
+        batch.importNotice = nil
+        // 重开 app（这一场是最近一条）：启动时重开它也不改。
+        let relaunched = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
+        check(relaunched.sessionDir.lastPathComponent == key(p), "重开 app：重开的是这一场")
+        refusedHere(relaunched, "重开 app")
+        // 原路径上真是这一场的照片（从盘上拷回来了）：抽查对得上，照常改过去。
+        try? fm.removeItem(at: p)
+        try? fm.copyItem(at: unplugged, to: p)
+        batch.progressText = ""
+        check(batch.switchSession(to: URL(fileURLWithPath: row.path)) && manifestAt(key(p), p) && pathsUnder(batch, p),
+              "照片拷回了原路径：抽查对得上，manifest 和照片路径改回原路径", manifestPhotoDir(key(p)) ?? "nil")
+        check(batch.progressText.contains("已改到") && !(batch.lastError ?? "").contains("不是这一场"),
+              "　…… 状态栏说改好了，不报「不是这一场的照片」", "\(batch.progressText) / \(batch.lastError ?? "")")
+        check(batch.overrides["DSCF0002"] == .reject, "　…… 人工改判还在")
     }
 
     /// 导卡选日期文件夹（CardImporter.target → dayFolder）：yyyyMMdd 这个名字被改了名 / 挪走的那一场占着（key 是原路径的
