@@ -138,11 +138,18 @@ enum WatermarkBatchCLI {
         let error = store.lastError
         print(store.progressText)
         if let error { print(error) }
-        if let record = batch.deliveryRecords.last, record != ledgerBefore {
+        // 分清「没对上这一场」（照常退出 0）和「对上了却没写进去」（原因在上面那行 lastError 里，退出码 1，和 --export-jpeg 一样）。
+        switch store.lastDelivery {
+        case .recorded(let record)? where batch.deliveryRecords.last == record && record != ledgerBefore:
             print("交付对照 \(batch.deliveryLedgerPath.path) · \(record.kind) · 这次 \(record.files.count) 张")
             for file in record.files { print("  对照 \(file.file) → \(file.id)") }
-        } else {
+        case .recorded?, .failed?:
+            print("交付对照: 没记下 → \(batch.deliveryLedgerPath.path)")
+            exit(1)
+        case .nothingMatched?:
             print("交付对照: 没记（这些照片不在分析过的场次里）")
+        case nil:
+            print("交付对照: 没记（一张都没写出去）")
         }
         exit(error == nil && !store.isExporting ? 0 : 1)
     }

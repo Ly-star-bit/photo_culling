@@ -174,6 +174,16 @@ enum DeliveryLedger {
         return .written(movedCorrupt: moved)
     }
 
+    /// 一次导出记对照的结果（水印页、无头 --watermark-batch 要分清「没对上」和「写失败」）。
+    enum Outcome: Equatable {
+        /// 记下了这一笔。
+        case recorded(DeliveryRecord)
+        /// 没有要记的：一张都没写出去，或者（水印页）写出去的原图都不是这一场的照片。
+        case nothingMatched
+        /// 有要记的，可是没记进去（关联值是给人看的那一句，批量页 lastError 也是它）。
+        case failed(String)
+    }
+
     /// 文件本身（设备号 + inode）：大小写、软链接、/tmp 和 /private/tmp 都骗不过。文件不在 = nil。
     static func fileID(_ path: String) -> String? {
         var st = stat()
@@ -190,30 +200,36 @@ extension BatchStore {
     var deliveryRecords: [DeliveryRecord] { DeliveryLedger.load(deliveryLedgerPath) }
 
     /// 导出 JPG / 精华写完以后记一笔。`ledger` 是开工时这一场的 exports.json（导出途中不让切场次，开工时拿住更稳）。
-    /// 一张都没写出去不记。原来那份解不开、挪开了的提醒一句（dataNotice）；读不出来、写不进去的报 lastError。
-    func recordDelivery(_ kind: DeliveryRecord.Kind, folder: URL, files: [DeliveryRecord.File], into ledger: URL) {
-        guard !files.isEmpty else { return }
+    /// 一张都没写出去不记。原来那份解不开、挪开了的提醒一句（dataNotice）；读不出来、写不进去的报 lastError，
+    /// 那一句也放在返回的 .failed 里（水印页拿它报在自己的状态栏上）。
+    @discardableResult
+    func recordDelivery(_ kind: DeliveryRecord.Kind, folder: URL, files: [DeliveryRecord.File],
+                        into ledger: URL) -> DeliveryLedger.Outcome {
+        guard !files.isEmpty else { return .nothingMatched }
         let name = photoDir.map { "「\($0.lastPathComponent)」" } ?? ""
+        let record = DeliveryRecord(kind: kind, folder: folder, files: files)
         let problem: String
-        switch DeliveryLedger.append(DeliveryRecord(kind: kind, folder: folder, files: files), to: ledger) {
+        switch DeliveryLedger.append(record, to: ledger) {
         case .written(let moved):
             if let moved {
                 addDataNotice("\(name)的交付对照 \(DeliveryLedger.fileName) 解不开（被手改过或写坏了），原件已挪成 " +
                               "\(moved.lastPathComponent)：以前导出的交付文件名，客户按它回复时认不出（这一次的照常记下了）")
             }
-            return
+            return .recorded(record)
         case .refused(let why):
             problem = "交付对照（\(DeliveryLedger.fileName)）\(why)，这次没记、也没改写它"
         case .writeFailed(let why):
             problem = "交付对照（\(DeliveryLedger.fileName)）没写进去（\(why)）"
         }
-        lastError = (lastError.map { $0 + "；" } ?? "") + problem + "：客户按这次导出的文件名回复时认不出"
+        let text = problem + "：客户按这次导出的文件名回复时认不出"
+        lastError = (lastError.map { $0 + "；" } ?? "") + text
+        return .failed(text)
     }
 
     /// 水印页导出写完：原图按文件本身（设备号 + inode）对回这一场的照片，对上的记一笔。水印页的照片不一定是这一场的
     /// （拖进来的外部照片、切了场次）：对不上的不记，不按文件名猜 —— 别的日子同名的 DSCF7207 不能认成这一场的。
-    func recordWatermarkDelivery(folder: URL, files: [(file: URL, source: URL)]) {
-        guard photoDir != nil, !items.isEmpty, !files.isEmpty else { return }
+    func recordWatermarkDelivery(folder: URL, files: [(file: URL, source: URL)]) -> DeliveryLedger.Outcome {
+        guard photoDir != nil, !items.isEmpty, !files.isEmpty else { return .nothingMatched }
         var byFile: [String: BatchItem] = [:]
         for item in items {
             for path in Set([item.rawPath, item.decodePath]) {
@@ -224,7 +240,7 @@ extension BatchStore {
             guard let key = DeliveryLedger.fileID(pair.source.path), let item = byFile[key] else { return nil }
             return DeliveryRecord.File(file: pair.file.lastPathComponent, id: item.id, original: item.rawPath)
         }
-        recordDelivery(.watermark, folder: folder, files: entries, into: deliveryLedgerPath)
+        return recordDelivery(.watermark, folder: folder, files: entries, into: deliveryLedgerPath)
     }
 }
 
@@ -232,7 +248,7 @@ extension WatermarkStore {
     /// 水印页导出写完交给批量页，记进当前场次的交付对照（AppModel 和无头 --watermark-batch 接上）。
     func recordDeliveries(into batch: BatchStore) {
         onDelivered = { [weak batch] folder, files in
-            batch?.recordWatermarkDelivery(folder: folder, files: files)
+            batch?.recordWatermarkDelivery(folder: folder, files: files) ?? .nothingMatched
         }
     }
 }

@@ -183,6 +183,18 @@ make_jpeg(os.path.join(other, IDS[0] + ".JPG"), 360, 240, seed=99)     # 别的�
 r = run(DATA, "--watermark-batch", other, os.path.join(WORK, "out-wm-other"), "--exif", "--session", SHOOT)
 check(r.returncode == 0 and len(ledger(LEDGER)) == 5 and "没记" in r.stdout,
       "批量页开着这一场、水印页导的是别处同名的文件：不记（按文件本身对，不按文件名猜）")
+if os.geteuid() == 0:
+    print("  SKIP 水印页对照写不进去（root 跑时 chmod 挡不住读）")
+else:
+    before = open(LEDGER, "rb").read()
+    os.chmod(LEDGER, 0)
+    try:
+        r = run(DATA, "--watermark-batch", SHOOT, os.path.join(WORK, "out-wm-locked"), "--exif")
+    finally:
+        os.chmod(LEDGER, 0o644)
+    check(r.returncode == 1 and "没记下" in r.stdout and "读不出来" in r.stdout and "不在分析过的场次里" not in r.stdout
+          and open(LEDGER, "rb").read() == before,
+          f"水印页这次的对照没记进去（exports.json 读不出来）：退出码 1、说原因，不说成「不在分析过的场次里」（{r.returncode}）")
 
 print("F. 导入客户选择：按交付文件名认回原片")
 h0, h1 = hl["files"][0]["id"], hl["files"][1]["id"]

@@ -403,8 +403,11 @@ final class WatermarkStore: ObservableObject {
     }
 
     /// 导出写完（含取消前已经写出的）：输出目录、[(写出去的文件, 原图)]，按导出顺序。批量页接上以后记进当前场次的
-    /// 交付对照（DeliveryLedger.swift 的 recordDeliveries）；没接 = 不记。
-    var onDelivered: (@MainActor (URL, [(file: URL, source: URL)]) -> Void)?
+    /// 交付对照（DeliveryLedger.swift 的 recordDeliveries），返回记没记下；没接 = 不记。
+    var onDelivered: (@MainActor (URL, [(file: URL, source: URL)]) -> DeliveryLedger.Outcome)?
+    /// 上一次导出记交付对照的结果（nil = 一张都没写出去、或者没接批量页）。没记进去的那一句也并进 lastError，
+    /// 水印页的状态栏看得到（批量页的 lastError 在别的页面上，还会被切场次清掉）。无头 --watermark-batch 按它分「没对上」和「写失败」。
+    private(set) var lastDelivery: DeliveryLedger.Outcome?
 
     /// 输出目录在拍摄文件夹里面被拦下时（审查 S11，ExportFolderGuard）：那句提示、建议改用的「<拍摄文件夹>/水印导出/」
     /// （分析时跳过）、是不是点导出时拦下的（是的话「导出到 水印导出/」点了接着导）。状态栏只在 lastError 还是这一句时
@@ -488,6 +491,7 @@ final class WatermarkStore: ObservableObject {
         isExporting = true
         exportCancelled = false
         lastError = nil
+        lastDelivery = nil
         clearNotice()
         if let folderReminder { setNotice(folderReminder) }
         progressText = "导出 0/\(jobs.count)..."
@@ -553,7 +557,8 @@ final class WatermarkStore: ObservableObject {
                 guard let self else { return }
                 self.progressFraction = nil
                 self.isExporting = false
-                if !delivered.isEmpty { self.onDelivered?(outputDir, delivered) }
+                let ledger = delivered.isEmpty ? nil : self.onDelivered?(outputDir, delivered)
+                self.lastDelivery = ledger
                 let succeeded = completed - failed.count
                 if self.exportCancelled {
                     // 已经写出的文件保留（撤销它们比留着更意外）。
@@ -571,6 +576,7 @@ final class WatermarkStore: ObservableObject {
                     let names = failed.prefix(3).map(\.name).joined(separator: ", ")
                     self.lastError = "\(failed.count) 张导出失败 (\(names)\(failed.count > 3 ? "…" : "")) — 首个原因: \(failed[0].reason)"
                 }
+                if case .failed(let why)? = ledger { self.lastError = (self.lastError.map { $0 + "；" } ?? "") + why }
             }
         }
     }
