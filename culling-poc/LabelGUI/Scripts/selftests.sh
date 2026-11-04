@@ -13,6 +13,9 @@
 #   --diag-selftest      诊断：状态栏提示历史、日志轮转、诊断包里没有照片和客户原话、逐张失败的原因、文件夹没权限
 #                        （端到端的命令行出口在 Scripts/diag_regression.py）
 #   --followup-selftest  跟进小修：写盘失败报给 MCP（persisted / save_failed）、水印页按客户选中导入、复制原片连续失败就停……
+#   --cull-mcp-selftest  选片 MCP 在真的 BatchStore 上：概览的 XMP 待更新 / 上次写的时间、导入客户选择（带备注、托盘跟着刷、
+#                        纯数字交付名）、AI 改判的出处（阈值建议不拿 AI 的当样本、亲手改过就拿掉）、一次定一场；
+#                        用 Fixtures/photot-session 的 JSON（不要照片），要一个空的数据目录（run 每条都给新的）
 #
 # 为什么每条都要临时数据目录：main.swift 在分派之前就建数据目录、往里写内置字体；ux / timeline / swiss 不查
 # LABELGUI_DATA_DIR，不设就会在 runner 上建出 ~/Library/Application Support/选片工具，MCP 冒烟里「不建目录」那一条就测不了
@@ -70,6 +73,7 @@ run session-move --session-move-selftest
 run quit --quit-selftest
 run diag --diag-selftest
 run followup --followup-selftest
+run cull-mcp --cull-mcp-selftest "$(cd "$(dirname "$0")/.." && pwd)/Fixtures/photot-session"
 
 if [ $real_before -eq 0 ] && [ -e "$REAL_DATA" ]; then
     failed+=("真实数据目录")
