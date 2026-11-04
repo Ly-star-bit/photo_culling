@@ -661,6 +661,23 @@ enum SessionMoveSelfTest {
         check(batch.photoDir?.path == i.path && (batch.lastError ?? "").contains("已不存在"),
               "停在登记的路径上，说文件夹不在了", batch.lastError ?? "")
         check(manifestPhotoDir(key(i)) == i.path, "manifest 没改")
+        // 上面那几条靠的是 restoreAccess 原来就有的闸（挪走了的原路径不存在，认回、改写本来就不会动手）。下面两条要
+        // switchSession 里那两道 followBookmark 闸自己挡：去掉任一道都会变红。
+        // 认回闸：实时桥直接给新路径 j（key(j) 下没有分析结果，最近场次里 i 那一条的书签解析到的就是 j）—— 不认回 i 那一场。
+        check(batch.switchSession(to: j, followBookmark: false) && batch.sessionDir.lastPathComponent == key(j)
+              && batch.items.isEmpty,
+              "实时桥给新路径：不认回原来那一场（按 key(新路径) 开，空的）", batch.sessionDir.lastPathComponent)
+        check(manifestPhotoDir(key(i)) == i.path, "认回闸：原来那一场的 manifest 没动")
+        // 改写闸：GUI 先从菜单点开（书签跟到 j，manifest 改到 j），原路径上又建了一个空文件夹，实时桥再按原路径打开 ——
+        // 不能把 manifest 改回原路径。
+        check(batch.switchSession(to: i) && manifestAt(key(i), j), "GUI 从菜单点：manifest 改到新位置")
+        try? fm.createDirectory(at: i, withIntermediateDirectories: true)
+        batch.progressText = ""
+        check(batch.switchSession(to: i, followBookmark: false) && batch.photoDir?.path == i.path
+              && batch.sessionDir.lastPathComponent == key(i),
+              "原路径又有了（空的）文件夹，实时桥按原路径打开：停在原路径、key 不变")
+        check(manifestAt(key(i), j) && !batch.progressText.contains("挪过"),
+              "改写闸：manifest 还指着新位置，没被改回原路径", "\(manifestPhotoDir(key(i)) ?? "nil") / \(batch.progressText)")
     }
 }
 
