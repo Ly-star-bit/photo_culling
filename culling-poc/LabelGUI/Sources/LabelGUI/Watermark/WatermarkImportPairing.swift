@@ -1,8 +1,11 @@
 import Foundation
 
-/// 水印页导入照片时的 RAW+JPG 配对。规则和 ImageLoader.listPhotos 一样：同一个目录里去掉扩展名同名
+/// 水印页导入照片时的 RAW+JPG 配对。规则基本照 ImageLoader.listPhotos：同一个目录里去掉扩展名同名
 /// （`deletingPathExtension().path`）的 RAW 和非 RAW 是同一张，留非 RAW（机内 JPG / HEIF，颜色就是相机冲的）；
 /// 同类同名（IMG_0001.HEIC + IMG_0001.JPG、RAF 旁边一张 DNG）不配对，各自保留。
+/// 和选片页不一样的一处：同名的两张 RAW 加一张 JPG（A.RAF + A.DNG + A.JPG），选片页把多出来的那张 RAW 当单独一张，
+/// 这里两张 RAW 都算 JPG 那一张、只留 JPG（不然导出多一份 ImageIO 冲洗的 X_wm-2.jpg）—— 「导入选片结果」带过来的
+/// [A.JPG, A.RAF] 也是这样，所以提示里不再写「和选片页一样」。
 /// 以前 addPhotos 只看扩展名，RAW+JPG 双存的文件夹拖进来每张两条，导出 X_wm.jpg 和 X_wm-2.jpg 两份，
 /// 后一份是 ImageIO 默认冲洗的 RAW。列表里已有的也算：先 JPG 后 RAW 跳过 RAW；先 RAW 后 JPG 用 JPG 原地换掉 RAW。
 enum WatermarkImportPairing {
@@ -100,7 +103,7 @@ enum WatermarkImportPairing {
         if !merge.replaced.isEmpty { parts.append("\(merge.replaced.count) 张 RAW 换成了同名 JPG") }
         if merge.skippedRaw > 0 {
             let lead: String = parts.isEmpty ? "没有新照片：" : ""
-            parts.append(lead + "跳过 \(merge.skippedRaw) 张同名 RAW（RAW+JPG 只留 JPG，和选片页一样）")
+            parts.append(lead + "跳过 \(merge.skippedRaw) 张同名 RAW（RAW+JPG 只留 JPG）")
         }
         if merge.rawOnly > 0 { parts.append("\(merge.rawOnly) 张只有 RAW，按系统默认冲洗导出") }
         if parts.isEmpty {

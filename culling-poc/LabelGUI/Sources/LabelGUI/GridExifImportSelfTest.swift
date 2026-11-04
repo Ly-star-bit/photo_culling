@@ -191,6 +191,9 @@ enum GridExifImportSelfTest {
             ("同类同名不配对：HEIC + JPG 两张都留", [], ["A.HEIC", "A.JPG"], ["A.HEIC", "A.JPG"], 2, 0, 0, 0),
             ("同类同名不配对：RAF + DNG 两张都留", [], ["A.DNG", "A.RAF"], ["A.DNG", "A.RAF"], 2, 0, 0, 2),
             ("RAF + DNG + JPG：都是同一张，只留 JPG", [], ["A.DNG", "A.JPG", "A.RAF"], ["A.JPG"], 1, 0, 2, 0),
+            // 选片页把 A.DNG + A.JPG 配成一张（解码 JPG）、多出来的 A.RAF 单算一张，「导入选片结果」带过来的就是这两条。
+            ("「导入选片结果」带过来 RAF + DNG + JPG 的那两张（A.JPG、A.RAF）：也只留 JPG",
+             [], ["A.JPG", "A.RAF"], ["A.JPG"], 1, 0, 1, 0),
             ("列表里 RAF + DNG，再来 JPG：两张 RAW 都换掉", ["A.RAF", "A.DNG"], ["A.JPG"], ["A.JPG"], 0, 2, 0, 0),
             ("不同文件夹的同名不是一对", [], ["d1/A.JPG", "d2/A.RAF"], ["d1/A.JPG", "d2/A.RAF"], 2, 0, 0, 1),
             ("已经在列表里的不重复收", ["A.JPG"], ["A.JPG"], ["A.JPG"], 0, 0, 0, 0),
@@ -210,12 +213,17 @@ enum GridExifImportSelfTest {
         // 提示：跳过的张数要写进去，免得以为少导了。
         let folder = WatermarkImportPairing.merge(existing: [], incoming: ["A.JPG", "A.RAF", "B.JPG", "B.RAF", "C.RAF"].map(u))
         let folderNotice = WatermarkImportPairing.notice(for: folder, requested: true) ?? "nil"
-        let folderWant = "已导入 3 张 · 跳过 2 张同名 RAW（RAW+JPG 只留 JPG，和选片页一样） · 1 张只有 RAW，按系统默认冲洗导出"
+        let folderWant = "已导入 3 张 · 跳过 2 张同名 RAW（RAW+JPG 只留 JPG） · 1 张只有 RAW，按系统默认冲洗导出"
         t.check(folderNotice == folderWant, "水印导入提示：写出导入、跳过、纯 RAW 张数", "得到 \(folderNotice)")
         let skipOnly = WatermarkImportPairing.merge(existing: [u("A.JPG")], incoming: [u("A.RAF")])
         let skipNotice = WatermarkImportPairing.notice(for: skipOnly, requested: true) ?? "nil"
-        t.check(skipNotice == "没有新照片：跳过 1 张同名 RAW（RAW+JPG 只留 JPG，和选片页一样）",
+        t.check(skipNotice == "没有新照片：跳过 1 张同名 RAW（RAW+JPG 只留 JPG）",
                 "水印导入提示：一张没进来、全是跳过的 RAW 时说清楚", "得到 \(skipNotice)")
+        // 「导入选片结果」这种情形里选片页其实是两张：提示不能说「和选片页一样」。
+        let fromBatch = WatermarkImportPairing.merge(existing: [], incoming: [u("A.JPG"), u("A.RAF")])
+        let fromBatchNotice = WatermarkImportPairing.notice(for: fromBatch, requested: true) ?? "nil"
+        t.check(fromBatchNotice == "已导入 1 张 · 跳过 1 张同名 RAW（RAW+JPG 只留 JPG）",
+                "水印导入提示：导入选片结果跳过同名 RAW 时不说「和选片页一样」", "得到 \(fromBatchNotice)")
         let swap = WatermarkImportPairing.merge(existing: [u("A.RAF")], incoming: [u("A.JPG")])
         let swapNotice = WatermarkImportPairing.notice(for: swap, requested: true) ?? "nil"
         let swapOK: Bool = swapNotice == "1 张 RAW 换成了同名 JPG" && swap.replaced.first?.old == u("A.RAF")
