@@ -750,6 +750,8 @@ enum OriginalsCopier {
 
     struct ShotResult: Sendable {
         var copied = 0
+        /// copied 里照片本体（RAW / 配对的 JPG）的个数，不算旁边的 .xmp：FailureStreak 只在照片真复制成了时重新数（审查 S15 跟进）。
+        var copiedImages = 0
         var skipped = 0
         var renamed = false
         /// 目标里已经有同名的 .xmp、内容不一样（多半是上次复制之后又写过一次 XMP）：不覆盖，留着旧的。
@@ -833,6 +835,9 @@ enum OriginalsCopier {
         if fm.fileExists(atPath: xmp.path) { plan.append((xmp, renamed(xmp, suffix: suffix, in: dest))) }
         let main = plan[0]
         for (src, target) in plan {
+            // 原图因为目标那边写不进去没落地（盘满、没权限…）：它的 .xmp 不单独复制过去 —— 目标里只会多一个没有原图的孤立
+            // .xmp，盘满时这几 KB 偏偏写得进，以前还把连续失败的计数清零，停不下来（审查 S15 跟进）。
+            if src == xmp, result.landedName == nil, result.targetFailure != nil { continue }
             if identical.contains(src) {
                 result.skipped += 1
                 if src == main.0 { result.landedName = main.1.lastPathComponent }
@@ -857,6 +862,7 @@ enum OriginalsCopier {
                                              originalName: src.lastPathComponent, shot: shot.id)
                 _ = try CardImporter.copyOne(copy, into: dest, cancel: cancel, onBytes: { _ in })
                 result.copied += 1
+                if src != xmp { result.copiedImages += 1 }
                 if src == main.0 { result.landedName = target.lastPathComponent }
             } catch CardImporter.ImportError.cancelled {
                 result.cancelled = true
@@ -905,8 +911,9 @@ enum OriginalsCopier {
     }
 
     /// 连续几张都写不进目标就停（审查 S15）：目标在不支持的共享 / 盘上、盘满、被拔时，以前每张都完整写完、回读一遍才失败，
-    /// 几百张 RAW 白跑一整批。只数目标那边的失败（targetFailure）；复制成了一个文件就重新数，跳过的（目标里一模一样）、
-    /// 只是原片读不出来的不算、也不打断。
+    /// 几百张 RAW 白跑一整批。只数目标那边的失败（targetFailure）；复制成了一个照片文件（RAW / JPG）就重新数 —— 旁边几 KB
+    /// 的 .xmp 写进去了不算（盘满时 RAW 的 .part 删掉、空间退回来，.xmp 总写得进，以前因此永远停不下）；跳过的（目标里
+    /// 一模一样）、只是原片读不出来的不算、也不打断。
     struct FailureStreak {
         static let limit = 3
         private(set) var count = 0
@@ -915,7 +922,7 @@ enum OriginalsCopier {
         var shouldStop: Bool { count >= Self.limit }
 
         mutating func record(_ r: ShotResult) {
-            if r.copied > 0 {
+            if r.copiedImages > 0 {
                 count = 0
                 lastReason = nil
                 return

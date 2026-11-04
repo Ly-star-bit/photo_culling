@@ -7,7 +7,8 @@ import Foundation
 ///     （场次目录 chmod 只读模拟盘满；后台那次拼图保存失败也算得上，不等 lastError 那一拍）。
 ///   - F19 水印页「导入选片结果」菜单：精选 / 精选 + 可用 / 客户选中（客户选中的废片也带，RAW+JPG 用 JPG）。
 ///   - 水印 EXIF 文字的快门：0、负数、非有限、非规格化的极小正数（1/t = inf）不崩、不填；≥1s 照旧 %g。
-///   - S15「复制原片到…」连续 3 张写不进目标就停、说清楚原因和怎么办（不支持 → NAS / exFAT），英文 strerror 换成中文。
+///   - S15「复制原片到…」连续 3 张写不进目标就停、说清楚原因和怎么办（不支持 → NAS / exFAT），英文 strerror 换成中文；
+///     照片写不进、旁边的 .xmp 写得进（盘满）也照样停，.xmp 不单独过去。
 ///   - M01 近似重复去重：拍摄时刻完全一样、一张 RAW 一张 JPG（分卡存、分文件夹放的同一帧）时，RAW 不判「连拍重复」；
 ///     场里只剩这一对时按一帧算、不提精选，接受全部推荐也不把 RAW 钉成废片。
 ///   - MCP cull_get_photos 的 exif：老 manifest 里存的 shutter_sec / aperture / focal_35 = 0 不报（和 summary 一样）。
@@ -273,9 +274,12 @@ enum FollowupSelfTest {
     static func originalsStop(_ dir: URL) {
         print("— S15 复制原片到…：连续 3 张写不进目标就停，原因和下一步说清楚")
         typealias Streak = OriginalsCopier.FailureStreak
-        func shot(copied: Int = 0, skipped: Int = 0, target: String? = nil, failed: Bool = false) -> OriginalsCopier.ShotResult {
+        /// copiedImages 不给 = copied 全是照片文件（RAW / JPG）；给 0 = 复制成的只是旁边的 .xmp。
+        func shot(copied: Int = 0, copiedImages: Int? = nil, skipped: Int = 0, target: String? = nil,
+                  failed: Bool = false) -> OriginalsCopier.ShotResult {
             var r = OriginalsCopier.ShotResult()
             r.copied = copied
+            r.copiedImages = copiedImages ?? copied
             r.skipped = skipped
             r.targetFailure = target
             if failed || target != nil { r.failed = ["x：" + (target ?? "原片读不出来")] }
@@ -300,6 +304,9 @@ enum FollowupSelfTest {
             ("只是原片读不出来（原片挪走了）不算目标的问题", [shot(failed: true), shot(failed: true), shot(failed: true),
                                              shot(failed: true)], nil),
             ("RAW 复制成了、JPG 没写进去：这张不算失败", [shot(copied: 1, target: full), shot(target: full), shot(target: full)], nil),
+            ("RAW 盘满、旁边几 KB 的 .xmp 写进去了：不算复制成，连续 3 张照样停",
+             [shot(copied: 1, copiedImages: 0, target: full), shot(copied: 1, copiedImages: 0, target: full),
+              shot(copied: 1, copiedImages: 0, target: full), shot(copied: 1, copiedImages: 0, target: full)], 3),
         ]
         for (name, results, want) in rows {
             let got = run(results)
@@ -344,6 +351,69 @@ enum FollowupSelfTest {
         let copied = (try? FileManager.default.contentsOfDirectory(atPath: dest.path))?.filter { !$0.hasPrefix(".") } ?? []
         check(store.lastError == nil && copied.count == 6 && store.progressText.hasPrefix("复制原片完成: 6 张"),
               "改回能写以后再复制：6 张全部复制、没有报错", "\(store.lastError ?? "nil") · \(store.progressText) · \(copied.count)")
+        originalsSidecarStop(dir.appendingPathComponent("xmp"))
+    }
+
+    /// 照片写不进目标、旁边的 .xmp 写得进（盘满时 RAW 写到一半失败、.part 删掉空间退回来，几 KB 的 .xmp 总写得进）：
+    /// .xmp 不单独复制过去（不留孤立的 .xmp），也不把连续失败的计数清零。模拟：目标里先放一个删不掉的「.<原图>.part」目录，
+    /// copyOne 清旧 .part 那一步就失败（算目标那边写不进），.xmp 自己的 .part 不受影响。
+    static func originalsSidecarStop(_ dir: URL) {
+        typealias Fake = FileSafetySelfTest.Fake
+        let fm = FileManager.default
+        let store = FileSafetySelfTest.makeShoot(dir.appendingPathComponent("shoot"),
+                                                 (1...4).map { Fake(id: "X\($0)", raw: "X\($0).RAF") })
+        var shots: [String: OriginalsCopier.Shot] = [:]
+        for item in store.items {
+            let xmp = URL(fileURLWithPath: item.rawPath).deletingPathExtension().appendingPathExtension("xmp")
+            try? Data("<x:xmpmeta id=\"\(item.id)\"/>".utf8).write(to: xmp)
+            shots[item.id] = OriginalsCopier.Shot(id: item.id, rawPath: item.rawPath, decodePath: item.decodePath)
+        }
+        func listing(_ url: URL) -> [String] {
+            ((try? fm.contentsOfDirectory(atPath: url.path)) ?? []).filter { !$0.hasPrefix(".") }.sorted()
+        }
+        // 正常的一张：RAW + .xmp 复制了 2 个文件，照片本体 1 个
+        let plain = dir.appendingPathComponent("plain")
+        try? fm.createDirectory(at: plain, withIntermediateDirectories: true)
+        if let x4 = shots["X4"] {
+            let r = OriginalsCopier.copy(x4, to: plain, cancel: AnalysisEngine.CancelFlag())
+            check(r.copied == 2 && r.copiedImages == 1 && r.targetFailure == nil && listing(plain) == ["X4.RAF", "X4.xmp"],
+                  "复制原片 RAW + 旁边的 .xmp：复制 2 个文件，照片本体算 1 个", "copied \(r.copied) · 照片 \(r.copiedImages) · \(listing(plain))")
+        }
+
+        let dest = dir.appendingPathComponent("dest")
+        try? fm.createDirectory(at: dest, withIntermediateDirectories: true)
+        var traps: [URL] = []
+        for name in ["X1.RAF", "X2.RAF", "X3.RAF"] {
+            let part = dest.appendingPathComponent("." + name + ".part")
+            try? fm.createDirectory(at: part, withIntermediateDirectories: true)
+            try? Data("held".utf8).write(to: part.appendingPathComponent("held"))
+            lock(part)
+            traps.append(part)
+        }
+        if let x1 = shots["X1"] {
+            let r = OriginalsCopier.copy(x1, to: dest, cancel: AnalysisEngine.CancelFlag())
+            check(r.copied == 0 && r.copiedImages == 0 && r.targetFailure != nil && r.landedName == nil && listing(dest).isEmpty,
+                  "复制原片 RAW 写不进目标：旁边的 .xmp 不单独复制过去（目标里不留孤立的 .xmp）、这一张算目标那边失败",
+                  "copied \(r.copied) · 照片 \(r.copiedImages) · \(r.targetFailure ?? "nil") · \(listing(dest))")
+        }
+        let ids = store.items.map(\.id)
+        store.copyOriginals(ids, to: dest)
+        FileSafetySelfTest.wait(store)
+        let error = store.lastError ?? ""
+        let stoppedOK: Bool = error.contains("连续 3 张都没复制成") && error.contains("后面 1 张没再试")
+            && store.progressText.hasPrefix("复制原片停下了: 3 张 · 复制了 0 个文件") && listing(dest).isEmpty
+        check(stoppedOK, "复制原片 照片写不进、.xmp 写得进：连续 3 张照样停，目标里没留下孤立的 .xmp",
+              "\(error) · \(store.progressText) · \(listing(dest))")
+        for part in traps {
+            unlock(part)
+            try? fm.removeItem(at: part)
+        }
+        store.copyOriginals(ids, to: dest)
+        FileSafetySelfTest.wait(store)
+        let all = listing(dest)
+        check(store.lastError == nil && all.count == 8 && all.filter { $0.hasSuffix(".xmp") }.count == 4
+              && store.progressText.hasPrefix("复制原片完成: 4 张 · 复制了 8 个文件"),
+              "复制原片 能写以后再复制：4 张 RAW 和各自的 .xmp 都过去了", "\(store.lastError ?? "nil") · \(store.progressText) · \(all)")
     }
 
     // MARK: - M01 去重不把分开放的同一帧 RAW 判成「连拍重复」
