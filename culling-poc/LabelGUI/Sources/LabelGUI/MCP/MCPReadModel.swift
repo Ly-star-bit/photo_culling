@@ -731,6 +731,15 @@ enum MCPArgs {
         let p: [String: Spec] = ["session": session, "op_id": .opID, "target": .oneOf(["verdicts", "collage"])]
         return ToolSpec(props: p, required: ["target"])
     }()
+    /// 导入客户选择：text（客户回复的原文）和 ids 给一个（rules 查）。
+    static let clientPicksSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "dry_run": .bool, "reveal": .bool, "op_id": .opID]
+        p["text"] = .string(maxLength: clientReplyMaxLength)
+        p["ids"] = .strings(count: 1...500, maxLength: 128, oneOf: nil)
+        return ToolSpec(props: p, required: [])
+    }()
+    /// 客户回复原文的上限（微信里回的几行、确认表「复制我的选择」、几百行的 CSV 都放得下）。
+    static let clientReplyMaxLength = 50_000
 
     /// 每个工具认的参数和必填的（session 不在必填里：它的规矩在路由表，§10.2）。
     static let specs: [String: ToolSpec] = {
@@ -752,6 +761,7 @@ enum MCPArgs {
         s["collage_export"] = exportSpec
         s["collage_set_layout"] = setLayoutSpec
         s["collage_auto_layout"] = autoLayoutSpec
+        s["cull_import_client_picks"] = clientPicksSpec
         return s
     }()
 
@@ -775,6 +785,11 @@ enum MCPArgs {
         case "collage_auto_layout":
             if given("photos") && given("count") {
                 return Problem(message: "photos 和 count 只能给一个：photos 指定用哪几张，count 让 app 从托盘挑几张。", hint: "")
+            }
+        case "cull_import_client_picks":
+            if given("text") == given("ids") {
+                return Problem(message: "text 和 ids 要给一个、只能给一个：text 是客户回复的原文（app 来认），ids 是你已经认出的照片 id。",
+                               hint: "客户在微信里回的那段话原样放进 text")
             }
         default:
             break

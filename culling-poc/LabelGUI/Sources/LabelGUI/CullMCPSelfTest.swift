@@ -41,6 +41,7 @@ enum CullMCPSelfTest {
             if !ok { failures.append(message()) }
         }
         xmpChecks(check, sessionDir: sessionDir)
+        clientPickChecks(check, sessionDir: sessionDir)
         for f in failures { print("FAIL " + f) }
         if failures.isEmpty {
             print("选片 MCP 自检：\(total) 条检查全部通过")
@@ -98,5 +99,37 @@ enum CullMCPSelfTest {
         try? FileManager.default.removeItem(at: path)
         let cleared = overviewXMP(open())
         check(cleared.stale == 0 && cleared.written == false && !cleared.warned, "删掉 xmp_state.json 以后回到没写过：\(cleared)")
+    }
+
+    // MARK: - 2. 导入客户选择（cull_import_client_picks 用的那几样）
+
+    /// 客户的原话 → resolveClientReply（导入框同一个函数）→ 结果主体（LiveHandlers.clientPicksBody，桥上 dry_run 回的就是它）；
+    /// importClientPicks 加选、一步判决撤销；同一批再导一次不压撤销；⌘Z 回到导入之前，client_picks.json 跟着删掉。
+    static func clientPickChecks(_ check: Check, sessionDir: URL) {
+        let store = open()
+        let file = sessionDir.appendingPathComponent("client_picks.json")
+        let r = store.resolveClientReply("要这几张：DSCF7208、7209 还有 9999，谢谢")
+        let body = LiveHandlers.clientPicksBody(r, existing: store.clientPicks)
+        let summary = body["summary"] as? [String] ?? []
+        check(r.ids == ["DSCF7208", "DSCF7209"] && r.unknown == ["9999"] && body["new_ids"] as? [String] == r.ids
+              && body["already_picked"] as? Int == 0 && body["existing_count"] as? Int == 0 && body["sheet"] is NSNull
+              && body["numbers_without_sheet"] as? Bool == true && summary.first == "认出 2 张 · 没认出 1 个：9999",
+              "认客户的原话：文件名 + 文件号认出 2 张，9999 列在没认出，预览第一行和导入框一样：\(body)")
+        let pushes = store.overrideUndoPushes
+        let depth = store.overrideUndoDepth
+        store.importClientPicks(r.ids)
+        check(store.clientPickCount == 2 && store.overrideUndoPushes == pushes + 1 && store.overrideUndoDepth == depth + 1
+              && FileManager.default.fileExists(atPath: file.path),
+              "标上：客户选中 2 张、压一步判决撤销、写了 client_picks.json（\(store.clientPickCount)、\(store.overrideUndoPushes - pushes)）")
+        let again = LiveHandlers.clientPicksBody(store.resolveClientReply("DSCF7208 DSCF7230"), existing: store.clientPicks)
+        check(again["new_ids"] as? [String] == ["DSCF7230"] && again["already_picked"] as? Int == 1 && again["existing_count"] as? Int == 2,
+              "再来一段：已经是客户选中的不算新增：\(again)")
+        store.importClientPicks(r.ids)
+        check(store.overrideUndoPushes == pushes + 1, "同一批再标一次：不压撤销（\(store.overrideUndoPushes - pushes)）")
+        let reopened = open()
+        check(reopened.clientPicks == Set(r.ids), "重开以后客户选中还在：\(reopened.clientPicks.sorted())")
+        let touched = store.undoLastOverride()
+        check(store.clientPickCount == 0 && Set(touched) == Set(r.ids) && !FileManager.default.fileExists(atPath: file.path),
+              "⌘Z：客户选中回到 0、动到的是那 2 张、client_picks.json 删掉：\(touched)")
     }
 }

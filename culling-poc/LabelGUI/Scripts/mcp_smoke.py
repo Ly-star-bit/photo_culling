@@ -316,7 +316,7 @@ TOOLS_ALL = ["app_status", "cull_list_sessions", "collage_list_templates", "cull
             "cull_get_photos", "cull_list_groups", "cull_preview_photos", "collage_get_state", "app_open_session",
             "cull_set_verdicts", "cull_show_photos", "collage_apply_template", "collage_run_kit", "collage_next_cover",
             "collage_set_text", "collage_set_style", "app_undo", "collage_save_variant", "collage_open_variant",
-            "collage_export", "collage_set_layout", "collage_auto_layout"]
+            "collage_export", "collage_set_layout", "collage_auto_layout", "cull_import_client_picks"]
 ALWAYS = TOOLS_ALL[:3]
 APP_TOOLS = TOOLS_ALL[3:]
 # 描述里出现的 app_* / cull_* / collage_* 名字里，这些是错误码不是工具。
@@ -674,7 +674,7 @@ s.request("tl", "tools/list")
 tl = s.reply("tl")
 tools = (tl or {}).get("result", {}).get("tools", [])
 names = [t.get("name") for t in tools]
-check(names == TOOLS_ALL, f"tools/list 恰好 23 个、顺序同 §10.1（再接方案栏的 2 个、导出和设计版式的 2 个）：{names}")
+check(names == TOOLS_ALL, f"tools/list 恰好 24 个、顺序同 §10.1（再接方案栏的 2 个、导出、设计版式的 2 个和导入客户选择）：{names}")
 TL_LIVE = tools
 
 

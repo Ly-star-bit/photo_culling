@@ -524,12 +524,13 @@ def err_code(body):
 APP_TOOLS = ["cull_session_overview", "cull_list_photos", "cull_get_photos", "cull_list_groups", "cull_preview_photos",
              "collage_get_state", "app_open_session", "cull_set_verdicts", "cull_show_photos", "collage_apply_template",
              "collage_run_kit", "collage_next_cover", "collage_set_text", "collage_set_style", "app_undo",
-             "collage_save_variant", "collage_open_variant", "collage_export", "collage_set_layout", "collage_auto_layout"]
-# hello 里的 capabilities（§10.4 的 12 个 + 方案栏的 2 个 + 导出 + 设计版式的 2 个，按名字排）
+             "collage_save_variant", "collage_open_variant", "collage_export", "collage_set_layout", "collage_auto_layout",
+             "cull_import_client_picks"]
+# hello 里的 capabilities（§10.4 的 12 个 + 方案栏的 2 个 + 导出 + 设计版式的 2 个 + 导入客户选择，按名字排）
 ALL_CAPS = sorted(["cull.read", "cull.preview", "collage.state", "session.open", "cull.set_verdicts", "cull.show",
                    "collage.apply_template", "collage.run_kit", "collage.next_cover", "collage.set_text", "collage.set_style",
                    "undo", "collage.save_variant", "collage.open_variant", "collage.export", "collage.set_layout",
-                   "collage.auto_layout"])
+                   "collage.auto_layout", "cull.import_client_picks"])
 
 
 def minimal_args(tool, session):
@@ -555,6 +556,8 @@ def minimal_args(tool, session):
         a["variant"] = "00000000"
     if tool == "collage_set_layout":
         a["layout"] = {"photo": "DSCF7208"}
+    if tool == "cull_import_client_picks":
+        a["text"] = "DSCF7208"
     return a
 
 
@@ -2941,6 +2944,97 @@ __attribute__((constructor)) static void init(void) {
                      "visible_windows": 0, "host_window_visible": False, "host_window_key": False},
               f"这么多写以后，宿主仍然从不变成前台、没有 key / main 窗口：{ns}")
         h.term()
+
+        # ---------- 选片 MCP 的出口：概览报 XMP 过期、导入客户选择（cull_import_client_picks）
+        # 自己一台宿主、自己一份数据目录（上面那台的判决、撤销栈都不碰）。先放一份 xmp_state.json：只有 mid 这一张记成
+        # 「写过、和现在一样」，别的都没写过 → 过期 = 总张数 - 1；之后 mid 的判决或客户选中一变就多 1 张
+        mid, mid2 = [r["id"] for r in rows if r["verdict"] == "usable" and not r.get("manual") and not r.get("client_pick")][:2]
+        _, gm, _ = mcp_call(env, "cull_get_photos", {"session": KEY, "ids": [mid]})
+        expr = (((gm or {}).get("photos") or [{}])[0]).get("expression_score")
+        mdata = fresh_data("G-m")
+        msess = os.path.join(mdata, "sessions", KEY)
+        json.dump({"marks": {mid: {"v": "可用", "s": 3 if (3 if expr is None else expr) >= 3 else 2}}, "foreign": [],
+                   "foreignRechecked": True}, open(os.path.join(msess, "xmp_state.json"), "w"))
+        cp_path = os.path.join(msess, "client_picks.json")
+        hm = Host("G-m", data=mdata, args=("--no-view",))
+        envm = hm.env()
+
+        def mw(tool, args, timeout=60):
+            _, b_, _ = mcp_full(envm, tool, dict(args, session=KEY), timeout)
+            return b_ or {}
+
+        def mst():
+            return state(hm)
+
+        def m_ov():
+            _, o_, _ = mcp_call(envm, "cull_session_overview", {"session": KEY})
+            return o_ or {}
+
+        def m_row(pid):
+            _, g_, _ = mcp_call(envm, "cull_get_photos", {"session": KEY, "ids": [pid]})
+            return (((g_ or {}).get("photos")) or [{}])[0]
+
+        def cp_disk():
+            return json.load(open(cp_path)) if os.path.exists(cp_path) else None
+
+        ov_m = m_ov()
+        n_m = ov_m.get("photo_count") or 0
+        check(ov_m.get("xmp") == {"stale_count": n_m - 1, "written": True} and "xmp_stale" in warn_codes(ov_m),
+              f"XMP 过期：xmp_state.json 里只有 {mid} 写过、和现在一样 → stale_count = {n_m} - 1、written true、带 xmp_stale（{ov_m.get('xmp')}）")
+        # dry_run（默认）：认出了哪些、没认出的原文，什么都不改；用户开着导入框（batch_sheet）也照样能看
+        picks0 = ov_m.get("client_pick_count")
+        disk0 = cp_disk()
+        sm0 = mst()
+        test_call(hm, "test.set_busy", {"reasons": ["batch_sheet"], "ms": 5000})
+        dr = mw("cull_import_client_picks", {"text": f"要这几张：{mid}、{mid2} 还有 98765，谢谢"})
+        busy_ap = mw("cull_import_client_picks", {"ids": [mid], "dry_run": False})
+        test_call(hm, "test.set_busy", {"reasons": ["batch_sheet"], "ms": 0})
+        sm1 = mst()
+        check(dr.get("dry_run") is True and dr.get("changed") is False and dr.get("ids") == [mid, mid2]
+              and dr.get("unknown") == ["98765"] and dr.get("new_ids") == [mid, mid2] and dr.get("already_picked") == 0
+              and (dr.get("summary") or [""])[0] == "认出 2 张 · 没认出 1 个：98765" and dr.get("undo", {}).get("steps_added") == 0
+              and dr.get("client_pick_count") == picks0 and steps(sm0, sm1) == (0, 0) and cp_disk() == disk0
+              and err_code(busy_ap) == "user_busy" and edata(busy_ap).get("transient") is False,
+              f"导入客户选择 dry_run：认出 {mid}、{mid2}，98765 列在 unknown，summary 和导入框一样，判决栈没动、client_picks.json 没写；"
+              f"用户开着导入框时 dry_run 照样回、正式标回 user_busy（{err_code(busy_ap)}）")
+        # 正式标：一步判决撤销、client_picks.json 回复到达时已写好、行上 client_pick、XMP 过期多 1 张（mid 要变紫色标）
+        op_m = "m-import-" + uuid.uuid4().hex[:12]
+        ap = mw("cull_import_client_picks", {"text": f"{mid}、{mid2}", "dry_run": False, "op_id": op_m})
+        sm2 = mst()
+        ov_m2 = m_ov()
+        check(ap.get("changed") is True and ap.get("dry_run") is False and ap.get("new_ids") == [mid, mid2]
+              and ap.get("client_pick_count") == picks0 + 2 and ap.get("undo", {}).get("target") == "verdicts"
+              and ap["undo"].get("steps_added") == 1 and steps(sm1, sm2) == (1, 0) and ap.get("live", {}).get("op_id") == op_m
+              and {mid, mid2} <= set(cp_disk() or []) and m_row(mid).get("client_pick") is True
+              and (sm2.get("external_notice") or "").startswith("AI：标了 2 张客户选中")
+              and ov_m2.get("client_pick_count") == picks0 + 2 and (ov_m2.get("xmp") or {}).get("stale_count") == n_m,
+              f"导入客户选择 dry_run:false：客户选中 +2、判决栈 +1、client_picks.json 回复到达时已写好、cull_get_photos client_pick:true、"
+              f"状态栏「AI：标了 2 张客户选中…」、XMP 过期变成 {n_m}（{(ov_m2.get('xmp') or {})}）")
+        rp = mw("cull_import_client_picks", {"text": f"{mid}、{mid2}", "dry_run": False, "op_id": op_m})
+        again = mw("cull_import_client_picks", {"ids": [mid2, mid], "dry_run": False})
+        sm3 = mst()
+        check(rp.get("replayed") is True and (rp.get("live") or {}).get("replayed") is True and again.get("changed") is False
+              and again.get("already_picked") == 2 and again.get("new_ids") == [] and again.get("undo", {}).get("steps_added") == 0
+              and steps(sm2, sm3) == (0, 0),
+              "同一个 op_id 再调 → replayed、不再做一遍；换 op_id 再标同两张 → changed false、steps_added 0，判决栈没动")
+        miss = mw("cull_import_client_picks", {"ids": [mid, "NOPE-9"], "dry_run": False})
+        none_ = mw("cull_import_client_picks", {"text": "谢谢老师 98765", "dry_run": False})
+        bad_m = [mw("cull_import_client_picks", a) for a in ({"text": "x", "ids": [mid]}, {}, {"text": "x", "clear": True})]
+        sm4 = mst()
+        check(err_code(miss) == "photo_not_found" and edata(miss).get("missing_ids") == ["NOPE-9"]
+              and edata(miss).get("executed") is False and none_.get("changed") is False and none_.get("ids") == []
+              and "nothing_recognized" in warn_codes(none_) and all(err_code(b) == "invalid_argument" for b in bad_m)
+              and steps(sm3, sm4) == (0, 0),
+              f"ids 里有一张不在这一场 → photo_not_found（missing_ids、一张都没标）；一张都没认出 → changed false、warning "
+              f"nothing_recognized；text 和 ids 都给 / 都不给 / 不认的参数 → invalid_argument {[err_code(b) for b in bad_m]}")
+        un_m = mw("app_undo", {"target": "verdicts"})
+        sm5 = mst()
+        ov_m3 = m_ov()
+        check(set(un_m.get("ids") or []) == {mid, mid2} and (un_m.get("undone") or {}).get("tool") == "cull_import_client_picks"
+              and (un_m["undone"].get("op_id") == op_m) and cp_disk() == disk0 and ov_m3.get("client_pick_count") == picks0
+              and (ov_m3.get("xmp") or {}).get("stale_count") == n_m - 1 and sm5["verdict_undo"]["depth"] == sm1["verdict_undo"]["depth"],
+              f"app_undo target=verdicts 撤掉 AI 的导入：动到的是 {mid}、{mid2}，client_picks.json、客户选中数、XMP 过期都回到导入之前")
+        hm.term()
 
         # ---------- 第 16 条 旧版 app 少一个写方法：只有那个工具回 app_version_mismatch
         hd = Host("G-drop", LABELGUI_LIVE_TEST_DROP_CAP="collage.run_kit", args=("--no-view",))

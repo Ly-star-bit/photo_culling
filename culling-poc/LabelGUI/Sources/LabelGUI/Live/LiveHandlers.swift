@@ -452,6 +452,7 @@ extension LiveHandlers {
             ("collage.set_text", setText), ("collage.set_style", setStyle), ("undo", undo),
             ("collage.save_variant", saveVariant), ("collage.open_variant", openVariant),
             ("collage.export", exportCollage), ("collage.set_layout", setLayout), ("collage.auto_layout", autoLayout),
+            ("cull.import_client_picks", importClientPicks),
         ]
         for (name, run) in methods {
             live.register(name, kind: .write) { [weak live, weak model] req in
@@ -585,6 +586,7 @@ extension LiveHandlers {
             "collage.set_text": "改字", "collage.set_style": "换样式", "undo": "撤销",
             "collage.save_variant": "存方案", "collage.open_variant": "切方案", "collage.export": "导出",
             "collage.set_layout": "设计版式", "collage.auto_layout": "排版",
+            "cull.import_client_picks": "导入客户选择",
         ]
         return labels[method] ?? method
     }
@@ -856,6 +858,83 @@ extension LiveHandlers {
         out["live"] = info
         out["warnings"] = warnings
         return .result(out)
+    }
+
+    // MARK: cull.import_client_picks（导入客户选择）
+
+    /// = 批量页「导出 › 导入客户选择…」：text 走 resolveClientReply（和导入框边打字边预览同一个函数），ids 要全在这一场。
+    /// dry_run（默认）只回认出了哪些，不等用户停手、不压撤销；dry_run:false 走 importClientPicks（导入框「标记为客户选中」：
+    /// 加到原来的上面，一步判决撤销，app_undo target=verdicts 能撤）。客户选中不改判决，拼图托盘不用刷。
+    static func importClientPicks(_ req: Request, live: LiveServer, model: AppModel) async -> Reply {
+        if let bad = checkArgs("cull_import_client_picks", req) { return bad }
+        let dryRun = req.params["dry_run"] as? Bool ?? true
+        if dryRun {
+            if let stop = precheck(req, Gate(scope: .verdicts), live: live, model: model, waited: false) { return stop }
+        } else if let stop = await begin(req, Gate(scope: .verdicts, analysis: true), live: live, model: model) {
+            return stop
+        }
+        let batch = model.batch
+        var resolution = ClientReply.Resolution()
+        if let text = req.params["text"] as? String {
+            resolution = batch.resolveClientReply(text)
+        } else {
+            let ids = MCPArgs.uniqueStrings(req.params["ids"])
+            let missing = ids.filter { batch.item(withID: $0) == nil }
+            guard missing.isEmpty else {
+                var data = notExecuted("ids 要全是这一场的照片 id（文件名去掉扩展名）；先 cull_list_photos 看有哪些，或者把客户的原话放进 text")
+                data["missing_ids"] = missing
+                return .failure("photo_not_found", "这些 id 在 app 当前这一场里没有：\(missing.prefix(20).joined(separator: ", "))：一张都没标", data)
+            }
+            resolution.ids = ids
+        }
+        let existing = batch.clientPicks
+        var out = clientPicksBody(resolution, existing: existing)
+        out["session"] = currentKey(batch) ?? NSNull()
+        out["dry_run"] = dryRun
+        let fresh = resolution.ids.filter { !existing.contains($0) }
+        var notice: String?
+        if !dryRun && !fresh.isEmpty {
+            let pushesBefore = batch.overrideUndoPushes
+            batch.importClientPicks(resolution.ids)
+            model.aiLog.recordWrite(.verdicts, op: req.opID ?? "", tool: "cull_import_client_picks", before: pushesBefore,
+                                    after: batch.overrideUndoPushes, depth: batch.overrideUndoDepth)
+            let text = "AI：标了 \(fresh.count) 张客户选中 · 在批量页 ⌘Z 撤销"
+            batchNotice(batch, text)
+            notice = text
+        }
+        let changed = notice != nil
+        out["changed"] = changed
+        out["client_pick_count"] = batch.clientPickCount
+        if dryRun {
+            out["undo"] = ["target": NSNull(), "steps_added": 0, "how": "dry_run 只看认出了哪些，什么都没改；dry_run:false 才标上"] as [String: Any]
+        } else {
+            out["undo"] = undoInfo(.verdicts, added: changed ? 1 : 0, model: model)
+        }
+        if !dryRun && req.params["reveal"] as? Bool == true { model.tab = .batch }
+        let (info, shown) = liveInfo(req, live: live, model: model, notice: notice)
+        out["live"] = info
+        var warnings = shown
+        if resolution.ids.isEmpty {
+            warnings.append(MCPReadModel.warning("nothing_recognized", "一张照片都没认出来：什么都没标。",
+                                                 hint: "看 unknown 和 summary；文件名、文件号、确认表编号都认不出时请用户自己在 app 里看"))
+        }
+        out["warnings"] = warnings
+        return .result(out)
+    }
+
+    /// 导入客户选择的结果主体（dry_run 和正式标一样）：认出的、没认出的原文、按哪张确认表对的、导入框里那几行预览。纯函数。
+    static func clientPicksBody(_ r: ClientReply.Resolution, existing: Set<String>) -> [String: Any] {
+        let fresh = r.ids.filter { !existing.contains($0) }
+        var out: [String: Any] = ["ids": r.ids, "unknown": r.unknown, "new_ids": fresh]
+        out["already_picked"] = r.ids.count - fresh.count
+        out["existing_count"] = existing.count
+        out["summary"] = ClientReply.summary(r, existing: existing)
+        out["sheet"] = r.sheet.map { ["id": $0.id, "title": $0.title] as [String: Any] } ?? NSNull()
+        out["used_sheet"] = r.usedSheet
+        out["header"] = r.header ?? NSNull()
+        out["numbers_without_sheet"] = r.numbersWithoutSheet
+        if let columns = r.tableColumns { out["table_columns"] = columns }
+        return out
     }
 
     // MARK: cull.show（在 app 里定位照片）

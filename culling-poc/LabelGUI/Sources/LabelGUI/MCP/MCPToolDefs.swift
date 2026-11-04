@@ -1,6 +1,6 @@
 import Foundation
 
-/// 23 个工具定义（v1 的 18 个 + 方案栏的 2 个 + 导出 + 设计版式的 2 个）和两版 instructions（DESIGN §10.1；schema 规则见 §3.0）。
+/// 24 个工具定义（v1 的 18 个 + 方案栏的 2 个 + 导出 + 设计版式的 2 个 + 导入客户选择）和两版 instructions（DESIGN §10.1；schema 规则见 §3.0）。
 /// - 全部写在下面一个原始 JSON 字符串里，启动时解析一次：大字典字面量会让 Xcode 16 / Swift 6.1 的类型检查超时（5277c01）。
 /// - 会随代码变的名单不写死：style / look / kit 的 enum、模板和分类的数目，启动时从 CollageStyles.all、CollageLook、
 ///   CollageKitID、CollageTemplates.builtin 算出来填进去。
@@ -34,7 +34,7 @@ enum MCPToolDefs {
 
     static let liveInstructions = """
     xuanpian 是本机「选片工具」（photo culling + collage）的接口，这一版只做实时：用户开着 app 时，读 app 当前打开的那一场（判决 pick/usable/reject、废片理由、章节、场、近似重复、人脸/闭眼/锐度/EXIF、预览图），以及改判、在 app 里定位照片、切场次、套拼图模板、一键成套、换封面、改标题/刊头/期号、换样式色调、存成方案、切方案、导出图片、撤销，都由 app 自己执行，窗口里当场看得到，用户按 ⌘Z 能撤。app 没开时只能看状态、列场次、列模板，其余工具返回 app_not_running：MCP 绝不会启动 app，请用户自己打开。先调 app_status。
-    流程：app_status（live.state 是 live 才能用其余工具；live.open_session 是 app 当前打开的那一场，所有 session 参数都填它）→ cull_session_overview → cull_list_groups / cull_list_photos → cull_get_photos / cull_preview_photos（看眼睛、对焦用 crop=face）。要别的场次：cull_list_sessions 找到它，再 app_open_session（只能打开 app「最近场次」里的；会清掉 app 里这一场的撤销记录，先问用户）。改判用 cull_set_verdicts，给用户看用 cull_show_photos；拼图先 collage_get_state，再 collage_apply_template / collage_run_kit / collage_next_cover / collage_set_text / collage_set_style，结果里有 app 当前画面的预览；模板不合适就自己设计：collage_list_templates（include=["layout_grammar"]）看语法，collage_set_layout 把版式放进当前页（collage_auto_layout 让 app 的引擎先排一版，读回 layout 再改）；要给用户出几版设计挑，每排好一版就 collage_save_variant 存成方案（不会被下一版盖掉），collage_open_variant 切回某一版；导出成图片用 collage_export（清晰度 1–3 倍，写到导出页设的目录）；撤销 AI 自己刚做的一步用 app_undo。
+    流程：app_status（live.state 是 live 才能用其余工具；live.open_session 是 app 当前打开的那一场，所有 session 参数都填它）→ cull_session_overview → cull_list_groups / cull_list_photos → cull_get_photos / cull_preview_photos（看眼睛、对焦用 crop=face）。要别的场次：cull_list_sessions 找到它，再 app_open_session（只能打开 app「最近场次」里的；会清掉 app 里这一场的撤销记录，先问用户）。改判用 cull_set_verdicts，给用户看用 cull_show_photos，客户发回来的选择用 cull_import_client_picks（先 dry_run 给用户看认出了哪些）；拼图先 collage_get_state，再 collage_apply_template / collage_run_kit / collage_next_cover / collage_set_text / collage_set_style，结果里有 app 当前画面的预览；模板不合适就自己设计：collage_list_templates（include=["layout_grammar"]）看语法，collage_set_layout 把版式放进当前页（collage_auto_layout 让 app 的引擎先排一版，读回 layout 再改）；要给用户出几版设计挑，每排好一版就 collage_save_variant 存成方案（不会被下一版盖掉），collage_open_variant 切回某一版；导出成图片用 collage_export（清晰度 1–3 倍，写到导出页设的目录）；撤销 AI 自己刚做的一步用 app_undo。
     出错时：user_busy 的 data.transient 为 true 是用户正在拖动或打字，等几秒再调；为 false 是开着对话框、连拍挑选或裁切，请用户先关掉，不要重试。app_outcome_unknown：用结果里的 op_id 原样再调同一个工具，不要换工具。session_not_open：先 app_status 看 open_session。其他错误按 hint 改。读到的是 app 内存里的状态（含还没存盘的改动）。图片是缩小预览，文字结果里有预览文件的路径；不要直接读原图（几十 MB）。session 可以填照片文件夹的绝对路径，也可以填 16 位 session key。
     """
 
@@ -116,7 +116,7 @@ enum MCPToolDefs {
     }
     """#
 
-    // MARK: - 23 个工具（顺序 = §10.1 表的 1–18，再接方案栏的 19、20、导出 21、设计版式的 22、23）
+    // MARK: - 24 个工具（顺序 = §10.1 表的 1–18，再接方案栏的 19、20、导出 21、设计版式的 22、23、导入客户选择 24）
 
     private static let definitionsJSON = #"""
     [
@@ -389,7 +389,19 @@ enum MCPToolDefs {
        "op_id":"$OP_ID",
        "inline":"$INLINE"},
       "required":["session"],"additionalProperties":false},
-     "annotations":"$WRITE"}
+     "annotations":"$WRITE"},
+
+    {"name":"cull_import_client_picks","title":"导入客户选择",
+     "description":"在 app 里导入客户的选择（= 批量页「导出 › 导入客户选择…」）：客户发回来的文字原样放进 text（微信里回的文件名、文件号 7221、确认表上的编号 12、35、78 或 12-15、确认表「复制我的选择」那一段、Pixieset 导出的 CSV），app 按和导入框同一套规则认成照片；你自己已经认出是哪几张时改用 ids（都要是这一场的，有一张不在就什么都不标）。认出的标成「客户选中」（紫心、XMP 紫色标），不改判决。dry_run 默认 true：只回认出了哪些（ids）、没认出的原文（unknown）、编号按哪张确认表对的（sheet）和导入框里那几行预览（summary），什么都不改；照着 summary 告诉用户、用户确认了再带 dry_run:false 标上。标是加到原来的客户选中上，不清掉原来的；一次调用是一步撤销（批量页 ⌘Z，或 app_undo target=verdicts），都已经是客户选中时什么都不做（changed=false）。导入框开着或者连拍挑选开着时回 user_busy，app 正在分析时回 analysis_running。op_id 只用来原样重发同一次调用（同一个 op_id 的 dry_run 和正式标会拿到同一份结果）。客户回复的原文会随对话发给 AI 服务商。",
+     "inputSchema":{"type":"object","properties":{
+       "session":"$SESSION",
+       "text":{"type":"string","minLength":1,"maxLength":50000,"description":"客户回复的原文，原样放进来；和 ids 只能给一个"},
+       "ids":{"type":"array","items":{"type":"string","minLength":1,"maxLength":128},"minItems":1,"maxItems":500,"uniqueItems":true,"description":"你已经认出的照片 id；和 text 只能给一个"},
+       "dry_run":{"type":"boolean","default":true,"description":"true = 只看认出了哪些，不标；false = 标成客户选中"},
+       "reveal":"$REVEAL",
+       "op_id":"$OP_ID"},
+      "required":["session"],"additionalProperties":false},
+     "annotations":"$WRITE_IDEMPOTENT"}
     ]
     """#
 }
