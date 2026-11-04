@@ -4324,30 +4324,17 @@ final class BatchStore: ObservableObject {
                 if let xmp = job.xmp, job.xmpAfter.allSatisfy(trashedIDs.contains), fm.fileExists(atPath: xmp.path) {
                     urls.append(xmp)
                 }
-                var moved: [URL] = []
-                do {
-                    for url in urls where fm.fileExists(atPath: url.path) {
-                        try fm.trashItem(at: url, resultingItemURL: nil)
-                        moved.append(url)
-                    }
-                    // 一个文件都没找到（外置盘没挂载、照片已被别处移走）不算成功：
-                    // 计入 trashedIDs 会把它从 manifest/VLM 结果里永久剔除，
-                    // 而原图其实一张都没动，提示却说"已移到废纸篓 (可恢复)"。
-                    if !moved.isEmpty {
-                        trashedIDs.insert(job.id)
-                        try? fm.removeItem(at: URL(fileURLWithPath: job.previewPath))
-                    } else {
-                        failed.append(job.id)
-                        failureReasons[job.id] = "文件不见了（外置盘没挂上，或者已经被别处移走）"
-                    }
-                } catch {
+                switch Self.trashFiles(job.id, urls, move: { try fm.trashItem(at: $0, resultingItemURL: nil) }) {
+                case .trashed:
+                    trashedIDs.insert(job.id)
+                    try? fm.removeItem(at: URL(fileURLWithPath: job.previewPath))
+                case .missing(let why):
                     failed.append(job.id)
-                    failureReasons[job.id] = Diagnostics.describeIO(error, trash: true)
-                    // 移走了一半：照片照旧留在网格里（还有文件在原处），再移一次时已经不在的那个会跳过、只移剩下的。
-                    if !moved.isEmpty {
-                        let left = urls.filter { fm.fileExists(atPath: $0.path) }.map(\.lastPathComponent)
-                        partial.append(TrashPartial(id: job.id, moved: moved.map(\.lastPathComponent), left: left))
-                    }
+                    failureReasons[job.id] = why
+                case .failed(let why, let half):
+                    failed.append(job.id)
+                    failureReasons[job.id] = why
+                    if let half { partial.append(half) }
                 }
                 let done = index + 1
                 if done % 10 == 0 || done == total {
@@ -4407,6 +4394,35 @@ final class BatchStore: ObservableObject {
         let id: String
         let moved: [String]
         let left: [String]
+    }
+
+    /// 一张照片的几个文件（RAW、配对的 JPG、.xmp）移到废纸篓的结果。只有 .trashed 才算移走（进 trashedIDs、从结果里抹掉）。
+    enum TrashOutcome: Equatable {
+        case trashed
+        /// 一个文件都没找到（外置盘没挂载、照片已被别处移走）：不算成功 —— 计入 trashedIDs 会把它从 manifest / VLM 结果里
+        /// 永久剔除，而原图其实一张都没动，提示却说「已移到废纸篓 (可恢复)」。
+        case missing(String)
+        /// 抛错了：原因，和移走了一半的（RAW 已经进了废纸篓、配对的 JPG / .xmp 抛错）。照片照旧留在网格里（还有文件在原处），
+        /// 再移一次时已经不在的那个会跳过、只移剩下的。
+        case failed(String, TrashPartial?)
+    }
+
+    /// 逐个移（在的才移），`move` 在 app 里是 fm.trashItem；自检换成会抛错的假动作，不碰真的废纸篓。
+    nonisolated static func trashFiles(_ id: String, _ urls: [URL], move: (URL) throws -> Void) -> TrashOutcome {
+        let fm = FileManager.default
+        var moved: [URL] = []
+        do {
+            for url in urls where fm.fileExists(atPath: url.path) {
+                try move(url)
+                moved.append(url)
+            }
+        } catch {
+            let why = Diagnostics.describeIO(error, trash: true)
+            guard !moved.isEmpty else { return .failed(why, nil) }
+            let left = urls.filter { fm.fileExists(atPath: $0.path) }.map(\.lastPathComponent)
+            return .failed(why, TrashPartial(id: id, moved: moved.map(\.lastPathComponent), left: left))
+        }
+        return moved.isEmpty ? .missing("文件不见了（外置盘没挂上，或者已经被别处移走）") : .trashed
     }
 
     /// 移到废纸篓有失败时状态栏那句：张数、前 3 张、原因（几种不同的分开数），移走了一半的单独说

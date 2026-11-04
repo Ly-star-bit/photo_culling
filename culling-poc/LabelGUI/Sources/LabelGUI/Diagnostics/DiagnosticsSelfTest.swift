@@ -10,7 +10,8 @@ import UniformTypeIdentifiers
 ///     没有照片、预览图（连名字都没有）、bookmark、客户备注原文、场次文件夹名、家目录；目标已经有文件 / 文件夹时一个字节都不动；
 ///     打码不只认 sessions.json（纯函数：任意路径逐段打码、「」里的文件夹名、不误伤；界面那一路：真的 AppModel 里认回的场次、
 ///     没登记的当前文件夹、掉出最近场次的旧场次、日志里的新路径、崩溃报告里转义过的路径 —— zip 里哪个文件都没有客户名）
-///   D 失败原因：盘不支持废纸篓、没权限、只读盘、盘满、EPERM；原因汇总；废纸篓移走一半；不限体积那条路逐字节和以前一样、
+///   D 失败原因：盘不支持废纸篓、没权限、只读盘、盘满、EPERM；原因汇总；废纸篓移走一半（拼的那句话，和真正判断的
+///     BatchStore.trashFiles：假的移动动作，RAW 移走、JPG 抛 EPERM / 都不在 / 第一个就抛错 / 再移一次）；不限体积那条路逐字节和以前一样、
 ///     写不进去报「没有权限」；writeJPEG 原片不在 / 解不开；水印页拿到真原因
 ///   E 文件夹权限：chmod 000 的照片文件夹分析时报「没有权限读这个文件夹 … 系统设置 › 隐私与安全性 › 文件与文件夹」，
 ///     不报「没有支持的图片文件」；空文件夹照旧；读不了的子文件夹跳过；开关按位置点名
@@ -511,6 +512,7 @@ enum DiagnosticsSelfTest {
               "废纸篓：张数、前几张、原因", note)
         check(note.contains("其中 1 张只移走了一部分（DSCF0001：DSCF0001.RAF 已在废纸篓，DSCF0001.JPG 还在原处）"),
               "废纸篓移走一半的单独说", note)
+        trashOutcomeChecks(work, check)
 
         // 不限体积那条路改成先在内存里编码再原子写：字节要和以前直接写文件一模一样。
         let dir = work.appendingPathComponent("encode", isDirectory: true)
@@ -574,6 +576,62 @@ enum DiagnosticsSelfTest {
         } catch {
             check(error.localizedDescription.contains("没有权限"), "水印页的「首个原因」拿到真原因", error.localizedDescription)
         }
+    }
+
+    /// 移到废纸篓真正判断「移走 / 不见了 / 移走一半」的那段（BatchStore.trashFiles）：移动动作换成假的（挪进一个假废纸篓
+    /// 文件夹、或者抛 EPERM），不碰真的废纸篓。
+    private static func trashOutcomeChecks(_ work: URL, _ check: Check) {
+        let fm = FileManager.default
+        let dir = work.appendingPathComponent("trash-pair", isDirectory: true)
+        let bin = work.appendingPathComponent("trash-pair-bin", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: bin, withIntermediateDirectories: true)
+        let raw = dir.appendingPathComponent("DSCF0001.RAF")
+        let jpg = dir.appendingPathComponent("DSCF0001.JPG")
+        try? Data("raw".utf8).write(to: raw)
+        try? Data("jpg".utf8).write(to: jpg)
+        let eperm = NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError,
+                            userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))])
+        func intoBin(_ url: URL) throws {
+            try fm.moveItem(at: url, to: bin.appendingPathComponent(url.lastPathComponent))
+        }
+        // RAW 移走了、JPG 被锁住抛 EPERM。
+        let half = BatchStore.trashFiles("DSCF0001", [raw, jpg]) { url in
+            if url == jpg { throw eperm }
+            try intoBin(url)
+        }
+        let wantPartial = BatchStore.TrashPartial(id: "DSCF0001", moved: ["DSCF0001.RAF"], left: ["DSCF0001.JPG"])
+        if case .failed(let why, let partial) = half {
+            check(partial == wantPartial, "废纸篓移走一半：moved 只有 RAW、left 只有 JPG", "\(String(describing: partial))")
+            check(why.contains("没有权限"), "废纸篓移走一半：原因是「没有权限」", why)
+        } else {
+            check(false, "废纸篓移走一半：算失败（不进 trashedIDs，照片留在网格里）", "\(half)")
+        }
+        check(!fm.fileExists(atPath: raw.path) && fm.fileExists(atPath: jpg.path), "前提：RAW 真的挪走了、JPG 还在原处")
+        // 再移一次：已经不在的 RAW 跳过，只移剩下的 JPG → 算移走。
+        let again = BatchStore.trashFiles("DSCF0001", [raw, jpg], move: intoBin)
+        check(again == .trashed && !fm.fileExists(atPath: jpg.path), "再移一次：跳过已经不在的、只移剩下的，算移走", "\(again)")
+        // 一个文件都没找到：不算成功，原因「文件不见了」。
+        let missing = BatchStore.trashFiles("DSCF0002", [dir.appendingPathComponent("DSCF0002.RAF")]) { _ in
+            check(false, "文件不在时不该去移")
+        }
+        if case .missing(let why) = missing {
+            check(why.contains("文件不见了"), "一个文件都没找到：算失败，原因「文件不见了」", why)
+        } else {
+            check(false, "一个文件都没找到：算失败（不进 trashedIDs）", "\(missing)")
+        }
+        // 第一个就抛错：失败，没有「移走一半」。
+        let lockedRaw = dir.appendingPathComponent("DSCF0003.RAF")
+        try? Data("raw".utf8).write(to: lockedRaw)
+        let first = BatchStore.trashFiles("DSCF0003", [lockedRaw]) { _ in throw eperm }
+        if case .failed(let why, let partial) = first {
+            check(partial == nil && why.contains("没有权限") && fm.fileExists(atPath: lockedRaw.path),
+                  "第一个文件就抛错：失败、不算移走一半、文件还在", "\(String(describing: partial)) \(why)")
+        } else {
+            check(false, "第一个文件就抛错：算失败", "\(first)")
+        }
+        try? fm.removeItem(at: dir)
+        try? fm.removeItem(at: bin)
     }
 
     // MARK: E 文件夹权限
