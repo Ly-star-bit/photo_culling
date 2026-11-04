@@ -193,12 +193,23 @@ enum FollowupSelfTest {
         check(!collage.projectSaveIsRefused && !liveReport.persisted && writeHint.contains("腾出磁盘空间") && writeHint.contains("整份再存"),
               "拼图写失败（不是拒存）：写工具那一路的 hint 照旧叫用户腾出磁盘空间、之后改一下会整份再存", writeHint)
 
-        // 后台那一次：改完等防抖的 1 s 过去、存盘队列上写失败；之后 flushSaves 没有排着的，也要报出来
+        // 后台那一次。先能写时存一次，把记下的结果清回「成功」：不然下面读到的还是上面当场写那次的失败，后台那次跑没跑、
+        // 记没记都测不出来（以前这一条永远绿）
+        unlock(session)
+        touch()
+        let cleared = collage.flushSaves()
+        check(cleared == nil, "拼图后台那一步之前：能写时存一次，记下的结果回到成功", cleared ?? "")
+        lock(session)
+        // 改完不 flush，等防抖的 1 s 过去、存盘队列上写失败：lastError 是后台那次的 Task 晚一拍设上的，等到它才说明真是后台写的
         collage.lastError = nil
         touch()
-        FileSafetySelfTest.waitUntil(1.8) { false }
+        let ranInBackground = FileSafetySelfTest.waitUntil(5) { collage.lastError?.hasPrefix("拼图项目保存失败") == true }
+        check(ranInBackground, "拼图后台保存：防抖那一次真在存盘队列上写了、失败了（lastError 由它设上）", collage.lastError ?? "nil")
+        // 再清掉 lastError：flushSaves（没有排着的）回的失败原因得来自存盘队列上记下的结果，不靠 lastError
+        collage.lastError = nil
         let late = collage.flushSaves()
-        check(late?.hasPrefix("拼图项目保存失败") == true, "拼图后台保存失败：flushSaves（没有排着的）照样回失败原因", late ?? "nil")
+        check(late?.hasPrefix("拼图项目保存失败") == true, "拼图后台保存失败：flushSaves（没有排着的）照样回失败原因，不靠 lastError",
+              late ?? "nil")
 
         unlock(session)
         touch()
