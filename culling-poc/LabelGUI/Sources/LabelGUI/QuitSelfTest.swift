@@ -7,7 +7,8 @@ import Foundation
 /// processBox，核对 willTerminate 以后子进程整组都没了、python 那一层只收到一次 SIGTERM；阈值防抖里排着的那次退出时写掉、
 /// 没排着的不写；防睡眠的 activity 在 pmset 里真的有、放掉就没，分析（合成的色块 JPEG）跑完 / 取消、VLM 提前返回都放掉；
 /// ⌘Q 确认的判断表（QuitGuard）和流程（QuitCoordinator，弹框、回 AppKit 都换成假的，在 modal panel 模式里等停下）；
-/// ⌘Q 也看拼图工程、标注存上没有（真的 AppModel、场次目录 / collage.json chmod 成写不进、读不出）。
+/// ⌘Q 也看拼图工程、标注存上没有（真的 AppModel、场次目录 / collage.json chmod 成写不进、读不出）；
+/// 「上次分析没跑完」的标记（开跑写、跑完 / 取消 / 出错删，留下的下次打开这一场提示）。
 /// 会写数据目录：只在临时目录里跑。每条打一行 PASS / FAIL，有 FAIL 退出码 1。不弹任何框。
 enum QuitSelfTest {
     @MainActor
@@ -24,6 +25,7 @@ enum QuitSelfTest {
         t.quitDecisionTable()
         t.quitCoordinatorFlows()
         t.quitChecksCollageAndLabels()
+        t.unfinishedAnalysisMarker()
         print("quit-selftest: \(t.passed) 通过 \(t.failed) 失败")
         exit(t.failed == 0 ? 0 : 1)
     }
@@ -572,6 +574,8 @@ final class QuitSelfTestHarness {
         let saved = store.progressText.split(separator: " ").dropFirst(2).first.flatMap { Int($0) } ?? -1
         check(stop.replies == [true] && !store.isRunning && store.progressText.hasPrefix("已取消: 已保存"),
               "停下、写完才放行退出（\(store.progressText)）")
+        check(!fm.fileExists(atPath: UnfinishedAnalysis.marker(in: store.sessionDir).path),
+              "放行之前「分析在跑」的标记已经删掉（自己叫停的，下次打开不说「上次没跑完」）")
         let layer1 = store.sessionDir.appendingPathComponent("layer1_results.json")
         let rows = (try? Data(contentsOf: layer1))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
@@ -848,6 +852,72 @@ final class QuitSelfTestHarness {
         let labelsOK2 = quit()
         check(labelsOK2.reply == .terminateNow && labelsOK2.asked.isEmpty, "标注存上了：直接退")
         AppDelegate.model = nil
+    }
+
+    // MARK: - 「上次分析没跑完」
+
+    func unfinishedAnalysisMarker() {
+        print("— 上次分析没跑完：开跑时在场次目录写标记，跑完 / 取消 / 出错删掉；崩溃、强退留下的，下次打开这一场提示「点重新分析补上」")
+        let store = newStore()
+        let folder = makePhotoFolder("photos-unfinished", count: 40, width: 1200, height: 800)
+        let other = work.appendingPathComponent("photos-unfinished-other", isDirectory: true)
+        try? fm.createDirectory(at: other, withIntermediateDirectories: true)
+        _ = store.switchSession(to: folder)
+        let dir = store.sessionDir
+        let marker = UnfinishedAnalysis.marker(in: dir)
+        check(!fm.fileExists(atPath: marker.path) && store.lastError == nil, "新场次：没有标记、不提示")
+
+        store.runAnalysis()
+        let during = fm.fileExists(atPath: marker.path) && store.isRunning
+        let body = (try? Data(contentsOf: marker)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let fields: Bool = body?["kind"] as? String == "analysis" && body?["pid"] as? Int == Int(getpid()) && body?["started"] is String
+        check(during && fields, "分析一开跑：场次目录里就有 \(UnfinishedAnalysis.fileName)（种类、开始时间、pid）")
+        spin(90) { !store.isRunning }
+        check(store.progressText.hasPrefix("完成") && !fm.fileExists(atPath: marker.path), "跑完：标记删掉（\(store.progressText)）")
+
+        store.runAnalysis()
+        store.cancel()
+        spin(60) { !store.isRunning }
+        check(store.progressText.contains("已取消") && !fm.fileExists(atPath: marker.path), "中途取消：标记删掉（\(store.progressText)）")
+
+        // 崩溃、强退、退出时等满时限照样放行：删标记那一步走不到 —— 手写一个，和进程半路没了留下的一样。
+        UnfinishedAnalysis.begin(in: dir)
+        _ = store.switchSession(to: other)
+        check(store.lastError == nil, "别的场次不提示（标记一场一个）")
+        _ = store.switchSession(to: folder)
+        check(store.lastError == UnfinishedAnalysis.notice, "切回这一场：状态栏说「\(store.lastError ?? "nil")」")
+        let relaunched = BatchStore(dataDir: dataDir, pythonRoot: work)
+        check(relaunched.sessionDir.standardizedFileURL.path == dir.standardizedFileURL.path
+              && relaunched.lastError == UnfinishedAnalysis.notice,
+              "重开 app（BatchStore.init 自动打开上一场）：一样提示（\(relaunched.lastError ?? "nil")）")
+        check(fm.fileExists(atPath: marker.path), "只是打开、没重新分析：标记留着（下次打开还提示）")
+
+        store.runAnalysis()
+        check(store.lastError == nil, "点「重新分析」：提示收起来")
+        spin(90) { !store.isRunning }
+        _ = store.switchSession(to: other)
+        _ = store.switchSession(to: folder)
+        check(!fm.fileExists(atPath: marker.path) && store.lastError == nil, "重新分析跑完：标记删掉，再打开不提示")
+
+        // 分析出错（文件夹里一张照片都没有）：用户看到了「分析失败」，不是没跑完 —— 也删掉。
+        let empty = work.appendingPathComponent("photos-unfinished-empty", isDirectory: true)
+        try? fm.createDirectory(at: empty, withIntermediateDirectories: true)
+        _ = store.switchSession(to: empty)
+        let emptyMarker = UnfinishedAnalysis.marker(in: store.sessionDir)
+        store.runAnalysis()
+        spin(20) { !store.isRunning }
+        check((store.lastError ?? "").hasPrefix("分析失败") && !fm.fileExists(atPath: emptyMarker.path),
+              "分析出错：标记也删掉（\(store.lastError ?? "nil")）")
+
+        // 更要紧的话不盖：照片文件夹不在了。
+        let gone = makePhotoFolder("photos-unfinished-gone", count: 2)
+        _ = store.switchSession(to: gone)
+        UnfinishedAnalysis.begin(in: store.sessionDir)
+        try? fm.removeItem(at: gone)
+        _ = store.switchSession(to: other)
+        _ = store.switchSession(to: gone)
+        check((store.lastError ?? "").contains("已不存在"), "照片文件夹不在了：照旧说文件夹不在（不被「没跑完」盖掉）")
+        _ = store.switchSession(to: other)
     }
 
     // MARK: - S05e 阈值防抖里排着的那次，退出时写掉

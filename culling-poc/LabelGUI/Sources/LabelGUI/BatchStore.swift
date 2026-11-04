@@ -1285,6 +1285,7 @@ final class BatchStore: ObservableObject {
             lastError = "这一场的预览图已清理省空间（掉出了最近 15 场，或者从「移除历史记录」里移除过），判决和人工改判都还在。" +
                         "点「重新分析」补回预览：没变的照片只重做预览，人工改判不会动"
         }
+        noteUnfinishedAnalysis()  // 上次分析没跑完（崩溃、强退）：开跑时写的标记还在（QuitSafety.swift）
         if let moved {
             progressText = "认出了「\(moved.name)」那一场：同一个文件夹改了名或挪了位置，判决、人工改判、客户选中、拼图都接上了"
         } else if let from = rebase.rebase?.from {
@@ -2758,6 +2759,8 @@ final class BatchStore: ObservableObject {
         provisionalBuffer = []
         provisionalCount = 0
         let sleepGuard = longTasks.begin(.analysis)
+        // 「上次分析没跑完」的标记（QuitSafety.swift）：跑完、取消、出错都在 isRunning 落下之前删掉；崩溃、强退删不到。
+        UnfinishedAnalysis.begin(in: data)
 
         Task.detached { [weak self] in
             defer { sleepGuard.end() }  // 所有出口都放掉防睡眠（审查 S05c）
@@ -2782,6 +2785,7 @@ final class BatchStore: ObservableObject {
                     }
                 }
             } catch {
+                UnfinishedAnalysis.end(in: data)
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     self.lastError = "分析失败: \(error.localizedDescription)"
@@ -2793,6 +2797,7 @@ final class BatchStore: ObservableObject {
                 }
                 return
             }
+            UnfinishedAnalysis.end(in: data)  // 跑完或取消（引擎已经把做完的写好了）
 
             await MainActor.run { [weak self] in
                 guard let self else { return }

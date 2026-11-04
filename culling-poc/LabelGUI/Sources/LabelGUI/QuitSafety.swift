@@ -145,3 +145,49 @@ final class LongTaskToken: @unchecked Sendable {
 
     deinit { end() }
 }
+
+// MARK: - 「上次分析没跑完」（审查 S05d 的尾巴）
+
+/// 分析开跑时在场次目录写一个小标记，跑完、取消、出错时删掉（BatchStore.runAnalysis，都在 isRunning 落下之前）。app 崩溃、
+/// 被强制退出、被系统杀掉、断电，或者退出时叫停以后等满时限照样放行（QuitCoordinator.tick）—— 这几种删不到，下次打开这一场
+/// （switchSession；启动时重开上一场也走它）看到它还在，就在状态栏说一句。不拿「预览比行多」判断（误报多）。
+/// 标记里的开始时间和 pid 只给人看（诊断包里列得到），判断只看文件在不在。VLM、复审不写：layer2 每 10 张落一次盘，再点一次接着跑。
+enum UnfinishedAnalysis {
+    static let fileName = "analysis_in_progress.json"
+    static let notice = "上次分析没跑完（app 退出或崩溃），点「重新分析」补上"
+
+    static func marker(in sessionDir: URL) -> URL { sessionDir.appendingPathComponent(fileName) }
+
+    /// 开跑：写标记。写不上（场次目录只读、盘满）不挡分析，只是这一次崩了下次不会提示。
+    @discardableResult
+    static func begin(in sessionDir: URL, now: Date = Date()) -> Bool {
+        let body: [String: Any] = ["kind": "analysis", "started": ISO8601DateFormatter().string(from: now),
+                                   "pid": Int(getpid())]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+            try data.write(to: marker(in: sessionDir), options: .atomic)
+            return true
+        } catch {
+            SessionFiles.log.error("写「分析在跑」标记失败：\(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    /// 跑完、取消、出错：删标记（没有也不要紧）。
+    static func end(in sessionDir: URL) {
+        try? FileManager.default.removeItem(at: marker(in: sessionDir))
+    }
+
+    static func leftOver(in sessionDir: URL) -> Bool {
+        FileManager.default.fileExists(atPath: marker(in: sessionDir).path)
+    }
+}
+
+extension BatchStore {
+    /// switchSession 读完以后：上次分析没跑完就在状态栏说一句。已经有更要紧的话（文件夹不在了、manifest 改不过来、
+    /// 预览清掉了 —— 后两种也是让点「重新分析」）就不盖它。标记留着，直到下一次分析跑完、取消或出错。
+    func noteUnfinishedAnalysis() {
+        guard lastError == nil, UnfinishedAnalysis.leftOver(in: sessionDir) else { return }
+        lastError = UnfinishedAnalysis.notice
+    }
+}
