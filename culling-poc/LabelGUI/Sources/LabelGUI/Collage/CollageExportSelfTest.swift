@@ -11,6 +11,9 @@ import ImageIO
 ///    另编的 JPEG）都写出每个跨页 + 一份页数对的 PDF，PDF 列在 files 最后，目录里没有临时文件。
 /// 3. 相册有跨页没写出来（testExportFailPages 当成渲染失败）：不出 PDF（盘上没有、files 里没有、没有临时文件），failure 写明
 ///    缺第几个跨页，写出来的跨页照实列出；同一次导出还有软警告（照片读不了）时「导出失败」不被它盖掉，警告接在后面。
+/// 4. 空照片格（emptyPhotoSlots / emptySlotWarning，导出按钮和 MCP 共用）：只数网格页上没照片（或照片不在托盘）的照片格，
+///    留白格、文字格、散落版、印样不算；提醒那句话写对页号；导出按钮有空格时先不导、等确认（exportConfirm），点了「仍然导出」
+///    才导，没有空格直接导、不问。
 /// 全过退出 0，否则 1。
 enum CollageExportSelfTest {
 
@@ -30,6 +33,9 @@ enum CollageExportSelfTest {
         albumExport(store, root.appendingPathComponent("album"), check: check)
         print("== 相册有跨页没写出来")
         albumFailure(store, root.appendingPathComponent("fail"), check: check)
+        print("== 空照片格")
+        emptySlots(check: check)
+        emptySlotConfirm(store, root.appendingPathComponent("confirm"), check: check)
 
         try? FileManager.default.removeItem(at: root)
         if check.failures.isEmpty {
@@ -325,5 +331,94 @@ enum CollageExportSelfTest {
         single.pages = [CollagePage(root: .leaf(CollageCell(kind: .empty)))]
         let o4 = runExport(store, project: single, options: options, name: "单张")
         check(o4?.failure == nil && o4?.files == ["单张.jpg"], "单张模式照旧", "\(o4?.files ?? [])")
+    }
+
+    // MARK: - 4. 空照片格
+
+    private static func emptySlots(check: Checks) {
+        let tray = CollagePhotoRef(id: "p1", path: "/nonexistent/selftest/p1.jpg", width: 3000, height: 2000)
+        func single(_ root: CollageNode) -> CollageProject {
+            var p = CollageProject()
+            p.canvas = CollageCanvas(name: "自检单张", width: 300, height: 400)
+            p.photos = [tray]
+            p.pages = [CollagePage(root: root)]
+            return p
+        }
+        func count(_ p: CollageProject) -> Int { CollageStore.emptyPhotoSlots(project: p).count }
+
+        let blank = single(CollageLayout.blankRoot(for: CollageCanvas(name: "自检单张", width: 300, height: 400)))
+        check(count(blank) == 1, "空白页的照片格：1 个", "\(count(blank))")
+        let warning = CollageStore.emptySlotWarning(CollageStore.emptyPhotoSlots(project: blank), project: blank) ?? ""
+        check(warning.hasPrefix("有 1 个空照片格"), "单页：「有 1 个空照片格」", warning)
+
+        let filled = single(.split(.row, 0.5, .leaf(photoCell("p1")), .leaf(CollageCell(kind: .empty))))
+        check(count(filled) == 0, "放了托盘里的照片 + 留白格：0 个", "\(count(filled))")
+        check(CollageStore.emptySlotWarning([], project: filled) == nil, "没有空格：不提醒")
+        var text = CollageCell(kind: .text)
+        text.text = CollageText()
+        let gone = single(.split(.column, 0.5, .leaf(photoCell("不在托盘")), .leaf(text)))
+        check(count(gone) == 1, "照片不在托盘里的照片格算空，文字格不算", "\(count(gone))")
+
+        var freeform = single(.leaf(CollageCell(kind: .photo)))
+        freeform.pages[0].freeform = true
+        check(count(freeform) == 0, "散落版不看切分树", "\(count(freeform))")
+        var sheet = single(.leaf(CollageCell(kind: .photo)))
+        sheet.pages[0].contactSheet = CollageContactSheet()
+        check(count(sheet) == 0, "印样整页按片条画，不看切分树", "\(count(sheet))")
+
+        // 相册 8 个跨页，第 3、7 个各留了一页空（胶装单张跨页那种：左页空着）
+        var album = albumProject(pages: 8)
+        album.photos = [tray]
+        let half = CollageNode.split(.row, 0.5, .leaf(CollageCell(kind: .photo)), .leaf(photoCell("p1")))
+        album.pages[2].root = half
+        album.pages[6].root = half
+        album.pages[0].root = .split(.row, 0.5, .leaf(photoCell("p1")), .leaf(photoCell("p1")))
+        let slots = CollageStore.emptyPhotoSlots(project: album)
+        let albumWarning = CollageStore.emptySlotWarning(slots, project: album) ?? ""
+        check(slots.map(\.page) == [2, 6] && slots.allSatisfy { $0.path == [0] }, "相册：第 3、7 个跨页的左页",
+              "\(slots.map { "\($0.page):\($0.path)" })")
+        check(albumWarning.hasPrefix("第 3、7 个跨页上有 2 个空照片格"), "相册：提醒写对跨页号", albumWarning)
+        var many = albumProject(pages: 10)
+        many.pages = many.pages.map { _ in CollagePage(root: .leaf(CollageCell(kind: .photo))) }
+        let manyWarning = CollageStore.emptySlotWarning(CollageStore.emptyPhotoSlots(project: many), project: many) ?? ""
+        check(manyWarning.hasPrefix("第 1、2、3、4、5、6、7、8 等 10 个跨页上有 10 个空照片格"), "跨页多时只列前 8 个", manyWarning)
+    }
+
+    @MainActor
+    private static func emptySlotConfirm(_ store: CollageStore, _ dir: URL, check: Checks) {
+        let fm = FileManager.default
+        func files(_ d: URL) -> [String] { ((try? fm.contentsOfDirectory(atPath: d.path)) ?? []).filter { !$0.hasPrefix(".") }.sorted() }
+        // 托盘是空的、加一页空白页：一个空照片格
+        let a = dir.appendingPathComponent("a")
+        var options = CollageStore.ExportOptions()
+        options.outputPath = a.path
+        store.exportOptions = options
+        store.exportName = "空格"
+        store.addPage()
+        let slots = CollageStore.emptyPhotoSlots(project: store.project)
+        check(slots.count == 1 && store.exportBlockedReason == nil, "加一页空白页：1 个空照片格、可以导出",
+              "\(slots.count) \(store.exportBlockedReason ?? "")")
+        store.export()
+        check(store.exportConfirm?.hasPrefix("有 1 个空照片格") == true && !store.isExporting && files(a).isEmpty,
+              "有空格：先不导，等确认", "\(store.exportConfirm ?? "nil") 导出中=\(store.isExporting) \(files(a))")
+        store.export(confirmed: true)
+        spin(60) { !store.isExporting }
+        check(store.exportConfirm == nil && files(a) == ["空格.jpg"], "点了「仍然导出」：导出来", "\(files(a))")
+
+        // 换成一个文字格：没有空格，直接导、不问（不用留白格换：版式语法里没照片的照片格就写成留白，
+        // applyDesignedLayout 的 snap 会把原来那个空照片格原样留下）
+        let b = dir.appendingPathComponent("b")
+        options.outputPath = b.path
+        store.exportOptions = options
+        var text = CollageCell(kind: .text)
+        text.text = CollageText()
+        store.applyDesignedLayout(.leaf(text))
+        let none = CollageStore.emptyPhotoSlots(project: store.project).isEmpty
+        store.export()
+        let asked = store.exportConfirm
+        let started = store.isExporting
+        spin(60) { !store.isExporting }
+        check(none && asked == nil && started && files(b) == ["空格.jpg"], "没有空格：不问，直接导出",
+              "空格没了=\(none) \(asked ?? "nil") 开始了=\(started) \(files(b))")
     }
 }

@@ -46,6 +46,17 @@ struct CollageView: View {
             CollageMasks.warmUp()
         }
         .background(CollageSessionWatch(batchStore: batchStore) { attachSession() })
+        // 有空照片格时导出前问一次（store.export 设 exportConfirm）
+        .alert("有空照片格，仍要导出吗？", isPresented: exportConfirmShown) {
+            Button("仍然导出") { store.export(confirmed: true) }
+            Button("取消", role: .cancel) { store.exportConfirm = nil }
+        } message: {
+            Text((store.exportConfirm ?? "") + "。从托盘拖照片进去，或者选中那一格「删除格子」。")
+        }
+    }
+
+    private var exportConfirmShown: Binding<Bool> {
+        Binding(get: { store.exportConfirm != nil }, set: { if !$0 { store.exportConfirm = nil } })
     }
 
     private func attachSession() {

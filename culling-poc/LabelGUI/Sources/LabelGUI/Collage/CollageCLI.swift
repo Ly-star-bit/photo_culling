@@ -2408,6 +2408,11 @@ enum CollageOpsScript {
                 // 走导出全流程（无头模式下不会在访达里弹窗口）。
                 store.exportOptions.outputPath = arg
                 store.export()
+                if let ask = store.exportConfirm {
+                    // 界面上会弹确认框（有空照片格）：脚本照「仍然导出」走，把那句话打出来
+                    print("  导出确认: " + ask)
+                    store.export(confirmed: true)
+                }
                 spin(300) { !store.isExporting }
                 print("  " + store.progressText)
                 let found = (try? FileManager.default.subpathsOfDirectory(atPath: arg)) ?? []

@@ -1193,6 +1193,8 @@ extension LiveHandlers {
         if let k = askedScale { options.scale = k }
         if let f = (req.params["format"] as? String).flatMap(CollageExport.Format.init(rawValue:)) { options.format = f }
         let name = req.params["name"] as? String ?? ""
+        // 空照片格（和导出按钮的确认框同一个判断）：照样导出，warnings 里报
+        let emptySlots = CollageStore.emptyPhotoSlots(project: project)
         let started = Date()
         let outcome = await withCheckedContinuation { (cont: CheckedContinuation<CollageStore.ExportOutcome, Never>) in
             collage.startExport(project: project, options: options, name: name, reveal: false) { cont.resume(returning: $0) }
@@ -1231,6 +1233,13 @@ extension LiveHandlers {
         if !settled {
             warnings.append(MCPReadModel.warning("hints_pending", "路人信息还没算完：这次导出的裁切可能和算完以后不一样。",
                                                  hint: "想要稳定的结果，过一会儿再导一次"))
+        }
+        if let w = CollageStore.emptySlotWarning(emptySlots, project: project) {
+            var item = MCPReadModel.warning("empty_slots", w,
+                                            hint: "collage_get_state 的 cells 里 kind 是 photo、photo_id 是 null 的就是：用 collage_set_layout 放上照片或者去掉这一格；确实要一块底色就不用管")
+            item["pages"] = Set(emptySlots.map { $0.page + 1 }).sorted()
+            item["count"] = emptySlots.count
+            warnings.append(item)
         }
         if let w = outcome.warning {
             warnings.append(MCPReadModel.warning("export_degraded", w, hint: "多半是原图挪走了、移动硬盘没插：请用户看一下"))

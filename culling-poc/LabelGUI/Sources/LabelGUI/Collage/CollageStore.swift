@@ -232,6 +232,9 @@ final class CollageStore: ObservableObject {
     @Published private(set) var progressText = ""
     @Published private(set) var progressFraction: Double?
     @Published var lastError: String?
+    /// 导出按钮要先问一句的话（有空照片格，emptySlotWarning）：界面弹确认框，点「仍然导出」= export(confirmed: true)。
+    /// nil = 不用问。
+    @Published var exportConfirm: String?
     @Published private(set) var notice: String?
     @Published private(set) var busyText: String?
     /// 相册去重拿掉的照片（可以一键加回）。
@@ -3487,8 +3490,15 @@ final class CollageStore: ObservableObject {
         var scale = 1
     }
 
-    func export() {
+    /// 导出按钮（⌘E）。有空照片格时先不导，exportConfirm 写上那句话等用户点一下（只在有空格时问，不是每次都弹）；
+    /// confirmed = 用户已经点了「仍然导出」。
+    func export(confirmed: Bool = false) {
         guard exportBlockedReason == nil else { return }
+        if !confirmed, let ask = Self.emptySlotWarning(Self.emptyPhotoSlots(project: project), project: project) {
+            exportConfirm = ask
+            return
+        }
+        exportConfirm = nil
         startExport(project: project, options: exportOptions, name: exportName, reveal: true)
     }
 
@@ -3654,6 +3664,42 @@ final class CollageStore: ObservableObject {
     }
 
     static let fillerBodyWarning = "正文还是灰条或占位字：印出来是要被人读的，在「文字」里换成自己的字"
+
+    /// 一个空照片格：kind 是 .photo，却没有照片（没放，或者那张已经不在托盘里）。导出时这一格什么都不画，印出来是一块底色。
+    struct EmptySlot: Hashable {
+        /// 第几页（从 0 起）。
+        var page: Int
+        var path: [Int]
+    }
+
+    /// 全部页里的空照片格（按页、阅读顺序）。和渲染器网格页 .photo 那一支同一个判断：kind == .photo、photoID 为 nil
+    /// 或者不在托盘里。.empty 是有意留白（错落、电影黑边）不算，文字格不算；散落版没分到照片的相纸导出时整张不印
+    /// （CollageItems.unprinted），印样整页按片条画，都不会留窟窿，不看。导出按钮的确认框和 MCP collage_export 共用。
+    nonisolated static func emptyPhotoSlots(project: CollageProject) -> [EmptySlot] {
+        let ids = Set(project.photos.map(\.id))
+        var out: [EmptySlot] = []
+        for (i, page) in project.pages.enumerated() where !page.freeform && page.contactSheet == nil {
+            let frames = CollageLayout.pageGeometry(page.root, canvas: project.canvas, style: project.style).frames
+            for f in frames where f.cell.kind == .photo && !f.rect.isEmpty {
+                if let id = f.cell.photoID, ids.contains(id) { continue }
+                out.append(EmptySlot(page: i, path: f.path))
+            }
+        }
+        return out
+    }
+
+    /// 有空照片格时导出前提醒的那句话（确认框、MCP 的 empty_slots 警告用同一句）；没有 = nil。
+    nonisolated static func emptySlotWarning(_ slots: [EmptySlot], project: CollageProject) -> String? {
+        guard !slots.isEmpty else { return nil }
+        let unit = project.mode == .album ? "个跨页" : "页"
+        var at = ""
+        if project.pages.count > 1 {
+            let pages = Set(slots.map(\.page)).sorted()
+            let listed = pages.prefix(8).map { "\($0 + 1)" }.joined(separator: "、")
+            at = "第 \(listed)" + (pages.count > 8 ? " 等 \(pages.count) " : " ") + unit + "上"
+        }
+        return "\(at)有 \(slots.count) 个空照片格：导出来是一块底色（预览里的虚线框不会印出来）"
+    }
 
     /// 印刷画布（≥ 150 dpi）上有正文是灰条 / 占位字。
     nonisolated static func fillerBody(_ report: CollageRender.RenderReport, canvas: CollageCanvas) -> Bool {
