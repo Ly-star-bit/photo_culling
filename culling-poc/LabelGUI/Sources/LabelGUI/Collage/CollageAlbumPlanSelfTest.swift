@@ -123,6 +123,24 @@ enum CollageAlbumPlanSelfTest {
         let tight = CollageStyleFineArt.plan(book.photos, dedupe: true, chapterMono: true, similarity: book.similarity,
                                              budget: CollageAlbumBudget(spreads: 8))
         check(tight.spreads.count > 8, "fine-art 压到 8 个放不下（每跨页最多 3 张）：多出来、不删片", "\(tight.spreads.count) 个")
+
+        // fine-art 每跨页固定 1–3 张、不看目标里的每跨页张数（命令行 / ops 的 20@1-2、默认编排时设的再换成 fine-art
+        // 都能把 1–2 带进来）：和 1–6 编出来一样，提示照实际的 3 张说，不说用户填的 2。
+        let sig20 = CollageStyleFineArtSelfTest.signature(CollageStyleFineArt.plan(
+            book.photos, dedupe: true, chapterMono: true, similarity: book.similarity, budget: CollageAlbumBudget(spreads: 20)))
+        let perSpreadSigs: [String] = [(1, 2), (2, 4), (1, 1)].map { lo, hi in
+            let b = CollageAlbumBudget(spreads: 20, minPerSpread: lo, maxPerSpread: hi)
+            let p = CollageStyleFineArt.plan(book.photos, dedupe: true, chapterMono: true, similarity: book.similarity, budget: b)
+            return CollageStyleFineArtSelfTest.signature(p)
+        }
+        check(perSpreadSigs.allSatisfy { $0 == sig20 }, "fine-art 不看每跨页张数：1–2、2–4、1–1 和 1–6 编出来一样（固定 1–3 张）",
+              perSpreadSigs.map { $0 == sig20 ? "同" : "不同" }.joined(separator: " "))
+        let capped2 = CollageAlbumBudget(spreads: 8, minPerSpread: 2, maxPerSpread: 2)
+        let overText = CollageAlbumBudget.outcome(spreads: 12, budget: capped2, photos: 30, fineArt: true) ?? ""
+        let underText = CollageAlbumBudget.outcome(spreads: 5, budget: capped2, photos: 9, fineArt: true) ?? ""
+        check(overText.contains("最多 \(CollageStyleFineArt.maxPerSpread) 张") && !overText.contains("最多 2 张")
+              && !underText.contains("至少"),
+              "fine-art 的提示照实际规则说（最多 3 张，不提用户填的每跨页张数）", overText + " / " + underText)
     }
 
     static func checkBudgetModel(check: (Bool, String, String) -> Void) {
@@ -180,6 +198,10 @@ enum CollageAlbumPlanSelfTest {
             outcome(.weddingAlbum, 18, 8, nil) == "18@8-8",
             outcome(.weddingAlbum, 18, 6, nil) == "18@6-6",
             outcome(.weddingAlbum, 18, 8, 7) == "错",
+            // 整本婚礼相册是 fine-art：每跨页固定 1–3 张，最多给 1、2 回参数不对（以前照收、报 2，编出来照样有 3 张的）。
+            outcome(.weddingAlbum, 18, nil, 2) == "错",
+            outcome(.weddingAlbum, 18, 1, 1) == "错",
+            outcome(.weddingAlbum, 18, nil, 3) == "18@1-3",
         ]
         check(mcp.allSatisfy { $0 }, "MCP 成套的 spreads：不给沿用、0 改回自动、只对整本婚礼相册、写错回参数不对",
               mcp.map { $0 ? "✓" : "✗" }.joined())

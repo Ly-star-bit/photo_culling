@@ -285,7 +285,7 @@ extension CollageStyleFineArt {
         // 扉页的色调同样看照片本身。
         if title.isMonochrome == true { spreads[0].fineArt?.look = monoLook }
         if let b = budget?.normalized, spreads.count > b.spreads {
-            compress(&spreads, toward: b.spreads, cap: b.maxPerSpread, similar: similar)
+            compress(&spreads, toward: b.spreads, similar: similar)
         }
         return CollageAlbum.Plan(spreads: spreads, dropped: dropped, theme: .fineArt, budget: budget)
     }

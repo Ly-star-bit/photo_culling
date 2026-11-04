@@ -10,7 +10,7 @@ struct CollageAlbumBudget: Codable, Hashable {
     var spreads: Int
     /// 每跨页最少几张（扉页固定一张，不算在里面）。
     var minPerSpread = 1
-    /// 每跨页最多几张。婚礼 fine-art 另外还有自己的上限（3 张）。
+    /// 每跨页最多几张。只对默认编排：婚礼 fine-art 每跨页固定 1–3 张（R3），最少、最多都不看。
     var maxPerSpread = 6
 
     static let spreadsRange = 1...200
@@ -46,12 +46,13 @@ struct CollageAlbumBudget: Codable, Hashable {
         guard let b = budget?.normalized else { return nil }
         if count == b.spreads { return "正好 \(b.spreads) 个跨页" }
         if count > b.spreads {
-            let cap = fineArt ? "婚礼 fine-art 每跨页最多 \(min(b.maxPerSpread, CollageStyleFineArt.maxPerSpread)) 张"
+            // fine-art 不看目标里的每跨页张数（固定 1–3 张）：照实际的上限说，不说用户填的那个。
+            let cap = fineArt ? "婚礼 fine-art 每跨页最多 \(CollageStyleFineArt.maxPerSpread) 张"
                 : "每跨页最多 \(b.maxPerSpread) 张"
             let fix = fineArt ? "编排换「默认」、或从托盘拿掉一些" : "调高每跨页张数、或从托盘拿掉一些"
             return "比目标 \(b.spreads) 个多 \(count - b.spreads) 个：\(cap)放不下这 \(photos) 张（目标跨页数不替你删片）—— \(fix)"
         }
-        let why = b.minPerSpread > 1 ? "\(photos) 张照片、每跨页至少 \(b.minPerSpread) 张" : "只有 \(photos) 张照片"
+        let why = b.minPerSpread > 1 && !fineArt ? "\(photos) 张照片、每跨页至少 \(b.minPerSpread) 张" : "只有 \(photos) 张照片"
         return "比目标 \(b.spreads) 个少 \(b.spreads - count) 个：\(why)"
     }
 }
@@ -288,7 +289,7 @@ extension CollageStyleFineArt {
     /// 对页双图 + 单 → 一主两辅），一张都不拿掉、每跨页还是最多 3 张；扉页、章节开篇不动。先并正文里落单的，
     /// 再并呼吸页、每章收尾的单张；同姿势、亮度差太多的先不并，实在并不动了再放开。并到目标或者再也并不动为止
     /// （多出来的跨页条上标橙）。比目标少不加页。
-    /// cap：并出来的跨页最多几张（fine-art 的 3 张和目标里的「每跨页最多」取小的）。
+    /// cap：并出来的跨页最多几张（fine-art 固定 3 张：plan 不传目标里的「每跨页最多」，那个只对默认编排）。
     /// （辅助函数都拿数组当参数、不捕获 inout：release 下 Swift 6.3 的 CopyPropagation 遇到捕获 inout 的局部函数会崩。）
     static func compress(_ spreads: inout [CollageAlbum.Spread], toward target: Int, cap: Int = maxPerSpread,
                          similar: [String: Set<String>]) {
@@ -401,30 +402,33 @@ struct CollageAlbumBudgetControls: View {
                     Text("\(b.spreads) 个跨页（\(b.spreads * 2)P）").monospacedDigit()
                 }
                 .help("1 个跨页 = 摊开的左右两页；印厂说的「P」是单页：\(b.spreads) 个跨页 = \(b.spreads * 2)P（含扉页）")
-                HStack(spacing: 4) {
-                    Text("每跨页")
-                    Stepper(value: Binding(get: { b.minPerSpread }, set: { v in
-                        var next = b
-                        next.minPerSpread = v
-                        next.maxPerSpread = max(next.maxPerSpread, v)
-                        store.setAlbumBudget(next, coalesce: true)
-                    }), in: CollageAlbumBudget.perSpreadRange) {
-                        Text("\(b.minPerSpread)").monospacedDigit()
+                // fine-art 每跨页固定 1–3 张、不看这两个数：不给调（存着的值留给换回默认编排）。
+                if !fineArt {
+                    HStack(spacing: 4) {
+                        Text("每跨页")
+                        Stepper(value: Binding(get: { b.minPerSpread }, set: { v in
+                            var next = b
+                            next.minPerSpread = v
+                            next.maxPerSpread = max(next.maxPerSpread, v)
+                            store.setAlbumBudget(next, coalesce: true)
+                        }), in: CollageAlbumBudget.perSpreadRange) {
+                            Text("\(b.minPerSpread)").monospacedDigit()
+                        }
+                        .fixedSize()
+                        Text("–")
+                        Stepper(value: Binding(get: { b.maxPerSpread }, set: { v in
+                            var next = b
+                            next.maxPerSpread = v
+                            next.minPerSpread = min(next.minPerSpread, v)
+                            store.setAlbumBudget(next, coalesce: true)
+                        }), in: CollageAlbumBudget.perSpreadRange) {
+                            Text("\(b.maxPerSpread) 张").monospacedDigit()
+                        }
+                        .fixedSize()
                     }
-                    .fixedSize()
-                    Text("–")
-                    Stepper(value: Binding(get: { b.maxPerSpread }, set: { v in
-                        var next = b
-                        next.maxPerSpread = v
-                        next.minPerSpread = min(next.minPerSpread, v)
-                        store.setAlbumBudget(next, coalesce: true)
-                    }), in: CollageAlbumBudget.perSpreadRange) {
-                        Text("\(b.maxPerSpread) 张").monospacedDigit()
-                    }
-                    .fixedSize()
+                    .help("每个跨页最少、最多放几张（扉页固定一张）")
                 }
-                .help("每个跨页最少、最多放几张（扉页固定一张）")
-                let rule = fineArt ? "婚礼 fine-art 每跨页最多 3 张：并掉落单的单图跨页往目标凑，凑不够就多出几个（不删片）"
+                let rule = fineArt ? "婚礼 fine-art 每跨页固定 1–3 张（每跨页张数只对默认编排）：并掉落单的单图跨页往目标凑，凑不够就多出几个（不删片）"
                     : "照片全部排进去、不替你删：每跨页最多 \(b.maxPerSpread) 张放不下时，多出来的跨页在跨页条上标橙"
                 Text(rule + "。改完点工具条的「自动编排」生效")
                     .font(.caption2).foregroundStyle(.secondary)
@@ -491,6 +495,12 @@ enum CollageBudgetChange {
                 return .failure(Bad(message: "spreads=0 是改回自动（不限跨页数），不能再给 min_per_spread / max_per_spread"))
             }
             return .success(.set(nil))
+        }
+        // 整本婚礼相册是婚礼 fine-art 编排：每跨页固定 1–3 张，给的最多比 3 小也做不到（以前照收、报的是用户给的数，
+        // 编出来照样有 3 张的跨页）。
+        if let h = hi, h < CollageStyleFineArt.maxPerSpread {
+            return .failure(Bad(message: "整本婚礼相册按婚礼 fine-art 编排，每跨页固定 1–3 张：max_per_spread 不能小于 "
+                                + "\(CollageStyleFineArt.maxPerSpread)（要每跨页最多 1–2 张，请用户在 app 里把相册的编排换成「默认」再点「自动编排」）"))
         }
         let a = lo ?? 1
         // 只给了最少（比如 8）：最多跟着抬到最少（和检视器的步进器一样），不拿没给的默认 6 去报「最少比最多大」。
