@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-// 退出确认（全项目审查 S05d，和 S01a 的「判决没存上」共用）：分析、VLM、导卡在跑时按 ⌘Q / 程序坞退出先问一句；
+// 退出确认（全项目审查 S05d，和 S01a 的「判决没存上」共用；拼图工程、标注没存上也问，见 QuitSaveCheck）：分析、VLM、导卡在跑时按 ⌘Q / 程序坞退出先问一句；
 // 选「停下并退出」走现有的 cancel()，等它把已完成的写完再真的退（.terminateLater）—— willTerminate 是同步的，
 // 等不到后台引擎写盘，只确认一句「确定退出」照样丢掉这一轮。注销、重启、关机不弹框，直接停下保存再放行。
 // 判断全在纯函数（QuitGuard）和可注入的流程（QuitCoordinator）里，--quit-selftest 断言；弹框只在 AppDelegate 这一条路上，
@@ -23,7 +23,7 @@ enum QuitGuard {
 
     struct State: Equatable {
         var running: Job?
-        /// 判决、客户选中、对时没存上（BatchStore.persistError，已经重试过一次还是失败）。
+        /// 判决、客户选中、对时没存上（BatchStore.persistError），拼图工程、标注没存上（QuitSaveCheck）—— 都已经重试过一次还是失败。
         var unsaved: String?
     }
 
@@ -142,12 +142,40 @@ extension BatchStore: QuitTarget {
     var runningLongTasks: [LongTaskKind] { longTasks.active }
 }
 
+/// 判决以外，退出前还要看的存盘：拼图工程（collage.json）、标注（labels.csv）。现在写一次（防抖里还没到点的、上次写失败的），
+/// 返回还没存上的原因（nil = 盘上是最新的）。以前 ⌘Q 只看判决那条红条：拼图写不进去（盘满）时直接退，willTerminate 里
+/// 再写一次也失败，相册改动就没了。
+@MainActor
+protocol QuitSaveCheck: AnyObject {
+    func unsavedForQuit() -> String?
+}
+
+extension CollageStore: QuitSaveCheck {
+    /// 原件读坏了、一下没动过的不算（见 projectUnsavedForQuit）。
+    func unsavedForQuit() -> String? {
+        guard let why = projectUnsavedForQuit() else { return nil }
+        let name = photoDir.map { "「\($0.lastPathComponent)」的" } ?? ""
+        return "\(name)拼图没存上：\(why)"
+    }
+}
+
+extension LabelStore: QuitSaveCheck {
+    /// flush 只在改过（dirty）时写，写失败的 dirty 留着，所以这一下就是重试。flush 以后 saveError 还在 = 改过、没写上
+    /// （写失败，或者 labels.csv 读不出来、已禁用保存）；没改过的不会有 saveError。
+    func unsavedForQuit() -> String? {
+        flush()
+        return saveError.map { "标注没存上：\($0)" }
+    }
+}
+
 /// 一次退出请求怎么走：问不问、停不停、什么时候回 AppKit。弹框（ask）和回 AppKit（reply）都是注入的：
 /// GUI 里是 NSAlert 和 NSApp.reply(toApplicationShouldTerminate:)，自检里是假的。
 @MainActor
 final class QuitCoordinator {
     let target: QuitTarget
     let headless: Bool
+    /// 判决以外还要看的存盘（拼图工程、标注）：AppDelegate 给 AppModel 里的那两个，自检给假的。
+    let saveChecks: () -> [QuitSaveCheck]
     /// 弹框，返回 true = 选了退出那一边（停下并退出 / 仍然退出）。
     let ask: (QuitGuard.Decision) -> Bool
     let reply: (Bool) -> Void
@@ -157,29 +185,37 @@ final class QuitCoordinator {
     /// 已经在停了（.terminateLater 挂着）。
     private(set) var stopping = false
 
-    init(target: QuitTarget, headless: Bool, ask: @escaping (QuitGuard.Decision) -> Bool,
-         reply: @escaping (Bool) -> Void) {
+    init(target: QuitTarget, headless: Bool, saveChecks: @escaping () -> [QuitSaveCheck] = { [] },
+         ask: @escaping (QuitGuard.Decision) -> Bool, reply: @escaping (Bool) -> Void) {
         self.target = target
         self.headless = headless
+        self.saveChecks = saveChecks
         self.ask = ask
         self.reply = reply
     }
 
-    var state: QuitGuard.State {
+    func state(unsaved: String?) -> QuitGuard.State {
         QuitGuard.State(
             running: QuitGuard.runningJob(isRunning: target.isRunning, analyzing: target.analyzing,
                                           importing: target.importing, queuedCards: target.queuedCardImports,
                                           longTasks: target.runningLongTasks),
-            unsaved: target.persistError)
+            unsaved: unsaved)
+    }
+
+    /// 判决那边没存上的先再写一次，拼图、标注现在写一次（还没到点的、上次写失败的），再汇总还没存上的（nil = 都存上了）。
+    func unsavedAfterRetry() -> String? {
+        if target.persistError != nil { _ = target.retryPersist() }
+        let reasons: [String?] = [target.persistError] + saveChecks().map { $0.unsavedForQuit() }
+        let text = reasons.compactMap { $0 }.joined(separator: "\n")
+        return text.isEmpty ? nil : text
     }
 
     func shouldTerminate(reason: QuitGuard.Reason) -> NSApplication.TerminateReply {
         if headless { return .terminateNow }
         // 在停了还又按了一次 ⌘Q：不另起一轮，那一次的 terminateLater 还挂着，停完照样退。
         if stopping { return .terminateCancel }
-        // 判决没存上的先再写一次，写上了就不用问。
-        if target.persistError != nil { _ = target.retryPersist() }
-        let decision = QuitGuard.decide(headless: false, state: state, reason: reason)
+        // 判决没存上的先再写一次、拼图和标注现在写一次，写上了就不用问。
+        let decision = QuitGuard.decide(headless: false, state: state(unsaved: unsavedAfterRetry()), reason: reason)
         switch decision {
         case .quit:
             return .terminateNow
@@ -224,8 +260,8 @@ final class QuitCoordinator {
 
     private func finish(_ reason: QuitGuard.Reason) {
         stopping = false
-        // 停下来以后判决还有没存上的（盘满了）：再写一次，还不行而且是用户按的退出，再问一句。
-        if target.persistError != nil, !target.retryPersist(), reason == .user, let unsaved = target.persistError {
+        // 停下来以后判决、拼图、标注还有没存上的（盘满了）：再写一次，还不行而且是用户按的退出，再问一句。
+        if let unsaved = unsavedAfterRetry(), reason == .user {
             reply(ask(.askUnsaved(unsaved)))
             return
         }
@@ -238,12 +274,20 @@ final class QuitCoordinator {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// LabelGUIApp.init 建好 AppModel 以后设。
     static weak var batch: BatchStore?
+    /// 同一个 AppModel（拼图工程、标注退出前一起看存上没有）：和 batch 一起设。
+    static weak var model: AppModel?
     private var coordinator: QuitCoordinator?
+
+    /// 判决以外退出前要看的存盘：拼图工程、标注。
+    static func saveChecks() -> [QuitSaveCheck] {
+        guard let model else { return [] }
+        return [model.collage, model.labels]
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !AppRuntime.headless, let batch = Self.batch else { return .terminateNow }
         let coordinator = self.coordinator ?? QuitCoordinator(
-            target: batch, headless: false, ask: QuitAlert.ask,
+            target: batch, headless: false, saveChecks: { Self.saveChecks() }, ask: QuitAlert.ask,
             reply: { NSApplication.shared.reply(toApplicationShouldTerminate: $0) })
         self.coordinator = coordinator
         return coordinator.shouldTerminate(reason: QuitGuard.currentReason())

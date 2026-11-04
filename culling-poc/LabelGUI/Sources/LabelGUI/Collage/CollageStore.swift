@@ -4081,6 +4081,16 @@ final class CollageStore: ObservableObject {
     /// projectSaveProblem 是不是「原件读坏了、这次打开期间不存盘」（不是写失败）：腾空间、再改一下都存不上，
     /// 实时桥的 save_failed 要换一种说法（LiveHandlers.collagePersistReport）。
     var projectSaveIsRefused: Bool { projectSaveRefused != nil }
+    /// ⌘Q 退出确认（AppDelegate.swift 的 QuitSaveCheck）：还没到点的那一次现在写；上次写失败（盘满）、之后没再改过的再整份
+    /// 写一次（腾出空间以后不用先随便改一下）。返回还没存上的原因：写失败的；原件读坏了、这次打开以后又改过的（改动只在内存里）。
+    /// 原件读坏了、一下没动过的不算 —— 不然那种场次每次 ⌘Q 都误问「有改动没存上」。
+    func projectUnsavedForQuit() -> String? {
+        flushSaves()
+        if hasRefusedEdits { return projectSaveProblem }
+        guard projectSaveRefused == nil, let url = projectURL, projectWriteResult.failure(for: url) != nil else { return nil }
+        saveProject(inBackground: false)
+        return projectWriteResult.failure(for: url)
+    }
 
     /// 还没到点的那一次现在写；已经交给后台在写的，等它写完再回来（换场次、退出、实时桥回复之前盘上要是最新的）。
     private func flushProjectSave() {

@@ -758,6 +758,7 @@ struct LabelGUIApp: App {
         )
         _model = StateObject(wrappedValue: model)
         AppDelegate.batch = model.batch
+        AppDelegate.model = model
         // 「帮助 › 导出诊断信息…」要的界面状态（当前场次几张、AI 实时开没开，见 Diagnostics/Diagnostics.swift）。
         Diagnostics.model = model
     }
