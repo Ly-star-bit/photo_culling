@@ -18,7 +18,8 @@ struct ClientImportSheet: View {
     }
 
     static let intro = "粘贴客户发回来的：确认表里「复制我的选择」的那段、微信里回的文件名或编号（12、35、78 · 12-15 · 7221），" +
-        "或者 Pixieset 等导出的 .csv、Lightroom 文件名清单。认出来的标成「客户选中」（紫心、XMP 紫色标），不改判决。"
+        "或者 Pixieset 等导出的 .csv、Lightroom 文件名清单。认出来的标成「客户选中」（紫心、XMP 紫色标），不改判决；" +
+        "文件名后面写的修图要求（「DSCF7207 备注：去路人」「7207 黑白」）存成客户备注，复制原片时写成「精修要求.csv」。"
 
     var body: some View {
         let resolution = store.resolveClientReply(text)
@@ -48,7 +49,7 @@ struct ClientImportSheet: View {
                 Button("取消") { isPresented = false }
                     .keyboardShortcut(.cancelAction)
                 Button("标记为客户选中 (\(resolution.ids.count))") {
-                    store.importClientPicks(resolution.ids)
+                    store.importClientPicks(resolution.ids, notes: resolution.notes)
                     isPresented = false
                 }
                 .buttonStyle(.borderedProminent)
@@ -100,7 +101,8 @@ extension ClientReply {
 
 // MARK: - 无头测试入口（只给测试 / 自动化用，不开界面）
 //
-// LABELGUI_DATA_DIR=<临时> LabelGUI --proof-sheet <照片文件夹> --out <x.html> [--scope picks|picks+usable] [--ids a,b]
+// LABELGUI_DATA_DIR=<临时> LabelGUI --proof-sheet <照片文件夹> --out <x.html> [--scope picks|picks+usable] [--ids a,b] [--quota N]
+//     [--with-watermark [--signature sig.png] [--watermark-text 样片]]（不叫 --watermark：那是 main.swift 里单张水印的入口）
 // LABELGUI_DATA_DIR=<临时> LabelGUI --client-import <照片文件夹> (--text <回复.txt> | --clear) [--apply] [--undo]
 // LABELGUI_DATA_DIR=<临时> LabelGUI --copy-list <照片文件夹> --format lr|c1|lines [--scope all|picks|usable|client] [--ids a,b]
 // LABELGUI_DATA_DIR=<临时> LabelGUI --copy-originals <照片文件夹> --dest <目录> [--scope ...] [--ids a,b]
@@ -162,12 +164,39 @@ enum ClientPicksCLI {
         guard let out = option("--out") else { print("--proof-sheet 要 --out <x.html>"); exit(1) }
         let ids = option("--ids").map { $0.split(separator: ",").map(String.init) }
         let previous = store.proofSheets.last?.id
-        store.exportContactSheet(to: URL(fileURLWithPath: out), includeUsable: option("--scope") == "picks+usable", ids: ids)
+        let quota = option("--quota").flatMap(Int.init)
+        let watermark = CommandLine.arguments.contains("--with-watermark") ? proofWatermark() : nil
+        store.exportContactSheet(to: URL(fileURLWithPath: out), includeUsable: option("--scope") == "picks+usable", ids: ids,
+                                 quota: quota, watermark: watermark)
         waitAndReport(store)
         // 这次没记下新的一张（导出失败、取消）就算失败，别把上一张当成这次的。
         guard let sheet = store.proofSheets.last, sheet.id != previous else { exit(1) }
-        print("表号 \(sheet.id) · \(sheet.scope) · \(sheet.ids.count) 张: " + sheet.ids.joined(separator: " "))
+        let limit = sheet.quota.map { " · 套餐 \($0) 张" } ?? ""
+        print("表号 \(sheet.id) · \(sheet.scope) · \(sheet.ids.count) 张\(limit): " + sheet.ids.joined(separator: " "))
         exit(0)
+    }
+
+    /// --with-watermark：和界面上同一个快照（水印页的设置从数据目录的 watermark/state.json 读），--signature / --watermark-text
+    /// 再往上改。没东西可画就退出（和界面一样不导没水印的）。
+    @MainActor
+    private static func proofWatermark() -> ProofWatermark {
+        let marks = WatermarkStore(dataDir: appDataDir)
+        if let sig = option("--signature") {
+            marks.signatureURL = URL(fileURLWithPath: sig)
+            marks.config.signatureEnabled = true
+        }
+        if let text = option("--watermark-text") {
+            marks.config.exifText.enabled = true
+            marks.config.exifText.customText = text
+        }
+        guard let snapshot = marks.proofWatermark() else {
+            print("--with-watermark：水印页没有签名也没开文字（给 --signature <png> 或 --watermark-text <字>）")
+            exit(1)
+        }
+        let sig = snapshot.signature.map { "签名 \($0.width)×\($0.height)" } ?? "没有签名"
+        let text = snapshot.config.exifText.enabled ? "文字" : "没有文字"
+        print("水印: \(sig) · \(text) · 左下 · 不透明度 \(snapshot.config.opacity)")
+        return snapshot
     }
 
     @MainActor
@@ -175,6 +204,14 @@ enum ClientPicksCLI {
         let picks = store.items.map(\.id).filter(store.clientPicks.contains)
         print("\(label): 客户选中 \(store.clientPickCount) 张 · XMP 过期 \(store.xmpStaleCount) 张 · 能撤销 \(store.canUndoOverride ? "是" : "否")")
         print("  客户选中: " + (picks.isEmpty ? "-" : picks.joined(separator: " ")))
+        let noted = store.items.map(\.id).filter { store.clientNotes[$0] != nil }
+        print("  客户备注: " + notesText(noted, store.clientNotes))
+    }
+
+    /// 「DSCF7207=去路人 | DSCF7210=黑白」（按给的顺序）；没有 = 「-」。
+    private static func notesText(_ ids: [String], _ notes: [String: String]) -> String {
+        let pairs = ids.compactMap { id in notes[id].map { id + "=" + $0 } }
+        return pairs.isEmpty ? "-" : pairs.joined(separator: " | ")
     }
 
     @MainActor
@@ -193,8 +230,11 @@ enum ClientPicksCLI {
             for line in ClientReply.summary(r, existing: store.clientPicks) { print("预览: " + line) }
             print("认出: " + (r.ids.isEmpty ? "-" : r.ids.joined(separator: " ")))
             print("没认出: " + (r.unknown.isEmpty ? "-" : r.unknown.joined(separator: " | ")))
-            print("编号表: " + (r.sheet?.id ?? "-") + (r.usedSheet ? "（用到了）" : ""))
-            if args.contains("--apply") { store.importClientPicks(r.ids) }
+            let used: String = r.usedSheet ? "（用到了）" : ""
+            let limit: String = r.sheet?.quota.map { " · 套餐 \($0) 张" } ?? ""
+            print("编号表: \(r.sheet?.id ?? "-")\(used)\(limit)")
+            print("备注: " + notesText(r.ids, r.notes))
+            if args.contains("--apply") { store.importClientPicks(r.ids, notes: r.notes) }
         }
         if args.contains("--apply") {
             printPicks(store, "导入后")

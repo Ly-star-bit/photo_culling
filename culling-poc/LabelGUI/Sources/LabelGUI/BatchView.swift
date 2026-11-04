@@ -37,6 +37,10 @@ struct BatchView: View {
     /// 导出 JPG / 精华 Top N 各自的交付设置（DeliveryOptions 的 JSON；空 = 还没改过，用默认）。
     @AppStorage("batch.jpegDelivery") private var jpegDeliveryRaw = ""
     @AppStorage("batch.highlightsDelivery") private var highlightsDeliveryRaw = ""
+    /// 「导出选片确认表」菜单里的「带水印（用水印页的签名）」：记住，默认关。
+    @AppStorage("batch.proofWatermark") private var proofWatermarkOn = false
+    /// 水印页的只读快照（ContentView 给：它同时拿着水印页）；nil = 没有水印页（离屏快照），菜单里不出这一项。
+    private let proofWatermark: (@MainActor () -> ProofWatermark?)?
     /// 连拍挑选（全窗口，占审片模式的位置）。nil = 在网格。
     @State private var pickRequest: PickRequest?
     /// 网格实际宽度 — ↑/↓ 换行导航需要估算列数。
@@ -46,9 +50,10 @@ struct BatchView: View {
     @State private var viewport: GridViewport
 
     /// viewport 只给离屏测试用（--batch-ui --scroll-test 从外面读它，验证滚出去的格子会不会注销）。
-    init(store: BatchStore, viewport: GridViewport? = nil) {
+    init(store: BatchStore, viewport: GridViewport? = nil, proofWatermark: (@MainActor () -> ProofWatermark?)? = nil) {
         self.store = store
         _viewport = State(initialValue: viewport ?? GridViewport())
+        self.proofWatermark = proofWatermark
     }
 
     enum GridMode: String, CaseIterable {
@@ -1857,11 +1862,13 @@ struct BatchView: View {
     }
 
     /// 两条角标各一个 tooltip，代替以前每个小图标各挂一个（一格 8 个 .help）。
-    static func statusHelp(rank: Int?, manual: Bool, client: Bool, pick: Bool, groupSize: Int) -> String {
+    static func statusHelp(rank: Int?, manual: Bool, client: Bool, pick: Bool, groupSize: Int,
+                           note: String? = nil) -> String {
         var parts: [String] = []
         if let rank { parts.append("本场评分第 \(rank)") }
         if manual { parts.append("人工改判") }
-        if client { parts.append("客户选中") }
+        // 客户在确认表上写的备注（修图要求）跟着紫心一起看。
+        if client { parts.append(note.map { "客户选中（备注：\($0)）" } ?? "客户选中") }
         if pick { parts.append("精选") }
         if groupSize > 1 { parts.append("同场 \(groupSize) 张") }
         return parts.joined(separator: " · ")
@@ -2020,7 +2027,8 @@ struct BatchView: View {
                         .background(.black.opacity(0.55), in: Capsule())
                         .padding(4)
                         .help(Self.statusHelp(rank: rank, manual: manual, client: client,
-                                              pick: item.verdict == .pick, groupSize: groupSize))
+                                              pick: item.verdict == .pick, groupSize: groupSize,
+                                              note: client ? store.clientNotes[item.id] : nil))
                     }
                 }
                 // 左下一条：信息（淘汰理由 · VLM 平反 · 慢门 · 水平 · 合影睁眼）。
@@ -2324,6 +2332,13 @@ struct BatchView: View {
 
     /// `ids` 给定 = 只导这几张（「选中的照片」，大场次分批发）。
     private func exportContactSheet(includeUsable: Bool, ids: [String]? = nil) {
+        // 带水印：点的这一下在主线程拍水印页的快照（之后改水印页不影响这一张）。开着却没东西可画就不导 ——
+        // 不悄悄发出去一张没水印的。
+        let watermark = proofWatermarkOn ? proofWatermark?() : nil
+        if proofWatermarkOn, proofWatermark != nil, watermark == nil {
+            store.lastError = "「带水印」开着，可水印页没有签名也没开文字：先去水印页选签名图，或者把「带水印」关掉"
+            return
+        }
         modalPanelOpen = true      // 存储卡导完别在保存面板开着时切场次（导出的会变成新场次的）
         defer { modalPanelOpen = false }
         let panel = NSSavePanel()
@@ -2331,8 +2346,12 @@ struct BatchView: View {
         if let htmlType = UTType(filenameExtension: "html") {
             panel.allowedContentTypes = [htmlType]
         }
+        // 套餐张数：默认这一场上次导出那张表填的。
+        let accessory = ProofSheetSaveAccessory(quota: store.proofSheets.last?.quota)
+        panel.accessoryView = accessory.view
         if panel.runModal() == .OK, let url = panel.url {
-            store.exportContactSheet(to: url, includeUsable: includeUsable, ids: ids)
+            store.exportContactSheet(to: url, includeUsable: includeUsable, ids: ids, quota: accessory.quota,
+                                     watermark: watermark)
         }
     }
 
@@ -2345,19 +2364,29 @@ struct BatchView: View {
         let counts = store.verdictCounts
         let keepers = counts.pick + counts.usable
         let selectedCount = selectedIDs.count
+        let marked = proofWatermarkOn && proofWatermark != nil
         Menu("导出选片确认表 (HTML)") {
-            Button("仅精选 (\(counts.pick) 张 · \(ProofSheetPage.estimate(counts.pick)))...") {
+            Button("仅精选 (\(counts.pick) 张 · \(ProofSheetPage.estimate(counts.pick, watermark: marked)))...") {
                 exportContactSheet(includeUsable: false)
             }
             .disabled(counts.pick == 0)
-            Button("精选 + 可用 (\(keepers) 张 · \(ProofSheetPage.estimate(keepers)))...") {
+            Button("精选 + 可用 (\(keepers) 张 · \(ProofSheetPage.estimate(keepers, watermark: marked)))...") {
                 exportContactSheet(includeUsable: true)
             }
             .disabled(keepers == 0)
-            Button("选中的照片 (\(selectedCount) 张 · \(ProofSheetPage.estimate(selectedCount)))...") {
+            Button("选中的照片 (\(selectedCount) 张 · \(ProofSheetPage.estimate(selectedCount, watermark: marked)))...") {
                 exportContactSheet(includeUsable: false, ids: selectedInGridOrder)
             }
             .disabled(selectedCount == 0)
+            if let proofWatermark {
+                Divider()
+                // 水印页没签名也没文字：开不了（已经开着的照样能关）。
+                let available = proofWatermark() != nil
+                Toggle(available ? "带水印（用水印页的签名）" : "带水印（水印页还没有签名或文字）", isOn: $proofWatermarkOn)
+                    .disabled(!available && !proofWatermarkOn)
+                    .help("每张小样左下角淡淡地压一个水印页的签名 / 文字（不平铺、不挡脸，右上角留给客户点的 ♥）；" +
+                          "只画在确认表里，预览和原片都不动。相框、画布比例不带过来")
+            }
         }
         .disabled(store.isRunning)
         Button("导入客户选择...") { showClientImport = true }

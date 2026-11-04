@@ -21,7 +21,7 @@ struct ContentView: View {
 
     var body: some View {
         TabView(selection: $model.tab) {
-            BatchView(store: batchStore)
+            BatchView(store: batchStore, proofWatermark: { [watermarkStore] in watermarkStore.proofWatermark() })
                 .tabItem { Label("批量处理", systemImage: "square.grid.3x3") }
                 .tag(AppTab.batch)
 

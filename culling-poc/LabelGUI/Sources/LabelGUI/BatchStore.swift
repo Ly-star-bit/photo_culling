@@ -301,6 +301,9 @@ final class BatchStore: ObservableObject {
     @Published private(set) var clientPicks: Set<String> = []
     /// 「只看客户选中」：和判决筛选叠加；复制文件名 / 复制原片没选中照片时就按它定范围。换场次清掉。
     @Published var clientPickFilter = false
+    /// 客户在确认表上给照片写的备注（修图要求：「去路人」「瘦脸」），照片 id → 原话。导入客户选择时和客户选中一起进来、
+    /// 同一步 ⌘Z；存 client_notes.json。复制原片时写成「精修要求.csv」。不写进 XMP（dc:description 放的是判决理由）。
+    @Published private(set) var clientNotes: [String: String] = [:]
 
     // Slider thresholds. Sharpness below → reject; worst clip pct above → reject;
     // face quality below → reject (0 disables; only applies to photos with a face).
@@ -1006,6 +1009,7 @@ final class BatchStore: ObservableObject {
             loadThresholds()
             loadOverrides()
             loadClientPicks()
+            loadClientNotes()
             loadXMPState()
             loadBodyOffsets()
             loadResults()
@@ -1098,6 +1102,7 @@ final class BatchStore: ObservableObject {
         loadOverrides()
         loadAIOverrides()
         loadClientPicks()
+        loadClientNotes()
         loadXMPState()
         loadBodyOffsets()
         loadResults()
@@ -1471,6 +1476,7 @@ final class BatchStore: ObservableObject {
         loadOverrides()
         loadAIOverrides()
         loadClientPicks()
+        loadClientNotes()
         loadXMPState()
         loadBodyOffsets()
         loadResults()
@@ -1688,6 +1694,8 @@ final class BatchStore: ObservableObject {
     private enum UndoStep {
         case verdicts([(id: String, previous: Verdict?, accepted: Bool, ai: AIOverride?)])
         case clientPicks(Set<String>)
+        /// 一次导入带备注的客户回复 / 连备注一起清除：之前的整份客户选中和整份客户备注。
+        case clientReply(picks: Set<String>, notes: [String: String])
         /// 按机身对时之前的整份偏移。
         case bodyOffsets([String: Int])
     }
@@ -1728,6 +1736,7 @@ final class BatchStore: ObservableObject {
         guard let step = overrideUndoStack.popLast() else { return [] }
         guard case .verdicts(let last) = step else {
             if case .clientPicks(let previous) = step { return restoreClientPicks(previous) }
+            if case .clientReply(let picks, let notes) = step { return restoreClientReply(picks: picks, notes: notes) }
             if case .bodyOffsets(let previous) = step { restoreBodyOffsets(previous) }
             return []
         }
@@ -2048,6 +2057,49 @@ final class BatchStore: ObservableObject {
         clientPicks = previous
         saveClientPicks()
         applyThresholds()
+        return items.map(\.id).filter(touched.contains)
+    }
+
+    // MARK: - 客户备注（client_notes.json）
+
+    private var clientNotesPath: URL { sessionDir.appendingPathComponent("client_notes.json") }
+
+    private func loadClientNotes() {
+        clientNotes = (try? Data(contentsOf: clientNotesPath))
+            .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+    }
+
+    private func saveClientNotes() {
+        if clientNotes.isEmpty {
+            try? FileManager.default.removeItem(at: clientNotesPath)
+            return
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        do {
+            try encoder.encode(clientNotes).write(to: clientNotesPath, options: .atomic)
+        } catch {
+            lastError = "客户备注没存上: \(error.localizedDescription)"
+        }
+    }
+
+    /// 客户选中和客户备注一起换（导入带备注的回复；清除客户选中时备注一起清）：一条撤销记录，⌘Z 两样一起回去。
+    func setClientReply(picks: Set<String>, notes: [String: String]) {
+        guard picks != clientPicks || notes != clientNotes else { return }
+        pushUndoStep(.clientReply(picks: clientPicks, notes: clientNotes))
+        clientPicks = picks
+        clientNotes = notes
+        saveClientPicks()
+        saveClientNotes()
+        applyThresholds()
+    }
+
+    /// ⌘Z 撤回一次带备注的导入 / 清除：选中变了的、备注变了的都算动到（按网格顺序）。
+    private func restoreClientReply(picks: Set<String>, notes: [String: String]) -> [String] {
+        let renoted = Set(clientNotes.keys).union(notes.keys).filter { clientNotes[$0] != notes[$0] }
+        clientNotes = notes
+        saveClientNotes()
+        let touched = Set(restoreClientPicks(picks)).union(renoted)
         return items.map(\.id).filter(touched.contains)
     }
 
@@ -3100,14 +3152,17 @@ final class BatchStore: ObservableObject {
     /// WeChat as one file. Preview JPEGs are embedded base64 (re-encoded at 800px/q0.72).
     /// 客户在页面上点选、「复制我的选择」发回文件名清单（见 ProofSheetPage）；这次导出的照片顺序
     /// 记进 proof_sheets.json，客户只回编号时按对的那张表认。`ids` 给定时只导这几张（选中的照片，
-    /// 大场次分批发），否则按判决选。
-    func exportContactSheet(to url: URL, includeUsable: Bool, ids: [String]? = nil) {
+    /// 大场次分批发），否则按判决选。`quota` = 套餐张数（页面上「已选 12 / 30 张」，选超了只提示；nil = 不限），
+    /// 跟着这张表记下来，导入客户选择时说超没超。`watermark` = 每张小样上画的角标（水印页的签名 / 文字，主线程拍好的
+    /// 快照）；nil = 不画，和以前一模一样。水印只画在内存里那张 800px 上，预览文件不动。
+    func exportContactSheet(to url: URL, includeUsable: Bool, ids: [String]? = nil, quota: Int? = nil,
+                            watermark: ProofWatermark? = nil) {
         guard !isRunning else { return }
         let wanted = ids.map(Set.init)
         let chosen = items.filter { item in
             if let wanted { return wanted.contains(item.id) }
             return item.verdict == .pick || (includeUsable && item.verdict == .usable)
-        }.map { (id: $0.id, previewPath: $0.previewPath, pick: $0.verdict == .pick) }
+        }.map { (id: $0.id, previewPath: $0.previewPath, pick: $0.verdict == .pick, original: $0.decodePath) }
         guard !chosen.isEmpty else {
             lastError = "没有可导出的照片"
             return
@@ -3130,7 +3185,8 @@ final class BatchStore: ObservableObject {
             var shown: [String] = []
             for (index, item) in chosen.enumerated() {
                 if flag.isSet { break }
-                guard let data = Self.contactSheetJPEG(path: item.previewPath) else { continue }
+                guard let data = Self.contactSheetJPEG(path: item.previewPath, watermark: watermark,
+                                                       original: item.original) else { continue }
                 shown.append(item.id)
                 cells += ProofSheetPage.cell(number: shown.count, id: item.id, pick: item.pick, jpeg: data)
                 let done = index + 1
@@ -3143,7 +3199,7 @@ final class BatchStore: ObservableObject {
             }
             let dateString = DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .none)
             let html = ProofSheetPage.html(title: title, sheetID: sheetID, count: shown.count,
-                                           date: dateString, cells: cells)
+                                           date: dateString, cells: cells, quota: quota)
             let cancelled = flag.isSet
             var writeError: String?
             if !cancelled {
@@ -3152,7 +3208,8 @@ final class BatchStore: ObservableObject {
             }
             let failure = writeError
             let bytes = Int64(html.utf8.count)
-            let sheet = ProofSheet(id: sheetID, date: Date(), scope: scope, ids: shown)
+            let sheet = ProofSheet(id: sheetID, date: Date(), scope: scope, ids: shown,
+                                   lists: ProofSheet.lists(quota: quota))
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
@@ -3163,19 +3220,32 @@ final class BatchStore: ObservableObject {
                     self.lastError = "联系表导出失败: \(failure)"
                 } else {
                     self.recordProofSheet(sheet)
-                    self.progressText = "选片确认表已导出: \(sheet.ids.count) 张 · \(Self.sizeText(bytes)) → \(url.lastPathComponent)"
+                    let marked = watermark == nil ? "" : "（带水印）"
+                    self.progressText = "选片确认表已导出\(marked): \(sheet.ids.count) 张 · \(Self.sizeText(bytes)) → \(url.lastPathComponent)"
                     if bytes > ProofSheetPage.largeBytes { self.lastError = ProofSheetPage.largeNote(bytes) }
+                    // 带水印时少了的（预览读不出来、水印画不上）说出来：不悄悄少几张。
+                    if watermark != nil, sheet.ids.count < total {
+                        let missing = "有 \(total - sheet.ids.count) 张没放进确认表（预览读不出来或水印画不上）"
+                        self.lastError = [self.lastError, missing].compactMap { $0 }.joined(separator: "；")
+                    }
                 }
             }
         }
     }
 
-    nonisolated private static func contactSheetJPEG(path: String) -> Data? {
+    /// 确认表里的一张：预览缩到 800px、q0.72。`watermark` 给了就在这张内存里的小样上画（`original` = 原片，水印按它换算
+    /// 边距、读 EXIF），画不上 = nil（这张不放，不放没水印的）；预览文件只读。
+    nonisolated static func contactSheetJPEG(path: String, watermark: ProofWatermark? = nil, original: String = "") -> Data? {
         guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
-              let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [
+              let thumb = CGImageSourceCreateThumbnailAtIndex(src, 0, [
                   kCGImageSourceCreateThumbnailFromImageAlways: true,
                   kCGImageSourceThumbnailMaxPixelSize: 800,
               ] as CFDictionary) else { return nil }
+        var cg = thumb
+        if let watermark {
+            guard let marked = watermark.apply(to: thumb, original: original) else { return nil }
+            cg = marked
+        }
         let out = NSMutableData()
         guard let dest = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
         CGImageDestinationAddImage(dest, cg, [kCGImageDestinationLossyCompressionQuality: 0.72] as CFDictionary)

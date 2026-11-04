@@ -539,6 +539,10 @@ final class WatermarkStore: ObservableObject {
     /// 水印页现在有没有读得出的签名图（拼图检视器「用水印页的签名」用）。
     var hasSignature: Bool { signatureImage != nil }
 
+    /// 选片确认表「带水印（用水印页的签名）」拍的只读快照：现在的设置 + 读出来的签名图，裁成确认表的角标
+    /// （ProofWatermark.make）。主线程取好交给后台画；nil = 签名、文字都没开（或签名图读不出来）。不改水印页任何东西。
+    func proofWatermark() -> ProofWatermark? { ProofWatermark.make(config: config, signature: signatureImage) }
+
     // MARK: - 预设
 
     func savePreset(named name: String) {
