@@ -4,7 +4,8 @@ import os
 // MARK: - 持久日志（全项目审查 D03）
 //
 // 以前 GUI 进程没有任何落盘的日志：从访达 / 程序坞启动时 stdout、stderr 都接在 /dev/null 上，print 和 LiveServer.log
-// 全丢，状态栏那一行红字下一次操作就被清掉，别人机器上出了问题没有现场。现在两份：
+// 全丢，状态栏那一行红字下一次操作就被清掉，别人机器上出了问题没有现场。现在两份（状态栏提示、实时桥的 LiveServer.log、
+// 列照片时跳过的文件夹都写进来）：
 //   - os.Logger（subsystem local.culling.labelgui，和 SessionFiles.log 同一个），「控制台」里按 subsystem 能筛；
 //   - 数据目录 logs/app.log 一份文本（一条一行，带时间、进程、级别、分类），超过 1 MB 轮转成 app.1.log … app.4.log，
 //     最多留 5 份（≈ 5 MB）。「帮助 › 导出诊断信息…」把它们打进 zip。

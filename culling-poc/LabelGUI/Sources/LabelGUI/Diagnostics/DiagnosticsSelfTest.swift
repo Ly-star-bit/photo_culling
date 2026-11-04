@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 
 /// 诊断这一组的无头自检（审查 D03）：LABELGUI_DATA_DIR=<临时> LabelGUI --diag-selftest [<photo_dir>] [--out <目录>]
 ///   A 状态栏提示的历史：20 条环形、新的在前、连着一样的只记次数、分级；三个 store 的 lastError 一设上就记、类型还是 String?
-///   B 持久日志：一条一行、换行折掉、轮转（个数、大小）、提示历史跟着进日志
+///   B 持久日志：一条一行、换行折掉、轮转（个数、大小）、提示历史跟着进日志、实时桥的 LiveServer.log 也进日志
 ///   C 诊断包：zip 里有说明 / 诊断信息 / 提示 / 日志 / 场次概况 / 目录结构 / 崩溃报告（只要最近的、选片工具的），
 ///     没有照片、预览图（连名字都没有）、bookmark、客户备注原文、场次文件夹名、家目录；目标已经有文件 / 文件夹时一个字节都不动；
 ///     打码不只认 sessions.json（纯函数：任意路径逐段打码、「」里的文件夹名、不误伤；界面那一路：真的 AppModel 里认回的场次、
@@ -145,6 +145,12 @@ enum DiagnosticsSelfTest {
         AppLog.flush()
         let after = (try? String(contentsOf: files[0], encoding: .utf8)) ?? ""
         check(after.contains("error collage: 提示也进日志：盘满了"), "状态栏提示跟着进日志（分类 = 页面）", after.suffix(200).description)
+        // 实时桥的日志（拿不到锁、桥开了、锁丢了……）：以前只走 stderr，从访达启动的 GUI 里进 /dev/null。
+        LiveServer.log("自检：桥的日志也进 app.log")
+        AppLog.flush()
+        let live = (try? String(contentsOf: files[0], encoding: .utf8)) ?? ""
+        check(live.contains("notice live: 自检：桥的日志也进 app.log\n"), "实时桥 LiveServer.log 也进日志（分类 live）",
+              live.suffix(200).description)
         AppLog.uninstallFileLog()
         check(AppLog.logsDir == nil, "卸下以后只进 os.Logger")
     }
