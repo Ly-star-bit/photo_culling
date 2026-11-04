@@ -154,6 +154,9 @@ enum LiveHost {
     /// 本机设置变。钉值本身是 AppRuntime.pinBatchSettings（别的无头入口在 main.swift 里用同一个，默认值一样）；
     /// 这里只多一步解析（STEP 2 实测：换得掉，读得到，~/Library/Preferences 里不多文件）。LABELGUI_LIVE_TEST_SETTINGS 可以改，
     /// 写成 `rejectBurstDuplicates=1,minKeepersPerChapter=2,sortOrder=filename`。
+    /// 去重开关按场次存以后（审查 S20a），rejectBurstDuplicates 钉的是「全局值」，和界面里一样：fixture 的 thresholds.json 里
+    /// 存了这个键就按它自己的（宿主打开哪一场就读哪一场的），没存的老场次才回落到这里钉的值；无头不把回落的值写回 fixture。
+    /// 不用 AppRuntime.pinnedRejectBurstDuplicates（那是 --verdicts --dedupe 盖过场次的），宿主要照 app 的样子读场次。
     private static func pinBatchSettings(_ raw: String?) -> Bool {
         var reject = false
         var minKeepers = 0
@@ -407,7 +410,8 @@ enum LiveHost {
         out["test_values"] = testValues
         out["test_applied"] = testApplied
         out["max_main_gap_ms"] = (maxGapMs * 10).rounded() / 10
-        // 钉进 argument domain 的三个设置在 store 里是不是真的生效了（§10.7「宿主的设置钉死」）
+        // 钉进 argument domain 的三个设置在 store 里是不是真的生效了（§10.7「宿主的设置钉死」）。
+        // rejectBurstDuplicates 是这一场生效的值：thresholds.json 里存了按存的，没存才是钉的全局值（审查 S20a）
         var settings: [String: Any] = ["rejectBurstDuplicates": model.batch.rejectBurstDuplicates]
         settings["minKeepersPerChapter"] = model.batch.minKeepersPerChapter
         settings["sortOrder"] = model.batch.sortOrder.rawValue

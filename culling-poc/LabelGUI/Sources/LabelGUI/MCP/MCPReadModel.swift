@@ -135,6 +135,9 @@ enum MCPReadModel {
             return row
         }
         var settings: [String: Any] = ["dedupe": s.rejectBurstDuplicates, "min_keepers_per_chapter": s.minKeepersPerChapter]
+        // 哪个只管这一场、哪个所有场次通用（审查 S20a）：去重按场次存，每章节最少保留是全局的提醒
+        settings["dedupe_scope"] = "session"
+        settings["min_keepers_scope"] = "all_sessions"
         settings["sort_order"] = s.sortOrder.rawValue
         settings["source"] = "app"
         out["settings"] = settings

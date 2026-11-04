@@ -1746,6 +1746,29 @@ try:
               and got == {"rejectBurstDuplicates": True, "minKeepersPerChapter": 2, "sortOrder": "文件名"},
               f"--no-view：live、test.snapshot → unknown_method；LABELGUI_LIVE_TEST_SETTINGS 钉的值在 store 里生效 {got}")
         h.term()
+        # 去重开关按场次存（审查 S20a）：上面那台的 fixture 没存这个键（老场次）→ 回落到钉的全局值（开）；这一台的
+        # thresholds.json 存着关、全局值照样钉成开 → 按这一场自己的（关）。概览 settings 标出作用范围，无头不改写这份文件。
+        d20 = fresh_data("C20")
+        t20 = os.path.join(d20, "sessions", KEY, "thresholds.json")
+        base20 = {"sharpness": 45, "exposure": 0.15, "faceQuality": 0}
+        if os.path.exists(t20):
+            with open(t20, encoding="utf-8") as f:
+                base20 = json.load(f)
+        base20["rejectBurstDuplicates"] = False
+        with open(t20, "w", encoding="utf-8") as f:
+            json.dump(base20, f)
+        with open(t20, "rb") as f:
+            before20 = f.read()
+        h = Host("C20", data=d20, args=("--no-view",), LABELGUI_LIVE_TEST_SETTINGS="rejectBurstDuplicates=1")
+        got20 = (state(h) or {}).get("settings") or {}
+        _, ov20, _ = mcp_call(h.env(), "cull_session_overview", {"session": KEY})
+        s20 = (ov20 or {}).get("settings") or {}
+        h.term()
+        with open(t20, "rb") as f:
+            after20 = f.read()
+        check(got20.get("rejectBurstDuplicates") is False and s20.get("dedupe") is False
+              and s20.get("dedupe_scope") == "session" and s20.get("min_keepers_scope") == "all_sessions" and after20 == before20,
+              f"去重按场次：fixture 的 thresholds.json 存着关、全局钉成开 → 这一场是关；概览 settings {s20}；文件没被改写")
         # T12 协议版本不符：app 声明 99–99
         h = Host("C12", LABELGUI_LIVE_TEST_PROTO="99,99")
         env = h.env()

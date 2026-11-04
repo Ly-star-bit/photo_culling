@@ -52,6 +52,8 @@ extension AppRuntime {
     /// setVolatileDomain 换的是整个 argument domain：先取出原来的（命令行里的 -key value）再合进去。
     /// 默认值 = 去重关 / 每章最少保留 0 / 按拍摄时间，和 --live-host 不设 LABELGUI_LIVE_TEST_SETTINGS 时一样。
     /// --mcp 不钉：它报的是 app 的真实设置。
+    /// 去重开关按场次存以后（审查 S20a），这里钉的 batch.rejectBurstDuplicates 是「全局值」：只管 thresholds.json 里还没有这个键的
+    /// 老场次回落到什么、新场次没有「上次用的」时打底；存了的场次按自己的。要盖过场次里存的值用 pinnedRejectBurstDuplicates。
     static func pinBatchSettings(rejectBurstDuplicates: Bool = false, minKeepersPerChapter: Int = 0,
                                  sortOrder: BatchStore.SortOrder = .captureTime) {
         let defaults = UserDefaults.standard
@@ -61,4 +63,9 @@ extension AppRuntime {
         domain["batch.sortOrder"] = sortOrder.rawValue
         defaults.setVolatileDomain(domain, forName: UserDefaults.argumentDomain)
     }
+
+    /// 命令行钉的「近似重复只留最佳」（--verdicts --dedupe）：不是 nil 就盖过每一场 thresholds.json 里存的值，**只在内存里** ——
+    /// BatchStore 打开场次时用它、拨开关 / 拖滑杆 / --gap 写盘时写的照样是这一场原来存的（审查 S20a 要的不落盘的设法）。
+    /// 建 store 之前设：BatchStore.init 会先打开「最近」里的第一场。nil = 按场次存的走（界面、测试宿主都是 nil）。
+    static var pinnedRejectBurstDuplicates: Bool?
 }
