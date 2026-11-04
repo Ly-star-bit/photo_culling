@@ -1,0 +1,34 @@
+{
+ "results": [
+  {
+   "closed_eyes": false,
+   "composition_issues": [],
+   "confidence": 0.9,
+   "error": null,
+   "expression_score": null,
+   "id": "A27-vlm",
+   "reason": "合成夹具",
+   "reject_recommended": true
+  },
+  {
+   "closed_eyes": false,
+   "composition_issues": [],
+   "confidence": 0.9,
+   "error": "timeout",
+   "expression_score": null,
+   "id": "A28-vlm-error",
+   "reason": "合成夹具",
+   "reject_recommended": true
+  },
+  {
+   "closed_eyes": false,
+   "composition_issues": [],
+   "confidence": 0.9,
+   "error": null,
+   "expression_score": null,
+   "id": "A29-multi",
+   "reason": "合成夹具",
+   "reject_recommended": true
+  }
+ ]
+}
