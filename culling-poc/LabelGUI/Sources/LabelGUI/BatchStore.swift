@@ -3757,6 +3757,11 @@ final class BatchStore: ObservableObject {
             lastError = "没有可导出的照片"
             return
         }
+        // 存储卡上的一场（审查 S07，和 exportJPEGs 一样）：确认表的 HTML 不写到卡上 —— 以为发给客户的那份存在电脑上，格式化卡就没了。
+        if let why = cardDestinationRefusal(url) {
+            lastError = why
+            return
+        }
         isRunning = true
         lastError = nil
         cancelFlag = AnalysisEngine.CancelFlag()
