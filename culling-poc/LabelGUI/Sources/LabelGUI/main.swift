@@ -65,6 +65,13 @@ if let mcpMode = MCPServerMain.mode(CommandLine.arguments), let mcpFDs {
 if CommandLine.arguments.contains("--mcp-selftest") {
     MCPSelfTest.run()
 }
+// 无头入口一律钉住 batch.*（去重关 / 每章最少保留 0 / 按拍摄时间，只在内存里）：输出不跟着本机设置域漂，
+// 也不会有谁赋值以后经 didSet 写回去。BatchStore 的初值在构造时读，这里在任何分派之前，一处管全部入口；
+// --verdicts 自己再按 --dedupe 钉一次，--live-host 按 LABELGUI_LIVE_TEST_SETTINGS 钉（LiveHost.pinBatchSettings）。
+// --mcp 不钉（上面已经永不返回）：它报的是 app 的真实设置。
+if AppRuntime.headless && !CommandLine.arguments.contains("--live-host") {
+    AppRuntime.pinBatchSettings()
+}
 
 // --app-ui、--live-host 是测试宿主：整套 store 都会写数据目录，所以 LABELGUI_DATA_DIR 没设、或者指到真实数据目录的，
 // 在建目录、注册字体之前就退出（它们自己的分派里还会再查一遍，那时已经晚了）。不跑 Python，不同步运行时（§9.7、§10.5）；
@@ -216,12 +223,12 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
     if CommandLine.arguments.contains("--clear-recents") {
         CollageCLI.requireIsolatedDataDir("--verdicts --clear-recents", "会删场次缓存")
     }
+    // 去重按 --dedupe、每章最少保留固定 0（章节警告受它影响），钉进 argument domain 再建 store：CI 的期望输出不跟着
+    // UserDefaults 漂，也不给属性赋值（didSet 会写进设置域：从 .app 里跑就改了用户界面里的开关）。
+    AppRuntime.pinBatchSettings(rejectBurstDuplicates: dedupe, minKeepersPerChapter: 0)
     MainActor.assumeIsolated {
         let store = BatchStore(dataDir: appDataDir,
                                pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
-        store.rejectBurstDuplicates = dedupe
-        // 章节警告受这个设置影响；固定成 0，CI 的期望输出不跟着 UserDefaults 漂。
-        store.minKeepersPerChapter = 0
         store.switchSession(to: dir)
         if let gap = gapOverride { store.takeGapSec = gap }
         // --accept-all：跑一遍「全部只留精选」再打印（写进该数据目录的 overrides.json，
@@ -347,8 +354,8 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--compare"),
         CollageCLI.requireIsolatedDataDir("--compare --keys", "按键（⏎、--auto 加数字键、undo）会改写这一场的 overrides.json / accepted.json")
     }
     MainActor.assumeIsolated {
-        // 不碰 minKeepersPerChapter 这类设置：它们写的是全局 UserDefaults，LABELGUI_DATA_DIR
-        // 隔离不了 —— 跑一次测试会把 GUI 里的设置改掉。
+        // 不给 minKeepersPerChapter 这类设置赋值：它们写的是全局 UserDefaults，LABELGUI_DATA_DIR 隔离不了。
+        // 读到的是开头钉住的那一份（去重关 / 0 / 按拍摄时间），不跟着本机设置漂。
         let store = BatchStore(dataDir: appDataDir,
                                pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         store.switchSession(to: dir)

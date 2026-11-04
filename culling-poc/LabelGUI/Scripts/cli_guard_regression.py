@@ -138,13 +138,21 @@ for label, path in variants:
         expect_refused(args, env_for(path), label)
 
 print("D. 临时数据目录照常跑（闸不多拦）")
-data = os.path.join(WORK, "data-ok")
-os.makedirs(data)
 fixture = "/tmp/labelgui-fixture-photot"   # 和 verdict_regression.sh 同一个路径（不需要存在，session key 从它算）
-key = run(["--session-key", fixture], env_for(data)).stdout.strip()
-os.makedirs(os.path.join(data, "sessions", key))
-for name in ("manifest.json", "layer1_results.json"):
-    shutil.copyfile(os.path.join(FIX, name), os.path.join(data, "sessions", key, name))
+
+
+def fixture_data(label):
+    """新的临时数据目录，灌好 photot 的分析结果（和 verdict_regression.sh 一样）。"""
+    d = os.path.join(WORK, f"data-{label}")
+    os.makedirs(d)
+    key = run(["--session-key", fixture], env_for(d)).stdout.strip()
+    os.makedirs(os.path.join(d, "sessions", key))
+    for name in ("manifest.json", "layer1_results.json"):
+        shutil.copyfile(os.path.join(FIX, name), os.path.join(d, "sessions", key, name))
+    return d
+
+
+data = fixture_data("ok")
 r = run(["--verdicts", fixture], env_for(data))
 expected = open(os.path.join(FIX, "expected_verdicts.txt"), encoding="utf-8").read()
 check(r is not None and r.returncode == 0 and r.stdout == expected, "--verdicts（只读）：退出码 0，输出和 expected_verdicts.txt 一样")
@@ -156,6 +164,31 @@ r = run(["--verdicts", fixture, "--accept-all", "--undo"], env_for(data))
 check(r is not None and r.returncode == 0 and "接受全部推荐" in r.stdout,
       f"--verdicts --accept-all（临时目录）：退出码 {None if r is None else r.returncode}")
 check(not os.path.exists(SESSIONS), "这几条都没碰假的家目录")
+
+print("E. batch.* 钉在内存里、不落盘：--verdicts --dedupe 照样生效，跑完设置域一个字节都不变，下一条不跟着漂")
+
+
+def defaults_export():
+    r_ = subprocess.run(["defaults", "export", "LabelGUI", "-"], capture_output=True, text=True)
+    return r_.returncode, r_.stdout
+
+
+# 这两条用真的家目录（数据目录照样是临时的）：假的家目录下 CFPreferences 可能写到别处，比 defaults export 就比不出来了。
+# 裸二进制的设置域是 LabelGUI（不是 app 的 local.culling.labelgui）；闸没失灵时一个字节都不写。
+data = fixture_data("settings")   # D 里按过 ⏎、接受过全部推荐，那份的判决已经变了
+real_home_env = {k: v for k, v in env_for(data).items() if k not in ("CFFIXED_USER_HOME", "HOME")}
+real_home_env["HOME"] = os.environ.get("HOME", "")
+before = defaults_export()
+r = run(["--verdicts", fixture, "--dedupe"], real_home_env)
+check(r is not None and r.returncode == 0 and "连拍去重: 开" in r.stdout and r.stdout != expected,
+      "--verdicts --dedupe：去重开着（钉进 argument domain 生效），判决和不去重时不一样")
+check(defaults_export() == before, "--verdicts --dedupe 跑完，LabelGUI 设置域和跑之前逐字节一样（以前会留下 rejectBurstDuplicates=1）")
+r = run(["--verdicts", fixture], real_home_env)
+check(r is not None and r.returncode == 0 and r.stdout == expected, "紧接着不带 --dedupe：和 expected_verdicts.txt 一样（没留下去重开关）")
+check(defaults_export() == before, "再跑一条，设置域还是一样")
+r = run(["--verdicts", fixture, "--dedupe"], env_for(data))
+check(r is not None and r.returncode == 0 and not os.path.exists(os.path.join(FAKE_HOME, "Library", "Preferences", "LabelGUI.plist")),
+      "假的家目录下跑 --verdicts --dedupe：假的家目录里也没有 LabelGUI.plist")
 
 print("G. 分派的每个参数都登记在 AppRuntime.headlessFlags 里（漏登记：脚本里跑会被 NoGUIGate 拦下，终端里跑 headless=false）")
 main_src = open(os.path.join(SRC, "main.swift"), encoding="utf-8").read()

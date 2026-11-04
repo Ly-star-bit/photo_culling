@@ -151,8 +151,8 @@ enum LiveHost {
 
     /// 三个 batch.* 设置在 AppModel.make 之前钉进 argument domain（§10.7「宿主的设置钉死」）：只在内存里，不落盘。
     /// 裸二进制的设置域是 LabelGUI，本机这个域被写过 batch.rejectBurstDuplicates 这些；不钉的话 fixture 的判决计数会跟着
-    /// 本机设置变。setVolatileDomain 换的是整个 argument domain，所以先取出原来的（命令行里的 -key value）再合进去
-    /// （STEP 2 实测：换得掉，读得到，~/Library/Preferences 里不多文件）。LABELGUI_LIVE_TEST_SETTINGS 可以改，
+    /// 本机设置变。钉值本身是 AppRuntime.pinBatchSettings（别的无头入口在 main.swift 里用同一个，默认值一样）；
+    /// 这里只多一步解析（STEP 2 实测：换得掉，读得到，~/Library/Preferences 里不多文件）。LABELGUI_LIVE_TEST_SETTINGS 可以改，
     /// 写成 `rejectBurstDuplicates=1,minKeepersPerChapter=2,sortOrder=filename`。
     private static func pinBatchSettings(_ raw: String?) -> Bool {
         var reject = false
@@ -185,12 +185,7 @@ enum LiveHost {
                 return false
             }
         }
-        let defaults = UserDefaults.standard
-        var domain = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
-        domain["batch.rejectBurstDuplicates"] = reject
-        domain["batch.minKeepersPerChapter"] = minKeepers
-        domain["batch.sortOrder"] = sort.rawValue
-        defaults.setVolatileDomain(domain, forName: UserDefaults.argumentDomain)
+        AppRuntime.pinBatchSettings(rejectBurstDuplicates: reject, minKeepersPerChapter: minKeepers, sortOrder: sort)
         return true
     }
 

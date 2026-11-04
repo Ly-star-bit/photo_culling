@@ -289,7 +289,8 @@ final class BatchStore: ObservableObject {
     @Published var minKeepersPerChapter: Int =
         UserDefaults.standard.integer(forKey: "batch.minKeepersPerChapter") {
         didSet {
-            UserDefaults.standard.set(minKeepersPerChapter, forKey: "batch.minKeepersPerChapter")
+            // 无头（命令行、测试宿主）只改内存：设置域和用户界面共用（从 .app 里跑就是用户真实的那份）。
+            if !AppRuntime.headless { UserDefaults.standard.set(minKeepersPerChapter, forKey: "batch.minKeepersPerChapter") }
             applyThresholds()
         }
     }
@@ -304,7 +305,7 @@ final class BatchStore: ObservableObject {
     @Published var rejectBurstDuplicates: Bool =
         UserDefaults.standard.bool(forKey: "batch.rejectBurstDuplicates") {
         didSet {
-            UserDefaults.standard.set(rejectBurstDuplicates, forKey: "batch.rejectBurstDuplicates")
+            if !AppRuntime.headless { UserDefaults.standard.set(rejectBurstDuplicates, forKey: "batch.rejectBurstDuplicates") }
             applyThresholds()
         }
     }
@@ -786,7 +787,7 @@ final class BatchStore: ObservableObject {
     @Published var sortOrder: SortOrder = SortOrder(
         rawValue: UserDefaults.standard.string(forKey: "batch.sortOrder") ?? "") ?? .captureTime {
         didSet {
-            UserDefaults.standard.set(sortOrder.rawValue, forKey: "batch.sortOrder")
+            if !AppRuntime.headless { UserDefaults.standard.set(sortOrder.rawValue, forKey: "batch.sortOrder") }
             var sorted = items
             Self.sort(&sorted, by: sortOrder)
             items = sorted

@@ -44,3 +44,21 @@ enum DataDirGuard {
         return out
     }
 }
+
+extension AppRuntime {
+    /// 三个 batch.* 设置钉进 argument domain（只在内存里，不落盘）：无头入口构造 BatchStore 之前调。
+    /// 属性的初值在 BatchStore.init 时从 UserDefaults 读，argument domain 排在最前，所以钉了就读到这里的值；
+    /// 不给属性赋值，didSet 也就不会把它写回设置域（裸二进制是 LabelGUI 域，从 .app 里跑就是用户真实的 local.culling.labelgui）。
+    /// setVolatileDomain 换的是整个 argument domain：先取出原来的（命令行里的 -key value）再合进去。
+    /// 默认值 = 去重关 / 每章最少保留 0 / 按拍摄时间，和 --live-host 不设 LABELGUI_LIVE_TEST_SETTINGS 时一样。
+    /// --mcp 不钉：它报的是 app 的真实设置。
+    static func pinBatchSettings(rejectBurstDuplicates: Bool = false, minKeepersPerChapter: Int = 0,
+                                 sortOrder: BatchStore.SortOrder = .captureTime) {
+        let defaults = UserDefaults.standard
+        var domain = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+        domain["batch.rejectBurstDuplicates"] = rejectBurstDuplicates
+        domain["batch.minKeepersPerChapter"] = minKeepersPerChapter
+        domain["batch.sortOrder"] = sortOrder.rawValue
+        defaults.setVolatileDomain(domain, forName: UserDefaults.argumentDomain)
+    }
+}
