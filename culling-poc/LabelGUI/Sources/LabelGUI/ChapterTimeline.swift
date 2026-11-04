@@ -493,16 +493,37 @@ private struct TimelineCard: View {
 // MARK: - 无头自检：随机章节数 / 张数 / 宽度，验证永远不出界、不重叠
 
 enum ChapterTimelineSelfTest {
+    static let trialCount = 3000
+
+    /// 第 trial 组的种子：seed 先过一步 splitmix64 混开，再和 trial 异或。以前直接 seed ^ trial：seed 小于 4096 时只动
+    /// trial 的低 12 位，CI 跑的 seed 1 / 2 / 3 拿到的是同一批 3000 个初始状态（只是 trial 编号换了位置），trial 又只决定
+    /// 段数上限，三轮合起来只有约 3900 组不同的输入、两两约 80% 一模一样。混开以后每个 seed 是另一批（run 开头核对）。
+    static func trialSeed(_ seed: UInt64, _ trial: Int) -> UInt64 {
+        var mixer = SeededRandom(seed: seed)
+        let mixed = mixer.next()
+        return mixed ^ UInt64(trial)
+    }
+
     /// LabelGUI --timeline-selftest [--seed N] [--trial K]：打印 PASS / 第一处 FAIL。
-    /// 每一组的随机数按 seed ^ trial 单独播种（SeededRandom，splitmix64）：同一个 seed 每次生成同样的 3000 组，
+    /// 每一组的随机数按 trialSeed(seed, trial) 单独播种（SeededRandom，splitmix64）：同一个 seed 每次生成同样的 3000 组，
     /// FAIL 行带 seed 和 trial，`--seed S --trial T` 只重跑挂掉的那一组（以前用系统随机数，挂了复现不出来）。
     @MainActor
     static func run(seed: UInt64, onlyTrial: Int? = nil) -> Never {
         let base = Date(timeIntervalSince1970: 1_790_000_000)
         var failures: [String] = []
-        let trials: [Int] = onlyTrial.map { [$0] } ?? Array(0..<3000)
+        let trials: [Int] = onlyTrial.map { [$0] } ?? Array(0..<trialCount)
+        if onlyTrial == nil {
+            // 换 seed 要真的换一批输入：这个 seed 的初始状态和后面两个 seed 的都不相交（CI 跑 1 / 2 / 3，三轮合起来两两不相交）。
+            let own = Set((0..<trialCount).map { trialSeed(seed, $0) })
+            for other in [seed &+ 1, seed &+ 2] {
+                let shared = (0..<trialCount).filter { own.contains(trialSeed(other, $0)) }.count
+                if shared > 0 {
+                    failures.append("seed=\(seed) 和 seed=\(other) 有 \(shared) 组初始状态相同：换 seed 没换输入")
+                }
+            }
+        }
         for trial in trials {
-            var rng = SeededRandom(seed: seed ^ UInt64(trial))
+            var rng = SeededRandom(seed: trialSeed(seed, trial))
             let n = Int.random(in: 1...(trial % 10 == 0 ? 600 : 80), using: &rng)
             let width = CGFloat.random(in: 120...2400, using: &rng)
             let days = Int.random(in: 1...5, using: &rng)

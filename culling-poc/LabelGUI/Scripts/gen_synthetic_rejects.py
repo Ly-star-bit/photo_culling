@@ -86,7 +86,8 @@ single = [
     ("A10-clip-whole-only", "整张裁切 0.5 但主体只有 0.01：按主体，不判", "可用 -",
      {"highlight_clip_pct": 0.5, "subject_highlight_clip_pct": 0.01}),
     ("A11-clip-shadow15", "主体暗部裁切正好 0.15（≥ 判）", "废片 曝光裁切", {"subject_shadow_clip_pct": 0.15}),
-    ("A12-ear005", "EAR 0.05 < 绝对地板 0.08、脸 0.4%", "废片 闭眼", {"faces": [face(0.05, 0.004)]}),
+    ("A12-ear005", "EAR 0.05、脸 0.4%：单张，地板 0.08 和单张线 0.15 都判（只有地板判得出的见 X 组）", "废片 闭眼",
+     {"faces": [face(0.05, 0.004)]}),
     ("A13-ear005-tiny", "EAR 0.05 但脸 0.2% < 0.3%：太小免检", "可用 -", {"faces": [face(0.05, 0.002)]}),
     ("A14-ear018-single", "单张 EAR 0.18 ≥ 单张线 0.15：睁眼", "可用 -", {"faces": [face(0.18, 0.004)]}),
     ("A15-ear014-single", "单张 EAR 0.14 < 单张线 0.15：闭眼", "废片 闭眼", {"faces": [face(0.14, 0.004)]}),
@@ -185,6 +186,15 @@ add("M01-manual-keep-blur", t, "锐度 30 但人工标可用：判决可用，�
 add("M02-manual-reject", t + timedelta(seconds=20), "没有理由、人工标废片：「滑杆漏掉」数到它", "废片 -")
 overrides["M01-manual-keep-blur"] = "可用"
 overrides["M02-manual-reject"] = "废片"
+
+# X：EAR 绝对地板 0.08（同一 burst_group，整组都在眨眼）。组里最好的 0.07 → 相对线 0.049，两张按组内相对都算睁眼、
+# 又是组（不走单张线 0.15）：只有地板判得出闭眼。A12 那种单张的 0.05 地板去掉了单张线照样判，测不到地板。
+# 放在 M02 之后 10 s（> 8 s，自成一场）、还在第一章里。
+t = T0 + timedelta(minutes=15)
+add("X01-ear007-floor", t, "组内最好 0.07 < 地板 0.08：闭眼（相对线 0.049 算睁眼，只有地板判）", "废片 闭眼",
+    patch={"faces": [face(0.07, 0.004)]})
+add("X02-ear005-floor", t + timedelta(seconds=1), "组内 0.05 ≥ 相对线 0.049，< 地板 0.08：闭眼（只有地板判）", "废片 闭眼",
+    patch={"faces": [face(0.05, 0.004)]}, new_group=False)
 
 # Z：第二章（隔 1 小时 45 分），全是废片 → 章节警告。Z03 的 layer1 带 error：不进网格。
 t = T0 + timedelta(hours=2)
