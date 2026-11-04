@@ -37,6 +37,26 @@ enum ProofSheetSelfTest {
         multiPhotoLines()
         markerChecks()
         leadingSignChecks()
+        greetingChecks()
+    }
+
+    // MARK: 寒暄行带全角逗号不当成 CSV（审查：按行写的备注全丢）
+
+    private static func greetingChecks() {
+        let all = items()
+        func resolve(_ text: String) -> ClientReply.Resolution { ClientReply.resolve(text, items: all, sheets: [bigSheet]) }
+        func detail(_ r: ClientReply.Resolution) -> String {
+            "认出 \(r.ids) · 备注 \(r.notes) · 表格列 \(r.tableColumns ?? []) · 没认出 \(r.unknown)"
+        }
+        let hello = resolve("你好，选好了\nDSCF7207，去路人\nDSCF7210，黑白")
+        check(hello.ids == ["DSCF7207", "DSCF7210"] && hello.notes == ["DSCF7207": "去路人", "DSCF7210": "黑白"]
+              && hello.tableColumns == nil, "「你好，选好了」开头、一行一张带要求：按行认、备注都在（不当成表格）", detail(hello))
+        let three = resolve("你好，选好了，谢谢\nDSCF7207，去路人，瘦脸\nDSCF7210，黑白，亮一点")
+        check(three.ids == ["DSCF7207", "DSCF7210"] && three.notes == ["DSCF7207": "去路人，瘦脸", "DSCF7210": "黑白，亮一点"]
+              && three.tableColumns == nil, "寒暄两个逗号、每行三段：照样按行认、备注原样", detail(three))
+        let csv = resolve("文件名,备注\nＤＳＣＦ７２０７,瘦脸\nDSCF7208,黑白\n")
+        check(csv.ids == ["DSCF7207", "DSCF7208"] && csv.notes.isEmpty && csv.tableColumns == ["文件名"],
+              "真的 CSV（半角逗号）照旧当表格认，全角的文件名格子也认", detail(csv))
     }
 
     // MARK: 备注开头客户自己写的 - ~ 留着（审查：「-1档」读回成「1档」）

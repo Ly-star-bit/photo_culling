@@ -440,8 +440,10 @@ enum ClientReply {
     /// 这一场的文件名（微信回「12，35」换行「DSCF7207，DSCF7208」，第一行是客户要的编号，不是表头）；
     /// 至少有一列一半以上的格子是文件名或全场唯一的文件号。不像表格就返回 nil，按普通文字切。
     /// 别的列里的格子：本身就是文件名 / 文件号的照认；带数字又认不出的列进「没认出」，一个都不悄悄扔。
+    /// `text` 是没转半角的原文：只有半角逗号分列（导出的 CSV 用的是它），中文聊天打的「，」不算 —— 以前转过半角再切，
+    /// 「你好，选好了」换行「DSCF7207，去路人」整段当成表格、按行写的备注全丢。每一格再转半角去认（全角数字、字母照认）。
     private static func table(_ text: String, lookup: Lookup) -> Table? {
-        let rows = CSV.parseRows(text).map { $0.map { $0.trimmingCharacters(in: .whitespaces) } }
+        let rows = CSV.parseRows(text).map { $0.map { halfwidth($0).trimmingCharacters(in: .whitespaces) } }
         guard rows.count >= 2, let head = rows.first, head.count >= 2,
               !head.contains(where: { hasDigit($0) || lookup.byFilename($0) != nil }) else { return nil }
         let body = rows.dropFirst()
@@ -507,11 +509,12 @@ enum ClientReply {
             return true
         }
 
-        let parsed = table(rest, lookup: lookup)
+        let spoken = originalRest(text, half: half, rest: rest)
+        let parsed = table(spoken, lookup: lookup)
         r.tableColumns = parsed?.columns
         r.tableDropped = Set(parsed?.dropped ?? []).count
         let words = parsed.map { $0.tokens.map { Word(token: $0) } }
-            ?? lineTokens(rest, original: originalRest(text, half: half, rest: rest), lookup: lookup, isHead: uniqueHead)
+            ?? lineTokens(rest, original: spoken, lookup: lookup, isHead: uniqueHead)
         for word in words {
             let token = word.token
             pendingNote = word.note
