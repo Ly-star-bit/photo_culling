@@ -102,8 +102,9 @@ extension CollageStyleFineArt {
     ///    左右页亮度差不超过 maxLumaGap（R8）。
     /// 5. 全书 3–4 张呼吸图（R5，按跨页数缩放），小一号放右页。
     /// 6. 整章黑白（chapterMono）：一章里黑白占三分之一以上，整章的跨页都设成黑白页（CollagePage.look）。
+    /// 7. 目标跨页数（budget，F06）：呼吸图按目标定张数，编完比目标多就把落单的单图跨页并起来（compress），不删片。
     static func plan(_ photos: [CollagePhotoRef], dedupe: Bool, chapterMono: Bool, title bookTitle: String = "",
-                     similarity: Similarity? = nil) -> CollageAlbum.Plan {
+                     similarity: Similarity? = nil, budget: CollageAlbumBudget? = nil) -> CollageAlbum.Plan {
         let pool = candidates(photos)
         let moments = oneMoment(pool)
         var dropped = moments.dropped
@@ -121,7 +122,7 @@ extension CollageStyleFineArt {
                 dropped += r.dropped
             }
         }
-        guard !kept.isEmpty else { return CollageAlbum.Plan(spreads: [], dropped: dropped, theme: .fineArt) }
+        guard !kept.isEmpty else { return CollageAlbum.Plan(spreads: [], dropped: dropped, theme: .fineArt, budget: budget) }
 
         let ordered = CollageSelect.chronological(kept)
         var chapters: [[CollagePhotoRef]] = []
@@ -143,7 +144,9 @@ extension CollageStyleFineArt {
         var avoidNext = similarSet(title, similar)
 
         // 呼吸图：按跨页数定几张（全书 3–4 张），各章轮着挑分数高的。
-        let estimate = Int((Double(ordered.count) / targetPerSpread).rounded(.up))
+        let natural = Int((Double(ordered.count) / targetPerSpread).rounded(.up))
+        // 指定了跨页数：书多厚按指定的算（薄册子少放空镜）。
+        let estimate = budget.map { min(natural, $0.normalized.spreads) } ?? natural
         let quota = breathQuota(spreads: estimate)
         var breathIDs: Set<String> = []
         if quota > 0 {
@@ -281,7 +284,10 @@ extension CollageStyleFineArt {
         }
         // 扉页的色调同样看照片本身。
         if title.isMonochrome == true { spreads[0].fineArt?.look = monoLook }
-        return CollageAlbum.Plan(spreads: spreads, dropped: dropped, theme: .fineArt)
+        if let b = budget?.normalized, spreads.count > b.spreads {
+            compress(&spreads, toward: b.spreads, cap: b.maxPerSpread, similar: similar)
+        }
+        return CollageAlbum.Plan(spreads: spreads, dropped: dropped, theme: .fineArt, budget: budget)
     }
 
     /// 同一瞬间只留一张：近似重复组（burstGroup）里留精选 / 分数最高的；同一 take（场）有精选就只留精选

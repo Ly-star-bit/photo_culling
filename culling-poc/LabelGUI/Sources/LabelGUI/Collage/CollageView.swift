@@ -157,8 +157,9 @@ struct CollageView: View {
                   + "纸、卡纸、≥ 25mm 的边距是样式：在「样式」里选「婚礼 fine-art」，一键成套「整本婚礼相册」两样一起设")
             Button("自动编排") { store.autoArrangeAlbum(dedupe: dedupeAlbum) }
                 .disabled(store.project.photos.isEmpty)
-                .help(fineArt ? "托盘里的照片按婚礼 fine-art 编成跨页：废片不要、同一场只留精选，扉页取宽景，每章疏 → 密 → 精选收尾"
-                      : "托盘里的照片按时间和章节编成跨页：分数最高的做扉页，好片单独成页")
+                .help((fineArt ? "托盘里的照片按婚礼 fine-art 编成跨页：废片不要、同一场只留精选，扉页取宽景，每章疏 → 密 → 精选收尾"
+                       : "托盘里的照片按时间和章节编成跨页：分数最高的做扉页，好片单独成页")
+                      + "。客户选中的一张都不拿掉；检视器「画布」里指定了跨页数就往那么多个跨页里塞（不删片）")
             Toggle("相似只留一张", isOn: $dedupeAlbum)
                 .toggleStyle(.checkbox)
                 .help(fineArt ? "只管画面相似的（关掉也不会全上：fine-art 一直是同一场只留精选、连拍只留一张）；拿掉的仍在托盘里，可以拖回任何跨页"
@@ -853,8 +854,12 @@ struct CollagePageStrip: View {
     var body: some View {
         let _ = CollagePerf.body("页条")
         HStack(spacing: 8) {
-            Text(unit).font(.caption).foregroundStyle(.secondary)
-                .frame(width: 32)
+            VStack(spacing: 2) {
+                Text(unit).font(.caption).foregroundStyle(.secondary)
+                // 相册：几个跨页（指定了跨页数是「现在 / 目标」，多了标橙）。
+                if store.isAlbum { CollageAlbumSpreadCount(store: store) }
+            }
+            .frame(width: 40)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(Array(store.project.pages.enumerated()), id: \.element.id) { item in
@@ -893,7 +898,11 @@ struct CollagePageStrip: View {
                 .frame(height: 52)
                 .overlay(RoundedRectangle(cornerRadius: 2)
                     .strokeBorder(selected ? Color.accentColor : Color.clear, lineWidth: 2.5))
-                Text("\(index + 1)").font(.caption2).foregroundStyle(selected ? .primary : .secondary)
+                // 超出目标跨页数的那几个跨页：页码标橙（印厂 / 套餐放不下的就是它们）。
+                let over: Bool = store.isAlbum && (store.project.albumBudget.map { index >= $0.spreads } ?? false)
+                let tint: AnyShapeStyle = over ? AnyShapeStyle(Color.orange)
+                    : selected ? AnyShapeStyle(HierarchicalShapeStyle.primary) : AnyShapeStyle(HierarchicalShapeStyle.secondary)
+                Text("\(index + 1)").font(.caption2).foregroundStyle(tint)
             }
         }
         .buttonStyle(.plain)

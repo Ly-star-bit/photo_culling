@@ -31,6 +31,7 @@ extension CollageCLI {
     /// ops「expect:…」：编排结果的断言（门禁里一行「断言失败」就算失败）。
     /// - clientplaced：托盘里客户选中的每一张都上了某个跨页，「拿掉」里没有一张客户选中的。
     /// - trayisclient：托盘不空、全是客户选中的（清空托盘再「带照片 › 客户选中」之后）。
+    /// - alltray：托盘里每一张都上了某个跨页（不删片）。spreads=N / spreads<=N / perspread=1-6：见 budgetExpect。
     @MainActor
     static func albumExpect(_ store: CollageStore, _ what: String) -> Expectation {
         switch what {
@@ -48,8 +49,14 @@ extension CollageCLI {
             let others = tray.filter { !$0.clientPick }.map(\.id)
             if !tray.isEmpty && others.isEmpty { return .pass("托盘 \(tray.count) 张全是客户选中的") }
             return .fail("托盘 \(tray.count) 张，不是客户选中的 [" + others.joined(separator: " ") + "]")
+        case "alltray":
+            // 不删片：托盘里的每一张都上了某个跨页（arrange:all = 关掉「相似只留一张」之后）。
+            let used = store.project.usedPhotoIDs
+            let off = store.project.photos.map(\.id).filter { !used.contains($0) }
+            if off.isEmpty { return .pass("托盘 \(store.project.photos.count) 张都上了") }
+            return .fail("没上 [" + off.joined(separator: " ") + "]")
         default:
-            return .unknown
+            return budgetExpect(store, what)
         }
     }
 

@@ -1498,6 +1498,8 @@ struct CollageProject: Codable, Hashable {
     var albumTheme: CollageAlbumTheme = .classic
     /// fine-art 编排的「整章黑白」：一章里黑白照片占三分之一以上，整章都转黑白。
     var albumChapterMono = true
+    /// 相册「自动编排」的目标跨页数、每跨页张数（F06）；nil = 自动（照片多少编多少）。旧工程没有 = nil。
+    var albumBudget: CollageAlbumBudget?
     /// 存下来的几版（拼图页底下的「方案」栏，见 CollageVariant）。放在工程里跟着 collage.json 存；不跟着撤销走
     /// （CollageStore.restore 换工程时留现在的方案栏）。编辑指纹、跨页小图的键都不算它。
     var variants: [CollageVariant] = []
@@ -2057,6 +2059,8 @@ extension CollageProject {
         watermark = c.softOptional(.watermark)
         albumTheme = c.soft(.albumTheme, .classic)
         albumChapterMono = c.soft(.albumChapterMono, true)
+        // 旧工程没有这个键 = 自动；坏了也只丢它（照常读回、按自动编）。
+        albumBudget = c.softOptional(.albumBudget)
         // 旧工程没有这个键 = 没有方案；哪一个坏了只丢它自己。
         variants = c.soft(.variants, [Failable<CollageVariant>]()).compactMap(\.value)
     }

@@ -507,16 +507,20 @@ enum CollageAlbum {
         var dropped: [CollagePhotoRef]
         /// 按哪个主题编的（build 按它出版式）。
         var theme: CollageAlbumTheme = .classic
+        /// 按哪个目标跨页数编的（没给 = nil）：编完的提示、跨页条和它比。
+        var budget: CollageAlbumBudget? = nil
     }
 
     /// 编排：去重 → 分数最高的做扉页 → 其余按时间、按章节分组，疏密交替（4-3-5-2-4-3）；
     /// 分数排前一成多的竖图和下一张组成一页一张的对页，横图单独铺满。
     /// theme = .fineArt：婚礼 fine-art 的编排（CollageStyleFineArt.plan，chapterMono = 整章黑白，title = 工程标题：
     /// 扉页标题是西文就不加字距）；默认主题照旧。
+    /// budget：目标跨页数（F06，CollageAlbumBudget）；默认主题走 planBudget，fine-art 编完往目标并。nil = 照旧。
     static func plan(_ photos: [CollagePhotoRef], dedupe: Bool = true, maxPerSpread: Int = 5,
-                     theme: CollageAlbumTheme = .classic, chapterMono: Bool = true, title: String = "") -> Plan {
+                     theme: CollageAlbumTheme = .classic, chapterMono: Bool = true, title: String = "",
+                     budget: CollageAlbumBudget? = nil) -> Plan {
         if theme == .fineArt {
-            return CollageStyleFineArt.plan(photos, dedupe: dedupe, chapterMono: chapterMono, title: title)
+            return CollageStyleFineArt.plan(photos, dedupe: dedupe, chapterMono: chapterMono, title: title, budget: budget)
         }
         var kept = photos
         var dropped: [CollagePhotoRef] = []
@@ -528,6 +532,7 @@ enum CollageAlbum {
             dropped = r.dropped
             similar = r.similar
         }
+        if let budget { return planBudget(kept, dropped: dropped, similar: similar, budget: budget) }
         guard let opener = kept.max(by: { $0.score < $1.score }) else { return Plan(spreads: [], dropped: dropped) }
         var spreads = [Spread(kind: .opener, photos: [opener])]
         let rest = CollageSelect.chronological(kept.filter { $0.id != opener.id })

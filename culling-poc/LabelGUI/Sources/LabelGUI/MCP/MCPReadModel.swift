@@ -657,6 +657,10 @@ enum MCPArgs {
         var p: [String: Spec] = ["session": session, "if_digest": digest, "reveal": .bool, "op_id": .opID, "inline": .bool]
         p["kit"] = .oneOf(MCPToolDefs.kitIDs)
         p["deadline_seconds"] = .deadline
+        // 整本婚礼相册的目标跨页数（F06）：0 = 改回自动
+        p["spreads"] = .int(0...200)
+        p["min_per_spread"] = .int(1...12)
+        p["max_per_spread"] = .int(1...12)
         return ToolSpec(props: p, required: ["kit"])
     }()
     static let coverSpec: ToolSpec = {

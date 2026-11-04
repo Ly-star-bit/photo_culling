@@ -3705,6 +3705,33 @@ __attribute__((constructor)) static void init(void) {
             skip("这本相册别的跨页上没有这一页以外的照片：同一张不能上两个跨页那一条跳过")
     else:
         skip(f"成套没出多跨页的相册（{err_code(kit2)}，{ga.get('mode')}，{ga.get('pages')} 页）：相册那两条跳过")
+    # 整本婚礼相册的目标跨页数（F06）：spreads 只对 weddingAlbum、写错不动；给了记进工程（collage_get_state 的
+    # album_target），结果里 album 报跨页数和多了几个（不删片：fine-art 每跨页最多 3 张，压不下就多，带 over_target）；
+    # spreads=0 改回自动
+    if "error" not in kit2:
+        sb0 = lst()
+        _, rk_bad = lw("collage_run_kit", {"kit": "fashionIssue", "spreads": 3})
+        _, rk_bad2 = lw("collage_run_kit", {"kit": "weddingAlbum", "spreads": 3, "min_per_spread": 4, "max_per_spread": 2})
+        _, rk_bad3 = lw("collage_run_kit", {"kit": "weddingAlbum", "max_per_spread": 2})
+        check(all(err_code(x) == "invalid_argument" for x in (rk_bad, rk_bad2, rk_bad3)) and lst()["edit_digest"] == sb0["edit_digest"],
+              f"成套的 spreads：不是整本婚礼相册、最少比最多大、只给每跨页张数 → invalid_argument，没动（{err_code(rk_bad)} {err_code(rk_bad2)} {err_code(rk_bad3)}）")
+        _, rk2 = lw("collage_run_kit", {"kit": "weddingAlbum", "spreads": 2, "max_per_spread": 3}, timeout=120)
+        gt = lget()
+        alb = rk2.get("album") or {}
+        over = max(0, (gt.get("pages") or 0) - 2)
+        warned = "over_target" in [w.get("code") for w in rk2.get("warnings") or []]
+        check("error" not in rk2 and (gt.get("album_target") or {}).get("spreads") == 2
+              and (gt.get("album_target") or {}).get("max_per_spread") == 3
+              and alb.get("spreads") == gt.get("pages") and alb.get("over_target") == over and warned == (over > 0),
+              f"成套 spreads=2：记进工程（album_target {gt.get('album_target')}），album 报 {alb.get('spreads')} 个、多 {alb.get('over_target')} 个，"
+              f"多了才有 over_target（{warned}）")
+        _, rk3 = lw("collage_run_kit", {"kit": "weddingAlbum", "spreads": 0}, timeout=120)
+        g0_ = lget()
+        check("error" not in rk3 and "album_target" not in g0_ and "target" in (rk3.get("album") or {})
+              and (rk3.get("album") or {}).get("target") is None,
+              f"成套 spreads=0：改回自动（collage_get_state 不再有 album_target，album.target 是 null；{g0_.get('pages')} 个跨页）")
+    else:
+        skip(f"整本婚礼相册没出来（{err_code(kit2)}）：目标跨页数那几条跳过")
     hl.term()
 
     # ============================================================ grep：Live/ 的禁用词（§5 第 7 层、§9.5.6）

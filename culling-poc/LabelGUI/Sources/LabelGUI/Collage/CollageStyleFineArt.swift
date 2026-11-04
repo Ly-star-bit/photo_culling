@@ -711,7 +711,7 @@ enum CollageStyleFineArt {
         let layout = CollageLayout.Context(canvas: project.canvas, style: project.style, photos: map,
                                            hints: context.hints, heroID: nil)
         let plan = CollageAlbum.plan(photos, dedupe: true, theme: .fineArt, chapterMono: project.albumChapterMono,
-                                     title: project.title)
+                                     title: project.title, budget: project.albumBudget)
         let pages = CollageAlbum.build(plan, context: layout, seed: context.seed)
         guard !pages.isEmpty else { return nil }
         project.pages = pages

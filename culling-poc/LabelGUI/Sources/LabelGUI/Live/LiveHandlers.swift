@@ -161,6 +161,8 @@ enum LiveHandlers {
         out["masthead"] = project.masthead
         out["issue"] = project.issue
         out["tray"] = project.photos.count
+        // 相册的目标跨页数（F06）：设了才报
+        if let b = project.albumBudget { out["album_target"] = CollageBudgetChange.targetInfo(b) }
         out["canvas"] = canvasInfo(project.canvas)
         out["style_fields"] = styleFields(project.style)
         let (rows, cut) = trayRows(collage)
@@ -938,7 +940,15 @@ extension LiveHandlers {
         guard let kit = (req.params["kit"] as? String).flatMap(CollageKitID.init(rawValue:)) else {
             return invalid("kit 只能是 " + MCPToolDefs.kitIDs.joined(separator: " / "))
         }
-        return await kitWrite(req, live: live, model: model, kit: kit, coverStep: 0, tool: "collage_run_kit")
+        let budget: CollageBudgetChange
+        switch CollageBudgetChange.parse(kit: kit, spreads: LiveWire.int(req.params["spreads"]),
+                                         min: LiveWire.int(req.params["min_per_spread"]),
+                                         max: LiveWire.int(req.params["max_per_spread"])) {
+        case .success(let change): budget = change
+        case .failure(let bad): return invalid(bad.message)
+        }
+        return await kitWrite(req, live: live, model: model, kit: kit, coverStep: 0, tool: "collage_run_kit",
+                              albumBudget: budget)
     }
 
     static func nextCover(_ req: Request, live: LiveServer, model: AppModel) async -> Reply {
@@ -955,7 +965,7 @@ extension LiveHandlers {
     /// 成套和换封面（§9.5.1「异步操作」）：不包 asOneUndoStep，发起前复位合并状态、等结局、落地后再复位一次。
     /// 发起之前先等路人信息算完（最多「剩余 deadline − 5 s」和 20 s 里小的那个；§10.6「STEP 1 不做了」第 2 条）。
     static func kitWrite(_ req: Request, live: LiveServer, model: AppModel, kit: CollageKitID, coverStep: Int,
-                         tool: String) async -> Reply {
+                         tool: String, albumBudget: CollageBudgetChange = .keep) async -> Reply {
         let collage = model.collage
         let gate = Gate(scope: .collage, digest: true)
         // 先第 5 步（桥关了、场次不对、if_digest 过期），再看是不是出一期：不然真正的原因被 invalid_state 盖住
@@ -976,7 +986,7 @@ extension LiveHandlers {
         let coverBefore = CollageStyleFashion.coverPhotoID(collage.project)
         // = 「一键成套 ▾」/「换封面」：applyKit 自己按 sessionToken、solveGeneration 丢掉作废的结果
         let epoch = model.aiLog.sessionEpoch
-        let landing = await collage.externalKit(kit, coverStep: coverStep)
+        let landing = await collage.externalKit(kit, coverStep: coverStep, budget: albumBudget)
         let outcome = landing.outcome
         switch outcome {
         case .superseded(let by):
@@ -1001,6 +1011,12 @@ extension LiveHandlers {
             }
             body["hints_settled"] = settled
             var warnings: [[String: Any]] = []
+            // 整本婚礼相册：几个跨页、目标几个、多了几个（F06；多了给一条 over_target）
+            if kit == .weddingAlbum {
+                let album = CollageBudgetChange.report(collage.project)
+                body["album"] = album.body
+                if let w = album.warning { warnings.append(w) }
+            }
             if !settled {
                 warnings.append(MCPReadModel.warning("hints_pending", "路人信息还没算完：这次成套的封面和裁切可能和算完以后不一样。",
                                                      hint: "想要稳定的结果，过一会儿再调一次"))

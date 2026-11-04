@@ -254,6 +254,9 @@ enum MCPToolDefs {
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "kit":{"type":"string","enum":"$KITS"},
+       "spreads":{"type":"integer","minimum":0,"maximum":200,"description":"只对 weddingAlbum：目标跨页数（1 个跨页 = 摊开的两页，20 个跨页 = 40P），记进工程，之后 app 里「自动编排」也按它；0 = 改回自动（照片多少编多少）。不给 = 沿用工程里的。不删片：婚礼 fine-art 每跨页最多 3 张，只把落单的单图跨页并起来往目标凑，凑不够结果里 album.over_target 报多了几个"},
+       "min_per_spread":{"type":"integer","minimum":1,"maximum":12,"description":"只对 weddingAlbum，和 spreads 一起给：每跨页最少几张（扉页不算），默认 1"},
+       "max_per_spread":{"type":"integer","minimum":1,"maximum":12,"description":"只对 weddingAlbum，和 spreads 一起给：每跨页最多几张，默认 6（fine-art 自己最多 3 张）"},
        "if_digest":"$IF_DIGEST",
        "reveal":"$REVEAL",
        "op_id":"$OP_ID",
