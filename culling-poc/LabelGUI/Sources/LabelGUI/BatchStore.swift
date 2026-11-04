@@ -2204,8 +2204,7 @@ final class BatchStore: ObservableObject {
             if accepted { acceptedIDs.insert(id) } else { acceptedIDs.remove(id) }
             aiOverrides[id] = ai
         }
-        saveOverrides()
-        saveAIOverrides()
+        saveOverrides()  // 出处（aiOverrides）一起写
         applyThresholds()
         return last.map(\.id)
     }
@@ -2246,8 +2245,7 @@ final class BatchStore: ObservableObject {
             overrides[id] = verdict
             aiOverrides[id] = AIOverride(opID: opID, tool: tool, at: now, previous: first, aiVerdict: verdict.rawValue)
         }
-        saveOverrides()
-        saveAIOverrides()
+        saveOverrides()  // 出处（aiOverrides）一起写
         applyThresholds()
     }
 
@@ -2362,7 +2360,7 @@ final class BatchStore: ObservableObject {
     private func loadOverrides() {
         persistRefused.remove(.overrides)
         refusedDirty.remove(.overrides)
-        backedUpPaths.subtract([overridesPath.path, acceptedPath.path])
+        backedUpPaths.subtract([overridesPath.path, acceptedPath.path, aiOverridesPath.path])
         let stamp = SessionFiles.timestamp()
         switch SessionFiles.read([String: String].self, at: overridesPath, stamp: stamp) {
         case .missing:
@@ -2379,6 +2377,16 @@ final class BatchStore: ObservableObject {
                     return
                 }
                 aside = "（accepted.json 一起挪成 \(acceptedMoved.lastPathComponent)）"
+            }
+            // ai_overrides.json 是这份判决的出处（哪几张是 AI 改的）：一样一起挪开。留在原处的话，下一次 AI 改判、改一张再 ⌘Z
+            // 就拿内存里空的 / 新的几条把它整份盖掉、删掉，原件修好放回去以后 AI 改过哪些也找不回来了。
+            if FileManager.default.fileExists(atPath: aiOverridesPath.path) {
+                guard let aiMoved = SessionFiles.moveAside(aiOverridesPath, stamp: stamp) else {
+                    refusePersist(.overrides, "\(sessionLabel)的人工改判文件 overrides.json 解不开，原件已挪成 \(moved.lastPathComponent)\(aside)；" +
+                                  "ai_overrides.json 挪不开，为免覆盖，这一场的改判先不存盘" + corruptNoticeTail)
+                    return
+                }
+                aside += "（ai_overrides.json 一起挪成 \(aiMoved.lastPathComponent)）"
             }
             addDataNotice("\(sessionLabel)的人工改判文件 overrides.json 解不开（被手改过或写坏了），原件已挪成 " +
                           "\(moved.lastPathComponent)\(aside)，这一场的判决先按自动的显示" + corruptNoticeTail)
@@ -2414,6 +2422,7 @@ final class BatchStore: ObservableObject {
         // .atomic: a crash mid-write here used to cost every manual verdict
         // of the shoot.
         try data.write(to: overridesPath, options: .atomic)
+        try writeAIOverrides()
         if acceptedIDs.isEmpty {
             guard FileManager.default.fileExists(atPath: acceptedPath.path) else { return }
             backupOnce(acceptedPath)
@@ -2431,33 +2440,52 @@ final class BatchStore: ObservableObject {
 
     /// 在 loadOverrides 之后调。只留现在判决还等于 AI 判的、也不是「接受推荐」钉的：老版本 app 打开过这一场、改了判决又
     /// 不维护这份文件，对不上的就丢掉（比 accepted.json 只看「在不在」严）。
+    /// 和 overrides.json 一样走 SessionFiles（审查 S02 跟进）：以前读不出、解不开都当空，下一次 AI 改判就拿新的几条整份盖掉。
+    /// 解不开挪开、提示；读不出来 / 挪不开就整份判决这一场不写（它和 overrides.json 一起写，见 writeOverrides）。
     private func loadAIOverrides() {
         aiOverrides = [:]
-        guard let data = try? Data(contentsOf: aiOverridesPath) else { return }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard let raw = try? decoder.decode([String: AIOverride].self, from: data) else { return }
-        aiOverrides = raw.filter { id, mark in overrides[id]?.rawValue == mark.aiVerdict && !acceptedIDs.contains(id) }
+        switch SessionFiles.read([String: AIOverride].self, at: aiOverridesPath, decoder: decoder) {
+        case .missing:
+            break
+        case .ok(let raw):
+            aiOverrides = raw.filter { id, mark in overrides[id]?.rawValue == mark.aiVerdict && !acceptedIDs.contains(id) }
+        case .corrupt(let moved?):
+            addDataNotice("\(sessionLabel)的 AI 改判出处 ai_overrides.json 解不开（被手改过或写坏了），原件已挪成 " +
+                          "\(moved.lastPathComponent)：AI 改过的那几张这回算成人工改判（判决本身没变）")
+        case .corrupt(nil):
+            refusePersist(.overrides, "\(sessionLabel)的 AI 改判出处 ai_overrides.json 解不开、也挪不开，为免覆盖，这一场的改判先不存盘" +
+                          "（修好或移走这个文件后重新打开这一场）")
+        case .unreadable(let why):
+            refusePersist(.overrides, "\(sessionLabel)的 AI 改判出处 ai_overrides.json 读不出来（\(why)），为免覆盖，这一场的改判先不存盘" +
+                          "（重新打开这一场再读一次）")
+        }
     }
 
-    private func saveAIOverrides() {
+    /// AI 改判的出处和判决一起写（writeOverrides）：一样跟着 persistRefused（原件读不出来时不写不删）、写失败进红条、能重试、
+    /// 打开以后第一次改写前留 .bak。以前单独 try? 写，失败了谁都不知道，判决不存盘的那一场它照样被盖掉、删掉。
+    private func saveAIOverrides() { persist(.overrides) }
+
+    private func writeAIOverrides() throws {
         guard !aiOverrides.isEmpty else {
-            try? FileManager.default.removeItem(at: aiOverridesPath)
+            guard FileManager.default.fileExists(atPath: aiOverridesPath.path) else { return }
+            backupOnce(aiOverridesPath)
+            try SessionFiles.remove(aiOverridesPath)
             return
         }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]
-        if let data = try? encoder.encode(aiOverrides) {
-            try? data.write(to: aiOverridesPath, options: .atomic)
-        }
+        let data = try encoder.encode(aiOverrides)
+        backupOnce(aiOverridesPath)
+        try data.write(to: aiOverridesPath, options: .atomic)
     }
 
-    /// 你亲手动过的这几张不再算 AI 改的（改判、定案、接受推荐、移进废纸篓都走这里）；真拿掉了才写文件。
+    /// 你亲手动过的这几张不再算 AI 改的（改判、定案、接受推荐、移进废纸篓都走这里）。只改内存：调用方接着 saveOverrides，
+    /// 出处和判决一起写。
     private func dropAIMarks(_ ids: some Collection<String>) {
-        var dropped = false
-        for id in ids where aiOverrides.removeValue(forKey: id) != nil { dropped = true }
-        if dropped { saveAIOverrides() }
+        for id in ids { aiOverrides.removeValue(forKey: id) }
     }
 
     // MARK: - 客户选中（client_picks.json）

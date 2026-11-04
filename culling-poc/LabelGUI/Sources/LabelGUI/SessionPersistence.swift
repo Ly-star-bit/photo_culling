@@ -23,7 +23,9 @@ enum SessionFiles {
     }
 
     /// `moveAside: false`：只看不动（导入框每敲一个字都要读一次确认表记录，那条路不挪文件）。`stamp` 见 moveAside。
-    static func read<T: Decodable>(_ type: T.Type, at url: URL, moveAside: Bool = true, stamp: String? = nil) -> Read<T> {
+    /// `decoder`：要特别设置的（ai_overrides.json 的时间是 ISO 8601）。
+    static func read<T: Decodable>(_ type: T.Type, at url: URL, moveAside: Bool = true, stamp: String? = nil,
+                                   decoder: JSONDecoder = JSONDecoder()) -> Read<T> {
         guard FileManager.default.fileExists(atPath: url.path) else { return .missing }
         let data: Data
         do {
@@ -32,7 +34,7 @@ enum SessionFiles {
             log.error("读不出 \(url.path, privacy: .public)：\(error.localizedDescription, privacy: .public)")
             return .unreadable(CardImporter.describe(error))
         }
-        if let value = try? JSONDecoder().decode(T.self, from: data) { return .ok(value) }
+        if let value = try? decoder.decode(T.self, from: data) { return .ok(value) }
         guard moveAside else { return .corrupt(nil) }
         return .corrupt(self.moveAside(url, stamp: stamp))
     }

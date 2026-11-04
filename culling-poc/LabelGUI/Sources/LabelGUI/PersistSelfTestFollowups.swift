@@ -193,4 +193,105 @@ extension PersistSelfTestHarness {
         let wantFull: [String: String] = [id: "眼睛提亮"]
         check(retried && store.persistError == nil && savedNotes(full) == wantFull, "腾出空间点「重试」：备注写上、红条消失")
     }
+
+    // MARK: - AI 改判出处（ai_overrides.json）跟着判决走
+
+    /// 一条 AI 改判出处（和 BatchStore.AIOverride 写出来的一样）。
+    func aiMarkJSON(_ id: String, verdict: Verdict) -> Data {
+        let mark = "{\"\(id)\":{\"ai_verdict\":\"\(verdict.rawValue)\",\"at\":\"2026-11-01T10:00:00Z\"," +
+            "\"op_id\":\"op-old\",\"previous\":null,\"tool\":\"cull_set_verdicts\"}}"
+        return Data(mark.utf8)
+    }
+
+    func aiOverridesFollowVerdicts() {
+        print("— AI 改判出处 ai_overrides.json：和判决一起挪开、一起不写、一起进红条，自己坏了也挪开")
+        freshIndex()
+        let other = makeSession("ai-other")
+        let store = newStore()
+
+        // 判决解不开：出处用同一个时间一起挪开，提示里说
+        let bad = makeSession("ai-corrupt-verdicts")
+        let aiData = aiMarkJSON("DSCF7207", verdict: .reject)
+        try? Data("{\"DSCF7207\": \"废".utf8).write(to: bad.dir.appendingPathComponent("overrides.json"))
+        try? aiData.write(to: bad.dir.appendingPathComponent("ai_overrides.json"))
+        store.switchSession(to: bad.folder)
+        guard let id = store.items.first?.id else {
+            check(false, "fixture 读进来了")
+            return
+        }
+        let aiAside = corruptCopies(of: "ai_overrides.json", in: bad.dir)
+        let pair = corruptCopies(of: "overrides.json", in: bad.dir).first?.lastPathComponent.dropFirst("overrides".count)
+        let aiPair = aiAside.first?.lastPathComponent.dropFirst("ai_overrides".count)
+        let movedTogether: Bool = aiAside.count == 1 && aiAside.first.flatMap(read) == aiData && pair != nil && pair == aiPair
+        check(movedTogether && !exists(bad.dir.appendingPathComponent("ai_overrides.json")),
+              "overrides.json 解不开：ai_overrides.json 用同一个时间一起挪开、一字不差")
+        check(store.dataNotice?.contains("ai_overrides.json") == true, "提示里说出处也挪开了：\(store.dataNotice ?? "nil")")
+        store.applyAIOverrides([(id: id, verdict: .pick)], opID: "op-new", tool: "cull_set_verdicts")
+        check(aiAside.first.flatMap(read) == aiData, "AI 再改判：挪开的出处原件没被碰到")
+
+        // 判决读不出来（权限）：这一场不写判决，出处也不写不删（以前改一张再 ⌘Z 就删掉它）
+        if chmodBlocks {
+            let locked = makeSession("ai-locked-verdicts")
+            let url = locked.dir.appendingPathComponent("overrides.json")
+            let aiURL = locked.dir.appendingPathComponent("ai_overrides.json")
+            try? Data("{\"DSCF7207\":\"废片\"}".utf8).write(to: url)
+            try? aiData.write(to: aiURL)
+            setMode(url, 0o000)
+            store.switchSession(to: locked.folder)
+            store.setOverride(id, .usable)
+            store.undoLastOverride()
+            check(read(aiURL) == aiData, "判决读不出来时改一张再 ⌘Z：ai_overrides.json 还在、一字不差")
+            store.applyAIOverrides([(id: id, verdict: .pick)], opID: "op-locked", tool: "cull_set_verdicts")
+            check(read(aiURL) == aiData && !exists(aiURL.appendingPathExtension("bak")), "AI 改判也不盖它（也没备份它：根本没写）")
+            setMode(url, 0o644)
+            store.switchSession(to: other.folder)
+            store.switchSession(to: locked.folder)
+            check(store.aiOverrides["DSCF7207"]?.opID == "op-old", "权限恢复后重新打开：AI 改过哪张、出处都读回来")
+
+            // 出处自己读不出来：整份判决这一场不写（判决和出处一起写）
+            let aiLocked = makeSession("ai-locked-marks")
+            let verdictsURL = aiLocked.dir.appendingPathComponent("overrides.json")
+            let verdicts = Data("{\"DSCF7207\":\"废片\"}".utf8)
+            let marksURL = aiLocked.dir.appendingPathComponent("ai_overrides.json")
+            try? verdicts.write(to: verdictsURL)
+            try? aiData.write(to: marksURL)
+            setMode(marksURL, 0o000)
+            store.switchSession(to: aiLocked.folder)
+            store.setOverride(id, .pick)
+            setMode(marksURL, 0o644)
+            let refused: Bool = read(verdictsURL) == verdicts && read(marksURL) == aiData
+            check(refused && store.persistError?.contains("判决") == true && store.dataNotice?.contains("ai_overrides.json") == true,
+                  "ai_overrides.json 读不出来：判决也先不写（两份一起写），红条、橙条都说")
+            store.switchSession(to: other.folder)
+        } else {
+            print("SKIP root 跑时 chmod 000 挡不住读，读不出来那两段测不了")
+        }
+
+        // 出处自己解不开：挪开、提示，判决照常；下一次 AI 改判写一份新的
+        let badMarks = makeSession("ai-corrupt-marks")
+        let marksGarbage = Data("{\"DSCF7207\": {\"op_id\": ".utf8)
+        try? Data("{\"DSCF7207\":\"废片\"}".utf8).write(to: badMarks.dir.appendingPathComponent("overrides.json"))
+        try? marksGarbage.write(to: badMarks.dir.appendingPathComponent("ai_overrides.json"))
+        store.switchSession(to: badMarks.folder)
+        let marksAside = corruptCopies(of: "ai_overrides.json", in: badMarks.dir)
+        check(marksAside.count == 1 && marksAside.first.flatMap(read) == marksGarbage && store.overrides["DSCF7207"] == .reject,
+              "ai_overrides.json 解不开：原件挪开、一字不差，判决照常读进来")
+        store.applyAIOverrides([(id: id, verdict: .usable)], opID: "op-fresh", tool: "cull_set_verdicts")
+        let fresh = CullMCPSelfTest.diskMarks(badMarks.dir)
+        check(fresh?[id]?["op_id"] as? String == "op-fresh" && marksAside.first.flatMap(read) == marksGarbage,
+              "下一次 AI 改判：写一份新的出处，挪开的原件不碰")
+
+        // 写不上（只读目录）：AI 改判的出处跟判决一起进红条，重试补写
+        let full = makeSession("ai-full")
+        store.switchSession(to: full.folder)
+        setWritable(full.dir, false)
+        defer { setWritable(full.dir, true) }
+        store.applyAIOverrides([(id: id, verdict: .reject)], opID: "op-full", tool: "cull_set_verdicts")
+        check(chmodBlocks ? store.persistError?.contains("判决") == true && CullMCPSelfTest.diskMarks(full.dir) == nil : true,
+              "写不上：红条说判决没存上，出处也没写半截")
+        setWritable(full.dir, true)
+        let retried = store.retryPersist()
+        check(retried && CullMCPSelfTest.diskMarks(full.dir)?[id]?["op_id"] as? String == "op-full" && store.persistError == nil,
+              "点「重试」：判决和出处一起写上")
+    }
 }
