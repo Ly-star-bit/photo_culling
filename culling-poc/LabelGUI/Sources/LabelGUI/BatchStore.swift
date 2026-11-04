@@ -3934,6 +3934,11 @@ final class BatchStore: ObservableObject {
     /// 亲手做的决定。写进去的都记在 acceptedIDs：判决钉住了，但不算「人工改判」。
     /// 整个操作一条撤销记录，⌘Z 一次全部回来。
     /// chapter 非 nil = 只动这一章（时间轴「只看这一章」开着时的「本章接受推荐」）。
+    ///
+    /// AI 出处（aiOverrides）和分组行的「接受推荐」（applyOverrides(recommendedDecision, accepted: true)）归属不一样，是有意的：
+    /// 分组行把这一场每一张都写一遍，AI 放行成精选、这次判决没变的那张也在里面 —— 用户看着这一场点了确认，就算用户的
+    /// （拿掉 AI 标记，之后进阈值建议、changed_by 是 user，和亲手按一下同一个判决一样）。这里只写要变的（本来就钉成精选的
+    /// 不写），没写到的照片用户没在这一步碰过，AI 标记留着、照旧算 AI 的。产品规则：用户在这一场上确认过 = 用户的。
     @discardableResult
     func acceptAllRecommendations(inChapter chapter: Int? = nil) -> Int {
         var changes: [(id: String, verdict: Verdict)] = []

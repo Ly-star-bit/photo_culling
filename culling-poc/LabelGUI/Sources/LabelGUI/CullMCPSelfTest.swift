@@ -404,5 +404,35 @@ enum CullMCPSelfTest {
               && store.overrideUndoDepth == depth,
               "⌘Z 一下：这一场全部回到改判之前，另一张回到用户判的精选，出处都没了")
         store.undoLastOverride()
+        acceptAttributionChecks(check)
+    }
+
+    /// 两个「接受推荐」对 AI 出处的归属不一样，是产品规则（见 BatchStore.acceptAllRecommendations 旁的注释）：AI 把一场里
+    /// 一张可用放行成精选以后，顶栏「全部接受推荐」不写本来就钉成精选的那张 → 照旧算 AI 的，同一场别的可用照样变废片；
+    /// 分组行「接受推荐」把这一场每一张都写一遍 → 用户在这一场上确认过，算用户的。
+    static func acceptAttributionChecks(_ check: Check) {
+        let store = open()
+        func autoUsable(_ take: Int) -> [String] {
+            store.members(ofTake: take).filter { $0.verdict == .usable && store.overrides[$0.id] == nil }.map(\.id)
+        }
+        guard let take = store.takeRows.map(\.take).first(where: { autoUsable($0).count >= 2 }) else {
+            check(false, "fixture 里找不到有 2 张以上自动可用的场")
+            return
+        }
+        let usable = autoUsable(take)
+        let target = usable[0]
+        let loser = usable[1]
+        store.applyAIOverrides([(id: target, verdict: .pick)], opID: "op-ai-accept", tool: "cull_set_verdicts")
+        store.acceptAllRecommendations()
+        let keptAI = store.aiOverride(target)?.opID == "op-ai-accept" && store.overrides[target] == .pick
+        check(keptAI && store.overrides[loser] == .reject,
+              "顶栏「全部接受推荐」：同一场的可用 \(loser) 变废片，AI 放行成精选的 \(target) 没被写、照旧算 AI 的")
+        store.undoLastOverride()
+        store.applyOverrides(store.recommendedDecision(for: store.members(ofTake: take)), accepted: true)
+        check(store.aiOverride(target) == nil && store.overrides[target] == .pick && store.overrides[loser] == .reject,
+              "分组行「接受推荐」：整场写一遍，用户在这一场上确认过，\(target) 不再算 AI 的")
+        store.undoLastOverride()
+        store.undoLastOverride()
+        check(store.overrides.isEmpty && store.aiOverrideCount == 0, "撤回去：没有改判、没有出处")
     }
 }
