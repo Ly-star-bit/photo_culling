@@ -168,8 +168,9 @@ struct CollageView: View {
                   + "纸、卡纸、≥ 25mm 的边距是样式：在「样式」里选「婚礼 fine-art」，一键成套「整本婚礼相册」两样一起设")
             Button("自动编排") { store.autoArrangeAlbum(dedupe: dedupeAlbum) }
                 .disabled(store.project.photos.isEmpty)
-                .help(fineArt ? "托盘里的照片按婚礼 fine-art 编成跨页：废片不要、同一场只留精选，扉页取宽景，每章疏 → 密 → 精选收尾"
-                      : "托盘里的照片按时间和章节编成跨页：分数最高的做扉页，好片单独成页")
+                .help((fineArt ? "托盘里的照片按婚礼 fine-art 编成跨页：废片不要、同一场只留精选，扉页取宽景，每章疏 → 密 → 精选收尾"
+                       : "托盘里的照片按时间和章节编成跨页：分数最高的做扉页，好片单独成页")
+                      + "。客户选中的一张都不拿掉；检视器「画布」里指定了跨页数就往那么多个跨页里塞（不删片）")
             Toggle("相似只留一张", isOn: $dedupeAlbum)
                 .toggleStyle(.checkbox)
                 .help(fineArt ? "只管画面相似的（关掉也不会全上：fine-art 一直是同一场只留精选、连拍只留一张）；拿掉的仍在托盘里，可以拖回任何跨页"
@@ -421,6 +422,11 @@ private struct CollageTrayHeader: View {
                     store.importVerdicts(batch: batchStore, includeUsable: true)
                 }
                 .disabled(batchStore.items.isEmpty)
+                // 客户选中：批量页「导入客户选择」导进来的（不看判决，客户选中的废片也带）。没导入过就不占地方。
+                if batchStore.clientPickCount > 0 {
+                    Button("客户选中 (\(batchStore.clientPickCount))") { store.importClientPicks(batch: batchStore) }
+                        .help("批量页导入的客户选择（紫心）。相册「自动编排」会把它们全部排上：客户选中的废片、同一场的第二张、连拍里的都不拿掉")
+                }
                 Button("精华 Top 20") { store.importTop(20, batch: batchStore) }
                     .disabled(batchStore.items.isEmpty)
                 Divider()
@@ -442,7 +448,7 @@ private struct CollageTrayHeader: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .help("从批量页带精选进来，或添加外部照片（也可以直接把文件拖到这里）；也在这里移除没用上的")
+            .help("从批量页带精选、客户选中进来，或添加外部照片（也可以直接把文件拖到这里）；也在这里移除没用上的")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -603,6 +609,16 @@ struct CollageTrayItem: View {
                     .shadow(radius: 1)
             }
         }
+        .overlay(alignment: .topLeading) {
+            // 客户选中：紫心（和批量页缩略图、确认表上客户点的那颗同一个符号同一个颜色）。
+            if photo.clientPick {
+                Image(systemName: "heart.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.purple)
+                    .padding(4)
+                    .shadow(radius: 1)
+            }
+        }
         .overlay(alignment: .bottomLeading) {
             if dropped {
                 Text(fineArt ? "拿掉" : "相似")
@@ -620,8 +636,17 @@ struct CollageTrayItem: View {
                     .strokeBorder(active ? Color.accentColor : Color.gray, lineWidth: 3)
             }
         }
-        .help(photo.id + (photo.isPick ? " · 精选" : "") + (uses > 1 ? " · 用了 \(uses) 次" : uses == 1 ? " · 已用" : "")
-              + (dropped ? (fineArt ? " · fine-art 编排没上（同一场只留精选 / 相似）" : " · 相册去重拿掉的") : ""))
+        .help(helpText)
+    }
+
+    /// 悬停提示（拆成一段段拼：一整串三元表达式加起来，CI 的编译器类型检查会超时）。
+    private var helpText: String {
+        var parts = [photo.id]
+        if photo.isPick { parts.append("精选") }
+        if photo.clientPick { parts.append("客户选中（编排不会拿掉）") }
+        if uses > 1 { parts.append("用了 \(uses) 次") } else if uses == 1 { parts.append("已用") }
+        if dropped { parts.append(fineArt ? "fine-art 编排没上（同一场只留精选 / 相似）" : "相册去重拿掉的") }
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -840,8 +865,12 @@ struct CollagePageStrip: View {
     var body: some View {
         let _ = CollagePerf.body("页条")
         HStack(spacing: 8) {
-            Text(unit).font(.caption).foregroundStyle(.secondary)
-                .frame(width: 32)
+            VStack(spacing: 2) {
+                Text(unit).font(.caption).foregroundStyle(.secondary)
+                // 相册：几个跨页（指定了跨页数是「现在 / 目标」，多了标橙）。
+                if store.isAlbum { CollageAlbumSpreadCount(store: store) }
+            }
+            .frame(width: 40)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(Array(store.project.pages.enumerated()), id: \.element.id) { item in
@@ -880,7 +909,11 @@ struct CollagePageStrip: View {
                 .frame(height: 52)
                 .overlay(RoundedRectangle(cornerRadius: 2)
                     .strokeBorder(selected ? Color.accentColor : Color.clear, lineWidth: 2.5))
-                Text("\(index + 1)").font(.caption2).foregroundStyle(selected ? .primary : .secondary)
+                // 超出目标跨页数的那几个跨页：页码标橙（印厂 / 套餐放不下的就是它们）。
+                let over: Bool = store.isAlbum && (store.project.albumBudget.map { index >= $0.spreads } ?? false)
+                let tint: AnyShapeStyle = over ? AnyShapeStyle(Color.orange)
+                    : selected ? AnyShapeStyle(HierarchicalShapeStyle.primary) : AnyShapeStyle(HierarchicalShapeStyle.secondary)
+                Text("\(index + 1)").font(.caption2).foregroundStyle(tint)
             }
         }
         .buttonStyle(.plain)

@@ -89,6 +89,9 @@ struct CollagePhotoRef: Codable, Hashable, Identifiable {
     var isMonochrome: Bool?
     /// 平均亮度 0…1（同上）：左右页亮度差、暗调整章用。
     var meanLuma: Double?
+    /// 客户选中（批量页「导入客户选择」的紫心，不改判决）：相册编排无条件保留 —— 废片、同一场只留精选、
+    /// 近似重复只留一张、「相似只留一张」都不拿掉它。外部文件 = false。
+    var clientPick = false
 
     init(id: String, path: String, previewPath: String? = nil, width: Int, height: Int) {
         self.id = id
@@ -1495,6 +1498,8 @@ struct CollageProject: Codable, Hashable {
     var albumTheme: CollageAlbumTheme = .classic
     /// fine-art 编排的「整章黑白」：一章里黑白照片占三分之一以上，整章都转黑白。
     var albumChapterMono = true
+    /// 相册「自动编排」的目标跨页数、每跨页张数（F06）；nil = 自动（照片多少编多少）。旧工程没有 = nil。
+    var albumBudget: CollageAlbumBudget?
     /// 存下来的几版（拼图页底下的「方案」栏，见 CollageVariant）。放在工程里跟着 collage.json 存；不跟着撤销走
     /// （CollageStore.restore 换工程时留现在的方案栏）。编辑指纹、跨页小图的键都不算它。
     var variants: [CollageVariant] = []
@@ -1664,6 +1669,8 @@ extension CollagePhotoRef {
         body = c.softOptional(.body)
         isMonochrome = c.softOptional(.isMonochrome)
         meanLuma = c.softOptional(.meanLuma)
+        // 旧工程没有这个键 = 不是（attach / 切回拼图时按批量页刷一遍就对上了）。
+        clientPick = c.soft(.clientPick, false)
     }
 }
 
@@ -2060,6 +2067,8 @@ extension CollageProject {
         watermark = c.softOptional(.watermark)
         albumTheme = c.soft(.albumTheme, .classic)
         albumChapterMono = c.soft(.albumChapterMono, true)
+        // 旧工程没有这个键 = 自动；坏了也只丢它（照常读回、按自动编）。
+        albumBudget = c.softOptional(.albumBudget)
         // 旧工程没有这个键 = 没有方案；哪一个坏了只丢它自己。
         variants = c.soft(.variants, [Failable<CollageVariant>]()).compactMap(\.value)
     }

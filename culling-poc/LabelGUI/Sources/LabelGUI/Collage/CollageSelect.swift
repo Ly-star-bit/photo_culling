@@ -25,6 +25,8 @@ enum CollageBridge {
     struct Facts {
         var takeRank: [String: Int] = [:]
         var manual: Set<String> = []
+        /// 客户选中（批量页导入的客户选择）：托盘格标紫心、相册编排无条件保留。
+        var clientPicks: Set<String> = []
 
         init() {}
 
@@ -32,6 +34,7 @@ enum CollageBridge {
         init(batch: BatchStore) {
             takeRank = batch.takeRank
             manual = Set(batch.items.lazy.map(\.id).filter { batch.isManual($0) })
+            clientPicks = batch.clientPicks
         }
     }
 
@@ -62,6 +65,7 @@ enum CollageBridge {
         ref.captureSubsec = item.captureSubsec
         ref.verdict = verdict(item.verdict)
         ref.isManual = facts.manual.contains(item.id)
+        ref.clientPick = facts.clientPicks.contains(item.id)
         ref.eyesOpen = item.dynamicEyeClosed.map { !$0 }
         ref.exif = item.exif
         ref.body = item.body.isEmpty ? nil : item.body
@@ -422,7 +426,8 @@ enum CollageSelect {
     ///   姿势在书里出现三次就腻了。精选只受连拍规则约束。
     /// 按分数从高到低过，精选天然先留。返回同地同姿势的两两关系，编排时一个跨页里别堆
     /// 三张这样的。特征算不出来时原样返回。
-    static func distinctMoments(_ photos: [CollagePhotoRef])
+    /// keeping：这几张无条件留下（相册编排传客户选中）；它们照样算进「已经留下的」，和它们是连拍、同姿势的别的照片照常拿掉。
+    static func distinctMoments(_ photos: [CollagePhotoRef], keeping keep: Set<String> = [])
         -> (kept: [CollagePhotoRef], dropped: [CollagePhotoRef], similar: [String: Set<String>]) {
         let sorted = photos.sorted { $0.score > $1.score }
         let head = Array(sorted.prefix(120))
@@ -453,7 +458,7 @@ enum CollageSelect {
             let distances = kept.compactMap { dist[p.id + "|" + $0.id] }
             let nearest = distances.min() ?? .infinity
             let samePose = distances.filter { $0 < 0.76 * median }.count
-            if nearest < 0.54 * median || (!p.isPick && samePose >= 2) {
+            if !keep.contains(p.id), nearest < 0.54 * median || (!p.isPick && samePose >= 2) {
                 dropped.append(p)
             } else {
                 kept.append(p)
@@ -502,26 +507,32 @@ enum CollageAlbum {
         var dropped: [CollagePhotoRef]
         /// 按哪个主题编的（build 按它出版式）。
         var theme: CollageAlbumTheme = .classic
+        /// 按哪个目标跨页数编的（没给 = nil）：编完的提示、跨页条和它比。
+        var budget: CollageAlbumBudget? = nil
     }
 
     /// 编排：去重 → 分数最高的做扉页 → 其余按时间、按章节分组，疏密交替（4-3-5-2-4-3）；
     /// 分数排前一成多的竖图和下一张组成一页一张的对页，横图单独铺满。
     /// theme = .fineArt：婚礼 fine-art 的编排（CollageStyleFineArt.plan，chapterMono = 整章黑白，title = 工程标题：
     /// 扉页标题是西文就不加字距）；默认主题照旧。
+    /// budget：目标跨页数（F06，CollageAlbumBudget）；默认主题走 planBudget，fine-art 编完往目标并。nil = 照旧。
     static func plan(_ photos: [CollagePhotoRef], dedupe: Bool = true, maxPerSpread: Int = 5,
-                     theme: CollageAlbumTheme = .classic, chapterMono: Bool = true, title: String = "") -> Plan {
+                     theme: CollageAlbumTheme = .classic, chapterMono: Bool = true, title: String = "",
+                     budget: CollageAlbumBudget? = nil) -> Plan {
         if theme == .fineArt {
-            return CollageStyleFineArt.plan(photos, dedupe: dedupe, chapterMono: chapterMono, title: title)
+            return CollageStyleFineArt.plan(photos, dedupe: dedupe, chapterMono: chapterMono, title: title, budget: budget)
         }
         var kept = photos
         var dropped: [CollagePhotoRef] = []
         var similar: [String: Set<String>] = [:]
         if dedupe {
-            let r = CollageSelect.distinctMoments(photos)
+            // 客户选中的不拿掉（F19：客户点名要的照片不能被相似去重悄悄删了）。
+            let r = CollageSelect.distinctMoments(photos, keeping: CollageAlbum.clientPickIDs(photos))
             kept = r.kept
             dropped = r.dropped
             similar = r.similar
         }
+        if let budget { return planBudget(kept, dropped: dropped, similar: similar, budget: budget) }
         guard let opener = kept.max(by: { $0.score < $1.score }) else { return Plan(spreads: [], dropped: dropped) }
         var spreads = [Spread(kind: .opener, photos: [opener])]
         let rest = CollageSelect.chronological(kept.filter { $0.id != opener.id })

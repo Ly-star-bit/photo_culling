@@ -132,6 +132,9 @@ enum CollageStyleFineArtSelfTest {
                   !($0.caption ?? "").contains(":")
               }, "没有拍摄时间：章节开篇只印章序（不印时刻）")
 
+        // 客户选中无条件保留（F19）等相册编排的另外几条：CollageAlbumPlanSelfTest.swift。
+        CollageAlbumPlanSelfTest.run(book: book, check: check)
+
         // ---------------------------------------------------------------- 4. 真照片套合成标记（可选）
         if args.count > flagIndex + 1, !args[flagIndex + 1].hasPrefix("--") {
             renderOnPhotos(dir: URL(fileURLWithPath: args[flagIndex + 1]), args: args, check: check)

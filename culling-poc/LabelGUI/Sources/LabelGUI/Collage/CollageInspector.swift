@@ -139,6 +139,9 @@ struct CollageLayoutPanel: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 } else if store.project.canvas.seams == .fold {
                     foldControls
+                    // 目标跨页数、每跨页张数（CollageAlbumBudget.swift）。
+                    Divider()
+                    CollageAlbumBudgetControls(store: store)
                 }
             }
             // 每一块都撑满检视器的宽（以前「画布」「输出目录」两块按内容收窄，和别的块对不齐）。

@@ -24,7 +24,8 @@ import CryptoKit
 ///   贴纸   --sticker washi@0.5,0.1,20（种类@中心x,y,旋转；可多次；另有 barcode 装饰条码、greasePencil 油性笔圈）
 ///   模板册 --template-sheet 出图.jpg [--only 分类或名字里的几个字]（全部内置模板套这组照片，拼成一张总览）
 ///          --look-sheet 出图.jpg（每个色调套这组照片并排）
-///   相册   --album [--spreads N] [--pdf] [--marks] [--no-dedupe] [--binding layflat|glued]（装订：平铺对裱 / 胶装锁线）
+///   相册   --album [--spreads N]（只出前 N 个跨页的图）[--pdf] [--marks] [--no-dedupe] [--binding layflat|glued]（装订：平铺对裱 / 胶装锁线）
+///          [--target-spreads N [--per-spread 1-6]]（目标跨页数、每跨页张数：照片全部塞进 N 个跨页，不删片，放不下就多出几个）
 ///          [--album-theme classic|fineArt]（fineArt = 婚礼 fine-art 编排：章节开篇、疏密、呼吸页、竖图成对；没给 --style
 ///          就用 fine-art 样式按册子尺寸算边距）[--no-chapter-mono]（不整章转黑白）
 ///   刊头   --masthead 刊名（空 = 标题转大写 / 拼音）--issue 期号（空 = 页码）
@@ -49,7 +50,10 @@ enum CollageCLI {
         // 主体蒙版缓存和界面同一个地方（场次目录下 collage_masks/）。
         CollageMasks.setDirectory(store.sessionDir.appendingPathComponent("collage_masks"))
         let facts = CollageBridge.Facts(batch: store)
-        let pool = store.items.filter { $0.verdict != .reject }.compactMap { CollageBridge.ref(from: $0, facts: facts) }
+        // 相册：客户选中的废片也要（编排无条件保留客户选中的，和拼图页一样）。
+        let album = args.contains("--album")
+        let pool = store.items.filter { $0.verdict != .reject || (album && store.clientPicks.contains($0.id)) }
+            .compactMap { CollageBridge.ref(from: $0, facts: facts) }
         guard !pool.isEmpty else {
             print("没有可用的照片（先 --analyze）")
             exit(1)
@@ -84,6 +88,13 @@ enum CollageCLI {
                 project.albumTheme = theme
             }
             project.albumChapterMono = !args.contains("--no-chapter-mono")
+            if let t = option("--target-spreads") {
+                guard let budget = CollageCLI.parseBudget(t + (option("--per-spread").map { "@" + $0 } ?? "")) else {
+                    print("--target-spreads 要一个 1–200 的数，--per-spread 写成 1-6（每跨页最少-最多几张）")
+                    exit(1)
+                }
+                project.albumBudget = budget
+            }
             runAlbum(project: project, photoMap: photoMap, out: out, debug: debug, seed: seed,
                      style: option("--style") == nil,
                      spreads: Int(option("--spreads") ?? "0") ?? 0,
@@ -370,8 +381,13 @@ enum CollageCLI {
         let context = CollageLayout.Context(canvas: project.canvas, style: project.style, photos: photoMap,
                                             hints: hints, heroID: nil)
         let plan = CollageAlbum.plan(photos, dedupe: dedupe, theme: project.albumTheme,
-                                     chapterMono: project.albumChapterMono, title: project.title)
+                                     chapterMono: project.albumChapterMono, title: project.title, budget: project.albumBudget)
         let used = plan.spreads.reduce(0) { $0 + $1.photos.count }
+        if let b = project.albumBudget {
+            let outcome = CollageAlbumBudget.outcome(spreads: plan.spreads.count, budget: b, photos: used,
+                                                     fineArt: plan.theme == .fineArt) ?? ""
+            print("目标 \(b.label) → \(outcome)")
+        }
         // fine-art：拿掉的分开说（同一场只留精选一直开着，「相似」才是 --no-dedupe 关的那个）。
         let droppedText = plan.theme == .fineArt ? CollageStyleFineArt.droppedNote(photos, plan: plan)
             : "相似拿掉 \(plan.dropped.count)"
@@ -746,7 +762,7 @@ enum CollageCLI {
 
 // MARK: - 界面离屏快照（不开 GUI：禁止激活、窗口从不显示）
 
-/// LabelGUI --collage-ui <photo_dir> <out.png> [--album] [--tab 版式|样式|文字|水印|导出] [--select 路径如 10]
+/// LabelGUI --collage-ui <photo_dir> <out.png> [--album [--target-spreads 20@1-6]] [--tab 版式|样式|文字|水印|导出] [--select 路径如 10]
 /// [--crop] [--overlay-index N] [--size 1440x900] [--adopt photos|page[:水印页预设名]] [--inspector-width 300] [--notice 提示文字]
 /// [--contact-frames]（印样的「逐帧」一开始就展开）[--light]（浅色外观）[--ax-dump]
 /// [--tray-filter all|unused|used] [--tray-select ID,ID]（托盘的筛选、多选）
@@ -796,6 +812,8 @@ enum CollageUISnapshot {
         }
         if args.contains("--album") {
             store.setMode(.album)
+            // --target-spreads 20 / 20@1-6：目标跨页数（看检视器里那一块、跨页条的「现在/目标」和标橙）。
+            if let t = option("--target-spreads"), let b = CollageCLI.parseBudget(t) { store.setAlbumBudget(b) }
             store.autoArrangeAlbum(dedupe: true)
             spin(60) { !store.project.pages.isEmpty && store.busyText == nil }
         } else if store.root == nil || args.contains("--relayout") {
@@ -2350,6 +2368,42 @@ enum CollageOpsScript {
             case "arrange":
                 store.autoArrangeAlbum(dedupe: arg != "all")
                 spin(60) { store.busyText == nil && !store.project.pages.isEmpty }
+            case "spreads":
+                // spreads:20 / spreads:20@1-6（目标跨页数、每跨页最少-最多几张）/ spreads:off（自动）：下一次 arrange 按它编。
+                if arg == "off" {
+                    store.setAlbumBudget(nil)
+                    print("  目标跨页数：自动")
+                } else if let b = CollageCLI.parseBudget(arg) {
+                    store.setAlbumBudget(b)
+                    print("  目标 " + b.label)
+                } else { ok = false }
+            case "clientpicks":
+                // clientpicks:DSCF7209;DSCF7211（= 批量页「导入客户选择」；clientpicks: 空 = 清除）：托盘按批量页刷新（紫心）。
+                let ids = Set(arg.split(separator: ";").map(String.init))
+                batch.setClientPicks(ids)
+                store.refreshFromBatch()
+                let marked = store.project.photos.filter(\.clientPick).map(\.id)
+                print("  客户选中 \(batch.clientPickCount) 张 · 托盘里标紫心 \(marked.count) 张"
+                      + (marked.isEmpty ? "" : "：" + marked.joined(separator: " ")))
+            case "importclient":
+                // 托盘「带照片 › 客户选中 (N)」。
+                let before = store.project.photos.count
+                store.importClientPicks(batch: batch)
+                spin(20) { store.busyText == nil }
+                idle()
+                print("  托盘 \(before) → \(store.project.photos.count) 张")
+            case "albumdump":
+                // 编排结果：每个跨页几张、客户选中的上了哪个跨页、拿掉了哪些（arrange 之后看）。
+                print(CollageCLI.albumDump(store))
+            case "expect":
+                // expect:clientplaced（客户选中的都上了、没有一张在「拿掉」里）| spreads=N | spreads<=N | perspread=1-6 |
+                // alltray（托盘里每张都上了）：编排结果的断言。
+                // 不对打一行「断言失败」（门禁按它算失败），写错了算参数不对。
+                switch CollageCLI.albumExpect(store, arg) {
+                case .pass(let detail): print("  断言通过 \(arg) · \(detail)")
+                case .fail(let detail): print("断言失败: \(op) · \(detail)")
+                case .unknown: ok = false
+                }
             case "page":
                 store.pageIndex = Int(arg) ?? 0
             case "addpage":

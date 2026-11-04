@@ -687,12 +687,12 @@ enum CollageStyleFineArt {
     // MARK: - 一键成套：整本婚礼相册
 
     /// 一键成套 kit：整本婚礼相册（CollageKitID.weddingAlbum）：切到相册模式（已经是相册就沿用它的册子尺寸、装订），
-    /// fine-art 样式按册子尺寸重算边距，托盘照片（废片不要）按 fine-art 主题编排（CollageStyleFineArtAlbum.swift）。
+    /// fine-art 样式按册子尺寸重算边距，托盘照片（废片不要，客户选中的废片要）按 fine-art 主题编排（CollageStyleFineArtAlbum.swift）。
     /// 托盘、标题、副标题、刊头、水印跟着工程走。照片不够（托盘空）= nil。
     static func weddingAlbum(_ context: CollageKits.Context) -> CollageProject? {
         var project = context.project
-        var photos = context.tray.filter { $0.verdict != .reject }
-        if photos.isEmpty { photos = context.tray }
+        // 废片不要，客户选中的废片要（和编排同一条：CollageStyleFineArt.candidates）。
+        var photos = candidates(context.tray)
         guard !photos.isEmpty else { return nil }
         // 亮度、黑白从路人信息补（托盘里的 ref 一般已经抄过；刚带进来、还没算到的从 hints 拿）。
         for i in photos.indices {
@@ -711,7 +711,7 @@ enum CollageStyleFineArt {
         let layout = CollageLayout.Context(canvas: project.canvas, style: project.style, photos: map,
                                            hints: context.hints, heroID: nil)
         let plan = CollageAlbum.plan(photos, dedupe: true, theme: .fineArt, chapterMono: project.albumChapterMono,
-                                     title: project.title)
+                                     title: project.title, budget: project.albumBudget)
         let pages = CollageAlbum.build(plan, context: layout, seed: context.seed)
         guard !pages.isEmpty else { return nil }
         project.pages = pages

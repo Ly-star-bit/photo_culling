@@ -598,6 +598,12 @@ final class CollageStore: ObservableObject {
         addRefs(from: items, layout: .none, facts: CollageBridge.Facts(batch: batch))
     }
 
+    /// 「带照片 › 客户选中 (N)」：批量页导入的客户选择（不看判决：客户选中的废片也带进来，编排时照样上）。
+    func importClientPicks(batch: BatchStore) {
+        let items = batch.items.filter { batch.clientPicks.contains($0.id) }
+        addRefs(from: items, layout: .none, facts: CollageBridge.Facts(batch: batch))
+    }
+
     func importTop(_ n: Int, batch: BatchStore) {
         let ids = batch.topPicks(n).ids
         addRefs(from: ids.compactMap { batch.item(withID: $0) }, layout: .none, facts: CollageBridge.Facts(batch: batch))
@@ -1443,7 +1449,9 @@ final class CollageStore: ObservableObject {
 
     /// 带结局的版本：`outcome` 在每种结局里恰好调一次（托盘空时直接调，其余在落地任务的 defer 里）。
     /// 界面和命令行走上面 `then:` 那个，调的是同一份实现。
-    func applyKit(_ kit: CollageKitID, coverStep: Int = 0, outcome: ((KitOutcome) -> Void)?) {
+    /// budget：整本婚礼相册的目标跨页数（MCP collage_run_kit 的 spreads，F06）跟着这一套一起落（同一步撤销）。
+    func applyKit(_ kit: CollageKitID, coverStep: Int = 0, budget: CollageBudgetChange = .keep,
+                  outcome: ((KitOutcome) -> Void)?) {
         let items = batch?.items ?? []
         let facts = batch.map { CollageBridge.Facts(batch: $0) } ?? CollageBridge.Facts()
         guard !project.photos.isEmpty || !items.isEmpty else {
@@ -1453,7 +1461,9 @@ final class CollageStore: ObservableObject {
         }
         cancelPendingSolve()
         solveSeed &+= 1
-        let context = CollageKits.Context(project: project, tray: project.photos, batchItems: { items }, facts: facts,
+        var base = project
+        if case .set(let b) = budget { base.albumBudget = b?.normalized }
+        let context = CollageKits.Context(project: base, tray: base.photos, batchItems: { items }, facts: facts,
                                           hints: hints, seed: solveSeed, coverStep: coverStep)
         let busy = "成套「\(kit.name)」…"
         busyText = busy
@@ -1503,7 +1513,7 @@ final class CollageStore: ObservableObject {
             // 和「自动编排」一样。别的成套（单张、印样……）没有「拿掉」这回事，照旧清空。
             let used = generated.usedPhotoIDs
             self.albumDropped = generated.mode == .album && generated.albumTheme == .fineArt
-                ? generated.photos.filter { !used.contains($0.id) && $0.verdict != .reject } : []
+                ? generated.photos.filter { !used.contains($0.id) && ($0.verdict != .reject || $0.clientPick) } : []
             self.commitEdit()
             // 成套可能带进托盘里没有的照片（印样的废片、整场的帧）：补算路人信息。
             self.computeHints(for: generated.photos)
@@ -2893,7 +2903,19 @@ final class CollageStore: ObservableObject {
         if !project.pages.isEmpty { setNotice(what + "：点「自动编排」按它重排（已经排好的跨页没动）") }
     }
 
-    /// 托盘里的全部照片自动编排成相册（去重可关）。
+    /// 目标跨页数、每跨页张数（nil = 自动）。已经排好的跨页不动，下一次「自动编排」按它编。
+    /// coalesce：步进器连着点合成一步撤销。
+    func setAlbumBudget(_ budget: CollageAlbumBudget?, coalesce: Bool = false) {
+        let next = budget?.normalized
+        guard next != project.albumBudget else { return }
+        pushUndo(coalesce: coalesce)
+        project.albumBudget = next
+        commitEdit()
+        let what = next.map { "目标 " + $0.label } ?? "跨页数改回自动"
+        if !project.pages.isEmpty { setNotice(what + "：点「自动编排」按它重排（已经排好的跨页没动）") }
+    }
+
+    /// 托盘里的全部照片自动编排成相册（去重可关）。有目标跨页数（project.albumBudget）就往那么多个跨页里塞，不删片。
     func autoArrangeAlbum(dedupe: Bool) {
         let photos = project.photos
         guard !photos.isEmpty else {
@@ -2905,15 +2927,23 @@ final class CollageStore: ObservableObject {
         let theme = project.albumTheme
         let chapterMono = project.albumChapterMono
         let title = project.title
+        let budget = project.albumBudget
         busyText = "编排相册…"
         // 编排也在作废机制里：编排期间切回单张、撤销、套模板，结果回来不能盖掉。
         let ticket = beginSolve()
         Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) { () -> ([CollagePage], [CollagePhotoRef], String?) in
-                let plan = CollageAlbum.plan(photos, dedupe: dedupe, theme: theme, chapterMono: chapterMono, title: title)
+            let result = await Task.detached(priority: .userInitiated) { () -> ([CollagePage], [CollagePhotoRef], String?, String?) in
+                let plan = CollageAlbum.plan(photos, dedupe: dedupe, theme: theme, chapterMono: chapterMono, title: title,
+                                             budget: budget)
                 // fine-art：拿掉的分开说（同一场只留精选一直开着，「相似只留一张」只管画面相似的）。
                 let note = theme == .fineArt && !plan.dropped.isEmpty ? CollageStyleFineArt.droppedNote(photos, plan: plan) : nil
-                return (CollageAlbum.build(plan, context: ctx, seed: 11), plan.dropped, note)
+                var tail: [String] = []
+                let placed = plan.spreads.reduce(0) { $0 + $1.photos.count }
+                if let target = CollageAlbumBudget.outcome(spreads: plan.spreads.count, budget: budget, photos: placed,
+                                                           fineArt: theme == .fineArt) { tail.append(target) }
+                if let client = CollageAlbum.clientPickNote(photos, plan: plan) { tail.append(client) }
+                return (CollageAlbum.build(plan, context: ctx, seed: 11), plan.dropped, note,
+                        tail.isEmpty ? nil : tail.joined(separator: "；"))
             }.value
             // 编排期间换了场次：结果属于上一个场次，丢掉（不能写进新场次的项目）。
             guard let self, self.sessionToken == ticket.session else { return }
@@ -2926,10 +2956,12 @@ final class CollageStore: ObservableObject {
             self.pageIndex = 0
             self.clearAlternatives()
             self.commitEdit()
+            let client = result.3.map { "；" + $0 } ?? ""
             if let note = result.2 {
-                self.setNotice("编排好 \(result.0.count) 个跨页，\(note) 张（可在托盘里拖回）")
+                self.setNotice("编排好 \(result.0.count) 个跨页，\(note) 张（可在托盘里拖回）" + client)
             } else {
-                self.setNotice("编排好 \(result.0.count) 个跨页" + (result.1.isEmpty ? "" : "，相似的拿掉 \(result.1.count) 张（可在托盘里拖回）"))
+                self.setNotice("编排好 \(result.0.count) 个跨页" + (result.1.isEmpty ? "" : "，相似的拿掉 \(result.1.count) 张（可在托盘里拖回）")
+                               + client)
             }
         }
     }
@@ -4329,11 +4361,11 @@ extension CollageStore {
 
     /// 一键成套 / 换封面的桥版本：异步的不包 asOneUndoStep（它们落地时自己记一步，§9.5.1），发起前、落地后各复位一次
     /// 合并状态，等 outcome 回来。
-    func externalKit(_ kit: CollageKitID, coverStep: Int = 0) async -> KitLanding {
+    func externalKit(_ kit: CollageKitID, coverStep: Int = 0, budget: CollageBudgetChange = .keep) async -> KitLanding {
         lastPushCoalesced = false
         lastUndoPush = .distantPast
         let landing = await withCheckedContinuation { (cont: CheckedContinuation<KitLanding, Never>) in
-            applyKit(kit, coverStep: coverStep, outcome: { [unowned self] o in
+            applyKit(kit, coverStep: coverStep, budget: budget, outcome: { [unowned self] o in
                 let now = KitLanding(outcome: o, undoPushes: undoPushes, undoDepth: undoDepth, notice: notice)
                 cont.resume(returning: now)
             })

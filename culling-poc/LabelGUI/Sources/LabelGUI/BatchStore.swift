@@ -208,6 +208,8 @@ final class BatchStore: ObservableObject {
     /// 网格多选的「拼图」：把这几张的 id 交给拼图 tab（ContentView 收到后切过去、清空）。
     /// 网格选中状态是 BatchView 私有的，只能这样递过去。
     @Published var collageRequest: [String]?
+    /// 网格多选的「进托盘」：只带进拼图托盘、不排版（筛「客户选中」⌘A 之后做相册用：拼图 (N) 会把 N 张排进一页）。
+    @Published var collageTrayRequest: [String]?
     /// AI 的「在 app 里定位照片」（cull_show_photos，DESIGN §9.3）：反过来的那一条 —— 网格选中是 BatchView 私有的，
     /// 桥只能把要选的 id 递过去。BatchView 消费（选中、焦点、滚过去）以后置回 nil；用户停在别的 tab 时，等批量页
     /// 下次出现再消费。只改视图状态：不进撤销、不改筛选、不开检视器，也不会把 app 拉到前台。

@@ -92,7 +92,8 @@ extension CollageStyleFineArt {
 
     /// fine-art 编排（CollageAlbum.plan(theme: .fineArt) 走这里）：
     /// 1. 废片不要；同一瞬间（近似重复组）只留一张；同一 take（场）只留精选（没有精选的场留它最好的那张）；
-    ///    「相似只留一张」开着时再按画面去重（CollageSelect.distinctMoments）。
+    ///    「相似只留一张」开着时再按画面去重（CollageSelect.distinctMoments）。客户选中的（CollagePhotoRef.clientPick）
+    ///    这几条都不拿掉：客户选中的废片照样上、连拍组里客户选中的都留（组里别的拿掉）、同一场客户选中的和精选一样留。
     /// 2. 扉页 = 景别最宽的那几张里分数最高的（R2），左页标题 + 日期行。
     /// 3. 按时间、按章节（R1）：两章以上从第二章起每章先来一个章节开篇（左页「II · 16:24」，右页本章最宽的一张；
     ///    第一章由扉页开篇 —— 不然一翻开就连着两个「左页一行字 + 右页一张」）；
@@ -101,27 +102,27 @@ extension CollageStyleFineArt {
     ///    左右页亮度差不超过 maxLumaGap（R8）。
     /// 5. 全书 3–4 张呼吸图（R5，按跨页数缩放），小一号放右页。
     /// 6. 整章黑白（chapterMono）：一章里黑白占三分之一以上，整章的跨页都设成黑白页（CollagePage.look）。
+    /// 7. 目标跨页数（budget，F06）：呼吸图按目标定张数，编完比目标多就把落单的单图跨页并起来（compress），不删片。
     static func plan(_ photos: [CollagePhotoRef], dedupe: Bool, chapterMono: Bool, title bookTitle: String = "",
-                     similarity: Similarity? = nil) -> CollageAlbum.Plan {
-        var pool = photos.filter { $0.verdict != .reject }
-        if pool.isEmpty { pool = photos }
+                     similarity: Similarity? = nil, budget: CollageAlbumBudget? = nil) -> CollageAlbum.Plan {
+        let pool = candidates(photos)
         let moments = oneMoment(pool)
         var dropped = moments.dropped
         var kept = moments.kept
         var similar: [String: Set<String>] = [:]
         if let given = similarity {
-            kept = kept.filter { p in given.kept.contains { $0.id == p.id } }
-            dropped += given.dropped.filter { d in moments.kept.contains { $0.id == d.id } }
+            kept = kept.filter { p in p.clientPick || given.kept.contains { $0.id == p.id } }
+            dropped += given.dropped.filter { d in !d.clientPick && moments.kept.contains { $0.id == d.id } }
             similar = given.similar
         } else {
-            let r = CollageSelect.distinctMoments(kept)
+            let r = CollageSelect.distinctMoments(kept, keeping: CollageAlbum.clientPickIDs(kept))
             similar = r.similar
             if dedupe {
                 kept = r.kept
                 dropped += r.dropped
             }
         }
-        guard !kept.isEmpty else { return CollageAlbum.Plan(spreads: [], dropped: dropped, theme: .fineArt) }
+        guard !kept.isEmpty else { return CollageAlbum.Plan(spreads: [], dropped: dropped, theme: .fineArt, budget: budget) }
 
         let ordered = CollageSelect.chronological(kept)
         var chapters: [[CollagePhotoRef]] = []
@@ -143,7 +144,9 @@ extension CollageStyleFineArt {
         var avoidNext = similarSet(title, similar)
 
         // 呼吸图：按跨页数定几张（全书 3–4 张），各章轮着挑分数高的。
-        let estimate = Int((Double(ordered.count) / targetPerSpread).rounded(.up))
+        let natural = Int((Double(ordered.count) / targetPerSpread).rounded(.up))
+        // 指定了跨页数：书多厚按指定的算（薄册子少放空镜）。
+        let estimate = budget.map { min(natural, $0.normalized.spreads) } ?? natural
         let quota = breathQuota(spreads: estimate)
         var breathIDs: Set<String> = []
         if quota > 0 {
@@ -281,13 +284,18 @@ extension CollageStyleFineArt {
         }
         // 扉页的色调同样看照片本身。
         if title.isMonochrome == true { spreads[0].fineArt?.look = monoLook }
-        return CollageAlbum.Plan(spreads: spreads, dropped: dropped, theme: .fineArt)
+        if let b = budget?.normalized, spreads.count > b.spreads {
+            compress(&spreads, toward: b.spreads, cap: b.maxPerSpread, similar: similar)
+        }
+        return CollageAlbum.Plan(spreads: spreads, dropped: dropped, theme: .fineArt, budget: budget)
     }
 
     /// 同一瞬间只留一张：近似重复组（burstGroup）里留精选 / 分数最高的；同一 take（场）有精选就只留精选
     /// （照片人选了好几张就都留，编排时不放在同一跨页），没有精选留场内名次第一 / 分数最高的那张。
+    /// 客户选中的都留：连拍组里有客户选中的，组里留它们（别的拿掉 —— 同一瞬间客户已经挑了）；场里客户选中的和精选一样留。
     static func oneMoment(_ photos: [CollagePhotoRef]) -> (kept: [CollagePhotoRef], dropped: [CollagePhotoRef]) {
         func better(_ a: CollagePhotoRef, _ b: CollagePhotoRef) -> Bool {
+            if a.clientPick != b.clientPick { return a.clientPick }
             if a.isPick != b.isPick { return a.isPick }
             let ra = a.takeRank ?? 99
             let rb = b.takeRank ?? 99
@@ -305,7 +313,7 @@ extension CollageStyleFineArt {
         }
         var stage: [CollagePhotoRef] = []
         for p in photos {
-            if let g = p.burstGroup, bestInBurst[g]?.id != p.id {
+            if !p.clientPick, let g = p.burstGroup, bestInBurst[g]?.id != p.id {
                 dropped.append(p)
             } else {
                 stage.append(p)
@@ -316,7 +324,7 @@ extension CollageStyleFineArt {
         for p in stage { if let t = p.take { takes[t, default: []].append(p) } }
         var keep: Set<String> = []
         for (_, members) in takes {
-            let picks = members.filter(\.isPick)
+            let picks = members.filter { $0.isPick || $0.clientPick }
             if picks.isEmpty {
                 if let best = members.min(by: better) { keep.insert(best.id) }
             } else {
@@ -413,10 +421,14 @@ extension CollageStyleFineArt {
     /// 拿掉的分两种说（命令行那一行、界面的提示）：同一场只留精选 / 近似重复只留一张（oneMoment，fine-art 一直开着），
     /// 和画面相似（「相似只留一张」那个开关）。
     static func droppedCounts(_ photos: [CollagePhotoRef], plan: CollageAlbum.Plan) -> (moments: Int, similar: Int) {
-        var pool = photos.filter { $0.verdict != .reject }
-        if pool.isEmpty { pool = photos }
-        let moments = oneMoment(pool).dropped.count
+        let moments = oneMoment(candidates(photos)).dropped.count
         return (moments, max(0, plan.dropped.count - moments))
+    }
+
+    /// 编排从哪些照片里挑：废片不要（客户选中的废片要：客户点名要的）；全是废片就全用（没别的可用）。
+    static func candidates(_ photos: [CollagePhotoRef]) -> [CollagePhotoRef] {
+        let pool = photos.filter { $0.verdict != .reject || $0.clientPick }
+        return pool.isEmpty ? photos : pool
     }
 
     static func droppedNote(_ photos: [CollagePhotoRef], plan: CollageAlbum.Plan) -> String {

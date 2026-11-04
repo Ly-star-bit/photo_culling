@@ -89,8 +89,9 @@ run() {
         FAILS+=("$name（退出码非 0，见 logs/$name.log）")
     fi
     # ops 里写错一步只会打印一行接着跑：门禁里不许有跳过的步骤，不然测的不是写的那些。
-    if grep -Eq "^(未知操作|参数不对，跳过)" "$OUT/logs/$name.log"; then
-        FAILS+=("$name（ops 有跳过的步骤：$(grep -Em1 "^(未知操作|参数不对，跳过)" "$OUT/logs/$name.log")）")
+    # ops 的 expect:… 断言不对打一行「断言失败」：同样算失败。
+    if grep -Eq "^(未知操作|参数不对，跳过|断言失败)" "$OUT/logs/$name.log"; then
+        FAILS+=("$name（ops 有跳过的步骤或断言失败：$(grep -Em1 "^(未知操作|参数不对，跳过|断言失败)" "$OUT/logs/$name.log")）")
     fi
     rm -rf "$data"
 }
@@ -213,6 +214,13 @@ EOF
     ops ops_grid9 grid9 "canvas:grid9,autolayout:9,renderclean:grid9_p.png@0.4,renderexport:grid9_e.png"
     echo "== ops：相册跨页"
     ops ops_album album "mode:album,arrange,page:0,renderexport:album_p0.png,page:1,renderclean:album_p1_p.png@0.3,renderexport:album_p1.png,page:2,renderexport:album_p2.png,binding:glued,page:0,renderexport:album_glued_p0.png,page:1,renderexport:album_glued_p1.png"
+    echo "== ops：相册里客户选中的不被拿掉（只看断言，不出图）"
+    # 7222 / 7231 平时被「相似只留一张」拿掉，7228 / 7230 平时被 fine-art 的同一场只留精选拿掉。
+    ops ops_album_client album_client "mode:album,clientpicks:DSCF7231;DSCF7222;DSCF7228;DSCF7230,arrange,albumdump,expect:clientplaced,albumtheme:fineArt,arrange,albumdump,expect:clientplaced,cleartray,importclient,expect:trayisclient,mode:album,arrange,albumdump,expect:clientplaced"
+    echo "== ops：相册目标跨页数（只看断言，不出图）"
+    # 关掉相似去重（arrange:all）21 张全上：5 个跨页正好；3 个放不下就多出来、一张不丢；fine-art 带上 6 张客户选中的
+    # 不指定是 7 个跨页，往 4 个并（每跨页最多 3 张，并到 5 个），客户选中的照样都在。
+    ops ops_album_budget album_budget "mode:album,spreads:5,arrange:all,albumdump,expect:spreads=5,expect:alltray,expect:perspread=1-6,spreads:6@2-4,arrange:all,albumdump,expect:spreads=6,expect:perspread=2-4,expect:alltray,spreads:3,arrange:all,albumdump,expect:alltray,albumtheme:fineArt,clientpicks:DSCF7228;DSCF7230;DSCF7231;DSCF7222;DSCF7209;DSCF7211,spreads:off,arrange,albumdump,spreads:4,arrange,albumdump,expect:spreads<=5,expect:clientplaced"
     echo "== ops：水印两层"
     ops ops_wm wm "wm:photos:$INPUTS/sig.png,wm:page,wmtext:page:拾光 · 门禁,wmpos:page:bottom_center,renderclean:wm_p.png@0.5,renderexport:wm_e.png,wmtile:photos:on,renderexport:wm_tile.png,wmtile:photos:off,mode:album,arrange,page:1,renderclean:wm_album_p.png@0.3,renderexport:wm_album.png"
     echo "== ops：自由文字图层花字投影（S0 修过：预览里的投影按缩放算）"
