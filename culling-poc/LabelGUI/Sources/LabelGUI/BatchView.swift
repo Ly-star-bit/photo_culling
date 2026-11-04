@@ -1001,9 +1001,9 @@ struct BatchView: View {
                 withAnimation(.easeInOut(duration: 0.2)) {
                     store.setOverrideBatch(pick.ids, verdict)
                 }
-                if !pick.fromSelection, let focused = focusedID {
-                    keepPlace(of: focused, before: before, proxy: proxy)
-                }
+                // 改的是选中的几张也要管焦点：焦点那张也在选中里（⇧点、⌘A、点场标题）、被筛掉或整场叠掉时
+                // 以前焦点不动，留在看不见的照片上。
+                keepPlace(changed: pick.ids, before: before, proxy: proxy)
                 if pick.fromSelection, let text = GridSelectionRules.changedNotice(count: pick.ids.count, verdict: verdict) {
                     showGridToast(text, verdict: verdict)
                 }
@@ -1430,19 +1430,26 @@ struct BatchView: View {
         .background(.bar)
     }
 
+    /// 批量栏改判：改完清掉选中，焦点和多选按数字键一样落到没改的邻居上（keepPlace，不滚动 —— 鼠标在批量栏上）。
+    /// 以前焦点不动：焦点那张也在选中里、被筛掉或整场叠掉时，下一次数字键改的是看不见的它。
+    private func applyBulk(changing changed: [String], _ apply: () -> Void) {
+        let before = visibleItems.map(\.id)
+        withAnimation { apply() }
+        selectedIDs.removeAll()
+        keepPlace(changed: changed, before: before, proxy: nil)
+    }
+
     private var bulkActionBar: some View {
         HStack(spacing: 8) {
             Text("已选 \(selectedIDs.count) 张 → 批量改判:")
             ForEach(Verdict.allCases.reversed(), id: \.self) { v in
                 Button(v.rawValue) {
-                    withAnimation { store.setOverrideBatch(selectedIDs, v) }
-                    selectedIDs.removeAll()
+                    applyBulk(changing: Array(selectedIDs)) { store.setOverrideBatch(selectedIDs, v) }
                 }
                 .buttonStyle(.bordered)
             }
             Button("恢复自动") {
-                withAnimation { store.setOverrideBatch(selectedIDs, nil) }
-                selectedIDs.removeAll()
+                applyBulk(changing: Array(selectedIDs)) { store.setOverrideBatch(selectedIDs, nil) }
             }
             .buttonStyle(.bordered)
             let groupCandidates = selectionGroupMembers
@@ -1451,10 +1458,7 @@ struct BatchView: View {
             if dropCount > 0 {
                 Divider().frame(height: 16)
                 Button("保留选中 · 其余 \(dropCount) 张设为废片") {
-                    withAnimation {
-                        store.keepOnly(selectedIDs, among: groupCandidates)
-                    }
-                    selectedIDs.removeAll()
+                    applyBulk(changing: groupCandidates) { store.keepOnly(selectedIDs, among: groupCandidates) }
                 }
                 .buttonStyle(.borderedProminent)
                 // ⌘⏎ 而不是光秃秃的 ⏎：网格自己用 .onKeyPress(.return) 开大图，
@@ -1581,30 +1585,47 @@ struct BatchView: View {
     /// 数字键改判后，这张在网格里挪了位置（按判决分区时跳到别的区、被筛选或叠放藏掉）：焦点落到原来
     /// 紧挨着它的下一张（没有就上一张）。不然 ←/→ 会从它的新位置（比如最底下的废片区）接着走，
     /// 刚才看到哪儿就丢了。还在原来两个邻居之间就不动。
-    private func keepPlace(of id: String, before: [String], proxy: ScrollViewProxy) {
-        guard let next = Self.placeAfterChange(of: id, before: before, after: visibleItems.map(\.id)) else { return }
-        focusedID = next
-        // 等网格按新判决重新铺一拍再滚：整场叠起来时立刻滚，目标位置还是旧的。
-        DispatchQueue.main.async { withAnimation { proxy.scrollTo(next, anchor: .center) } }
+    /// 多选按数字键、批量栏一次改了好几张（`changed`）也走这里：以前只管改焦点那张的情形，焦点那张在选中里、
+    /// 被筛掉或跟着整场叠掉时焦点留在看不见的照片上，下一次数字键悄悄改它。落不了又看不见了就清掉焦点
+    /// （GridSelectionRules.refocus）。`proxy` = nil：不滚动（批量栏是鼠标点的）。
+    private func keepPlace(changed: [String], before: [String], proxy: ScrollViewProxy?) {
+        switch GridSelectionRules.refocus(focused: focusedID, changed: changed, before: before,
+                                          after: visibleItems.map(\.id)) {
+        case .stay:
+            return
+        case .clear:
+            focusedID = nil
+        case .move(let next):
+            focusedID = next
+            // 等网格按新判决重新铺一拍再滚：整场叠起来时立刻滚，目标位置还是旧的。
+            guard let proxy else { return }
+            DispatchQueue.main.async { withAnimation { proxy.scrollTo(next, anchor: .center) } }
+        }
     }
 
     /// keepPlace 的判断（纯函数，`--ux-selftest` 直接测）：nil = 这张还在原来两个邻居之间，不用动；
     /// 否则返回改判前紧跟在它后面、现在还看得见的那张（后面没有就往前找）。
-    static func placeAfterChange(of id: String, before: [String], after: [String]) -> String? {
+    /// `changed`：这一下一起改了判决的别的照片（多选按数字键、批量栏）。它们跟着一起挪走了，不拿来比位置、
+    /// 也先不落上去 —— 不然按判决分区时选中的一串一起跳去精选区，焦点会跟着落到那一串的第二张上。
+    nonisolated static func placeAfterChange(of id: String, before: [String], after: [String],
+                                             changed: Set<String> = []) -> String? {
         guard let old = before.firstIndex(of: id) else { return nil }
         let visible = Set(after)
+        let anchor: (String) -> Bool = { $0 != id && !changed.contains($0) }
         if let new = after.firstIndex(of: id) {
             // 「没挪」= 在两边都还在的照片里，它前后还是原来那两张。只看紧挨着的邻居不行：同一场里别的
             // 照片被叠掉 / 展开出来，紧挨着的邻居变了，可它其实没动（审查发现）。
             let earlier = Set(before)
-            let prevBefore = before[..<old].last { visible.contains($0) }
-            let nextBefore = before[(old + 1)...].first { visible.contains($0) }
-            let prevAfter = after[..<new].last { earlier.contains($0) }
-            let nextAfter = after[(new + 1)...].first { earlier.contains($0) }
+            let prevBefore = before[..<old].last { visible.contains($0) && anchor($0) }
+            let nextBefore = before[(old + 1)...].first { visible.contains($0) && anchor($0) }
+            let prevAfter = after[..<new].last { earlier.contains($0) && anchor($0) }
+            let nextAfter = after[(new + 1)...].first { earlier.contains($0) && anchor($0) }
             if prevBefore == prevAfter && nextBefore == nextAfter { return nil }
         }
         let candidates = Array(before[(old + 1)...]) + Array(before[..<old].reversed())
-        return candidates.first { $0 != id && visible.contains($0) }
+        // 没改的邻居一张都看不见了（⌘A 以后全改）：退回去落在一起改了的、还看得见的那张上。
+        return candidates.first { anchor($0) && visible.contains($0) }
+            ?? candidates.first { $0 != id && visible.contains($0) }
     }
 
     /// [ / ]：从焦点那张所在的章节往前 / 往后跳一章；那一章在当前视图里一张都没有就接着往下找。

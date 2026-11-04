@@ -16,12 +16,17 @@ enum CollageHandoff {
             var order: [String] = []
             // 同一张的 RAW 和 JPEG 都在水印页列表里时会映射到同一个 id：只带一次（托盘去重只防已在托盘里的）。
             var seen = Set<String>()
+            // 认不出的外部文件里同一张的 RAW 和 JPG：只带 JPG（水印页列表本来就配过对，这里防命令行 wmhandoff 这类
+            // 直接给路径的；只在这一批里配，托盘里已有的不看 —— 跳掉的照片就不在这次的版式里了）。
+            let external = urls.filter { index[$0.standardizedFileURL.path] == nil }
+            let keptExternal = Set(pairedExternalFiles(external, trayPaths: []).kept.map(\.path))
             for url in urls {
                 if let item = index[url.standardizedFileURL.path] {
                     guard seen.insert(item.id).inserted else { continue }
                     items.append(item)
                     order.append(item.id)
                 } else {
+                    guard keptExternal.contains(url.path) else { continue }
                     guard seen.insert(CollageBridge.fileID(url)).inserted else { continue }
                     files.append(url)
                     order.append(CollageBridge.fileID(url))
@@ -74,6 +79,34 @@ enum CollageHandoff {
     static func adopt(_ req: WatermarkCollageRequest, layer: CollageMarkLayerKind, into collage: CollageStore) -> Bool {
         collage.adoptWatermark(config: req.config, signatureURL: req.signatureURL, layer: layer,
                                refShort: req.refShort, presetName: req.presetName)
+    }
+
+    /// 拼图收外部文件（托盘拖进来、「添加文件…」= CollageStore.addFiles，水印页交接里认不出是批量页的）时的 RAW+JPG
+    /// 配对，规则同水印页（WatermarkImportPairing.key / isRaw）：同一个目录里去掉扩展名同名的 RAW 和非 RAW 是同一张，
+    /// 只收非 RAW（机内 JPG，颜色是相机冲的；RAW 按 ImageIO 默认冲洗）；托盘里已经有这一张的非 RAW 也不再收 RAW。
+    /// 托盘里只有 RAW、这次来了同名 JPG：照收 JPG，不原地换（托盘里那张可能已经排进版式）。同类同名（RAF + DNG、
+    /// HEIC + JPG）各自留着。以前按完整路径去重，RAW+JPG 双存的文件夹拖进托盘每一帧两张、排版两张都用上。
+    /// 返回要收的（顺序不变）和没收的 RAW 张数（同一个路径给了两次只算一张）。
+    nonisolated static func pairedExternalFiles(_ urls: [URL], trayPaths: [String]) -> (kept: [URL], skippedRaw: Int) {
+        typealias Pairing = WatermarkImportPairing
+        var nonRawKeys = Set<String>()
+        for path in trayPaths {
+            let url = URL(fileURLWithPath: path)
+            if !Pairing.isRaw(url) { nonRawKeys.insert(Pairing.key(url)) }
+        }
+        for url in urls where !Pairing.isRaw(url) {
+            nonRawKeys.insert(Pairing.key(url))
+        }
+        var kept: [URL] = []
+        var skipped = Set<String>()
+        for url in urls {
+            if Pairing.isRaw(url), nonRawKeys.contains(Pairing.key(url)) {
+                skipped.insert(url.path)
+                continue
+            }
+            kept.append(url)
+        }
+        return (kept, skipped.count)
     }
 
     /// 批量页这一场：路径 → 照片（解码路径、原文件路径都认，RAW+JPEG 配对时水印页拿的是 JPEG）。

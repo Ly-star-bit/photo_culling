@@ -102,6 +102,8 @@ enum GridExifImportSelfTest {
         t.check(second.ids == ["u1"], "多选 按完数字键清掉选中：接着方向键 + 数字改的是焦点那张，不是早先那几张",
                 "得到 \(second.ids)")
 
+        refocusCases(t)
+
         let pruneRows: [(String, Set<String>, [String], Set<String>)] = [
             ("⌘A 后切到「废片」筛选：精选、可用的选中剪掉", ["p1", "u1", "r1", "r2"], ["r1", "r2"], ["r1", "r2"]),
             ("换章（[ ] / 时间轴）：上一章的选中剪掉", ["c1a", "c1b"], ["c2a", "c2b"], []),
@@ -119,6 +121,51 @@ enum GridExifImportSelfTest {
         let restore = GridSelectionRules.changedNotice(count: 2, verdict: nil) ?? "nil"
         t.check(restore == "已改 2 张 → 恢复自动 · ⌘Z 撤销", "多选 按 0 恢复自动也提示", "得到 \(restore)")
         t.check(GridSelectionRules.changedNotice(count: 1, verdict: .pick) == nil, "多选 只改一张不提示")
+    }
+
+    /// 多选改判以后焦点落在哪（GridSelectionRules.refocus，数字键和批量栏共用）。
+    private static func refocusCases(_ t: Tally) {
+        typealias R = GridSelectionRules.Refocus
+        // (说明, 焦点, 这一下改了的, 改判前看得见的（顺序）, 改判后看得见的, 期望)
+        let rows: [(String, String?, [String], [String], [String], R)] = [
+            ("「可用」筛选下 ⇧选 A–D 按 1：四张都藏了 → 落到没改的 E（以前焦点留在藏起的 A 上）",
+             "A", ["A", "B", "C", "D"], ["A", "B", "C", "D", "E", "F"], ["E", "F"], .move("E")),
+            ("按判决分区时选中的一串跳去精选区 → 落到原来后面没改的 E，不跟着落到那一串的第二张 B",
+             "A", ["A", "B", "C", "D"], ["p1", "A", "B", "C", "D", "E", "r1"], ["A", "B", "C", "D", "p1", "E", "r1"], .move("E")),
+            ("按判决分区、选中的一串改完还在原来两张没改的照片之间 → 不动",
+             "A", ["A", "B", "C", "D"], ["p1", "A", "B", "C", "D", "E"], ["p1", "A", "B", "C", "D", "E"], .stay),
+            ("焦点没选、还看得见 → 不动", "F", ["A", "B", "C", "D"], ["A", "B", "C", "D", "E", "F"], ["E", "F"], .stay),
+            ("焦点没选、却跟着整场定完叠掉（只看待处理）→ 落到下一场第一张",
+             "t3", ["t1", "t2"], ["t1", "t2", "t3", "u1", "u2"], ["u1", "u2"], .move("u1")),
+            ("「保留选中」：焦点那张废了被筛掉、留下的 B 一起改了 → 落到没改的 X",
+             "A", ["A", "B"], ["A", "B", "X"], ["B", "X"], .move("X")),
+            ("一起改了的那几张之外没有看得见的 → 退回去落在一起改了、还看得见的那张",
+             "A", ["A", "B"], ["A", "B"], ["B"], .move("B")),
+            ("⌘A 以后全被筛掉、一张都没得落 → 清掉焦点（下一次数字键什么都不改）",
+             "A", ["A", "B"], ["A", "B"], [], .clear),
+            ("改焦点那张：唯一一张被筛掉 → 清掉焦点（以前留在看不见的它上面）", "p1", ["p1"], ["p1"], [], .clear),
+            ("改焦点那张：位置没变 → 不动", "a2", ["a2"], ["a1", "a2", "a3"], ["a1", "a2", "a3"], .stay),
+            ("没有焦点 → 不动", nil, ["A"], ["A", "B"], ["B"], .stay),
+        ]
+        for (name, focused, changed, before, after, want) in rows {
+            let got = GridSelectionRules.refocus(focused: focused, changed: changed, before: before, after: after)
+            t.check(got == want, "多选 改完焦点 " + name, "得到 \(got)")
+        }
+
+        // 审查报告的情形连起来走一遍：按 1 改 A–D，再按 3 —— 改的是看得见的 E，不是藏起来的 A。
+        let visible = ["A", "B", "C", "D", "E", "F"]
+        let first = GridSelectionRules.digitTargets(selected: ["A", "B", "C", "D"], visible: visible, focused: "A")
+        let after = ["E", "F"]
+        var focus: String? = "A"
+        switch GridSelectionRules.refocus(focused: focus, changed: first.ids, before: visible, after: after) {
+        case .stay: break
+        case .clear: focus = nil
+        case .move(let next): focus = next
+        }
+        let afterClear: Set<String> = first.clearSelection ? [] : ["A", "B", "C", "D"]
+        let second = GridSelectionRules.digitTargets(selected: afterClear, visible: after, focused: focus)
+        t.check(second.ids == ["E"], "多选 ⇧选 A–D 按 1 藏掉以后再按 3：改的是看得见的 E，不是藏起来的 A",
+                "得到 \(second.ids)")
     }
 
     // MARK: - 水印页导入的 RAW+JPG 配对（S26a）
@@ -144,6 +191,9 @@ enum GridExifImportSelfTest {
             ("同类同名不配对：HEIC + JPG 两张都留", [], ["A.HEIC", "A.JPG"], ["A.HEIC", "A.JPG"], 2, 0, 0, 0),
             ("同类同名不配对：RAF + DNG 两张都留", [], ["A.DNG", "A.RAF"], ["A.DNG", "A.RAF"], 2, 0, 0, 2),
             ("RAF + DNG + JPG：都是同一张，只留 JPG", [], ["A.DNG", "A.JPG", "A.RAF"], ["A.JPG"], 1, 0, 2, 0),
+            // 选片页把 A.DNG + A.JPG 配成一张（解码 JPG）、多出来的 A.RAF 单算一张，「导入选片结果」带过来的就是这两条。
+            ("「导入选片结果」带过来 RAF + DNG + JPG 的那两张（A.JPG、A.RAF）：也只留 JPG",
+             [], ["A.JPG", "A.RAF"], ["A.JPG"], 1, 0, 1, 0),
             ("列表里 RAF + DNG，再来 JPG：两张 RAW 都换掉", ["A.RAF", "A.DNG"], ["A.JPG"], ["A.JPG"], 0, 2, 0, 0),
             ("不同文件夹的同名不是一对", [], ["d1/A.JPG", "d2/A.RAF"], ["d1/A.JPG", "d2/A.RAF"], 2, 0, 0, 1),
             ("已经在列表里的不重复收", ["A.JPG"], ["A.JPG"], ["A.JPG"], 0, 0, 0, 0),
@@ -163,12 +213,17 @@ enum GridExifImportSelfTest {
         // 提示：跳过的张数要写进去，免得以为少导了。
         let folder = WatermarkImportPairing.merge(existing: [], incoming: ["A.JPG", "A.RAF", "B.JPG", "B.RAF", "C.RAF"].map(u))
         let folderNotice = WatermarkImportPairing.notice(for: folder, requested: true) ?? "nil"
-        let folderWant = "已导入 3 张 · 跳过 2 张同名 RAW（RAW+JPG 只留 JPG，和选片页一样） · 1 张只有 RAW，按系统默认冲洗导出"
+        let folderWant = "已导入 3 张 · 跳过 2 张同名 RAW（RAW+JPG 只留 JPG） · 1 张只有 RAW，按系统默认冲洗导出"
         t.check(folderNotice == folderWant, "水印导入提示：写出导入、跳过、纯 RAW 张数", "得到 \(folderNotice)")
         let skipOnly = WatermarkImportPairing.merge(existing: [u("A.JPG")], incoming: [u("A.RAF")])
         let skipNotice = WatermarkImportPairing.notice(for: skipOnly, requested: true) ?? "nil"
-        t.check(skipNotice == "没有新照片：跳过 1 张同名 RAW（RAW+JPG 只留 JPG，和选片页一样）",
+        t.check(skipNotice == "没有新照片：跳过 1 张同名 RAW（RAW+JPG 只留 JPG）",
                 "水印导入提示：一张没进来、全是跳过的 RAW 时说清楚", "得到 \(skipNotice)")
+        // 「导入选片结果」这种情形里选片页其实是两张：提示不能说「和选片页一样」。
+        let fromBatch = WatermarkImportPairing.merge(existing: [], incoming: [u("A.JPG"), u("A.RAF")])
+        let fromBatchNotice = WatermarkImportPairing.notice(for: fromBatch, requested: true) ?? "nil"
+        t.check(fromBatchNotice == "已导入 1 张 · 跳过 1 张同名 RAW（RAW+JPG 只留 JPG）",
+                "水印导入提示：导入选片结果跳过同名 RAW 时不说「和选片页一样」", "得到 \(fromBatchNotice)")
         let swap = WatermarkImportPairing.merge(existing: [u("A.RAF")], incoming: [u("A.JPG")])
         let swapNotice = WatermarkImportPairing.notice(for: swap, requested: true) ?? "nil"
         let swapOK: Bool = swapNotice == "1 张 RAW 换成了同名 JPG" && swap.replaced.first?.old == u("A.RAF")
@@ -179,5 +234,32 @@ enum GridExifImportSelfTest {
         t.check(dupNotice == "没有可导入的照片 (格式不支持，或已经在列表里)", "水印导入提示：全在列表里照旧", "得到 \(dupNotice)")
         let nothing = WatermarkImportPairing.notice(for: WatermarkImportPairing.merge(existing: [], incoming: []), requested: false)
         t.check(nothing == nil, "水印导入提示：什么都没给就不提示")
+
+        collageFileCases(t, u: u, names: names)
+    }
+
+    /// 拼图托盘收外部文件（CollageStore.addFiles、水印页交接里认不出的）的 RAW+JPG 配对：CollageHandoff.pairedExternalFiles。
+    private static func collageFileCases(_ t: Tally, u: (String) -> URL, names: ([URL]) -> String) {
+        // (说明, 托盘里已有的, 这次拖进来的, 期望收的, 没收的 RAW 张数)
+        let rows: [(String, [String], [String], [String], Int)] = [
+            ("RAW+JPG 双存的文件夹拖进托盘：每一帧只收 JPG，纯 RAW 照收",
+             [], ["A.JPG", "A.RAF", "B.JPG", "B.RAF", "C.RAF"], ["A.JPG", "B.JPG", "C.RAF"], 2),
+            ("RAW 排在 JPG 前面（.ARW < .JPG）：照样只收 JPG", [], ["A.ARW", "A.JPG"], ["A.JPG"], 1),
+            ("扩展名大小写不同照样配对", [], ["a.raf", "a.JPG"], ["a.JPG"], 1),
+            ("托盘里已经有这一张的 JPG，再拖它的 RAW：不收", ["A.JPG"], ["A.RAF"], [], 1),
+            ("托盘里只有 RAW，再拖同名 JPG：照收 JPG（不原地换，托盘里那张可能已经上了版）", ["A.RAF"], ["A.JPG"], ["A.JPG"], 0),
+            ("同类同名不配对：RAF + DNG 都收", [], ["A.DNG", "A.RAF"], ["A.DNG", "A.RAF"], 0),
+            ("同类同名不配对：HEIC + JPG 都收", [], ["A.HEIC", "A.JPG"], ["A.HEIC", "A.JPG"], 0),
+            ("不同文件夹的同名不是一对", [], ["d1/A.JPG", "d2/A.RAF"], ["d1/A.JPG", "d2/A.RAF"], 0),
+            ("同一张 RAW 给了两次（文件夹 + 里面的文件）：只算一张没收", [], ["A.JPG", "A.RAF", "A.RAF"], ["A.JPG"], 1),
+        ]
+        for (name, tray, incoming, want, skipped) in rows {
+            let got = CollageHandoff.pairedExternalFiles(incoming.map(u), trayPaths: tray.map { u($0).path })
+            let gotList = names(got.kept)
+            let wantList = want.joined(separator: ",")
+            let ok: Bool = gotList == wantList && got.skippedRaw == skipped
+            t.check(ok, "拼图外部文件 " + name,
+                    "得到 [\(gotList)] 没收 \(got.skippedRaw)，期望 [\(wantList)] 没收 \(skipped)")
+        }
     }
 }

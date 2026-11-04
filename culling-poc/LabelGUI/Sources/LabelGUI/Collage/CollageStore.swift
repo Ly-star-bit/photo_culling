@@ -807,6 +807,13 @@ final class CollageStore: ObservableObject {
             setNotice("没有可导入的照片（格式不支持）")
             return
         }
+        // 同一张的 RAW 和 JPG（RAW+JPG 双存的文件夹、托盘里已经有这一张的 JPG）只收 JPG（CollageHandoff.pairedExternalFiles）。
+        let paired = CollageHandoff.pairedExternalFiles(files, trayPaths: project.photos.map(\.path))
+        guard !paired.kept.isEmpty else {
+            setNotice("这 \(paired.skippedRaw) 张 RAW 的同名 JPG 已经在托盘里了（RAW+JPG 只留 JPG）")
+            return
+        }
+        files = paired.kept
         addRefs(from: [], files: files, layout: layout ? .solve(files.map(CollageBridge.fileID)) : .none)
     }
 
