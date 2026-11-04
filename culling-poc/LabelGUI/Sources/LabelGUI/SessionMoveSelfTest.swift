@@ -560,6 +560,19 @@ extension SessionMoveSelfTest {
               "拼图输出目录选到卡上：不导（AI 的 collage_export 走同一个 startExport）", refused ?? "nil")
         collage.exportOptions.outputPath = off.appendingPathComponent("拼图").path
         check(collage.exportBlockedReason == nil, "拼图输出目录选到卡外：可以导", collage.exportBlockedReason ?? "")
+        // 「选择…」面板选完：选到卡上（拍摄文件夹外面 / 里面）不换、说卡上不写，不叫人点「用默认」（卡上的一场没有默认目录）
+        let chosenBefore = collage.exportOptions.outputPath
+        for target in [card.appendingPathComponent("拼图2"), dcim.appendingPathComponent("成品")] {
+            let took = collage.chooseOutputFolder(target)
+            let name = String(target.path.dropFirst(cardPath.count))
+            let said = collage.lastError ?? ""
+            check(!took && collage.exportOptions.outputPath == chosenBefore && said.contains("存储卡") && !said.contains("用默认"),
+                  "拼图「选择…」选到卡上的「\(name)」：不换，说卡上不写、不叫人点「用默认」", said)
+        }
+        let offCollage = off.appendingPathComponent("拼图2")
+        let tookOff = collage.chooseOutputFolder(offCollage)
+        check(tookOff && collage.exportOptions.outputPath == offCollage.path && collage.lastError == nil,
+              "　…… 再选卡外的：换上，卡上那句收掉", collage.lastError ?? "")
         collage.exportOptions = savedOptions
         check(cardListing() == before, "拼图这一路也没往卡上写", "\(cardListing())")
 

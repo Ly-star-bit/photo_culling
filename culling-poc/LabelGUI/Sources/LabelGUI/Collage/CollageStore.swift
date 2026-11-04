@@ -3631,11 +3631,21 @@ final class CollageStore: ObservableObject {
     /// 文件夹里只提醒。换成了的话，之前拦下的那句收掉。返回换没换。
     @discardableResult
     func chooseOutputFolder(_ url: URL) -> Bool {
+        // 批量页这一场开在存储卡上、选到卡上（审查 S07）：不换，说卡上不写 —— 先于拍摄文件夹那道（拍摄文件夹在卡上，
+        // 它里面也在卡上），那句叫人点「用默认」，卡上的一场没有默认目录。
+        if onCardSession, let why = batch?.cardDestinationRefusal(url) {
+            lastError = why
+            return false
+        }
         if let why = exportFolderRefusal(url) {
             lastError = why
             return false
         }
         if let photoDir, lastError == Self.folderRefusalText(photoDir) { lastError = nil }
+        // 卡上那句（这里或导出时拦下的）不看是哪个目录：拿照片文件夹（就在卡上）算出同一句来比
+        if onCardSession, let photoDir, let onCard = batch?.cardDestinationRefusal(photoDir), lastError == onCard {
+            lastError = nil
+        }
         exportOptions.outputPath = url.path
         if let note = exportFolderReminder(url) { setNotice(note) }
         return true
