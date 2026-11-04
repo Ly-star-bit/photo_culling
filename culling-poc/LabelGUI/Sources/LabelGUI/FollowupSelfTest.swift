@@ -8,7 +8,8 @@ import Foundation
 ///   - F19 水印页「导入选片结果」菜单：精选 / 精选 + 可用 / 客户选中（客户选中的废片也带，RAW+JPG 用 JPG）。
 ///   - 水印 EXIF 文字的快门：0、负数、非有限、非规格化的极小正数（1/t = inf）不崩、不填；≥1s 照旧 %g。
 ///   - S15「复制原片到…」连续 3 张写不进目标就停、说清楚原因和怎么办（不支持 → NAS / exFAT），英文 strerror 换成中文。
-///   - M01 近似重复去重：拍摄时刻完全一样、一张 RAW 一张 JPG（分卡存、分文件夹放的同一帧）时，RAW 不判「连拍重复」。
+///   - M01 近似重复去重：拍摄时刻完全一样、一张 RAW 一张 JPG（分卡存、分文件夹放的同一帧）时，RAW 不判「连拍重复」；
+///     场里只剩这一对时按一帧算、不提精选，接受全部推荐也不把 RAW 钉成废片。
 ///   - MCP cull_get_photos 的 exif：老 manifest 里存的 shutter_sec / aperture / focal_35 = 0 不报（和 summary 一样）。
 /// 只写数据目录；改过的权限全部改回来，退出前删掉造出来的照片文件夹。
 @MainActor
@@ -441,7 +442,21 @@ enum FollowupSelfTest {
         }
         check(verdict("T1") != .reject && verdict("G1") != .reject, "护着的 RAW 不是废片（移到废纸篓不会动它）",
               "T1 \(verdict("T1").map(\.rawValue) ?? "—") · G1 \(verdict("G1").map(\.rawValue) ?? "—")")
+        // 精选按帧数对手：单帧的场里只剩同一帧的 RAW + JPG，两张都不提成精选（以前 JPG 会被提成一张没有对手的精选）
+        check(verdict("T1") == .usable && verdict("T1_2") == .usable,
+              "单帧的场只剩分卡存的同一帧：RAW、JPG 都是可用，没有提出一张没对手的精选",
+              "T1 \(verdict("T1").map(\.rawValue) ?? "—") · T1_2 \(verdict("T1_2").map(\.rawValue) ?? "—")")
+        check(verdict("G2") == .pick, "对照 同一帧的 RAW 旁边还有另一帧：照常在场里提精选（赢的是另一帧）",
+              "G2 \(verdict("G2").map(\.rawValue) ?? "—")")
+        // 接受全部推荐：没有精选的那一场不动，护着的 RAW 不会被钉成废片
+        store.acceptAllRecommendations()
+        check(verdict("T1") != .reject && verdict("T1_2") != .reject, "接受全部推荐以后：单帧场的 RAW、JPG 都不是废片",
+              "T1 \(verdict("T1").map(\.rawValue) ?? "—") · T1_2 \(verdict("T1_2").map(\.rawValue) ?? "—")")
+        store.undoLastOverride()
         store.rejectBurstDuplicates = false
+        check(verdict("T1") == .usable && verdict("T1_2") == .usable,
+              "关掉去重也一样：单帧场里的同一帧 RAW + JPG 都是可用，不提精选",
+              "T1 \(verdict("T1").map(\.rawValue) ?? "—") · T1_2 \(verdict("T1_2").map(\.rawValue) ?? "—")")
         check(!dup("J1") && !dup("S1"), "关掉去重：连拍重复整组回来")
     }
 

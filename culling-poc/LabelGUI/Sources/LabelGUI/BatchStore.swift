@@ -4066,6 +4066,12 @@ final class BatchStore: ObservableObject {
             takeGroups[item.take, default: []].append(idx)
         }
         for (_, indices) in takeGroups where indices.count >= 2 {
+            // 按「帧」数对手：分卡存 / 分文件夹放的同一帧（RAW 和它那张 JPG，审查 M01）只算一张 —— 去重护住 RAW 以后，
+            // 单帧的场里剩下这一对，不该提出一张没有真实对手的精选。只用来数，候选还是这一场全部存活的照片。
+            let frames = indices.filter { idx in
+                !indices.contains { $0 != idx && Self.isSplitTwin(raw: updated[idx], of: updated[$0]) }
+            }
+            guard frames.count >= 2 else { continue }
             // 场里有人工精选就让给它，不在旁边再自动挑一张。
             if indices.contains(where: { overrides[updated[$0].id] == .pick }) { continue }
             if let best = Self.bestIndex(indices.filter { overrides[updated[$0].id] == nil },
