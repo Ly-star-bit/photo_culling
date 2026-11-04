@@ -83,8 +83,15 @@ enum FollowupSelfTest {
 
     // MARK: - S01b 写盘失败要让实时桥的写工具知道
 
+    /// root 跑时 chmod 只读挡不住写：靠只读模拟盘满的那几段跳过（CI 的 runner 不是 root）。
+    static var chmodWorks: Bool { geteuid() != 0 }
+
     static func persistReport(_ dir: URL) {
         print("— S01b 判决 / 客户选中 / 拼图没存上：写工具回 persisted:false + save_failed，「已存盘」只在真存上时说")
+        guard chmodWorks else {
+            print("SKIP root 跑时 chmod 只读挡不住写，这一段测不了")
+            return
+        }
         typealias Fake = FileSafetySelfTest.Fake
         let store = FileSafetySelfTest.makeShoot(dir, [Fake(id: "A", raw: "A.JPG"), Fake(id: "B", raw: "B.JPG"),
                                                        Fake(id: "C", raw: "C.JPG")])
@@ -311,6 +318,10 @@ enum FollowupSelfTest {
               "没有权限也换成中文，认不出的原样留着")
 
         // 端到端：目标文件夹只读（每张都在建 .part 时失败）→ 6 张里试了 3 张就停，状态栏说清楚；改回来再复制全部成功
+        guard chmodWorks else {
+            print("SKIP root 跑时 chmod 只读挡不住写，复制原片端到端这一段测不了")
+            return
+        }
         typealias Fake = FileSafetySelfTest.Fake
         let fakes = (1...6).map { Fake(id: "C\($0)", raw: "C\($0).JPG") }
         let store = FileSafetySelfTest.makeShoot(dir.appendingPathComponent("shoot"), fakes)
