@@ -124,12 +124,13 @@ final class CardImportCenter: ObservableObject {
     /// 启动时用：先在后台读完卡，有新照片、而且这批没被「不导入」过才弹。
     private func offerIfNew(_ volume: CardImporter.Volume) {
         let ledgerURL = appDataDir.appendingPathComponent(CardImporter.ledgerFileName)
-        // 和确认框同一个目标（记住的导入位置、备份位置）。
-        let target = CardImporter.target(settings: settings, choice: .saved)
-        let backup = CardImporter.backupTarget(settings: settings, primary: target)
+        let settings = self.settings
         let flag = AnalysisEngine.CancelFlag()
         launchScans[volume.root.path] = flag
         Task.detached(priority: .utility) {
+            // 和确认框同一个目标（记住的导入位置、备份位置）。在后台找：网络盘卡住时别卡界面。
+            let target = CardImporter.target(settings: settings, choice: .saved)
+            let backup = CardImporter.backupTarget(settings: settings, primary: target)
             let plan = try? CardImporter.plan(source: volume.root, destination: target.destination,
                                               mustExist: target.mustExist, backup: backup?.issue == nil ? backup : nil,
                                               ledger: CardImporter.Ledger.load(from: ledgerURL),
@@ -179,14 +180,25 @@ final class CardImportCenter: ObservableObject {
         current.error = nil
         current.planningNote = nil
         current.includeImported = includeImported
-        let target = CardImporter.target(settings: settings, choice: current.choice)
-        let backup = CardImporter.backupTarget(settings: settings, primary: target, skip: current.skipBackup)
-        current.targetIssue = target.issue
-        current.backupIssue = target.issue == nil ? backup?.issue : nil
+        current.targetIssue = nil
+        current.backupIssue = nil
         offer = current
-        guard target.issue == nil, backup?.issue == nil else { return }
+        let settings = self.settings
+        let choice = current.choice
+        let skipBackup = current.skipBackup
         let ledgerURL = appDataDir.appendingPathComponent(CardImporter.ledgerFileName)
         Task.detached(priority: .userInitiated) {
+            // 导到哪、备份到哪：在后台找（书签、卷、写权限 —— 网络盘卡住时别卡界面）。说不通就不出计划。
+            let target = CardImporter.target(settings: settings, choice: choice)
+            let backup = CardImporter.backupTarget(settings: settings, primary: target, skip: skipBackup)
+            if target.issue != nil || backup?.issue != nil {
+                await MainActor.run { [weak self] in
+                    guard let self, token == self.planToken, self.offer?.volume == volume, !flag.isSet else { return }
+                    self.offer?.targetIssue = target.issue
+                    self.offer?.backupIssue = target.issue == nil ? backup?.issue : nil
+                }
+                return
+            }
             let result: Result<CardImporter.Plan, Error> = Result {
                 try CardImporter.plan(source: volume.root, destination: target.destination, mustExist: target.mustExist,
                                       backup: backup,
@@ -247,7 +259,8 @@ final class CardImportCenter: ObservableObject {
     /// 「同时备份一份到另一块盘」开关。打开时还没选过备份位置就先选（不选就还是关着）。
     func setBackupEnabled(_ on: Bool) {
         if on && settings.backup == nil {
-            chooseBackupRoot()
+            // 开关的回调里别直接跑模态面板：下一拍再开。
+            DispatchQueue.main.async { [weak self] in self?.chooseBackupRoot() }
             return
         }
         settings.backupEnabled = on
@@ -764,6 +777,7 @@ struct CardImportSheet: View {
 /// --dest 也可以换成 --dest-root <根目录>（记住的导入位置，按今天建 yyyyMMdd；不在 = 画「导入位置找不到」）
 /// 或 --into-existing <已有文件夹>（这次导进已有的文件夹）—— 只在内存里，不写设置文件。
 /// --backup <备份根目录>：开着第二份备份（--backup-free-bytes N 假装备份盘只剩这么多）。
+/// --via-replan：走确认框自己的 CardImportCenter.replan（后台找目标、出计划）再画。
 enum CardImportSnapshot {
     @MainActor
     static func run(flagIndex: Int) -> Never {
@@ -805,7 +819,19 @@ enum CardImportSnapshot {
         offer.targetIssue = target.issue
         let backupTarget = CardImporter.backupTarget(settings: settings, primary: target)
         offer.backupIssue = target.issue == nil ? backupTarget?.issue : nil
-        if !args.contains("--planning"), target.issue == nil, backupTarget?.issue == nil {
+        if args.contains("--via-replan") {
+            // 走确认框自己那条路（CardImportCenter.replan：后台找目标、出计划），而不是这里直接算 ——
+            // 验证界面上「更改」之后重读的结果。只能配 --dest-root / --into-existing（--dest 是测试专用的直给目标）。
+            var start = CardImportCenter.Offer(volume: volume)
+            start.choice = offer.choice
+            center.offer = start
+            center.replan(includeImported: args.contains("--reimport"))
+            let deadline = Date().addingTimeInterval(60)
+            while center.offer?.planning == true, Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            offer = center.offer ?? start
+        } else if !args.contains("--planning"), target.issue == nil, backupTarget?.issue == nil {
             do {
                 offer.plan = try CardImporter.plan(source: card, destination: target.destination, mustExist: target.mustExist,
                                                    backup: backupTarget,

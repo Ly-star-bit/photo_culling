@@ -651,6 +651,30 @@ os.makedirs(root_b6)
 r = run_card_env(bcard, os.path.join(WORK, "data_b6"), None, {}, "--dest-root", root_b6, "--backup", root_b6)
 check(r.returncode == 3 and "同一个地方" in r.stdout and listing(root_b6) == [], "备份位置就是导入位置：拒绝")
 
+print("B7. 确认框自己那条路（CardImportCenter.replan，后台找目标 / 备份位置再出计划）：说不通的不出计划")
+
+
+def card_ui(*extra):
+    env = dict(os.environ, LABELGUI_DATA_DIR=os.path.join(WORK, "data_b7"))
+    png = os.path.join(WORK, "card_ui_b7.png")
+    r = subprocess.run([BIN, "--card-ui", bcard, png, "--via-replan", *extra], env=env,
+                       capture_output=True, text=True, timeout=120)
+    print("    " + r.stdout.strip().replace("\n", "\n    "))
+    return r
+
+
+root_b7, broot_b7 = os.path.join(WORK, "root_b7"), os.path.join(WORK, "backup_b7")
+os.makedirs(root_b7)
+os.makedirs(broot_b7)
+r = card_ui("--dest-root", root_b7, "--backup", broot_b7)
+check(r.returncode == 0 and "要导入：2 张" in r.stdout and f"root_b7/{TODAY}" in r.stdout and "备份：" in r.stdout,
+      "导入位置、备份都在：出了计划（2 张，带备份）")
+r = card_ui("--dest-root", "/Volumes/NoSuchDisk_K/照片")
+check(r.returncode == 0 and "导入位置有问题" in r.stdout and "要导入" not in r.stdout, "导入位置的盘没插上：不出计划，说清楚")
+r = card_ui("--dest-root", root_b7, "--backup", "/Volumes/NoSuchDisk_K/备份")
+check(r.returncode == 0 and "备份位置有问题" in r.stdout and "要导入" not in r.stdout, "备份盘没插上：不出计划，说清楚")
+check(listing(root_b7) == [] and listing(broot_b7) == [], "确认框读卡不往任何地方写")
+
 print("F. 存储卡从头到尾没被动过")
 check(tree(CARD) == card_before, "卡上每个文件的大小 / 修改时间 / SHA-256 都和开始时一样")
 
