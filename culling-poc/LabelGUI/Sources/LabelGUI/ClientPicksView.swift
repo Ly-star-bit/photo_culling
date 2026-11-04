@@ -107,7 +107,8 @@ extension ClientReply {
 // 都会读写这一场的会话目录（确认表记录、客户选中、复制目标），所以必须给临时数据目录。
 enum ClientPicksCLI {
     /// 最后一个是场次持久化自检（PersistSelfTest.swift）：搭这里的分派，不另动 main.swift。
-    static let flags = ["--proof-sheet", "--client-import", "--copy-list", "--copy-originals", PersistSelfTest.flag]
+    /// 写成字面量：cli_guard_regression.py 按字面量核对「登记了的参数都有分派」。
+    static let flags = ["--proof-sheet", "--client-import", "--copy-list", "--copy-originals", "--persist-selftest"]
 
     @MainActor
     static func run(flag: String, flagIndex: Int) -> Never {
