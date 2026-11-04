@@ -917,7 +917,8 @@ extension LiveHandlers {
     /// = 批量页「导出 › 导入客户选择…」：text 走 resolveClientReply（和导入框边打字边预览同一个函数），ids 要全在这一场。
     /// dry_run（默认）只回认出了哪些，不等用户停手、不压撤销；dry_run:false 走 importClientPicks（导入框「标记为客户选中」：
     /// 加到原来的上面，文件名后面的修图要求一起存成客户备注，一步判决撤销，app_undo target=verdicts 能撤）。
-    /// 照片都已经是客户选中、只是这次补了备注也算改了（导入框一样会存）。客户选中不改判决，拼图托盘不用刷。
+    /// 照片都已经是客户选中、只是这次补了备注也算改了（导入框一样会存）。客户选中不改判决，但拼图托盘里的照片带着 clientPick
+    /// （紫心；相册编排按它无条件保留客户选中）：标完跟着刷，用户一直停在拼图页、没切 tab 时也对（applyClientImport）。
     static func importClientPicks(_ req: Request, live: LiveServer, model: AppModel) async -> Reply {
         if let bad = checkArgs("cull_import_client_picks", req) { return bad }
         let dryRun = req.params["dry_run"] as? Bool ?? true
@@ -944,9 +945,11 @@ extension LiveHandlers {
         out["session"] = currentKey(batch) ?? NSNull()
         out["dry_run"] = dryRun
         var notice: String?
+        out["collage_tray_refreshed"] = false
         if !dryRun {
             let pushesBefore = batch.overrideUndoPushes
-            let delta = applyClientImport(resolution, batch: batch)
+            let delta = applyClientImport(resolution, batch: batch, collage: model.collage)
+            out["collage_tray_refreshed"] = delta.changed
             if delta.changed {
                 model.aiLog.recordWrite(.verdicts, op: req.opID ?? "", tool: "cull_import_client_picks", before: pushesBefore,
                                         after: batch.overrideUndoPushes, depth: batch.overrideUndoDepth)
@@ -998,11 +1001,14 @@ extension LiveHandlers {
     }
 
     /// dry_run:false 那一步 = 导入框的「标记为客户选中」（客户选中和备注一起，一步撤销）。什么都不变时不调
-    /// （不压撤销，状态栏也不写「新增 0 张」）。
-    static func applyClientImport(_ r: ClientReply.Resolution, batch: BatchStore) -> ClientImportDelta {
+    /// （不压撤销，状态栏也不写「新增 0 张」）。改了就刷拼图托盘（和 cull_set_verdicts、app_undo 一样）：托盘里那几张的
+    /// clientPick 只在 refreshFromBatch 时跟上，不刷的话停在拼图页点「自动编排」会把客户选中的废片、连拍第二张拿掉。
+    static func applyClientImport(_ r: ClientReply.Resolution, batch: BatchStore,
+                                  collage: CollageStore?) -> ClientImportDelta {
         let delta = clientImportDelta(r, picks: batch.clientPicks, notes: batch.clientNotes)
         guard delta.changed else { return delta }
         batch.importClientPicks(r.ids, notes: r.notes)
+        collage?.refreshFromBatch()
         return delta
     }
 

@@ -151,8 +151,15 @@ enum CullMCPSelfTest {
         check(noted.ids == ["DSCF7208", "DSCF7209"] && noted.notes == wanted && bodyNotes == wanted
               && bodyNew == ["DSCF7208", "DSCF7209"],
               "认出带备注的两行：notes 是客户原话、new_notes 是这两张：\(body)")
+        // 拼图托盘里已经有 DSCF7208（没刷之前 clientPick false）：标完要跟着刷成 true —— 相册编排按它保留客户选中，
+        // 用户停在拼图页没切 tab 时没人替它刷（审查：以前 handler 不刷）
+        let collage = trayWithPhoto("DSCF7208", store: store, sessionDir: sessionDir)
+        let trayBefore = collage.project.photos.first { $0.id == "DSCF7208" }?.clientPick
         let pushes = store.overrideUndoPushes
-        let first = LiveHandlers.applyClientImport(noted, batch: store)
+        let first = LiveHandlers.applyClientImport(noted, batch: store, collage: collage)
+        let trayAfter = collage.project.photos.first { $0.id == "DSCF7208" }?.clientPick
+        check(trayBefore == false && trayAfter == true,
+              "导入以后拼图托盘里 DSCF7208 的 clientPick 跟着刷成 true（之前 \(String(describing: trayBefore))，之后 \(String(describing: trayAfter))）")
         let rows = store.retouchRows(noted.ids)
         check(first.fresh == noted.ids && first.renoted == noted.ids && store.clientNotes == wanted
               && store.clientPicks == Set(noted.ids) && store.overrideUndoPushes == pushes + 1
@@ -164,14 +171,14 @@ enum CullMCPSelfTest {
         // 照片已经是客户选中，客户又补了一句：只改备注也要存（导入框走 setClientReply），没写的那张留着原来的
         let more = store.resolveClientReply("DSCF7208 去路人，黑白")
         let moreBody = LiveHandlers.clientPicksBody(more, existing: store.clientPicks, existingNotes: store.clientNotes)
-        let second = LiveHandlers.applyClientImport(more, batch: store)
+        let second = LiveHandlers.applyClientImport(more, batch: store, collage: collage)
         let merged = store.clientNotes["DSCF7208"] == "去路人，黑白" && store.clientNotes["DSCF7209"] == "瘦脸"
         check(second.fresh.isEmpty && second.renoted == ["DSCF7208"] && second.changed && merged
               && moreBody["new_ids"] as? [String] == [] && moreBody["new_notes"] as? [String] == ["DSCF7208"]
               && store.overrideUndoPushes == pushes + 2
               && LiveHandlers.clientImportNotice(second).hasPrefix("AI：更新了 1 张的客户备注"),
               "都已经是客户选中、只补了备注：照样算改了、再压一步撤销，DSCF7209 的备注留着（\(store.clientNotes)）")
-        let third = LiveHandlers.applyClientImport(more, batch: store)
+        let third = LiveHandlers.applyClientImport(more, batch: store, collage: collage)
         check(!third.changed && store.overrideUndoPushes == pushes + 2, "同一句再导一次：什么都不变、不压撤销")
         let notice = LiveHandlers.clientImportNotice(first)
         check(notice.hasPrefix("AI：标了 2 张客户选中 · 备注 2 张"), "状态栏那一句带备注张数：\(notice)")
@@ -180,6 +187,21 @@ enum CullMCPSelfTest {
         _ = store.undoLastOverride()
         check(store.clientPickCount == 0 && store.clientNotes.isEmpty && !fm.fileExists(atPath: notesFile.path),
               "再 ⌘Z：客户选中和备注一起回到导入之前，client_notes.json 删掉（\(store.clientNotes)）")
+    }
+
+    /// 一个托盘里只有这一张（clientPick 先记成 false）的拼图工程：写进这一场的 collage.json，再挂到批量页这一场
+    /// （= 用户开着拼图页；挂上时按批量页刷一遍，这时还不是客户选中）。
+    static func trayWithPhoto(_ id: String, store: BatchStore, sessionDir: URL) -> CollageStore {
+        var project = CollageProject()
+        var ref = CollagePhotoRef(id: id, path: photoDir.appendingPathComponent(id + ".JPG").path, width: 3, height: 2)
+        ref.clientPick = false
+        project.photos = [ref]
+        if let data = try? JSONEncoder().encode(project) {
+            try? data.write(to: sessionDir.appendingPathComponent("collage.json"), options: .atomic)
+        }
+        let collage = CollageStore(dataDir: appDataDir)
+        collage.attach(sessionDir: sessionDir, photoDir: photoDir, batch: store)
+        return collage
     }
 
     // MARK: - 3. AI 改判的出处（ai_overrides.json）

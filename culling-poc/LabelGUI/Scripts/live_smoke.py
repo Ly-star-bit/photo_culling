@@ -3096,8 +3096,10 @@ __attribute__((constructor)) static void init(void) {
         check(nd.get("notes") == {mid: "去路人", mid2: "瘦脸"} and nd.get("new_notes") == [mid, mid2] and nd.get("changed") is False
               and cn_dry is None and na.get("changed") is True and na.get("new_ids") == [mid, mid2] and na.get("new_notes") == [mid, mid2]
               and cn_disk() == {mid: "去路人", mid2: "瘦脸"} and {mid, mid2} <= set(cp_disk() or []) and steps(sn0, sn1) == (1, 0)
-              and (sn1.get("external_notice") or "").startswith("AI：标了 2 张客户选中 · 备注 2 张"),
-              f"带备注导入：dry_run 回 notes / new_notes、不写；dry_run:false 客户选中和 client_notes.json 一起写上、一步撤销（{cn_disk()}）")
+              and (sn1.get("external_notice") or "").startswith("AI：标了 2 张客户选中 · 备注 2 张")
+              and nd.get("collage_tray_refreshed") is False and na.get("collage_tray_refreshed") is True,
+              f"带备注导入：dry_run 回 notes / new_notes、不写；dry_run:false 客户选中和 client_notes.json 一起写上、一步撤销、"
+              f"拼图托盘跟着刷（{cn_disk()}）")
         nb = mw("cull_import_client_picks", {"text": f"{mid} 去路人，黑白", "dry_run": False})
         sn2 = mst()
         nc = mw("cull_import_client_picks", {"text": f"{mid} 去路人，黑白", "dry_run": False})
@@ -3106,7 +3108,8 @@ __attribute__((constructor)) static void init(void) {
               and (cn_disk() or {}).get(mid) == "去路人，黑白" and (cn_disk() or {}).get(mid2) == "瘦脸"
               and nb.get("undo", {}).get("steps_added") == 1 and steps(sn1, sn2) == (1, 0)
               and (sn2.get("external_notice") or "").startswith("AI：更新了 1 张的客户备注")
-              and nc.get("changed") is False and nc.get("new_notes") == [] and steps(sn2, sn3) == (0, 0),
+              and nc.get("changed") is False and nc.get("new_notes") == [] and steps(sn2, sn3) == (0, 0)
+              and nc.get("collage_tray_refreshed") is False,
               f"已经是客户选中、只补了备注：changed true、再压一步、{mid2} 的备注留着；同一句再导 changed false（{cn_disk()}）")
         un_n = [mw("app_undo", {"target": "verdicts"}) for _ in range(2)]
         sn4 = mst()
