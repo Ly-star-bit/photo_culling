@@ -6,7 +6,8 @@ import UniformTypeIdentifiers
 /// 文件安全自检（2026-11 全项目审查 S08 / S09 / S10 / S17）：LABELGUI_DATA_DIR=<临时目录> LabelGUI --files-selftest
 /// 在数据目录里造几场假的拍摄（小文件 + 手写的 manifest / layer1，不用跑分析），逐条断言、打 PASS / FAIL：
 ///   - XMP：「XMP 待更新」只写改了的那几张，别的 sidecar 一个不换（LR 里改过的星级不被盖回去）；全部重写时内容没变的不重写。
-///   - 同名不同格式共用一个 .xmp：整组不写、单独点名、不记成已同步；移废片时共用的 .xmp 全移走才带走。
+///   - 同名不同格式共用一个 .xmp：整组不写、单独点名、不记成已同步；移废片时共用的 .xmp 全移走才带走；
+///     MCP 概览单独报（shared_sidecar_count、xmp_shared_sidecar），不算进叫用户去点「XMP 待更新」的 xmp_stale。
 ///   - DNG / JPG 写完提醒 LR 不读旁边的 .xmp。
 ///   - 废片移到废纸篓默认跳过拼图页、印样帧（放不下的也算）、存好的方案里用到的，只在托盘里的照常移
 ///     （和 app 同一个 AppModel.make 接线；只算要移哪些，不真的往废纸篓里放）。
@@ -268,6 +269,32 @@ enum FileSafetySelfTest {
         let single = SidecarSharing.trashSidecars(moving: [photo("t1")], all: all)
         check(single.carry["t1"]?.xmp.lastPathComponent == "t1.xmp" && single.carry["t1"]?.after == [],
               "不共用的照常带走自己的 .xmp")
+
+        // MCP 概览（cull_session_overview）：同名冲突单独报，不当成「点重写就好」的过期。
+        func overview() -> (xmp: [String: Any], warnings: [String: [String: Any]]) {
+            let ov = MCPReadModel.overview(store, session: "files-selftest")
+            var byCode: [String: [String: Any]] = [:]
+            for w in ov["warnings"] as? [[String: Any]] ?? [] {
+                if let code = w["code"] as? String { byCode[code] = w }
+            }
+            return (ov["xmp"] as? [String: Any] ?? [:], byCode)
+        }
+        let onlyShared = overview()
+        let sharedWarning = onlyShared.warnings["xmp_shared_sidecar"]
+        check(onlyShared.xmp["stale_count"] as? Int == 4 && onlyShared.xmp["shared_sidecar_count"] as? Int == 4
+              && onlyShared.warnings["xmp_stale"] == nil
+              && (sharedWarning?["message"] as? String ?? "").contains("4 张")
+              && (sharedWarning?["hint"] as? String ?? "").contains("写不进去"),
+              "MCP 概览：4 张全是同名冲突 → stale 4、shared_sidecar_count 4，只带 xmp_shared_sidecar、不带 xmp_stale",
+              "\(onlyShared.xmp) \(onlyShared.warnings.keys.sorted())")
+        store.setOverride("t1", .pick)
+        let mixed = overview()
+        let staleWarning = mixed.warnings["xmp_stale"]
+        let hint = staleWarning?["hint"] as? String ?? ""
+        check(mixed.xmp["stale_count"] as? Int == 5 && mixed.xmp["shared_sidecar_count"] as? Int == 4
+              && (staleWarning?["message"] as? String ?? "").contains("有 1 张") && mixed.warnings["xmp_shared_sidecar"] != nil,
+              "再改 t1：stale 5，xmp_stale 只数写得了的 1 张，同名冲突那条还在", "\(mixed.xmp) \(staleWarning ?? [:])")
+        check(hint.contains("「XMP 待更新」") && !hint.contains("XMP 过期"), "xmp_stale 的提示用状态栏现在的按钮名「XMP 待更新」", hint)
     }
 
     // MARK: - S09-b LR 不读 DNG / JPG 旁边的 .xmp

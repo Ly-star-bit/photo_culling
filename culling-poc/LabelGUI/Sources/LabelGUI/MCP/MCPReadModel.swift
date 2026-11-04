@@ -101,9 +101,12 @@ enum MCPReadModel {
         // 其中 AI 经实时桥改的（照样算人工改判；阈值建议不拿它们当样本）
         out["ai_override_count"] = s.aiOverrideCount
         out["client_pick_count"] = s.clientPickCount
-        // 「XMP 过期」（状态栏那一句）：LR / C1 看的是 XMP，AI 改完判决它就过期了；没写过 XMP 时 stale_count 一直是 0
+        // 「XMP 待更新」（状态栏那一句）：LR / C1 看的是 XMP，AI 改完判决它就过期了；没写过 XMP 时 stale_count 一直是 0。
+        // stale_count 和状态栏的 N 一样（含同名冲突写不了的）；shared_sidecar_count 是其中同名不同格式共用一个 .xmp、
+        // app 整组不写的 —— 点重写也降不下来，单独报，不让 AI 一直叫用户去点
         let xmpStale = s.xmpStaleCount
-        out["xmp"] = ["stale_count": xmpStale, "written": s.xmpEverWritten] as [String: Any]
+        let xmpShared = s.xmpSharedSidecarCount
+        out["xmp"] = ["stale_count": xmpStale, "written": s.xmpEverWritten, "shared_sidecar_count": xmpShared] as [String: Any]
 
         var thresholds: [String: Any] = ["sharpness": r3(s.sharpnessThreshold)]
         thresholds["clip_pct"] = r3(s.exposureThreshold * 100)
@@ -153,9 +156,15 @@ enum MCPReadModel {
             warnings.append(warning("unparsed_photos", "有 \(s.unparsedCount) 张照片在清单里、但没有分析结果（不在任何计数里）。",
                                     hint: "请用户在 app 里点「重新分析」"))
         }
-        if xmpStale > 0 {
-            warnings.append(warning("xmp_stale", "上次写 XMP 之后有 \(xmpStale) 张的判决、星级或客户选中变了：Lightroom / Capture One 里还是旧的。",
-                                    hint: "改完以后提醒用户在 app 里点状态栏「XMP 过期」重写（MCP 不写 XMP）"))
+        let xmpWritable = max(0, xmpStale - xmpShared)
+        if xmpWritable > 0 {
+            warnings.append(warning("xmp_stale", "上次写 XMP 之后有 \(xmpWritable) 张的判决、星级或客户选中变了：Lightroom / Capture One 里还是旧的。",
+                                    hint: "改完以后提醒用户在 app 里点状态栏「XMP 待更新」重新写入（MCP 不写 XMP）"))
+        }
+        if xmpShared > 0 {
+            warnings.append(warning("xmp_shared_sidecar",
+                                    "\(xmpShared) 张同名不同格式的照片（比如 IMG_0001.HEIC 和 IMG_0001.JPG）共用一个 .xmp，app 不写它们的 XMP。",
+                                    hint: "点重写也写不进去：请用户把其中一张挪到别的文件夹再重新分析，或者在 Lightroom / Capture One 里自己标"))
         }
         out["warnings"] = warnings
         return out
