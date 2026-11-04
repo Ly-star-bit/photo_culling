@@ -296,7 +296,8 @@ enum FileSafetySelfTest {
         check(mixed.xmp["stale_count"] as? Int == 5 && mixed.xmp["shared_sidecar_count"] as? Int == 4
               && (staleWarning?["message"] as? String ?? "").contains("有 1 张") && mixed.warnings["xmp_shared_sidecar"] != nil,
               "再改 t1：stale 5，xmp_stale 只数写得了的 1 张，同名冲突那条还在", "\(mixed.xmp) \(staleWarning ?? [:])")
-        check(hint.contains("「XMP 待更新」") && !hint.contains("XMP 过期"), "xmp_stale 的提示用状态栏现在的按钮名「XMP 待更新」", hint)
+        // 按钮上的字是「XMP 待更新 N 张 · 点这里重新写入」（BatchView.xmpStaleLabel），提示照抄整句，所以只核对开头
+        check(hint.contains("「XMP 待更新") && !hint.contains("XMP 过期"), "xmp_stale 的提示用状态栏现在的按钮名「XMP 待更新…」", hint)
     }
 
     // MARK: - S09-b LR 不读 DNG / JPG 旁边的 .xmp
