@@ -1,0 +1,73 @@
+接受全部推荐: 动了 5 场 · overrides 13 条 · 人工改判 4 条
+连拍去重: 关
+照片 52 · 精选 5 · 可用 18 · 废片 29
+近似重复 3 组 / 10 张 (phash 层，自动规则作用范围)
+场 (间隔≤8s) 5 个多张场 / 14 张 · 待处理 0
+  理由 文件损坏: 2
+  理由 闭眼: 6
+  理由 虚焦: 6
+  理由 曝光裁切: 6
+  理由 欠曝: 2
+  理由 过曝: 2
+  理由 人脸质量低: 4
+  理由 VLM建议淘汰: 2
+  章节警告: 章节2 (12:00-12:00) 的 2 张全部被淘汰
+  滑杆漏掉(手动废且无理由): 1
+  场 35 (3 张): B01-ear030=精选 B02-ear018-rel=废片 B03-ear0215=废片
+  场 36 (3 张): C01-q070=精选 C02-q050=废片 C03-q056=废片
+  场 37 (4 张): D01-q066=废片 D02-q068=精选#1 D03-manual-usable=可用#2 D04-blur=废片
+  场 38 (2 张): E01-take-best=精选 E02-take-other=废片
+  场 39 (2 张): F01-take-auto=废片 F02-manual-pick=精选
+阈值: 锐度 45.0 · 曝光裁切 0.15 · 人脸质量 0.3 · 预设 标准
+  A01-ok 可用 -
+  A02-sharp44 废片 虚焦
+  A03-sharp45 可用 -
+  A04-under-face70-p99-90 废片 欠曝
+  A05-under-p99-100 可用 -
+  A06-under-face80 可用 -
+  A07-over-face240 废片 过曝
+  A08-over-face239 可用 -
+  A09-clip-subject20 废片 曝光裁切
+  A10-clip-whole-only 可用 -
+  A11-clip-shadow15 废片 曝光裁切
+  A12-ear005 废片 闭眼
+  A13-ear005-tiny 可用 -
+  A14-ear018-single 可用 -
+  A15-ear014-single 废片 闭眼
+  A16-fullres-closed-appeal 废片 闭眼
+  A17-fullres-tiny 可用 -
+  A18-appeal-eyes 可用 -
+  A19-appeal-sharp 可用 -
+  A20-appeal-partial 废片 曝光裁切
+  A21-appeal-lowkey 可用 -
+  A22-appeal-highkey 可用 -
+  A23-appeal-error 废片 虚焦
+  A24-q-single-low 废片 人脸质量低
+  A25-q-closeup 废片 人脸质量低
+  A26-q-wide 可用 -
+  A27-vlm 废片 VLM建议淘汰
+  A28-vlm-error 可用 -
+  A29-multi 废片 文件损坏,闭眼,虚焦,曝光裁切,过曝,人脸质量低,VLM建议淘汰
+  A30-noface-dark 废片 欠曝
+  A31-noface-dark-p99 可用 -
+  A32-noface-white 废片 曝光裁切
+  A33-legacy-no-p99 废片 曝光裁切
+  A34-legacy-eye 废片 闭眼
+  B01-ear030 精选 -
+  B02-ear018-rel 废片 闭眼
+  B03-ear0215 废片 -
+  C01-q070 精选 -
+  C02-q050 废片 人脸质量低
+  C03-q056 废片 -
+  D01-q066 废片 -
+  D02-q068 精选 -
+  D03-manual-usable 可用 -
+  D04-blur 废片 虚焦
+  E01-take-best 精选 -
+  E02-take-other 废片 -
+  F01-take-auto 废片 -
+  F02-manual-pick 精选 -
+  M01-manual-keep-blur 可用 虚焦
+  M02-manual-reject 废片 -
+  Z01-corrupt 废片 文件损坏
+  Z02-ch2-blur 废片 虚焦

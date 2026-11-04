@@ -77,6 +77,27 @@ jobs:
       - name: 存储卡导入回归 (--ingest)
         run: python3 culling-poc/LabelGUI/Scripts/card_import_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
 
+      # 不要照片的进程内自检：网格改判后的焦点、时间轴不出界、五种杂志风和人物挡字的版式规则……每条都在新的临时
+      # LABELGUI_DATA_DIR 里跑；时间轴自检的随机数按 seed 播种，固定跑 3 个 seed（FAIL 行带 seed 和 trial，原样能复现）。
+      # 和下面几步一样放在 MCP 冒烟后面（见 MCP 冒烟那段注释）。
+      - name: 自检 (--*-selftest)
+        timeout-minutes: 10
+        run: culling-poc/LabelGUI/Scripts/selftests.sh culling-poc/LabelGUI/.build/release/LabelGUI
+
+      # 合成图跑原生分析：手写几张结果确定的图（平滑渐变、整张死白、截断的 .jpg、带动态照片尾巴的、手写 APP1 拍摄时间 +
+      # Orientation=6 的连拍对）真跑 --analyze，再 --verdicts --per-photo，按正则断言理由和标志（虚焦、曝光裁切不判过曝、
+      # 文件损坏、同组、预览转正），不比数值；最后给 2000 / 8000 行的 --verdicts 计时（很宽的上限 + 耗时比）。临时数据目录。
+      - name: 合成图跑原生分析 (--analyze)
+        timeout-minutes: 15
+        run: python3 -I culling-poc/LabelGUI/Scripts/native_analysis_smoke.py culling-poc/LabelGUI/.build/release/LabelGUI
+
+      # 交付回归（端到端，纯函数那一半是上面「自检」里的 --delivery-selftest）：水印输出路径就是原片（同路径 / 大小写 / 硬链接）
+      # 被拒、原片不变；水印批量输出到照片目录全部另存 -2；写 XMP 时 LR 的 sidecar 只改星级色标、调色关键字按字段不变，
+      # 自己的整份重写，读不全 / 读不了的不碰；精华 Top N 和水印去 GPS（对照组 GPS 还在）。合成图、临时数据目录。
+      - name: 交付回归 (--export-xmp / --export-jpeg / --watermark)
+        timeout-minutes: 10
+        run: python3 -I culling-poc/LabelGUI/Scripts/delivery_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
+
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:

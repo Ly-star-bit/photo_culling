@@ -507,9 +507,35 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--body-offset"),
     }
 }
 
-// 时间轴布局自检：LabelGUI --timeline-selftest（随机章节数/张数/宽度，验证不出界、不重叠）。
+// 时间轴布局自检：LabelGUI --timeline-selftest [--seed N] [--trial K]（随机章节数/张数/宽度，验证不出界、不重叠）。
+// 随机数按 seed 播种（--seed，或环境变量 LABELGUI_SELFTEST_SEED；都没给 = 1），同一个 seed 每次跑的都是同样的 3000 组；
+// FAIL 行带 seed 和 trial，--trial 只重跑那一组。CI（Scripts/selftests.sh）固定跑几个 seed。
 if CommandLine.arguments.contains("--timeline-selftest") {
-    MainActor.assumeIsolated { ChapterTimelineSelfTest.run() }
+    let args = CommandLine.arguments
+    func number<T: FixedWidthInteger>(_ flag: String, _ env: String?) -> T? {
+        let raw: String?
+        if let i = args.firstIndex(of: flag) {
+            raw = args.count > i + 1 ? args[i + 1] : ""
+        } else {
+            raw = env.flatMap { ProcessInfo.processInfo.environment[$0] }
+        }
+        guard let raw else { return nil }
+        // 写错了直接退出：悄悄退回默认 seed，以为在复现的其实是另一组。
+        guard let value = T(raw) else {
+            print("--timeline-selftest：\(flag) 要一个非负整数，拿到的是「\(raw)」")
+            exit(2)
+        }
+        return value
+    }
+    let seed: UInt64 = number("--seed", "LABELGUI_SELFTEST_SEED") ?? 1
+    let trial: UInt32? = number("--trial", nil)
+    MainActor.assumeIsolated { ChapterTimelineSelfTest.run(seed: seed, onlyTrial: trial.map { Int($0) }) }
+}
+
+// 交付环节数据安全自检（XMP 归属 / 合并、同名另存、截断 JPEG、同一个文件、两条去 GPS）：
+// LABELGUI_DATA_DIR=<临时> LabelGUI --delivery-selftest（见 DeliverySelfTest.swift；端到端在 Scripts/delivery_regression.py）。
+if CommandLine.arguments.contains("--delivery-selftest") {
+    MainActor.assumeIsolated { DeliverySelfTest.run() }
 }
 
 // 批量页 / 连拍挑选离屏快照：LabelGUI --batch-ui|--compare-ui <photo_dir> <out.png> [...]（见 UISnapshot.swift）。

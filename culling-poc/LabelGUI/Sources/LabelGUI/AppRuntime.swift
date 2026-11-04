@@ -14,6 +14,7 @@ enum AppRuntime {
         "--swiss-selftest",
         "--album-selftest",
         "--newspaper-selftest",
+        "--delivery-selftest",
         "--app-ui", "--live-host",
         "--mcp", "--mcp-call", "--mcp-tools", "--mcp-selftest",
     ]
