@@ -970,6 +970,15 @@ extension LiveHandlers {
     /// 加到原来的上面，文件名后面的修图要求一起存成客户备注，一步判决撤销，app_undo target=verdicts 能撤）。
     /// 照片都已经是客户选中、只是这次补了备注也算改了（导入框一样会存）。客户选中不改判决，但拼图托盘里的照片带着 clientPick
     /// （紫心；相册编排按它无条件保留客户选中）：标完跟着刷，用户一直停在拼图页、没切 tab 时也对（applyClientImport）。
+    /// 导入客户选择存上没有：客户选中和客户备注是同一次导入、同一步撤销写的（BatchStore.setClientReply），两份一起算 ——
+    /// 以前只看 client_picks.json，备注写不上（client_notes.json 盘满、原件读坏了先不写）也回 persisted:true、说「已存盘」。
+    static let clientReplyFiles: [BatchStore.PersistFile] = [.clientPicks, .clientNotes]
+
+    /// app_undo target=verdicts 撤的这一步动过哪几份：撤 AI 导入的客户选择看客户选中 + 客户备注，改判看 overrides.json。
+    static func undoPersistFiles(tool: String) -> [BatchStore.PersistFile] {
+        tool == "cull_import_client_picks" ? clientReplyFiles : [.overrides]
+    }
+
     static func importClientPicks(_ req: Request, live: LiveServer, model: AppModel) async -> Reply {
         if let bad = checkArgs("cull_import_client_picks", req) { return bad }
         let dryRun = req.params["dry_run"] as? Bool ?? true
@@ -1019,7 +1028,7 @@ extension LiveHandlers {
         }
         if !dryRun && req.params["reveal"] as? Bool == true { model.tab = .batch }
         // 存上盘没有（审查 S01b）：dry_run 什么都没写，不报
-        let saved = dryRun ? PersistReport(persisted: true, warnings: []) : batchPersistReport(batch, [.clientPicks])
+        let saved = dryRun ? PersistReport(persisted: true, warnings: []) : batchPersistReport(batch, clientReplyFiles)
         if !dryRun { out["persisted"] = saved.persisted }
         // dry_run、什么都没变：窗口看不见那句「改动已生效并已存盘…请告诉用户切过去看」不说（结果照 summary 在对话里讲）
         let (info, shown) = liveInfo(req, live: live, model: model, notice: notice, persisted: saved.persisted,
@@ -1842,9 +1851,8 @@ extension LiveHandlers {
             out["session"] = currentKey(batch) ?? NSNull()
             out["verdict_counts"] = ["pick": counts.pick, "usable": counts.usable, "reject": counts.reject]
             out["undo"] = ["target": "verdicts", "steps_removed": 1, "depth": batch.overrideUndoDepth] as [String: Any]
-            // 存上盘没有（审查 S01b）：撤的是 AI 导入的客户选中就看 client_picks.json，改判看 overrides.json
-            let files: [BatchStore.PersistFile] = entry.tool == "cull_import_client_picks" ? [.clientPicks] : [.overrides]
-            let saved = batchPersistReport(batch, files)
+            // 存上盘没有（审查 S01b）：撤的是 AI 导入的客户选择就看 client_picks.json + client_notes.json，改判看 overrides.json
+            let saved = batchPersistReport(batch, undoPersistFiles(tool: entry.tool))
             out["persisted"] = saved.persisted
             let (info, warnings) = liveInfo(req, live: live, model: model, notice: text, persisted: saved.persisted)
             out["live"] = info

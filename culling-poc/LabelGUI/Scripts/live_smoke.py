@@ -3250,6 +3250,24 @@ __attribute__((constructor)) static void init(void) {
             check(sf_ok.get("persisted") is True and "save_failed" not in warn_codes(sf_ok) and disk_ov.get(keep_id) == "精选"
                   and keep_id in disk_cp and sf_ct2.get("persisted") is True and "save_failed" not in warn_codes(sf_ct2),
                   "改回能写以后：下一次改判 persisted true、overrides.json 里是精选，之前没存上的客户选中一起补进 client_picks.json，拼图 persisted true")
+            # 客户备注没写上（最终审查）：client_picks.json 写得上、client_notes.json 被一个同名的非空文件夹挡住 —— 带备注导入回
+            # persisted false + save_failed（以前只看 client_picks.json，照样 true、说「已存盘」）；挪开以后撤销这次导入，两份都写上
+            cn_block = os.path.join(msess, "client_notes.json")
+            if os.path.exists(cn_block):
+                skip("客户备注没写上：client_notes.json 已经在了（上面的用例没清干净），这一条测不了")
+            else:
+                os.makedirs(os.path.join(cn_block, "挡着"))
+                try:
+                    nb_i = mw("cull_import_client_picks", {"text": f"{mid2} 只修这张", "dry_run": False})
+                finally:
+                    shutil.rmtree(cn_block)
+                nb_u = mw("app_undo", {"target": "verdicts"})
+                check(nb_i.get("changed") is True and nb_i.get("new_notes") == [mid2] and nb_i.get("persisted") is False
+                      and "save_failed" in warn_codes(nb_i) and no_saved_claim(nb_i)
+                      and (nb_u.get("undone") or {}).get("tool") == "cull_import_client_picks" and nb_u.get("persisted") is True
+                      and not os.path.exists(cn_block) and mid2 not in (cp_disk() or []),
+                      f"只有客户备注写不上：带备注导入 persisted false + save_failed；挪开以后撤销它，persisted true、两份都回到导入之前"
+                      f"（{warn_codes(nb_i)} / {nb_u.get('persisted')}）")
             # 拼图写不上（盘满）时切场次（最终审查）：批量页这几份都存上了、只有 collage.json 写不进去 —— app_open_session 带
             # confirm 也不切、回 save_failed（以前照切，拼图换成新场次的工程，改动丢了还回 opened:true）；改回能写以后、没再改拼图，
             # 再调一次：切之前整份再存一次，存上了才切
