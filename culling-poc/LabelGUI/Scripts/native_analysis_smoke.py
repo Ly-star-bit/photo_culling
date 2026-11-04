@@ -318,10 +318,12 @@ def scale_section():
     ratio = (sizes[8000] - base) / max(0.05, sizes[2000] - base)
     limit = 60 * SLACK
     check(sizes[8000] < limit, f"8000 行 --verdicts {sizes[8000]:.1f}s < {limit:.0f}s（很宽的上限，只抓数量级的退化）")
-    # 耗时比只在 8000 行真花了点时间（≥ 0.5s）时才算数：零点几秒的量级上，runner 抖一下比例就乱了。
+    # 耗时比只在 8000 行真花了点时间（本机 ≥ 0.5s，CI 上 ×4 = 2s）时才算数：零点几秒的量级上，runner 抖一下比例就乱了。
+    # 本机线性的 8000 行约 0.3s，到不了门槛；O(n²) 的变化部分 ≈ 16 倍，一定过门槛、比例也一定超。
     spent = sizes[8000] - base
-    check(ratio < 10 or spent < 0.5,
-          f"8000 行比 2000 行（减掉进程启动 {base:.2f}s）耗时比 {ratio:.1f}（< 10，或者 8000 行总共不到 0.5s；"
+    floor = 0.5 * SLACK
+    check(ratio < 10 or spent < floor,
+          f"8000 行比 2000 行（减掉进程启动 {base:.2f}s）耗时比 {ratio:.1f}（< 10，或者 8000 行总共不到 {floor:.1f}s；"
           f"线性 ≈ 4，O(n²) ≈ 16）")
 
 
