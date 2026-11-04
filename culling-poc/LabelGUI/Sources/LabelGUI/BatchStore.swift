@@ -968,7 +968,7 @@ final class BatchStore: ObservableObject {
             lastError = "「\(folder.lastPathComponent)」的照片文件夹已不存在 (被删除、改名或所在硬盘未挂载)。" +
                         "下面是上次分析的缓存结果，重新分析/导出/写 XMP 都会失败。"
         } else if previewsPruned {
-            lastError = "这一场掉出了最近 15 场，预览图已清理省空间 (判决和人工改判都还在)。" +
+            lastError = "这一场的预览图已清理省空间（掉出了最近 15 场，或者从「移除历史记录」里移除过），判决和人工改判都还在。" +
                         "点「重新分析」补回预览：没变的照片只重做预览，人工改判不会动"
         }
         // Register a session that HAS cached results as soon as it's opened, not
@@ -1064,16 +1064,26 @@ final class BatchStore: ObservableObject {
         where dir.hasDirectoryPath
             && dir.lastPathComponent != "default"
             && !keep.contains(dir.lastPathComponent) {
-            try? fm.removeItem(at: dir.appendingPathComponent("previews"))
-            // 拼图的主体蒙版（派生数据，进拼图 tab 会按需重算）跟着预览一起清。
-            try? fm.removeItem(at: dir.appendingPathComponent("collage_masks"))
-            // 什么都没剩（只打开过、从没分析过的空场次）才连目录一起删。打开时就写下的 thresholds.json 不算。
-            let left = (try? fm.contentsOfDirectory(atPath: dir.path))?.filter { $0 != "thresholds.json" }
-            if left?.isEmpty == true {
-                try? fm.removeItem(at: dir)
-            }
+            Self.clearSessionCache(dir)
         }
     }
+
+    /// 一场只清能重新生成的：预览图、拼图主体蒙版（进拼图 tab 会按需重算）。判决、客户选中、对时、拼图工程和方案
+    /// 这些 KB 级的文件一律留着。掉出最近 15 场（上面）和「移除历史记录」（removeSession）都走这里。
+    nonisolated private static func clearSessionCache(_ dir: URL) {
+        let fm = FileManager.default
+        for name in sessionCacheDirs {
+            try? fm.removeItem(at: dir.appendingPathComponent(name))
+        }
+        // 什么都没剩（只打开过、从没分析过的空场次）才连目录一起删。打开时就写下的 thresholds.json 不算。
+        let left = (try? fm.contentsOfDirectory(atPath: dir.path))?.filter { $0 != "thresholds.json" }
+        if left?.isEmpty == true {
+            try? fm.removeItem(at: dir)
+        }
+    }
+
+    /// 场次目录里能删、删了能重新生成的那几样（菜单上报的「能释放多少」只算它们）。
+    nonisolated static let sessionCacheDirs = ["previews", "collage_masks"]
 
     /// 这一场的预览图被上面清掉了（判决还在）：网格会是一片灰，得说清楚怎么补回来。
     private var previewsPruned: Bool {
@@ -1094,6 +1104,8 @@ final class BatchStore: ObservableObject {
     /// a 3000-photo shoot is ~570MB and a full 15-entry menu can reach several
     /// GB — the menu showed no hint of that, and 移除/清除 were the only way to
     /// reclaim it. Measured off-main because it walks every preview directory.
+    /// 只算「移除历史记录」真会删的（预览图 + 拼图蒙版，sessionCacheDirs）：判决、拼图这些小文件移除时留着，
+    /// 算进去菜单报的数就和实际释放的对不上。
     @Published private(set) var sessionSizes: [String: Int64] = [:]
 
     var totalSessionBytes: Int64 { sessionSizes.values.reduce(0, +) }
@@ -1119,7 +1131,8 @@ final class BatchStore: ObservableObject {
         Task.detached(priority: .utility) {
             var sizes: [String: Int64] = [:]
             for key in keys {
-                sizes[key] = Self.directorySize(root.appendingPathComponent(key))
+                let dir = root.appendingPathComponent(key)
+                sizes[key] = Self.sessionCacheDirs.reduce(Int64(0)) { $0 + Self.directorySize(dir.appendingPathComponent($1)) }
             }
             let result = sizes
             await MainActor.run { [weak self] in self?.sessionSizes = result }
@@ -1159,8 +1172,10 @@ final class BatchStore: ObservableObject {
         refreshSessionSizes()
     }
 
-    /// Drop one shoot from the menu and delete its cached analysis (previews,
-    /// layer results, overrides). The photos themselves are never touched.
+    /// 从菜单里拿掉一场，只清它能重新生成的缓存（预览图、拼图蒙版，和掉出最近 15 场一样走 clearSessionCache）。
+    /// 人工改判、接受推荐、客户选中、确认表、机身对时、拼图工程和存着的方案都留着：重新打开这个文件夹就原样回来。
+    /// 以前是整个 sessions/<key> 删掉，不确认、不进废纸篓（审查 S06）—— 想腾地方清掉一场已交付的，几周后客户回来
+    /// 改相册才发现拼图、改判全没了。照片本身从来不碰。
     /// Removing the shoot that's currently open also clears the view — its
     /// previews are about to vanish, so leaving it on screen would show holes.
     func removeSession(_ entry: SessionEntry) {
@@ -1169,15 +1184,17 @@ final class BatchStore: ObservableObject {
             lastError = "正在处理中，先点“取消”再移除历史记录"
             return
         }
+        let freed = sessionSizes[entry.key]
         recentSessions.removeAll { $0.key == entry.key }
         saveSessionsIndex()
         if photoDir != nil, currentSessionKey == entry.key {
             resetToNoSession()
         }
-        try? FileManager.default.removeItem(
-            at: dataDir.appendingPathComponent("sessions/\(entry.key)"))
+        Self.clearSessionCache(dataDir.appendingPathComponent("sessions/\(entry.key)"))
         refreshSessionAvailability(force: true)
-        progressText = "已从列表移除「\(entry.name)」(照片本身未动)"
+        let size = freed.map { "（\(Self.sizeText($0))）" } ?? ""
+        progressText = "已从列表移除「\(entry.name)」：清掉了预览图\(size)。判决、人工改判、客户选中、拼图和方案都还留着，" +
+                       "重新打开这个文件夹就回来 (照片本身未动)"
     }
 
     /// Empty the menu and wipe the cached sessions it listed. Originals untouched —
@@ -1192,7 +1209,8 @@ final class BatchStore: ObservableObject {
         recentSessions = []
         saveSessionsIndex()
         resetToNoSession()
-        // 用户在确认框里点过的「全部清除」：菜单里列着的这几场整份删，判决、人工改判一起（确认框里写着）。
+        // 用户在确认框里点过的「全部清除」：菜单里列着的这几场整份删，判决、人工改判、客户选中、拼图和方案一起
+        // （确认框里一样样写着）。只想腾空间、判决留着的，用「移除历史记录」里的单场（removeSession）。
         // 掉出菜单的更早的场次确认框里没列，不能顺手把它们的判决也删了：只清预览（pruneOrphanedSessions，
         // 这时 keep 集是空的），判决这些 KB 级的小文件照旧留着。
         for key in listed {

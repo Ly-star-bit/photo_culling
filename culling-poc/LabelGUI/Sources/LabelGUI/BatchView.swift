@@ -266,8 +266,10 @@ struct BatchView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("将释放约 \(BatchStore.sizeText(store.totalSessionBytes)) 磁盘空间。" +
-                 "只删除这些拍摄的缓存分析结果 (预览图/判决/人工改判)，照片本身不动。重新打开这些文件夹需要再分析一次。" +
-                 "更早掉出菜单的拍摄只清预览图，判决照旧留着。")
+                 "会永久删掉这些拍摄在选片工具里的全部记录：预览图、判决和人工改判、客户选中、拼图工程和存着的方案，删了找不回来。" +
+                 "照片本身不动，已经写出去的 XMP、导出的 JPG 也不动；重新打开这些文件夹需要再分析一次。" +
+                 "只想腾空间、判决和拼图留着的，用「移除历史记录」里的单场 (只清预览图)。" +
+                 "更早掉出菜单的拍摄只清预览图，判决、拼图照旧留着。")
         }
     }
 
@@ -372,11 +374,13 @@ struct BatchView: View {
                     // NSMenu items can't carry their own context menu, so removal
                     // lives in a submenu rather than a right-click on each row.
                     // 缓存体积在这里显示：预览图约 190KB/张，15 场大拍摄能到几个 GB，
-                    // 而菜单本来完全看不出占了多少盘。
-                    Menu("移除历史记录 (共 \(BatchStore.sizeText(store.totalSessionBytes)))") {
+                    // 而菜单本来完全看不出占了多少盘。只报移除真会释放的（预览图 + 拼图蒙版）。
+                    // 单场移除只清预览：判决、客户选中、拼图和方案留着（审查 S06：以前点一下整场永久删掉）。
+                    Menu("移除历史记录 (可释放 \(BatchStore.sizeText(store.totalSessionBytes)))") {
+                        Text("只清预览图，判决、客户选中、拼图和方案都留着")
                         ForEach(store.recentSessions) { session in
                             let bytes = store.sessionSizes[session.key] ?? 0
-                            Button("\(session.name) · \(session.photoCount) 张 · \(BatchStore.sizeText(bytes))") {
+                            Button("\(session.name) · \(session.photoCount) 张 · 释放 \(BatchStore.sizeText(bytes))") {
                                 store.removeSession(session)
                             }
                         }
