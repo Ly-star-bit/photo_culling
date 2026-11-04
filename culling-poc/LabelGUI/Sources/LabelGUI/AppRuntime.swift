@@ -21,6 +21,7 @@ enum AppRuntime {
         "--launch-gate-probe",
         "--mcp", "--mcp-call", "--mcp-tools", "--mcp-selftest",
         "--cull-mcp-selftest",
+        "--quit-selftest",
     ]
 
     /// true = 无头跑（测试、自动化）。

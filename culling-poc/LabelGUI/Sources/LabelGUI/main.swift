@@ -543,6 +543,11 @@ if CommandLine.arguments.contains("--files-selftest") {
     MainActor.assumeIsolated { FileSafetySelfTest.run() }
 }
 
+// 长任务和退出自检（退出时 VLM 子进程整组停掉、阈值防抖写掉）：LABELGUI_DATA_DIR=<临时> LabelGUI --quit-selftest（见 QuitSelfTest.swift）
+if CommandLine.arguments.contains("--quit-selftest") {
+    MainActor.assumeIsolated { QuitSelfTest.run() }
+}
+
 // 按机身对时（会写这一场的 body_offsets.json，只在临时数据目录下跑）：
 // LABELGUI_DATA_DIR=<临时> LabelGUI --body-offset <photo_dir> [--body '<机身 key>' --seconds +180 | --align id,id] [--undo]
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--body-offset"),
