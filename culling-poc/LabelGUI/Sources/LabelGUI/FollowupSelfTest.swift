@@ -9,6 +9,7 @@ import Foundation
 ///   - 水印 EXIF 文字的快门：0、负数、非有限、非规格化的极小正数（1/t = inf）不崩、不填；≥1s 照旧 %g。
 ///   - S15「复制原片到…」连续 3 张写不进目标就停、说清楚原因和怎么办（不支持 → NAS / exFAT），英文 strerror 换成中文。
 ///   - M01 近似重复去重：拍摄时刻完全一样、一张 RAW 一张 JPG（分卡存、分文件夹放的同一帧）时，RAW 不判「连拍重复」。
+///   - MCP cull_get_photos 的 exif：老 manifest 里存的 shutter_sec / aperture / focal_35 = 0 不报（和 summary 一样）。
 /// 只写数据目录；改过的权限全部改回来，退出前删掉造出来的照片文件夹。
 @MainActor
 enum FollowupSelfTest {
@@ -38,6 +39,7 @@ enum FollowupSelfTest {
         watermarkShutter()
         originalsStop(root.appendingPathComponent("copy"))
         splitTwinDedupe(root.appendingPathComponent("twin"))
+        readModelExif(root.appendingPathComponent("exif"))
         unlockAll()
         try? FileManager.default.removeItem(at: root)
         print(failures == 0 ? "跟进小修自检：全部通过（\(total) 条）" : "跟进小修自检：\(failures) / \(total) 条失败")
@@ -343,6 +345,8 @@ enum FollowupSelfTest {
         let group: Int
         let sharpness: Double
         var camera = "X-T50"
+        /// manifest 里的 exif（不给 = 只有 ISO 400）。
+        var exif: [String: Any]?
     }
 
     /// 照 FileSafetySelfTest.writeShoot 手写 manifest / layer1（拍摄时间、小数秒、组号自己给），打开这一场。
@@ -357,7 +361,7 @@ enum FollowupSelfTest {
             try? Data(("PHOTO " + photo.id).utf8).write(to: url)
             manifest.append([
                 "id": photo.id, "raw_path": url.path, "decode_path": url.path, "preview_path": "previews/\(photo.id).jpg",
-                "capture_time": photo.time, "camera": photo.camera, "body_serial": "", "exif": ["iso": 400],
+                "capture_time": photo.time, "camera": photo.camera, "body_serial": "", "exif": photo.exif ?? ["iso": 400],
             ])
             var row: [String: Any] = [
                 "id": photo.id, "sharpness": photo.sharpness, "burst_group": photo.group, "face_found": false, "face_count": 0,
@@ -428,5 +432,30 @@ enum FollowupSelfTest {
               "T1 \(verdict("T1").map(\.rawValue) ?? "—") · G1 \(verdict("G1").map(\.rawValue) ?? "—")")
         store.rejectBurstDuplicates = false
         check(!dup("J1") && !dup("S1"), "关掉去重：连拍重复整组回来")
+    }
+
+    // MARK: - MCP 读模型的 exif：老 manifest 里的 0 不报
+
+    static func readModelExif(_ dir: URL) {
+        print("— MCP cull_get_photos 的 exif：老 manifest 里存的快门 / 光圈 / 等效焦距 0 不报")
+        let zero: [String: Any] = ["shutter_sec": 0, "aperture": 0, "focal_35": 0, "iso": 400]
+        let real: [String: Any] = ["shutter_sec": 0.004, "aperture": 2.8, "focal_35": 85, "iso": 800]
+        let store = makeDupShoot(dir, [
+            DupFake(id: "Z0", file: "Z0.JPG", time: "2026-03-21T11:00:00", group: 1, sharpness: 90, exif: zero),
+            DupFake(id: "Z1", file: "Z1.JPG", time: "2026-03-21T11:05:00", group: 2, sharpness: 90, exif: real),
+        ])
+        func exif(_ id: String) -> [String: Any] {
+            guard let item = store.item(withID: id) else { return [:] }
+            return MCPReadModel.detail(item, store, groupSizes: [:])["exif"] as? [String: Any] ?? [:]
+        }
+        let z = exif("Z0")
+        let zeroOK: Bool = z["shutter_sec"] == nil && z["aperture"] == nil && z["focal_35"] == nil
+            && z["iso"] as? Int == 400 && z["summary"] as? String == "ISO 400"
+        check(zeroOK, "老 manifest 里 shutter_sec / aperture / focal_35 是 0：不报这几项，iso、summary 照旧", "\(z)")
+        let r = exif("Z1")
+        let realOK: Bool = r["shutter_sec"] as? Double == 0.004 && r["aperture"] as? Double == 2.8 && r["focal_35"] as? Int == 85
+        check(realOK, "正常的快门 1/250、f/2.8、85mm 照报", "\(r)")
+        let encodable = JSONSerialization.isValidJSONObject(z) && JSONSerialization.isValidJSONObject(r)
+        check(encodable, "两张的 exif 都能编成 JSON")
     }
 }
