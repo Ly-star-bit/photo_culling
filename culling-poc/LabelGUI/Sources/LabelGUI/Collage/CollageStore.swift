@@ -245,6 +245,10 @@ final class CollageStore: ObservableObject {
 
     private let stateDir: URL
     private var projectURL: URL?
+    /// 这个工程的原件读不出来、或者解不开又挪不开（审查 S02b）：这次 attach 期间不存盘，免得拿空工程把它盖掉。
+    private var projectSaveRefused: String?
+    /// 这次 attach 以后第一次保存前留过 <工程>.bak 没有（照 LabelStore 的 backedUpSinceLoad）。
+    private var projectBackedUp = false
     private(set) var photoDir: URL?
     private var projectSaveTask: Task<Void, Never>?
     private var stateSaveTask: Task<Void, Never>?
@@ -490,11 +494,26 @@ final class CollageStore: ObservableObject {
         var loaded = CollageProject()
         loaded.canvas = defaultCanvas
         loaded.style = defaultStyle
-        if let data = try? Data(contentsOf: newURL),
-           let decoded = try? JSONDecoder().decode(CollageProject.self, from: data) {
+        projectSaveRefused = nil
+        projectBackedUp = false
+        // 以前读不出、解不开都悄悄换成空工程，用户（或 AI）随便动一下，1 秒后就把整本相册和所有方案盖掉（审查 S02b）。
+        // 解不开的先挪成 <工程>.corrupt-<时间>.json 保住原件；读不出来、挪不开的这次不存盘。没有这个文件是新场次的常态。
+        let file = newURL.lastPathComponent
+        switch SessionFiles.read(CollageProject.self, at: newURL) {
+        case .missing:
+            break
+        case .ok(let decoded):
             // 源文件暂时找不到（移动硬盘没插）也保留在托盘里：格子会空着，插上盘就回来了。
             // 以前在这里直接删掉，下一次保存就把它们永久抹掉了。
             loaded = decoded
+        case .corrupt(let moved?):
+            lastError = "拼图工程 \(file) 解不开（被手改过或写坏了），原件已挪成 \(moved.lastPathComponent)，这里先从空的开始"
+        case .corrupt(nil):
+            projectSaveRefused = "拼图工程 \(file) 解不开、也挪不开：为免覆盖，这一场的拼图先不存盘（修好或移走它再打开这一场）"
+            lastError = projectSaveRefused
+        case .unreadable(let why):
+            projectSaveRefused = "拼图工程 \(file) 读不出来（\(why)）：为免覆盖，这一场的拼图先不存盘（重新打开这一场再读一次）"
+            lastError = projectSaveRefused
         }
         project = loaded
         pageIndex = min(pageIndex, max(0, project.pages.count - 1))
@@ -3826,10 +3845,19 @@ final class CollageStore: ObservableObject {
     private func saveProject(inBackground: Bool) {
         projectSaveTask = nil
         guard let url = projectURL else { return }
+        if let refused = projectSaveRefused {
+            lastError = refused
+            return
+        }
         let snapshot = project
+        // 每次 attach 以后第一次保存前，在存盘队列上把原文件复制成 <工程>.bak（不是「写前改名」：中间会有一段
+        // 时间文件不存在）：整本被换掉、老版本丢了不认识的方案以后，打开时的那一版还在（审查 S02b）。
+        let backup = !projectBackedUp
+        projectBackedUp = true
         let write: @Sendable () -> String? = {
             do {
                 let data = try JSONEncoder().encode(snapshot)
+                if backup { SessionFiles.backup(url) }
                 try data.write(to: url, options: .atomic)
                 return nil
             } catch {

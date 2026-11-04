@@ -27,6 +27,7 @@ enum PersistSelfTest {
         t.removeSessionKeepsVerdicts()
         t.corruptFilesKept()
         t.unreadableFileRefused()
+        t.corruptCollageKept()
         print("persist-selftest: \(t.passed) 通过 \(t.failed) 失败")
         exit(t.failed == 0 ? 0 : 1)
     }
@@ -254,5 +255,53 @@ final class PersistSelfTestHarness {
         store.switchSession(to: makeSession("s02a-locked-other").folder)
         store.switchSession(to: s.folder)
         check(store.overrides["DSCF7207"] == .reject, "权限恢复后重新打开：原来的改判读回来了")
+    }
+
+    // MARK: - S02b 拼图工程读坏了
+
+    /// 拼图上随便改一下（= 用户的第一次编辑）再立刻落盘。
+    func touchCollage(_ store: CollageStore) {
+        var style = store.project.style
+        style.gutter += 0.002
+        store.setStyle(style, coalesce: false)
+        store.flushSaves()
+    }
+
+    func corruptCollageKept() {
+        print("— S02b 拼图工程解不开：挪开保住原件、提示，第一次编辑不盖掉；每次打开后第一次保存前留 .bak")
+        let s = makeSession("s02b")
+        let url = s.dir.appendingPathComponent("collage.json")
+        let bak = url.appendingPathExtension("bak")
+        let garbage = Data("{\"pages\": [{\"id\": ".utf8)
+        try? garbage.write(to: url)
+        let store = CollageStore(dataDir: dataDir)
+        store.attach(sessionDir: s.dir, photoDir: s.folder, batch: nil)
+        let aside = corruptCopies(of: "collage.json", in: s.dir)
+        check(aside.count == 1 && read(aside[0]) == garbage && !exists(url),
+              "collage.json 原件挪成 \(aside.first?.lastPathComponent ?? "—")，内容一字不差")
+        check(store.lastError?.contains("解不开") == true, "拼图页提示：\(store.lastError ?? "nil")")
+        touchCollage(store)
+        let saved = read(url).flatMap { try? JSONDecoder().decode(CollageProject.self, from: $0) }
+        check(saved != nil && aside.first.flatMap(read) == garbage, "第一次编辑写出新的 collage.json，挪开的原件没被碰到")
+        check(!exists(bak), "打开时没有原件就不留 .bak")
+
+        // 下次打开（另一个 store = 重启 app）：第一次保存前把打开时的那一版复制成 collage.json.bak，只复制一次
+        let atOpen = read(url)
+        let again = CollageStore(dataDir: dataDir)
+        again.attach(sessionDir: s.dir, photoDir: s.folder, batch: nil)
+        check(again.lastError == nil, "好的工程照常打开、不提示")
+        touchCollage(again)
+        check(atOpen != nil && read(bak) == atOpen, "打开后第一次保存前留了 collage.json.bak（打开时那一版）")
+        touchCollage(again)
+        check(read(bak) == atOpen, ".bak 一次打开只备份一次")
+
+        // 没开文件夹时用的 scratch.json 走同一段
+        let scratch = dataDir.appendingPathComponent("collage/scratch.json")
+        try? Data().write(to: scratch)
+        let third = CollageStore(dataDir: dataDir)
+        third.attach(sessionDir: nil, photoDir: nil, batch: nil)
+        let scratchAside = corruptCopies(of: "scratch.json", in: scratch.deletingLastPathComponent())
+        check(scratchAside.count == 1 && third.lastError?.contains("scratch.json") == true,
+              "没开文件夹时的 scratch.json（零长度）同样挪开、提示")
     }
 }
