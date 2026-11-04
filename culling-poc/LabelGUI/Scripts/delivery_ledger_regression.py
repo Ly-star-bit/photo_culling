@@ -327,6 +327,27 @@ if clash:
     check(got == [] and miss == [f"{t}（交付文件名还是原片名？）", f"{t}.jpg（交付文件名还是原片名？）"],
           f"「{t}」「{t}.jpg」：原片 {t} 和交付名 {t}.jpg（是 {clash['id']}）各指一张 → 都不猜（认出 {got} · 没认出 {miss}）")
 
+print("J. {序号} 不补零、同一个文件夹再导一次另存的 1-2.jpg：客户回「1-2」，有确认表时和表上第 1 到 2 张对不上 = 不猜")
+DATA3, LEDGER3 = make_data("data3")
+out_plain = os.path.join(WORK, "out-plain")
+for _ in range(2):
+    r = run(DATA3, "--export-jpeg", SHOOT, "--dest", out_plain, "--scope", "picks+usable", "--name", "{序号}",
+            "--size", "long:200")
+recs = ledger(LEDGER3)
+again = recs[-1]["files"] if len(recs) == 2 else []
+x = again[0]["id"] if again else "-"
+check(r.returncode == 0 and bool(again) and again[0]["file"] == "1-2.jpg",
+      f"第二次另存成 1-2.jpg → {x}（{[f['file'] for f in again[:3]]}）")
+got, miss = client_import(DATA3, "1-2\n")
+check(got == [x] and miss == [], f"没有确认表：「1-2」就是交付文件名 1-2.jpg（认出 {got} · 没认出 {miss}）")
+sa, sb, sc = [i for i in IDS if i != x][:3]
+r = run(DATA3, "--proof-sheet", SHOOT, "--out", os.path.join(WORK, "sheet3.html"), "--ids", f"{sa},{sb},{sc}")
+check(r.returncode == 0, f"确认表：第 1–3 张是 {sa} {sb} {sc}，都不是 1-2.jpg 那张")
+got, miss = client_import(DATA3, "1-2\n1 - 2\n1-2.jpg\n2-3\n")
+check(got == [x, sb, sc], f"「1-2.jpg」带扩展名按交付名，「2-3」是表上第 2 到 3 张（认出 {got}）")
+check(miss == ["1-2（交付文件名还是编号？）"],
+      f"「1-2」「1 - 2」：交付名是 {x}、表上第 1 到 2 张是 {sa} {sb} → 不猜（没认出 {miss}）")
+
 if CLEANUP:
     shutil.rmtree(WORK, ignore_errors=True)
 shutil.rmtree(SOCK, ignore_errors=True)

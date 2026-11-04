@@ -6,6 +6,8 @@ import Foundation
 /// - 界面那条路的接线：用和 app 同一个 AppModel.make 建 store，水印页真导出一次，对照要记进批量页这一场的 exports.json
 ///   （AppModel.make 里 `watermark.recordDeliveries(into: batch)` 那一行丢了，这里就红；无头 --watermark-batch 自己接，测不到它）；
 ///   exports.json 解不开：挪成 exports.corrupt-<时间>.json、批量页提醒；读不出来：不写、不挪，水印页自己的状态栏报出来。
+/// - 导入客户选择（ClientReply.resolve）：原片本来就叫 001.JPG、交付名 001.jpg 是另一张；交付名 1-2.jpg 和确认表的
+///   范围「1-2」指的不是同一批 —— 都列进没认出、不猜。
 /// 临时文件都在 `dir` 下（场次 JSON 在数据目录的 sessions/ 里），调用方跑完删掉。
 @MainActor
 enum DeliveryLedgerSelfTest {
@@ -40,6 +42,12 @@ enum DeliveryLedgerSelfTest {
               "原片 001.JPG 和交付名 001.jpg（是 017）各指一张：「001」「001.jpg」都不猜", "\(plain.unknown)")
         check(plain.ids == ["002", "017", "023"],
               "交付名和原片名是同一张的（002）照认；没有确认表时「1-2」按交付名 1-2.jpg 认", "\(plain.ids)")
+        let sheet = ProofSheet(id: "selftest-ledger", date: Date(), scope: "选中的照片", ids: ["001", "002", "017"])
+        let ranged = resolve("1-2\n2-3\n1-2.jpg\n5-2\n", sheets: [sheet])
+        check(ranged.unknown == ["1-2（交付文件名还是编号？）"],
+              "有确认表：「1-2」交付名是 023、表上第 1 到 2 张是 001 002 → 不猜", "\(ranged.unknown)")
+        check(ranged.ids == ["002", "017", "023"],
+              "「2-3」照旧按表认，「1-2.jpg」带扩展名按交付名，倒着写的「5-2」不是范围、按交付名认", "\(ranged.ids)")
     }
 
     // MARK: - 水印页：原图按文件本身对回这一场

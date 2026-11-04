@@ -9,7 +9,8 @@ import CryptoKit
 // Pixieset 之类导出的 CSV / Lightroom 清单。这里尽量都认，认不出的原样列出来给你看，不猜。
 // 认的顺序：完整文件名（扩展名不论、不分大小写）→ 文件名去掉扩展名 / 照片 id → 文件号（≥3 位数字，
 // 全场只有一张是这个号才算，比如 7221 → DSCF7221）→ 编号（确认表上的 #n：带表号就按那张表，
-// 没带就按最近导出的那张，预览里说是哪张）。12-15 这种范围只当编号认。
+// 没带就按最近导出的那张，预览里说是哪张）。12-15 这种范围按编号认（同一个文件夹再导一次另存的交付名 1-2.jpg
+// 也叫这个名字：和表上那几张不是同一批就不猜，见 resolve）。
 
 enum ClientReply {
     struct Resolution {
@@ -95,11 +96,13 @@ enum ClientReply {
         }
 
         /// 交付文件名：完整文件名 → 名字 → 去掉扩展名再按名字（扩展名的规矩和原片一样）。纯数字的名字（{序号:3}
-        /// 导出的 001）不带扩展名时不在这里认，走文件号 / 编号那条（resolve 里当第三种认法一起比）。
+        /// 导出的 001）、范围样的名字（{序号} 不补零再导一次另存的 1-2）不带扩展名时不在这里认，走文件号 / 编号那条
+        /// （resolve 里和编号一起比：客户回「1-2」多半说的是表上第 1 到 2 张）。
         func deliveredFilename(_ token: String) -> Set<String>? {
             let lower = token.lowercased()
             if let hit = deliveredFile[lower] { return hit }
-            if !ClientReply.isDigits(Substring(lower)), let hit = deliveredName[lower] { return hit }
+            if !ClientReply.isDigits(Substring(lower)), !ClientReply.isRange(Substring(lower)),
+               let hit = deliveredName[lower] { return hit }
             let url = URL(fileURLWithPath: lower)
             let ext = url.pathExtension
             guard !ext.isEmpty, ext.count <= 4, ext.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }),
@@ -387,11 +390,25 @@ enum ClientReply {
             let parts = token.split(separator: "-", omittingEmptySubsequences: false)
             if parts.count == 2, isDigits(parts[0]), isDigits(parts[1]),
                let a = Int(parts[0]), let b = Int(parts[1]) {
-                // 范围只当编号认：12-15 = 表上第 12 到 15 张。
+                // 范围按编号认：12-15 = 表上第 12 到 15 张。
+                var photos: [String?]?
+                if r.sheet != nil { photos = a <= b && b - a < 1000 ? (a...b).map(sheetPhoto) : [nil] }
+                let complete: Bool = photos.map { list in !list.contains { $0 == nil } } ?? false
+                let byIndex: [String]? = complete ? photos?.compactMap { $0 } : nil
+                // {序号} 不补零、同一个文件夹再导一次另存的「1-2.jpg」也叫这个名字：算第二种认法，和单个数字的交付名一样 ——
+                // 没有表（或者表上没有这几号）就按交付名认；表上那几张不是它 = 说不准，不替你挑。
+                if let delivered = lookup.deliveredName[token] {
+                    let agrees: Bool = byIndex.map { Set($0) == delivered } ?? true
+                    if delivered.count == 1, let id = delivered.first, agrees {
+                        hit(id)
+                    } else {
+                        miss(token + (delivered.count > 1 ? "（重名）" : "（交付文件名还是编号？）"))
+                    }
+                    continue
+                }
                 guard r.sheet != nil else { r.numbersWithoutSheet = true; miss(token); continue }
-                let photos = a <= b && b - a < 1000 ? (a...b).map(sheetPhoto) : [nil]
-                if photos.contains(where: { $0 == nil }) { miss(token); continue }
-                photos.compactMap { $0 }.forEach(hit)
+                guard let byIndex else { miss(token); continue }
+                byIndex.forEach(hit)
                 r.usedSheet = true
                 continue
             }
