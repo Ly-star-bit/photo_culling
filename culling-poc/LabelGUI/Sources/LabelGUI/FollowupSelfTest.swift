@@ -4,7 +4,8 @@ import Foundation
 /// 不要照片、不跑分析、不开界面：照 FileSafetySelfTest 在数据目录里造几场假的拍摄（小文件 + 手写的 manifest / layer1），逐条断言、
 /// 打 PASS / FAIL：
 ///   - S01b 判决、客户选中、拼图写盘失败时，实时桥写工具的结果 persisted:false + save_failed，「已存盘」只在真存上时说
-///     （场次目录 chmod 只读模拟盘满；后台那次拼图保存失败也算得上，不等 lastError 那一拍）。
+///     （场次目录 chmod 只读模拟盘满；后台那次拼图保存失败也算得上，不等 lastError 那一拍；拼图原件读不出来、这一场先不存时
+///     hint 另一种说法，不叫用户腾空间）。
 ///   - F19 水印页「导入选片结果」菜单：精选 / 精选 + 可用 / 客户选中（客户选中的废片也带，RAW+JPG 用 JPG）。
 ///   - 水印 EXIF 文字的快门：0、负数、非有限、非规格化的极小正数（1/t = inf）不崩、不填；≥1s 照旧 %g。
 ///   - S15「复制原片到…」连续 3 张写不进目标就停、说清楚原因和怎么办（不支持 → NAS / exFAT），英文 strerror 换成中文；
@@ -187,6 +188,10 @@ enum FollowupSelfTest {
         let nowReport = LiveHandlers.collagePersistReport(now)
         check(now?.hasPrefix("拼图项目保存失败") == true && !nowReport.persisted && codes(nowReport.warnings) == ["save_failed"],
               "拼图写不上（flushSaves 当场写）：回失败原因、persisted false + save_failed", now ?? "nil")
+        let liveReport = LiveHandlers.collagePersistReport(collage)
+        let writeHint = (liveReport.warnings.first?["hint"] as? String) ?? ""
+        check(!collage.projectSaveIsRefused && !liveReport.persisted && writeHint.contains("腾出磁盘空间") && writeHint.contains("整份再存"),
+              "拼图写失败（不是拒存）：写工具那一路的 hint 照旧叫用户腾出磁盘空间、之后改一下会整份再存", writeHint)
 
         // 后台那一次：改完等防抖的 1 s 过去、存盘队列上写失败；之后 flushSaves 没有排着的，也要报出来
         collage.lastError = nil
@@ -200,6 +205,34 @@ enum FollowupSelfTest {
         let back = collage.flushSaves()
         check(back == nil && LiveHandlers.collagePersistReport(back).persisted,
               "拼图腾出空间后再改一下：flushSaves 回 nil、persisted true（lastError 不清也不影响）", back ?? "")
+
+        // 拼图工程原件读不出来（S02b：这次打开期间不存盘）：腾空间、再改一下都存不上，save_failed 另一种说法
+        let fm = FileManager.default
+        let refusedDir = photoDir.deletingLastPathComponent().appendingPathComponent("collage-refused")
+        try? fm.createDirectory(at: refusedDir, withIntermediateDirectories: true)
+        let refusedFile = refusedDir.appendingPathComponent("collage.json")
+        let original = Data("{\"pages\":[]}".utf8)
+        try? original.write(to: refusedFile)
+        setMode(refusedFile, 0o000)
+        locked.append(refusedFile)
+        let refusedStore = CollageStore(dataDir: appDataDir)
+        refusedStore.attach(sessionDir: refusedDir, photoDir: refusedDir, batch: nil)
+        var refusedStyle = refusedStore.project.style
+        refusedStyle.gutter += 0.002
+        refusedStore.setStyle(refusedStyle, coalesce: false)
+        let refusedProblem = refusedStore.flushSaves()
+        let refused = LiveHandlers.collagePersistReport(refusedStore)
+        let refusedHint = (refused.warnings.first?["hint"] as? String) ?? ""
+        let refusedText = messages(refused.warnings)
+        let refusedOK: Bool = refusedProblem != nil && refusedStore.projectSaveIsRefused && !refused.persisted
+            && codes(refused.warnings) == ["save_failed"] && refusedText.contains("读不出来")
+        check(refusedOK, "拼图工程原件读不出来、这一场先不存：写工具 persisted false + save_failed，原话说是原件读不出来",
+              "\(refusedProblem ?? "nil") · \(refusedText)")
+        check(!refusedHint.contains("腾出磁盘空间") && !refusedHint.contains("整份再存") && refusedHint.contains("修好或移走")
+              && refusedHint.contains("切回这一场") && refusedHint.contains("不会存盘"),
+              "拼图拒存时的 hint：不叫用户腾空间、不说改一下就会存上，叫修好或移走那个文件、切走再切回来重新打开", refusedHint)
+        unlock(refusedFile)
+        check((try? Data(contentsOf: refusedFile)) == original, "拼图拒存：原件一个字没动")
     }
 
     // MARK: - F19 水印页按客户选中导入
