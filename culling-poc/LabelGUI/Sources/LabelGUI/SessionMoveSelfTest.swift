@@ -1,6 +1,7 @@
 import Foundation
 
-/// 挪了的文件夹认得回来（2026-11 全项目审查 S04 第一步）：LABELGUI_DATA_DIR=<临时目录> LabelGUI --session-move-selftest
+/// 挪了的文件夹认得回来（2026-11 全项目审查 S04 第一步）、存储卡当一场打开时不写卡（S07）：
+///     LABELGUI_DATA_DIR=<临时目录> LabelGUI --session-move-selftest
 /// 在数据目录里造几场假的拍摄（FileSafetySelfTest.writeShoot：小 JPEG + 手写的 manifest / layer1，不跑分析），真的改名、
 /// 拷贝、删掉文件夹，逐条断言、打 PASS / FAIL：
 ///   - 同卷改名以后从「选择文件夹…」/ 拖进来打开新路径：沿用旧场次的 key（不开空场次），判决、客户选中都在；manifest 和
@@ -10,6 +11,10 @@ import Foundation
 ///   - 「重新定位文件夹…」：跨卷拷过去、原来的删了（书签解析不到）—— 指给它新位置以后 key 不变、路径改过去；
 ///     选错文件夹（一张这一场的照片都没有）不换书签。
 ///   - 实时桥（followBookmark: false）不跟书签、不认回、不改路径。
+///   - 存储卡：判断表（DCIM 在卷根 + 可移除 / 可推出才算；外置 SSD、系统盘、网络卷不算；读不出来按「可能是」），
+///     真读一个系统盘上的 DCIM 文件夹不算卡；编的卷属性（CardImporter.volumeFactsOverride，不挂真的卡 —— hdiutil 挂的映像
+///     会弹「可移除的宗卷」授权框）打开卡上的 DCIM/100CANON：移废片、写 XMP、高 ISO 复制、导出到卡上、拼图默认目录都挡住，
+///     卡上一个文件都没多、没少；导出到卡外照常；外置 SSD 上的工作文件夹照常。
 /// 只写数据目录；退出前删掉造出来的照片文件夹。
 @MainActor
 enum SessionMoveSelfTest {
@@ -46,6 +51,8 @@ enum SessionMoveSelfTest {
         reopenFromMenu(root.appendingPathComponent("menu"), batch: model.batch)
         relocate(root.appendingPathComponent("relocate"), batch: model.batch)
         liveBridgeDoesNotFollow(root.appendingPathComponent("live"), batch: model.batch)
+        cardTable(root.appendingPathComponent("card-table"))
+        cardSession(root.appendingPathComponent("card"), model: model)
         try? FileManager.default.removeItem(at: root)
         print("session-move-selftest: \(passes) 通过 \(failures) 失败")
         exit(failures == 0 ? 0 : 1)
@@ -338,5 +345,178 @@ enum SessionMoveSelfTest {
         check(batch.photoDir?.path == i.path && (batch.lastError ?? "").contains("已不存在"),
               "停在登记的路径上，说文件夹不在了", batch.lastError ?? "")
         check(manifestPhotoDir(key(i)) == i.path, "manifest 没改")
+    }
+}
+
+// MARK: - 存储卡当一场打开（S07）
+
+extension SessionMoveSelfTest {
+    private static func cardTable(_ dir: URL) {
+        print("== 存储卡判断表（纯函数）+ 真读一个系统盘上的 DCIM")
+        let card = CardVolumeFacts(removable: true, ejectable: true, rootFileSystem: false, local: true,
+                                   volumePath: "/Volumes/EOS_DIGITAL", name: "EOS_DIGITAL")
+        let ssd = CardVolumeFacts(removable: false, ejectable: true, rootFileSystem: false, local: true,
+                                  volumePath: "/Volumes/T7", name: "T7")
+        let system = CardVolumeFacts(removable: false, ejectable: false, rootFileSystem: true, local: true,
+                                     volumePath: "/", name: "Macintosh HD")
+        let nas = CardVolumeFacts(removable: false, ejectable: true, rootFileSystem: false, local: false,
+                                  volumePath: "/Volumes/photo", name: "photo")
+        let fixedDisk = CardVolumeFacts(removable: false, ejectable: false, rootFileSystem: false, local: true,
+                                        volumePath: "/Volumes/Data2", name: "Data2")
+        func kind(_ path: String, child: Bool = false, _ facts: CardVolumeFacts?) -> CardSessionCheck.Kind {
+            CardImporter.classifyCardSession(path: path, hasDCIMChild: child, facts: facts).kind
+        }
+        let full = CardImporter.classifyCardSession(path: "/Volumes/EOS_DIGITAL/DCIM/100CANON", hasDCIMChild: false, facts: card)
+        check(full == CardSessionCheck(kind: .card, name: "EOS_DIGITAL", root: "/Volumes/EOS_DIGITAL"),
+              "卡上的 DCIM/100CANON → 是卡，带卡名和挂载点", "\(full)")
+        check(kind("/Volumes/EOS_DIGITAL/DCIM", card) == .card, "卡上的 DCIM 本身 → 是卡")
+        check(kind("/Volumes/EOS_DIGITAL/dcim/100CANON", card) == .card, "小写 dcim 也认")
+        check(kind("/Volumes/EOS_DIGITAL", child: true, card) == .card, "打开的是卡的根（下面有 DCIM）→ 是卡")
+        check(kind("/Volumes/EOS_DIGITAL", child: false, card) == .no, "可移除盘的根、下面没有 DCIM → 不是")
+        check(kind("/Volumes/T7/项目/0321", ssd) == .no, "外置 SSD 上的工作文件夹（路径里没有 DCIM）→ 不是")
+        check(kind("/Volumes/T7/备份/DCIM/100CANON", ssd) == .no, "外置 SSD 上备份的 DCIM（不在卷根下）→ 不是")
+        check(kind("/Volumes/T7/备份", child: true, ssd) == .no, "外置 SSD 上的文件夹、下面有 DCIM（不是卷根）→ 不是")
+        check(kind("/Volumes/T7/DCIM/100CANON", ssd) == .card, "可推出的盘、卷根下就是 DCIM（读卡器里的卡就是这样）→ 当卡挡")
+        check(kind("/Users/x/Pictures/卡备份/DCIM/100CANON", system) == .no, "系统盘上拷出来的 DCIM → 不是")
+        check(kind("/Volumes/photo/DCIM/100CANON", nas) == .no, "网络卷上的 DCIM → 不是")
+        check(kind("/Volumes/Data2/DCIM/100CANON", fixedDisk) == .no, "不可移除、不可推出的内置第二块盘 → 不是")
+        check(kind("/Volumes/EOS_DIGITAL/DCIM/100CANON", nil) == .maybe, "卷属性整个读不出来 → 可能是卡（照样挡）")
+        var noRemovable = card
+        noRemovable.removable = nil
+        noRemovable.ejectable = nil
+        check(kind("/Volumes/EOS_DIGITAL/DCIM", noRemovable) == .maybe, "可不可移除读不出来 → 可能是")
+        var noRoot = card
+        noRoot.rootFileSystem = nil
+        check(kind("/Volumes/EOS_DIGITAL/DCIM", noRoot) == .maybe, "是不是系统盘读不出来 → 可能是")
+        var noMount = card
+        noMount.volumePath = nil
+        check(kind("/Volumes/EOS_DIGITAL/DCIM", noMount) == .maybe, "挂载点读不出来 → 可能是")
+        check(kind("/Users/x/Pictures/0321", nil) == .no, "路径里没有 DCIM：不看卷属性，直接不是")
+        let maybe = CardImporter.classifyCardSession(path: "/Volumes/EOS_DIGITAL/DCIM", hasDCIMChild: false, facts: nil)
+        check(maybe.blocksWrites && maybe.subject.contains("像是在存储卡上"), "「可能是」也挡写，话里说「像是」", maybe.subject)
+        check(full.subject == "这是存储卡「EOS_DIGITAL」上的文件夹", "是卡：话里带卡名", full.subject)
+
+        let check1 = CardSessionCheck(kind: .card, name: "EOS_DIGITAL", root: "/Volumes/EOS_DIGITAL")
+        check(check1.contains(URL(fileURLWithPath: "/Volumes/EOS_DIGITAL/导出JPG"), photoDir: nil), "导出目标在卡上 → 在")
+        check(check1.contains(URL(fileURLWithPath: "/Volumes/EOS_DIGITAL"), photoDir: nil), "卡的根本身 → 在")
+        check(!check1.contains(URL(fileURLWithPath: "/Users/x/Pictures/导出"), photoDir: nil), "电脑上的文件夹 → 不在")
+        check(!check1.contains(URL(fileURLWithPath: "/Volumes/EOS_DIGITAL_2/导出"), photoDir: nil), "名字带同样前缀的另一张卡 → 不在")
+        check(!CardSessionCheck.no.contains(URL(fileURLWithPath: "/Volumes/EOS_DIGITAL/x"), photoDir: nil), "不是卡的场次什么都不挡")
+
+        // 真读：数据目录在系统盘上，DCIM/100CANON 也不算卡（不编卷属性）。
+        let real = dir.appendingPathComponent("DCIM/100CANON")
+        try? FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        let facts = CardImporter.volumeFacts(of: real)
+        check(facts?.rootFileSystem == true, "真读卷属性：数据目录在系统盘上", "\(String(describing: facts))")
+        check(CardImporter.cardSession(for: real) == .no, "真读：系统盘上的 DCIM/100CANON 不算卡")
+        check(CardImporter.cardSession(for: dir) == .no, "真读：下面有 DCIM 的系统盘文件夹不算卡")
+    }
+
+    private static func cardSession(_ root: URL, model: AppModel) {
+        print("== 存储卡当一场打开：移废片、写 XMP、高 ISO、导出到卡上、拼图默认目录都不写卡（编的卷属性）")
+        let fm = FileManager.default
+        let batch = model.batch
+        let collage = model.collage
+        let card = root.appendingPathComponent("EOS_DIGITAL")
+        let dcim = card.appendingPathComponent("DCIM/100CANON")
+        let ssd = root.appendingPathComponent("T7")
+        let off = root.appendingPathComponent("电脑上")
+        try? fm.createDirectory(at: off, withIntermediateDirectories: true)
+        FileSafetySelfTest.writeShoot(dcim, [
+            Fake(id: "IMG_0001", raw: "IMG_0001.JPG", iso: 6400, jpeg: true),
+            Fake(id: "IMG_0002", raw: "IMG_0002.CR3", iso: 6400),
+            Fake(id: "IMG_0003", raw: "IMG_0003.JPG", jpeg: true),
+        ])
+        let cardPath = card.path
+        let ssdPath = ssd.path
+        CardImporter.volumeFactsOverride = { url in
+            let path = url.standardizedFileURL.path
+            if path.hasPrefix(cardPath + "/") || path == cardPath {
+                return CardVolumeFacts(removable: true, ejectable: true, rootFileSystem: false, local: true,
+                                       volumePath: cardPath, name: "EOS_DIGITAL")
+            }
+            if path.hasPrefix(ssdPath + "/") || path == ssdPath {
+                return CardVolumeFacts(removable: false, ejectable: true, rootFileSystem: false, local: true,
+                                       volumePath: ssdPath, name: "T7")
+            }
+            return nil
+        }
+        defer { CardImporter.volumeFactsOverride = nil }
+        func cardListing() -> [String] {
+            (fm.subpaths(atPath: card.path) ?? []).sorted()
+        }
+
+        check(batch.switchSession(to: dcim) && batch.items.count == 3, "打开卡上的 DCIM/100CANON：3 张")
+        check(batch.cardSession == CardSessionCheck(kind: .card, name: "EOS_DIGITAL", root: cardPath) && batch.isCardSession,
+              "认出是存储卡「EOS_DIGITAL」", "\(batch.cardSession)")
+        check(batch.defaultJPEGExportFolder == nil, "没有默认的「导出JPG/」（导出到 / 精华按钮灰掉）")
+        batch.setOverride("IMG_0001", .pick)
+        batch.setOverride("IMG_0003", .reject)
+        // 万一闸失效：要移的那张原片先删掉，trashRejects 一张都移不动，不会真的往废纸篓里放东西。
+        try? fm.removeItem(at: dcim.appendingPathComponent("IMG_0003.JPG"))
+        let before = cardListing()
+
+        batch.trashRejects()
+        FileSafetySelfTest.wait(batch)
+        check((batch.lastError ?? "").contains("存储卡") && (batch.lastError ?? "").contains(".Trashes") && batch.items.count == 3,
+              "移废片：不移，说卡自己的 .Trashes 格式化就没了", batch.lastError ?? "")
+        batch.exportXMP(.all)
+        FileSafetySelfTest.wait(batch)
+        check((batch.lastError ?? "").contains("不带 .xmp") && !cardListing().contains { $0.hasSuffix(".xmp") },
+              "写 XMP：不写，说正式导入不带 .xmp", batch.lastError ?? "")
+        batch.exportHighISORaws(minISO: 3200, keepersOnly: false)
+        FileSafetySelfTest.wait(batch)
+        check((batch.lastError ?? "").contains("高 ISO")
+              && !fm.fileExists(atPath: dcim.appendingPathComponent(ImageLoader.denoiseSubfolder).path),
+              "高 ISO 复制：不复制、没建「高ISO降噪/」", batch.lastError ?? "")
+        let options = DeliveryOptions.jpegExport(legacyMaxPixel: 1024, legacyQuality: 0.85)
+        let onCard = card.appendingPathComponent("导出")
+        batch.exportJPEGs(to: onCard, includeUsable: true, options: options)
+        FileSafetySelfTest.wait(batch)
+        check((batch.lastError ?? "").contains("导出目标") && !fm.fileExists(atPath: onCard.path),
+              "导出 JPG 选了卡上的文件夹：不导、没建", batch.lastError ?? "")
+        batch.exportHighlights(count: 5, into: card.appendingPathComponent("精华"), options: options)
+        FileSafetySelfTest.wait(batch)
+        check((batch.lastError ?? "").contains("导出目标") && !fm.fileExists(atPath: card.appendingPathComponent("精华").path),
+              "精华导到卡上：不导", batch.lastError ?? "")
+        check(cardListing() == before, "卡上一个文件都没多、没少", "\(cardListing())")
+
+        let offExport = off.appendingPathComponent("导出JPG")
+        batch.exportJPEGs(to: offExport, includeUsable: true, options: options)
+        FileSafetySelfTest.wait(batch)
+        let written = (try? fm.contentsOfDirectory(atPath: offExport.path)) ?? []
+        check(written.contains { $0.lowercased().hasSuffix(".jpg") }, "导出到卡外的文件夹照常导", "\(written) \(batch.lastError ?? "")")
+
+        // 拼图：默认目录（卡上的「拼图导出/」）不给；选到卡上的不导；选到卡外的照常。
+        FileSafetySelfTest.waitUntil(0.3) { false }
+        model.ensureCollageAttached()
+        collage.importFromBatch(ids: ["IMG_0001"], batch: batch, layout: true)
+        check(FileSafetySelfTest.waitUntil { !collage.isSolving && !collage.project.pages.isEmpty }, "拼图排了一版")
+        let savedOptions = collage.exportOptions
+        collage.exportOptions.outputPath = nil
+        check(collage.defaultOutputFolder == nil && collage.outputFolder == nil
+              && (collage.exportBlockedReason ?? "").contains("存储卡"),
+              "拼图默认目录在卡上：不给，导出按钮说先选卡外的目录", collage.exportBlockedReason ?? "nil")
+        let collageOnCard = card.appendingPathComponent("拼图")
+        collage.exportOptions.outputPath = collageOnCard.path
+        let refused = collage.startExport(project: collage.project, options: collage.exportOptions, name: "卡上", reveal: false)
+        check((refused ?? "").contains("导出目标") && !fm.fileExists(atPath: collageOnCard.path)
+              && (collage.exportBlockedReason ?? "").contains("导出目标"),
+              "拼图输出目录选到卡上：不导（AI 的 collage_export 走同一个 startExport）", refused ?? "nil")
+        collage.exportOptions.outputPath = off.appendingPathComponent("拼图").path
+        check(collage.exportBlockedReason == nil, "拼图输出目录选到卡外：可以导", collage.exportBlockedReason ?? "")
+        collage.exportOptions = savedOptions
+        check(cardListing() == before, "拼图这一路也没往卡上写", "\(cardListing())")
+
+        // 外置 SSD 上的工作文件夹（可推出、没有 DCIM）、SSD 上备份的 DCIM（不在卷根）：照常是普通场次。
+        let work = ssd.appendingPathComponent("项目/0321")
+        FileSafetySelfTest.writeShoot(work, [Fake(id: "A", raw: "A.JPG", jpeg: true)])
+        check(batch.switchSession(to: work) && !batch.isCardSession && batch.defaultJPEGExportFolder != nil,
+              "外置 SSD 上的工作文件夹：不当卡，默认导出目录照常", "\(batch.cardSession)")
+        let backup = ssd.appendingPathComponent("备份/DCIM/100CANON")
+        FileSafetySelfTest.writeShoot(backup, [Fake(id: "B", raw: "B.JPG", jpeg: true)])
+        check(batch.switchSession(to: backup) && !batch.isCardSession, "外置 SSD 上备份的 DCIM：不当卡")
+        check(batch.switchSession(to: dcim) && batch.isCardSession, "切回卡上那一场：又认出是卡")
+        check(batch.switchSession(to: work) && !batch.isCardSession, "切到别的场次：卡的标记跟着清掉")
     }
 }

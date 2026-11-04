@@ -1031,6 +1031,23 @@ final class BatchStore: ObservableObject {
     private var currentSessionKey = "default"
     private var currentSessionPath = ""
 
+    /// 这一场开在存储卡上（审查 S07）：移废片、写 XMP、高 ISO 复制、导出到卡上都挡住，批量页顶上叫人先导入这张卡。
+    /// switchSession 里算（主线程；CardImporter.cardSession 只对照片文件夹本身取卷属性，不读卷根），没打开场次时是 .no。
+    @Published private(set) var cardSession: CardSessionCheck = .no
+    var isCardSession: Bool { cardSession.blocksWrites }
+
+    /// 卡上不做的写操作给 lastError 的一句话；nil = 不是卡，照常做。
+    func cardWriteRefusal(_ what: String) -> String? {
+        guard cardSession.blocksWrites else { return nil }
+        return "\(cardSession.subject)：\(what)。先导入这张卡（文件夹菜单「从存储卡导入…」），在导入后的文件夹里再做"
+    }
+
+    /// 导出目标在这张卡上（或者说不清、像是在卡上）：给 lastError 的一句话；nil = 照常导。
+    func cardDestinationRefusal(_ folder: URL) -> String? {
+        guard cardSession.contains(folder, photoDir: photoDir) else { return nil }
+        return "导出目标在\(cardSession.label)上：卡上的东西一个不动，请选一个不在卡上的文件夹（或者先导入这张卡）"
+    }
+
     nonisolated private static func makeBookmark(for url: URL) -> Data? {
         (try? url.bookmarkData(options: .withSecurityScope,
                                includingResourceValuesForKeys: nil, relativeTo: nil))
@@ -1113,6 +1130,8 @@ final class BatchStore: ObservableObject {
         currentSessionPath = moved?.path ?? folder.path
         sessionDir = dataDir.appendingPathComponent("sessions/\(currentSessionKey)")
         try? FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+        // 是不是开在存储卡上（审查 S07）：路径里没有 DCIM、下面也没有 DCIM 的只多一次 stat，不读卷属性。
+        cardSession = CardImporter.cardSession(for: resolved)
         overrides = [:]
         acceptedIDs = []
         overrideUndoStack = []
@@ -1539,6 +1558,7 @@ final class BatchStore: ObservableObject {
         accessedFolder?.stopAccessingSecurityScopedResource()
         accessedFolder = nil
         photoDir = nil
+        cardSession = .no
         currentSessionKey = "default"
         currentSessionPath = ""
         sessionDir = dataDir.appendingPathComponent("sessions/default")
@@ -3784,6 +3804,11 @@ final class BatchStore: ObservableObject {
             lastError = "正在处理中，先点“取消”再移动废片"
             return
         }
+        // 存储卡上（审查 S07）：移到的是卡自己的 .Trashes，不是系统废纸篓，格式化卡就找不回来。
+        if let why = cardWriteRefusal("废片移到废纸篓只会进卡自己的废纸篓（.Trashes），格式化卡就找不回来，这里不移") {
+            lastError = why
+            return
+        }
         // 真移之前现取一次拼图在用的（拼图工程先挂到这一场）：菜单上的张数是之前推过来的，这期间可能又排了一版。
         refreshCollageInUse()
         let rejects = includeCollage ? trashableRejectsIncludingCollage : trashableRejects
@@ -3931,8 +3956,11 @@ final class BatchStore: ObservableObject {
 
     /// Default JPG output folder: a subfolder of the shoot that listPhotos
     /// skips, so exporting never feeds the outputs back into the next analysis.
+    /// 存储卡上的一场（审查 S07）没有默认目录（那是卡上的「导出JPG/」）：「导出到 导出JPG/」、精华的按钮跟着灰掉，
+    /// 「其他文件夹…」选的也不能在卡上（exportJPEGs 里挡）。
     var defaultJPEGExportFolder: URL? {
-        photoDir?.appendingPathComponent(ImageLoader.jpegExportSubfolder)
+        guard !isCardSession else { return nil }
+        return photoDir?.appendingPathComponent(ImageLoader.jpegExportSubfolder)
     }
 
     /// 上一次 JPG / 精华导出写了什么（无头 --export-jpeg 打印用）。
@@ -4007,6 +4035,11 @@ final class BatchStore: ObservableObject {
         if let photoDir, OriginalsCopier.insideAnalysis(folder, shoot: photoDir) {
             lastError = "不能导出到拍摄文件夹里面：勾了覆盖会把原片换成导出的 JPG，不勾下次分析也会把它们当成新照片。" +
                 "请用「导出到 \(ImageLoader.jpegExportSubfolder)/」，或选拍摄文件夹外面的文件夹"
+            return
+        }
+        // 存储卡上的一场（审查 S07）：导出目标不能在卡上。
+        if let why = cardDestinationRefusal(folder) {
+            lastError = why
             return
         }
         // 目标路径在开工前一次排好（并发的 worker 各自算会撞名）。
@@ -4216,6 +4249,11 @@ final class BatchStore: ObservableObject {
     /// （见 HighISOCopier）。只复制 RAW 本身。
     func exportHighISORaws(minISO: Int, keepersOnly: Bool) {
         guard !isRunning, let photoDir else { return }
+        // 存储卡上（审查 S07）：「高ISO降噪/」就在卡上。
+        if let why = cardWriteRefusal("高 ISO RAW 会复制到卡上的「\(ImageLoader.denoiseSubfolder)」文件夹，这里不复制") {
+            lastError = why
+            return
+        }
         let (raws, jpegOnly) = highISOMatches(minISO: minISO, keepersOnly: keepersOnly)
         guard !raws.isEmpty else {
             lastError = "没有 ISO ≥ \(minISO) 的 RAW"
@@ -4308,6 +4346,12 @@ final class BatchStore: ObservableObject {
 
     func exportXMP(_ scope: XMPExportScope = .all) {
         guard !isRunning, !items.isEmpty else { return }
+        // 存储卡上（审查 S07）：.xmp 会写在卡上，正式导卡时 .xmp 当成相机的配套文件不导（CardImporter.sidecarExtensions）。
+        // 无头 --export-xmp 走的也是这里，一样不写。
+        if let why = cardWriteRefusal("XMP 会写在卡上，正式导入时不带 .xmp（星级、色标带不过去），这里不写") {
+            lastError = why
+            return
+        }
         isRunning = true
         lastError = nil
         // 只写改了的：和「XMP 待更新」同一个判断。从没写过（xmpState == nil）时状态栏不提醒，走到这里就按整场写。

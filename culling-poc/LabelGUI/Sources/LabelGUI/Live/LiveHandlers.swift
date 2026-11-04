@@ -1321,6 +1321,13 @@ extension LiveHandlers {
             return .failure("invalid_state", "app 还在排这一版（排版没落地），现在导出的会是落地之前的样子。",
                             ["hint": "过一两秒再调", "executed": false])
         }
+        // 批量页这一场开在存储卡上（审查 S07）：默认的「拼图导出/」在卡上不给，选的目录也不能在卡上 —— 不往卡上写。
+        if model.batch.isCardSession, collage.outputFolder == nil || collage.cardOutputRefusal != nil {
+            let why = collage.cardOutputRefusal ?? "照片在存储卡上：默认的输出目录（卡上的「拼图导出」）不能用，导出页上也没选别的目录"
+            return .failure("invalid_state", why + "。",
+                            ["hint": "请用户先导入这张卡（文件夹菜单「从存储卡导入…」），或者在拼图页「导出」里选一个不在卡上的目录",
+                             "executed": false])
+        }
         guard collage.outputFolder != nil else {
             return .failure("invalid_state", "没有输出目录：app 还没打开照片文件夹，导出页上也没选目录。",
                             ["hint": "请用户在拼图页「导出」里选一个输出目录", "executed": false])

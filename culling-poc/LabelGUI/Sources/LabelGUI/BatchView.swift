@@ -359,6 +359,28 @@ struct BatchView: View {
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(Color.orange.opacity(0.14))
         }
+        // 直接把存储卡当一场打开（审查 S07）：卡上的东西一个不动，给导入的入口。
+        if store.isCardSession {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "sdcard").foregroundStyle(.orange)
+                Text(cardSessionText).font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button("从存储卡导入...") {
+                    NotificationCenter.default.post(name: .cardImportRequested, object: nil)
+                }
+                .controlSize(.small)
+                .disabled(store.isRunning)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(Color.orange.opacity(0.10))
+        }
+    }
+
+    private var cardSessionText: String {
+        let head = "\(store.cardSession.subject)：可以看片、改判，但移废片、写 XMP、高 ISO 复制、导出到卡上都关了，卡上的东西一个不动。"
+        let tail = "要正式选片先导入这张卡（复制到电脑、逐个校验过再分析）—— 在卡上做的改判不会跟到导入后的那一场。"
+        return head + tail
     }
 
     private func finishedImportText(_ done: CardImporter.FinishedImport) -> String {
@@ -545,7 +567,9 @@ struct BatchView: View {
                     showTrashConfirm = true
                 }
                 // 拼图里在用的默认不移、但确认框里能「连这些一起移」：只有两样都是 0 才灰掉。
-                .disabled(store.trashableRejectCount + store.collageProtectedRejectCount == 0 || store.isRunning)
+                // 存储卡上的一场（审查 S07）也灰掉：确认框那句「系统废纸篓，可随时恢复」在卡上不成立（顶上横幅说为什么）。
+                .disabled(store.trashableRejectCount + store.collageProtectedRejectCount == 0 || store.isRunning
+                          || store.isCardSession)
             } label: {
                 Label("导出", systemImage: "square.and.arrow.up")
             }
