@@ -1962,11 +1962,30 @@ final class BatchStore: ObservableObject {
     /// 这次打开这一场以后已经备份过（<名字>.bak）的文件。
     private var backedUpPaths: Set<String> = []
 
-    /// 加一条读坏文件的提醒（几场、几个文件各有问题时攒着，最多 4 条）。
+    /// 橙条最多显示几条提醒：一场里判决、AI 出处、客户选中、客户备注、对时、阈值一起坏，再加 sessions.json 那一条也放得下。
+    static let dataNoticeCap = 6
+    /// 橙条第一行「挤掉了几条」的开头（再加提醒时认出它、换成新的数）。
+    private static let droppedNoticePrefix = "（另有 "
+    /// 这次橙条（用户点掉以前）被挤掉的条数。
+    private var droppedNotices = 0
+
+    /// 加一条读坏文件的提醒（几场、几个文件各有问题时攒着，最多 dataNoticeCap 条）。以前超过 4 条直接丢掉最早的、
+    /// 什么都不说；现在每条都记进日志，挤掉的在第一行说一共几条。
     func addDataNotice(_ text: String) {
+        AppLog.notice("persist", "提醒：\(text)")
+        if dataNotice == nil { droppedNotices = 0 }
         var lines = dataNotice.map { $0.components(separatedBy: "\n") } ?? []
+        if lines.first?.hasPrefix(Self.droppedNoticePrefix) == true { lines.removeFirst() }
         lines.append(text)
-        dataNotice = lines.suffix(4).joined(separator: "\n")
+        let overflow = lines.count - Self.dataNoticeCap
+        if overflow > 0 {
+            droppedNotices += overflow
+            lines.removeFirst(overflow)
+        }
+        if droppedNotices > 0 {
+            lines.insert(Self.droppedNoticePrefix + "\(droppedNotices) 条更早的提醒放不下，已记进日志：帮助 › 导出诊断信息…）", at: 0)
+        }
+        dataNotice = lines.joined(separator: "\n")
     }
 
     /// 提醒里说是哪一场。
