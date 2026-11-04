@@ -18,6 +18,9 @@ extension CardImporter {
         /// 那块盘的卷 UUID、名字（盘没插上时说得出是哪块；认得出 /Volumes 下同名的不是那块盘）。
         var volumeUUID: String?
         var volumeName: String?
+        /// 那块盘挂在哪（/Volumes/photo）：拿不到卷 UUID 的盘（很多网络共享）靠它认 —— 共享断了以后 /Volumes/photo
+        /// 可能留下一个系统盘上的空文件夹，路径还在，可已经不是那块盘了。
+        var volumePath: String?
     }
 
     /// appDataDir/card_import_settings.json（只有界面和测试的 --save-settings 写它）。
@@ -75,7 +78,8 @@ extension CardImporter {
         let bookmark = (try? folder.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))
         let values = try? folder.resourceValues(forKeys: [.volumeUUIDStringKey, .volumeLocalizedNameKey, .volumeNameKey])
         return SavedFolder(path: folder.path, bookmark: bookmark, volumeUUID: values?.volumeUUIDString,
-                           volumeName: values?.volumeLocalizedName ?? values?.volumeName)
+                           volumeName: values?.volumeLocalizedName ?? values?.volumeName,
+                           volumePath: volumeMountPath(of: folder))
     }
 
     enum FolderState: Equatable {
@@ -85,7 +89,7 @@ extension CardImporter {
     }
 
     /// 记住的文件夹现在在不在。先跟书签（改名 / 挪动过也找得到；不自动连网络盘、不弹框），再看路径；
-    /// 找到的文件夹不在原来那块盘上（卷 UUID 对不上）不算，在废纸篓里也不算。
+    /// 找到的文件夹不在原来那块盘上（卷 UUID 对不上；没有卷 UUID 的，落到了系统盘上）不算，在废纸篓里也不算。
     static func resolve(_ saved: SavedFolder) -> FolderState {
         var candidates: [URL] = []
         if let bookmark = saved.bookmark {
@@ -96,12 +100,19 @@ extension CardImporter {
             }
         }
         candidates.append(URL(fileURLWithPath: saved.path))
+        // 拿不到卷 UUID 的盘（很多网络共享）只能靠挂载点认：记下的挂载点；以前的设置没记，路径在 /Volumes/<名字>/ 下就是
+        // /Volumes/<名字>。
+        let mount = saved.volumeUUID == nil ? expectedMountPath(saved) : nil
         // 在访达里「删掉」文件夹就是挪进废纸篓（同一块盘上的一次改名）：书签按文件身份跟过去，卷 UUID 也对得上 ——
         // 不挡的话照片会导进 ~/.Trash/… 或 /Volumes/T7/.Trashes/501/…，清倒废纸篓就没了（审查发现）。当成「不在了」。
         for url in candidates where directoryExists(url) && !isInTrash(url) {
             if let want = saved.volumeUUID,
                let actual = (try? url.resourceValues(forKeys: [.volumeUUIDStringKey]))?.volumeUUIDString,
                actual != want { continue }
+            // 没有卷 UUID、原来不在系统盘上的：找到的文件夹落在系统盘上就不算。共享断了，/Volumes/photo 可能留下一个
+            // 系统盘上的空文件夹 —— 以前路径在就收下，照片就写进了系统盘（审查发现）。只挡这一种：共享重新挂成
+            // /Volumes/photo-1、书签跟过去的照样收下（不在系统盘上）。
+            if let mount, mount != "/", (volumeMountPath(of: url) ?? "/") == "/" { continue }
             return .ok(url.standardizedFileURL)
         }
         if let want = saved.volumeUUID {
@@ -109,6 +120,9 @@ extension CardImporter {
                 return .volumeOffline(name: saved.volumeName ?? volumeNameInPath(saved.path) ?? "外接盘")
             }
             return .gone
+        }
+        if let mount, mount != "/", !mountedVolumePaths().contains(mount) {
+            return .volumeOffline(name: saved.volumeName ?? URL(fileURLWithPath: mount).lastPathComponent)
         }
         if let name = offlineVolumeName(for: saved.path) { return .volumeOffline(name: name) }
         return .gone
@@ -188,6 +202,32 @@ extension CardImporter {
         let parts = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
         guard parts.count >= 3, parts[0] == "/", parts[1] == "Volumes" else { return nil }
         return parts[2]
+    }
+
+    /// 这个位置所在的那块盘挂在哪（standardized 路径；系统盘上的是 /）。读不出来 = nil。
+    static func volumeMountPath(of url: URL) -> String? {
+        (try? url.resourceValues(forKeys: [.volumeURLKey]))?.volume?.standardizedFileURL.path
+    }
+
+    /// 记住的文件夹应该挂在哪：记下的挂载点；以前的设置没记，路径在 /Volumes/<名字>/ 下就当是 /Volumes/<名字>。
+    private static func expectedMountPath(_ saved: SavedFolder) -> String? {
+        saved.volumePath ?? volumeNameInPath(saved.path).map { "/Volumes/" + $0 }
+    }
+
+    /// 这个文件夹在哪块盘上：卷 UUID，拿不到（很多网络共享）就用挂载点。确认导入时记下（Plan.mustExistVolume），
+    /// 真开始导时再比 —— 排着队的时候盘被拔了、共享断了，原路径上留下的同名空文件夹在系统盘上，路径还在，盘已经换了。
+    static func volumeIdentity(of url: URL) -> String? {
+        // 新建一个 URL 再读：resourceValues 缓存在 URL 对象上，确认时读过的那份会跟着计划一路带到开始导的时候（后台任务里
+        // 没有 run loop 帮它清），读出来的就还是确认那一刻的盘。
+        let fresh = URL(fileURLWithPath: url.path, isDirectory: true)
+        let values = try? fresh.resourceValues(forKeys: [.volumeUUIDStringKey, .volumeURLKey])
+        if let uuid = values?.volumeUUIDString { return uuid }
+        return values?.volume.map { "mount:" + $0.standardizedFileURL.path }
+    }
+
+    private static func mountedVolumePaths() -> Set<String> {
+        let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: nil, options: []) ?? []
+        return Set(urls.map { $0.standardizedFileURL.path })
     }
 
     private static func mountedVolumeUUIDs() -> Set<String> {

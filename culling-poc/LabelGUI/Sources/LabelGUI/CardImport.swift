@@ -107,6 +107,9 @@ enum CardImporter {
         var freeBytes: Int64?
         /// 第二份备份（没开 = nil）。
         var backup: Backup?
+        /// mustExist 在哪块盘上（CardImporter.volumeIdentity）：确认那一刻的，开始导之前再比一次。importFromCard 重做计划时
+        /// 带着确认时的这一个（重做的计划是现在的样子：排队时盘被拔、原路径留下空文件夹的话，现在算出来的就是系统盘）。
+        var mustExistVolume: String?
 
         var totalBytes: Int64 { copies.reduce(0) { $0 + $1.size } }
         var shotCount: Int { Set(copies.map(\.shot)).count }
@@ -160,6 +163,8 @@ enum CardImporter {
             var freeBytes: Int64?
             /// 和导入位置在同一块盘上（空间一起算；盘坏了两份一起没 —— 确认框提醒一句）。var：离屏快照假装两块盘。
             var sameVolume: Bool
+            /// 备份根目录在哪块盘上（同 Plan.mustExistVolume）：开始备份之前再比一次。
+            var mustExistVolume: String?
         }
     }
 
@@ -716,6 +721,9 @@ enum CardImporter {
         // 以前导到的那个文件夹不在：盘没插上（/Volumes/<名字> 没挂）和文件夹真没了，说法不一样。
         let previousMissing = folders.first.map { !isDirectory(URL(fileURLWithPath: $0)) } ?? false
         let previousOffline = previousMissing ? folders.first.flatMap(offlineVolumeName(for:)) : nil
+        // 确认这一刻导入位置 / 备份根目录在哪块盘上（开始导之前再比一次）。
+        let mustExistVolume = mustExist.flatMap(volumeIdentity(of:))
+        let backupVolume = backup?.mustExist.flatMap(volumeIdentity(of:))
         return Plan(source: source, sourceName: source.lastPathComponent, destination: destination,
                     mustExist: mustExist,
                     copies: copies, alreadyThere: alreadyThere,
@@ -738,8 +746,10 @@ enum CardImporter {
                                     existingInBackup: existingInBackup,
                                     totalBytes: backupBytes, fileCount: backupFiles,
                                     freeBytes: freeBytes(near: b.destination),
-                                    sameVolume: sameVolume(destination, b.destination))
-                    })
+                                    sameVolume: sameVolume(destination, b.destination),
+                                    mustExistVolume: backupVolume)
+                    },
+                    mustExistVolume: mustExistVolume)
     }
 
     /// 两个位置在不在同一块盘上（还不存在的往上找存在的那一级）。
@@ -774,6 +784,11 @@ enum CardImporter {
         // 外接盘上的导入位置 / 选的已有文件夹，确认之后被拔掉、删掉了：不导（往上找存在的那一级会落到系统盘）。
         if let must = plan.mustExist, !isDirectory(must) {
             outcome.aborted = "导入位置 \(displayPath(must)) 不见了（盘拔掉了？），没导"
+            return finish()
+        }
+        // 确认之后那块盘换了：排队时盘被拔、网络共享断了，原路径上留下系统盘上的空文件夹 —— isDirectory 照样过（审查发现）。
+        if let must = plan.mustExist, let want = plan.mustExistVolume, volumeIdentity(of: must) != want {
+            outcome.aborted = "导入位置 \(displayPath(must)) 已经不在原来那块盘上了（盘拔掉了、共享断了？），没导"
             return finish()
         }
         if let free = freeBytes(near: plan.destination), free < plan.totalBytes + spaceMargin {
@@ -1006,6 +1021,9 @@ enum CardImporter {
     private static func prepareBackup(_ backup: Plan.Backup, for plan: Plan) -> String? {
         if let must = backup.mustExist, !isDirectory(must) {
             return "备份位置 \(displayPath(must)) 不见了，盘没插上？这次没备份"
+        }
+        if let must = backup.mustExist, let want = backup.mustExistVolume, volumeIdentity(of: must) != want {
+            return "备份位置 \(displayPath(must)) 已经不在原来那块盘上了（盘拔掉了、共享断了？），这次没备份"
         }
         let probe = existingAncestor(of: backup.destination)
         if isWithin(probe, plan.source) || isWithin(plan.source, backup.destination) {
@@ -1442,14 +1460,18 @@ extension BatchStore {
         Task.detached { [weak self] in
             let fresh: CardImporter.Plan
             do {
-                fresh = try CardImporter.plan(source: plan.source, destination: plan.destination,
-                                              mustExist: plan.mustExist,
-                                              backup: plan.backup.map {
-                                                  CardImporter.Target(destination: $0.destination, mustExist: $0.mustExist,
-                                                                      appending: false, issue: nil)
-                                              },
-                                              ledger: CardImporter.Ledger.load(from: ledgerURL),
-                                              includeImported: plan.includeImported, cancel: flag)
+                var made = try CardImporter.plan(source: plan.source, destination: plan.destination,
+                                                 mustExist: plan.mustExist,
+                                                 backup: plan.backup.map {
+                                                     CardImporter.Target(destination: $0.destination, mustExist: $0.mustExist,
+                                                                         appending: false, issue: nil)
+                                                 },
+                                                 ledger: CardImporter.Ledger.load(from: ledgerURL),
+                                                 includeImported: plan.includeImported, cancel: flag)
+                // 卷身份按确认那一刻的比（排队时盘被拔、原路径上留下空文件夹的话，现在重算出来的就是系统盘）。
+                made.mustExistVolume = plan.mustExistVolume
+                made.backup?.mustExistVolume = plan.backup?.mustExistVolume
+                fresh = made
             } catch {
                 await MainActor.run { [weak self] in
                     live.on = false
@@ -1575,6 +1597,7 @@ private final class ImportLiveBox: @unchecked Sendable {
 /// LABELGUI_DATA_DIR=<临时> LabelGUI --ingest <card_dir> --dest <dir> [--reimport] [--plan-only] [--cancel-after N]
 ///   [--cancel-at-bytes B] [--via-store [--no-analyze] [--preload-notice 文字]…] [--ledger-cap N] [--plant-after-plan 文件名]
 ///   [--plant-symlink-after-plan 文件名] [--plant-symlink-mid 文件名] [--rename-after-plan 路径]
+///   [--pretend-volume-changed] [--pretend-backup-volume-changed]（假装确认之后导入位置 / 备份位置那块盘换了）
 ///   （--dest 也可以换成 --dest-root <根目录> / --into-existing <已有文件夹> / --use-saved-settings，
 ///    配 --save-settings 把 --dest-root 记进数据目录 —— 走界面那套「导到哪」，见 CardImportDestinations.swift）
 ///   [--backup <备份根目录>] [--backup-full-at N] [--unplug-backup-after N]（第二份备份；后两个是测试备份盘满、被拔）
@@ -1631,7 +1654,7 @@ enum CardImportCLI {
         let dest = target.destination
         if let cap = option("--ledger-cap").flatMap(Int.init) { CardImporter.Ledger.cap = cap }
         let ledgerURL = appDataDir.appendingPathComponent(CardImporter.ledgerFileName)
-        let plan: CardImporter.Plan
+        var plan: CardImporter.Plan
         do {
             plan = try CardImporter.plan(source: card, destination: dest, mustExist: target.mustExist,
                                          backup: backupTarget,
@@ -1666,6 +1689,10 @@ enum CardImportCLI {
         if let path = option("--rename-after-plan") {
             try? FileManager.default.moveItem(atPath: path, toPath: path + ".moved")
         }
+        // --pretend-volume-changed / --pretend-backup-volume-changed：假装确认之后那块盘换了（排队时拔了、共享断了，原路径上
+        // 留下系统盘上的空文件夹 —— 本机造不出来）：验证开始导之前再核对卷身份；配 --via-store 验证重做的计划带着确认时的那个。
+        if args.contains("--pretend-volume-changed") { plan.mustExistVolume = "pretend-other-volume" }
+        if args.contains("--pretend-backup-volume-changed") { plan.backup?.mustExistVolume = "pretend-other-volume" }
         // 备份盘的两种意外（测试用）：--backup-full-at N 第 N 次备份当成「盘满了」；--unplug-backup-after N
         // 主目标导完 N 个文件后把备份根目录挪走（像被拔掉）。主目标都要照常导完。
         let backupFullAt = option("--backup-full-at").flatMap(Int.init)

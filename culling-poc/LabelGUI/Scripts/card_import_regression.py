@@ -586,6 +586,30 @@ r = ingest_to(data_r4, "--use-saved-settings")
 check(r.returncode == 3 and "「T7」" in r.stdout and "没插上" in r.stdout, "说「T7」没插上、退出码 3")
 check(listing(root4) == [], f"那个文件夹里什么都没写（{listing(root4)}）")
 
+print("R4b. 拿不到卷 UUID 的盘（很多网络共享）：靠挂载点认 —— 共享断了、/Volumes/photo 留下系统盘上的空文件夹（落回了系统盘），不算，不导")
+root4b = os.path.join(WORK, "root_r4b")
+os.makedirs(root4b)
+data_r4b = os.path.join(WORK, "data_r4b")
+ingest_to(data_r4b, "--dest-root", root4b, "--save-settings", "--plan-only")
+settings_path = os.path.join(data_r4b, "card_import_settings.json")
+saved = json.load(open(settings_path))
+check(bool(saved["root"].get("volumePath")), f"设置里记了那块盘的挂载点（{saved['root'].get('volumePath')}）")
+saved["root"].pop("volumeUUID", None)                    # 像 SMB 共享那样拿不到 UUID，挂载点照实记着
+json.dump(saved, open(settings_path, "w"))
+r = ingest_to(data_r4b, "--use-saved-settings", "--plan-only")
+check(r.returncode == 0 and f"root_r4b/{TODAY}" in r.stdout, "没有 UUID、挂载点对得上：照常出计划")
+legacy = dict(saved["root"])
+legacy.pop("volumePath", None)                           # 以前的设置没记挂载点、文件夹也不在 /Volumes 下
+json.dump(dict(saved, root=legacy), open(settings_path, "w"))
+r = ingest_to(data_r4b, "--use-saved-settings", "--plan-only")
+check(r.returncode == 0 and f"root_r4b/{TODAY}" in r.stdout, "以前的设置（没记挂载点）、文件夹在系统盘上：照常出计划")
+saved["root"]["volumePath"] = "/Volumes/NoSuchDisk_K"   # 记的是那个共享，现在路径上的文件夹在系统盘上
+saved["root"]["volumeName"] = "photo"
+json.dump(saved, open(settings_path, "w"))
+r = ingest_to(data_r4b, "--use-saved-settings")
+check(r.returncode == 3 and "「photo」" in r.stdout and "没插上" in r.stdout, "落回了系统盘：说「photo」没插上、退出码 3")
+check(listing(root4b) == [], f"那个文件夹里什么都没写（{listing(root4b)}）")
+
 print("R5. 这次导进一个已有的文件夹（追加到已有场次）：不建日期子文件夹；文件夹不在就不导")
 exist5 = os.path.join(WORK, "已有场次_r5")
 os.makedirs(exist5)
@@ -601,6 +625,26 @@ os.makedirs(root6)
 r = ingest_to(os.path.join(WORK, "data_r6"), "--dest-root", root6, "--rename-after-plan", root6)
 check(r.returncode != 0 and "不见了" in r.stdout, "说导入位置不见了")
 check(not os.path.exists(root6) and listing(root6 + ".moved") == [], "原路径没重建，挪走的那个里也没写东西")
+
+print("R6b. 确认之后那块盘换了（排队时拔了、共享断了，原路径上留下系统盘上的空文件夹）：开始导之前再核对卷，不导")
+root6b = os.path.join(WORK, "root_r6b")
+os.makedirs(root6b)
+r = ingest_to(os.path.join(WORK, "data_r6b"), "--dest-root", root6b, "--pretend-volume-changed")
+check(r.returncode != 0 and "不在原来那块盘上" in r.stdout and listing(root6b) == [], f"直接导：不导、说不在原来那块盘上（{listing(root6b)}）")
+r = ingest_to(os.path.join(WORK, "data_r6b2"), "--dest-root", root6b, "--pretend-volume-changed", "--via-store", "--no-analyze")
+check("不在原来那块盘上" in r.stdout and "先别格式化" in r.stdout and listing(root6b) == [],
+      "走界面那条（开始时重做计划）：带着确认时的卷身份，照样拦住、提醒先别格式化")
+root6c, broot6c = os.path.join(WORK, "root_r6c"), os.path.join(WORK, "backup_r6c")
+os.makedirs(root6c)
+os.makedirs(broot6c)
+r = ingest_to(os.path.join(WORK, "data_r6c"), "--dest-root", root6c, "--backup", broot6c, "--pretend-backup-volume-changed")
+check(listing(os.path.join(root6c, TODAY)) == RFILES and listing(broot6c) == [] and r.returncode != 0
+      and "不在原来那块盘上" in r.stdout and "先别格式化" in r.stdout, "备份盘换了：主目标照常导完，备份没写、叫人先别格式化")
+root6d = os.path.join(WORK, "root_r6d")
+os.makedirs(root6d)
+r = ingest_to(os.path.join(WORK, "data_r6d"), "--dest-root", root6d, "--via-store", "--no-analyze")
+check("不在原来那块盘上" not in r.stdout and listing(os.path.join(root6d, TODAY)) == RFILES,
+      f"对照：盘没换时走界面那条照常导（{listing(os.path.join(root6d, TODAY))}）")
 
 print("R7. 以前导到的文件夹在一块现在没插上的盘上：说「盘没插上」，不说「文件夹不在了」")
 small = rand(50_000)
