@@ -86,28 +86,92 @@ enum DeliveryLedger {
         return records
     }
 
-    /// 记一次（只留最近 30 次）。整份解不开的先挪成 exports.json.bak 再写，不悄悄把以前的盖掉。
+    /// 盘上的一条：解得开的记录，或者解不开的那一条原样（新版本改了字段、手改坏了一条）—— 写回去时原样留着，
+    /// 不在下一次记一笔时悄悄丢掉（照 sessions.json 的 SessionsIndexFile.unknown）。
+    private enum Entry {
+        case record(DeliveryRecord)
+        case raw(Data)
+    }
+
+    /// 一条一条解；nil = 整份不是数组（截断、零长度、手改坏了括号）。
+    private static func entries(_ data: Data) -> [Entry]? {
+        guard let array = (try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])) as? [Any] else {
+            return nil
+        }
+        let d = decoder()
+        return array.compactMap { element -> Entry? in
+            // sortedKeys：同一条每次序列化出来一字不差。
+            guard let raw = try? JSONSerialization.data(withJSONObject: element, options: [.fragmentsAllowed, .sortedKeys])
+            else { return nil }
+            if let record = try? d.decode(DeliveryRecord.self, from: raw) { return .record(record) }
+            return .raw(raw)
+        }
+    }
+
+    /// 记一笔的结果。
+    enum AppendResult: Equatable {
+        /// 写进去了。`movedCorrupt` = 原来那份整份解不开，原件挪到了哪（exports.corrupt-<时间>.json）。
+        case written(movedCorrupt: URL?)
+        /// 原件在、却读不出来（权限、I/O），或者解不开又挪不开：没写，原件原样留着（拿空的去盖就全没了）。关联值是原因。
+        case refused(String)
+        /// 写不进去（盘满了……）。关联值是原因。
+        case writeFailed(String)
+    }
+
+    /// 记一次（只留最近 30 次）。和场次里别的小文件一样（SessionPersistence.swift，审查 S02）分清四种：没有 = 从空的开始；
+    /// 解不开 = 先挪成 exports.corrupt-<时间>.json（同名已有加 -2，不盖掉上一次挪开的）再写；读不出来、挪不开 = 不写；
+    /// 解得开的照用，其中解不开的单条原样写回去。
     @MainActor @discardableResult
-    static func append(_ record: DeliveryRecord, to url: URL) -> Bool {
-        var records: [DeliveryRecord] = []
-        if let data = try? Data(contentsOf: url) {
-            if let old = decode(data) {
-                records = old
+    static func append(_ record: DeliveryRecord, to url: URL) -> AppendResult {
+        var kept: [Entry] = []
+        var moved: URL?
+        if FileManager.default.fileExists(atPath: url.path) {
+            let data: Data
+            do {
+                data = try Data(contentsOf: url)
+            } catch {
+                SessionFiles.log.error("读不出 \(url.path, privacy: .public)：\(error.localizedDescription, privacy: .public)")
+                return .refused("读不出来（\(CardImporter.describe(error))）")
+            }
+            if let old = entries(data) {
+                kept = old
+            } else if let target = SessionFiles.moveAside(url) {
+                moved = target
             } else {
-                let backup = url.appendingPathExtension("bak")
-                try? FileManager.default.removeItem(at: backup)
-                try? FileManager.default.moveItem(at: url, to: backup)
+                return .refused("解不开、也挪不开")
             }
         }
-        records = Array((records + [record]).suffix(limit))
+        let all = Array((kept + [.record(record)]).suffix(limit))
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        guard let data = try? encoder.encode(records), (try? data.write(to: url, options: .atomic)) != nil else {
-            return false
+        let records = all.compactMap { entry -> DeliveryRecord? in
+            if case .record(let r) = entry { return r }
+            return nil
+        }
+        let data: Data
+        do {
+            if records.count == all.count {
+                data = try encoder.encode(records)
+            } else {
+                var out = Data("[".utf8)
+                for (i, entry) in all.enumerated() {
+                    if i > 0 { out.append(contentsOf: Array(",".utf8)) }
+                    switch entry {
+                    case .record(let r): out.append(try encoder.encode(r))
+                    case .raw(let raw): out.append(raw)
+                    }
+                }
+                out.append(contentsOf: Array("]".utf8))
+                data = out
+            }
+            try data.write(to: url, options: .atomic)
+        } catch {
+            SessionFiles.log.error("写 \(url.path, privacy: .public) 失败：\(CardImporter.describe(error), privacy: .public)")
+            return .writeFailed(CardImporter.describe(error))
         }
         if let now = stamp(url) { cache = (url.path, now, records) }
-        return true
+        return .written(movedCorrupt: moved)
     }
 
     /// 文件本身（设备号 + inode）：大小写、软链接、/tmp 和 /private/tmp 都骗不过。文件不在 = nil。
@@ -126,12 +190,24 @@ extension BatchStore {
     var deliveryRecords: [DeliveryRecord] { DeliveryLedger.load(deliveryLedgerPath) }
 
     /// 导出 JPG / 精华写完以后记一笔。`ledger` 是开工时这一场的 exports.json（导出途中不让切场次，开工时拿住更稳）。
-    /// 一张都没写出去不记。
+    /// 一张都没写出去不记。原来那份解不开、挪开了的提醒一句（dataNotice）；读不出来、写不进去的报 lastError。
     func recordDelivery(_ kind: DeliveryRecord.Kind, folder: URL, files: [DeliveryRecord.File], into ledger: URL) {
         guard !files.isEmpty else { return }
-        if !DeliveryLedger.append(DeliveryRecord(kind: kind, folder: folder, files: files), to: ledger) {
-            lastError = (lastError.map { $0 + "；" } ?? "") + "交付对照（\(DeliveryLedger.fileName)）没写进去：客户按导出的文件名回复时认不出"
+        let name = photoDir.map { "「\($0.lastPathComponent)」" } ?? ""
+        let problem: String
+        switch DeliveryLedger.append(DeliveryRecord(kind: kind, folder: folder, files: files), to: ledger) {
+        case .written(let moved):
+            if let moved {
+                addDataNotice("\(name)的交付对照 \(DeliveryLedger.fileName) 解不开（被手改过或写坏了），原件已挪成 " +
+                              "\(moved.lastPathComponent)：以前导出的交付文件名，客户按它回复时认不出（这一次的照常记下了）")
+            }
+            return
+        case .refused(let why):
+            problem = "交付对照（\(DeliveryLedger.fileName)）\(why)，这次没记、也没改写它"
+        case .writeFailed(let why):
+            problem = "交付对照（\(DeliveryLedger.fileName)）没写进去（\(why)）"
         }
+        lastError = (lastError.map { $0 + "；" } ?? "") + problem + "：客户按这次导出的文件名回复时认不出"
     }
 
     /// 水印页导出写完：原图按文件本身（设备号 + inode）对回这一场的照片，对上的记一笔。水印页的照片不一定是这一场的

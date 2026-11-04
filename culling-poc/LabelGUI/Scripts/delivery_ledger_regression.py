@@ -218,7 +218,7 @@ got, miss = client_import(DATA, "001.jpg\n002\n003\n1\n")
 check(got == [a, c], f"001.jpg 按交付名、003 交付名和表上都没冲突、1 = 表上第 1 张（认出 {got}）")
 check(miss == ["002（交付文件名还是编号？）"], f"002：交付名是 {b}、表上第 2 张是 {c} → 不猜（没认出 {miss}）")
 
-print("H. 只留最近 30 次；坏掉的单条跳过；整份坏了先备份再写；重名不替你挑；不在这一场的 id 不认")
+print("H. 只留最近 30 次；坏掉的单条跳过、写回去原样留着；整份坏了先挪开再写；读不出来的不写；重名不替你挑；不在这一场的 id 不认")
 DATA2, LEDGER2 = make_data("data2")
 
 
@@ -239,12 +239,50 @@ json.dump([{"broken": True}, seed(1, files=[{"file": "AMBI.jpg", "id": IDS[1], "
 got, miss = client_import(DATA2, "AMBI\nkeep_me.jpg\nghost.jpg\n")
 check(got == [IDS[2]], f"坏掉的那条不影响别的：keep_me.jpg 认出（{got}）")
 check(miss == ["AMBI（重名）", "ghost.jpg"], f"两次导出同名指向两张 = 重名；不在这一场的 id 不认（{miss}）")
+r = run(DATA2, "--export-jpeg", SHOOT, "--dest", os.path.join(WORK, "out-keep"), "--scope", "top:1", "--size", "long:200")
+recs = ledger(LEDGER2)
+check(r.returncode == 0 and len(recs) == 4 and recs[0] == {"broken": True} and recs[-1].get("kind") == "highlights",
+      f"再记一笔：解不开的那一条原样留在文件里，不悄悄丢（{len(recs)} 条，第一条 {recs[0] if recs else '-'}）")
+got, miss = client_import(DATA2, "keep_me.jpg\n")
+check(got == [IDS[2]], f"　…… 写回去以后别的照样认（{got}）")
+SDIR2 = os.path.dirname(LEDGER2)
+
+
+def corrupt_copies():
+    return sorted(n for n in os.listdir(SDIR2) if n.startswith("exports.corrupt-") and n.endswith(".json"))
+
+
 with open(LEDGER2, "w") as f:
     f.write("not json")
 r = run(DATA2, "--export-jpeg", SHOOT, "--dest", os.path.join(WORK, "out-bad"), "--scope", "top:1", "--size", "long:200")
 recs = ledger(LEDGER2)
-bak = open(LEDGER2 + ".bak").read() if os.path.isfile(LEDGER2 + ".bak") else ""
-check(r.returncode == 0 and len(recs) == 1 and bak == "not json", f"整份坏了：备份成 exports.json.bak、新写 1 次（{len(recs)}）")
+moved = corrupt_copies()
+first = open(os.path.join(SDIR2, moved[0])).read() if moved else ""
+check(r.returncode == 0 and len(recs) == 1 and len(moved) == 1 and first == "not json"
+      and not os.path.exists(LEDGER2 + ".bak"),
+      f"整份坏了：原件挪成 exports.corrupt-<时间>.json、新写 1 次（{len(recs)}，{moved}）")
+with open(LEDGER2, "w") as f:
+    f.write("still not json")
+r = run(DATA2, "--export-jpeg", SHOOT, "--dest", os.path.join(WORK, "out-bad2"), "--scope", "top:1", "--size", "long:200")
+moved = corrupt_copies()
+texts = sorted(open(os.path.join(SDIR2, n)).read() for n in moved)
+check(r.returncode == 0 and len(ledger(LEDGER2)) == 1 and texts == ["not json", "still not json"],
+      f"又坏一次：另挪一份，不盖掉上一次挪开的（{moved}）")
+if os.geteuid() == 0:
+    print("  SKIP 读不出来的 exports.json（root 跑时 chmod 挡不住读）")
+else:
+    before = open(LEDGER2, "rb").read()
+    os.chmod(LEDGER2, 0)
+    try:
+        r = run(DATA2, "--export-jpeg", SHOOT, "--dest", os.path.join(WORK, "out-unreadable"), "--scope", "top:1",
+                "--size", "long:200")
+    finally:
+        os.chmod(LEDGER2, 0o644)
+    after = open(LEDGER2, "rb").read()
+    check(r.returncode == 1 and "没记下" in r.stdout and "读不出来" in r.stdout and after == before
+          and corrupt_copies() == moved,
+          f"读不出来（chmod 000）：不当空的盖掉、不挪，退出码 1、说原因（{r.returncode}，"
+          f"{'原件没动' if after == before else '原件被改了'}）")
 
 if CLEANUP:
     shutil.rmtree(WORK, ignore_errors=True)
