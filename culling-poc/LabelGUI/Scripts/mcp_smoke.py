@@ -1419,6 +1419,11 @@ if ON_GITHUB and os.path.exists(REAL_DATA) is False:
     s.tool("u1", "app_status")
     s.close()
     check(not os.path.exists(REAL_DATA), f"CI：不设 LABELGUI_DATA_DIR 跑完，{REAL_DATA} 仍然不存在")
+elif ON_GITHUB:
+    # 干净的 runner 上本来没有这个目录：已经有了 = 前面哪一步起 LabelGUI 时没设 LABELGUI_DATA_DIR（release.yml 里 MCP 冒烟
+    # 前面那段注释）。以前这里只 print 一行 skip，CI 照样绿、悄悄少测一条；现在记 FAIL。
+    check(False, f"CI：MCP 冒烟之前 {REAL_DATA} 就已经存在 —— 前面的步骤建出了真实数据目录，"
+                 "「不设 LABELGUI_DATA_DIR 也不建目录」这一条测不了（新步骤放到 MCP 冒烟后面，或者每条命令都设 LABELGUI_DATA_DIR）")
 else:
     print("  skip 不设 LABELGUI_DATA_DIR 的那一条只在 CI 上跑（GITHUB_ACTIONS=true 且真实数据目录不存在）")
 

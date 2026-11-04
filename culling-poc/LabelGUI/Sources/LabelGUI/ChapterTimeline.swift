@@ -493,13 +493,16 @@ private struct TimelineCard: View {
 // MARK: - 无头自检：随机章节数 / 张数 / 宽度，验证永远不出界、不重叠
 
 enum ChapterTimelineSelfTest {
-    /// LabelGUI --timeline-selftest：打印 PASS / 第一处 FAIL。
+    /// LabelGUI --timeline-selftest [--seed N] [--trial K]：打印 PASS / 第一处 FAIL。
+    /// 每一组的随机数按 seed ^ trial 单独播种（SeededRandom，splitmix64）：同一个 seed 每次生成同样的 3000 组，
+    /// FAIL 行带 seed 和 trial，`--seed S --trial T` 只重跑挂掉的那一组（以前用系统随机数，挂了复现不出来）。
     @MainActor
-    static func run() -> Never {
-        var rng = SystemRandomNumberGenerator()
+    static func run(seed: UInt64, onlyTrial: Int? = nil) -> Never {
         let base = Date(timeIntervalSince1970: 1_790_000_000)
         var failures: [String] = []
-        for trial in 0..<3000 {
+        let trials: [Int] = onlyTrial.map { [$0] } ?? Array(0..<3000)
+        for trial in trials {
+            var rng = SeededRandom(seed: seed ^ UInt64(trial))
             let n = Int.random(in: 1...(trial % 10 == 0 ? 600 : 80), using: &rng)
             let width = CGFloat.random(in: 120...2400, using: &rng)
             let days = Int.random(in: 1...5, using: &rng)
@@ -520,35 +523,39 @@ enum ChapterTimelineSelfTest {
             }
             let layout = ChapterTimelineLayout.compute(segs, width: width, measure: ChapterTimelineLayout.measureText)
             let eps: CGFloat = 0.01
-            if layout.segments.count != n { failures.append("trial \(trial): \(layout.segments.count) 段 ≠ \(n)") }
+            // 生成参数一起打出来：看一眼就知道是哪种输入挂的，不用先重跑。
+            let tag = "seed=\(seed) trial=\(trial) (\(n) 段、宽 \(width)、\(days) 天)"
+            if layout.segments.count != n { failures.append("\(tag): \(layout.segments.count) 段 ≠ \(n)") }
             for (k, s) in layout.segments.enumerated() {
                 if s.x < -eps || s.x + s.width > width + eps {
-                    failures.append("trial \(trial): 第 \(k) 段出界 x=\(s.x) w=\(s.width) / \(width)")
+                    failures.append("\(tag): 第 \(k) 段出界 x=\(s.x) w=\(s.width) / \(width)")
                 }
                 if k > 0 {
                     let prev = layout.segments[k - 1]
-                    if s.x < prev.x + prev.width - eps { failures.append("trial \(trial): 第 \(k) 段和前一段重叠") }
+                    if s.x < prev.x + prev.width - eps { failures.append("\(tag): 第 \(k) 段和前一段重叠") }
                 }
-                if s.width <= 0 { failures.append("trial \(trial): 第 \(k) 段宽度 \(s.width)") }
+                if s.width <= 0 { failures.append("\(tag): 第 \(k) 段宽度 \(s.width)") }
             }
             for (k, l) in layout.labels.enumerated() {
                 if l.x < -eps || l.x + l.width > width + 0.5 + eps {
-                    failures.append("trial \(trial): 标签「\(l.text)」出界 x=\(l.x) w=\(l.width) / \(width)")
+                    failures.append("\(tag): 标签「\(l.text)」出界 x=\(l.x) w=\(l.width) / \(width)")
                 }
                 if k > 0 {
                     let prev = layout.labels[k - 1]
                     if l.x < prev.x + prev.width + ChapterTimelineLayout.labelSpacing - eps {
-                        failures.append("trial \(trial): 标签「\(prev.text)」和「\(l.text)」重叠")
+                        failures.append("\(tag): 标签「\(prev.text)」和「\(l.text)」重叠")
                     }
                 }
             }
             if failures.count > 5 { break }
         }
         if failures.isEmpty {
-            print("时间轴自检 PASS：3000 组随机章节（1–600 段、宽 120–2400pt、1–5 天、带无时间段）全部不出界、不重叠")
+            let what = onlyTrial.map { "第 \($0) 组" } ?? "3000 组随机章节（1–600 段、宽 120–2400pt、1–5 天、带无时间段）全部"
+            print("时间轴自检 PASS（seed=\(seed)）：\(what)不出界、不重叠")
             exit(0)
         }
         failures.prefix(10).forEach { print("FAIL " + $0) }
+        print("复现：LabelGUI --timeline-selftest --seed \(seed) --trial <上面的 trial>")
         exit(1)
     }
 }

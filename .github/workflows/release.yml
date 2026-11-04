@@ -77,6 +77,13 @@ jobs:
       - name: 存储卡导入回归 (--ingest)
         run: python3 culling-poc/LabelGUI/Scripts/card_import_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
 
+      # 不要照片的进程内自检：网格改判后的焦点、时间轴不出界、五种杂志风和人物挡字的版式规则……每条都在新的临时
+      # LABELGUI_DATA_DIR 里跑；时间轴自检的随机数按 seed 播种，固定跑 3 个 seed（FAIL 行带 seed 和 trial，原样能复现）。
+      # 和下面几步一样放在 MCP 冒烟后面（见 MCP 冒烟那段注释）。
+      - name: 自检 (--*-selftest)
+        timeout-minutes: 10
+        run: culling-poc/LabelGUI/Scripts/selftests.sh culling-poc/LabelGUI/.build/release/LabelGUI
+
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
