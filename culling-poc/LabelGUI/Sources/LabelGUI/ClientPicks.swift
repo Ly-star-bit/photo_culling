@@ -63,7 +63,9 @@ enum ClientReply {
                         byNumber[n, default: []].insert(item.id)
                     }
                 }
-                if let n = ClientReply.fileNumber(item.id) { byNumber[n, default: []].insert(item.id) }
+                // 文件号只按文件名登记，不看 id：id 末尾的数字不一定是文件号 —— 根目录后来放进一张同名的，它的 id 是
+                // DSCF0001_2（ImageLoader.listPhotos 的 claim），按 id 登记就成了 2 号，「0002」认成它或者报好几张。
+                // 带路径的 id（仪式_DSC_0001）、多出来的单张（IMG_0001_heic）末尾的数字和文件名一样或者没有，不缺什么。
             }
             for entry in deliveries.flatMap(\.files) where live.contains(entry.id) {
                 let url = URL(fileURLWithPath: entry.file.lowercased())

@@ -174,6 +174,23 @@ class Shoot:
                 out[parts[0]] = parts[1]
         return out
 
+    def client_import(self, text):
+        """--client-import 预览（不带 --apply，不改客户选中）：返回 {"认出": ..., "没认出": ..., "客户选中": ...} 各一行原文。"""
+        reply = os.path.join(WORK, f"reply-{_serial[0]}.txt")
+        _serial[0] += 1
+        with open(reply, "w") as f:
+            f.write(text)
+        r = subprocess.run([BIN, "--client-import", self.root, "--text", reply], env=env_for(self.data),
+                           capture_output=True, text=True, timeout=120)
+        out = {}
+        for line in r.stdout.splitlines():
+            for key in ("认出", "没认出", "客户选中"):
+                if line.strip().startswith(key + ": ") and key not in out:
+                    out[key] = line.strip()[len(key) + 2:]
+        if r.returncode != 0:
+            print("    [stdout] " + r.stdout.strip()[-600:])
+        return out
+
 
 def expect_ids(shoot, want, label):
     by_raw, _ = shoot.ids()
@@ -279,6 +296,13 @@ def run_all():
     check(sha_before is not None and c.preview_sha("DSCF0001") == sha_before, "previews/DSCF0001.jpg 没被新来的那张盖掉")
     check(c.preview_sha("DSCF0001_2") is not None, "新来的那张有自己的预览图")
     check(c.verdicts().get("DSCF0001") == "精选", "改判还在原来那张上")
+    # DSCF0001_2 末尾的 2 是起名加的后缀，不是文件号（文件是 DSCF0001.JPG）：客户回「0002」只认 DSCF0002。
+    r = c.client_import("0002")
+    check(r.get("认出") == "DSCF0002" and r.get("没认出") == "-",
+          f"客户回 0002 认成 DSCF0002，DSCF0001_2 不算 2 号（实际 认出 {r.get('认出')} / 没认出 {r.get('没认出')}）")
+    r = c.client_import("0001")
+    check(r.get("认出") == "-" and "好几张" in (r.get("没认出") or ""),
+          f"客户回 0001：两张都是 1 号，报好几张（实际 认出 {r.get('认出')} / 没认出 {r.get('没认出')}）")
 
     print("D. 对照：根目录 DSCF0001 + 后来加 B/DSCF0001（以前就不改名）")
     d = Shoot("shoot_d")
