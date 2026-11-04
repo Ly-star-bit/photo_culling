@@ -77,43 +77,159 @@ enum DeliveryLedger {
         (try? decoder().decode([Lenient].self, from: data)).map { $0.compactMap(\.record) }
     }
 
-    /// 这一场的对照，最早的在前。没有 / 读不出 = 空。
+    /// 这一场的对照，最早的在前。没有 / 读不出 = 空。读不出来的不记进缓存：改回权限以后修改时间、大小都没变，
+    /// 记了就一直是空的。
     @MainActor static func load(_ url: URL) -> [DeliveryRecord] {
         guard let now = stamp(url) else { return [] }
         if let cache, cache.path == url.path, cache.stamp == now { return cache.records }
-        let records = (try? Data(contentsOf: url)).flatMap(decode) ?? []
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        let records = decode(data) ?? []
         cache = (url.path, now, records)
         return records
     }
 
-    /// 记一次（只留最近 30 次）。整份解不开的先挪成 exports.json.bak 再写，不悄悄把以前的盖掉。
+    /// 盘上的一条：解得开的记录，或者解不开的那一条原样（新版本改了字段、手改坏了一条）—— 写回去时原样留着，
+    /// 不在下一次记一笔时悄悄丢掉（照 sessions.json 的 SessionsIndexFile.unknown）。
+    private enum Entry {
+        case record(DeliveryRecord)
+        case raw(Data)
+    }
+
+    /// 一条一条解；nil = 整份不是数组（截断、零长度、手改坏了括号）。
+    private static func entries(_ data: Data) -> [Entry]? {
+        guard let array = (try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])) as? [Any] else {
+            return nil
+        }
+        let d = decoder()
+        return array.compactMap { element -> Entry? in
+            // sortedKeys：同一条每次序列化出来一字不差。
+            guard let raw = try? JSONSerialization.data(withJSONObject: element, options: [.fragmentsAllowed, .sortedKeys])
+            else { return nil }
+            if let record = try? d.decode(DeliveryRecord.self, from: raw) { return .record(record) }
+            return .raw(raw)
+        }
+    }
+
+    /// 记一笔的结果。
+    enum AppendResult: Equatable {
+        /// 写进去了。`movedCorrupt` = 原来那份整份解不开，原件挪到了哪（exports.corrupt-<时间>.json）。
+        case written(movedCorrupt: URL?)
+        /// 原件在、却读不出来（权限、I/O），或者解不开又挪不开：没写，原件原样留着（拿空的去盖就全没了）。关联值是原因。
+        case refused(String)
+        /// 写不进去（盘满了……）。关联值是原因。
+        case writeFailed(String)
+    }
+
+    /// 记一次（只留最近 30 次）。和场次里别的小文件一样（SessionPersistence.swift，审查 S02）分清四种：没有 = 从空的开始；
+    /// 解不开 = 先挪成 exports.corrupt-<时间>.json（同名已有加 -2，不盖掉上一次挪开的）再写；读不出来、挪不开 = 不写；
+    /// 解得开的照用，其中解不开的单条原样写回去。
     @MainActor @discardableResult
-    static func append(_ record: DeliveryRecord, to url: URL) -> Bool {
-        var records: [DeliveryRecord] = []
-        if let data = try? Data(contentsOf: url) {
-            if let old = decode(data) {
-                records = old
+    static func append(_ record: DeliveryRecord, to url: URL) -> AppendResult {
+        var kept: [Entry] = []
+        var moved: URL?
+        if FileManager.default.fileExists(atPath: url.path) {
+            let data: Data
+            do {
+                data = try Data(contentsOf: url)
+            } catch {
+                SessionFiles.log.error("读不出 \(url.path, privacy: .public)：\(error.localizedDescription, privacy: .public)")
+                return .refused("读不出来（\(CardImporter.describe(error))）")
+            }
+            if let old = entries(data) {
+                kept = old
+            } else if let target = SessionFiles.moveAside(url) {
+                moved = target
             } else {
-                let backup = url.appendingPathExtension("bak")
-                try? FileManager.default.removeItem(at: backup)
-                try? FileManager.default.moveItem(at: url, to: backup)
+                return .refused("解不开、也挪不开")
             }
         }
-        records = Array((records + [record]).suffix(limit))
+        let all = Array((kept + [.record(record)]).suffix(limit))
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        guard let data = try? encoder.encode(records), (try? data.write(to: url, options: .atomic)) != nil else {
-            return false
+        let records = all.compactMap { entry -> DeliveryRecord? in
+            if case .record(let r) = entry { return r }
+            return nil
+        }
+        let data: Data
+        do {
+            if records.count == all.count {
+                data = try encoder.encode(records)
+            } else {
+                var out = Data("[".utf8)
+                for (i, entry) in all.enumerated() {
+                    if i > 0 { out.append(contentsOf: Array(",".utf8)) }
+                    switch entry {
+                    case .record(let r): out.append(try encoder.encode(r))
+                    case .raw(let raw): out.append(raw)
+                    }
+                }
+                out.append(contentsOf: Array("]".utf8))
+                data = out
+            }
+            try data.write(to: url, options: .atomic)
+        } catch {
+            SessionFiles.log.error("写 \(url.path, privacy: .public) 失败：\(CardImporter.describe(error), privacy: .public)")
+            return .writeFailed(CardImporter.describe(error))
         }
         if let now = stamp(url) { cache = (url.path, now, records) }
-        return true
+        return .written(movedCorrupt: moved)
+    }
+
+    /// 一次导出记对照的结果（水印页、无头 --watermark-batch 要分清「没对上」和「写失败」）。
+    enum Outcome: Equatable {
+        /// 记下了这一笔。
+        case recorded(DeliveryRecord)
+        /// 没有要记的：一张都没写出去，或者（水印页）写出去的原图都不是这一场的照片。
+        case nothingMatched
+        /// 有要记的，可是没记进去（关联值是给人看的那一句，批量页 lastError 也是它）。
+        case failed(String)
     }
 
     /// 文件本身（设备号 + inode）：大小写、软链接、/tmp 和 /private/tmp 都骗不过。文件不在 = nil。
     static func fileID(_ path: String) -> String? {
         var st = stat()
         return stat(path, &st) == 0 ? "\(st.st_dev):\(st.st_ino)" : nil
+    }
+
+    /// 这一场的一张照片（在主线程上从 BatchItem 抄出来，交给后台比对）。
+    struct SessionPhoto {
+        let id: String
+        let rawPath: String
+        let decodePath: String
+    }
+
+    /// 水印页写出去的（交付文件名, 原图路径）→ 这一场的哪一张：原图按文件本身（设备号 + inode）对。会 stat，放在后台跑 ——
+    /// 场次在掉线的网络盘上时 stat 一次就可能卡几秒（refreshSessionAvailability 也为这个放到后台）。
+    /// 先按文件名（去掉扩展名、不分大小写）挑候选，只 stat 写出去的那几张原图和名字对得上的场次照片：水印页导的照片和
+    /// 这一场没关系时，一张场次照片都不 stat。代价：经过改了名的链接才指到这一场的原图认不出（不记，和对不上一样，不猜）。
+    /// 同一个文件对上好几张时认场次里靠前的那张（和以前整场建表时一样）。`statFile` 只给自检数 stat 了哪些路径。
+    static func matchByFile(_ sources: [(file: String, source: String)], photos: [SessionPhoto],
+                            statFile: (String) -> String? = DeliveryLedger.fileID) -> [DeliveryRecord.File] {
+        func stem(_ path: String) -> String {
+            URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent.lowercased()
+        }
+        var byStem: [String: [Int]] = [:]
+        for (index, photo) in photos.enumerated() {
+            for name in Set([stem(photo.rawPath), stem(photo.decodePath)]) { byStem[name, default: []].append(index) }
+        }
+        var ids: [String: String?] = [:]
+        func id(_ path: String) -> String? {
+            if let known = ids[path] { return known }
+            let found = statFile(path)
+            ids[path] = .some(found)
+            return found
+        }
+        return sources.compactMap { pair -> DeliveryRecord.File? in
+            guard let candidates = byStem[stem(pair.source)], let key = id(pair.source) else { return nil }
+            for index in candidates {
+                let photo = photos[index]
+                if id(photo.rawPath) == key || id(photo.decodePath) == key {
+                    return DeliveryRecord.File(file: pair.file, id: photo.id, original: photo.rawPath)
+                }
+            }
+            return nil
+        }
     }
 }
 
@@ -126,29 +242,46 @@ extension BatchStore {
     var deliveryRecords: [DeliveryRecord] { DeliveryLedger.load(deliveryLedgerPath) }
 
     /// 导出 JPG / 精华写完以后记一笔。`ledger` 是开工时这一场的 exports.json（导出途中不让切场次，开工时拿住更稳）。
-    /// 一张都没写出去不记。
-    func recordDelivery(_ kind: DeliveryRecord.Kind, folder: URL, files: [DeliveryRecord.File], into ledger: URL) {
-        guard !files.isEmpty else { return }
-        if !DeliveryLedger.append(DeliveryRecord(kind: kind, folder: folder, files: files), to: ledger) {
-            lastError = (lastError.map { $0 + "；" } ?? "") + "交付对照（\(DeliveryLedger.fileName)）没写进去：客户按导出的文件名回复时认不出"
+    /// 一张都没写出去不记。原来那份解不开、挪开了的提醒一句（dataNotice）；读不出来、写不进去的报 lastError，
+    /// 那一句也放在返回的 .failed 里（水印页拿它报在自己的状态栏上）。
+    @discardableResult
+    func recordDelivery(_ kind: DeliveryRecord.Kind, folder: URL, files: [DeliveryRecord.File],
+                        into ledger: URL, session: String? = nil) -> DeliveryLedger.Outcome {
+        guard !files.isEmpty else { return .nothingMatched }
+        let name = session ?? photoDir.map { "「\($0.lastPathComponent)」" } ?? ""
+        let record = DeliveryRecord(kind: kind, folder: folder, files: files)
+        let problem: String
+        switch DeliveryLedger.append(record, to: ledger) {
+        case .written(let moved):
+            if let moved {
+                addDataNotice("\(name)的交付对照 \(DeliveryLedger.fileName) 解不开（被手改过或写坏了），原件已挪成 " +
+                              "\(moved.lastPathComponent)：以前导出的交付文件名，客户按它回复时认不出（这一次的照常记下了）")
+            }
+            return .recorded(record)
+        case .refused(let why):
+            problem = "交付对照（\(DeliveryLedger.fileName)）\(why)，这次没记、也没改写它"
+        case .writeFailed(let why):
+            problem = "交付对照（\(DeliveryLedger.fileName)）没写进去（\(why)）"
         }
+        let text = problem + "：客户按这次导出的文件名回复时认不出"
+        lastError = (lastError.map { $0 + "；" } ?? "") + text
+        return .failed(text)
     }
 
     /// 水印页导出写完：原图按文件本身（设备号 + inode）对回这一场的照片，对上的记一笔。水印页的照片不一定是这一场的
     /// （拖进来的外部照片、切了场次）：对不上的不记，不按文件名猜 —— 别的日子同名的 DSCF7207 不能认成这一场的。
-    func recordWatermarkDelivery(folder: URL, files: [(file: URL, source: URL)]) {
-        guard photoDir != nil, !items.isEmpty, !files.isEmpty else { return }
-        var byFile: [String: BatchItem] = [:]
-        for item in items {
-            for path in Set([item.rawPath, item.decodePath]) {
-                if let key = DeliveryLedger.fileID(path), byFile[key] == nil { byFile[key] = item }
-            }
-        }
-        let entries = files.compactMap { pair -> DeliveryRecord.File? in
-            guard let key = DeliveryLedger.fileID(pair.source.path), let item = byFile[key] else { return nil }
-            return DeliveryRecord.File(file: pair.file.lastPathComponent, id: item.id, original: item.rawPath)
-        }
-        recordDelivery(.watermark, folder: folder, files: entries, into: deliveryLedgerPath)
+    /// 比对在后台（DeliveryLedger.matchByFile 要 stat，场次可能在网络盘上）；开始时拿住这一场的 exports.json 和名字，
+    /// 中途切了场次也记进导出时开着的那一场。
+    func recordWatermarkDelivery(folder: URL, files: [(file: URL, source: URL)]) async -> DeliveryLedger.Outcome {
+        guard let dir = photoDir, !items.isEmpty, !files.isEmpty else { return .nothingMatched }
+        let photos = items.map { DeliveryLedger.SessionPhoto(id: $0.id, rawPath: $0.rawPath, decodePath: $0.decodePath) }
+        let sources = files.map { (file: $0.file.lastPathComponent, source: $0.source.path) }
+        let ledger = deliveryLedgerPath
+        let session = "「\(dir.lastPathComponent)」"
+        let entries = await Task.detached(priority: .utility) {
+            DeliveryLedger.matchByFile(sources, photos: photos)
+        }.value
+        return recordDelivery(.watermark, folder: folder, files: entries, into: ledger, session: session)
     }
 }
 
@@ -156,7 +289,8 @@ extension WatermarkStore {
     /// 水印页导出写完交给批量页，记进当前场次的交付对照（AppModel 和无头 --watermark-batch 接上）。
     func recordDeliveries(into batch: BatchStore) {
         onDelivered = { [weak batch] folder, files in
-            batch?.recordWatermarkDelivery(folder: folder, files: files)
+            guard let batch else { return .nothingMatched }
+            return await batch.recordWatermarkDelivery(folder: folder, files: files)
         }
     }
 }

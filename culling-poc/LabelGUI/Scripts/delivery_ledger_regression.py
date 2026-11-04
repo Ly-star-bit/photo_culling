@@ -81,21 +81,24 @@ if len(KEY) != 16:
     sys.exit(2)
 
 
-def make_data(name):
+def make_data(name, shoot=SHOOT, key=KEY, rename=None):
+    """`rename`：fixture 的 id → 这一场的 id（照片文件名跟着它，见 I 段）；不给就照 fixture。"""
+    rename = rename or {}
     data = os.path.join(WORK, name)
-    sdir = os.path.join(data, "sessions", KEY)
+    sdir = os.path.join(data, "sessions", key)
     os.makedirs(os.path.join(sdir, "previews"))
     rows = []
     for p in PHOTOS:
         q = dict(p)
-        q["raw_path"] = q["decode_path"] = os.path.join(SHOOT, p["id"] + ".JPG")
-        q["preview_path"] = f"previews/{p['id']}.jpg"
+        q["id"] = rename.get(p["id"], p["id"])
+        q["raw_path"] = q["decode_path"] = os.path.join(shoot, q["id"] + ".JPG")
+        q["preview_path"] = f"previews/{q['id']}.jpg"
         q["body_serial"] = "SYN0001"
-        shutil.copyfile(q["raw_path"], os.path.join(sdir, "previews", p["id"] + ".jpg"))
+        shutil.copyfile(q["raw_path"], os.path.join(sdir, "previews", q["id"] + ".jpg"))
         rows.append(q)
-    json.dump({"photo_dir": SHOOT, "photos": rows}, open(os.path.join(sdir, "manifest.json"), "w"), ensure_ascii=False)
+    json.dump({"photo_dir": shoot, "photos": rows}, open(os.path.join(sdir, "manifest.json"), "w"), ensure_ascii=False)
     l1o = dict(l1)
-    l1o["results"] = [x for x in l1["results"] if x["id"] in IDS]
+    l1o["results"] = [dict(x, id=rename.get(x["id"], x["id"])) for x in l1["results"] if x["id"] in IDS]
     json.dump(l1o, open(os.path.join(sdir, "layer1_results.json"), "w"), ensure_ascii=False)
     return data, os.path.join(sdir, "exports.json")
 
@@ -109,11 +112,11 @@ def only_jpgs(folder):
     return bool(names) and all(n.endswith(".jpg") for n in names)
 
 
-def client_import(data, text):
+def client_import(data, text, shoot=SHOOT):
     path = os.path.join(WORK, "reply.txt")
     with open(path, "w") as f:
         f.write(text)
-    r = run(data, "--client-import", SHOOT, "--text", path)
+    r = run(data, "--client-import", shoot, "--text", path)
     lines = r.stdout.splitlines()
     got = next((l[len("认出: "):] for l in lines if l.startswith("认出: ")), "-")
     miss = next((l[len("没认出: "):] for l in lines if l.startswith("没认出: ")), "-")
@@ -183,6 +186,18 @@ make_jpeg(os.path.join(other, IDS[0] + ".JPG"), 360, 240, seed=99)     # 别的�
 r = run(DATA, "--watermark-batch", other, os.path.join(WORK, "out-wm-other"), "--exif", "--session", SHOOT)
 check(r.returncode == 0 and len(ledger(LEDGER)) == 5 and "没记" in r.stdout,
       "批量页开着这一场、水印页导的是别处同名的文件：不记（按文件本身对，不按文件名猜）")
+if os.geteuid() == 0:
+    print("  SKIP 水印页对照写不进去（root 跑时 chmod 挡不住读）")
+else:
+    before = open(LEDGER, "rb").read()
+    os.chmod(LEDGER, 0)
+    try:
+        r = run(DATA, "--watermark-batch", SHOOT, os.path.join(WORK, "out-wm-locked"), "--exif")
+    finally:
+        os.chmod(LEDGER, 0o644)
+    check(r.returncode == 1 and "没记下" in r.stdout and "读不出来" in r.stdout and "不在分析过的场次里" not in r.stdout
+          and open(LEDGER, "rb").read() == before,
+          f"水印页这次的对照没记进去（exports.json 读不出来）：退出码 1、说原因，不说成「不在分析过的场次里」（{r.returncode}）")
 
 print("F. 导入客户选择：按交付文件名认回原片")
 h0, h1 = hl["files"][0]["id"], hl["files"][1]["id"]
@@ -218,7 +233,7 @@ got, miss = client_import(DATA, "001.jpg\n002\n003\n1\n")
 check(got == [a, c], f"001.jpg 按交付名、003 交付名和表上都没冲突、1 = 表上第 1 张（认出 {got}）")
 check(miss == ["002（交付文件名还是编号？）"], f"002：交付名是 {b}、表上第 2 张是 {c} → 不猜（没认出 {miss}）")
 
-print("H. 只留最近 30 次；坏掉的单条跳过；整份坏了先备份再写；重名不替你挑；不在这一场的 id 不认")
+print("H. 只留最近 30 次；坏掉的单条跳过、写回去原样留着；整份坏了先挪开再写；读不出来的不写；重名不替你挑；不在这一场的 id 不认")
 DATA2, LEDGER2 = make_data("data2")
 
 
@@ -239,12 +254,99 @@ json.dump([{"broken": True}, seed(1, files=[{"file": "AMBI.jpg", "id": IDS[1], "
 got, miss = client_import(DATA2, "AMBI\nkeep_me.jpg\nghost.jpg\n")
 check(got == [IDS[2]], f"坏掉的那条不影响别的：keep_me.jpg 认出（{got}）")
 check(miss == ["AMBI（重名）", "ghost.jpg"], f"两次导出同名指向两张 = 重名；不在这一场的 id 不认（{miss}）")
+r = run(DATA2, "--export-jpeg", SHOOT, "--dest", os.path.join(WORK, "out-keep"), "--scope", "top:1", "--size", "long:200")
+recs = ledger(LEDGER2)
+check(r.returncode == 0 and len(recs) == 4 and recs[0] == {"broken": True} and recs[-1].get("kind") == "highlights",
+      f"再记一笔：解不开的那一条原样留在文件里，不悄悄丢（{len(recs)} 条，第一条 {recs[0] if recs else '-'}）")
+got, miss = client_import(DATA2, "keep_me.jpg\n")
+check(got == [IDS[2]], f"　…… 写回去以后别的照样认（{got}）")
+SDIR2 = os.path.dirname(LEDGER2)
+
+
+def corrupt_copies():
+    return sorted(n for n in os.listdir(SDIR2) if n.startswith("exports.corrupt-") and n.endswith(".json"))
+
+
 with open(LEDGER2, "w") as f:
     f.write("not json")
 r = run(DATA2, "--export-jpeg", SHOOT, "--dest", os.path.join(WORK, "out-bad"), "--scope", "top:1", "--size", "long:200")
 recs = ledger(LEDGER2)
-bak = open(LEDGER2 + ".bak").read() if os.path.isfile(LEDGER2 + ".bak") else ""
-check(r.returncode == 0 and len(recs) == 1 and bak == "not json", f"整份坏了：备份成 exports.json.bak、新写 1 次（{len(recs)}）")
+moved = corrupt_copies()
+first = open(os.path.join(SDIR2, moved[0])).read() if moved else ""
+check(r.returncode == 0 and len(recs) == 1 and len(moved) == 1 and first == "not json"
+      and not os.path.exists(LEDGER2 + ".bak"),
+      f"整份坏了：原件挪成 exports.corrupt-<时间>.json、新写 1 次（{len(recs)}，{moved}）")
+with open(LEDGER2, "w") as f:
+    f.write("still not json")
+r = run(DATA2, "--export-jpeg", SHOOT, "--dest", os.path.join(WORK, "out-bad2"), "--scope", "top:1", "--size", "long:200")
+moved = corrupt_copies()
+texts = sorted(open(os.path.join(SDIR2, n)).read() for n in moved)
+check(r.returncode == 0 and len(ledger(LEDGER2)) == 1 and texts == ["not json", "still not json"],
+      f"又坏一次：另挪一份，不盖掉上一次挪开的（{moved}）")
+if os.geteuid() == 0:
+    print("  SKIP 读不出来的 exports.json（root 跑时 chmod 挡不住读）")
+else:
+    before = open(LEDGER2, "rb").read()
+    os.chmod(LEDGER2, 0)
+    try:
+        r = run(DATA2, "--export-jpeg", SHOOT, "--dest", os.path.join(WORK, "out-unreadable"), "--scope", "top:1",
+                "--size", "long:200")
+    finally:
+        os.chmod(LEDGER2, 0o644)
+    after = open(LEDGER2, "rb").read()
+    check(r.returncode == 1 and "没记下" in r.stdout and "读不出来" in r.stdout and after == before
+          and corrupt_copies() == moved,
+          f"读不出来（chmod 000）：不当空的盖掉、不挪，退出码 1、说原因（{r.returncode}，"
+          f"{'原件没动' if after == before else '原件被改了'}）")
+
+print("I. 原片本身就叫 001.JPG（按序号命名的扫描件、导入时改过名）：交付名 001.jpg 指的是另一张 = 不猜，带不带扩展名都一样")
+SEQ = os.path.join(WORK, "shoot-seq")
+os.makedirs(SEQ)
+# 倒着起名：拍得最早的叫 008，{序号:3} 导出来的 001.jpg 就不是原片 001。
+SEQ_NAME = {p["id"]: f"{len(PHOTOS) - i:03d}" for i, p in enumerate(PHOTOS)}
+for i, p in enumerate(PHOTOS):
+    make_jpeg(os.path.join(SEQ, SEQ_NAME[p["id"]] + ".JPG"), 360, 240, seed=300 + i)
+r = run(os.path.join(WORK, "data-key-seq"), "--session-key", SEQ, quiet=True)
+SEQ_KEY = r.stdout.strip().splitlines()[-1] if r.returncode == 0 and r.stdout.strip() else ""
+check(len(SEQ_KEY) == 16, f"第二场算得出 key（{SEQ_KEY!r}）")
+DATA_SEQ, LEDGER_SEQ = make_data("data-seq", shoot=SEQ, key=SEQ_KEY, rename=SEQ_NAME)
+r = run(DATA_SEQ, "--export-jpeg", SEQ, "--dest", os.path.join(WORK, "out-seq-orig"), "--scope", "picks+usable",
+        "--size", "long:200")
+got, miss = client_import(DATA_SEQ, "003\n005.jpg\n", shoot=SEQ)
+check(r.returncode == 0 and got == ["003", "005"] and miss == [],
+      f"默认 {{原名}} 导出：交付名就是原片名、两边是同一张，照认（认出 {got} · 没认出 {miss}）")
+os.remove(LEDGER_SEQ)
+r = run(DATA_SEQ, "--export-jpeg", SEQ, "--dest", os.path.join(WORK, "out-seq-num"), "--scope", "picks+usable",
+        "--name", "{序号:3}", "--size", "long:200")
+files = ledger(LEDGER_SEQ)[-1]["files"] if ledger(LEDGER_SEQ) else []
+clash = next((f for f in files if f["file"][:-4] != f["id"] and f["file"][:-4] in SEQ_NAME.values()), None)
+check(r.returncode == 0 and clash is not None, f"{{序号:3}} 导出：有一张交付名和另一张原片同名（{clash}）")
+if clash:
+    t = clash["file"][:-4]
+    got, miss = client_import(DATA_SEQ, f"{t}\n{t}.jpg\n", shoot=SEQ)
+    check(got == [] and miss == [f"{t}（交付文件名还是原片名？）", f"{t}.jpg（交付文件名还是原片名？）"],
+          f"「{t}」「{t}.jpg」：原片 {t} 和交付名 {t}.jpg（是 {clash['id']}）各指一张 → 都不猜（认出 {got} · 没认出 {miss}）")
+
+print("J. {序号} 不补零、同一个文件夹再导一次另存的 1-2.jpg：客户回「1-2」，有确认表时和表上第 1 到 2 张对不上 = 不猜")
+DATA3, LEDGER3 = make_data("data3")
+out_plain = os.path.join(WORK, "out-plain")
+for _ in range(2):
+    r = run(DATA3, "--export-jpeg", SHOOT, "--dest", out_plain, "--scope", "picks+usable", "--name", "{序号}",
+            "--size", "long:200")
+recs = ledger(LEDGER3)
+again = recs[-1]["files"] if len(recs) == 2 else []
+x = again[0]["id"] if again else "-"
+check(r.returncode == 0 and bool(again) and again[0]["file"] == "1-2.jpg",
+      f"第二次另存成 1-2.jpg → {x}（{[f['file'] for f in again[:3]]}）")
+got, miss = client_import(DATA3, "1-2\n")
+check(got == [x] and miss == [], f"没有确认表：「1-2」就是交付文件名 1-2.jpg（认出 {got} · 没认出 {miss}）")
+sa, sb, sc = [i for i in IDS if i != x][:3]
+r = run(DATA3, "--proof-sheet", SHOOT, "--out", os.path.join(WORK, "sheet3.html"), "--ids", f"{sa},{sb},{sc}")
+check(r.returncode == 0, f"确认表：第 1–3 张是 {sa} {sb} {sc}，都不是 1-2.jpg 那张")
+got, miss = client_import(DATA3, "1-2\n1 - 2\n1-2.jpg\n2-3\n")
+check(got == [x, sb, sc], f"「1-2.jpg」带扩展名按交付名，「2-3」是表上第 2 到 3 张（认出 {got}）")
+check(miss == ["1-2（交付文件名还是编号？）"],
+      f"「1-2」「1 - 2」：交付名是 {x}、表上第 1 到 2 张是 {sa} {sb} → 不猜（没认出 {miss}）")
 
 if CLEANUP:
     shutil.rmtree(WORK, ignore_errors=True)
