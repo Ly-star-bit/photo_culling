@@ -15,6 +15,8 @@
    「精修要求-2.csv」，原来那份不动。
 4. --proof-sheet --with-watermark --signature：每张图都变了、张数和顺序不变、预览文件一个字节没动；
    没签名也没文字时不导（不悄悄导出不带水印的）；打印每张平均体积（bytesPerPhoto 的依据）。
+5. 水印页只开了 EXIF 参数文字（默认模板）：原片没有 EXIF、外接盘没插时一张都画不上 → 不导、不记表、不报「带水印」；
+   写一句自定义文字照样导。
 
 只写临时目录，跑完删掉。
 """
@@ -241,6 +243,7 @@ def run(binary, work):
     check("客户备注: " + picks[0] + "=换成调亮一点" in r.stdout.split("撤销后")[-1], "清除也能 ⌘Z 回来")
 
     watermark(lg, work, photos, session, ids, picks, preview_hash, page_a)
+    blank_watermark(lg, work, data, photos, session)
 
     print("确认表回归: " + ("全部通过" if not failures else "{} 条没过: {}".format(len(failures), "；".join(failures))))
     return 0 if not failures else 1
@@ -288,6 +291,50 @@ def watermark(lg, work, photos, session, ids, picks, preview_hash, page_a):
         return sum(len(c[1]) for c in cs) // max(1, len(cs))
     print("体积: 每张平均 base64 {} 字节（不带水印）· {}（签名角标）· {}（文字角标）".format(
         avg(plain), avg(marked), avg(cells(page_d))))
+
+
+def blank_watermark(lg, work, data, photos, session):
+    """水印页只开了 EXIF 参数文字（默认模板、没签名、没自定义文字），原片没有 EXIF / 外接盘没插：一张都画不上，
+    不导出一份干净的确认表还报「带水印」。"""
+    out = os.path.join(work, "out")
+    state_dir = os.path.join(data, "watermark")
+    os.makedirs(state_dir, exist_ok=True)
+    state = os.path.join(state_dir, "state.json")
+    with open(state, "w", encoding="utf-8") as f:
+        json.dump({"config": {"signatureEnabled": False, "exifText": {"enabled": True, "customText": ""}}}, f)
+    sheets_path = os.path.join(session, "proof_sheets.json")
+    before = open(sheets_path, encoding="utf-8").read()
+    try:
+        # 原片在，可是没有 EXIF（sips 转出来的 JPEG 不带机身型号）。
+        time.sleep(1.1)
+        e_html = os.path.join(out, "e.html")
+        p = lg("--proof-sheet", photos, "--out", e_html, "--with-watermark", ok=False)
+        check("水印: 没有签名 · 文字" in p.stdout, "只开 EXIF 模板文字：照样做得出角标", p.stdout + p.stderr)
+        check(p.returncode != 0 and "选片确认表没导出：5 张都没画上水印" in p.stdout and "原片" in p.stdout,
+              "原片没有 EXIF：一张都画不上就不导、说清楚要读原片", p.stdout + p.stderr)
+        check("选片确认表已导出（带水印）" not in p.stdout, "不报「带水印」")
+        check(not os.path.exists(e_html) and open(sheets_path, encoding="utf-8").read() == before, "没导的不写 HTML、不记表")
+
+        # 外接盘没插：拍摄文件夹整个不在（预览在数据目录，场次照样打开）。
+        offline = photos + ".offline"
+        os.rename(photos, offline)
+        try:
+            time.sleep(1.1)
+            f_html = os.path.join(out, "f.html")
+            p = lg("--proof-sheet", photos, "--out", f_html, "--with-watermark", ok=False)
+            check(p.returncode != 0 and "都没画上水印" in p.stdout and not os.path.exists(f_html),
+                  "原片读不到（外接盘没插）：不导、不报带水印", p.stdout + p.stderr)
+            check(open(sheets_path, encoding="utf-8").read() == before, "外接盘没插：不记表")
+        finally:
+            os.rename(offline, photos)
+
+        # 同样的设置写一句自定义文字：照样导（不靠原片）。
+        time.sleep(1.1)
+        g_html = os.path.join(out, "g.html")
+        p = lg("--proof-sheet", photos, "--out", g_html, "--with-watermark", "--watermark-text", "样片")
+        check(p.returncode == 0 and "选片确认表已导出（带水印）: 5 张" in p.stdout, "写了自定义文字：照样导 5 张", p.stdout + p.stderr)
+    finally:
+        os.remove(state)
 
 
 if __name__ == "__main__":

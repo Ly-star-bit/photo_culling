@@ -38,6 +38,59 @@ enum ProofSheetSelfTest {
         markerChecks()
         leadingSignChecks()
         greetingChecks()
+        blankWatermarkChecks()
+    }
+
+    // MARK: 水印画不上东西就不放（审查：只开 EXIF 模板文字、原片读不到时报「带水印」却是干净的图）
+
+    private static func blankWatermarkChecks() {
+        var template = WatermarkEngine.Config()
+        template.signatureEnabled = false
+        template.exifText.enabled = true
+        template.exifText.customText = ""
+        guard let mark = ProofWatermark.make(config: template, signature: nil),
+              let base = solid(800, 533, gray: 100.0 / 255) else {
+            check(false, "只有 EXIF 模板文字也做得出角标")
+            return
+        }
+        check(mark.needsOriginalEXIF && mark.skipReason.contains("原片"), "只有 EXIF 模板文字：标出来要读原片", mark.skipReason)
+        check(mark.apply(to: base, original: "") == nil, "模板文字、没给原片：画不上 = nil（不交回干净的小样）")
+        check(mark.apply(to: base, original: "/nonexistent/proof-selftest/DSCF7207.RAF") == nil,
+              "模板文字、原片读不到（外接盘没插）：nil")
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("proof-blank-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let bare = dir.appendingPathComponent("bare.jpg")
+        let tagged = dir.appendingPathComponent("tagged.jpg")
+        let preview = dir.appendingPathComponent("preview.jpg")
+        guard let big = solid(1200, 800, gray: 0.4), writeJPEG(big, to: bare), writeJPEG(big, to: preview),
+              let dest = CGImageDestinationCreateWithURL(tagged as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
+            check(false, "造得出原片")
+            return
+        }
+        let tiff: [CFString: Any] = [kCGImagePropertyTIFFMake: "FUJIFILM", kCGImagePropertyTIFFModel: "X-T50"]
+        CGImageDestinationAddImage(dest, big, [kCGImagePropertyTIFFDictionary: tiff] as CFDictionary)
+        check(CGImageDestinationFinalize(dest), "写得出带机身型号的原片")
+        check(mark.apply(to: base, original: bare.path) == nil, "模板文字、原片在但没有 EXIF：nil")
+        if let drawn = mark.apply(to: base, original: tagged.path) {
+            check(changed(pixels(base), pixels(drawn), width: 800, height: 533) != nil, "原片有机身型号：照样画上「FUJIFILM X-T50」")
+        } else {
+            check(false, "原片有机身型号：照样画上")
+        }
+        check(BatchStore.contactSheetJPEG(path: preview.path, watermark: mark, original: "") == nil,
+              "确认表里那一张：画不上就不放（contactSheetJPEG = nil）")
+        var literal = template
+        literal.exifText.template = "小何摄影"
+        check(ProofWatermark.make(config: literal, signature: nil)?.apply(to: base, original: "") != nil,
+              "模板里只有字、没有占位符：不用原片也画得上")
+        // 签名比画面还高（被跳过）、又没开文字：一样什么都没画。
+        var sigOnly = WatermarkEngine.Config()
+        sigOnly.exifText.enabled = false
+        if let tall = whiteSignature(10, 2000), let skipped = ProofWatermark.make(config: sigOnly, signature: tall) {
+            check(!skipped.needsOriginalEXIF && skipped.apply(to: base, original: "") == nil, "签名太高被跳过、没开文字：nil")
+        } else {
+            check(false, "造得出很高的签名")
+        }
     }
 
     // MARK: 寒暄行带全角逗号不当成 CSV（审查：按行写的备注全丢）
