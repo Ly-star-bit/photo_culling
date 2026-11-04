@@ -702,6 +702,14 @@ os.makedirs(broot6c)
 r = ingest_to(os.path.join(WORK, "data_r6c"), "--dest-root", root6c, "--backup", broot6c, "--pretend-backup-volume-changed")
 check(listing(os.path.join(root6c, TODAY)) == RFILES and listing(broot6c) == [] and r.returncode != 0
       and "不在原来那块盘上" in r.stdout and "先别格式化" in r.stdout, "备份盘换了：主目标照常导完，备份没写、叫人先别格式化")
+root6e, broot6e = os.path.join(WORK, "root_r6e"), os.path.join(WORK, "backup_r6e")
+os.makedirs(root6e)
+os.makedirs(broot6e)
+r = ingest_to(os.path.join(WORK, "data_r6e"), "--dest-root", root6e, "--backup", broot6e, "--pretend-backup-volume-changed",
+              "--via-store", "--no-analyze")
+check(listing(os.path.join(root6e, TODAY)) == RFILES and listing(broot6e) == []
+      and "不在原来那块盘上" in r.stdout and "先别格式化" in r.stdout,
+      f"备份盘换了、走界面那条：重做的计划也带着备份根目录确认时的卷身份（备份里 {listing(broot6e)}）")
 root6d = os.path.join(WORK, "root_r6d")
 os.makedirs(root6d)
 r = ingest_to(os.path.join(WORK, "data_r6d"), "--dest-root", root6d, "--via-store", "--no-analyze")
