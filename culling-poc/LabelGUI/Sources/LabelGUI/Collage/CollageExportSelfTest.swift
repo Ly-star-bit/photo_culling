@@ -11,6 +11,8 @@ import ImageIO
 ///    另编的 JPEG）都写出每个跨页 + 一份页数对的 PDF，PDF 列在 files 最后，目录里没有临时文件。
 /// 3. 相册有跨页没写出来（testExportFailPages 当成渲染失败）：不出 PDF（盘上没有、files 里没有、没有临时文件），failure 写明
 ///    缺第几个跨页，写出来的跨页照实列出；同一次导出还有软警告（照片读不了）时「导出失败」不被它盖掉，警告接在后面。
+///    PNG 跨页写出来了、只是 PDF 那份 JPEG 编不出来（testExportFailPDFEncodePages）：照样不出 PDF，提示说「图写出来了、
+///    但没能放进 PDF」、不说「没写出来」，和 files 对得上；和渲染失败的同时有时两句各说各的页号。
 /// 4. 空照片格（emptyPhotoSlots / emptySlotWarning，导出按钮和 MCP 共用）：只数网格页上没照片（或照片不在托盘）的照片格，
 ///    留白格、文字格、散落版、印样不算；提醒那句话写对页号；导出按钮有空格时先不导、等确认（exportConfirm），点了「仍然导出」
 ///    才导，没有空格直接导、不问。
@@ -414,6 +416,50 @@ enum CollageExportSelfTest {
               "只有软警告：PDF 照出（3 页）", "\(o3?.failure ?? "") \(o3?.files ?? [])")
         check(store.lastError == o3?.warning && store.lastError != nil && store.progressText.hasPrefix("导出完成"),
               "只有软警告：界面是那条警告 + 导出完成", "\(store.lastError ?? "") / \(store.progressText)")
+
+        // e) PNG：第 2 个跨页的图写出来了，只是 PDF 用的那份 JPEG 编不出来 —— 照样不出 PDF，但不说「没写出来」
+        let e = dir.appendingPathComponent("e")
+        options.outputPath = e.path
+        options.format = .png
+        store.exportOptions = options
+        store.testExportFailPDFEncodePages = [1]
+        let o5 = runExport(store, project: albumProject(pages: 3), options: options, name: "编码")
+        store.testExportFailPDFEncodePages = []
+        let failure5 = o5?.failure ?? ""
+        check(o5?.files == ["编码_跨页_01.png", "编码_跨页_02.png", "编码_跨页_03.png"]
+              && fm.fileExists(atPath: e.appendingPathComponent("编码_跨页_02.png").path)
+              && !fm.fileExists(atPath: e.appendingPathComponent("编码.pdf").path) && leftovers(e).isEmpty,
+              "PNG 跨页写出来了、PDF 那份编不出来：三张都列出、不出 PDF", "\(o5?.files ?? [])")
+        check(failure5.contains("转不成 PDF 页") && failure5.contains("没生成 PDF")
+              && failure5.contains("第 2 个跨页的图写出来了、但没能放进 PDF") && !failure5.contains("没写出来"),
+              "提示说图写出来了、没能放进 PDF，不说「没写出来」", failure5)
+        check((store.lastError ?? "").hasPrefix("导出失败") && !store.progressText.hasPrefix("导出完成"),
+              "界面照样是导出失败", store.lastError ?? "")
+
+        // f) 第 1 个跨页渲染失败 + 第 3 个跨页只是 PDF 那份编不出来：两句各说各的页号
+        let f = dir.appendingPathComponent("f")
+        options.outputPath = f.path
+        store.exportOptions = options
+        store.testExportFailPages = [0]
+        store.testExportFailPDFEncodePages = [2]
+        let o6 = runExport(store, project: albumProject(pages: 3), options: options, name: "两种")
+        store.testExportFailPages = []
+        store.testExportFailPDFEncodePages = []
+        let failure6 = o6?.failure ?? ""
+        check(o6?.files == ["两种_跨页_02.png", "两种_跨页_03.png"]
+              && !fm.fileExists(atPath: f.appendingPathComponent("两种.pdf").path),
+              "渲染失败的不列、只缺 PDF 那份的照列，不出 PDF", "\(o6?.files ?? [])")
+        check(failure6.contains("第 1 个跨页没写出来，第 3 个跨页的图写出来了、但没能放进 PDF")
+              && !failure6.contains("第 3 个跨页没写出来"), "两种失败各说各的页号", failure6)
+
+        // pdfSkippedNote 本身：跨页多时只列前 8 个（以前多打了一个「个」：「等 10 个 个跨页」）
+        let many = CollageStore.pdfSkippedNote(Array(0..<10))
+        check(many.contains("第 1、2、3、4、5、6、7、8 等 10 个跨页没写出来") && !many.contains("个 个"),
+              "跨页多时只列前 8 个", many)
+        let mixed = CollageStore.pdfSkippedNote([0, 1, 2], written: [1])
+        check(mixed.hasPrefix("没生成 PDF：第 1、3 个跨页没写出来，第 2 个跨页的图写出来了、但没能放进 PDF"),
+              "没写出来的、只缺 PDF 的分开列", mixed)
+        options.format = .jpeg
 
         // d) 单张模式不受影响（没有 PDF）
         let d = dir.appendingPathComponent("d")
