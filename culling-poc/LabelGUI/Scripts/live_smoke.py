@@ -3082,6 +3082,41 @@ __attribute__((constructor)) static void init(void) {
         check((r_k.get("ai_override") or {}).get("op_id") == op_k and r_k.get("changed_by") == "ai"
               and r_f.get("changed_by") == "user" and "ai_override" not in r_f,
               "重开宿主：AI 改判的出处读回来了；对不上 overrides.json 的那一条（老版本 app 改过）丢掉，照样是用户的人工改判")
+
+        # ---------- 一次定一场（cull_set_verdicts 的 changes）：最大的那一场推荐的那张 pick、其余 reject，一次调用一步撤销，
+        # app_undo 一下全回去；两种写法混着给、同一张两个判决 → invalid_argument
+        _, gs_, _ = mcp_call(envm, "cull_list_groups", {"session": KEY, "kind": "scene", "min_size": 3, "limit": 100})
+        cand = [g_ for g_ in (gs_ or {}).get("groups") or []
+                if g_.get("recommended") and not {mid, mid2} & {m_["id"] for m_ in g_["members"]} and not g_.get("members_truncated")]
+        big = max(cand, key=lambda g_: g_["count"])
+        keep_id = big["recommended"]
+        sc_ids = [m_["id"] for m_ in big["members"]]
+        lose = [i for i in sc_ids if i != keep_id]
+        chg = [{"id": i, "verdict": "pick" if i == keep_id else "reject"} for i in sc_ids] + [{"id": "NOPE-7", "verdict": "pick"}]
+        s_a = state(hm2)
+        sc = mw("cull_set_verdicts", {"changes": chg})
+        s_b = state(hm2)
+        _, sp_, _ = mcp_call(envm, "cull_list_photos", {"session": KEY, "scene": big["key"], "limit": 100})
+        got_sc = {r["id"]: (r["verdict"], r.get("changed_by")) for r in (sp_ or {}).get("rows") or []}
+        want_sc = {i: ("pick" if i == keep_id else "reject", "ai") for i in sc_ids}
+        to = sc.get("changed_to") or {}
+        check(sorted(sc.get("changed") or []) == sorted(sc_ids) and sc.get("missing_ids") == ["NOPE-7"]
+              and to.get("pick") == [keep_id] and sorted(to.get("reject") or []) == sorted(lose)
+              and sc.get("undo", {}).get("steps_added") == 1 and steps(s_a, s_b) == (1, 0) and got_sc == want_sc
+              and (s_b.get("external_notice") or "").startswith(f"AI：改判 {len(sc_ids)} 张（精选 1 · 废片 {len(lose)}）"),
+              f"一次定一场（场 {big['key']}，{len(sc_ids)} 张）：changes 一次写完 1 张 pick、{len(lose)} 张 reject（不在这一场的进 missing_ids），"
+              f"判决栈只 +1，每张 changed_by ai，状态栏「AI：改判 {len(sc_ids)} 张（精选 1 · 废片 {len(lose)}）…」")
+        un_sc = mw("app_undo", {"target": "verdicts"})
+        s_c = state(hm2)
+        check(sorted(un_sc.get("ids") or []) == sorted(sc_ids) and s_c["verdict_digest"] == s_a["verdict_digest"]
+              and s_c["verdict_undo"]["depth"] == s_a["verdict_undo"]["depth"] and not set(sc_ids) & set(ai_disk()),
+              "app_undo target=verdicts 一下：这一场全部回到改判之前（verdict_digest 逐字节相同），出处一起撤掉")
+        bad_sc = [mw("cull_set_verdicts", a) for a in (
+            {"changes": [{"id": keep_id, "verdict": "pick"}], "ids": [keep_id], "verdict": "pick"},
+            {"changes": [{"id": keep_id, "verdict": "pick"}, {"id": keep_id, "verdict": "reject"}]},
+            {"changes": {keep_id: "pick"}}, {"verdict": "pick"})]
+        check(all(err_code(b) == "invalid_argument" for b in bad_sc) and steps(s_c, state(hm2)) == (0, 0),
+              f"changes 和 ids + verdict 混着给 / 同一张两个判决 / 写成 {{id: 判决}} / 只给 verdict → invalid_argument {[err_code(b) for b in bad_sc]}")
         hm2.term()
 
         # ---------- 第 16 条 旧版 app 少一个写方法：只有那个工具回 app_version_mismatch

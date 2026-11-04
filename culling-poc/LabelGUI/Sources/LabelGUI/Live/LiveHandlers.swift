@@ -816,19 +816,32 @@ extension LiveHandlers {
         if let bad = checkArgs("cull_set_verdicts", req) { return bad }
         if let stop = await begin(req, Gate(scope: .verdicts, analysis: true), live: live, model: model) { return stop }
         let batch = model.batch
-        let raw = req.params["verdict"] as? String ?? ""
-        let target: Verdict? = verdictNames[raw]
+        // 两种写法：ids + verdict（都改成同一个）、changes（每张各自的，比如一场里一张 pick、其余 reject）。都是一次调用一步撤销
+        let wanted: [(id: String, target: Verdict?)]
+        let mixed = req.params["changes"] != nil
+        if mixed, case .success(let list) = MCPArgs.verdictChanges(req.params["changes"]) {
+            wanted = list.map { (id: $0.id, target: verdictNames[$0.verdict]) }
+        } else {
+            let target: Verdict? = verdictNames[req.params["verdict"] as? String ?? ""]
+            wanted = MCPArgs.uniqueStrings(req.params["ids"]).map { (id: $0, target: target) }
+        }
         var changed: [String] = []
         var unchanged: [String] = []
         var missing: [String] = []
-        for id in MCPArgs.uniqueStrings(req.params["ids"]) {
+        var writes: [(id: String, verdict: Verdict?)] = []
+        for (id, target) in wanted {
             guard batch.item(withID: id) != nil else {
                 missing.append(id)
                 continue
             }
             // 已经是这个判决（人工改的，不是「接受推荐」钉的；auto = 没有 override）的不动
             let same = target == nil ? batch.overrides[id] == nil : (batch.isManual(id) && batch.overrides[id] == target)
-            if same { unchanged.append(id) } else { changed.append(id) }
+            if same {
+                unchanged.append(id)
+            } else {
+                changed.append(id)
+                writes.append((id: id, verdict: target))
+            }
         }
         guard !changed.isEmpty || !unchanged.isEmpty else {
             return .failure("photo_not_found", "这些 id 在 app 当前这一场里都没有：\(missing.joined(separator: ", "))",
@@ -839,18 +852,22 @@ extension LiveHandlers {
         if !changed.isEmpty {
             // = 网格里按 1/2/3/0（一次只压一步撤销），只是另记出处（ai_overrides.json：照样算人工改判，阈值建议不拿它当样本）；
             // 拼图托盘里的判决跟着刷（§9.5.2）。不调 keepPlace：用户的焦点不跟着跳
-            batch.applyAIOverrides(changed.map { (id: $0, verdict: target) }, opID: req.opID ?? "", tool: "cull_set_verdicts")
+            batch.applyAIOverrides(writes, opID: req.opID ?? "", tool: "cull_set_verdicts")
             model.collage.refreshFromBatch()
             model.aiLog.recordWrite(.verdicts, op: req.opID ?? "", tool: "cull_set_verdicts", before: pushesBefore,
                                     after: batch.overrideUndoPushes, depth: batch.overrideUndoDepth)
-            let what = target.map { "改成\($0.rawValue)" } ?? "恢复自动判决"
-            let text = "AI：把 \(changed.count) 张\(what) · 在批量页 ⌘Z 撤销"
+            let text = "AI：" + verdictSummary(writes.map(\.verdict)) + " · 在批量页 ⌘Z 撤销"
             batchNotice(batch, text)
             notice = text
         }
         if req.params["reveal"] as? Bool == true { model.tab = .batch }
         let counts = batch.verdictCounts
         var out: [String: Any] = ["changed": changed, "unchanged": unchanged, "missing_ids": missing]
+        if mixed {
+            // changes 的写法：changed 里的每张改成了什么（判决名 → id）
+            out["changed_to"] = Dictionary(grouping: writes, by: { $0.verdict.map(MCPReadModel.verdictName) ?? "auto" })
+                .mapValues { $0.map(\.id) }
+        }
         out["session"] = currentKey(batch) ?? NSNull()
         out["verdict_counts"] = ["pick": counts.pick, "usable": counts.usable, "reject": counts.reject]
         out["collage_tray_refreshed"] = !changed.isEmpty
@@ -859,6 +876,20 @@ extension LiveHandlers {
         out["live"] = info
         out["warnings"] = warnings
         return .result(out)
+    }
+
+    /// 改判的提示：都改成同一个 =「把 N 张改成精选」（和以前一样）；各不相同 =「改判 N 张（精选 1 · 废片 7）」。
+    nonisolated static func verdictSummary(_ targets: [Verdict?]) -> String {
+        let first = targets.first ?? nil
+        if targets.allSatisfy({ $0 == first }) {
+            return "把 \(targets.count) 张" + (first.map { "改成\($0.rawValue)" } ?? "恢复自动判决")
+        }
+        let order: [Verdict?] = [.pick, .usable, .reject, nil]
+        let parts = order.compactMap { v -> String? in
+            let n = targets.filter { $0 == v }.count
+            return n == 0 ? nil : "\(v?.rawValue ?? "恢复自动") \(n)"
+        }
+        return "改判 \(targets.count) 张（" + parts.joined(separator: " · ") + "）"
     }
 
     // MARK: cull.import_client_picks（导入客户选择）

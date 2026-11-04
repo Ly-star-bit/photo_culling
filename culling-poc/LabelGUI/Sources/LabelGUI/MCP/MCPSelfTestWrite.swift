@@ -179,6 +179,17 @@ extension MCPSelfTest {
         let k = "0123456789abcdef"
         let op = "op-12345678"
         let cell: [String: Any] = ["path": "01", "index": 0, "text": "第一行，带逗号"]
+        // cull_set_verdicts 的 changes（每张各自的判决）：同一张重复给同一个判决去重，给两个不同的是错
+        let scene: [[String: String]] = [["id": "a", "verdict": "pick"], ["id": "b", "verdict": "reject"],
+                                         ["id": "c", "verdict": "auto"], ["id": "a", "verdict": "pick"]]
+        let onePick: [[String: String]] = [["id": "a", "verdict": "pick"]]
+        let twoVerdicts: [[String: String]] = [["id": "a", "verdict": "pick"], ["id": "a", "verdict": "reject"]]
+        let badVerdict: [[String: String]] = [["id": "a", "verdict": "keep"]]
+        let noVerdict: [[String: String]] = [["id": "a"]]
+        let extraKey: [[String: String]] = [["id": "a", "verdict": "pick", "why": "笑得好"]]
+        let emptyID: [[String: String]] = [["id": "", "verdict": "pick"]]
+        let mapForm: [String: String] = ["a": "pick"]
+        let tooMany: [[String: String]] = (0..<501).map { ["id": "p\($0)", "verdict": "reject"] }
         // (工具, 参数, 应该过)
         let rows: [(String, [String: Any], Bool)] = [
             ("app_open_session", ["session": k], true),
@@ -192,6 +203,18 @@ extension MCPSelfTest {
             ("cull_set_verdicts", ["session": k, "ids": [], "verdict": "pick"], false),
             ("cull_set_verdicts", ["session": k, "ids": (0..<501).map { "p\($0)" }, "verdict": "pick"], false),
             ("cull_set_verdicts", ["session": k, "ids": ["a"], "verdict": "pick", "inline": true], false),
+            ("cull_set_verdicts", ["session": k, "changes": scene, "reveal": true, "op_id": op], true),
+            ("cull_set_verdicts", ["session": k, "changes": onePick, "ids": ["b"], "verdict": "reject"], false),
+            ("cull_set_verdicts", ["session": k, "changes": onePick, "verdict": "reject"], false),
+            ("cull_set_verdicts", ["session": k, "changes": twoVerdicts], false),
+            ("cull_set_verdicts", ["session": k, "changes": badVerdict], false),
+            ("cull_set_verdicts", ["session": k, "changes": noVerdict], false),
+            ("cull_set_verdicts", ["session": k, "changes": extraKey], false),
+            ("cull_set_verdicts", ["session": k, "changes": emptyID], false),
+            ("cull_set_verdicts", ["session": k, "changes": [Any]()], false),
+            ("cull_set_verdicts", ["session": k, "changes": mapForm], false),
+            ("cull_set_verdicts", ["session": k, "changes": tooMany], false),
+            ("cull_set_verdicts", ["session": k, "verdict": "pick"], false),
             ("cull_import_client_picks", ["session": k, "text": "12、35、78 · DSCF7221.JPG"], true),
             ("cull_import_client_picks", ["session": k, "ids": ["a", "b", "a"], "dry_run": false, "reveal": true, "op_id": op], true),
             ("cull_import_client_picks", ["session": k], false),
@@ -287,6 +310,17 @@ extension MCPSelfTest {
             let problem = MCPArgs.check(tool, args, deadlineCap: 600)
             check((problem == nil) == ok, "\(tool) \(MCPJSON.string(args).prefix(120))：期望\(ok ? "过" : "不过")，实际 \(problem?.message ?? "过")")
         }
+        if case .success(let list) = MCPArgs.verdictChanges(scene) {
+            let got = list.map { "\($0.id)=\($0.verdict)" }.joined(separator: " ")
+            check(got == "a=pick b=reject c=auto", "changes 按给的顺序取、重复的去重：\(got)")
+        } else {
+            check(false, "changes 的正常写法应该解得出来")
+        }
+        let mixedText = LiveHandlers.verdictSummary([.pick, .reject, .reject, nil])
+        let sameText = LiveHandlers.verdictSummary([.reject, .reject])
+        check(mixedText == "改判 4 张（精选 1 · 废片 2 · 恢复自动 1）" && sameText == "把 2 张改成废片"
+              && LiveHandlers.verdictSummary([nil]) == "把 1 张恢复自动判决",
+              "改判的提示：各不相同 = 按判决分开数，都一样 = 和以前一句话：\(mixedText) / \(sameText)")
         let first = MCPToolDefs.styleKeys.first ?? ""
         check(MCPArgs.check("collage_set_style", ["style": first, "look": MCPToolDefs.lookKeys.first ?? ""]) == nil,
               "style / look 的 enum 取自 CollageStyles.all、CollageLook")

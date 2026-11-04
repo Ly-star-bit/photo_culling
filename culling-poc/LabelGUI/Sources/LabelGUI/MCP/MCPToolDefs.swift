@@ -217,14 +217,19 @@ enum MCPToolDefs {
      "annotations":"$DESTRUCTIVE"},
 
     {"name":"cull_set_verdicts","title":"改判",
-     "description":"在 app 里改判（= 网格里按 1/2/3/0）：pick 精选、usable 可用、reject 废片、auto 恢复自动判决。用户在窗口里当场看到；一次调用是一步撤销，用户按 ⌘Z 能撤，也可以 app_undo target=verdicts。已经是这个判决的照片不动（列在 unchanged）。AI 改的判决和用户亲手改的一样钉住、算人工改判（manual:true），另外记下出处（cull_list_photos 的 changed_by 是 ai，重开 app 也在），阈值建议不拿它们当样本；用户之后亲手再改就算用户的。连拍挑选开着时回 user_busy，app 正在分析时回 analysis_running。",
+     "description":"在 app 里改判（= 网格里按 1/2/3/0）：pick 精选、usable 可用、reject 废片、auto 恢复自动判决。两种写法二选一：ids + verdict 把这些照片改成同一个判决；changes 给每张各自的判决（定一场连拍：一张 pick、其余 reject，一次调用写完）。用户在窗口里当场看到；不管改几张、几种判决，一次调用都是一步撤销，用户按 ⌘Z 能撤，也可以 app_undo target=verdicts。已经是这个判决的照片不动（列在 unchanged）。AI 改的判决和用户亲手改的一样钉住、算人工改判（manual:true），另外记下出处（cull_list_photos 的 changed_by 是 ai，重开 app 也在），阈值建议不拿它们当样本；用户之后亲手再改就算用户的。连拍挑选开着时回 user_busy，app 正在分析时回 analysis_running。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
-       "ids":{"type":"array","items":{"type":"string","minLength":1,"maxLength":128},"minItems":1,"maxItems":500,"uniqueItems":true,"description":"照片 id（文件名去掉扩展名，比如 DSCF7208）"},
-       "verdict":{"type":"string","enum":["pick","usable","reject","auto"]},
+       "ids":{"type":"array","items":{"type":"string","minLength":1,"maxLength":128},"minItems":1,"maxItems":500,"uniqueItems":true,"description":"照片 id（文件名去掉扩展名，比如 DSCF7208），都改成 verdict；和 changes 只能用一种"},
+       "verdict":{"type":"string","enum":["pick","usable","reject","auto"],"description":"ids 里的照片都改成这个"},
+       "changes":{"type":"array","items":{"type":"object","properties":{
+           "id":{"type":"string","minLength":1,"maxLength":128,"description":"照片 id"},
+           "verdict":{"type":"string","enum":["pick","usable","reject","auto"]}},
+          "required":["id","verdict"],"additionalProperties":false},
+        "minItems":1,"maxItems":500,"description":"每张各自的判决，比如 [{\"id\":\"DSCF7221\",\"verdict\":\"pick\"},{\"id\":\"DSCF7222\",\"verdict\":\"reject\"}]；和 ids + verdict 只能用一种"},
        "reveal":"$REVEAL",
        "op_id":"$OP_ID"},
-      "required":["session","ids","verdict"],"additionalProperties":false},
+      "required":["session"],"additionalProperties":false},
      "annotations":"$WRITE_IDEMPOTENT"},
 
     {"name":"cull_show_photos","title":"在 app 里定位照片",

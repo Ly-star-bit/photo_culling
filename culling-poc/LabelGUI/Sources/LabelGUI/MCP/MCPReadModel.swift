@@ -619,6 +619,9 @@ enum MCPArgs {
         case layout
         /// 颜色："#RRGGBB" 或色名（CollageLayoutSpec.namedColors）。
         case color
+        /// cull_set_verdicts 的 changes：[{id, verdict}]，每张各自的判决（一次调用一步撤销）。写成对象数组而不是 {id: verdict}：
+        /// 键不固定的 object 在 schema 里只能写 additionalProperties:{…}，有的客户端（Gemini / Antigravity）不认。
+        case verdictChanges(count: ClosedRange<Int>)
     }
 
     struct ToolSpec {
@@ -666,12 +669,15 @@ enum MCPArgs {
     // 写工具（§9.3）：reveal / op_id / if_digest / inline 是几个工具共用的
     static let digest: Spec = .text(maxLength: 64)
     static let openSpec = ToolSpec(props: ["session": session, "confirm": .bool, "reveal": .bool, "op_id": .opID], required: [])
+    /// ids + verdict（这些改成同一个判决）和 changes（每张各自的）二选一：rules 查。
     static let verdictsSpec: ToolSpec = {
         var p: [String: Spec] = ["session": session, "reveal": .bool, "op_id": .opID]
         p["ids"] = .strings(count: 1...500, maxLength: 128, oneOf: nil)
-        p["verdict"] = .oneOf(["pick", "usable", "reject", "auto"])
-        return ToolSpec(props: p, required: ["ids", "verdict"])
+        p["verdict"] = .oneOf(verdictValues)
+        p["changes"] = .verdictChanges(count: 1...500)
+        return ToolSpec(props: p, required: [])
     }()
+    static let verdictValues = ["pick", "usable", "reject", "auto"]
     static let showSpec: ToolSpec = {
         var p: [String: Spec] = ["session": session, "reveal": .bool, "mode": .oneOf(["select", "focus"])]
         p["ids"] = .strings(count: 1...200, maxLength: 128, oneOf: nil)
@@ -808,6 +814,16 @@ enum MCPArgs {
             if given("photos") && given("count") {
                 return Problem(message: "photos 和 count 只能给一个：photos 指定用哪几张，count 让 app 从托盘挑几张。", hint: "")
             }
+        case "cull_set_verdicts":
+            if given("changes") {
+                if given("ids") || given("verdict") {
+                    return Problem(message: "ids + verdict 和 changes 只能用一种：ids + verdict 是这些照片改成同一个判决，changes 是每张各自的判决。",
+                                   hint: "一场里一张 pick、其余 reject 这种，全写进 changes：[{\"id\":\"…\",\"verdict\":\"pick\"}, …]")
+                }
+            } else if !given("ids") || !given("verdict") {
+                return Problem(message: "cull_set_verdicts 要给 ids + verdict（这些照片改成同一个判决），或者 changes（每张各自的判决）。",
+                               hint: "能用的参数：changes、ids、op_id、reveal、session、verdict")
+            }
         case "cull_import_client_picks":
             if given("text") == given("ids") {
                 return Problem(message: "text 和 ids 要给一个、只能给一个：text 是客户回复的原文（app 来认），ids 是你已经认出的照片 id。",
@@ -910,8 +926,38 @@ enum MCPArgs {
             } catch {
                 return Problem(message: (error as? CollageLayoutSpec.Problem)?.text ?? "\(name) 不是颜色。", hint: "")
             }
+        case .verdictChanges(let count):
+            if case .failure(let p) = verdictChanges(value, name: name, count: count) { return p }
         }
         return nil
+    }
+
+    /// changes 解出来：[(id, 判决名)]，按给的顺序、同一张重复给同一个判决的去重。同一张给了两个不同的判决、键不对、
+    /// 判决不认、张数不在范围里都是错。LiveHandlers 执行时用同一个函数取值。
+    static func verdictChanges(_ value: Any?, name: String = "changes",
+                               count: ClosedRange<Int> = 1...500) -> Result<[(id: String, verdict: String)], Problem> {
+        let shape = Problem(message: "\(name) 要写成 [{\"id\":\"DSCF7208\",\"verdict\":\"pick\"}, …]：id 是 1–128 个字的照片 id，"
+                            + "verdict 只能是 " + verdictValues.joined(separator: " / ") + "。", hint: "")
+        guard let list = value as? [Any] else { return .failure(shape) }
+        var out: [(id: String, verdict: String)] = []
+        var seen: [String: String] = [:]
+        for raw in list {
+            guard let obj = raw as? [String: Any], Set(obj.keys) == ["id", "verdict"],
+                  let id = obj["id"] as? String, !id.isEmpty, id.count <= 128,
+                  let verdict = obj["verdict"] as? String, verdictValues.contains(verdict) else { return .failure(shape) }
+            if let before = seen[id] {
+                guard before == verdict else {
+                    return .failure(Problem(message: "\(name) 里 \(id) 给了两个不同的判决（\(before)、\(verdict)）。", hint: "一张照片只写一次"))
+                }
+                continue
+            }
+            seen[id] = verdict
+            out.append((id: id, verdict: verdict))
+        }
+        guard count.contains(out.count) else {
+            return .failure(Problem(message: "\(name) 要 \(count.lowerBound)–\(count.upperBound) 张（去重以后）。", hint: ""))
+        }
+        return .success(out)
     }
 
     /// JSON 里的数（整数、小数都算；true / false、非有限数不算）。

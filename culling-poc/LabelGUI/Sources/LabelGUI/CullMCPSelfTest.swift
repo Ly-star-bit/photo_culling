@@ -43,6 +43,7 @@ enum CullMCPSelfTest {
         xmpChecks(check, sessionDir: sessionDir)
         clientPickChecks(check, sessionDir: sessionDir)
         provenanceChecks(check, sessionDir: sessionDir)
+        sceneChecks(check)
         for f in failures { print("FAIL " + f) }
         if failures.isEmpty {
             print("选片 MCP 自检：\(total) 条检查全部通过")
@@ -225,5 +226,39 @@ enum CullMCPSelfTest {
         check(aiOnly == 0 && old.manualRejectsWithoutReason == 1,
               "「滑杆漏掉」：AI 废掉的 2 张不算（\(aiOnly)），用户亲手废的 1 张算（\(old.manualRejectsWithoutReason)）")
         old.setOverrideBatch(old.overrides.keys.sorted(), nil)
+    }
+
+    // MARK: - 4. 一次定一场（cull_set_verdicts 的 changes）
+
+    /// 最大的那一场：推荐的那张 pick、其余 reject，外加别处一张恢复自动 —— 一次 applyAIOverrides、一步撤销，⌘Z 一下全回去。
+    static func sceneChecks(_ check: Check) {
+        let store = open()
+        guard let take = store.takeRows.max(by: { $0.indices.count < $1.indices.count })?.take else {
+            check(false, "fixture 里找不到多张的场")
+            return
+        }
+        let members = store.members(ofTake: take).map(\.id)
+        guard let keep = members.first(where: { store.takeRank[$0] == 1 }), members.count >= 3,
+              let outside = store.items.map(\.id).sorted().first(where: { !members.contains($0) }) else {
+            check(false, "场 \(take) 没有推荐的那张、或者不到 3 张")
+            return
+        }
+        store.setOverride(outside, .pick)
+        let pushes = store.overrideUndoPushes
+        let depth = store.overrideUndoDepth
+        var changes: [(id: String, verdict: Verdict?)] = members.map { (id: $0, verdict: $0 == keep ? .pick : .reject) }
+        changes.append((id: outside, verdict: nil))
+        store.applyAIOverrides(changes, opID: "op-scene-01", tool: "cull_set_verdicts")
+        let rejected = members.filter { store.item(withID: $0)?.verdict == .reject }.count
+        let alive = store.members(ofTake: take).filter { $0.verdict != .reject }
+        let oneStep = store.overrideUndoPushes == pushes + 1 && store.overrideUndoDepth == depth + 1
+        let decided = store.item(withID: keep)?.verdict == .pick && rejected == members.count - 1 && !store.isPendingTake(alive: alive)
+        check(oneStep && decided && store.overrides[outside] == nil && store.aiOverrideCount == members.count,
+              "一次定一场（场 \(take)，\(members.count) 张）：1 张 pick、\(members.count - 1) 张 reject、另一张恢复自动，只压一步撤销，这一场不再待处理")
+        let touched = store.undoLastOverride()
+        check(Set(touched) == Set(members + [outside]) && store.overrides == [outside: .pick] && store.aiOverrideCount == 0
+              && store.overrideUndoDepth == depth,
+              "⌘Z 一下：这一场全部回到改判之前，另一张回到用户判的精选，出处都没了")
+        store.undoLastOverride()
     }
 }
