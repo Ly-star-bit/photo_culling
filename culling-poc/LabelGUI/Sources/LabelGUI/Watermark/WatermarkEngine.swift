@@ -965,6 +965,8 @@ enum WatermarkEngine {
         case decodeFailed
         case composeFailed
         case encodeFailed
+        /// 编码或写盘失败，带原因（盘满了、没有权限、只读盘……，审查 D03）。
+        case writeFailed(String)
         /// 压到最低质量还是超过体积上限（文件照最低质量写出去了）。
         case overLimit(Double)
 
@@ -975,6 +977,7 @@ enum WatermarkEngine {
             case .decodeFailed: return "解码失败 (文件损坏或格式不支持)"
             case .composeFailed: return "合成失败"
             case .encodeFailed: return "写入 JPEG 失败 (检查输出目录权限/磁盘空间)"
+            case .writeFailed(let why): return "写入 JPEG 失败：\(why)"
             case .overLimit(let mb):
                 return "压到最低质量 \(Int(DeliveryEncoder.floorQuality * 100)) 还是超过 \(String(format: "%g", mb)) MB（已按最低质量写出）"
             }
@@ -1040,7 +1043,7 @@ enum WatermarkEngine {
             }
         }
         switch outcome {
-        case .failed: throw ExportError.encodeFailed
+        case .failed(let why): throw ExportError.writeFailed(why)
         case .overLimit: throw ExportError.overLimit(options.maxMB)
         case .ok: return composition.textFit
         }

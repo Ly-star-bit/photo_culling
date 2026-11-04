@@ -707,6 +707,12 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--export-jpeg"),
     }
 }
 
+// 诊断这一组的自检（逐张失败的原因）：
+// LABELGUI_DATA_DIR=<临时> LabelGUI --diag-selftest [<photo_dir>]（见 Diagnostics/DiagnosticsSelfTest.swift）。
+if CommandLine.arguments.contains("--diag-selftest") {
+    MainActor.assumeIsolated { DiagnosticsSelfTest.run() }
+}
+
 // 走到这里就要开界面了。命令行里带着不认识的 `--参数`（拼错了、或者拿新的测试脚本跑旧版程序）时
 // 不开：测试 / 自动化以为自己在无头跑，结果弹出一个窗口。系统自己传的参数是单横线（-NSDocument…、-psn_…）。
 if let unknown = CommandLine.arguments.dropFirst().first(where: { $0.hasPrefix("--") }) {

@@ -112,6 +112,8 @@ WRITERS = [
     ["--fashion-selftest", PHOTOS],
     ["--newspaper-selftest", PHOTOS],
     ["--album-selftest", PHOTOS, "--out", o("album-st")],
+    # 诊断（审查 D03）：自检会在数据目录里建临时文件夹
+    ["--diag-selftest"],
 ]
 SESSIONS = os.path.join(FAKE_REAL, "sessions")
 

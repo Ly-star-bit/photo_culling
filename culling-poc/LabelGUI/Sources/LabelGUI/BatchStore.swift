@@ -3744,6 +3744,9 @@ final class BatchStore: ObservableObject {
             let fm = FileManager.default
             var trashedIDs: Set<String> = []
             var failed: [String] = []
+            // 每张为什么没移成（审查 D03），和「移走了一半」的：RAW 已经进了废纸篓、配对的 JPG / .xmp 抛错。
+            var failureReasons: [String: String] = [:]
+            var partial: [TrashPartial] = []
             for (index, job) in jobs.enumerated() {
                 if flag.isSet { break }
                 var urls = [URL(fileURLWithPath: job.rawPath)]
@@ -3754,23 +3757,30 @@ final class BatchStore: ObservableObject {
                 if let xmp = job.xmp, job.xmpAfter.allSatisfy(trashedIDs.contains), fm.fileExists(atPath: xmp.path) {
                     urls.append(xmp)
                 }
+                var moved: [URL] = []
                 do {
-                    var movedAny = false
                     for url in urls where fm.fileExists(atPath: url.path) {
                         try fm.trashItem(at: url, resultingItemURL: nil)
-                        movedAny = true
+                        moved.append(url)
                     }
                     // 一个文件都没找到（外置盘没挂载、照片已被别处移走）不算成功：
                     // 计入 trashedIDs 会把它从 manifest/VLM 结果里永久剔除，
                     // 而原图其实一张都没动，提示却说"已移到废纸篓 (可恢复)"。
-                    if movedAny {
+                    if !moved.isEmpty {
                         trashedIDs.insert(job.id)
                         try? fm.removeItem(at: URL(fileURLWithPath: job.previewPath))
                     } else {
                         failed.append(job.id)
+                        failureReasons[job.id] = "文件不见了（外置盘没挂上，或者已经被别处移走）"
                     }
                 } catch {
                     failed.append(job.id)
+                    failureReasons[job.id] = Diagnostics.describeIO(error, trash: true)
+                    // 移走了一半：照片照旧留在网格里（还有文件在原处），再移一次时已经不在的那个会跳过、只移剩下的。
+                    if !moved.isEmpty {
+                        let left = urls.filter { fm.fileExists(atPath: $0.path) }.map(\.lastPathComponent)
+                        partial.append(TrashPartial(id: job.id, moved: moved.map(\.lastPathComponent), left: left))
+                    }
                 }
                 let done = index + 1
                 if done % 10 == 0 || done == total {
@@ -3783,6 +3793,8 @@ final class BatchStore: ObservableObject {
 
             let trashed = trashedIDs
             let failedIds = failed
+            let failureNote = Self.trashFailureNote(trashed: trashed.count, failed: failed, reasons: failureReasons,
+                                                    partial: partial)
             let keptShared = keptSidecars.filter { fm.fileExists(atPath: $0.path) }.count
             await MainActor.run { [weak self] in
                 guard let self else { return }
@@ -3806,6 +3818,7 @@ final class BatchStore: ObservableObject {
                 self.postResultsChanged(previewsChanged: false)
                 if flag.isSet {
                     self.progressText = "已取消: \(trashed.count) 张已移到废纸篓 (可恢复)，其余未动"
+                    if !failedIds.isEmpty { self.lastError = failureNote }
                 } else if failedIds.isEmpty {
                     // 一段一段拼：一长串 + 和三元在 CI 的 Xcode 16 上类型检查会慢。
                     let hollowed = trashed.intersection(inCollage).count
@@ -3816,10 +3829,34 @@ final class BatchStore: ObservableObject {
                     if keptShared > 0 { parts.append("\(keptShared) 个 .xmp 同名的另一张照片还在用，留着没移") }
                     self.progressText = parts.joined(separator: "；")
                 } else {
-                    self.lastError = "移到废纸篓: \(trashed.count) 成功, \(failedIds.count) 失败 (\(failedIds.prefix(3).joined(separator: ", ")))"
+                    self.lastError = failureNote
                 }
             }
         }
+    }
+
+    /// 移到废纸篓时一张只移走了一部分文件（审查 D03）：哪些已经在废纸篓、哪些还在原处。
+    struct TrashPartial: Sendable, Equatable {
+        let id: String
+        let moved: [String]
+        let left: [String]
+    }
+
+    /// 移到废纸篓有失败时状态栏那句：张数、前 3 张、原因（几种不同的分开数），移走了一半的单独说
+    /// （照片留在网格里、再移一次只移剩下的）。
+    nonisolated static func trashFailureNote(trashed: Int, failed: [String], reasons: [String: String],
+                                             partial: [TrashPartial]) -> String {
+        let names = failed.prefix(3).joined(separator: ", ") + (failed.count > 3 ? "…" : "")
+        var note = "移到废纸篓: \(trashed) 成功, \(failed.count) 失败 (\(names))"
+        note += Diagnostics.reasonSummary(failed.compactMap { reasons[$0] })
+        if let first = partial.first {
+            let moved = first.moved.joined(separator: "、")
+            let left = first.left.isEmpty ? "其余文件" : first.left.joined(separator: "、")
+            let example = partial.count > 1 ? "如 " : ""
+            note += "；其中 \(partial.count) 张只移走了一部分（\(example)\(first.id)：\(moved) 已在废纸篓，\(left) 还在原处）"
+                + "，照片留在网格里，处理好原因后再移一次会把剩下的也移走"
+        }
+        return note
     }
 
     /// Removes trashed ids from manifest/layer JSONs so reopening the app doesn't
@@ -3955,7 +3992,7 @@ final class BatchStore: ObservableObject {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             } catch {
                 await MainActor.run { [weak self] in
-                    self?.lastError = "无法创建导出文件夹: \(error.localizedDescription)"
+                    self?.lastError = "无法创建导出文件夹「\(folder.lastPathComponent)」: \(Diagnostics.describeIO(error))"
                     self?.isRunning = false
                 }
                 return
@@ -3966,6 +4003,7 @@ final class BatchStore: ObservableObject {
             // seed `workers` tasks, add one more as each finishes.
             let workers = min(4, max(2, ProcessInfo.processInfo.activeProcessorCount / 4))
             var failed: [String] = []
+            var failureReasons: [String: String] = [:]
             var overLimit: [String] = []
             var written: [URL] = []
             var done = 0
@@ -3982,7 +4020,7 @@ final class BatchStore: ObservableObject {
                     switch outcome {
                     case .ok: written.append(dest)
                     case .overLimit: written.append(dest); overLimit.append(id)
-                    case .failed: failed.append(id)
+                    case .failed(let why): failed.append(id); failureReasons[id] = why
                     }
                     done += 1
                     let doneNow = done
@@ -3995,6 +4033,7 @@ final class BatchStore: ObservableObject {
             }
 
             let failedIds = failed
+            let reasonText = Diagnostics.reasonSummary(failed.compactMap { failureReasons[$0] })
             let overIds = overLimit
             let writtenFiles = written.sorted { $0.lastPathComponent < $1.lastPathComponent }
             // 按导出顺序（精华按名次）；取消了也记已经写出去的那些，文件都在。
@@ -4010,14 +4049,18 @@ final class BatchStore: ObservableObject {
                                                        failed: failedIds)
                 let count = writtenFiles.count
                 let kept = renamed > 0 ? "（\(renamed) 张目标里已有同名，另存为 -2、-3…，旧文件没动）" : ""
+                // 逐张失败的原因（盘满了、没有权限、原片不在了……）跟在张数后面，几种不同的分开数（审查 D03）。
+                let failedNote = "JPG 导出: \(count) 成功, \(failedIds.count) 失败 (\(failedIds.prefix(3).joined(separator: ", ")))"
+                    + reasonText
                 if flag.isSet {
                     self.progressText = "导出已取消: 已写出 \(count) 张 → \(folderLabel)"
+                    if !failedIds.isEmpty { self.lastError = failedNote }
                 } else if failedIds.isEmpty {
                     let title = isHighlights ? "精华导出完成" : "JPG 导出完成"
                     self.progressText = "\(title): \(count) 张 → \(folderLabel)" + kept
                     if !overIds.isEmpty { self.lastError = DeliveryEncoder.overLimitNote(overIds, maxMB: options.maxMB) }
                 } else {
-                    self.lastError = "JPG 导出: \(count) 成功, \(failedIds.count) 失败 (\(failedIds.prefix(3).joined(separator: ", ")))"
+                    self.lastError = failedNote
                 }
                 self.recordDelivery(isHighlights ? .highlights : .jpeg, folder: folder, files: delivered, into: ledger)
             }
@@ -4046,7 +4089,7 @@ final class BatchStore: ObservableObject {
     nonisolated static func writeJPEG(from source: URL, to dest: URL, options: DeliveryOptions) -> DeliveryEncoder.Outcome {
         guard let src = CGImageSourceCreateWithURL(source as CFURL, nil),
               CGImageSourceGetCount(src) > 0
-        else { return .failed }
+        else { return .failed(Self.unreadableSourceReason(source)) }
         var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
         // 属性字典这条路，ImageIO 按 EXIF/TIFF 现编 XMP，原图的 XMP 包不跟过来 —— 拿掉 {GPS} 就是全拿掉了。
         // 拍摄时间、机身、镜头、版权、方向都留着。
@@ -4083,12 +4126,12 @@ final class BatchStore: ObservableObject {
         } else {
             image = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCache: false] as CFDictionary)
         }
-        guard var image else { return .failed }
+        guard var image else { return .failed("解不开原片（文件损坏或格式不支持）") }
         // 锐化那条已经在渲染时认过、转过了。
         if !rendered { image = SharpRenderer.retagged(image, as: assumed) }
         // 网络 / 微信：Adobe RGB、P3 真转换成 sRGB（平台丢了 ICC 按 sRGB 显示也不发灰），EXIF 色彩空间跟着改。
         if !keepColor, SharpRenderer.needsSRGBConversion(image.colorSpace) {
-            guard let converted = SharpRenderer.convertedToSRGB(image) else { return .failed }
+            guard let converted = SharpRenderer.convertedToSRGB(image) else { return .failed("转成 sRGB 失败") }
             image = converted
         }
         if !keepColor, image.colorSpace?.name == CGColorSpace.sRGB,
@@ -4103,6 +4146,14 @@ final class BatchStore: ObservableObject {
             props[kCGImageDestinationLossyCompressionQuality] = quality
             CGImageDestinationAddImage(out, finalImage, props as CFDictionary)
         }
+    }
+
+    /// 原片打不开时说是哪一种（审查 D03）：不在了（盘没挂上、被移走）、没有权限读、还是在但解不开。
+    nonisolated static func unreadableSourceReason(_ source: URL) -> String {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: source.path) { return "原片不在了（所在的盘没挂上，或者被移走、改名了）" }
+        if !fm.isReadableFile(atPath: source.path) { return "没有权限读原片" }
+        return "解不开原片（文件损坏或格式不支持）"
     }
 
     // MARK: - 高ISO RAW export (降噪流程: PureRAW / LR AI 降噪只吃 RAW)
@@ -4292,6 +4343,7 @@ final class BatchStore: ObservableObject {
             var writtenIDs: [String] = []
             var preserved: [String] = []
             var failed: [String] = []
+            var failureReasons: [String] = []
             for (index, job) in jobs.enumerated() {
                 if flag.isSet { break }
                 // 合并、原样保留、写失败、没变都走到下面同一个进度更新（以前合并和保留两路 continue 跳过了它）。
@@ -4309,10 +4361,11 @@ final class BatchStore: ObservableObject {
                     writtenIDs.append(job.id)
                 case .preserved:
                     preserved.append(job.id)
-                case .failed:
+                case .failed(let why):
                     failed.append(job.id)
+                    failureReasons.append(why)
                 }
-                if let format = job.lightroomBlind, outcome != .preserved, outcome != .failed {
+                if let format = job.lightroomBlind, outcome.landed {
                     lightroomBlind += 1
                     blindFormats.insert(format)
                 }
@@ -4333,6 +4386,7 @@ final class BatchStore: ObservableObject {
             let writtenIds = writtenIDs
             let preservedIds = preserved
             let failedIds = failed
+            let reasonText = Diagnostics.reasonSummary(failureReasons, unit: "个")
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
@@ -4409,7 +4463,8 @@ final class BatchStore: ObservableObject {
                     self.lastError = warning.isEmpty ? nil : warning
                 } else {
                     let failedNames = failedIds.prefix(3).joined(separator: ", ")
-                    var message = "XMP: \(done) 个成功, \(failedIds.count) 个失败 (\(failedNames))"
+                    // 逐个失败的原因（只读盘、没有权限、盘满了……）紧跟在个数后面（审查 D03）。
+                    var message = "XMP: \(done) 个成功, \(failedIds.count) 个失败 (\(failedNames))" + reasonText
                     for note in notes { message += "；" + note }
                     if !warning.isEmpty { message += "；" + warning }
                     self.lastError = message
@@ -4428,7 +4483,16 @@ final class BatchStore: ObservableObject {
         case unchanged
         /// 别的软件的 sidecar，读不全、合并不了：没碰。
         case preserved
-        case failed
+        /// 写不进去；带给人看的原因（只读盘、没有权限、盘满了……，审查 D03）。
+        case failed(String)
+
+        /// 盘上现在是这次要的那一份（写了、合并了、本来就对）。
+        var landed: Bool {
+            switch self {
+            case .written, .merged, .unchanged: return true
+            case .preserved, .failed: return false
+            }
+        }
     }
 
     /// 写一张（后台线程，纯文件 IO）。别人的 sidecar 只合并星级 / 色标，合并不了的不碰；自己的写整份模板。
@@ -4450,7 +4514,7 @@ final class BatchStore: ObservableObject {
                 do {
                     try data.write(to: job.url, options: .atomic)
                 } catch {
-                    return .failed
+                    return .failed(Diagnostics.describeIO(error))
                 }
                 return .merged
             }
@@ -4459,7 +4523,7 @@ final class BatchStore: ObservableObject {
         do {
             try job.content.write(to: job.url, atomically: true, encoding: .utf8)
         } catch {
-            return .failed
+            return .failed(Diagnostics.describeIO(error))
         }
         return .written
     }
