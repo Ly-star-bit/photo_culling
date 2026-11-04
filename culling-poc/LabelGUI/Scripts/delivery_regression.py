@@ -367,7 +367,9 @@ def gps_section():
         dest = os.path.join(WORK, f"top-{len(extra)}")
         os.makedirs(dest)
         r = run(["--export-jpeg", photos, "--dest", dest, "--scope", "top:2"] + extra, data)
-        lines = [l.strip() for l in r.stdout.splitlines() if l.startswith("  ") and ".jpg " in l]
+        # 「  对照 <文件> → <id>」是交付对照（DeliveryLedger）那几行，不是逐张的文件属性行
+        lines = [l.strip() for l in r.stdout.splitlines()
+                 if l.startswith("  ") and ".jpg " in l and not l.strip().startswith("对照 ")]
         files = [os.path.join(dp, n) for dp, _, ns in os.walk(dest) for n in ns if n.lower().endswith(".jpg")]
         tags = ["有GPS" in l for l in lines]
         mine = [sj.has_gps(open(p, "rb").read()) for p in files]
