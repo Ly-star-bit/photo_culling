@@ -231,7 +231,8 @@ final class CollageStore: ObservableObject {
     @Published private(set) var isExporting = false
     @Published private(set) var progressText = ""
     @Published private(set) var progressFraction: Double?
-    @Published var lastError: String?
+    /// 一设上就记进状态栏提示的历史和持久日志（ErrorHistory，审查 D03）。
+    @Published var lastError: String? { didSet { ErrorHistory.shared.record(lastError, source: .collage) } }
     /// 导出按钮要先问一句的话（有空照片格，emptySlotWarning）：界面弹确认框，点「仍然导出」= export(confirmed: true)。
     /// nil = 不用问。
     @Published var exportConfirm: String?

@@ -112,6 +112,9 @@ WRITERS = [
     ["--fashion-selftest", PHOTOS],
     ["--newspaper-selftest", PHOTOS],
     ["--album-selftest", PHOTOS, "--out", o("album-st")],
+    # 诊断（审查 D03）：打包会读数据目录里的日志、自检会建 logs/ 和假场次
+    ["--diag-export", o("diag.zip")],
+    ["--diag-selftest"],
 ]
 SESSIONS = os.path.join(FAKE_REAL, "sessions")
 

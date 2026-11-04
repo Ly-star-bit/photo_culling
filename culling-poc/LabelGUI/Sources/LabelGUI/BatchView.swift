@@ -653,15 +653,8 @@ struct BatchView: View {
                     .help(all.joined(separator: "\n"))
             }
             if let error = store.lastError {
-                HStack(spacing: 4) {
-                    Text(error).font(.caption).foregroundStyle(.red)
-                        .lineLimit(1).help(error)
-                    Button { store.lastError = nil } label: {
-                        Image(systemName: "xmark.circle.fill").font(.caption)
-                    }
-                    .buttonStyle(.plain).foregroundStyle(.secondary)
-                    .help("关闭这条提示")
-                }
+                // 点一下弹出全文（可选中、复制）和最近的提示（ErrorNotice，审查 D03）。
+                ErrorNotice(text: error, source: .batch) { store.lastError = nil }
             }
             Spacer()
             // AI 刚在这一页做了什么（改判、撤销改判，§9.4.3 第 11 步；10 s 后自己消失）。放状态栏不放顶栏（顶栏在 1280pt
@@ -1224,6 +1217,8 @@ struct BatchView: View {
                     .foregroundStyle(.red)
                     .frame(maxWidth: 480)
                     .multilineTextAlignment(.center)
+                    .textSelection(.enabled)
+                if Diagnostics.mentionsPrivacySettings(error) { PrivacySettingsButton() }
                 Button("重新分析") { store.runAnalysis() }
                     .disabled(store.photoDir == nil)
             } else if let dir = store.photoDir {

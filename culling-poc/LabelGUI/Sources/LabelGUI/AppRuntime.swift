@@ -23,6 +23,7 @@ enum AppRuntime {
         "--mcp", "--mcp-call", "--mcp-tools", "--mcp-selftest",
         "--cull-mcp-selftest",
         "--quit-selftest",
+        "--diag-export", "--diag-selftest",
     ]
 
     /// true = 无头跑（测试、自动化）。

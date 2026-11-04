@@ -87,6 +87,19 @@ enum ImageLoader {
         let decodeURL: URL
     }
 
+    /// 照片文件夹的顶层列得出来吗（审查 D03）：列得出来 = nil；列不出来 = 给人看的话 —— 被系统隐私权限（桌面、文稿、下载、
+    /// 外接盘、网络盘，点过「不允许」）拦下时点名系统设置里的开关，不再落到「没有支持的图片文件」。
+    /// 只在分析开始前调（AnalysisEngine）：别放进最近场次、切场次那几条路 —— 读目录内容会让系统弹隐私询问，
+    /// 最近菜单一刷就是 15 个框（README「别让系统意外弹隐私框」）。
+    static func folderReadProblem(_ directory: URL) -> String? {
+        do {
+            _ = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            return nil
+        } catch {
+            return Diagnostics.folderUnreadableMessage(directory, error: error)
+        }
+    }
+
     /// Recursive: wedding shoots routinely arrive as 仪式/晚宴/花絮 subfolders.
     /// RAW+JPEG pairing happens per-directory — same stem in different folders is
     /// two different shots, not a pair.
@@ -98,8 +111,13 @@ enum ImageLoader {
         // 不用 .skipsHiddenFiles：它也会跳过带「隐藏」标记的文件 —— FAT 卡上的隐藏属性（尼康等的「隐藏图像」）
         // 就是这个标记，那些是真照片；直接打开卡、或者访达拷出来的文件夹（标记会跟着拷）里它们被悄悄跳过，
         // 网格里没有、也不算「无法解析」。和存储卡导入一样，只跳过名字以点开头的（._ 文件、.Trashes）。
+        // 读不了的子文件夹（权限、I/O）跳过、接着往下列（和以前一样），只记一行日志：一个子文件夹不该让整场分析失败。
+        let skipUnreadable: (URL, Error) -> Bool = { url, error in
+            AppLog.warning("analysis", "列照片时跳过读不了的 \(url.path)：\(Diagnostics.describeIO(error))")
+            return true
+        }
         if let enumerator = fm.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey],
-                                          options: [.skipsPackageDescendants]) {
+                                          options: [.skipsPackageDescendants], errorHandler: skipUnreadable) {
             for case let url as URL in enumerator {
                 if url.lastPathComponent.hasPrefix(".") {
                     if url.hasDirectoryPath { enumerator.skipDescendants() }

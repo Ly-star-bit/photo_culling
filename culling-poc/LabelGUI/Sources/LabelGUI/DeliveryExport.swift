@@ -342,7 +342,8 @@ enum DeliveryEncoder {
     /// 压到这个质量还超就不再压了（再低就花了），照这个质量写出去并报出来。
     static let floorQuality = 0.4
 
-    enum Outcome: Sendable { case ok, overLimit, failed }
+    /// `failed` 带给人看的原因（盘满了、没有权限、只读盘……，审查 D03：以前只有一个 failed，收尾只报张数）。
+    enum Outcome: Sendable { case ok, overLimit, failed(String) }
 
     /// 收尾时点名压不到上限的那几张（文件照最低质量写出去了）。
     static func overLimitNote(_ names: [String], maxMB: Double) -> String {
@@ -352,16 +353,13 @@ enum DeliveryEncoder {
     }
 
     /// `add` 往 destination 里加图（带属性字典或元数据树，两条出口加法不同），参数是这次的质量。
-    /// 没有上限 = 和以前一样直接写文件；有上限 = 先在内存里编码，超了就在 [最低, 设定] 之间二分质量
+    /// 没有上限 = 照设定的质量编码一次写出去；有上限 = 先在内存里编码，超了就在 [最低, 设定] 之间二分质量
     /// （最多 7 次编码），取放得下的最高质量。
+    /// 两条路都是先在内存里编码、再原子写文件（审查 D03）：以前不限体积那条直接 CGImageDestinationCreateWithURL +
+    /// Finalize，只回一个 Bool，写不进去时分不出盘满、没权限、只读盘；现在 catch 到的错误带 POSIX 码，翻成中文原因。
+    /// 编码出来的字节和直接写文件一样（--diag-selftest 逐字节核对）。
     static func write(to dest: URL, quality: Double, maxBytes: Int?,
                       add: (CGImageDestination, Double) -> Void) -> Outcome {
-        guard let maxBytes else {
-            guard let out = CGImageDestinationCreateWithURL(dest as CFURL, UTType.jpeg.identifier as CFString, 1, nil)
-            else { return .failed }
-            add(out, quality)
-            return CGImageDestinationFinalize(out) ? .ok : .failed
-        }
         func encode(_ q: Double) -> Data? {
             let data = NSMutableData()
             guard let out = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil)
@@ -369,7 +367,13 @@ enum DeliveryEncoder {
             add(out, q)
             return CGImageDestinationFinalize(out) ? data as Data : nil
         }
-        guard var best = encode(quality) else { return .failed }
+        let encodeFailed = Outcome.failed("JPEG 编码失败")
+        guard let maxBytes else {
+            guard let data = encode(quality) else { return encodeFailed }
+            do { try data.write(to: dest, options: .atomic) } catch { return .failed(Diagnostics.describeIO(error)) }
+            return .ok
+        }
+        guard var best = encode(quality) else { return encodeFailed }
         var fits = best.count <= maxBytes
         if !fits, quality > floorQuality, let floor = encode(floorQuality) {
             best = floor
@@ -383,7 +387,7 @@ enum DeliveryEncoder {
                 }
             }
         }
-        do { try best.write(to: dest, options: .atomic) } catch { return .failed }
+        do { try best.write(to: dest, options: .atomic) } catch { return .failed(Diagnostics.describeIO(error)) }
         return fits ? .ok : .overLimit
     }
 }
