@@ -18,7 +18,8 @@ struct ClientImportSheet: View {
     }
 
     static let intro = "粘贴客户发回来的：确认表里「复制我的选择」的那段、微信里回的文件名或编号（12、35、78 · 12-15 · 7221），" +
-        "或者 Pixieset 等导出的 .csv、Lightroom 文件名清单。认出来的标成「客户选中」（紫心、XMP 紫色标），不改判决。"
+        "或者 Pixieset 等导出的 .csv、Lightroom 文件名清单。认出来的标成「客户选中」（紫心、XMP 紫色标），不改判决；" +
+        "文件名后面写的修图要求（「DSCF7207 备注：去路人」「7207 黑白」）存成客户备注，复制原片时写成「精修要求.csv」。"
 
     var body: some View {
         let resolution = store.resolveClientReply(text)
@@ -229,8 +230,9 @@ enum ClientPicksCLI {
             for line in ClientReply.summary(r, existing: store.clientPicks) { print("预览: " + line) }
             print("认出: " + (r.ids.isEmpty ? "-" : r.ids.joined(separator: " ")))
             print("没认出: " + (r.unknown.isEmpty ? "-" : r.unknown.joined(separator: " | ")))
-            print("编号表: " + (r.sheet?.id ?? "-") + (r.usedSheet ? "（用到了）" : "")
-                  + (r.sheet?.quota.map { " · 套餐 \($0) 张" } ?? ""))
+            let used: String = r.usedSheet ? "（用到了）" : ""
+            let limit: String = r.sheet?.quota.map { " · 套餐 \($0) 张" } ?? ""
+            print("编号表: \(r.sheet?.id ?? "-")\(used)\(limit)")
             print("备注: " + notesText(r.ids, r.notes))
             if args.contains("--apply") { store.importClientPicks(r.ids, notes: r.notes) }
         }

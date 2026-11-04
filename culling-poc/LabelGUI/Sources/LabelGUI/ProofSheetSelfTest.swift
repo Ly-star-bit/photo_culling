@@ -158,9 +158,10 @@ enum ProofSheetSelfTest {
         if let diff = changed(before, after, width: 800, height: 533) {
             // 读不到原片：按长边 6000 算，边距 30 × 800/6000 = 4px；签名宽 = 短边 533 × 20% = 107。
             let box = diff.box
-            check(abs(Int(box.minX) - 4) <= 1 && abs(Int(box.maxY) - (533 - 4)) <= 1,
-                  "签名在左下、边距按原片换算（读不到原片按长边 6000：4px）", "\(box)")
-            check(abs(Int(box.width) - 107) <= 2, "签名宽 = 短边 × 20%", "\(box)")
+            let left = Int(box.minX), bottom = Int(box.maxY), width = Int(box.width)
+            let marginOK = abs(left - 4) <= 1 && abs(bottom - 529) <= 1
+            check(marginOK, "签名在左下、边距按原片换算（读不到原片按长边 6000：4px）", "\(box)")
+            check(abs(width - 107) <= 2, "签名宽 = 短边 × 20%", "\(box)")
             check(box.maxX < 400 && box.minY > 266, "只动左下那一块（右上的 ♥、中间的脸都没碰）", "\(box)")
             check(diff.brightest <= 185 && diff.brightest >= 170, "不透明度 0.5：白签名压在灰上是半亮", "\(diff.brightest)")
         } else {
@@ -175,8 +176,9 @@ enum ProofSheetSelfTest {
         if let big = solid(3000, 2000, gray: 0.4), writeJPEG(big, to: originalURL),
            let scaled = made.apply(to: base, original: originalURL.path),
            let diff = changed(before, pixels(scaled), width: 800, height: 533) {
-            check(abs(Int(diff.box.minX) - 8) <= 1 && abs(Int(diff.box.maxY) - (533 - 8)) <= 1,
-                  "边距按原片长边换算（3000 → 8px）", "\(diff.box)")
+            let left = Int(diff.box.minX), bottom = Int(diff.box.maxY)
+            let marginOK = abs(left - 8) <= 1 && abs(bottom - 525) <= 1
+            check(marginOK, "边距按原片长边换算（3000 → 8px）", "\(diff.box)")
         } else {
             check(false, "原片读得到时画得上")
         }
@@ -185,8 +187,10 @@ enum ProofSheetSelfTest {
         if let tall = solid(533, 800, gray: 100.0 / 255), let textMark,
            let drawn = textMark.apply(to: tall, original: ""),
            let diff = changed(pixels(tall), pixels(drawn), width: 533, height: 800) {
-            check(diff.box.maxX < 533 - 52 || diff.box.minY > 52, "竖图：文字不压右上的 ♥", "\(diff.box)")
-            check(diff.box.minY > 400 && diff.box.minX < 40, "竖图：文字在左下", "\(diff.box)")
+            let heartZone = CGRect(x: 533 - 52, y: 0, width: 52, height: 52)
+            check(!diff.box.intersects(heartZone), "竖图：文字不压右上的 ♥", "\(diff.box)")
+            let lowerLeft = diff.box.minY > 400 && diff.box.minX < 40
+            check(lowerLeft, "竖图：文字在左下", "\(diff.box)")
         } else {
             check(false, "只有文字时画得上")
         }
@@ -333,8 +337,8 @@ enum ProofSheetSelfTest {
         // 复制：剪贴板接口没有、execCommand 也不行 → 摆在框里让人长按复制。
         ctx.evaluateScript("__byId['copy'].onclick();")
         let copied = eval(ctx, "__byId['out'].value")
-        let expected = ProofSheetPage.header + " " + sheetID + "\n" + names[0] + "\n" + names[1] + " "
-            + ProofSheetPage.noteMarker + note + "\n" + names[3] + "\n" + names[4] + "\n"
+        let notedLine = "\(names[1]) \(ProofSheetPage.noteMarker)\(note)"
+        let expected = "\(ProofSheetPage.header) \(sheetID)\n\(names[0])\n\(notedLine)\n\(names[3])\n\(names[4])\n"
         check(copied == expected, "复制的文字：一张一行，带备注的「文件名 备注：…」", copied.debugDescription)
         // 有剪贴板接口：提示里说超了几张、几张带备注。
         ctx.evaluateScript("navigator.clipboard = { writeText: function (t) { __clip = t; return { then: function (ok) { ok(); } }; } }; __byId['copy'].onclick();")
@@ -371,7 +375,7 @@ enum ProofSheetSelfTest {
                   eval(ctx2, "__byId['count'].textContent"))
             ctx2.evaluateScript("__cells[0].onclick(); __byId['copy'].onclick();")
             let text = eval(ctx2, "__byId['out'].value")
-            let want = ProofSheetPage.header + " " + sheetID + "\n" + names[0] + "\n" + names[2] + "\n"
+            let want = "\(ProofSheetPage.header) \(sheetID)\n\(names[0])\n\(names[2])\n"
             check(text == want, "没写备注：复制的文字和以前一样（表号一行、一行一个文件名）", text.debugDescription)
             check(eval(ctx2, "__byId['count'].className") == "", "不设张数不变色")
         }
@@ -445,8 +449,9 @@ enum ProofSheetSelfTest {
         expect("DSCF7207\nDSCF7208 黑白\n7210 7211", ids: ["DSCF7207", "DSCF7208", "DSCF7210", "DSCF7211"],
                notes: ["DSCF7208": "黑白"], "一行一行各认各的")
         expect("DSCF7207 去路人\nDSCF7207 还要瘦脸", ids: ["DSCF7207"], notes: ["DSCF7207": "还要瘦脸"], "同一张写两次取后一次")
-        let header = ProofSheetPage.header + " " + bigSheet.id + "\n"
-        expect(header + "DSCF7207 " + ProofSheetPage.noteMarker + "和 DSCF7208 一样的调色，修 3 处\nDSCF7210\n",
+        let header = "\(ProofSheetPage.header) \(bigSheet.id)\n"
+        let marked = "\(header)DSCF7207 \(ProofSheetPage.noteMarker)和 DSCF7208 一样的调色，修 3 处\nDSCF7210\n"
+        expect(marked,
                ids: ["DSCF7207", "DSCF7210"], notes: ["DSCF7207": "和 DSCF7208 一样的调色，修 3 处"],
                "确认表的「备注：」后面整段原样算备注，里面的文件名、数字不认")
         expect(header + "DSCF7207\nDSCF7208\n", ids: ["DSCF7207", "DSCF7208"], notes: [:], "老格式（没有备注）照旧")

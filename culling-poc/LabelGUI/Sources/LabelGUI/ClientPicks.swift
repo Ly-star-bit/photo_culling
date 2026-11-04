@@ -419,8 +419,9 @@ enum ClientReply {
             let short = note.count > 24 ? String(note.prefix(24)) + "…" : note
             return id + "「" + short + "」"
         }
-        let more = noted.count > 3 ? "…" : ""
-        return "带备注 \(noted.count) 张：" + shown.joined(separator: "、") + more + "（存进客户备注，复制原片时写成「精修要求.csv」）"
+        let more: String = noted.count > 3 ? "…" : ""
+        let list = shown.joined(separator: "、")
+        return "带备注 \(noted.count) 张：\(list)\(more)（存进客户备注，复制原片时写成「精修要求.csv」）"
     }
 
     /// 那张表设了套餐张数：这次认出几张、超没超（只提示）。
@@ -854,7 +855,8 @@ extension OriginalsCopier {
         guard !rows.isEmpty else { return nil }
         let data = retouchCSV(rows)
         for n in 1...99 {
-            let name = retouchFileName + (n == 1 ? "" : "-\(n)") + ".csv"
+            let suffix: String = n == 1 ? "" : "-\(n)"
+            let name = "\(retouchFileName)\(suffix).csv"
             let url = dest.appendingPathComponent(name)
             if FileManager.default.fileExists(atPath: url.path) {
                 if (try? Data(contentsOf: url)) == data { return "\(name) 已经有了（\(rows.count) 张的备注，一模一样）" }

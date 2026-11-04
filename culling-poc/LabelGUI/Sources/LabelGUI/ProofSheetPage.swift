@@ -98,11 +98,13 @@ enum ProofSheetPage {
     static func cell(number: Int, id: String, pick: Bool, jpeg: Data) -> String {
         let name = escape(id)
         let star = pick ? " ★" : ""
-        return "<div class=\"cell\" data-name=\"\(name)\" data-n=\"\(number)\"><img src=\"data:image/jpeg;base64,"
-            + jpeg.base64EncodedString() + "\" alt=\"\(name)\"><span class=\"mark\">♥</span>"
-            + "<div class=\"cap\"><b>\(name)</b> · #\(number)\(star)"
+        // 拆成几段：一长串 + 在 CI 的 Xcode 16 上类型检查会慢。
+        let open = "<div class=\"cell\" data-name=\"\(name)\" data-n=\"\(number)\"><img src=\"data:image/jpeg;base64,"
+        let image = jpeg.base64EncodedString() + "\" alt=\"\(name)\"><span class=\"mark\">♥</span>"
+        let caption = "<div class=\"cap\"><b>\(name)</b> · #\(number)\(star)"
             + "<button class=\"nb\" id=\"nb\(number)\" type=\"button\">写备注</button></div>"
-            + "<div class=\"nt\" id=\"nt\(number)\"></div></div>\n"
+        let note = "<div class=\"nt\" id=\"nt\(number)\"></div></div>\n"
+        return open + image + caption + note
     }
 
     /// 备注最长多少字（页面上的输入框按它限）。
