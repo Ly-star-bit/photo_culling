@@ -72,6 +72,11 @@ if CommandLine.arguments.contains("--mcp-selftest") {
 if AppRuntime.headless && !CommandLine.arguments.contains("--live-host") {
     AppRuntime.pinBatchSettings()
 }
+// GUI 启动门控的探锁、认人走一遍，只打印结论、不弹框（测试用，见 LaunchGate.swift）：
+// LABELGUI_DATA_DIR=<临时> LabelGUI --launch-gate-probe [--budget-ms N]。只读，不建目录。
+if CommandLine.arguments.contains("--launch-gate-probe") {
+    LaunchGate.runProbe()
+}
 
 // --app-ui、--live-host 是测试宿主：整套 store 都会写数据目录，所以 LABELGUI_DATA_DIR 没设、或者指到真实数据目录的，
 // 在建目录、注册字体之前就退出（它们自己的分派里还会再查一遍，那时已经晚了）。不跑 Python，不同步运行时（§9.7、§10.5）；
@@ -83,6 +88,14 @@ if let testHostFlag {
     AppUISnapshot.requireNotRealDataDir(testHostFlag)
 }
 ensureAppDataDir()
+// GUI 启动门控（见 LaunchGate.swift）：这个数据目录已经被另一个活着的选片工具拿着，就弹框「切换过去 / 退出」，
+// 在换掉共用的 runtime/culling-poc、建任何 store 之前退出。只对开界面这一条路：无头命令、测试宿主、带 `--` 参数的、
+// LABELGUI_NO_GUI=1 都不过这道门（测试宿主的 another_instance / waiting_for_lock 照旧）。
+if testHostFlag == nil,
+   LaunchGate.isGUILaunch(argv: CommandLine.arguments, env: ProcessInfo.processInfo.environment,
+                          ppid: getppid(), stdinIsTTY: isatty(STDIN_FILENO) != 0) {
+    MainActor.assumeIsolated { LaunchGate.enforce(dataDir: appDataDir) }
+}
 if testHostFlag == nil {
     syncEmbeddedPipeline(to: appDataDir)
 }

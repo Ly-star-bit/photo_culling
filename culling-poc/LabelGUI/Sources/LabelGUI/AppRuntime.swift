@@ -15,6 +15,7 @@ enum AppRuntime {
         "--album-selftest",
         "--newspaper-selftest",
         "--app-ui", "--live-host",
+        "--launch-gate-probe",
         "--mcp", "--mcp-call", "--mcp-tools", "--mcp-selftest",
     ]
 

@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""无头命令的护栏回归（审查 S36）：会写数据目录的命令，没设 LABELGUI_DATA_DIR、或者设了但指到真实数据目录时都退出码 2，
-什么都不写；分派的每个参数都登记在 AppRuntime.headlessFlags 里。
+"""启动和无头命令的护栏回归（审查 S13、S36）：
+  A–D 会写数据目录的命令，没设 LABELGUI_DATA_DIR、或者设了但指到真实数据目录时都退出码 2，什么都不写；临时目录照常跑。
+  E   batch.*（去重、每章最少保留、排序）钉在内存里：--verdicts --dedupe 照样生效，跑完 LabelGUI 设置域逐字节不变。
+  F   GUI 启动门控的探锁、认人（--launch-gate-probe，只打印、不弹框）：真的 --live-host 拿着锁 → 认出来；
+      旧的一行、pid 不是 LabelGUI、空的一行 → 等满以后 unknown；只拿 LOCK_SH 的不挡。
+  G   main.swift 顶层分派的参数和 AppRuntime.headlessFlags 两边对得上。
 
 用法: python3 -I cli_guard_regression.py <LabelGUI 裸二进制> [工作目录]
 「真实数据目录」一律用 CFFIXED_USER_HOME 换成假的家目录下那个（card_import_regression G 段、live_smoke 同一招）：
 判断哪天失灵，写的也是假的家目录，碰不到用户。第一步先确认假的家目录真的生效，没生效就不往下跑。
 不开界面：每条命令都带 LABELGUI_NO_GUI=1，不跑 .app 里的二进制。工作目录不给就用临时目录，跑完删掉。
 """
-import os, re, shutil, subprocess, sys, tempfile
+import fcntl, json, os, re, select, shutil, signal, subprocess, sys, tempfile, time
 
 BIN = os.path.abspath(sys.argv[1])
 if ".app/" in BIN.lower():
@@ -189,6 +193,92 @@ check(defaults_export() == before, "再跑一条，设置域还是一样")
 r = run(["--verdicts", fixture, "--dedupe"], env_for(data))
 check(r is not None and r.returncode == 0 and not os.path.exists(os.path.join(FAKE_HOME, "Library", "Preferences", "LabelGUI.plist")),
       "假的家目录下跑 --verdicts --dedupe：假的家目录里也没有 LabelGUI.plist")
+
+print("F. GUI 启动门控的探锁、认人（--launch-gate-probe：和 GUI 同一段代码，只打印结论、绝不弹框）")
+
+
+def gate(data, budget=300):
+    r_ = run(["--launch-gate-probe", "--budget-ms", str(budget)], env_for(data))
+    return "超时" if r_ is None else (r_.stdout.strip() if r_.returncode == 0 else f"退出码 {r_.returncode}")
+
+
+def gate_dir(label):
+    d = os.path.join(WORK, f"gate-{label}")
+    os.makedirs(d)
+    return d
+
+
+def hold(data, line, mode=fcntl.LOCK_EX):
+    """本脚本自己拿着 <data>/.live.lock（假装是别的进程），写好那一行。"""
+    fd = os.open(os.path.join(data, ".live.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, mode | fcntl.LOCK_NB)
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, line.encode(), 0)
+    return fd
+
+
+check(gate(gate_dir("empty")) == "launch-gate proceed", "没有锁文件 → proceed")
+r = run(["--launch-gate-probe"], env_for())
+check(r is not None and r.returncode == 2, "--launch-gate-probe 不设 LABELGUI_DATA_DIR → 退出码 2")
+# 一个真的 --live-host 当「另一个实例」：它拿着锁、写了那一行（role=app、pid、exe）
+hd = gate_dir("host")
+snaps = os.path.join(WORK, "snaps")
+os.makedirs(snaps)
+host = subprocess.Popen([BIN, "--live-host", PHOTOS, "--no-view"], env=env_for(hd, LABELGUI_LIVE_TEST_OUT=snaps),
+                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=open(os.path.join(WORK, "host.err"), "w"),
+                        cwd=WORK)
+ready, buf, deadline = False, b"", time.monotonic() + 40
+while not ready and time.monotonic() < deadline and host.poll() is None:
+    if select.select([host.stdout], [], [], 0.2)[0]:
+        chunk = os.read(host.stdout.fileno(), 4096)
+        if not chunk:
+            break
+        buf += chunk
+        ready = any(l.startswith("ready ") for l in buf.decode(errors="replace").splitlines())
+check(ready, f"宿主就绪（pid {host.pid}）")
+try:
+    if ready:
+        want = f"launch-gate running pid={host.pid} path={os.path.realpath(BIN)}"
+        got = gate(hd)
+        check(got == want, f"宿主拿着这个数据目录的锁 → 认出来是它（{got}）")
+        # 对方关了「允许 AI 实时操作」时 socket 不监听、hello 不回，但那一行照样在：门控不靠 hello。这里拿脚本自己拿着锁、
+        # 那一行写宿主的 pid / exe、bridge=off 来演（真的关桥要走 socket 上的 test.set_bridge）
+        bd = gate_dir("bridge-off")
+        fd = hold(bd, json.dumps({"role": "app", "pid": host.pid, "exe": os.path.realpath(BIN), "bridge": "off",
+                                  "reason": "disabled_in_settings"}) + "\n")
+        got = gate(bd)
+        os.close(fd)
+        check(got == want, f"那一行写着 bridge=off（没有 socket）：照样认出来（{got}）")
+finally:
+    if host.poll() is None:
+        host.send_signal(signal.SIGTERM)
+        try:
+            host.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            host.kill()
+            host.wait(timeout=5)
+check(gate(hd) == "launch-gate proceed", "宿主退出以后锁就放了 → proceed")
+# 锁被拿着、那一行认不出人：等满 --budget-ms 以后 unknown（GUI 弹框只给「退出」）
+dead = subprocess.Popen(["/usr/bin/true"])
+dead.wait()
+for label, line, want in [
+    ("pid 是本脚本、exe 写的是 app（pid 跑的不是 LabelGUI）",
+     json.dumps({"role": "app", "pid": os.getpid(), "exe": "/Applications/选片工具.app/Contents/MacOS/LabelGUI"}),
+     f"launch-gate unknown pid={os.getpid()}"),
+    ("那一行是旧的（pid 已经退出）", json.dumps({"role": "app", "pid": dead.pid, "exe": os.path.realpath(BIN)}),
+     f"launch-gate unknown pid={dead.pid}"),
+    ("那一行是空的", "", "launch-gate unknown pid=-"),
+]:
+    d = gate_dir(f"held-{len(os.listdir(WORK))}")
+    fd = hold(d, line)
+    got = gate(d)
+    os.close(fd)
+    check(got == want, f"{label} → {got}")
+d = gate_dir("shared")
+fd = hold(d, "", fcntl.LOCK_SH)
+got = gate(d)
+os.close(fd)
+check(got == "launch-gate proceed", f"别人只拿着 LOCK_SH（--mcp 探锁那种）不挡 → {got}")
 
 print("G. 分派的每个参数都登记在 AppRuntime.headlessFlags 里（漏登记：脚本里跑会被 NoGUIGate 拦下，终端里跑 headless=false）")
 main_src = open(os.path.join(SRC, "main.swift"), encoding="utf-8").read()
