@@ -1146,6 +1146,12 @@ final class BatchStore: ObservableObject {
     private var currentSessionKey = "default"
     private var currentSessionPath = ""
 
+    /// 最近一次 switchSession（返回 true 的那次）打开的不是给的那个文件夹，而是按原路径认出来的、已经改名 / 挪走了的那一场
+    /// （红条说了「现在是另一个文件夹」）：这里是那一场的照片现在在哪；nil = 打开的就是给的文件夹。调用方据此别接着
+    /// 「分析新文件夹」—— runAnalysis 分析的会是挪走的那一场（全部复用、红条被清掉），给的文件夹里新导进来的照片照样没人管（审查）。
+    /// switchSession 返回 true 以后马上读才有意义。
+    private(set) var lastSwitchOpenedElsewhere: URL?
+
     /// 这一场开在存储卡上（审查 S07）：移废片、写 XMP、高 ISO 复制、导出到卡上都挡住，批量页顶上叫人先导入这张卡。
     /// switchSession 里算（主线程；CardImporter.cardSession 只对照片文件夹本身取卷属性，不读卷根），没打开场次时是 .no。
     @Published private(set) var cardSession: CardSessionCheck = .no
@@ -1239,6 +1245,7 @@ final class BatchStore: ObservableObject {
            let target = SessionLocation.identity(resolved.path), given != target {
             carriedAway = resolved
         }
+        lastSwitchOpenedElsewhere = carriedAway
         // 认回挪了的文件夹（审查 S04 第一步）：这个路径还没有分析结果，「最近场次」里却有一条的书签解析到的就是它（同卷改名 /
         // 挪动、卷名变「T7 1」以后从「选择文件夹…」或拖进来打开的）—— 沿用那一条的 key 和 path，和从菜单点一个改了名的
         // 文件夹同一个样子，不再开一个空场次整场重分析。实时桥（followBookmark: false）不认：它就是要只按字符串走。

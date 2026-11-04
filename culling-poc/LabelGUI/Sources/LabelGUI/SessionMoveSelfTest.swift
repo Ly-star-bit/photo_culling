@@ -334,6 +334,7 @@ enum SessionMoveSelfTest {
         check(batch.switchSession(to: q) && batch.sessionDir.lastPathComponent == key(p), "改名以后从「选择文件夹…」打开：认回")
         check(batch.switchSession(to: p) && !(batch.lastError ?? "").contains("另一个文件夹"),
               "原路径上没有东西时从菜单点：照常跟书签，不说「另一个文件夹」", batch.lastError ?? "")
+        check(batch.lastSwitchOpenedElsewhere == nil, "　…… 也不交出「打开的是别处那一场」（调用方照常分析、照常问）")
         // 第二张卡导到同一个日期文件夹。
         try? fm.createDirectory(at: p, withIntermediateDirectories: true)
         try? Data(repeating: 0x45, count: 800).write(to: p.appendingPathComponent("DSCF9001.JPG"))
@@ -342,6 +343,23 @@ enum SessionMoveSelfTest {
         check(sameDir(batch.photoDir, q) && error.contains("另一个文件夹") && error.contains("20261104 张三") && error.contains("改个名"),
               "打开的是挪走的那一场，红条说原路径现在是另一个文件夹、要改名再开", error)
         check(manifestAt(key(p), q), "原来那一场的 manifest 没被改到新文件夹上")
+        check(sameDir(batch.lastSwitchOpenedElsewhere, q), "switchSession 交出打开的是挪到别处的那一场（调用方别接着分析、别问「已有分析结果」）")
+        // 导卡自动打开（openFinishedImport：「这次导进一个已有的文件夹…」选了原路径）也走这条：不接着分析（分析的会是挪走的
+        // 那一场、红条被清掉），导入横幅说怎么打开新导的这批。
+        batch.importNotice = nil
+        batch.finishedImport = CardImporter.FinishedImport(folder: p, analyze: true, shots: 1)
+        batch.openFinishedImport()
+        let analyzing = batch.isRunning
+        FileSafetySelfTest.wait(batch)
+        let afterImport = batch.lastError ?? ""
+        let notice = batch.importNotice ?? ""
+        check(!analyzing && afterImport.contains("另一个文件夹") && sameDir(batch.photoDir, q),
+              "导卡自动打开：没接着分析挪走的那一场，红条还在", afterImport)
+        check(notice.contains("1 张导到了") && notice.contains("改个名") && notice.contains("选择文件夹") && batch.finishedImport == nil,
+              "导入横幅说新导的这批没打开、要先改名再用「选择文件夹…」打开（横幅不留着等再点）", notice)
+        check(!batch.items.contains { under($0.rawPath, p) } && manifestAt(key(p), q),
+              "新导的照片没混进挪走的那一场，manifest 还指着挪走的位置")
+        batch.importNotice = nil
     }
 
     /// 导卡选日期文件夹（CardImporter.target → dayFolder）：yyyyMMdd 这个名字被改了名 / 挪走的那一场占着（key 是原路径的

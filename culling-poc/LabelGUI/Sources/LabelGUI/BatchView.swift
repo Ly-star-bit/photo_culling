@@ -2368,6 +2368,9 @@ struct BatchView: View {
         if panel.runModal() == .OK, let url = panel.url {
             // 没切成（这一场还有改动没存上）：下面的「已有分析结果」会说成新选的那个文件夹。
             guard store.switchSession(to: url) else { return }
+            // 选的文件夹在原路径上、按它认出的是已经改名 / 挪走的那一场（红条说了要改名再开）：不问「已有分析结果、要重新分析吗」
+            // —— 标题说的是选的这个文件夹，点「重新分析」分析的却是挪走的那一场，红条还被清掉（审查）。
+            if store.lastSwitchOpenedElsewhere != nil { return }
             // A folder with no cached session shows an empty grid until analysis
             // runs — users read that as "选了没反应", so kick it off right away.
             if store.items.isEmpty {

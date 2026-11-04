@@ -977,6 +977,21 @@ check(r.returncode == 0 and listing(p2_l) == LNAMES + ["IMG_0003.BMP"] and not o
       f"导进了 {TODAY}-2（{listing(p2_l)}）")
 check(folder.endswith("/" + TODAY + "-2") and " · 3 张" in line, f"打开、分析的是 {TODAY}-2 这一场，3 张（{line}）")
 
+print("L3. 「这次导进一个已有的文件夹…」选了原路径（上面又建了 yyyyMMdd）：自动打开认出的是改了名的那一场 —— 不接着分析，红条和横幅说要先改名")
+os.makedirs(p_l)
+card_ld = mkcard("card_ld", {"DCIM/100CANON/" + n: bmp_l(400, 240) for n in LNAMES})   # 同名、不同片
+q_before = manifests_l(data_l)[q_session[0]] if q_session else None
+r = run_card_env(card_ld, data_l, None, {}, "--into-existing", p_l, "--via-store")
+folder, line = opened_l(r.stdout)
+err = next((l for l in r.stdout.splitlines() if l.startswith("lastError：")), "")
+notice = next((l for l in r.stdout.splitlines() if l.startswith("导入提醒：")), "")
+check(r.returncode == 0 and listing(p_l) == LNAMES, f"照片导进了选的 {TODAY}（{listing(p_l)}）")
+check(folder.endswith("/" + TODAY + " 张三") and " · 2 张" in line, f"按 {TODAY} 认出的是改了名的那一场（{line}）")
+check("另一个文件夹" in err and "改个名" in err, f"红条说原路径现在是另一个文件夹、要改名再开，没被接着的分析清掉（{err}）")
+check("分析" not in line.split(" · ", 2)[-1], f"没接着分析改了名的那一场（{line}）")
+check("2 张导到了" in notice and "改个名" in notice and "选择文件夹" in notice, f"导入横幅说新导的这批没打开、怎么打开（{notice}）")
+check(q_session and manifests_l(data_l).get(q_session[0]) == q_before, "改了名的那一场的 manifest 一字没动（新卡的照片没混进去）")
+
 print("F. 存储卡从头到尾没被动过")
 check(tree(CARD) == card_before, "卡上每个文件的大小 / 修改时间 / SHA-256 都和开始时一样")
 
