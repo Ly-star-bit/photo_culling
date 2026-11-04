@@ -18,10 +18,19 @@ extension ImageLoader {
 
         init() {}
 
+        /// manifest.json 里和 photos 并列的一份：上一次列出来、却没进 photos 的照片（取消时还没轮到的、这一次解码失败的），
+        /// 只记 id、raw_path、decode_path。只靠 photos 的话，沿用下来的 id 掉出去一次，下一次就按撞名规矩重新起名
+        /// （仪式_DSC_0001 又变回 DSC_0001）。每次分析只写这一次列出来的，不和更早的合并：移走了的照片照旧放掉它的 id。
+        static let idOnlyKey = "photos_without_results"
+
         /// 从上一次的 manifest 建表 —— 不管哪个引擎、哪个分析版本写的：版本升级整场重分析时 id 也得沿用。
         /// 路径先相对旧 manifest 的 photo_dir 算（拍摄文件夹挪过、外置盘换了挂载点也对得上），套不上再相对这一次的根目录。
+        /// photos 先、idOnlyKey 那份后（同一个文件先记下的算）。
         init(manifest: [String: Any]?, photoDir: URL) {
-            guard let rows = manifest?["photos"] as? [[String: Any]], !rows.isEmpty else { return }
+            let analyzed = manifest?["photos"] as? [[String: Any]] ?? []
+            let idOnly = manifest?[Self.idOnlyKey] as? [[String: Any]] ?? []
+            let rows = analyzed + idOnly
+            guard !rows.isEmpty else { return }
             var roots: [String] = []
             if let old = manifest?["photo_dir"] as? String, !old.isEmpty { roots.append(old) }
             roots.append(photoDir.path)

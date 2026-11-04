@@ -217,6 +217,22 @@ def run_all():
     expect_ids(a2, {"仪式/DSC_0001.JPG": "仪式_DSC_0001", "仪式/DSC_0002.JPG": "DSC_0002"}, "重分析以后 id 不变")
     check(a2.verdicts().get("仪式_DSC_0001") == "精选", "改判还对得上")
 
+    print("A3. 整场重分析时那张解不开（掉出 manifest 的 photos 一次），换回好的再分析：id 还是 仪式_DSC_0001")
+    a3 = Shoot("shoot_a3")
+    a3.put("仪式/DSC_0001.JPG"); a3.put("晚宴/DSC_0001.JPG"); a3.put("仪式/DSC_0002.JPG")
+    expect_run(a3.analyze(), 3, 0, "第一次")
+    a3.write("overrides.json", {"仪式_DSC_0001": "精选"})
+    a3.edit("layer1_results.json", lambda j: j.update(analysis_version=1))
+    a3.rm("晚宴/DSC_0001.JPG")
+    put_junk(a3.root, "仪式/DSC_0001.JPG")
+    res = a3.analyze()
+    check(res["failed"] == ["仪式_DSC_0001"], f"整场重分析，解不开的那张报 仪式_DSC_0001（实际 {res['failed']}）")
+    a3.put("仪式/DSC_0001.JPG")
+    expect_run(a3.analyze(), 1, 1, "换回解得开的")
+    expect_ids(a3, {"仪式/DSC_0001.JPG": "仪式_DSC_0001", "仪式/DSC_0002.JPG": "DSC_0002"},
+               "掉出过一次还叫 仪式_DSC_0001（不变回 DSC_0001）")
+    check(a3.verdicts().get("仪式_DSC_0001") == "精选", "改判还对得上")
+
     print("B. 主机位在子文件夹里、改判过，后来放进号码重叠的副机位子文件夹")
     b = Shoot("shoot_b")
     b.put("主机位/DSCF0001.JPG"); b.put("主机位/DSCF0002.JPG")
@@ -242,6 +258,13 @@ def run_all():
     b.rm("主机位/DSCF0001.JPG")
     res = b.analyze()
     check(res["failed"] == ["DSCF0001"], f"失败的是 DSCF0001，不是 主机位_DSCF0001（实际 {res['failed']}）")
+    print("B4. 再跑一次：上一次失败的那张没进 manifest 的 photos，id 也记着（副机位/DSCF0001 还在，不变成 主机位_DSCF0001）")
+    with open(os.path.join(b.session, "manifest.json")) as f:
+        idonly = {os.path.relpath(os.path.realpath(p["raw_path"]), os.path.realpath(b.root)): p["id"]
+                  for p in json.load(f).get("photos_without_results", [])}
+    check(idonly == {"主机位/DSCF0001.RAF": "DSCF0001"}, f"manifest 的 photos_without_results 记着失败的那张（实际 {idonly}）")
+    res = b.analyze()
+    check(res["failed"] == ["DSCF0001"], f"第二次失败的还叫 DSCF0001（实际 {res['failed']}）")
 
     print("C. 子文件夹里的 DSCF0001 改判过，根目录后来放进一张同名的")
     c = Shoot("shoot_c")
