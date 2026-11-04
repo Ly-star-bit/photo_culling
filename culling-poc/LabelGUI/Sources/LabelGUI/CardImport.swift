@@ -1129,6 +1129,7 @@ enum CardImporter {
             renameCode = errno
         }
         if renameCode == ENOTSUP {
+            renameFallbacks.add()
             var existing = stat()
             if lstat(final.path, &existing) == 0 { throw ImportError.targetExists(final.lastPathComponent) }
             let probe = errno
@@ -1215,6 +1216,17 @@ enum CardImporter {
         let env = ProcessInfo.processInfo.environment
         return env["LABELGUI_TEST_NO_RENAME_EXCL"] == "1" && !(env["LABELGUI_DATA_DIR"] ?? "").isEmpty
     }()
+
+    /// copyOne 走了 ENOTSUP 退路（lstat + 普通 rename）的次数：--ingest 打出来，回归核对退路真的走了 —— 只看导进来的
+    /// 结果分不出走没走（审查发现：开关失效时 K1、K2 照样绿）。
+    static let renameFallbacks = EventCounter()
+
+    final class EventCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func add() { lock.lock(); count += 1; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+    }
 
     /// 错误里的 POSIX 错误码（Foundation 包了一层的也挖出来）。
     static func posixCode(_ error: Error) -> Int32? {
@@ -1579,6 +1591,7 @@ enum CardImportCLI {
             return args[i + 1]
         }
         CollageCLI.requireIsolatedDataDir("--ingest", "会写导入账本")
+        if CardImporter.pretendNoExclusiveRename { print("（测试：假装目标卷不支持 RENAME_EXCL）") }
         // 导到哪：--dest 直接给目标文件夹（老用法）；或者走界面那套 —— --dest-root 导入根目录（按今天建 yyyyMMdd）、
         // --into-existing 导进已有的文件夹、--use-saved-settings 用数据目录里记住的根目录（--save-settings 先记下）。
         // 哪个都没给（或记住的是「图片」）就拒绝：测试不往真的「图片」里写。
@@ -1709,6 +1722,7 @@ enum CardImportCLI {
         }
         print(outcome.summary + "（\(outcome.copiedFiles) 个文件）")
         print(String(format: "elapsed=%.3f", outcome.elapsed))
+        print("RENAME_EXCL 退路：\(CardImporter.renameFallbacks.value) 次")
         for f in outcome.failed { print("  失败 \(f.name)：\(f.reason)") }
         if outcome.backupDestination != nil {
             print("备份：写成 \(outcome.backupCopiedFiles)/\(outcome.backupPlannedFiles) 个文件" +

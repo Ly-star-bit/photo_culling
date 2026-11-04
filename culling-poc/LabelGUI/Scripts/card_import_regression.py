@@ -341,6 +341,16 @@ check(r.returncode == 0 and listing(d) == sorted(os.path.basename(k) for k in k1
 check(all(sha(os.path.join(d, os.path.basename(k))) == hashlib.sha256(v).hexdigest() for k, v in k1_files.items()),
       "内容和卡上逐字节一致")
 check(hidden(d) == [], f"没有残留的 .part（{hidden(d)}）")
+PRETEND = "（测试：假装目标卷不支持 RENAME_EXCL）"
+
+
+def fallbacks(stdout):
+    """--ingest 打的「RENAME_EXCL 退路：N 次」（copyOne 真的走了 ENOTSUP 那条退路几次）。"""
+    m = re.search(r"RENAME_EXCL 退路：(\d+) 次", stdout)
+    return int(m.group(1)) if m else -1
+
+
+check(PRETEND in r.stdout and fallbacks(r.stdout) == 4, f"开关真的生效：4 个文件都走了退路（{fallbacks(r.stdout)} 次）")
 
 print("K2. 退路下，整张检查之后才冒出来的悬空符号链接：lstat 看得见，没被改名盖掉")
 d = os.path.join(WORK, "dest_k2")
@@ -349,12 +359,14 @@ link = os.path.join(d, "IMG_0001.JPG")
 check(os.path.islink(link) and os.readlink(link) == "nowhere-planted-by-test", "符号链接还是原来那个，没被盖掉")
 check(r.returncode != 0 and "没覆盖" in r.stdout, "IMG_0001.JPG 报「已经有、没覆盖」，退出码非 0")
 check(hidden(d) == [], f"没有残留的 .part（{hidden(d)}）")
+check(PRETEND in r.stdout and fallbacks(r.stdout) >= 2, f"撞上链接的那个也是在退路里拦下的（退路 {fallbacks(r.stdout)} 次）")
 
 print("K3. 计划之后冒出悬空的符号链接：整张跳过（RAW 也不导，不拆开），链接没动")
 d = os.path.join(WORK, "dest_k3")
 r = run_card_env(c, os.path.join(WORK, "data_k3"), d, {}, "--plant-symlink-after-plan", "IMG_0002.JPG")
 check(listing(d) == ["IMG_0001.CR3", "IMG_0001.JPG", "IMG_0002.JPG"], f"IMG_0002 整张没导（{listing(d)}）")
 check(os.path.islink(os.path.join(d, "IMG_0002.JPG")), "符号链接还在")
+check(PRETEND not in r.stdout and fallbacks(r.stdout) == 0, f"对照：不设开关时一次退路都不走（{fallbacks(r.stdout)} 次）")
 
 # ---------- RAW、JPG 分卡存：文件头（拍摄时间、SubSec、型号、机身序列号）认同一帧 ----------
 import struct
