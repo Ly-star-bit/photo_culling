@@ -79,6 +79,9 @@ final class PersistSelfTestHarness {
             try? fm.removeItem(at: target)
             try? fm.copyItem(at: fixture.appendingPathComponent(file), to: target)
         }
+        // fixture 的 photo_dir 是不存在的 /tmp/labelgui-fixture-photot：先把照片路径换到这个文件夹下（以前第一次打开时
+        // switchSession 不核对就替它改了；现在书签解析不到时要抽查对得上才改，空文件夹对不上，会按记的位置开、报红条）。
+        _ = SessionLocation.rebaseManifest(in: dir, to: folder)
         let session = Session(folder: folder, dir: dir)
         fillCache(session)
         return session
