@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""无头命令的护栏回归（审查 S36）：会写数据目录的命令，没设 LABELGUI_DATA_DIR、或者设了但指到真实数据目录时都退出码 2，
+什么都不写；分派的每个参数都登记在 AppRuntime.headlessFlags 里。
+
+用法: python3 -I cli_guard_regression.py <LabelGUI 裸二进制> [工作目录]
+「真实数据目录」一律用 CFFIXED_USER_HOME 换成假的家目录下那个（card_import_regression G 段、live_smoke 同一招）：
+判断哪天失灵，写的也是假的家目录，碰不到用户。第一步先确认假的家目录真的生效，没生效就不往下跑。
+不开界面：每条命令都带 LABELGUI_NO_GUI=1，不跑 .app 里的二进制。工作目录不给就用临时目录，跑完删掉。
+"""
+import os, re, shutil, subprocess, sys, tempfile
+
+BIN = os.path.abspath(sys.argv[1])
+if ".app/" in BIN.lower():
+    print("只跑裸二进制（.build/…/LabelGUI），不跑 .app 里的那份")
+    sys.exit(2)
+WORK = sys.argv[2] if len(sys.argv) > 2 else tempfile.mkdtemp(prefix="cli-guard-")
+CLEANUP = len(sys.argv) <= 2
+shutil.rmtree(WORK, ignore_errors=True)
+os.makedirs(WORK)
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = os.path.join(ROOT, "Sources", "LabelGUI")
+FIX = os.path.join(ROOT, "Fixtures", "photot-session")
+FAKE_HOME = os.path.join(WORK, "假的家目录")
+FAKE_REAL = os.path.join(FAKE_HOME, "Library", "Application Support", "选片工具")
+SOCK = tempfile.mkdtemp(prefix="cli-guard-sock-")   # socket 根目录要短（sun_path 103 字节）
+OUT = os.path.join(WORK, "out")
+PHOTOS = os.path.join(WORK, "photos")
+CARD = os.path.join(WORK, "card")
+for d in (FAKE_HOME, OUT, PHOTOS, os.path.join(CARD, "DCIM", "100CANON"), os.path.join(WORK, "mcp-out")):
+    os.makedirs(d, exist_ok=True)
+failures = []
+
+
+def check(cond, msg):
+    print(("  ok   " if cond else "  FAIL ") + msg)
+    if not cond:
+        failures.append(msg)
+
+
+def env_for(data=None, **extra):
+    """干净的环境：去掉所有 LABELGUI_*，家目录换成假的；data=None 就是不设 LABELGUI_DATA_DIR。"""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LABELGUI_") and k != "CFFIXED_USER_HOME"}
+    env.update(CFFIXED_USER_HOME=FAKE_HOME, HOME=FAKE_HOME, LABELGUI_NO_GUI="1", LABELGUI_LIVE_SOCK_ROOT=SOCK,
+               LABELGUI_MCP_OUT=os.path.join(WORK, "mcp-out"))
+    if data is not None:
+        env["LABELGUI_DATA_DIR"] = data
+    env.update(extra)
+    return env
+
+
+def run(args, env, timeout=60):
+    try:
+        return subprocess.run([BIN, *args], env=env, capture_output=True, text=True, timeout=timeout,
+                              cwd=WORK, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def finish():
+    print()
+    print("无头护栏回归全部通过" if not failures else f"无头护栏回归 {len(failures)} 项失败")
+    shutil.rmtree(SOCK, ignore_errors=True)
+    if CLEANUP and not failures:
+        shutil.rmtree(WORK, ignore_errors=True)
+    sys.exit(1 if failures else 0)
+
+
+print("A. 假的家目录生效（不生效就不往下跑：后面的命令要是闸失灵，会写到真的家目录）")
+r = run(["--session-key", PHOTOS], env_for())
+check(r is not None and r.returncode == 0 and os.path.isdir(os.path.join(FAKE_REAL, "fonts")),
+      f"--session-key 不设 LABELGUI_DATA_DIR：数据目录建在假的家目录下（{FAKE_REAL}）")
+if failures:
+    finish()
+
+# 会写数据目录的命令 × 各自的参数形状（参数给全，保证走到各自的闸；闸失灵时写的也只是假的家目录）
+o = lambda name: os.path.join(OUT, name)
+WRITERS = [
+    # 审查 S36 新加闸的四条
+    ["--compare", PHOTOS, "--keys", "enter"],
+    ["--compare", PHOTOS, "--auto", "--keys", "1"],
+    ["--compare", PHOTOS, "--keys", "undo"],
+    ["--verdicts", PHOTOS, "--accept-all"],
+    ["--verdicts", PHOTOS, "--accept-all", "--undo"],
+    ["--verdicts", PHOTOS, "--clear-recents"],
+    ["--collage", PHOTOS, "--auto", "4", "--out", o("c.jpg")],
+    ["--collage", PHOTOS, "--album", "--out", o("album")],
+    ["--compare-crop", PHOTOS, "IMG_0001", o("crop.jpg")],
+    # 本来就有闸的（统一成 requireIsolatedDataDir 以后照样拦）
+    ["--export-xmp", PHOTOS],
+    ["--body-offset", PHOTOS, "--body", "x", "--seconds", "+60"],
+    ["--proof-sheet", PHOTOS, "--out", o("proof.pdf")],
+    ["--client-import", PHOTOS, "--file", o("picks.txt"), "--apply"],
+    ["--copy-list", PHOTOS, "--format", "lines"],
+    ["--copy-originals", PHOTOS, "--dest", o("orig")],
+    ["--ingest", CARD, "--dest", o("ingest")],
+    ["--collage-ops", PHOTOS, "--ops", "clear"],
+    ["--collage-ui", PHOTOS, o("cu.png")],
+    ["--batch-ui", PHOTOS, o("bu.png")],
+    ["--compare-ui", PHOTOS, o("cmpu.png")],
+    ["--watermark-ui", PHOTOS, o("wu.png")],
+    ["--watermark-batch", PHOTOS, o("wb")],
+    ["--export-jpeg", PHOTOS, "--dest", o("jpeg")],
+    ["--card-ui", CARD, o("card.png"), "--dest", o("cd")],
+    ["--app-ui", PHOTOS, o("app.png")],
+    ["--live-host", PHOTOS, "--no-view"],
+    ["--mask-selftest", PHOTOS],
+    ["--film-selftest", PHOTOS, "--out", o("film")],
+    ["--fashion-selftest", PHOTOS],
+    ["--newspaper-selftest", PHOTOS],
+    ["--album-selftest", PHOTOS, "--out", o("album-st")],
+]
+SESSIONS = os.path.join(FAKE_REAL, "sessions")
+
+
+def expect_refused(args, env, label):
+    shutil.rmtree(SESSIONS, ignore_errors=True)
+    r = run(args, env)
+    rc = "超时" if r is None else r.returncode
+    leaked = os.path.exists(SESSIONS)
+    check(r is not None and r.returncode == 2 and not leaked,
+          f"{label}：{' '.join(a.replace(WORK, '…') for a in args)} → 退出码 {rc}"
+          + ("，假的家目录下出现了 sessions/" if leaked else "，没有 sessions/"))
+
+
+print("B. 不设 LABELGUI_DATA_DIR：会写数据目录的命令都退出码 2，假的家目录下不出现 sessions/")
+for args in WRITERS:
+    expect_refused(args, env_for(), "没设")
+
+print("C. LABELGUI_DATA_DIR 指到真实数据目录（原样 / 符号链接 / 大小写不同 / 结尾斜杠）也退出码 2")
+link = os.path.join(WORK, "指过去的链接")
+os.symlink(FAKE_REAL, link)
+variants = [("原样", FAKE_REAL), ("符号链接", link), ("大写", FAKE_REAL.replace("Application Support", "APPLICATION SUPPORT")),
+            ("结尾斜杠", FAKE_REAL + "/")]
+for label, path in variants:
+    for args in (["--compare", PHOTOS, "--keys", "enter"], ["--verdicts", PHOTOS, "--accept-all"],
+                 ["--collage", PHOTOS, "--auto", "4", "--out", o("c.jpg")], ["--collage-ops", PHOTOS, "--ops", "clear"],
+                 ["--body-offset", PHOTOS], ["--ingest", CARD, "--dest", o("ingest")], ["--export-xmp", PHOTOS]):
+        expect_refused(args, env_for(path), label)
+
+print("D. 临时数据目录照常跑（闸不多拦）")
+data = os.path.join(WORK, "data-ok")
+os.makedirs(data)
+fixture = "/tmp/labelgui-fixture-photot"   # 和 verdict_regression.sh 同一个路径（不需要存在，session key 从它算）
+key = run(["--session-key", fixture], env_for(data)).stdout.strip()
+os.makedirs(os.path.join(data, "sessions", key))
+for name in ("manifest.json", "layer1_results.json"):
+    shutil.copyfile(os.path.join(FIX, name), os.path.join(data, "sessions", key, name))
+r = run(["--verdicts", fixture], env_for(data))
+expected = open(os.path.join(FIX, "expected_verdicts.txt"), encoding="utf-8").read()
+check(r is not None and r.returncode == 0 and r.stdout == expected, "--verdicts（只读）：退出码 0，输出和 expected_verdicts.txt 一样")
+r = run(["--compare", fixture], env_for(data))
+check(r is not None and r.returncode == 0, f"--compare 不给 --keys：退出码 {None if r is None else r.returncode}")
+r = run(["--compare", fixture, "--keys", "enter"], env_for(data))
+check(r is not None and r.returncode == 0, f"--compare --keys enter（临时目录）：退出码 {None if r is None else r.returncode}")
+r = run(["--verdicts", fixture, "--accept-all", "--undo"], env_for(data))
+check(r is not None and r.returncode == 0 and "接受全部推荐" in r.stdout,
+      f"--verdicts --accept-all（临时目录）：退出码 {None if r is None else r.returncode}")
+check(not os.path.exists(SESSIONS), "这几条都没碰假的家目录")
+
+print("G. 分派的每个参数都登记在 AppRuntime.headlessFlags 里（漏登记：脚本里跑会被 NoGUIGate 拦下，终端里跑 headless=false）")
+main_src = open(os.path.join(SRC, "main.swift"), encoding="utf-8").read()
+runtime_src = open(os.path.join(SRC, "AppRuntime.swift"), encoding="utf-8").read()
+picks_src = open(os.path.join(SRC, "ClientPicksView.swift"), encoding="utf-8").read()
+mcp_src = open(os.path.join(SRC, "MCP", "MCPServerMain.swift"), encoding="utf-8").read()
+m = re.search(r"headlessFlags: Set<String> = \[(.*?)\]", runtime_src, re.S)
+registered = set(re.findall(r'"(--[\w-]+)"', m.group(1))) if m else set()
+dispatched = set()
+for line in main_src.splitlines():
+    if not line.startswith(("if ", "for flag in ")):   # 只看顶层分派（缩进的是各自的子选项）
+        continue
+    dispatched |= set(re.findall(r'(?:firstIndex\(of: |contains\()"(--[\w-]+)"', line))
+    if line.startswith("for flag in ["):
+        dispatched |= set(re.findall(r'"(--[\w-]+)"', line))
+pm = re.search(r"static let flags = \[(.*?)\]", picks_src)
+dispatched |= set(re.findall(r'"(--[\w-]+)"', pm.group(1))) if pm else set()
+dispatched |= {f for f in re.findall(r'"(--mcp[\w-]*)"', mcp_src)}
+check(bool(registered) and len(dispatched) > 30, f"读到了 headlessFlags（{len(registered)} 个）和顶层分派（{len(dispatched)} 个）")
+check(dispatched <= registered, f"分派了却没登记：{sorted(dispatched - registered)}")
+check(registered <= dispatched, f"登记了却没有分派：{sorted(registered - dispatched)}")
+
+finish()

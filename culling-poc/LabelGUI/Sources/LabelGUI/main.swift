@@ -209,6 +209,13 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
     if let gi = CommandLine.arguments.firstIndex(of: "--gap"), CommandLine.arguments.count > gi + 1 {
         gapOverride = Double(CommandLine.arguments[gi + 1])
     }
+    // 会写的两个开关在建 store 之前就查（建 store 本身就会改 sessions.json）：没设临时数据目录 → 退出码 2，什么都不写。
+    if CommandLine.arguments.contains("--accept-all") {
+        CollageCLI.requireIsolatedDataDir("--verdicts --accept-all", "会改写这一场的 overrides.json / accepted.json")
+    }
+    if CommandLine.arguments.contains("--clear-recents") {
+        CollageCLI.requireIsolatedDataDir("--verdicts --clear-recents", "会删场次缓存")
+    }
     MainActor.assumeIsolated {
         let store = BatchStore(dataDir: appDataDir,
                                pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
@@ -262,9 +269,8 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
             if multiBody { BodyClockCLI.printTimeline(store) }
         }
         // --clear-recents：打印完再点一次「全部清除」，数还剩哪些场次目录 —— 验证掉出菜单的旧场次
-        // 判决不被顺手删掉。会删数据目录里的场次：只在临时 LABELGUI_DATA_DIR 下跑。
+        // 判决不被顺手删掉。会删数据目录里的场次：只在临时 LABELGUI_DATA_DIR 下跑（闸在建 store 之前）。
         if CommandLine.arguments.contains("--clear-recents") {
-            CollageCLI.requireIsolatedDataDir("--clear-recents", "会删场次缓存")
             store.clearRecentSessions()
             let root = appDataDir.appendingPathComponent("sessions")
             let left = ((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
@@ -335,6 +341,11 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--compare"),
         guard let i = CommandLine.arguments.firstIndex(of: flag), CommandLine.arguments.count > i + 1 else { return nil }
         return CommandLine.arguments[i + 1]
     }
+    // 给了 --keys 就要临时数据目录：⏎、--auto 加数字键、undo 都会同步写 overrides.json / accepted.json，
+    // 只拦 enter 会漏掉后两种。不给 --keys 只打印这一组的草稿。
+    if CommandLine.arguments.contains("--keys") {
+        CollageCLI.requireIsolatedDataDir("--compare --keys", "按键（⏎、--auto 加数字键、undo）会改写这一场的 overrides.json / accepted.json")
+    }
     MainActor.assumeIsolated {
         // 不碰 minKeepersPerChapter 这类设置：它们写的是全局 UserDefaults，LABELGUI_DATA_DIR
         // 隔离不了 —— 跑一次测试会把 GUI 里的设置改掉。
@@ -392,9 +403,11 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--compare"),
 }
 
 // Headless 拼图 / 相册：LabelGUI --collage <photo_dir> [选项]（选项见 CollageCLI.swift）。
-// 只读分析结果、只写 --out —— 界面不开也能逐像素看版式和裁切。
+// 只读分析结果、只写 --out —— 界面不开也能逐像素看版式和裁切。打开场次会改写 sessions.json（重排最近场次、
+// 可能挤掉第 15 场并清它的预览），所以也要临时数据目录。
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--collage"),
    CommandLine.arguments.count > flagIndex + 1 {
+    CollageCLI.requireIsolatedDataDir("--collage", "打开场次会改写 sessions.json（重排最近场次）")
     MainActor.assumeIsolated {
         CollageCLI.run(flagIndex: flagIndex)
     }
@@ -570,6 +583,7 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--compare-crop"),
     let dir = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])
     let id = CommandLine.arguments[flagIndex + 2]
     let out = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 3])
+    CollageCLI.requireIsolatedDataDir("--compare-crop", "打开场次会改写 sessions.json（重排最近场次）")
     MainActor.assumeIsolated {
         let store = BatchStore(dataDir: appDataDir,
                                pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
