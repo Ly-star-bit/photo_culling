@@ -9,6 +9,7 @@ enum CollageAlbumPlanSelfTest {
 
     static func run(book: CollageStyleFineArtSelfTest.Book, check: (Bool, String, String) -> Void) {
         checkClientPicks(book: book, check: check)
+        checkDistinctKeeping(check: check)
         checkBudgetClassic(book: book, check: check)
         checkBudgetFineArt(book: book, check: check)
         checkBudgetModel(check: check)
@@ -360,6 +361,43 @@ enum CollageAlbumPlanSelfTest {
 
     // MARK: - F19 客户选中
 
+    /// 相似去重豁免客户选中，走生产的 distinctMoments（合成照片没有 Vision 特征：注入画面距离）：
+    /// K1、K2 几乎一样，K2、K4 几乎一样，K1–K4 有点像但不到连拍，K3 和谁都远（中位数 = 远的那个）。
+    /// 不豁免：K2 和 K1 是连拍 → 拿掉；K4 只和 K1 有点像 → 留。豁免 K2：K2 留下、也算「已经留下的」→ K4 和它是连拍、拿掉。
+    /// 默认编排（CollageAlbum.plan dedupe）、fine-art（不给相似关系 = 生产那条路）、plan(theme: .fineArt) 各走一遍。
+    static func checkDistinctKeeping(check: (Bool, String, String) -> Void) {
+        print("== 相似去重豁免客户选中（注入画面距离，走 distinctMoments）")
+        typealias B = CollageStyleFineArtSelfTest.Book
+        let base = [B.ref("K1", 1, 0, score: 2.0), B.ref("K2", 1, 1, score: 1.5), B.ref("K3", 1, 2, score: 1.8),
+                    B.ref("K4", 1, 3, score: 1.4)]
+        let near: [Set<String>: Double] = [["K1", "K2"]: 0.1, ["K2", "K4"]: 0.1, ["K1", "K4"]: 0.6]
+        CollageSelect.distanceOverride = { a, b in near[[a.id, b.id]] ?? 1.0 }
+        defer { CollageSelect.distanceOverride = nil }
+        var picked = base
+        for i in picked.indices where picked[i].id == "K2" { picked[i].clientPick = true }
+
+        func ids(_ list: [CollagePhotoRef]) -> String { list.map(\.id).sorted().joined(separator: ",") }
+        let plain = CollageSelect.distinctMoments(base)
+        let kept = CollageSelect.distinctMoments(base, keeping: ["K2"])
+        check(ids(plain.dropped) == "K2" && ids(kept.dropped) == "K4",
+              "distinctMoments：不豁免拿掉 K2（和 K1 连拍）；豁免 K2 留下它、它也算留下的（和它连拍的 K4 拿掉）",
+              "不豁免拿掉 \(ids(plain.dropped)) · 豁免拿掉 \(ids(kept.dropped))")
+        let routes: [(String, ([CollagePhotoRef]) -> CollageAlbum.Plan)] = [
+            ("默认编排", { CollageAlbum.plan($0, dedupe: true) }),
+            ("默认编排 + 目标跨页数", { CollageAlbum.plan($0, dedupe: true, budget: CollageAlbumBudget(spreads: 3)) }),
+            ("fine-art", { CollageStyleFineArt.plan($0, dedupe: true, chapterMono: true) }),
+            ("plan(theme: .fineArt)", { CollageAlbum.plan($0, dedupe: true, theme: .fineArt) }),
+        ]
+        for (name, run) in routes {
+            let without = run(base)
+            let with = run(picked)
+            let placed = Set(with.spreads.flatMap(\.photos).map(\.id))
+            check(ids(without.dropped) == "K2" && placed.contains("K2") && ids(with.dropped) == "K4",
+                  "\(name)：相似去重拿掉 K2；客户选中了 K2 就留着（和它连拍的 K4 拿掉）",
+                  "没选拿掉 \(ids(without.dropped)) · 选了拿掉 \(ids(with.dropped))\(placed.contains("K2") ? "" : "，K2 没上")")
+        }
+    }
+
     static func checkClientPicks(book: CollageStyleFineArtSelfTest.Book, check: (Bool, String, String) -> Void) {
         print("== 客户选中无条件保留（fine-art）")
         // A05：场 1 有精选 A04 → 平时拿掉；A09：连拍组 5 的第二张 → 平时拿掉；E05：废片 → 平时不要；
@@ -367,14 +405,19 @@ enum CollageAlbumPlanSelfTest {
         let chosen: Set<String> = ["A05", "A09", "E05", "C10"]
         var photos = book.photos
         for i in photos.indices where chosen.contains(photos[i].id) { photos[i].clientPick = true }
+        // 相似关系用没标客户选中的那份算（和真的一样：去重的结果不带客户选中的标记，客户选中看要编的这批照片）。
         var sim = book.similarity
-        sim.kept = photos.filter { $0.id != "C10" }
-        sim.dropped = photos.filter { $0.id == "C10" }
+        sim.kept = book.photos.filter { $0.id != "C10" }
+        sim.dropped = book.photos.filter { $0.id == "C10" }
 
         let before = CollageStyleFineArt.plan(book.photos, dedupe: true, chapterMono: true, similarity: sim)
         let placedBefore = Set(before.spreads.flatMap(\.photos).map(\.id))
         check(placedBefore.isDisjoint(with: chosen), "对照：没有客户选中时这四张都不上（场里有精选 / 连拍第二张 / 废片 / 相似）",
               chosen.intersection(placedBefore).sorted().joined(separator: " "))
+        let rejectIDs = Set(book.photos.filter { $0.verdict == .reject }.map(\.id))
+        let accountedBefore = placedBefore.union(before.dropped.map(\.id)).union(rejectIDs)
+        check(before.dropped.contains { $0.id == "C10" } && accountedBefore == Set(book.photos.map(\.id)),
+              "对照：相似拿掉的 C10 在「拿掉的」里（每张要么上了、要么拿掉、要么是废片）", "")
 
         let plan = CollageStyleFineArt.plan(photos, dedupe: true, chapterMono: true, similarity: sim)
         let placed = plan.spreads.flatMap(\.photos).map(\.id)

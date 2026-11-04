@@ -115,7 +115,9 @@ extension CollageStyleFineArt {
         var similar: [String: Set<String>] = [:]
         if let given = similarity {
             kept = kept.filter { p in p.clientPick || given.kept.contains { $0.id == p.id } }
-            dropped += given.dropped.filter { d in !d.clientPick && moments.kept.contains { $0.id == d.id } }
+            // 客户选中看要编的这批照片（给定的相似关系可能是标客户选中之前算的，那份上没有标记）。
+            let picks = CollageAlbum.clientPickIDs(moments.kept)
+            dropped += given.dropped.filter { d in !picks.contains(d.id) && moments.kept.contains { $0.id == d.id } }
             similar = given.similar
         } else {
             let r = CollageSelect.distinctMoments(kept, keeping: CollageAlbum.clientPickIDs(kept))
