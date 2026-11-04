@@ -2169,7 +2169,8 @@ struct BatchView: View {
             store.lastError = "正在处理中，先点“取消”再换文件夹"
             return
         }
-        store.switchSession(to: folder)
+        // 没切成（这一场还有改动没存上）：别对着原来那一场接着分析。
+        guard store.switchSession(to: folder) else { return }
         if store.items.isEmpty { store.runAnalysis() }
     }
 
@@ -2181,7 +2182,8 @@ struct BatchView: View {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url {
-            store.switchSession(to: url)
+            // 没切成（这一场还有改动没存上）：下面的「已有分析结果」会说成新选的那个文件夹。
+            guard store.switchSession(to: url) else { return }
             // A folder with no cached session shows an empty grid until analysis
             // runs — users read that as "选了没反应", so kick it off right away.
             if store.items.isEmpty {

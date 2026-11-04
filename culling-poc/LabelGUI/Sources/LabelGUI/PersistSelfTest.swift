@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// 场次持久化自检（全项目审查 S01 / S02 / S06）：
@@ -29,6 +30,7 @@ enum PersistSelfTest {
         t.unreadableFileRefused()
         t.corruptCollageKept()
         t.sessionsIndexTolerant()
+        t.writeFailureVisible()
         print("persist-selftest: \(t.passed) 通过 \(t.failed) 失败")
         exit(t.failed == 0 ? 0 : 1)
     }
@@ -142,7 +144,7 @@ final class PersistSelfTestHarness {
         // 先移除不是当前打开的那一场
         store.removeSession(entryB)
         check(!exists(b.dir.appendingPathComponent("previews")) && exists(b.dir.appendingPathComponent("manifest.json"))
-              && store.photoDir?.path == a.folder.path,
+              && store.photoDir != nil && store.sessionDir.lastPathComponent == a.key,
               "移除另一场：它的预览清掉、分析结果留着，当前这一场不动")
         // 再移除当前这一场
         store.removeSession(entryA)
@@ -365,5 +367,94 @@ final class PersistSelfTestHarness {
         second.switchSession(to: a.folder)
         check(exists(c.dir.appendingPathComponent("previews")), "这次启动不清别的场次的预览")
         check(second.recentSessions.map(\.key) == [a.key], "新的索引从这一场开始")
+    }
+
+    // MARK: - S01a 写盘失败：常驻红条、重试、切场次前拦住
+
+    /// 场次目录设成只读（写不进新文件、改不了名）= 盘满时 .atomic 写失败的样子（错误码不同：这里是「没有权限」）。
+    func setWritable(_ dir: URL, _ on: Bool) {
+        try? fm.setAttributes([.posixPermissions: on ? 0o755 : 0o555], ofItemAtPath: dir.path)
+    }
+
+    func savedVerdicts(_ s: Session) -> [String: String]? {
+        read(s.dir.appendingPathComponent("overrides.json")).flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }
+    }
+
+    func writeFailureVisible() {
+        print("— S01a 判决、客户选中、对时写不上：常驻红条、重试、下一次改判 / 切场次前 / 退出时再写，切场次先拦住")
+        freshIndex()
+        let s = makeSession("s01a"), other = makeSession("s01a-other")
+        let store = newStore()
+        store.switchSession(to: s.folder)
+        let ids = store.items.map(\.id)
+        guard ids.count >= 2 else {
+            check(false, "fixture 读进来了")
+            return
+        }
+        let id = ids[0], id2 = ids[1]
+        defer { setWritable(s.dir, true) }
+        store.setOverride(id, .pick)
+        check(store.persistError == nil, "写得上的时候没有红条")
+
+        setWritable(s.dir, false)
+        store.setOverride(id2, .reject)
+        let error = store.persistError ?? ""
+        check(error.contains("判决") && error.contains("没有权限") && error.contains("重试"),
+              "改判写不上：红条说哪样没存上、为什么、怎么办：\(error)")
+        check(store.lastError == nil, "不借 lastError（切场次、分析会清它）")
+        let switched = store.switchSession(to: other.folder)
+        check(!switched && store.sessionDir.lastPathComponent == s.key && store.overrides[id2] == .reject,
+              "切场次被拦下：还在这一场，内存里的改判还在")
+        check(store.lastError?.contains("重试") == true, "状态栏说清为什么没切：\(store.lastError ?? "nil")")
+        check(!store.retryPersist() && store.persistError != nil, "盘还没腾出来：重试照样失败，红条留着")
+        store.setClientPicks([id2])
+        check(store.persistError?.contains("客户选中") == true, "客户选中也写不上：同一条红条一起说")
+
+        setWritable(s.dir, true)
+        store.setOverride(id, .usable)
+        let picks = read(s.dir.appendingPathComponent("client_picks.json")).flatMap { try? JSONDecoder().decode([String].self, from: $0) }
+        check(store.persistError == nil && savedVerdicts(s) == [id: Verdict.usable.rawValue, id2: Verdict.reject.rawValue] && picks == [id2],
+              "腾出空间后的下一次改判：之前没存上的判决、客户选中一起写回去，红条消失")
+
+        if let body = store.bodies.first?.key {
+            setWritable(s.dir, false)
+            store.setBodyOffsets([body: 90])
+            check(store.persistError?.contains("机身对时") == true, "机身对时写不上也上红条")
+            setWritable(s.dir, true)
+            let url = s.dir.appendingPathComponent("body_offsets.json")
+            func offsets() -> [String: Int]? { read(url).flatMap { try? JSONDecoder().decode([String: Int].self, from: $0) } }
+            let before = offsets()
+            let retried = store.retryPersist()
+            check(before == nil && retried && store.persistError == nil && offsets() == [body: 90],
+                  "点「重试」写回去、红条消失")
+        } else {
+            check(false, "fixture 里有机身（对时那一条要用）")
+        }
+
+        setWritable(s.dir, false)
+        store.setOverride(id, .reject)
+        setWritable(s.dir, true)
+        check(store.switchSession(to: other.folder) && store.persistError == nil, "切场次前先自动重试：写上了就照常切")
+        store.switchSession(to: s.folder)
+        check(store.overrides[id] == .reject, "切回来判决是最后改的那一次")
+
+        setWritable(s.dir, false)
+        store.setOverride(id, .pick)
+        if let entry = store.recentSessions.first(where: { $0.key == s.key }) {
+            store.removeSession(entry)
+            // 比 sessionDir 不比 photoDir：第二次打开走 bookmark，解析出来的是 /private/var/… 那条路径
+            check(store.photoDir != nil && store.sessionDir.lastPathComponent == s.key && store.overrides[id] == .pick
+                  && store.recentSessions.contains { $0.key == s.key },
+                  "移除当前这一场也先拦住（会清掉界面）")
+        }
+        setWritable(s.dir, true)
+        store.retryPersist()
+
+        setWritable(s.dir, false)
+        store.setOverride(id, .usable)
+        setWritable(s.dir, true)
+        NotificationCenter.default.post(name: NSApplication.willTerminateNotification, object: nil)
+        spin(5) { store.persistError == nil }
+        check(store.persistError == nil && savedVerdicts(s)?[id] == Verdict.usable.rawValue, "退出（willTerminate）时再写一次")
     }
 }

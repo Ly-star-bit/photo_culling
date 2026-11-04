@@ -892,6 +892,12 @@ final class BatchStore: ObservableObject {
         self.dataDir = dataDir
         self.pythonRoot = pythonRoot
         self.sessionDir = dataDir.appendingPathComponent("sessions/default")
+        // 退出时把没存上的判决、客户选中、对时再写一次（审查 S01）。拦住退出要 NSApplicationDelegateAdaptor，不在这里做。
+        persistTerminateObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { _ = self?.retryPersist() }
+        }
         loadSessionsIndex()
         // Reopen the most recent shoot so relaunching the app doesn't lose context.
         if let last = recentSessions.first {
@@ -952,14 +958,18 @@ final class BatchStore: ObservableObject {
     /// Point the store at the session for this folder: existing results load
     /// instantly (no re-analysis); a new folder starts empty until 开始分析.
     /// `followBookmark` 只有实时桥传 false（见 restoreAccess）：挪走了的文件夹就照常提示「照片文件夹已不存在」。
-    func switchSession(to folder: URL, followBookmark: Bool = true) {
+    /// 返回 false = 没切（正在处理中，或者这一场还有改动没存上）：调用方别接着「分析新文件夹」「报已打开」。
+    @discardableResult
+    func switchSession(to folder: URL, followBookmark: Bool = true) -> Bool {
         // 处理中切换会把 A 的流式结果灌进 B 的网格（同名文件还会顶掉 B 的行），
         // 而 isRunning 永远停在 true —— 之后 runAnalysis 的 guard 让“重新分析”
         // 静默失效，用户点了毫无反应。先取消，再切。
         guard !isRunning else {
             lastError = "正在处理中，先点“取消”再切换文件夹"
-            return
+            return false
         }
+        // 判决、客户选中、对时还有没存上的（盘满了）：再写一次，还不行就不切（审查 S01）。
+        guard persistBeforeLeaving("切场次") else { return false }
         let resolved = restoreAccess(to: folder, followBookmark: followBookmark)
         photoDir = resolved
         // Session key from the URL the caller had (the recents entry's path):
@@ -1011,6 +1021,7 @@ final class BatchStore: ObservableObject {
         if !items.isEmpty { touchSessionIndex() }
         refreshSessionAvailability()
         postResultsChanged(previewsChanged: false)
+        return true
     }
 
     /// One notification for "results on disk changed". `previewsChanged` is
@@ -1289,10 +1300,13 @@ final class BatchStore: ObservableObject {
             lastError = "正在处理中，先点“取消”再移除历史记录"
             return
         }
+        let isCurrent = photoDir != nil && currentSessionKey == entry.key
+        // 移除当前这一场会清掉界面（内存里的判决跟着没了）：还有没存上的先拦住（审查 S01）。
+        if isCurrent, !persistBeforeLeaving("移除这一场") { return }
         let freed = sessionSizes[entry.key]
         recentSessions.removeAll { $0.key == entry.key }
         saveSessionsIndex()
-        if photoDir != nil, currentSessionKey == entry.key {
+        if isCurrent {
             resetToNoSession()
         }
         Self.clearSessionCache(dataDir.appendingPathComponent("sessions/\(entry.key)"))
@@ -1311,6 +1325,8 @@ final class BatchStore: ObservableObject {
         }
         let count = recentSessions.count
         let listed = recentSessions.map(\.key)
+        // 当前这一场不在要删的里面（没分析过、没进菜单）又有没存上的：照切场次一样先拦住。在里面的反正整份删掉。
+        if photoDir != nil, !listed.contains(currentSessionKey), !persistBeforeLeaving("清除历史记录") { return }
         recentSessions = []
         // sessions.json 里读不懂、原样留着的那几条也一起清出索引（它们不在菜单里，场次目录照下面只清预览）。
         sessionsIndexUnknown = []
@@ -1346,6 +1362,9 @@ final class BatchStore: ObservableObject {
         clientPickFilter = false
         verdictFilter = nil
         lastError = nil
+        // 走到这里的：没有挂着的（removeSession 先拦过），或者这一场刚被「全部清除」整份删掉 —— 没存上的也就不用存了。
+        persistFailures = [:]
+        updatePersistError()
         loadReviewPosition()
         loadThresholds()
         loadOverrides()
@@ -1485,6 +1504,77 @@ final class BatchStore: ObservableObject {
     private func backupOnce(_ url: URL) {
         guard !backedUpPaths.contains(url.path) else { return }
         if SessionFiles.backup(url) { backedUpPaths.insert(url.path) }
+    }
+
+    // MARK: 判决、客户选中、对时没存上（审查 S01）
+
+    /// 判决、客户选中、机身对时写盘失败（现实里只有盘满）：批量页顶上一条常驻红条 + 「重试」，同一个文件下一次写成功
+    /// 才消失。以前全是 try? 吞掉，界面、日志都没有；切场次时 loadOverrides 从盘上读，内存里没存上的改判当场就没了。
+    /// 不放 lastError：切场次、分析都会清它。
+    @Published private(set) var persistError: String?
+    /// 没写成的文件 → 原因（CardImporter.describe）。每次都整份重写，所以下一次改判本身就是重试；另外红条上的
+    /// 「重试」、切场次之前、退出（willTerminate）时都再写一遍。
+    private var persistFailures: [PersistFile: String] = [:]
+    private var persistTerminateObserver: NSObjectProtocol?
+
+    /// 写这一份，顺手把之前没写成的也再写一遍。
+    private func persist(_ file: PersistFile) {
+        for f in PersistFile.allCases where f == file || persistFailures[f] != nil {
+            attemptWrite(f)
+        }
+        updatePersistError()
+    }
+
+    private func attemptWrite(_ file: PersistFile) {
+        // 原件读不出来、挪不开的（S02）：不写，免得拿内存里的空的盖掉它。
+        guard !persistRefused.contains(file) else { return }
+        do {
+            // 场次目录被别的程序删了（访达里删、清理工具）：建回来再写，不然「文件不见了」永远重试不成、切不了场次。
+            if !FileManager.default.fileExists(atPath: sessionDir.path) {
+                try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+            }
+            switch file {
+            case .overrides: try writeOverrides()
+            case .clientPicks: try writeClientPicks()
+            case .bodyOffsets: try writeBodyOffsets()
+            }
+            persistFailures[file] = nil
+        } catch {
+            let why = CardImporter.describe(error)
+            persistFailures[file] = why
+            SessionFiles.log.error("写\(file.label, privacy: .public)失败：\(why, privacy: .public)")
+        }
+    }
+
+    /// 红条上的「重试」、切场次之前、退出时：没写成的再写一遍。true = 都存上了（本来就没有挂着的也是 true）。
+    @discardableResult
+    func retryPersist() -> Bool {
+        for f in PersistFile.allCases where persistFailures[f] != nil {
+            attemptWrite(f)
+        }
+        updatePersistError()
+        return persistFailures.isEmpty
+    }
+
+    /// 离开这一场（切场次、移除当前这一场）之前：还有没存上的就再写一次，还写不上就拦住 —— 不然 switchSession 的
+    /// loadOverrides 从盘上读，内存里没存上的改判当场就没了。
+    private func persistBeforeLeaving(_ action: String) -> Bool {
+        guard !persistFailures.isEmpty, !retryPersist() else { return true }
+        lastError = "这一场还有改动没存上：先腾出磁盘空间、点顶上红条的「重试」，存上以后再\(action)"
+        return false
+    }
+
+    private func updatePersistError() {
+        let failed = PersistFile.allCases.filter { persistFailures[$0] != nil }
+        guard !failed.isEmpty else {
+            if persistError != nil { persistError = nil }
+            return
+        }
+        let reasons = Set(failed.compactMap { persistFailures[$0] }).sorted().joined(separator: "、")
+        let what = failed.map(\.label).joined(separator: "、")
+        let text = "\(sessionLabel)的\(what)没存上（\(reasons)）：改动还在，但只在内存里。" +
+                   "腾出磁盘空间后点「重试」；存上之前切不了场次，也先别退出"
+        if persistError != text { persistError = text }
     }
 
     func setOverride(_ id: String, _ verdict: Verdict?) {
@@ -1719,14 +1809,7 @@ final class BatchStore: ObservableObject {
         }
     }
 
-    private func saveOverrides() {
-        guard !persistRefused.contains(.overrides) else { return }
-        do {
-            try writeOverrides()
-        } catch {
-            SessionFiles.log.error("写判决失败：\(CardImporter.describe(error), privacy: .public)")
-        }
-    }
+    private func saveOverrides() { persist(.overrides) }
 
     private func writeOverrides() throws {
         let data = try JSONEncoder().encode(overrides.mapValues(\.rawValue))
@@ -1771,14 +1854,7 @@ final class BatchStore: ObservableObject {
         }
     }
 
-    private func saveClientPicks() {
-        guard !persistRefused.contains(.clientPicks) else { return }
-        do {
-            try writeClientPicks()
-        } catch {
-            SessionFiles.log.error("写客户选中失败：\(CardImporter.describe(error), privacy: .public)")
-        }
-    }
+    private func saveClientPicks() { persist(.clientPicks) }
 
     private func writeClientPicks() throws {
         backupOnce(clientPicksPath)
@@ -2554,14 +2630,7 @@ final class BatchStore: ObservableObject {
         bodyOffsets = stored.filter { allowed.contains($0.value) }
     }
 
-    private func saveBodyOffsets() {
-        guard !persistRefused.contains(.bodyOffsets) else { return }
-        do {
-            try writeBodyOffsets()
-        } catch {
-            SessionFiles.log.error("写机身对时失败：\(CardImporter.describe(error), privacy: .public)")
-        }
-    }
+    private func saveBodyOffsets() { persist(.bodyOffsets) }
 
     private func writeBodyOffsets() throws {
         backupOnce(bodyOffsetsPath)
