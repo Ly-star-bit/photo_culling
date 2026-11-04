@@ -199,9 +199,109 @@ enum ClientReply {
                 words.append(Word(token: split.head, note: split.note))
                 continue
             }
-            words += tokens(line).map { Word(token: $0) }
+            // 一行好几张、开头那张带着备注（「7207 去路人，7208 瘦脸」）：按句读后面紧跟的照片切成几段，各带各的备注。
+            // 开头那张没带备注的（「DSCF7207, DSCF7208 都要」）不切，照旧按分隔符切、不带备注。
+            if let parts = photoSegments(line, original: raw, isHead: isHead), parts.count >= 2,
+               let first = noteSplit(parts[0].half, original: parts[0].raw, lookup: lookup, isHead: isHead) {
+                words.append(Word(token: first.head, note: first.note))
+                for part in parts.dropFirst() {
+                    if let split = noteSplit(part.half, original: part.raw, lookup: lookup, isHead: isHead) {
+                        words.append(Word(token: split.head, note: split.note))
+                    } else {
+                        words += plainWords(part.half, lookup: lookup, isHead: isHead)
+                    }
+                }
+                continue
+            }
+            words += plainWords(line, lookup: lookup, isHead: isHead)
         }
         return words
+    }
+
+    /// 按分隔符切成词。紧贴着汉字写的照片（「7208瘦脸」）拆成这张照片和它的备注 —— 以前整个词进「没认出」；
+    /// 这一场的文件名本身带汉字的（「婚礼001.JPG」）不拆。
+    private static func plainWords(_ text: String, lookup: Lookup, isHead: (String) -> Bool) -> [Word] {
+        tokens(text).map { token in
+            guard lookup.byFilename(token) == nil, token.unicodeScalars.contains(where: { !$0.isASCII }),
+                  let split = noteSplit(token, original: token, lookup: lookup, isHead: isHead) else {
+                return Word(token: token)
+            }
+            return Word(token: split.head, note: split.note)
+        }
+    }
+
+    /// 一行里在句读（逗号、顿号、分号、句号、叹号、问号）后面紧跟着又一张照片（全场唯一的文件名 / 文件号）的地方切成几段，
+    /// 分隔用的句读不要；`half` 是转过半角的、`raw` 是同一段原文。一刀都切不出 = nil。
+    private static func photoSegments(_ line: String, original: String,
+                                      isHead: (String) -> Bool) -> [(half: String, raw: String)]? {
+        let scalars = Array(line.unicodeScalars)
+        let source = Array(original.unicodeScalars)
+        let raw = source.count == scalars.count ? source : scalars
+        var bounds: [(end: Int, next: Int)] = []
+        for (i, s) in scalars.enumerated() where clauseBreaks.contains(s) {
+            var start = i + 1
+            while start < scalars.count, CharacterSet.whitespaces.contains(scalars[start]) { start += 1 }
+            var end = start
+            while end < scalars.count, !clauseBreaks.contains(scalars[end]) { end += 1 }
+            guard end > start, startsWithHead(Array(scalars[start..<end]), isHead: isHead) else { continue }
+            bounds.append((i, start))
+        }
+        guard !bounds.isEmpty else { return nil }
+        func text(_ part: ArraySlice<Unicode.Scalar>) -> String { String(String.UnicodeScalarView(part)) }
+        var parts: [(half: String, raw: String)] = []
+        var start = 0
+        for bound in bounds {
+            parts.append((text(scalars[start..<bound.end]), text(raw[start..<bound.end])))
+            start = bound.next
+        }
+        parts.append((text(scalars[start...]), text(raw[start...])))
+        return parts
+    }
+
+    /// 切段用的句读（转过半角以后的：全角逗号、分号、叹号、问号已经是半角的了）。冒号不算（「DSCF7207：瘦脸」）。
+    private static let clauseBreaks = CharacterSet(charactersIn: ",，、;；。!！?？")
+
+    /// 开头那个词可能在哪儿结束：头几个分隔符处，和字母数字后面紧跟汉字的地方（「7207去路人」「DSCF7207瘦脸」）。
+    private static func headCuts(_ scalars: [Unicode.Scalar]) -> [Int] {
+        var cuts: [Int] = []
+        for (i, s) in scalars.enumerated() where i > 0 && !separators.contains(scalars[i - 1]) {
+            let boundary = separators.contains(s) || (!s.isASCII && scalars[i - 1].isASCII)
+            guard boundary else { continue }
+            cuts.append(i)
+            if cuts.count >= 4 { break }
+        }
+        return cuts
+    }
+
+    /// 这一段开头是不是这一场的一张照片：整段就是，或者在 headCuts 切下来的开头那段是。
+    private static func startsWithHead(_ scalars: [Unicode.Scalar], isHead: (String) -> Bool) -> Bool {
+        let whole = String(String.UnicodeScalarView(scalars))
+        if let head = clean(whole), isHead(head) { return true }
+        return headCuts(scalars).contains { cut in
+            clean(String(String.UnicodeScalarView(scalars[..<cut]))).map(isHead) ?? false
+        }
+    }
+
+    /// 一个词在 ASCII 和非 ASCII 交界处切开（「7208瘦脸」→ 7208、瘦脸；「去路人7208」→ 去路人、7208）。
+    private static func scriptRuns(_ word: String) -> [String] {
+        var runs: [String] = []
+        var current = String.UnicodeScalarView()
+        for s in word.unicodeScalars {
+            if let last = current.last, last.isASCII != s.isASCII {
+                runs.append(String(current))
+                current = String.UnicodeScalarView()
+            }
+            current.append(s)
+        }
+        if !current.isEmpty { runs.append(String(current)) }
+        return runs
+    }
+
+    /// 备注里的这个词还认得出照片吗：它本身、或者它在 ASCII 和汉字交界处切开的每一段（「7208瘦脸」里的 7208，
+    /// 和切开头用的同一条规则）是文件名、全场唯一的文件号、范围。
+    private static func mentionsPhoto(_ word: String, lookup: Lookup) -> Bool {
+        let pieces = [word] + scriptRuns(word).compactMap(clean)
+        return pieces.contains { lookup.nameLike($0) || isRange(Substring($0)) }
     }
 
     /// 备注前面去掉的：空白、逗号、冒号、顿号这些（括号、引号留着，是备注自己的）。
@@ -210,7 +310,8 @@ enum ClientReply {
     /// 一行开头是这一场的一张照片（文件名，或全场唯一的 ≥3 位文件号），后面跟着的是不是备注：是就返回开头那个词和备注原话。
     /// - 后面以「备注」打头（确认表复制出来的「DSCF7207 备注：去路人」）：整段原样算备注，里面再有文件名、数字都不认。
     /// - 别的写法（「7207 去路人」「DSCF7207：瘦脸」「DSCF7207 修 3 处」）：后面还认得出照片的就不是备注，整行照旧按
-    ///   分隔符切 —— 有文件名、全场唯一的文件号、范围，或者全是数字、两个以上数字（「DSCF7207 12 35」「7207、35、78 都要」）。
+    ///   分隔符切 —— 有文件名、全场唯一的文件号、范围（紧贴着汉字写的「7208瘦脸」也算，见 mentionsPhoto），
+    ///   或者全是数字、两个以上数字（「DSCF7207 12 35」「7207、35、78 都要」）。
     ///   只夹着一个小数字的（「修 3 处」）算备注：以前那个 3 会被当成表上第 3 张认进来。
     private static func noteSplit(_ line: String, original: String, lookup: Lookup,
                                   isHead: (String) -> Bool) -> (head: String, note: String)? {
@@ -219,14 +320,7 @@ enum ClientReply {
         let raw = source.count == scalars.count ? source : scalars
         // 开头那个词可能带空格（「IMG 0001.JPG 黑白」）：在头几个分隔符处切，长的先试。中文紧贴着文件名打的
         // （「7207去路人」「DSCF7207瘦脸」）在字母数字和汉字交界处也切一刀。
-        var cuts: [Int] = []
-        for (i, s) in scalars.enumerated() where i > 0 && !separators.contains(scalars[i - 1]) {
-            let boundary = separators.contains(s) || (!s.isASCII && scalars[i - 1].isASCII)
-            guard boundary else { continue }
-            cuts.append(i)
-            if cuts.count >= 4 { break }
-        }
-        for cut in cuts.reversed() {
+        for cut in headCuts(scalars).reversed() {
             let headText = String(String.UnicodeScalarView(scalars[..<cut]))
             guard let head = clean(headText), isHead(head) else { continue }
             let restText = String(String.UnicodeScalarView(scalars[cut...]))
@@ -241,7 +335,7 @@ enum ClientReply {
                 // 「第 12 张」「35 号」明说是第几张的：照旧当要的照片（「DSCF7207 第12张 谢谢」）。
                 if restText.range(of: #"第\s*[0-9]+|[0-9]+\s*[张張号號]"#, options: .regularExpression) != nil { return nil }
                 let words = tokens(restText)
-                if words.contains(where: { lookup.nameLike($0) || isRange(Substring($0)) }) { return nil }
+                if words.contains(where: { mentionsPhoto($0, lookup: lookup) }) { return nil }
                 let numbers = words.filter { isDigits(Substring($0)) }.count
                 if numbers >= 2 || (!words.isEmpty && numbers == words.count) { return nil }
             }

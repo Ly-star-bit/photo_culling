@@ -34,6 +34,36 @@ enum ProofSheetSelfTest {
     /// 后面加的检查（同一个 --proof-selftest 里跑）。
     private static func extraChecks() {
         watermarkChecks()
+        multiPhotoLines()
+    }
+
+    // MARK: 一行好几张照片（审查：第二张被吞进第一张的备注）
+
+    private static func multiPhotoLines() {
+        let all = items()
+        func expect(_ text: String, ids: [String], notes: [String: String], _ name: String) {
+            let r = ClientReply.resolve(text, items: all, sheets: [bigSheet])
+            let ok = r.ids == ids && r.notes == notes
+            check(ok, name, "认出 \(r.ids.joined(separator: " ")) · 备注 \(r.notes) · 没认出 \(r.unknown)")
+        }
+        expect("7207去路人，7208瘦脸，7215调亮", ids: ["DSCF7207", "DSCF7208", "DSCF7215"],
+               notes: ["DSCF7207": "去路人", "DSCF7208": "瘦脸", "DSCF7215": "调亮"],
+               "「7207去路人，7208瘦脸，7215调亮」：三张都认、各带各的备注（以前 7208、7215 被吞进 7207 的备注）")
+        expect("7207 去路人，7208 瘦脸", ids: ["DSCF7207", "DSCF7208"], notes: ["DSCF7207": "去路人", "DSCF7208": "瘦脸"],
+               "「7207 去路人，7208 瘦脸」：两张各带各的备注")
+        expect("7207 去路人，7208瘦脸", ids: ["DSCF7207", "DSCF7208"], notes: ["DSCF7207": "去路人", "DSCF7208": "瘦脸"],
+               "第二张紧贴着汉字也切得开")
+        expect("7207 去路人，背景虚一点，7208 瘦脸", ids: ["DSCF7207", "DSCF7208"],
+               notes: ["DSCF7207": "去路人，背景虚一点", "DSCF7208": "瘦脸"], "备注里的逗号不切（后面不是照片），原样留着")
+        expect("DSCF7207瘦脸 DSCF7208", ids: ["DSCF7207", "DSCF7208"], notes: ["DSCF7207": "瘦脸"],
+               "没有句读：紧贴着汉字的「DSCF7207瘦脸」拆成照片 + 备注，后面那张照认")
+        expect("7207、7208 瘦脸", ids: ["DSCF7207", "DSCF7208"], notes: [:],
+               "开头那张没带备注（「7207、7208 …」）：不切段、不带备注（和「DSCF7207, DSCF7208 都要」一样）")
+        let glued = ClientReply.resolve("7207 去路人还有7208瘦脸", items: all, sheets: [bigSheet])
+        let visible = glued.ids.contains("DSCF7208") || glued.unknown.contains { $0.contains("7208") }
+        check(visible && glued.notes["DSCF7207"]?.contains("7208") != true,
+              "「…还有7208瘦脸」：7208 不悄悄进 7207 的备注（认出来或者列在没认出里）",
+              "认出 \(glued.ids) · 备注 \(glued.notes) · 没认出 \(glued.unknown)")
     }
 
     // MARK: 确认表水印（只画在内存里的 800px 小样上）
