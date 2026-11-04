@@ -5,6 +5,7 @@ import Foundation
 /// 打 PASS / FAIL：
 ///   - S01b 判决、客户选中、拼图写盘失败时，实时桥写工具的结果 persisted:false + save_failed，「已存盘」只在真存上时说
 ///     （场次目录 chmod 只读模拟盘满；后台那次拼图保存失败也算得上，不等 lastError 那一拍）。
+///   - F19 水印页「导入选片结果」菜单：精选 / 精选 + 可用 / 客户选中（客户选中的废片也带，RAW+JPG 用 JPG）。
 /// 只写数据目录；改过的权限全部改回来，退出前删掉造出来的照片文件夹。
 @MainActor
 enum FollowupSelfTest {
@@ -30,6 +31,7 @@ enum FollowupSelfTest {
         let root = appDataDir.appendingPathComponent("followup-selftest-" + String(UUID().uuidString.prefix(8)))
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         persistReport(root.appendingPathComponent("persist"))
+        watermarkImport(root.appendingPathComponent("wm"))
         unlockAll()
         try? FileManager.default.removeItem(at: root)
         print(failures == 0 ? "跟进小修自检：全部通过（\(total) 条）" : "跟进小修自检：\(failures) / \(total) 条失败")
@@ -181,5 +183,41 @@ enum FollowupSelfTest {
         let back = collage.flushSaves()
         check(back == nil && LiveHandlers.collagePersistReport(back).persisted,
               "拼图腾出空间后再改一下：flushSaves 回 nil、persisted true（lastError 不清也不影响）", back ?? "")
+    }
+
+    // MARK: - F19 水印页按客户选中导入
+
+    static func watermarkImport(_ dir: URL) {
+        print("— F19 水印页「导入选片结果」：精选 / 精选 + 可用 / 客户选中")
+        typealias Fake = FileSafetySelfTest.Fake
+        let store = FileSafetySelfTest.makeShoot(dir, [
+            Fake(id: "P1", raw: "P1.JPG", jpeg: true), Fake(id: "U1", raw: "U1.JPG", jpeg: true),
+            Fake(id: "R1", raw: "R1.JPG", jpeg: true), Fake(id: "RW", raw: "RW.ARW", decode: "RW.JPG"),
+        ])
+        store.setOverride("P1", .pick)
+        store.setOverride("U1", .usable)
+        store.setOverride("R1", .reject)
+        store.setOverride("RW", .pick)
+        store.importClientPicks(["R1", "RW"])
+        func names(_ urls: [URL]) -> [String] { urls.map(\.lastPathComponent) }
+        func inOrder(_ ids: Set<String>) -> [String] {
+            store.items.filter { ids.contains($0.id) }.map { URL(fileURLWithPath: $0.decodePath).lastPathComponent }
+        }
+        let picks = names(WatermarkStore.batchPhotos(store, .picks))
+        let keepers = names(WatermarkStore.batchPhotos(store, .picksAndUsable))
+        let client = names(WatermarkStore.batchPhotos(store, .clientPicks))
+        check(picks == inOrder(["P1", "RW"]), "精选：只带精选，RAW+JPG 带 JPG", "\(picks)")
+        check(keepers == inOrder(["P1", "U1", "RW"]), "精选 + 可用：和以前那个按钮一样", "\(keepers)")
+        check(client == inOrder(["R1", "RW"]) && client.contains("R1.JPG") && client.contains("RW.JPG"),
+              "客户选中：不看判决（客户点名的废片 R1 也带），RAW+JPG 带 JPG", "\(client)")
+
+        let wm = WatermarkStore(dataDir: appDataDir)
+        wm.importClientPicks(store)
+        check(names(wm.photos) == client, "水印页 importClientPicks：列表里就是客户选中的那几张", "\(names(wm.photos))")
+        wm.importFromBatch(store, includeUsable: false)
+        let after = Set(names(wm.photos))
+        check(after == Set(client + picks) && wm.photos.count == after.count,
+              "再导入精选：加上 P1，和已经在列表里的 RW 不重复", "\(names(wm.photos))")
+        wm.clearPhotos()
     }
 }
