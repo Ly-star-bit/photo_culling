@@ -507,6 +507,10 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--body-offset"),
     }
 }
 
+// 选片 MCP 的出口（概览的 XMP 过期、AI 改判的出处、一次定一场、导入客户选择）在真的 store 上跑一遍（只写临时数据目录）：
+// LABELGUI_DATA_DIR=<临时> LabelGUI --cull-mcp-selftest <Fixtures/photot-session>（见 CullMCPSelfTest.swift）。
+if let i = CommandLine.arguments.firstIndex(of: "--cull-mcp-selftest") { MainActor.assumeIsolated { CullMCPSelfTest.run(flagIndex: i) } }
+
 // 时间轴布局自检：LabelGUI --timeline-selftest（随机章节数/张数/宽度，验证不出界、不重叠）。
 if CommandLine.arguments.contains("--timeline-selftest") {
     MainActor.assumeIsolated { ChapterTimelineSelfTest.run() }

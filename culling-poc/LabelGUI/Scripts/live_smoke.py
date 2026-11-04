@@ -1969,6 +1969,11 @@ __attribute__((constructor)) static void init(void) {
         check((ov.get("settings") or {}).get("source") == "app" and ov.get("analysis") == {"running": False}
               and ov.get("pending_writes") == 0 and not any(k in ov for k in ("recently_modified_sec", "dedupe")),
               "概览：settings.source=app、analysis.running、pending_writes；没有 §10.1 删掉的字段")
+        xmp = ov.get("xmp") or {}
+        xmp_ok = (isinstance(xmp.get("stale_count"), int) and isinstance(xmp.get("written"), bool)
+                  and ("xmp_stale" in warn_codes(ov)) == (xmp.get("stale_count", 0) > 0)
+                  and (not CI or xmp == {"stale_count": 0, "written": False}))
+        check(xmp_ok, f"概览的 xmp：stale_count、written，过期了才带 xmp_stale（fixture 没写过 XMP：0、false）：{xmp}")
         groups, cur, pages = [], None, 0
         while pages < 20:
             a = {"session": KEY, "kind": "scene", "limit": 2}

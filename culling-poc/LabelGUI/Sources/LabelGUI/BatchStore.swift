@@ -545,6 +545,8 @@ final class BatchStore: ObservableObject {
     }
     var autoRejectCount: Int { derived.autoRejectCount }
     var xmpStaleCount: Int { derived.xmpStaleCount }
+    /// 这一场写过 XMP 没有（xmp_state.json 在）：没写过时 xmpStaleCount 永远是 0，MCP 的概览要分得清「没过期」和「没写过」。
+    var xmpEverWritten: Bool { xmpState != nil }
     var clientPickCount: Int { derived.clientPickCount }
     var clientPickRejectCount: Int { derived.clientPickRejectCount }
     /// 「废片移到废纸篓」真会移的张数：废片里去掉客户选中的（客户点名要精修的照片不扔）。

@@ -99,6 +99,9 @@ enum MCPReadModel {
         out["reason_counts"] = s.reasonCounts
         out["manual_override_count"] = s.manualOverrideCount
         out["client_pick_count"] = s.clientPickCount
+        // 「XMP 过期」（状态栏那一句）：LR / C1 看的是 XMP，AI 改完判决它就过期了；没写过 XMP 时 stale_count 一直是 0
+        let xmpStale = s.xmpStaleCount
+        out["xmp"] = ["stale_count": xmpStale, "written": s.xmpEverWritten] as [String: Any]
 
         var thresholds: [String: Any] = ["sharpness": r3(s.sharpnessThreshold)]
         thresholds["clip_pct"] = r3(s.exposureThreshold * 100)
@@ -144,6 +147,10 @@ enum MCPReadModel {
         if s.unparsedCount > 0 {
             warnings.append(warning("unparsed_photos", "有 \(s.unparsedCount) 张照片在清单里、但没有分析结果（不在任何计数里）。",
                                     hint: "请用户在 app 里点「重新分析」"))
+        }
+        if xmpStale > 0 {
+            warnings.append(warning("xmp_stale", "上次写 XMP 之后有 \(xmpStale) 张的判决、星级或客户选中变了：Lightroom / Capture One 里还是旧的。",
+                                    hint: "改完以后提醒用户在 app 里点状态栏「XMP 过期」重写（MCP 不写 XMP）"))
         }
         out["warnings"] = warnings
         return out

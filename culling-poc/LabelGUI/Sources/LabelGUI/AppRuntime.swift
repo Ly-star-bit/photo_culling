@@ -16,6 +16,7 @@ enum AppRuntime {
         "--newspaper-selftest",
         "--app-ui", "--live-host",
         "--mcp", "--mcp-call", "--mcp-tools", "--mcp-selftest",
+        "--cull-mcp-selftest",
     ]
 
     /// true = 无头跑（测试、自动化）。
