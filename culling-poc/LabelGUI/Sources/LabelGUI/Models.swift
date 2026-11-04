@@ -17,12 +17,11 @@ struct ExifMeta: Codable, Hashable {
     /// Human-readable "1/125 · f/2.8 · ISO 800 · 85mm" line.
     var summary: String {
         var parts: [String] = []
-        if let s = shutterSec {
-            parts.append(s >= 1 ? String(format: "%.0fs", s) : "1/\(Int((1 / s).rounded()))")
-        }
-        if let a = aperture { parts.append(String(format: "f/%.1f", a)) }
+        // 快门 0（老 manifest 里存过的 0/1）或极小正数时跳过这一段，不再 Int(+inf) 崩。
+        if let s = shutterSec, let text = Self.shutterText(s) { parts.append(text) }
+        if let a = aperture, a.isFinite, a > 0 { parts.append(String(format: "f/%.1f", a)) }
         if let i = iso { parts.append("ISO \(i)") }
-        if let f = focal35 { parts.append("\(f)mm") }
+        if let f = focal35, f > 0 { parts.append("\(f)mm") }
         return parts.joined(separator: " · ")
     }
 
