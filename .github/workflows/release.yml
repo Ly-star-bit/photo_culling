@@ -84,6 +84,13 @@ jobs:
         timeout-minutes: 10
         run: culling-poc/LabelGUI/Scripts/selftests.sh culling-poc/LabelGUI/.build/release/LabelGUI
 
+      # 合成图跑原生分析：手写几张结果确定的图（平滑渐变、整张死白、截断的 .jpg、带动态照片尾巴的、手写 APP1 拍摄时间 +
+      # Orientation=6 的连拍对）真跑 --analyze，再 --verdicts --per-photo，按正则断言理由和标志（虚焦、曝光裁切不判过曝、
+      # 文件损坏、同组、预览转正），不比数值；最后给 2000 / 8000 行的 --verdicts 计时（很宽的上限 + 耗时比）。临时数据目录。
+      - name: 合成图跑原生分析 (--analyze)
+        timeout-minutes: 15
+        run: python3 -I culling-poc/LabelGUI/Scripts/native_analysis_smoke.py culling-poc/LabelGUI/.build/release/LabelGUI
+
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
