@@ -543,6 +543,11 @@ if CommandLine.arguments.contains("--files-selftest") {
     MainActor.assumeIsolated { FileSafetySelfTest.run() }
 }
 
+// 挪了的文件夹认得回来（改名 / 拷贝 / 重新定位 / 实时桥不跟书签）：LABELGUI_DATA_DIR=<临时> LabelGUI --session-move-selftest
+if CommandLine.arguments.contains("--session-move-selftest") {
+    MainActor.assumeIsolated { SessionMoveSelfTest.run() }
+}
+
 // 按机身对时（会写这一场的 body_offsets.json，只在临时数据目录下跑）：
 // LABELGUI_DATA_DIR=<临时> LabelGUI --body-offset <photo_dir> [--body '<机身 key>' --seconds +180 | --align id,id] [--undo]
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--body-offset"),

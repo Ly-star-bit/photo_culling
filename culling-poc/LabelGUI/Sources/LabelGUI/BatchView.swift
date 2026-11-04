@@ -383,6 +383,17 @@ struct BatchView: View {
                             store.switchSession(to: URL(fileURLWithPath: session.path))
                         }
                     }
+                    // 找不到照片文件夹的那几场（挪到了别的盘、卷名变了）：指给它现在的位置，判决、拼图接着用（审查 S04）。
+                    // NSMenu 的一行挂不了右键菜单，和下面「移除历史记录」一样放子菜单。
+                    let missingSessions = store.recentSessions.filter { store.missingSessionKeys.contains($0.key) }
+                    if !missingSessions.isEmpty {
+                        Menu("重新定位文件夹...") {
+                            Text("照片挪到了别处：指给它现在的位置，判决、拼图接着用")
+                            ForEach(missingSessions) { session in
+                                Button("\(session.name) · \(session.photoCount) 张...") { relocateSession(session) }
+                            }
+                        }
+                    }
                     Divider()
                     // NSMenu items can't carry their own context menu, so removal
                     // lives in a submenu rather than a right-click on each row.
@@ -2327,6 +2338,23 @@ struct BatchView: View {
                     store.runAnalysis()
                 }
             }
+        }
+    }
+
+    /// 「重新定位文件夹…」：选这一场的照片现在在哪（审查 S04）。面板从原来那一级（还在的话）开始找。
+    private func relocateSession(_ session: BatchStore.SessionEntry) {
+        modalPanelOpen = true
+        defer { modalPanelOpen = false }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.message = "「\(session.name)」的照片现在在哪个文件夹？"
+        panel.prompt = "重新定位"
+        let parent = URL(fileURLWithPath: session.path).deletingLastPathComponent()
+        if FileManager.default.fileExists(atPath: parent.path) { panel.directoryURL = parent }
+        if panel.runModal() == .OK, let url = panel.url {
+            store.relocateSession(session, to: url)
         }
     }
 

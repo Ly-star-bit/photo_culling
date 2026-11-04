@@ -1059,6 +1059,29 @@ final class BatchStore: ObservableObject {
         return resolved
     }
 
+    /// 认回挪了的文件夹（审查 S04 第一步）：`givenKey`（按新路径算的 key）下还没有分析结果时，看「最近场次」里哪一条的
+    /// 书签解析到的就是 `folder` —— 同一个卷里改了名、挪了位置，卷名从「T7」变成「T7 1」。按设备号 + inode 比，不按字符串。
+    /// 只解析和 `folder` 同一个卷的书签（书签里记着卷 UUID，不碰文件系统就读得到）：别的卷（没挂上的网络盘）一个都不解析，
+    /// 主线程上不会等；解析也不弹框、不去挂载。拷贝出来的副本认不回来（书签先认路径，原来的文件夹还在就解析到原来那个），
+    /// 那是第二步（跨卷指纹匹配）的事。旧场次没有 manifest 的不认（没东西可沿用）。
+    private func movedSessionEntry(for folder: URL, givenKey: String) -> SessionEntry? {
+        let fm = FileManager.default
+        let sessions = dataDir.appendingPathComponent("sessions")
+        func hasManifest(_ key: String) -> Bool {
+            fm.fileExists(atPath: sessions.appendingPathComponent(key).appendingPathComponent("manifest.json").path)
+        }
+        guard !hasManifest(givenKey), let target = SessionLocation.identity(folder.path) else { return nil }
+        let volume = SessionLocation.volumeUUID(of: folder)
+        for entry in recentSessions where entry.key != givenKey {
+            guard let bookmark = entry.bookmark, hasManifest(entry.key),
+                  SessionLocation.bookmarkVolumeUUID(bookmark) == volume,
+                  let resolved = SessionLocation.resolveQuietly(bookmark),
+                  SessionLocation.identity(resolved.path) == target else { continue }
+            return entry
+        }
+        return nil
+    }
+
     /// Point the store at the session for this folder: existing results load
     /// instantly (no re-analysis); a new folder starts empty until 开始分析.
     /// `followBookmark` 只有实时桥传 false（见 restoreAccess）：挪走了的文件夹就照常提示「照片文件夹已不存在」。
@@ -1075,6 +1098,10 @@ final class BatchStore: ObservableObject {
         // 判决、客户选中、对时还有没存上的（盘满了）：再写一次，还不行就不切（审查 S01）。
         guard persistBeforeLeaving("切场次") else { return false }
         let resolved = restoreAccess(to: folder, followBookmark: followBookmark)
+        // 认回挪了的文件夹（审查 S04 第一步）：这个路径还没有分析结果，「最近场次」里却有一条的书签解析到的就是它（同卷改名 /
+        // 挪动、卷名变「T7 1」以后从「选择文件夹…」或拖进来打开的）—— 沿用那一条的 key 和 path，和从菜单点一个改了名的
+        // 文件夹同一个样子，不再开一个空场次整场重分析。实时桥（followBookmark: false）不认：它就是要只按字符串走。
+        let moved = followBookmark ? movedSessionEntry(for: resolved, givenKey: Self.sessionKey(for: folder)) : nil
         photoDir = resolved
         // Session key from the URL the caller had (the recents entry's path):
         // keeps existing results reachable even if the bookmark resolved the
@@ -1082,8 +1109,8 @@ final class BatchStore: ObservableObject {
         // is open — recomputing it from `photoDir` (the resolved, possibly
         // renamed path) made runAnalysis write into sessions/<old key> while the
         // index recorded <new key>: results vanished and were later pruned.
-        currentSessionKey = Self.sessionKey(for: folder)
-        currentSessionPath = folder.path
+        currentSessionKey = moved?.key ?? Self.sessionKey(for: folder)
+        currentSessionPath = moved?.path ?? folder.path
         sessionDir = dataDir.appendingPathComponent("sessions/\(currentSessionKey)")
         try? FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
         overrides = [:]
@@ -1097,6 +1124,9 @@ final class BatchStore: ObservableObject {
         // 看起来像是"照片少了一大半"。
         verdictFilter = nil
         lastError = nil
+        // 照片文件夹挪过（书签跟到了新位置、上面认回了旧场次、「重新定位文件夹…」）：manifest 里的照片路径先改到现在的位置
+        // 再读 —— 不然移废片、写 XMP、导出都按旧路径走（审查 S04）。实时桥不跟书签，也不改。
+        let rebase = followBookmark ? SessionLocation.rebaseManifest(in: sessionDir, to: resolved) : (rebase: nil, failed: false)
         loadReviewPosition()
         loadThresholds()
         loadOverrides()
@@ -1112,10 +1142,18 @@ final class BatchStore: ObservableObject {
         // so up front instead of letting 导出/分析 fail silently later.
         if !FileManager.default.fileExists(atPath: resolved.path) {
             lastError = "「\(folder.lastPathComponent)」的照片文件夹已不存在 (被删除、改名或所在硬盘未挂载)。" +
-                        "下面是上次分析的缓存结果，重新分析/导出/写 XMP 都会失败。"
+                        "下面是上次分析的缓存结果，重新分析/导出/写 XMP 都会失败。" +
+                        "文件夹挪到了别处的，在文件夹菜单「重新定位文件夹…」里指给它现在的位置"
+        } else if rebase.failed {
+            lastError = "这一场的照片文件夹挪过，可 manifest.json 写不进去、照片路径没改过来：先别移废片、写 XMP（会按旧位置找）"
         } else if previewsPruned {
             lastError = "这一场的预览图已清理省空间（掉出了最近 15 场，或者从「移除历史记录」里移除过），判决和人工改判都还在。" +
                         "点「重新分析」补回预览：没变的照片只重做预览，人工改判不会动"
+        }
+        if let moved {
+            progressText = "认出了「\(moved.name)」那一场：同一个文件夹改了名或挪了位置，判决、人工改判、客户选中、拼图都接上了"
+        } else if let from = rebase.rebase?.from {
+            progressText = "这一场的照片文件夹挪过（原来在 \(CardImporter.displayPath(URL(fileURLWithPath: from)))），照片路径已改到现在的位置"
         }
         // Register a session that HAS cached results as soon as it's opened, not
         // just after an analysis: pruneOrphanedSessions clears the previews of
@@ -1420,6 +1458,51 @@ final class BatchStore: ObservableObject {
         let size = freed.map { "（\(Self.sizeText($0))）" } ?? ""
         progressText = "已从列表移除「\(entry.name)」：清掉了预览图\(size)。判决、人工改判、客户选中、拼图和方案都还留着，" +
                        "重新打开这个文件夹就回来 (照片本身未动)"
+    }
+
+    /// 「重新定位文件夹…」（审查 S04 第一步，像 Lightroom 的 Find Missing Folder）：菜单里标着「文件夹已不存在」的一场，
+    /// 指给它照片现在在哪（挪到了别的盘、卷名变了）。只换书签，key 和 path 照旧钉着（现有的 pinned-key 那一套：restoreAccess
+    /// 跟着书签走到新位置，switchSession 再把 manifest 里的照片路径改过去），然后打开它。判决、人工改判、客户选中、拼图都在
+    /// 场次目录里，一样不动。新位置里按原来的子文件夹和文件名一张这一场的照片都找不到的不换 —— 多半是选错了文件夹。
+    /// 返回 false = 没换（原因在 lastError）；换了书签、却没切成（这一场还有改动没存上）的也是 false，书签留着新的。
+    @discardableResult
+    func relocateSession(_ entry: SessionEntry, to folder: URL) -> Bool {
+        guard !isRunning else {
+            lastError = "正在处理中，先点“取消”再重新定位文件夹"
+            return false
+        }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDir), isDir.boolValue else {
+            lastError = "「\(folder.lastPathComponent)」不是一个文件夹，没有重新定位"
+            return false
+        }
+        guard let index = recentSessions.firstIndex(where: { $0.key == entry.key }) else {
+            lastError = "「\(entry.name)」已经不在「最近场次」里了，没有重新定位"
+            return false
+        }
+        let dir = dataDir.appendingPathComponent("sessions/\(entry.key)")
+        if SessionLocation.anyPhotoPresent(sessionDir: dir, under: folder) == false {
+            lastError = "「\(folder.lastPathComponent)」里找不到「\(entry.name)」的照片（按原来的子文件夹和文件名一张都没对上），" +
+                        "没有重新定位：看看是不是选错了文件夹"
+            return false
+        }
+        guard let bookmark = Self.makeBookmark(for: folder) else {
+            lastError = "记不下「\(folder.lastPathComponent)」的位置（建不了书签），没有重新定位"
+            return false
+        }
+        recentSessions[index].bookmark = bookmark
+        saveSessionsIndex()
+        // 这个文件夹自己也单独打开过（直接选它时新开的那一场）：两条都留在菜单里，说一声。
+        let ownKey = Self.sessionKey(for: folder)
+        let ownSession = ownKey != entry.key && FileManager.default.fileExists(
+            atPath: dataDir.appendingPathComponent("sessions/\(ownKey)/manifest.json").path)
+        guard switchSession(to: URL(fileURLWithPath: entry.path)) else { return false }
+        var note = "「\(entry.name)」重新定位到 \(CardImporter.displayPath(folder))：判决、人工改判、客户选中、拼图都接着用"
+        if ownSession {
+            note += "（直接打开这个文件夹时另开过一场，菜单里两条都在，不要的那条从「移除历史记录」里移除）"
+        }
+        progressText = note
+        return true
     }
 
     /// Empty the menu and wipe the cached sessions it listed. Originals untouched —

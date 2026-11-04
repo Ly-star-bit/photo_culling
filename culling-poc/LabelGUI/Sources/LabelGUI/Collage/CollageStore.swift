@@ -452,6 +452,8 @@ final class CollageStore: ObservableObject {
             ?? stateDir.appendingPathComponent("scratch.json")
         guard newURL != projectURL else {
             // 同一个场次（切回拼图 tab）：批量页那边可能改过判决、调过场的间隔。
+            // 照片文件夹可能挪过（同一个 key，书签跟到了新位置、重新定位过，审查 S04）：跟上，refreshFromBatch 才认这一场。
+            self.photoDir = photoDir
             refreshFromBatch()
             return
         }
@@ -536,7 +538,7 @@ final class CollageStore: ObservableObject {
     func refreshFromBatch() {
         guard let batch, let photoDir, let batchDir = batch.photoDir,
               batchDir.standardizedFileURL.path == photoDir.standardizedFileURL.path,
-              !project.photos.isEmpty else { return }
+              !project.photos.isEmpty || !project.variants.isEmpty else { return }
         let facts = CollageBridge.Facts(batch: batch)
         func refreshed(_ p: CollageProject) -> CollageProject? {
             var out = p
@@ -548,6 +550,19 @@ final class CollageStore: ObservableObject {
                 if ref != out.photos[i] {
                     out.photos[i] = ref
                     changed = true
+                }
+            }
+            // 方案里存着自己那份照片（不在托盘里的也有）：只跟上文件路径（照片文件夹挪过，审查 S04），别的照存时的样子。
+            for v in out.variants.indices {
+                for j in out.variants[v].project.photos.indices {
+                    let ref = out.variants[v].project.photos[j]
+                    guard let item = batch.item(withID: ref.id), ref.previewPath != nil else { continue }
+                    var moved = ref
+                    CollageBridge.followPaths(&moved, of: item)
+                    if moved != ref {
+                        out.variants[v].project.photos[j] = moved
+                        changed = true
+                    }
                 }
             }
             return changed ? out : nil
