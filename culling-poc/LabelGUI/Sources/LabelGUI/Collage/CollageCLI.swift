@@ -89,6 +89,11 @@ enum CollageCLI {
             }
             project.albumChapterMono = !args.contains("--no-chapter-mono")
             if let t = option("--target-spreads") {
+                // 20@1-6 已经带了每跨页张数，再给 --per-spread 是两处说法，不猜听哪个。
+                if t.contains("@"), option("--per-spread") != nil {
+                    print("--target-spreads \(t) 已经写了每跨页张数，不能再加 --per-spread：二选一")
+                    exit(1)
+                }
                 guard let budget = CollageCLI.parseBudget(t + (option("--per-spread").map { "@" + $0 } ?? "")) else {
                     print("--target-spreads 要一个 1–200 的数，--per-spread 写成 1-6（每跨页最少-最多几张）")
                     exit(1)

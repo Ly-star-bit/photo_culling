@@ -527,15 +527,17 @@ enum CollageBudgetChange {
 // MARK: - 命令行
 
 extension CollageCLI {
-    /// 「20」「20@1-6」→ 目标跨页数（每跨页最少-最多）；写错 = nil。
+    /// 「20」「20@1-6」→ 目标跨页数（每跨页最少-最多）；写错 = nil。每一段都要整段是数：多一个 @（20@1-6@2-4）、
+    /// 多一个 -、空段、夹了字母的都不认（以前 compactMap 把认不出的那段悄悄扔掉，20@1-6@2-4 成了 1–4）。
     static func parseBudget(_ text: String) -> CollageAlbumBudget? {
-        let parts = text.split(separator: "@", maxSplits: 1).map(String.init)
+        let parts = text.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
         guard let first = parts.first, let n = Int(first), CollageAlbumBudget.spreadsRange.contains(n) else { return nil }
         guard parts.count == 2 else { return CollageAlbumBudget(spreads: n) }
-        let range = parts[1].split(separator: "-").compactMap { Int($0) }
-        guard range.count == 2, range[0] >= 1, range[0] <= range[1],
-              CollageAlbumBudget.perSpreadRange.contains(range[1]) else { return nil }
-        return CollageAlbumBudget(spreads: n, minPerSpread: range[0], maxPerSpread: range[1])
+        guard !parts[1].contains("@") else { return nil }
+        let range = parts[1].split(separator: "-", omittingEmptySubsequences: false)
+        guard range.count == 2, let lo = Int(range[0]), let hi = Int(range[1]),
+              lo >= 1, lo <= hi, CollageAlbumBudget.perSpreadRange.contains(hi) else { return nil }
+        return CollageAlbumBudget(spreads: n, minPerSpread: lo, maxPerSpread: hi)
     }
 
     /// ops 的 expect:spreads=N（正好 N 个跨页）/ spreads<=N / perspread=1-6（扉页以外每个跨页的张数在这个范围里）。

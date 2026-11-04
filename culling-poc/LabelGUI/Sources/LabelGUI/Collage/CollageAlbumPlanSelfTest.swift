@@ -153,6 +153,11 @@ enum CollageAlbumPlanSelfTest {
         check(parsed == [CollageAlbumBudget(spreads: 20).label, CollageAlbumBudget(spreads: 20, minPerSpread: 2, maxPerSpread: 5).label,
                          "-", "-", "-", "-"],
               "命令行 spreads:20 / 20@2-5 认得，写错的不认", parsed.joined(separator: " | "))
+        // 每一段都要整段是数（--target-spreads 20@1-6 再加 --per-spread 2-4 拼出来的 20@1-6@2-4 以前被认成 1–4）。
+        let strict = ["20@1-6@2-4", "20@a1-2-6", "20@1-2-6", "20@", "20@1-", "20@-6", "@20", "20@1-6x"]
+            .map { CollageCLI.parseBudget($0)?.label ?? "-" }
+        check(strict.allSatisfy { $0 == "-" }, "命令行每跨页张数写错（两个 @、夹字母、空段、多一个 -）不认、不猜",
+              strict.joined(separator: " | "))
         // 三种结果：沿用 / 改回自动 / 换成几个跨页；写错 = 「错」。
         func outcome(_ kit: CollageKitID, _ n: Int?, _ lo: Int?, _ hi: Int?) -> String {
             switch CollageBudgetChange.parse(kit: kit, spreads: n, min: lo, max: hi) {
