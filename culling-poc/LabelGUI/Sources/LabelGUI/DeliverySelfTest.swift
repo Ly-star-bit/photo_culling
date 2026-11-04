@@ -47,6 +47,8 @@ enum DeliverySelfTest {
         truncationCases(work.appendingPathComponent("trunc"), t)
         print("== 同一个文件（WatermarkEngine.isSameFile）")
         sameFileCases(work.appendingPathComponent("same"), t)
+        print("== 拼图、水印导出不写进拍摄文件夹（ExportFolderGuard，见 ExportFolderSelfTest.swift）")
+        ExportFolderSelfTest.run(work.appendingPathComponent("folder")) { t.check($0, $1, $2) }
         print("== 去 GPS（BatchStore.writeJPEG、WatermarkEngine.export）")
         gpsCases(work.appendingPathComponent("gps"), t)
         try? fm.removeItem(at: work)

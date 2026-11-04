@@ -130,7 +130,8 @@ enum WatermarkBatchCLI {
         batch.switchSession(to: option("--session").map { URL(fileURLWithPath: $0) } ?? dir)
         store.recordDeliveries(into: batch)
         let ledgerBefore = batch.deliveryRecords.last
-        store.exportAll()
+        // 同界面：批量页这一场、每张照片所在的文件夹都不让写进去（审查 S11），最近场次只提醒
+        store.exportAll(shootDir: batch.photoDir, sessions: batch.recentSessions)
         let deadline = Date().addingTimeInterval(300)
         while store.isExporting && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         let error = store.lastError

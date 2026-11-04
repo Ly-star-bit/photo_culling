@@ -3553,6 +3553,36 @@ final class CollageStore: ObservableObject {
         startExport(project: project, options: exportOptions, name: exportName, reveal: true)
     }
 
+    /// 输出目录落在这一场的拍摄文件夹里面、下次分析会扫到（审查 S11，ExportFolderGuard）：拦下的那句话；能导 = nil。
+    /// 默认的「拼图导出/」分析时跳过，不拦。startExport 开工前查（导出按钮、MCP、命令行 export: 都走它），面板选完也查。
+    func exportFolderRefusal(_ folder: URL) -> String? {
+        guard let photoDir, ExportFolderGuard.blockingShoot(folder, among: [photoDir]) != nil else { return nil }
+        return Self.folderRefusalText(photoDir)
+    }
+
+    private static func folderRefusalText(_ shoot: URL) -> String {
+        ExportFolderGuard.refusal(shoot: shoot, what: "拼图", fix: "点「用默认」导出到「\(ImageLoader.collageExportSubfolder)/」")
+    }
+
+    /// 批量页最近哪一场的拍摄文件夹装着输出目录：只提醒那一句（不拦）；没有 = nil。
+    func exportFolderReminder(_ folder: URL) -> String? {
+        ExportFolderGuard.sessionReminder(folder, sessions: batch?.recentSessions ?? [], what: "拼图")
+    }
+
+    /// 导出页「选择…」面板选完：在拍摄文件夹里面就不换（原来的目录不动），lastError 说清楚；在最近哪一场的拍摄
+    /// 文件夹里只提醒。换成了的话，之前拦下的那句收掉。返回换没换。
+    @discardableResult
+    func chooseOutputFolder(_ url: URL) -> Bool {
+        if let why = exportFolderRefusal(url) {
+            lastError = why
+            return false
+        }
+        if let photoDir, lastError == Self.folderRefusalText(photoDir) { lastError = nil }
+        exportOptions.outputPath = url.path
+        if let note = exportFolderReminder(url) { setNotice(note) }
+        return true
+    }
+
     /// 导出按钮和 AI 的 collage_export 共用。project 是要导出的那一版（AI 可以直接导存着的方案）；options、name 只管
     /// 这一次（AI 给的倍数、格式不改导出页上的设置）。reveal：做完在访达里选中（AI 调的不弹）。done 在主线程上、
     /// 导出结束时恰好回调一次（开始不了也回，failure 写原因）。返回开始不了的原因，nil = 开始了。
@@ -3566,6 +3596,12 @@ final class CollageStore: ObservableObject {
         if isExporting { return refuse("正在导出") }
         if snapshot.pages.isEmpty { return refuse("还没有版式") }
         guard let folder = outputFolder else { return refuse("先选择输出目录") }
+        // 输出目录在拍摄文件夹里面（全局记住的目录可能是上一场选的；MCP 不经过面板）：建目录之前就拦（审查 S11）
+        if let why = exportFolderRefusal(folder) {
+            lastError = why
+            return refuse(why, folder: folder)
+        }
+        if let note = exportFolderReminder(folder) { setNotice(note) }
         let hints = self.hints
         // 直接写进输出目录（以前每次先建一个「标题_时间」子目录再往里写）。
         do {

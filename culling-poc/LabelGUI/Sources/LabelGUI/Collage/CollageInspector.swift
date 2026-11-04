@@ -1466,6 +1466,7 @@ struct CollageExportPanel: View {
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         panel.prompt = "选择输出目录"
-        if panel.runModal() == .OK, let url = panel.url { store.exportOptions.outputPath = url.path }
+        // 选到拍摄文件夹里面（下次分析会扫到）就不换、lastError 说清楚（审查 S11）
+        if panel.runModal() == .OK, let url = panel.url { store.chooseOutputFolder(url) }
     }
 }

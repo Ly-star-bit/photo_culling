@@ -5,7 +5,9 @@ Scripts/selftests.sh 里跑）；这里验它们在命令行出口上确实接�
 
 1. --watermark 输出路径就是原片（同一路径、. 和 ..、大小写不同、硬链接）→ 退出码 1、原片逐字节不变；
    指向原片的符号链接 → 不管成不成功，原片逐字节不变。
-2. --watermark-batch 输出目录就是照片目录、文件名模板 {原名}（先写好 watermark/state.json）→ 原片不变、输出全是 -2；
+2. --watermark-batch 输出目录在拍摄文件夹里面（照片目录本身、里面还没建的「交付」、--session 那一场里面）、文件名模板
+   {原名}（先写好 watermark/state.json）→ 退出码 1、报「不能导出到拍摄文件夹」、照片目录一个文件都不多、子目录不建（审查 S11）；
+   导进照片目录里的「水印导出/」（分析跳过）照常、原片不变，再导一次全是 -2；
    没有任何水印内容（不带 --exif / --signature）→ 退出码 1，而且是因为「没有任何水印内容」（不是别的原因）。
 3. --export-xmp：原图旁边已有 LR 写的 sidecar → 只改星级 / 色标，调色、关键字按解析后的字段逐个不变；
    自己写的（x:xmptk="选片工具"）和以前 culling-poc 写的 → 整份重写成现在的模板；读不全的（rdf:resource）、
@@ -260,7 +262,7 @@ def same_file_section():
 # ---------------------------------------------------------------- 2. 水印批量输出到照片目录
 
 def batch_section():
-    print("2. --watermark-batch：输出目录就是照片目录、文件名 {原名}")
+    print("2. --watermark-batch：输出目录在拍摄文件夹里面不导、「水印导出/」照常，文件名 {原名}")
     d = os.path.join(WORK, "batch")
     os.makedirs(d)
     for i, name in enumerate(("p1.jpg", "p2.jpg", "P3.JPG")):
@@ -276,16 +278,33 @@ def batch_section():
     check(r.returncode == 1 and "没有任何水印内容" in r.stdout,
           f"不带 --exif / --signature：退出码 {r.returncode}（要 1），原因是「没有任何水印内容」（{r.stdout.strip()[-80:]!r}）")
     check(tree(d) == before, "　…… 照片目录一个文件都没多、没变")
+    # 审查 S11：输出目录在拍摄文件夹里面（下次分析会把带水印的副本当成新照片）就不导 —— 以前这里导出成 -2
+    refuse = "不能导出到拍摄文件夹"
     r = run(["--watermark-batch", d, d, "--exif"], data)
-    after = tree(d)
-    check(r.returncode == 0, f"带 --exif：退出码 0（{(r.stdout + r.stderr).strip()[-160:]!r}）")
-    check(all(after.get(n) == h for n, h in before.items()), "原片（和旁边的 notes.txt）逐字节不变")
-    new = sorted(set(after) - set(before))
-    # 大小写敏感的卷上 P3.JPG 和 P3.jpg 是两个文件，不用另存。
-    ci = os.path.exists(os.path.join(d, "p3.jpg"))
-    want = ["P3-2.jpg", "p1-2.jpg", "p2-2.jpg"] if ci else ["P3.jpg", "p1-2.jpg", "p2-2.jpg"]
-    check(new == want, f"输出全是 -2（{new}{'' if ci else '；大小写敏感的卷，P3.jpg 不和 P3.JPG 撞'}）")
+    check(r.returncode == 1 and refuse in r.stdout and tree(d) == before,
+          f"带 --exif、输出目录就是照片目录：退出码 {r.returncode}（要 1）、报「{refuse}」、照片目录一个文件都没多"
+          f"（{(r.stdout + r.stderr).strip()[-160:]!r}）")
+    deliver = os.path.join(d, "交付", "客户A")
+    r = run(["--watermark-batch", d, deliver, "--exif"], data)
+    check(r.returncode == 1 and refuse in r.stdout and not os.path.exists(os.path.join(d, "交付")),
+          f"输出到照片目录里还没建的「交付/客户A」：退出码 {r.returncode}（要 1）、报「{refuse}」、「交付」没建出来")
+    other = os.path.join(WORK, "batch-session")
+    os.makedirs(other)
+    r = run(["--watermark-batch", d, os.path.join(other, "交付"), "--exif", "--session", other], data)
+    check(r.returncode == 1 and f"{refuse}「batch-session」" in r.stdout and not os.path.exists(os.path.join(other, "交付")),
+          f"照片在别处、输出到批量页开着的那一场（--session）里面：退出码 {r.returncode}（要 1）、点名那一场、没建目录"
+          f"（{r.stdout.strip()[-120:]!r}）")
+    wm = os.path.join(d, "水印导出")
+    r = run(["--watermark-batch", d, wm, "--exif"], data)
+    first = sorted(os.listdir(wm)) if os.path.isdir(wm) else []
+    check(r.returncode == 0 and first == ["P3.jpg", "p1.jpg", "p2.jpg"],
+          f"导进照片目录里的「水印导出/」（分析跳过）：退出码 {r.returncode}（要 0）、写出 {first}"
+          f"（{(r.stdout + r.stderr).strip()[-160:]!r}）")
+    r = run(["--watermark-batch", d, wm, "--exif"], data)
+    new = sorted(set(os.listdir(wm)) - set(first)) if os.path.isdir(wm) else []
+    check(r.returncode == 0 and new == ["P3-2.jpg", "p1-2.jpg", "p2-2.jpg"], f"再导一次：全是 -2（{new}）")
     check("另存为 -2" in r.stdout, f"说了「目标里已有同名，另存为 -2」：{r.stdout.strip().splitlines()[:1]}")
+    check(tree(d) == before, "原片（和旁边的 notes.txt）逐字节不变、照片目录这一层没多文件")
 
 
 # ---------------------------------------------------------------- 3. 写 XMP
