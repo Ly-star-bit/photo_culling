@@ -84,7 +84,7 @@ extension LiveHandlers {
         }
         let warning = MCPReadModel.warning(
             "save_failed", "改动在 app 里已经生效，但拼图工程没存上盘，现在只在内存里：选片工具说「\(problem)」",
-            hint: "照原话告诉用户：先腾出磁盘空间（或者看拼图页底下的提示）；之后拼图上随便改一下 app 会整份再存一次")
+            hint: "照原话告诉用户：先腾出磁盘空间（或者看拼图页底下的提示）；之后拼图上随便改一下 app 会整份再存一次。存上之前 app 不让切场次，也先别退出")
         return PersistReport(persisted: false, warnings: [warning])
     }
 

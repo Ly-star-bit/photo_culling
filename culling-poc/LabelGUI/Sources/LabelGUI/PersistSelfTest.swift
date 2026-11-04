@@ -38,6 +38,7 @@ enum PersistSelfTest {
         t.aiOverridesFollowVerdicts()
         t.sessionsIndexDropsKeyless()
         t.collageUnknownBlocksTrash()
+        t.collageWriteFailureBlocksLeaving()
         print("persist-selftest: \(t.passed) 通过 \(t.failed) 失败")
         exit(t.failed == 0 ? 0 : 1)
     }

@@ -15,7 +15,7 @@ import ImageIO
 ///   - 实时桥（followBookmark: false）不跟书签、不认回、不改路径。
 ///   - 存储卡：判断表（DCIM 在卷根 + 可移除 / 可推出才算；外置 SSD、系统盘、网络卷不算；读不出来按「可能是」），
 ///     真读一个系统盘上的 DCIM 文件夹不算卡；编的卷属性（CardImporter.volumeFactsOverride，不挂真的卡 —— hdiutil 挂的映像
-///     会弹「可移除的宗卷」授权框）打开卡上的 DCIM/100CANON：移废片、写 XMP、高 ISO 复制、导出到卡上、复制原片到卡上、水印导出到卡上（含「导出到 水印导出/」）、拼图默认目录和「选择…」选到卡上都挡住，
+///     会弹「可移除的宗卷」授权框）打开卡上的 DCIM/100CANON：移废片、写 XMP、高 ISO 复制、导出到卡上、选片确认表存到卡上、复制原片到卡上、水印导出到卡上（含「导出到 水印导出/」）、拼图默认目录和「选择…」选到卡上都挡住，
 ///     卡上一个文件都没多、没少；导出到卡外照常；外置 SSD 上的工作文件夹照常。
 /// 只写数据目录；退出前删掉造出来的照片文件夹。
 @MainActor
@@ -840,6 +840,16 @@ extension SessionMoveSelfTest {
         FileSafetySelfTest.wait(batch)
         check((batch.lastError ?? "").contains("导出目标") && !fm.fileExists(atPath: card.appendingPathComponent("精华").path),
               "精华导到卡上：不导", batch.lastError ?? "")
+        // 选片确认表（菜单「导出选片确认表」和无头 --proof-sheet 走同一个 exportContactSheet）：存到卡上的不写、不记表
+        let sheetsBefore = batch.proofSheets.count
+        for target in [card.appendingPathComponent("确认表.html"), dcim.appendingPathComponent("确认表.html")] {
+            batch.exportContactSheet(to: target, includeUsable: true)
+            FileSafetySelfTest.wait(batch)
+            let name = String(target.path.dropFirst(cardPath.count))
+            check((batch.lastError ?? "").contains("导出目标") && !fm.fileExists(atPath: target.path)
+                  && batch.proofSheets.count == sheetsBefore,
+                  "选片确认表存到卡上的「\(name)」：不写、不记表", batch.lastError ?? "")
+        }
         // 复制原片到…：面板以前从拍摄文件夹旁边（卡的 DCIM）开，卡上的目标照收（原片副本、精修要求.csv 都写在卡上）。
         let pictures = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
         let startFresh = batch.copyPanelStartFolder
@@ -902,6 +912,11 @@ extension SessionMoveSelfTest {
         FileSafetySelfTest.wait(batch)
         let written = (try? fm.contentsOfDirectory(atPath: offExport.path)) ?? []
         check(written.contains { $0.lowercased().hasSuffix(".jpg") }, "导出到卡外的文件夹照常导", "\(written) \(batch.lastError ?? "")")
+        let sheetOff = off.appendingPathComponent("确认表.html")
+        batch.exportContactSheet(to: sheetOff, includeUsable: true)
+        FileSafetySelfTest.wait(batch)
+        check(fm.fileExists(atPath: sheetOff.path) && batch.proofSheets.count == sheetsBefore + 1,
+              "选片确认表存到卡外照常导、记表", batch.lastError ?? "")
 
         // 拼图：默认目录（卡上的「拼图导出/」）不给；选到卡上的不导；选到卡外的照常。
         FileSafetySelfTest.waitUntil(0.3) { false }

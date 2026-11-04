@@ -845,6 +845,14 @@ extension LiveHandlers {
                 return .failure("save_failed", "app 里这一场还有改动没存上（\(unsaved)），这次没有切场次",
                                 ["executed": false, "hint": "照原话告诉用户：先腾出磁盘空间、点批量页顶上红条的「重试」，存上以后再切"])
             }
+            // 拼图工程写不上（盘满）：批量页红条不管它，switchSession 离开前再整份写了一次还是失败、拦下了（persistBeforeLeaving）。
+            // 原件读坏了那一种上面带 confirm 已经放行，到不了这里。
+            let collage = model.collage
+            if !batch.isRunning, let why = collage.projectSaveProblem, !collage.projectSaveIsRefused {
+                return .failure("save_failed", "app 里这一场的拼图没存上（\(why)），这次没有切场次：切过去拼图改动就没了",
+                                ["executed": false,
+                                 "hint": "照原话告诉用户：先腾出磁盘空间（看拼图页底下的提示），之后再调一次 app_open_session —— app 切之前会先整份再存一次，存上了才切"])
+            }
             return .failure("invalid_state", "选片工具没切场次：\(batch.lastError ?? "正在处理中")", ["executed": false])
         }
         model.ensureCollageAttached()
@@ -957,6 +965,15 @@ extension LiveHandlers {
 
     // MARK: cull.import_client_picks（导入客户选择）
 
+    /// 导入客户选择存上没有：客户选中和客户备注是同一次导入、同一步撤销写的（BatchStore.setClientReply），两份一起算 ——
+    /// 以前只看 client_picks.json，备注写不上（client_notes.json 盘满、原件读坏了先不写）也回 persisted:true、说「已存盘」。
+    static let clientReplyFiles: [BatchStore.PersistFile] = [.clientPicks, .clientNotes]
+
+    /// app_undo target=verdicts 撤的这一步动过哪几份：撤 AI 导入的客户选择看客户选中 + 客户备注，改判看 overrides.json。
+    static func undoPersistFiles(tool: String) -> [BatchStore.PersistFile] {
+        tool == "cull_import_client_picks" ? clientReplyFiles : [.overrides]
+    }
+
     /// = 批量页「导出 › 导入客户选择…」：text 走 resolveClientReply（和导入框边打字边预览同一个函数），ids 要全在这一场。
     /// dry_run（默认）只回认出了哪些，不等用户停手、不压撤销；dry_run:false 走 importClientPicks（导入框「标记为客户选中」：
     /// 加到原来的上面，文件名后面的修图要求一起存成客户备注，一步判决撤销，app_undo target=verdicts 能撤）。
@@ -1011,7 +1028,7 @@ extension LiveHandlers {
         }
         if !dryRun && req.params["reveal"] as? Bool == true { model.tab = .batch }
         // 存上盘没有（审查 S01b）：dry_run 什么都没写，不报
-        let saved = dryRun ? PersistReport(persisted: true, warnings: []) : batchPersistReport(batch, [.clientPicks])
+        let saved = dryRun ? PersistReport(persisted: true, warnings: []) : batchPersistReport(batch, clientReplyFiles)
         if !dryRun { out["persisted"] = saved.persisted }
         // dry_run、什么都没变：窗口看不见那句「改动已生效并已存盘…请告诉用户切过去看」不说（结果照 summary 在对话里讲）
         let (info, shown) = liveInfo(req, live: live, model: model, notice: notice, persisted: saved.persisted,
@@ -1834,9 +1851,8 @@ extension LiveHandlers {
             out["session"] = currentKey(batch) ?? NSNull()
             out["verdict_counts"] = ["pick": counts.pick, "usable": counts.usable, "reject": counts.reject]
             out["undo"] = ["target": "verdicts", "steps_removed": 1, "depth": batch.overrideUndoDepth] as [String: Any]
-            // 存上盘没有（审查 S01b）：撤的是 AI 导入的客户选中就看 client_picks.json，改判看 overrides.json
-            let files: [BatchStore.PersistFile] = entry.tool == "cull_import_client_picks" ? [.clientPicks] : [.overrides]
-            let saved = batchPersistReport(batch, files)
+            // 存上盘没有（审查 S01b）：撤的是 AI 导入的客户选择就看 client_picks.json + client_notes.json，改判看 overrides.json
+            let saved = batchPersistReport(batch, undoPersistFiles(tool: entry.tool))
             out["persisted"] = saved.persisted
             let (info, warnings) = liveInfo(req, live: live, model: model, notice: text, persisted: saved.persisted)
             out["live"] = info

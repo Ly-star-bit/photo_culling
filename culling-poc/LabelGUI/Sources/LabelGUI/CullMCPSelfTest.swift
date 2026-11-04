@@ -180,6 +180,7 @@ enum CullMCPSelfTest {
         check(store.clientPickCount == 0 && Set(touched) == Set(r.ids) && !FileManager.default.fileExists(atPath: file.path),
               "⌘Z：客户选中回到 0、动到的是那 2 张、client_picks.json 删掉：\(touched)")
         clientNoteChecks(check, store: store, sessionDir: sessionDir)
+        clientNotePersistChecks(check, store: store, sessionDir: sessionDir)
     }
 
     /// 带修图要求的回复（审查：桥上以前只传 ids，备注丢了、summary 却说存了）：LiveHandlers.applyClientImport（handler 的
@@ -232,6 +233,47 @@ enum CullMCPSelfTest {
         _ = store.undoLastOverride()
         check(store.clientPickCount == 0 && store.clientNotes.isEmpty && !fm.fileExists(atPath: notesFile.path),
               "再 ⌘Z：客户选中和备注一起回到导入之前，client_notes.json 删掉（\(store.clientNotes)）")
+    }
+
+    /// cull_import_client_picks、app_undo 的 persisted 把客户备注也算上（最终审查）：client_picks.json 写上了、client_notes.json
+    /// 没写上（这里拿一个同名的非空文件夹挡住，和盘满一样写不进去）也是 persisted false + save_failed —— 以前只看
+    /// client_picks.json，照样说「已存盘」。挡住以后的那次导入、撤销都核对；挪开以后重试补写上，回到 true。
+    static func clientNotePersistChecks(_ check: Check, store: BatchStore, sessionDir: URL) {
+        let fm = FileManager.default
+        let notesFile = sessionDir.appendingPathComponent("client_notes.json")
+        let files = LiveHandlers.clientReplyFiles
+        let undoFiles = LiveHandlers.undoPersistFiles(tool: "cull_import_client_picks")
+        check(files.contains(.clientNotes) && undoFiles.contains(.clientNotes) && undoFiles.contains(.clientPicks)
+              && LiveHandlers.undoPersistFiles(tool: "cull_set_verdicts") == [.overrides],
+              "导入客户选择、撤销它的 persisted 看客户选中 + 客户备注两份，撤改判看 overrides.json：\(files) / \(undoFiles)")
+        store.importClientPicks(["DSCF7208"], notes: ["DSCF7208": "去路人"])
+        check(LiveHandlers.batchPersistReport(store, files).persisted && fm.fileExists(atPath: notesFile.path),
+              "（对照）盘是好的：带备注导入，两份都写上、persisted true")
+        // 备注那一份写不进去：client_notes.json 换成一个非空的文件夹（原子写换不掉它）
+        try? fm.removeItem(at: notesFile)
+        try? fm.createDirectory(at: notesFile, withIntermediateDirectories: true)
+        try? Data("x".utf8).write(to: notesFile.appendingPathComponent("挡着"))
+        store.importClientPicks(["DSCF7209"], notes: ["DSCF7209": "瘦脸"])
+        let both = LiveHandlers.batchPersistReport(store, files)
+        let picksOnly = LiveHandlers.batchPersistReport(store, [.clientPicks])
+        let codes = both.warnings.compactMap { $0["code"] as? String }
+        let banner = store.persistError ?? ""
+        check(!both.persisted && codes == ["save_failed"] && picksOnly.persisted && banner.contains("客户备注")
+              && store.clientNotes["DSCF7209"] == "瘦脸",
+              "客户选中写上了、客户备注没写上：persisted false + save_failed（只看 client_picks.json 会是 true），红条说客户备注：\(banner)")
+        _ = store.undoLastOverride()
+        let undone = LiveHandlers.batchPersistReport(store, undoFiles)
+        check(!undone.persisted && store.clientNotes == ["DSCF7208": "去路人"] && !store.clientPicks.contains("DSCF7209"),
+              "备注还写不上时撤销这次导入：内存里撤了，persisted false（\(store.clientNotes)）")
+        // 挪开以后点「重试」：补写上，回到 true；再撤掉第一次导入，盘上回到什么都没有
+        try? fm.removeItem(at: notesFile)
+        try? fm.removeItem(at: notesFile.appendingPathExtension("bak"))
+        let retried = store.retryPersist()
+        check(retried && LiveHandlers.batchPersistReport(store, files).persisted && store.persistError == nil,
+              "挪开挡着的文件夹、重试：两份都写上，persisted true、红条没了")
+        _ = store.undoLastOverride()
+        check(store.clientPickCount == 0 && store.clientNotes.isEmpty && !fm.fileExists(atPath: notesFile.path),
+              "再撤掉第一次导入：客户选中、备注都回到 0，client_notes.json 删掉")
     }
 
     /// 纯数字交付名开头的那一行（审查：W 的 uniqueHead 不看 D 的交付名）：「{序号:3}」导出的 003.jpg、017.jpg 发给客户，
