@@ -16,6 +16,7 @@ enum AppRuntime {
         "--newspaper-selftest",
         "--delivery-selftest",
         "--files-selftest",
+        "--collage-export-selftest",
         "--app-ui", "--live-host",
         "--launch-gate-probe",
         "--mcp", "--mcp-call", "--mcp-tools", "--mcp-selftest",

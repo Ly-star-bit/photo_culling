@@ -2579,6 +2579,7 @@ __attribute__((constructor)) static void init(void) {
             # 改不了输出目录就不测导出：默认的输出目录不能写（CI 上会建出约定不存在的 /tmp 照片目录）
             raise RuntimeError(f"test.set_export_dir 没设上：{set_dir}")
         s0 = settled()
+        _, cs_e, _ = mcp_call(env, "collage_get_state", {"include_preview": False})
         _, e1, _ = w("collage_export", {"session": KEY, "scale": 1, "name": "冒烟导出"}, timeout=120)
         _, e2, _ = w("collage_export", {"session": KEY, "scale": 2, "name": "冒烟导出"}, timeout=120)
         _, e3, _ = w("collage_export", {"session": KEY, "variant": id1, "name": "冒烟方案", "format": "png"}, timeout=120)
@@ -2599,6 +2600,17 @@ __attribute__((constructor)) static void init(void) {
               and ((s1.get("collage") or {}).get("notice") or "").startswith("AI：导出了"),
               f"导出：1 倍 {f1[0].get('width')} px、2 倍 {f2[0].get('width')} px（用了 {k2} 倍）、同名加 -2、方案直接导成 PNG；"
               f"不进撤销、拼图没变、导出页的倍数还是 {saved_scale}（目录里 {on_disk}）")
+        # 空照片格（照片格里没放照片、或照片不在托盘）照样导出，warnings 里报 empty_slots：和导出前这一页的 cells 对得上
+        cs_e = cs_e or {}
+        tray_ids = {p.get("id") for p in cs_e.get("tray_photos") or []}
+        holes = [c.get("path") for c in cs_e.get("cells") or []
+                 if c.get("kind") == "photo" and c.get("photo_id") not in tray_ids]
+        judged = cs_e.get("pages") == 1 and cs_e.get("page_kind") == "grid" and not cs_e.get("tray_photos_truncated")
+        ew = [x for x in e1.get("warnings") or [] if x.get("code") == "empty_slots"]
+        check(not judged or (bool(ew) == bool(holes)
+                             and (not ew or (ew[0].get("count") == len(holes) and ew[0].get("pages") == [1]))),
+              f"导出：空照片格的提醒和这一页的 cells 对得上（{'核对' if judged else '多页/非网格，不核对'}；"
+              f"空格 {holes}，empty_slots {ew}）")
         op = "exp-" + uuid.uuid4().hex[:12]
         _, r1, _ = w("collage_export", {"session": KEY, "name": "重放", "op_id": op}, timeout=120)
         listed1 = sorted(os.listdir(exp_dir))
