@@ -115,19 +115,33 @@ enum SessionFiles {
 
 /// 「最近场次」的索引文件解出来的样子。以前整份用 JSONDecoder 解 [SessionEntry]，一条缺了 name 整份就当空的；
 /// 下一次打开有结果的场次，索引被整份覆盖成 1 条，紧接着 pruneOrphanedSessions 把别的场次的预览都删了。
-/// 现在一条一条解：解得开的进菜单，解不开的原样留在文件里（不进菜单），它们的场次也不清预览。
+/// 现在一条一条解：解得开的进菜单，解不开、但认得出是哪一场的原样留在文件里（不进菜单），它们的场次也不清预览。
+/// 连是哪一场都认不出的（null、{}、既没有 key 也没有 path）丢掉：对不上任何场次目录、保护不了谁的预览，原样留着的话
+/// 每次都写回去，MCP 那边永远报 sessions_index_unreadable，只有「全部清除」清得掉（审查跟进）。
 struct SessionsIndexFile {
     struct Unknown: Equatable {
         /// 这一条原样的 JSON。
         let raw: Data
         /// 能认出来的场次 key（有 key 用 key；只有 path 就按 path 算，和 sessionKey 一样）：pruneOrphanedSessions 跳过它。
         let key: String?
+        /// 这一条里写着的照片文件夹（有的话）：提示里点名「重新打开哪个文件夹」。
+        var path: String? = nil
     }
 
     var entries: [BatchStore.SessionEntry] = []
     var unknown: [Unknown] = []
+    /// 认不出是哪一场、丢掉了的条数（只记日志）。
+    var dropped = 0
 
     var unknownKeys: Set<String> { Set(unknown.compactMap(\.key)) }
+
+    /// 提示里点名读不懂的那几条是哪个文件夹：最多 3 个，多的说「等 N 条」；一个路径都没有 = nil。
+    var unknownFoldersText: String? {
+        let paths = unknown.compactMap(\.path)
+        guard !paths.isEmpty else { return nil }
+        let shown = paths.prefix(3).joined(separator: "、")
+        return paths.count > 3 ? "\(shown) 等 \(paths.count) 个" : shown
+    }
 
     /// nil = 整份解不开（不是 JSON 数组：截断、零长度、手改坏了括号）。
     static func decode(_ data: Data) -> SessionsIndexFile? {
@@ -140,8 +154,11 @@ struct SessionsIndexFile {
             else { continue }
             if let entry = try? decoder.decode(BatchStore.SessionEntry.self, from: raw) {
                 out.entries.append(entry)
+            } else if let key = recoverKey(element) {
+                let path = ((element as? [String: Any])?["path"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                out.unknown.append(Unknown(raw: raw, key: key, path: path))
             } else {
-                out.unknown.append(Unknown(raw: raw, key: recoverKey(element)))
+                out.dropped += 1
             }
         }
         return out

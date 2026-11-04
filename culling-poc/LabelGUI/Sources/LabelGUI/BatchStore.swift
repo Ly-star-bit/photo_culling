@@ -1508,10 +1508,14 @@ final class BatchStore: ObservableObject {
         // sessions.json 就能让菜单无限长下去。
         recentSessions = Array(index.entries.prefix(15))
         sessionsIndexUnknown = index.unknown
+        if index.dropped > 0 {
+            SessionFiles.log.notice("sessions.json 里 \(index.dropped) 条认不出是哪一场（null、{}、没有 key 也没有 path）：丢掉，下次写索引时就没了")
+        }
         let recoverable = index.unknown.filter { $0.key != nil }.count
         if recoverable > 0 {
+            let folders = index.unknownFoldersText.map { "（\($0)）" } ?? ""
             addDataNotice("「最近场次」的索引 sessions.json 里有 \(recoverable) 条读不懂（可能被手改过），原样留在文件里：" +
-                          "这几场不进菜单、预览也不清，从「选择文件夹…」重新打开那个文件夹就回来")
+                          "这几场不进菜单、预览也不清，从「选择文件夹…」重新打开那个文件夹\(folders)就回来")
         }
         refreshSessionAvailability()
     }

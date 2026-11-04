@@ -37,7 +37,8 @@ enum MCPStatus {
             warnings.append(dataDirUnreadableWarning(lockUnseen: LiveClient.lockUnseen(probe), sessionsDenied: index.denied))
         }
         if let problem = index.problem {
-            warnings.append(warning("sessions_index_unreadable", problem, hint: "请用户在选片工具里打开一次任意场次，app 会重写这个文件"))
+            warnings.append(warning("sessions_index_unreadable", problem,
+                                    hint: index.hint ?? "请用户在选片工具里打开一次任意场次，app 会重写这个文件"))
         }
 
         let state = probe.state.rawValue

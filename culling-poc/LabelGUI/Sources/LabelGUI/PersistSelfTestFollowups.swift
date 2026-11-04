@@ -294,4 +294,44 @@ extension PersistSelfTestHarness {
         check(retried && CullMCPSelfTest.diskMarks(full.dir)?[id]?["op_id"] as? String == "op-full" && store.persistError == nil,
               "点「重试」：判决和出处一起写上")
     }
+
+    // MARK: - sessions.json 里认不出是哪一场的条目
+
+    func sessionsIndexDropsKeyless() {
+        print("— S02c 跟进 sessions.json 里认不出是哪一场的（null、{}、没有 key 也没有 path）：丢掉；认得出的照旧原样留着、提示点名文件夹")
+        freshIndex()
+        let a = makeSession("s02c-keyless-a"), b = makeSession("s02c-keyless-b"), c = makeSession("s02c-keyless-c")
+        let indexURL = dataDir.appendingPathComponent("sessions.json")
+        let good: [String: Any] = ["key": a.key, "path": a.folder.path, "name": a.folder.lastPathComponent,
+                                   "lastAnalyzed": "2026-11-01T10:00:00Z", "photoCount": 21]
+        let noName: [String: Any] = ["key": b.key, "path": b.folder.path, "lastAnalyzed": "2026-11-01T09:00:00Z", "photoCount": 21]
+        let pathOnly: [String: Any] = ["path": c.folder.path]
+        let list: [Any] = [good, NSNull(), [String: Any](), ["name": "没有 key 也没有 path"], noName, pathOnly]
+        try? JSONSerialization.data(withJSONObject: list).write(to: indexURL)
+
+        // MCP 先读（app 还没写过）：认不出的那三条不报，只报认得出的两条、点名文件夹，提示不再是「打开任意场次」
+        let before = MCPPaths.readSessionsIndex()
+        let problem = before.problem ?? ""
+        let hint = before.hint ?? ""
+        let problemOK: Bool = problem.contains("2 条读不懂") && problem.contains(b.folder.path) && problem.contains(c.folder.path)
+        check(before.entries.map(\.key) == [a.key] && problemOK, "MCP：列好的那一条，说 2 条读不懂（不算认不出的 3 条）、点名文件夹：\(problem)")
+        check(hint.contains("选择文件夹") && hint.contains(b.folder.path) && !hint.contains("任意场次"),
+              "MCP 的提示：重新打开那个文件夹（不是「打开任意场次」）：\(hint)")
+
+        let store = newStore()  // init 打开 a：登记、写回索引
+        let disk = diskIndex()
+        let raw = read(indexURL).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [Any] }
+        check(raw?.count == 3 && disk?.unknown.map(\.key) == [b.key, c.key] && disk?.dropped == 0,
+              "写回去：认不出的 3 条没了，认得出的 2 条原样留着（\(raw?.count ?? -1) 条）")
+        let notice = store.dataNotice ?? ""
+        check(notice.contains("2 条读不懂") && notice.contains(b.folder.path) && notice.contains(c.folder.path),
+              "橙条说 2 条读不懂、点名是哪两个文件夹：\(notice)")
+
+        // 照提示重新打开那两个文件夹：新的一条取代读不懂的，MCP 的警告没了
+        store.switchSession(to: b.folder)
+        store.switchSession(to: c.folder)
+        let after = MCPPaths.readSessionsIndex()
+        check(after.problem == nil && diskIndex()?.unknown.isEmpty == true && after.entries.count == 3,
+              "重新打开那两个文件夹以后：索引里没有读不懂的了，MCP 不再报（\(after.problem ?? "nil")）")
+    }
 }

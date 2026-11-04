@@ -36,6 +36,7 @@ enum PersistSelfTest {
         t.refusedEditsSurface()
         t.clientNotesGuarded()
         t.aiOverridesFollowVerdicts()
+        t.sessionsIndexDropsKeyless()
         print("persist-selftest: \(t.passed) 通过 \(t.failed) 失败")
         exit(t.failed == 0 ? 0 : 1)
     }
