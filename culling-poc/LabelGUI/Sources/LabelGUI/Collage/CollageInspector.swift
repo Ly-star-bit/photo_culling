@@ -399,7 +399,8 @@ struct CollageLayoutPanel: View {
                         .disabled(store.root == nil)
                         .help("结构不变，按照片原比例重算每条缝的位置（手动拖过的缝会被重算）")
                     if !store.alternatives.isEmpty {
-                        Text("第 \(store.alternativeIndex + 1)/\(store.alternatives.count) 版")
+                        Text(store.alternativeIndex < 0 ? "备选 \(store.alternatives.count) 版"
+                             : "第 \(store.alternativeIndex + 1)/\(store.alternatives.count) 版")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }

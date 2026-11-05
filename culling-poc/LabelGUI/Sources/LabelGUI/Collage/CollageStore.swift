@@ -87,6 +87,7 @@ final class CollageStore: ObservableObject {
 
     @Published private(set) var alternatives: [CollageLayout.Scored] = []
     @Published private(set) var alternativeThumbs: [NSImage] = []
+    /// 画布上现在是第几版；-1 = 不在这一排里（右键「从备选里去掉」拿掉的正是现在这一版）。
     @Published private(set) var alternativeIndex = 0
     @Published private(set) var isSolving = false
     private var solveSeed: UInt64 = 7
@@ -94,6 +95,10 @@ final class CollageStore: ObservableObject {
     private var alternativesPageID: UUID?
     /// 散落版备选用的参数（套用备选时写进页面，下次「换一批」接着用）。
     private var alternativesScatter: CollageScatterSpec?
+    /// 备选是哪一批：每出一批、清空一次 +1；缩略图渲完记下自己是哪一批的。去掉一版要两排一起删，缩略图还是上一批的
+    /// （新一批刚出来、缩略图还在渲）时不能删，删了下标就对不上。
+    private var alternativesBatch = 0
+    private var thumbsBatch = -1
     /// 每次求解 +1：后发先至时只认最新的那一次。
     private var solveGeneration = 0
     /// 每次换场次换一个：后台任务（导入、编排、求解）回来时场次变了就丢弃结果。
@@ -1348,6 +1353,7 @@ final class CollageStore: ObservableObject {
         alternatives = results
         alternativesPageID = page?.id
         alternativeIndex = 0
+        alternativesBatch += 1
         commitEdit()
         renderAlternativeThumbs()
     }
@@ -1399,6 +1405,32 @@ final class CollageStore: ObservableObject {
         alternativesPageID = nil
         alternativesScatter = nil
         alternativeIndex = 0
+        alternativesBatch += 1
+    }
+
+    /// 备选条的「清空」：这一排全清掉，画布上现在这一版留着（只是不再有备选，不进撤销）。还在算的「换一批」作废，
+    /// 免得算完又铺满一排、还把画布换掉。以前没有这个入口，备选只有退出 app 才清得掉。
+    func clearAlternativeStrip() {
+        cancelSolveIfRunning()
+        clearAlternatives()
+    }
+
+    /// 备选条右键「从备选里去掉」：只从这一排拿掉这一版，画布不动、不进撤销。拿掉的正是画布上现在这一版时，
+    /// 这一排里就没有哪版是现在的样子（不描蓝边），→ 从第一版接着翻。拿光了 = 清空。
+    func removeAlternative(_ index: Int) {
+        guard thumbsBatch == alternativesBatch, alternatives.indices.contains(index),
+              alternativeThumbs.count == alternatives.count else { return }
+        guard alternatives.count > 1 else {
+            clearAlternativeStrip()
+            return
+        }
+        alternatives.remove(at: index)
+        alternativeThumbs.remove(at: index)
+        if index == alternativeIndex {
+            alternativeIndex = -1
+        } else if index < alternativeIndex {
+            alternativeIndex -= 1
+        }
     }
 
     func applyAlternative(_ index: Int) {
@@ -1426,7 +1458,9 @@ final class CollageStore: ObservableObject {
 
     func previousAlternative() {
         guard !alternatives.isEmpty else { return }
-        applyAlternative((alternativeIndex - 1 + alternatives.count) % alternatives.count)
+        // 现在这一版不在这一排里（-1）：← 到最后一版。
+        applyAlternative(alternativeIndex < 0 ? alternatives.count - 1
+                                              : (alternativeIndex - 1 + alternatives.count) % alternatives.count)
     }
 
     func refit() {
@@ -1442,6 +1476,7 @@ final class CollageStore: ObservableObject {
         let items = alternatives.map { s -> CollagePage in pageFor(s, replacing: current) }
         let generation = solveGeneration
         let pageID = alternativesPageID
+        let batch = alternativesBatch
         var snapshot = project
         let hints = self.hints
         // 备选条上 64pt 高：按长边 150 渲，相册跨页（2:1）只有 75px 高，放到 128px 是糊的 —— 高度也要够。
@@ -1461,8 +1496,9 @@ final class CollageStore: ObservableObject {
                 }
             }.value
             guard let self, self.solveGeneration == generation, self.alternativesPageID == pageID,
-                  self.alternatives.count == thumbs.count else { return }
+                  self.alternativesBatch == batch, self.alternatives.count == thumbs.count else { return }
             self.alternativeThumbs = thumbs
+            self.thumbsBatch = batch
         }
     }
 

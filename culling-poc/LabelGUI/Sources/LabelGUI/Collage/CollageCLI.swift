@@ -2203,6 +2203,18 @@ enum CollageOpsScript {
                     }
                     print("  模板缩略图存了 \(names.count) 张 → \(arg)_*.png")
                 }
+            case "altapply", "altremove", "altclear", "altstate":
+                // altapply:i 点第几版 / altremove:i 右键「从备选里去掉」/ altclear 备选条「清空」/ altstate 只打印；
+                // 打印：几版、缩略图几张、画布上是第几版（-1 = 不在这一排）、画布上几张照片、能撤几步
+                spin(15) { !store.alternatives.isEmpty && store.alternativeThumbs.count == store.alternatives.count }
+                switch name {
+                case "altapply": store.applyAlternative(Int(arg) ?? 0)
+                case "altremove": store.removeAlternative(Int(arg) ?? 0)
+                case "altclear": store.clearAlternativeStrip()
+                default: break
+                }
+                print("  备选 \(store.alternatives.count) 版 · 缩略图 \(store.alternativeThumbs.count) · 现在第 \(store.alternativeIndex) 版"
+                      + " · 画布 \(store.page?.photoIDs.count ?? 0) 张 · 页 \(store.project.pages.count) · 撤销 \(store.undoDepth)")
             case "altthumb":
                 // altthumb:序号=文件名：把第几个备选的缩略图存下来（核对和点下去的一致）。
                 let kv = arg.split(separator: "=", maxSplits: 1).map(String.init)

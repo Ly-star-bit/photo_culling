@@ -677,33 +677,51 @@ struct CollageAlternativeStrip: View {
                     .foregroundStyle(.tertiary)
                 Spacer()
             } else {
-                CollageAlternativeThumbs(store: store, thumbs: store.alternativeThumbs, selected: store.alternativeIndex)
+                CollageAlternativeThumbs(store: store, thumbs: store.alternativeThumbs, selected: store.alternativeIndex,
+                                         clearCanvasLabel: clearCanvasLabel)
                     .equatable()
+                Button {
+                    store.clearAlternativeStrip()
+                } label: {
+                    Label("清空", systemImage: "xmark.circle")
+                }
+                .controlSize(.small)
+                .help("清空这一排备选：画布上现在这一版留着。右键缩略图可以只去掉一版，或者连画布一起清")
             }
         }
         .padding(.horizontal, 10)
         .frame(height: 78)
     }
+
+    /// 右键「连画布一起清」的说法：单张拼图只有一页 = 清空画布（照片还在托盘里）；几页的 / 相册 = 删掉这一页 / 跨页。
+    private var clearCanvasLabel: String {
+        if store.isAlbum { return "删除这个跨页" }
+        return store.project.pages.count > 1 ? "删除这一页" : "清空画布（照片还在托盘里）"
+    }
 }
 
-/// 备选缩略图那一排（几十张）：只有缩略图换了、选中的换了才重算。
+/// 备选缩略图那一排（几十张）：只有缩略图换了、选中的换了才重算。右键：用这一版 / 从备选里去掉 / 清空备选 /
+/// 连画布一起清（以前右键没反应，备选只有退出 app 才清得掉）。
 private struct CollageAlternativeThumbs: View, Equatable {
     /// 只用来调方法（不订阅）。
     let store: CollageStore
     let thumbs: [NSImage]
     let selected: Int
+    let clearCanvasLabel: String
     /// 每张缩略图是不是同一张（== 只比这个：NSImage 不是 Sendable，nonisolated 的 == 里不碰它）。
     private let thumbIDs: [ObjectIdentifier]
 
-    init(store: CollageStore, thumbs: [NSImage], selected: Int) {
+    init(store: CollageStore, thumbs: [NSImage], selected: Int, clearCanvasLabel: String) {
         self.store = store
         self.thumbs = thumbs
         self.selected = selected
+        self.clearCanvasLabel = clearCanvasLabel
         thumbIDs = thumbs.map(ObjectIdentifier.init)
     }
 
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.store === b.store && a.selected == b.selected && a.thumbIDs == b.thumbIDs
+            && a.clearCanvasLabel == b.clearCanvasLabel
     }
 
     var body: some View {
@@ -722,7 +740,14 @@ private struct CollageAlternativeThumbs: View, Equatable {
                                 lineWidth: 2.5))
                     }
                     .buttonStyle(.plain)
-                    .help("第 \(item.offset + 1) 版")
+                    .contextMenu {
+                        Button("用这一版") { store.applyAlternative(item.offset) }
+                        Button("从备选里去掉") { store.removeAlternative(item.offset) }
+                        Divider()
+                        Button("清空备选") { store.clearAlternativeStrip() }
+                        Button(clearCanvasLabel, role: .destructive) { store.deletePage(store.pageIndex) }
+                    }
+                    .help("第 \(item.offset + 1) 版（右键：去掉这一版、清空备选）")
                 }
             }
             .padding(.vertical, 6)
