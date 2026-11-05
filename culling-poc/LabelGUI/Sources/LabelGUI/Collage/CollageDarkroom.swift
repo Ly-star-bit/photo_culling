@@ -215,18 +215,22 @@ final class CollageDarkroom: ObservableObject {
     }
 
     /// 强度：同一级上改；这一页 / 这一格还没有自己的色调时，用现在看到的色调 + 新强度给它设上。
+    /// 已经有的就只改强度（模板带的 fromTemplate 留着：换模板时它照旧不跟着照片走）。
     func setStrength(_ value: Double, coalesce: Bool = true) {
         let v = min(1, max(0, value))
-        let look = current.look
         switch effectiveScope {
         case .project:
             var st = store.project.style
             st.lookStrength = v
             store.setStyle(st, coalesce: coalesce)
         case .page:
-            store.setPageLook(CollageLookSetting(look: look, strength: v), coalesce: coalesce)
+            var s = store.page?.look ?? CollageLookSetting(look: current.look, strength: v)
+            s.strength = v
+            store.setPageLook(s, coalesce: coalesce)
         case .cell:
-            store.setCellLook(CollageLookSetting(look: look, strength: v), coalesce: coalesce)
+            var s = store.selectedCell?.look ?? CollageLookSetting(look: current.look, strength: v)
+            s.strength = v
+            store.setCellLook(s, coalesce: coalesce)
         }
     }
 

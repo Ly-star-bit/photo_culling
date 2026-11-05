@@ -8,7 +8,8 @@ import Foundation
 /// 2. 打开：整组、看到的就是工程的色调；单张拼图没有「这一页」，没选格子「这一格」退回整组。
 /// 3. 悬停只是预览：工程、撤销步数都不动，预览用的工程里这一级换成了悬停的色调。
 /// 4. 套用：整组 / 这一页 / 这一格各改各的那一级，一次一步撤销，undo 一下回去。
-/// 5. 强度：这一页还没有自己的色调时拖强度 = 用现在看到的色调 + 新强度给这一页设上；连拖合成一步。
+/// 5. 强度：这一页还没有自己的色调时拖强度 = 用现在看到的色调 + 新强度给这一页设上；连拖合成一步；
+///    已经有的（包括模板带的）只改强度，fromTemplate 留着。
 /// 6. 颗粒、晕光、统一色温永远改整组，选「这一格」也一样。
 /// 7. ←→ 按看片台的先后走、到头绕回，只预览不套用；⏎（apply(focus)）才套用。
 /// 8. 原图：所有级别不调色、颗粒晕光统一色温都是 0，版式不变。
@@ -121,6 +122,11 @@ enum CollageDarkroomSelfTest {
         check(store.project.pages[0].look?.look == .filmPastel && store.project.pages[0].look?.strength == 0.5
               && store.project.pages[1].look == nil, "这一页：只改这一页（强度沿用 50%），别的跨页不动")
         check(album.overriddenBelow == nil, "选「这一页」时不提示被下级盖住")
+        store.setPageLook(CollageLookSetting(look: .mono, strength: 0.9, fromTemplate: true))
+        album.setStrength(0.6, coalesce: false)
+        check(store.project.pages[0].look == CollageLookSetting(look: .mono, strength: 0.6, fromTemplate: true),
+              "模板带的页级色调拖强度：只改强度，fromTemplate 留着", "\(String(describing: store.project.pages[0].look))")
+        album.apply(.filmPastel)
         album.scope = .project
         check(album.overriddenBelow != nil, "选「整组」而这一页单独设了色调：提示整组改了这一页看不出来")
 
