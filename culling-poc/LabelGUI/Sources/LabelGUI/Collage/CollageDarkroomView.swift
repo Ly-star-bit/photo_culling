@@ -81,10 +81,20 @@ enum DarkroomPalette {
 }
 
 enum DarkroomFont {
+    /// 本机已经装好的字体家族，只读一次。没装的不拿名字去问 CoreText（按需下载的字体会经 fontd 去找，没网时那一问
+    /// 可能一直不回，见 CollageTypeset 的 installedPostScriptNames），直接退到系统的衬线 / 等宽。
+    private static let installed: Set<String> = Set((CTFontManagerCopyAvailableFontFamilyNames() as? [String]) ?? [])
+    private static let songti = installed.contains("Songti SC")
+    private static let typewriter = installed.contains("American Typewriter")
+
     /// 宋体标题（印刷品的味道）。
-    static func title(_ size: CGFloat) -> Font { .custom("Songti SC", size: size).weight(.bold) }
+    static func title(_ size: CGFloat) -> Font {
+        songti ? .custom("Songti SC", size: size).weight(.bold) : .system(size: size, weight: .bold, design: .serif)
+    }
     /// 打字机字：英文小标、片边、标签。
-    static func type(_ size: CGFloat) -> Font { .custom("American Typewriter", size: size) }
+    static func type(_ size: CGFloat) -> Font {
+        typewriter ? .custom("American Typewriter", size: size) : .system(size: size, design: .monospaced)
+    }
     /// 读数：等宽数字。
     static func digits(_ size: CGFloat) -> Font { .system(size: size, weight: .semibold, design: .monospaced) }
     static func label(_ size: CGFloat) -> Font { .system(size: size, weight: .medium) }
