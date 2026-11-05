@@ -4703,7 +4703,12 @@ extension CollageStore {
         var corner: Double?
         var background: CollageColor?
         var shape: CollageShape?
-        var isEmpty: Bool { margin == nil && gutter == nil && corner == nil && background == nil && shape == nil }
+        var filmGrain: Double?
+        var filmHalation: Double?
+        var isEmpty: Bool {
+            margin == nil && gutter == nil && corner == nil && background == nil && shape == nil
+                && filmGrain == nil && filmHalation == nil
+        }
     }
 
     /// 换样式 / 色调 / 强度（照 CollageCLI.swift 的 style、look、strength 三个 op）：预设整套换（不合并），
@@ -4725,6 +4730,8 @@ extension CollageStore {
                 st.backgroundMode = .solid
             }
             if let shape = fields.shape { st.shape = shape }
+            if let grain = fields.filmGrain { st.filmGrain = min(1, max(0, grain)) }
+            if let halation = fields.filmHalation { st.filmHalation = min(1, max(0, halation)) }
             setStyle(st)
         }
     }

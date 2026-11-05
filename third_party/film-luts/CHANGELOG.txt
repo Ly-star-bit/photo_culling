@@ -12,6 +12,10 @@ Changes to the spektrafilm material in this folder (CC BY-SA 4.0)
     around mid gray is scaled by 0.8 below and 1.5 above (an
     inverse of the camera tone curve already in the photo); scanner white / black
     point correction on;
-  - renamed with generic look names (file name = look id in the app).
+  - renamed with generic look names (file name = look id in the app);
+  - <look>.film.cube / <look>.print.cube: the same chain split at the film density
+    (spektrafilm's cmy_film tap) into two 24^3 tables, so the app can add grain
+    between them; <look>.json: the density range of that split, the per-channel grain
+    standard deviation derived from spektrafilm's grain model, and its halation preset.
   The app blends each table toward the original with its strength slider at run time.
   Script: culling-poc/LabelGUI/Scripts/bake_film_luts.py

@@ -208,6 +208,16 @@ struct CollageLookBox: View {
                 CollageSlider(label: "强度", value: binding(\.lookStrength), range: 0...1,
                               display: percentText(store.project.style.lookStrength))
                     .disabled(store.project.style.look == .none)
+                CollageSlider(label: "颗粒", value: binding(\.filmGrain), range: 0...1,
+                              display: percentText(store.project.style.filmGrain))
+                    .disabled(!store.project.style.look.isSpectral)
+                    .help("光谱胶片的颗粒（spektrafilm 的颗粒模型）：50% ≈ 这款胶片在 35mm 底片上的真实颗粒，100% 是两倍。"
+                          + "按每张照片的像素算，导出和放大预览时才看得清；只在光谱胶片色调（柔肤…银幕）上起作用")
+                CollageSlider(label: "晕光", value: binding(\.filmHalation), range: 0...1,
+                              display: percentText(store.project.style.filmHalation))
+                    .disabled(!store.project.style.look.isSpectral)
+                    .help("高光边上泛红的光晕（底片片基的反射）：100% = 没有防光晕层的底片。导出大图时更明显；"
+                          + "只在光谱胶片色调上起作用")
                 CollageSlider(label: "统一色温", value: binding(\.harmonize), range: 0...1,
                               display: percentText(store.project.style.harmonize))
                     .help("其余照片的色温、明暗往主图靠：不同时间、不同光线拍的放在一起才像一组")

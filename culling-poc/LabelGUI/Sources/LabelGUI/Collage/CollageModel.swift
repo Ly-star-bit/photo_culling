@@ -932,6 +932,11 @@ struct CollageStyle: Codable, Hashable {
     var lookStrength = 0.8
     /// 统一到主图：其余照片的色温、明暗往主图靠，0 = 不动。
     var harmonize = 0.0
+    /// 光谱胶片的颗粒 0…1（只在光谱色调上起作用，CollageFilmEffects）：0.5 = 这款胶片在 35mm 底片上的
+    /// 真实颗粒（spektrafilm 的颗粒模型），1 = 两倍。0 = 不加（和没有这一项时逐像素一样）。
+    var filmGrain = 0.0
+    /// 光谱胶片的晕光 0…1：高光往外散的红橙光晕（片基反射），1 = 底片没有防光晕层。0 = 不加。
+    var filmHalation = 0.0
     /// 四边不一样的边距（留白杂志、婚礼相册）；nil = 四边都是 margin（旧行为）。
     var insets: CollageInsets?
     /// 照片加网（报纸风）；nil = 不加。加网的照片不再锐化（锐化会在网点边上起白边）。
@@ -1872,6 +1877,10 @@ extension CollageStyle {
         look = c.soft(.look, d.look)
         lookStrength = min(1, max(0, c.soft(.lookStrength, d.lookStrength)))
         harmonize = min(1, max(0, c.soft(.harmonize, d.harmonize)))
+        let grainValue = c.soft(.filmGrain, d.filmGrain)
+        filmGrain = grainValue.isFinite ? min(1, max(0, grainValue)) : 0
+        let halationValue = c.soft(.filmHalation, d.filmHalation)
+        filmHalation = halationValue.isFinite ? min(1, max(0, halationValue)) : 0
         insets = c.softOptional(.insets)
         halftone = c.softOptional(.halftone)
         let mat = c.soft(.matWidth, d.matWidth)

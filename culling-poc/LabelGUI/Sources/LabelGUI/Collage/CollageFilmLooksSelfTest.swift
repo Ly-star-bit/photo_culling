@@ -15,6 +15,11 @@ import CoreImage
 /// 5. 渲染：一块纯色走 CollageLooks.apply（CIColorCubeWithColorSpace，sRGB）出来的颜色和 CPU 上 grade() 算的差 ≤ 3/255
 ///    —— 预览、导出（GPU）和主图取色、压字判深浅（CPU）用的是同一个颜色。
 /// 6. 存档：新色调存进 CollageLookSetting 再读回来不变。
+/// 7. 颗粒、晕光（CollageFilmEffects）：每个光谱色调的 film / print 表和 .json 都读得到；两项都是 0 时和
+///    CollageLooks.apply 逐字节一样；一块灰上开颗粒，均值不动（≤ 0.004 线性）、每个通道的标准差和 CPU 按
+///    print 表斜率 × σ(密度) / 像素边长 × 0.65 像素模糊算的差 35% 以内，颗粒跟着像素尺寸变（像素小一半 → 颗粒
+///    大约大一倍）；同一张照片渲两次逐字节一样、换一张照片噪声不一样；灰底白圆开晕光，圆外的红抬得比绿多、
+///    绿比蓝多，晕光 0 时原样；CollageStyle 里的颗粒、晕光存了读回来不变，旧 JSON 没有这两项是 0、坏值收到 0…1。
 /// 全过退出 0，否则 1。
 enum CollageFilmLooksSelfTest {
 
@@ -151,8 +156,167 @@ enum CollageFilmLooksSelfTest {
             check(back?.look == look && abs((back?.strength ?? 0) - 0.65) < 1e-9, "\(look.rawValue) 存了读回来不变")
         }
 
+        // ---------------------------------------------------------------- 7. 颗粒、晕光
+        print("== 颗粒、晕光")
+        for look in spectral {
+            guard let fx = CollageFilmEffects.extras(look) else {
+                check(false, "\(look.rawValue) 读得到 film / print 表和 .json")
+                continue
+            }
+            check(fx.film.size == fx.size && fx.print.size == fx.size && fx.sigmaUnit.count == 3,
+                  "\(look.rawValue) film / print 表 \(fx.size)³、σ 三个通道")
+            check(fx.halationSigmaUM == 50 || fx.halationSigmaUM == 65, "\(look.rawValue) 晕光 σ 是片基给的 50 / 65 µm",
+                  "\(fx.halationSigmaUM)")
+        }
+        grainAndHalation(check)
+        styleCoding(check)
+
         print(failures.isEmpty ? "全部通过" : "失败 \(failures.count) 项：" + failures.joined(separator: "；"))
         exit(failures.isEmpty ? 0 : 1)
+    }
+
+    private static let linear = CGColorSpace(name: CGColorSpace.linearSRGB)!
+
+    /// 渲成线性光的 Float RGBA。
+    private static func readLinear(_ image: CIImage, _ rect: CGRect) -> [Float] {
+        let w = Int(rect.width), h = Int(rect.height)
+        var buf = [Float](repeating: 0, count: w * h * 4)
+        CollageRender.ciContext.render(image, toBitmap: &buf, rowBytes: w * 16, bounds: rect, format: .RGBAf,
+                                       colorSpace: linear)
+        return buf
+    }
+
+    private static func stats(_ px: [Float], _ c: Int) -> (mean: Double, std: Double) {
+        let n = px.count / 4
+        var m = 0.0
+        for i in 0..<n { m += Double(px[i * 4 + c]) }
+        m /= Double(n)
+        var v = 0.0
+        for i in 0..<n { let d = Double(px[i * 4 + c]) - m; v += d * d }
+        return (m, (v / Double(n)).squareRoot())
+    }
+
+    private static func grainAndHalation(_ check: (Bool, String, String) -> Void) {
+        let look = CollageLook.filmWarmSkin
+        guard let fx = CollageFilmEffects.extras(look),
+              let grayColor = CIColor(red: 0.5, green: 0.45, blue: 0.4, alpha: 1, colorSpace: CollageRender.srgb)
+        else { check(false, "颗粒自检的准备", ""); return }
+        let rect = CGRect(x: 0, y: 0, width: 192, height: 192)
+        let gray = CIImage(color: grayColor).cropped(to: rect)
+        var ops = CollageLooks.Ops(gains: nil, look: look, strength: 1)
+        let base = readLinear(CollageLooks.apply(gray, ops: ops), rect)
+        let off = readLinear(CollageFilmEffects.apply(gray, ops: ops, frameLongEdge: 2000, seed: "a", extent: rect), rect)
+        check(base == off, "颗粒、晕光都是 0：和 CollageLooks.apply 逐字节一样", "")
+
+        // 灰块开颗粒 0.5，照片长边 2000 像素（像素 17.5 µm）。
+        ops.grain = 0.5
+        let long = 2000.0
+        let grained = readLinear(CollageFilmEffects.apply(gray, ops: ops, frameLongEdge: long, seed: "a", extent: rect), rect)
+        // CPU 预测：输入 → film 表（归一化密度）→ print 表在这一点的斜率 J；δ 的标准差 = σ(d) × 2·颗粒 / 像素边长 ×
+        // 0.65 像素高斯模糊对白噪声的衰减（离散核平方和开方）。
+        let pixelUM = fx.filmFormatMM * 1000 / long
+        let enc = CollageFilmLUTs.sample(fx.film, 0.5, 0.45, 0.4)
+        func dec(_ v: Double) -> Double { v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+        let d = [dec(enc.0), dec(enc.1), dec(enc.2)]
+        func sigmaAt(_ c: Int) -> Double {
+            let s = fx.sigmaUnit[c]
+            let x = min(1, max(0, d[c])) * Double(s.count - 1)
+            let i = min(Int(x), s.count - 2)
+            return s[i] + (s[i + 1] - s[i]) * (x - Double(i))
+        }
+        var kernel: [Double] = (-4...4).map { exp(-Double($0 * $0) / (2 * fx.grainBlurPx * fx.grainBlurPx)) }
+        let ks = kernel.reduce(0, +)
+        kernel = kernel.map { $0 / ks }
+        let blur1D = kernel.map { $0 * $0 }.reduce(0, +)
+        let atten = blur1D  // 二维可分离：方差衰减 = (Σw²)²，标准差衰减 = Σw²
+        let hstep = 0.02
+        func printAt(_ v: [Double]) -> [Double] {
+            let o = CollageFilmLUTs.sample(fx.print, v[0], v[1], v[2])
+            return [o.0, o.1, o.2]
+        }
+        var jac = [[Double]](repeating: [0, 0, 0], count: 3)
+        for k in 0..<3 {
+            var up = d, dn = d
+            up[k] += hstep
+            dn[k] -= hstep
+            let pu = printAt(up), pd = printAt(dn)
+            for c in 0..<3 { jac[c][k] = (pu[c] - pd[c]) / (2 * hstep) }
+        }
+        let sd = (0..<3).map { sigmaAt($0) * 2 * ops.grain / pixelUM * atten }
+        for c in 0..<3 {
+            let predicted = (0..<3).map { jac[c][$0] * sd[$0] }.map { $0 * $0 }.reduce(0, +).squareRoot()
+            let b = stats(base, c), g = stats(grained, c)
+            let name = ["R", "G", "B"][c]
+            check(abs(g.mean - b.mean) <= 0.004, "颗粒 0.5：\(name) 均值不动",
+                  String(format: "%.4f → %.4f", b.mean, g.mean))
+            check(predicted > 0 && abs(g.std / predicted - 1) <= 0.35, "颗粒 0.5：\(name) 标准差和 spektrafilm 模型对得上",
+                  String(format: "实测 %.4f 预测 %.4f", g.std, predicted))
+        }
+        // 亮的饱和色（蓝天）上开颗粒，均值也不动：中间有一步超过 1 被夹掉的话，这里会整片偏色。
+        if let skyColor = CIColor(red: 0.55, green: 0.78, blue: 0.95, alpha: 1, colorSpace: CollageRender.srgb) {
+            let sky = CIImage(color: skyColor).cropped(to: rect)
+            let skyBase = readLinear(CollageLooks.apply(sky, ops: CollageLooks.Ops(gains: nil, look: look, strength: 1)), rect)
+            let skyGrain = readLinear(CollageFilmEffects.apply(sky, ops: ops, frameLongEdge: long, seed: "a", extent: rect), rect)
+            let shift = (0..<3).map { abs(stats(skyGrain, $0).mean - stats(skyBase, $0).mean) }.max() ?? 1
+            check(shift <= 0.006, "蓝天上开颗粒：均值不动（没有哪一步被夹到 0…1）", String(format: "最大偏 %.4f", shift))
+        }
+        // 像素小一半（长边 4000）：颗粒大约大一倍。
+        let fine = readLinear(CollageFilmEffects.apply(gray, ops: ops, frameLongEdge: 4000, seed: "a", extent: rect), rect)
+        let ratio = stats(fine, 1).std / max(1e-9, stats(grained, 1).std)
+        check(ratio > 1.6 && ratio < 2.4, "照片长边 2000 → 4000：颗粒的标准差约翻倍", String(format: "%.2f 倍", ratio))
+        let again = readLinear(CollageFilmEffects.apply(gray, ops: ops, frameLongEdge: long, seed: "a", extent: rect), rect)
+        check(again == grained, "同一张照片渲两次逐字节一样", "")
+        let other = readLinear(CollageFilmEffects.apply(gray, ops: ops, frameLongEdge: long, seed: "b", extent: rect), rect)
+        check(other != grained, "换一张照片（id 不同）噪声不一样", "")
+        var weak = ops
+        weak.strength = 0.5
+        let half = readLinear(CollageFilmEffects.apply(gray, ops: weak, frameLongEdge: long, seed: "a", extent: rect), rect)
+        let halfBase = readLinear(CollageLooks.apply(gray, ops: weak), rect)
+        check(abs(stats(half, 1).std - stats(halfBase, 1).std - 0.5 * (stats(grained, 1).std - stats(base, 1).std)) < 0.35 * stats(grained, 1).std,
+              "色调强度 50%：颗粒也减半", String(format: "%.4f / %.4f", stats(half, 1).std, stats(grained, 1).std))
+
+        // 灰底白圆，晕光 1：σ = 65 µm / 像素 ≈ 8 像素。用灰底不用黑底：黑那一段在胶片的趾部，抬上去的光被压得几乎
+        // 看不出来（物理上就是这样），灰底上色调表的斜率接近 1。
+        let disc = CGRect(x: 0, y: 0, width: 256, height: 256)
+        guard let ctx = CGContext(data: nil, width: 256, height: 256, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CollageRender.srgb, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return }
+        ctx.setFillColor(CGColor(gray: 0.35, alpha: 1))
+        ctx.fill(disc)
+        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+        ctx.fillEllipse(in: CGRect(x: 88, y: 88, width: 80, height: 80))
+        guard let cg = ctx.makeImage() else { return }
+        let src = CIImage(cgImage: cg)
+        var hops = CollageLooks.Ops(gains: nil, look: look, strength: 1)
+        let plain = readLinear(CollageFilmEffects.apply(src, ops: hops, frameLongEdge: 4300, seed: "a", extent: disc), disc)
+        hops.halation = 1
+        let glow = readLinear(CollageFilmEffects.apply(src, ops: hops, frameLongEdge: 4300, seed: "a", extent: disc), disc)
+        let i = (128 * 256 + 128 + 50) * 4  // 圆心往右 50 像素：圆外 10 像素
+        let rise = (0..<3).map { Double(glow[i + $0] - plain[i + $0]) }
+        check(rise[0] > 0.01 && rise[0] > rise[1] && rise[1] >= rise[2] - 1e-4,
+              "晕光 1：圆外泛红（红抬得最多、绿次之、蓝最少）", String(format: "R +%.4f G +%.4f B +%.4f", rise[0], rise[1], rise[2]))
+        let center = (128 * 256 + 128) * 4
+        let centerShift = (0..<3).map { abs(Double(glow[center + $0] - plain[center + $0])) }.max() ?? 1
+        check(centerShift < 0.01, "晕光 1：白圆中间不变暗（光是往外散，不是整体压暗）", String(format: "最大差 %.4f", centerShift))
+        let far = (128 * 256 + 2) * 4
+        check(abs(glow[far] - plain[far]) < 0.004, "晕光只在高光附近：离圆远的灰基本不动",
+              String(format: "%.4f", glow[far] - plain[far]))
+        hops.halation = 0
+        let none = readLinear(CollageFilmEffects.apply(src, ops: hops, frameLongEdge: 4300, seed: "a", extent: disc), disc)
+        check(none == plain, "晕光 0：原样", "")
+    }
+
+    private static func styleCoding(_ check: (Bool, String, String) -> Void) {
+        var style = CollageStyle()
+        style.look = .cineDay
+        style.filmGrain = 0.3
+        style.filmHalation = 0.7
+        let back = (try? JSONEncoder().encode(style)).flatMap { try? JSONDecoder().decode(CollageStyle.self, from: $0) }
+        check(back?.filmGrain == 0.3 && back?.filmHalation == 0.7 && back?.look == .cineDay, "颗粒、晕光存了读回来不变", "")
+        let old = try? JSONDecoder().decode(CollageStyle.self, from: Data(#"{"look":"film"}"#.utf8))
+        check(old?.filmGrain == 0 && old?.filmHalation == 0, "旧 JSON 没有颗粒、晕光：都是 0", "")
+        let bad = try? JSONDecoder().decode(CollageStyle.self, from: Data(#"{"filmGrain":7,"filmHalation":-2}"#.utf8))
+        check(bad?.filmGrain == 1 && bad?.filmHalation == 0, "坏值收到 0…1", "")
     }
 
     /// 一块 8×8 的纯色走 CollageLooks.apply（强度 0.8），读回中间那个像素（sRGB 0…1）。

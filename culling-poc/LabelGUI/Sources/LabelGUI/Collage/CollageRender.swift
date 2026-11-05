@@ -1585,8 +1585,10 @@ enum CollageRender {
         lanczos.setValue(scaleY, forKey: kCIInputScaleKey)
         lanczos.setValue(scaleX / scaleY, forKey: kCIInputAspectRatioKey)
         guard var output = lanczos.outputImage?.cropped(to: target) else { return nil }
-        // 调色在锐化之前（锐化放大的是调完色的边缘）。
-        output = CollageLooks.apply(output, ops: color).cropped(to: target)
+        // 调色在锐化之前（锐化放大的是调完色的边缘）。光谱胶片的颗粒、晕光按整张照片在这一格的像素尺寸换算
+        // （照片原图的长边缩到这次渲染有多少像素 = 一张 35mm 底片）；没开这两项 = 和 CollageLooks.apply 一样。
+        output = CollageFilmEffects.apply(output, ops: color, frameLongEdge: max(dw * scaleX, dh * scaleY),
+                                          seed: photo.id, extent: target).cropped(to: target)
         if let screen {
             // 加网替代锐化：锐化会在网点边上起白边，网点本身就是最硬的边。
             output = CollageScreening.apply(output, spec: screen, extent: target)
@@ -1774,7 +1776,9 @@ enum CollageRender {
     private static func opsKey(_ ops: CollageLooks.Ops?) -> String {
         guard let ops, !ops.isIdentity else { return "-" }
         let gains = ops.gains.map { $0.map { String(Int(($0 * 1000).rounded())) }.joined(separator: ",") } ?? ""
-        return "\(ops.look.rawValue)|\(Int((ops.strength * 20).rounded()))|\(gains)"
+        let film = ops.look.isSpectral && (ops.grain > 0.001 || ops.halation > 0.001)
+            ? "|g\(Int((ops.grain * 100).rounded()))h\(Int((ops.halation * 100).rounded()))" : ""
+        return "\(ops.look.rawValue)|\(Int((ops.strength * 20).rounded()))|\(gains)\(film)"
     }
 
     /// 主图（调过色）的平均色。

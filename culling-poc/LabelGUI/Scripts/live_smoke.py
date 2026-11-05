@@ -2565,6 +2565,19 @@ __attribute__((constructor)) static void init(void) {
               and s2["disk_edit_digest"] == s0["edit_digest"],
               f"换样式「{style_key}」+ 色调「{look_key}」+ 强度 0.35：一步；app_undo 以后编辑指纹、整工程指纹、collage.json 都回去")
 
+        # ---------- 光谱胶片的颗粒、晕光：和色调一起给是一步，结果、collage_get_state 都读得回来；app_undo 回去
+        s0 = settled()
+        out, b, _ = w("collage_set_style", {"session": KEY, "look": "filmWarmSkin", "film_grain": 0.5, "film_halation": 0.25})
+        s1 = st()
+        _, g1, _ = mcp_call(env, "collage_get_state", {"include_preview": False})
+        _, u, _ = w("app_undo", {"target": "collage"})
+        s2 = settled()
+        check(b.get("changed") is True and b.get("film_grain") == 0.5 and b.get("film_halation") == 0.25
+              and (g1 or {}).get("film_grain") == 0.5 and (g1 or {}).get("film_halation") == 0.25
+              and steps(s0, s1) == (0, 1) and "error" not in u and s2["edit_digest"] == s0["edit_digest"],
+              f"光谱胶片「filmWarmSkin」+ 颗粒 0.5 + 晕光 0.25：一步，回包和 collage_get_state 都有 film_grain / film_halation；"
+              f"app_undo 回去（{b.get('film_grain')} / {(g1 or {}).get('film_grain')}）")
+
         # ---------- 方案栏：存成方案不进撤销、切到方案一步撤销；一模一样的不再存；app_undo 回到切之前（方案栏不变）；
         # 没有的 id、过期的 digest 不执行
         _, cs0, _ = mcp_call(env, "collage_get_state", {"include_preview": False})

@@ -81,9 +81,11 @@ def srgb_decode(x):
 TONE = dict(shadow=0.8, highlight=1.5, wb=True)
 
 
-def make_simulator(film, paper, scan_film, tone=TONE):
+def make_pipeline(film, paper, scan_film, tone=TONE):
+    """上游的 SimulationPipeline（Simulator 包的就是它）+ 消化过的参数。process() 能从中间的 tap 进出
+    （inject / collect），2-LUT 的颗粒要用。"""
     from spektrafilm.runtime.params_builder import digest_params, init_params
-    from spektrafilm.runtime.process import Simulator
+    from spektrafilm.runtime.pipeline import SimulationPipeline
 
     p = init_params(film_profile=film, print_profile=paper)
     p.io.input_color_space = "sRGB"
@@ -96,7 +98,7 @@ def make_simulator(film, paper, scan_film, tone=TONE):
     if tone["wb"]:
         dp.scanner.white_correction = True
         dp.scanner.black_correction = True
-    return Simulator(dp)
+    return SimulationPipeline(dp), dp
 
 
 def pre_tone(lin, tone=TONE):
@@ -114,10 +116,119 @@ def identity_grid(n):
     return np.stack([r, g, b], axis=-1).reshape(n * n, n, 3)
 
 
+def srgb_encode(x):
+    x = np.clip(x, 0.0, 1.0)
+    return np.where(x <= 0.0031308, x * 12.92, 1.055 * x ** (1 / 2.4) - 0.055)
+
+
 def bake(film, paper, scan_film, n=SIZE, tone=TONE):
-    sim = make_simulator(film, paper, scan_film, tone)
-    out = np.asarray(sim.process(pre_tone(srgb_decode(identity_grid(n)), tone)), dtype=np.float64)
+    pipe, _ = make_pipeline(film, paper, scan_film, tone)
+    out = np.asarray(pipe.process(pre_tone(srgb_decode(identity_grid(n)), tone)), dtype=np.float64)
     return np.clip(out.reshape(n, n, n, 3), 0.0, 1.0)
+
+
+# ---------------------------------------------------------------- 颗粒、晕光要的数据
+
+# 颗粒在胶片密度上加（上游也是：负片显影出 CMY 密度以后、印相纸之前）。app 拿不到 spektrafilm 的流水线，
+# 就把它在 cmy_film 这个 tap 拆成两张表：film = sRGB → 密度，print = 密度 → 输出；颗粒 = print(密度 + 噪声)
+# − print(密度)，加在一步到位的那张色调表的结果上（不加颗粒时和 phase 1 逐像素一样）。颗粒只用 print 表局部的
+# 斜率，24³ 够（32³ 每款多 1.8 MB）。
+SPLIT_SIZE = 24
+# 密度两头各留的余量：噪声把密度推出观测范围时 cube 不夹断（上游 2-LUT 在雾度下面留 0.2）。
+DENSITY_HEADROOM = 0.25
+
+
+def bake_split(film, paper, scan_film, n=SPLIT_SIZE, tone=TONE):
+    """film 表的值 = 归一化密度，按 sRGB 编码存（app 用 CIColorCubeWithColorSpace(sRGB) 读，工作空间里拿到的
+    正好是归一化密度）；print 表的值 = 线性 sRGB（app 用不带色彩空间的 CIColorCube，按工作空间里的归一化密度
+    直接查，查出来就是线性光）。返回 (film, print, d_lo, d_hi, dp)。"""
+    pipe, dp = make_pipeline(film, paper, scan_film, tone)
+    grid = pre_tone(srgb_decode(identity_grid(n)), tone)
+    dens = np.asarray(pipe.process(grid, collect="cmy_film"), dtype=np.float64).reshape(n, n, n, 3)
+    flat = dens.reshape(-1, 3)
+    d_lo = flat.min(axis=0) - DENSITY_HEADROOM
+    d_hi = flat.max(axis=0) + DENSITY_HEADROOM
+    film_table = srgb_encode((dens - d_lo) / (d_hi - d_lo))
+    phys = d_lo + identity_grid(n) * (d_hi - d_lo)
+    out = np.asarray(pipe.process(phys, inject="cmy_film"), dtype=np.float64)
+    print_table = srgb_decode(np.clip(out, 0.0, 1.0)).reshape(n, n, n, 3)
+    return film_table, print_table, d_lo, d_hi, dp
+
+
+def grain_sigma_unit(dp, d_lo, d_hi, samples=256):
+    """每个通道：归一化密度 → 1 µm 边长的像素上颗粒的标准差（归一化单位）。照搬上游
+    apply_grain_to_density_layers 的泊松-二项模型：一个子层里显影的颗粒数 ~ Binomial(Poisson(n/sat), p)，
+    密度方差 = p·dmax²·sat/n（sat = 1 − p·u），三个子层独立相加；子层怎么分总密度用上游的
+    interp_density_cmy_layers。n 和像素面积成正比，所以边长 s µm 的像素上标准差 = 这个值 / s。
+    染料云模糊（1 µm）、微结构（30 nm）在拼图的像素尺寸（≥ 5 µm）下看不出来，不做；最后那一下 0.65 像素的
+    模糊在 app 里做。"""
+    from spektrafilm.model.density_curves import interp_density_cmy_layers
+
+    g = dp.film_render.grain
+    curves = np.asarray(dp.film.data.density_curves, dtype=np.float64)
+    norm_curves = curves - np.nanmin(curves, axis=0)
+    layer_curves = np.asarray(dp.film.data.density_curves_layers, dtype=np.float64)
+    t = np.linspace(0.0, 1.0, samples)
+    dens = np.clip(d_lo[None, :] + t[:, None] * (d_hi - d_lo)[None, :], 0.0, None)
+    layers = interp_density_cmy_layers(dens[None, :, :], norm_curves, layer_curves,
+                                       positive_film=dp.film.info.type == "positive")[0]  # (samples, 子层, 通道)
+    dmax_layers = np.nanmax(layer_curves, axis=0)  # (子层, 通道)
+    frac = dmax_layers / dmax_layers.sum(axis=0)[None, :]
+    dmin_layers = frac * np.asarray(g.density_min)[None, :]
+    dmax_eff = dmax_layers + dmin_layers
+    area = g.particle_area_um2 * np.asarray(g.particle_scale)[None, :] * np.asarray(g.particle_scale_layers)[:, None]
+    n_unit = frac / area  # 1 µm² 上的颗粒数
+    p = np.clip((layers + dmin_layers[None]) / dmax_eff[None], 1e-6, 1 - 1e-6)
+    sat = 1 - p * np.asarray(g.uniformity)[None, None, :]
+    var = p * dmax_eff[None] ** 2 * sat / n_unit[None]
+    return np.sqrt(var.sum(axis=1)) / (d_hi - d_lo)[None, :]  # (samples, 通道)
+
+
+def check_grain(film, paper, scan_film, pixel_um=10.0, size=256):
+    """解析的颗粒标准差 vs 上游真抽样（apply_grain_to_density_layers，模糊关掉）：几个密度上比一比。"""
+    from spektrafilm.model.density_curves import interp_density_cmy_layers
+    from spektrafilm.model.grain import apply_grain_to_density_layers
+
+    _, _, d_lo, d_hi, dp = bake_split(film, paper, scan_film, n=9)
+    sig = grain_sigma_unit(dp, d_lo, d_hi)
+    g = dp.film_render.grain
+    curves = np.asarray(dp.film.data.density_curves, dtype=np.float64)
+    norm_curves = curves - np.nanmin(curves, axis=0)
+    layer_curves = np.asarray(dp.film.data.density_curves_layers, dtype=np.float64)
+    worst = 0.0
+    for t in (0.2, 0.4, 0.6, 0.8):
+        d = np.clip(d_lo + t * (d_hi - d_lo), 0, None)
+        flat = np.ones((size, size, 3)) * d[None, None, :]
+        layers = interp_density_cmy_layers(flat, norm_curves, layer_curves, positive_film=dp.film.info.type == "positive")
+        out = apply_grain_to_density_layers(layers, np.nanmax(layer_curves, axis=0), pixel_size_um=pixel_um,
+                                            particle_area_um2=g.particle_area_um2, particle_scale=g.particle_scale,
+                                            particle_scale_layers=g.particle_scale_layers, density_min=g.density_min,
+                                            grain_uniformity=g.uniformity, grain_blur=0.0,
+                                            grain_blur_dye_clouds_um=0.0, grain_micro_structure=(0.0, 0.0))
+        measured = out.reshape(-1, 3).std(axis=0)
+        predicted = np.array([np.interp(t, np.linspace(0, 1, sig.shape[0]), sig[:, c]) for c in range(3)]) \
+            * (d_hi - d_lo) / pixel_um
+        ratio = measured / predicted
+        worst = max(worst, float(np.max(np.abs(ratio - 1))))
+        print(f"  t={t}  抽样 {measured.round(4)}  解析 {predicted.round(4)}  比 {ratio.round(3)}")
+    return worst
+
+
+def halation_params(dp):
+    """晕光滑杆拉满 = 上游「没有防光晕层」那一档（_HALATION_PRESETS 的 (use, 'no')）：底片片基的反射，
+    三次反弹、每次宽 √k 倍、强度减半。σ 按片基厚度（照相片 65 µm、电影片 50 µm）。"""
+    from spektrafilm.runtime import params_builder as pb
+
+    preset = pb._HALATION_PRESETS.get((dp.film.info.use, "no")) or pb._HALATION_PRESETS[("still", "no")]
+    from spektrafilm.runtime.params_schema import HalationParams
+
+    h = HalationParams()  # 反弹次数、衰减用上游默认（lut_mode 只清了 σ，这两个没动，但别依赖它）
+    return {
+        "sigma_um": float(preset["sigma_h"][0]),
+        "strength_max": [float(v) for v in preset["strength"]],
+        "bounces": int(h.halation_n_bounces),
+        "bounce_decay": float(h.halation_bounce_decay),
+    }
 
 
 def apply_trilinear(img, table):
@@ -172,13 +283,59 @@ def upstream_license_path():
     raise SystemExit("找不到 spektrafilm 自带的 SPEKTRAFILM_LICENSE.txt")
 
 
+def write_data_cube(table, path, raw_value, version, what):
+    n = table.shape[0]
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(f'TITLE "{raw_value} {what.split(":")[0]}"\n')
+        fh.write(f"# 选片工具 拼图色调 {raw_value} {what}, {n}^3 (data for grain, not a look LUT)\n")
+        fh.write(f"# Generated with spektrafilm {version} by Andrea Volpato - https://github.com/andreavolpato/spektrafilm\n")
+        fh.write("# Licensed CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/), see SPEKTRAFILM_LICENSE.txt\n")
+        fh.write(f"LUT_3D_SIZE {n}\n")
+        fh.write("DOMAIN_MIN 0.0 0.0 0.0\nDOMAIN_MAX 1.0 1.0 1.0\n")
+        for bi in range(n):
+            for gi in range(n):
+                for ri in range(n):
+                    r, g, b = table[bi, gi, ri]
+                    fh.write(f"{r:.6f} {g:.6f} {b:.6f}\n")
+
+
 def write_all(out_dir):
+    import json
+
+    from spektrafilm.runtime.params_schema import GrainParams
+
     os.makedirs(out_dir, exist_ok=True)
     version = spektrafilm_version()
     for raw, film, paper, scan in LOOKS:
         table = bake(film, paper, scan)
         write_cube(table, os.path.join(out_dir, f"{raw}.cube"), raw, version)
-        print(f"{raw}.cube  白 {table[-1, -1, -1].round(3)}  黑 {table[0, 0, 0].round(3)}")
+        film_t, print_t, d_lo, d_hi, dp = bake_split(film, paper, scan)
+        write_data_cube(film_t, os.path.join(out_dir, f"{raw}.film.cube"), raw, version,
+                        "film: sRGB gamma-encoded in -> normalized film CMY density, stored sRGB-encoded")
+        write_data_cube(print_t, os.path.join(out_dir, f"{raw}.print.cube"), raw, version,
+                        "print: normalized film CMY density in -> linear sRGB out")
+        sigma = grain_sigma_unit(dp, d_lo, d_hi)
+        meta = {
+            "look": raw,
+            "spektrafilm": version,
+            "license": "CC BY-SA 4.0, Andrea Volpato, https://github.com/andreavolpato/spektrafilm",
+            "split_size": SPLIT_SIZE,
+            "d_lo": [round(float(v), 6) for v in d_lo],
+            "d_hi": [round(float(v), 6) for v in d_hi],
+            "film_format_mm": float(dp.camera.film_format_mm),
+            # lut_mode 把 grain.blur 清成 0 了（空间效果全关），这里要的是上游默认那 0.65 像素。
+            "grain_blur_px": float(GrainParams().blur),
+            "grain_sigma_unit": [[round(float(v), 7) for v in sigma[:, c]] for c in range(3)],
+            "halation": halation_params(dp),
+        }
+        with open(os.path.join(out_dir, f"{raw}.json"), "w", encoding="utf-8") as fh:
+            json.dump(meta, fh, ensure_ascii=False, indent=1)
+            fh.write("\n")
+        # 两半合起来应该就是一步到位那张表（只差两次插值）。
+        chained = apply_trilinear(srgb_decode(apply_trilinear(identity_grid(SIZE).reshape(-1, 3), film_t)), print_t)
+        err = np.abs(srgb_encode(chained) - table.reshape(-1, 3)).max()
+        print(f"{raw}.cube  白 {table[-1, -1, -1].round(3)}  黑 {table[0, 0, 0].round(3)}"
+              f"  film∘print 和一步到位最大差 {err:.4f}")
     shutil.copyfile(upstream_license_path(), os.path.join(out_dir, "SPEKTRAFILM_LICENSE.txt"))
     today = datetime.date.today().isoformat()
     with open(os.path.join(out_dir, "CHANGELOG.txt"), "w", encoding="utf-8") as fh:
@@ -196,7 +353,11 @@ def write_all(out_dir):
             f"    around mid gray is scaled by {TONE['shadow']} below and {TONE['highlight']} above (an\n"
             "    inverse of the camera tone curve already in the photo); scanner white / black\n"
             "    point correction on;\n"
-            "  - renamed with generic look names (file name = look id in the app).\n"
+            "  - renamed with generic look names (file name = look id in the app);\n"
+            f"  - <look>.film.cube / <look>.print.cube: the same chain split at the film density\n"
+            f"    (spektrafilm's cmy_film tap) into two {SPLIT_SIZE}^3 tables, so the app can add grain\n"
+            "    between them; <look>.json: the density range of that split, the per-channel grain\n"
+            "    standard deviation derived from spektrafilm's grain model, and its halation preset.\n"
             "  The app blends each table toward the original with its strength slider at run time.\n"
             "  Script: culling-poc/LabelGUI/Scripts/bake_film_luts.py\n"
         )
@@ -244,8 +405,15 @@ def main():
     ap.add_argument("--out", help="写 LUT 的目录（third_party/film-luts）")
     ap.add_argument("--explore", nargs=2, metavar=("SAMPLES", "SHEET"), help="挑片总览，不写 LUT")
     ap.add_argument("--all-films", action="store_true", help="--explore 时把上游所有拍摄用胶片都排上")
+    ap.add_argument("--check-grain", action="store_true", help="解析的颗粒标准差对上游真抽样")
     args = ap.parse_args()
-    if args.explore:
+    if args.check_grain:
+        worst = 0.0
+        for raw, film, paper, scan in LOOKS:
+            print(raw)
+            worst = max(worst, check_grain(film, paper, scan))
+        print(f"最大相对差 {worst:.3f}")
+    elif args.explore:
         combos = [(f"{raw} ({film}/{paper})", film, paper, scan) for raw, film, paper, scan in LOOKS]
         if args.all_films:
             combos = all_film_combos()

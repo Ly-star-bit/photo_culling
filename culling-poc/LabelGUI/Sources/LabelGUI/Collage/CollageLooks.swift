@@ -14,6 +14,10 @@ enum CollageLooks {
         var gains: [Double]?
         var look: CollageLook = .none
         var strength = 0.8
+        /// 光谱胶片的颗粒、晕光（CollageStyle.filmGrain / filmHalation）；只有光谱色调、在照片格里
+        /// （CollageRender.cellImage → CollageFilmEffects）起作用，模糊底、CPU 取色都不看。
+        var grain = 0.0
+        var halation = 0.0
 
         /// 黑白、旧照强度拖到 0 也还是黑白（以前 0 就变回彩色，1% 又全去色，滑杆在 0 附近跳）。
         var isIdentity: Bool { gains == nil && (look == .none || (strength <= 0.001 && !look.isMonochrome)) }
@@ -26,7 +30,8 @@ enum CollageLooks {
                     photos: [String: CollagePhotoRef]) -> [String: Ops] {
         let onPage = pagePhotoIDs.compactMap { photos[$0] }
         guard !onPage.isEmpty else { return [:] }
-        let base = Ops(gains: nil, look: style.look, strength: style.lookStrength)
+        let base = Ops(gains: nil, look: style.look, strength: style.lookStrength,
+                       grain: style.filmGrain, halation: style.filmHalation)
         var out: [String: Ops] = [:]
         for p in onPage { out[p.id] = base }
         guard style.harmonize > 0.001, onPage.count >= 2,
@@ -159,6 +164,11 @@ enum CollageLooks {
 
     static func apply(_ image: CIImage, ops: Ops?) -> CIImage {
         guard let ops, !ops.isIdentity else { return image }
+        return applyCube(applyGains(image, ops: ops), ops: ops)
+    }
+
+    /// 「统一到主图」的线性光增益（apply 的第一步）。
+    static func applyGains(_ image: CIImage, ops: Ops) -> CIImage {
         var out = image
         if let g = ops.gains, g.count == 3, let matrix = CIFilter(name: "CIColorMatrix") {
             matrix.setValue(out, forKey: kCIInputImageKey)
@@ -167,6 +177,12 @@ enum CollageLooks {
             matrix.setValue(CIVector(x: 0, y: 0, z: CGFloat(g[2]), w: 0), forKey: "inputBVector")
             if let o = matrix.outputImage { out = o }
         }
+        return out
+    }
+
+    /// 色调的 3D LUT（apply 的第二步）。
+    static func applyCube(_ image: CIImage, ops: Ops) -> CIImage {
+        var out = image
         if ops.look != .none, ops.strength > 0.001 || ops.look.isMonochrome,
            let data = cube(ops.look, strength: ops.strength),
            let filter = CIFilter(name: "CIColorCubeWithColorSpace") {

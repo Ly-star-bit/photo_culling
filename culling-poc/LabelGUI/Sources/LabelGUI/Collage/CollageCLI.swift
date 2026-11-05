@@ -1010,6 +1010,7 @@ private struct CollageSnapshotHost: View {
 /// 上面没列的：
 /// 版式：refit（贴合原比例：结构不变、按照片原比例重算缝）、sel:P（选中格子）、containblur:P（完整显示、四周用本图模糊填）、margin:0（外边距，相对短边）、
 ///     bg:solid|fromPhoto|blurPhoto|gradient[=底色 hex]、look:<色调>、strength:0.8（色调强度）、harmonize:0.6（统一色温）、
+///     grain:0.5 / halation:1（光谱胶片的颗粒、晕光）、
 ///     layout:grid|scatter、autolayout:N（托盘前 N 张重新自动排版）、relayout:ID;ID（这一页的照片再加这几张重排）；
 ///     layoutnowait / autolayoutnowait = 同上但不等排版落下，wait = 等排版落下。
 /// 托盘多选：untray:ID;ID;…（一次移除几张，一步撤销）、untrayunused（移除没用上的）、untraydropped（移除相似拿掉的）、
@@ -1674,6 +1675,12 @@ enum CollageOpsScript {
             case "harmonize":
                 var st = store.project.style
                 st.harmonize = Double(arg) ?? 0
+                store.setStyle(st)
+            case "grain", "halation":
+                // grain:0.5 / halation:1：光谱胶片的颗粒、晕光（只在光谱色调上起作用）。
+                var st = store.project.style
+                let v = min(1, max(0, Double(arg) ?? 0))
+                if name == "grain" { st.filmGrain = v } else { st.filmHalation = v }
                 store.setStyle(st)
             case "subtitle":
                 store.setSubtitle(arg)

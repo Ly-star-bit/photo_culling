@@ -174,6 +174,8 @@ enum LiveHandlers {
         out["style_name"] = key.flatMap { k in CollageStyles.all.first { $0.key == k }?.name } ?? NSNull()
         out["look"] = project.style.look.rawValue
         out["look_strength"] = MCPReadModel.r3(project.style.lookStrength)
+        out["film_grain"] = MCPReadModel.r3(project.style.filmGrain)
+        out["film_halation"] = MCPReadModel.r3(project.style.filmHalation)
         out["title"] = project.title
         out["subtitle"] = project.subtitle
         out["masthead"] = project.masthead
@@ -1557,6 +1559,8 @@ extension LiveHandlers {
         fields.corner = req.params["corner"].flatMap(MCPArgs.number)
         fields.background = req.params["background"].flatMap { try? CollageLayoutSpec.color($0, path: "background") }
         fields.shape = (req.params["shape"] as? String).flatMap { CollageLayoutSpec.shapes[$0] }
+        fields.filmGrain = req.params["film_grain"].flatMap(MCPArgs.number)
+        fields.filmHalation = req.params["film_halation"].flatMap(MCPArgs.number)
         var parts: [String] = []
         if let preset { parts.append("样式「\(CollageStyles.all.first { $0.key == preset }?.name ?? preset)」") }
         if let look { parts.append("色调「\(look.label)」") }
@@ -1566,6 +1570,8 @@ extension LiveHandlers {
         if fields.corner != nil { parts.append("圆角") }
         if fields.background != nil { parts.append("底色") }
         if fields.shape != nil { parts.append("格子形状") }
+        if fields.filmGrain != nil { parts.append("颗粒") }
+        if fields.filmHalation != nil { parts.append("晕光") }
         let before = collage.editDigest
         let pushes = collage.undoPushes
         // = 样式页点预设（不合并），色调、强度在同一步里再改（和界面一样，也会改「下次新建拼图沿用的默认样式」）
@@ -1574,6 +1580,8 @@ extension LiveHandlers {
         var body: [String: Any] = ["look": collage.project.style.look.rawValue]
         body["style"] = styleKey(collage.project.style) ?? NSNull()
         body["look_strength"] = MCPReadModel.r3(collage.project.style.lookStrength)
+        body["film_grain"] = MCPReadModel.r3(collage.project.style.filmGrain)
+        body["film_halation"] = MCPReadModel.r3(collage.project.style.filmHalation)
         body["style_fields"] = styleFields(collage.project.style)
         return await collageDone(req, live: live, model: model, tool: "collage_set_style", changed: changed,
                                  pushesBefore: pushes, digestBefore: before, summary: summary, body: body)
