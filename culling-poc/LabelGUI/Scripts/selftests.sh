@@ -55,20 +55,40 @@ run() {
     sock="$(mktemp -d "$WORK/sock.XXXXXX")"
     local start=$SECONDS
     # stdin 接 /dev/null：自检不该读终端；LABELGUI_NO_GUI=1：万一哪条走到了开界面那一句，最后一道闸直接退出。
-    # 每条自检单独限时（SELFTEST_TIMEOUT 秒，默认 180）：卡住的那一条到点被 SIGALRM 停掉、点名报出来，后面的照跑。
-    # 以前整步 10 分钟一到被 CI 杀掉，看不出是哪一条。perl 的 alarm 跨 exec 保留，macOS 自带 perl。
-    out="$(LABELGUI_DATA_DIR="$data" LABELGUI_NO_GUI=1 LABELGUI_LIVE_SOCK_ROOT="$sock" LABELGUI_MCP_OUT="$WORK/mcp-out" \
-        perl -e 'alarm shift @ARGV; exec @ARGV or die "exec: $!"' "$LIMIT" "$BIN" "$@" </dev/null 2>&1)"
+    # 每条自检单独限时（SELFTEST_TIMEOUT 秒，默认 180）：到点先用 sample 抓一份调用栈（卡在哪），再停掉、点名报出来，后面的照跑。
+    # 以前整步 10 分钟一到被 CI 杀掉，看不出是哪一条。输出写文件（被停掉时 print 的缓冲本来就会丢，调用栈才是线索）。
+    local log="$WORK/out.$$.txt" stack="$WORK/sample.$$.txt" timedout=0 pid
+    LABELGUI_DATA_DIR="$data" LABELGUI_NO_GUI=1 LABELGUI_LIVE_SOCK_ROOT="$sock" LABELGUI_MCP_OUT="$WORK/mcp-out" \
+        "$BIN" "$@" </dev/null >"$log" 2>&1 &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ $((SECONDS - start)) -ge "$LIMIT" ]; then
+            timedout=1
+            /usr/bin/sample "$pid" 3 -file "$stack" >/dev/null 2>&1 || true
+            kill -TERM "$pid" 2>/dev/null; sleep 2; kill -KILL "$pid" 2>/dev/null
+            break
+        fi
+        sleep 0.5
+    done
+    wait "$pid" 2>/dev/null
     rc=$?
+    out="$(cat "$log" 2>/dev/null)"
+    rm -f "$log"
     local took=$((SECONDS - start))
     timings="$timings $label=${took}s"
-    if [ $rc -eq 142 ]; then
+    if [ $timedout -eq 1 ]; then
         failed+=("${label}（超时）")
-        echo "FAIL ${label}：超过 ${LIMIT}s 没跑完，被停掉。最后几行输出："
-        printf '%s\n' "$out" | tail -15 | sed 's/^/    /'
+        # 调用栈里本程序和系统框架的那几层（主线程在最前），够看出卡在哪
+        local frames
+        frames="$(grep -E '\(in (LabelGUI|CoreText|CoreGraphics|ImageIO|Vision|AppKit|Foundation|CoreFoundation|libdispatch|libsystem_kernel)' "$stack" 2>/dev/null \
+            | sed -E 's/^[[:space:]+!:|]*//; s/  +/ /g' | head -40)"
+        echo "FAIL ${label}：超过 ${LIMIT}s 没跑完，被停掉。调用栈（sample）："
+        printf '%s\n' "$frames" | sed 's/^/    /'
+        printf '%s\n' "$out" | tail -10 | sed 's/^/    /'
         if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-            echo "::error title=自检超时 $label::超过 ${LIMIT}s 没跑完。最后一行：$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1 | cut -c1-200)"
+            echo "::error title=自检超时 $label::超过 ${LIMIT}s 没跑完。调用栈：%0A$(printf '%s\n' "$frames" | cut -c1-160 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
         fi
+        rm -f "$stack"
     elif [ $rc -eq 0 ]; then
         passed=$((passed + 1))
         echo "PASS $label (${took}s): $(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1)"
@@ -76,7 +96,9 @@ run() {
         failed+=("$label")
         echo "FAIL ${label}：退出码 ${rc} (${took}s)，完整输出："
         printf '%s\n' "$out" | sed 's/^/    /'
-        if [ "${GITHUB_ACTIONS:-}" = "true" ]; then echo "::error title=自检 $label::退出码 $rc"; fi
+        if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+            echo "::error title=自检 $label::退出码 ${rc}。没过的：%0A$(printf '%s\n' "$out" | grep -E 'FAIL|失败|✗|✘' | head -12 | cut -c1-240 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+        fi
     fi
     # 被限时停掉的自检来不及收尾（比如 --quit-selftest 起的假 uv / python）：凡是命令行里带着这条自检临时目录的进程都是它起的，一并停掉
     pkill -f -- "$data/" 2>/dev/null || true
