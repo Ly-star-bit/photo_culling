@@ -237,6 +237,18 @@ struct CollageLookBox: View {
                     .help("只给这一页换色调（整章黑白、一期杂志里的一页黑白）；格子还能在「版式」里单独设")
                 }
                 halftoneControls
+                Button {
+                    store.openDarkroom()
+                } label: {
+                    Label("进暗房…", systemImage: "film")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.large)
+                .buttonStyle(.bordered)
+                .tint(Color(red: 1, green: 0.702, blue: 0.251))
+                .disabled(store.page == nil)
+                .help("整页的看片台：大样张按片种排（负片、反转片、电影负片、滤镜），悬停就在大预览里看，拖竖线比原图，"
+                      + "强度试条、颗粒、晕光、1:1 放大镜都在一处；整组、这一页、这一格都能改")
                 Text("整组照片套同一个色调；导出和预览一样。黑白、旧照的强度只管影调。")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)

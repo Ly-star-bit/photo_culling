@@ -776,7 +776,8 @@ enum CollageCLI {
 /// 截图前先改工程（都可选）：--relayout [--count 6]（托盘重新自动排版，几张；工程里还没有版式时也排）、
 /// --layout grid|scatter、--template <模板名>、--title 标题、--subtitle 副标题、--look <色调>、
 /// --overlay <压字预设>（放在主图那一格并选中它）、--page N（相册第 N 个跨页，从 0 起；先换页再选格子）、
-/// --select-item N（选中第 N 个自由图层）。
+/// --select-item N（选中第 N 个自由图层）、--darkroom（开着暗房截，CollageDarkroom：可再给
+/// --darkroom-scope page|cell、--darkroom-hover <色调>、--darkroom-split 0.3、--darkroom-original（按住空格））。
 /// --inspector-width N：只截检视器、宽 N pt（高取 --size 的高）—— 窗口里检视器能拖到 300…380，
 /// 分栏视图给多宽外面定不准，单独截才能逐个宽度看有没有挤出去。
 /// --tab 水印 时另外打印面板上每层显示什么（「水印面板」行）；--ax-dump 打印辅助功能树（滑杆、分段、输入框）。
@@ -882,6 +883,21 @@ enum CollageUISnapshot {
                       + " · 提示：" + (store.notice ?? "无"))
             }
         }
+        // --darkroom：开着暗房截（悬停、对比、「套用到」都能从命令行给，离屏点不了）。
+        if args.contains("--darkroom") {
+            store.openDarkroom()
+            if let dr = store.darkroom {
+                if let s = option("--darkroom-scope").flatMap(CollageDarkroom.Scope.init(rawValue:)) {
+                    if s == .cell, store.selection == nil, let first = store.geometry.frames.first(where: { $0.cell.kind == .photo }) {
+                        store.selection = first.path
+                    }
+                    dr.scope = s
+                }
+                if let h = option("--darkroom-hover").flatMap(CollageLook.init(rawValue:)) { dr.hover = h }
+                if let v = option("--darkroom-split").flatMap(Double.init) { dr.split = min(1, max(0, v)) }
+                dr.showOriginal = args.contains("--darkroom-original")
+            }
+        }
         // --contact-frames：印样的「逐帧」一开始就展开（离屏点不了展开箭头）。
         SnapshotPreview.contactFramesOpen = args.contains("--contact-frames")
         let tab: CollageInspector.Tab = CollageInspector.Tab.allCases.first { $0.rawValue == option("--tab") } ?? .layout
@@ -903,6 +919,12 @@ enum CollageUISnapshot {
         host.layoutSubtreeIfNeeded()
         // 等备选缩略图、预览渲染、跨页缩略图都出来。
         spin(4)
+        // 暗房：等样张、大预览、试条、底片条、放大镜都渲完（放大镜是导出尺寸，最多等 60 秒）。
+        if let dr = store.darkroom {
+            spin(60) { !dr.busy && dr.processed != nil && dr.loupe != nil }
+            print("暗房 · 套用到 \(dr.effectiveScope.label) · \(dr.current.look.label) · 样张 \(dr.frames.count) · 试条 \(dr.testStrip.count) · "
+                  + "底片条 \(dr.reel.count) · 放大镜 \(dr.loupe == nil ? "无" : "有")")
+        }
         // --notice <字>：状态栏提示（平常 5 秒就清掉，等不到截图）—— 截图前放上，核对长提示不把状态栏撑高。
         if let text = option("--notice") { store.setNotice(text) }
         host.layoutSubtreeIfNeeded()

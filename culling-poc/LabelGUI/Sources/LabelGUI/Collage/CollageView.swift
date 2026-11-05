@@ -24,6 +24,31 @@ struct CollageView: View {
 
     var body: some View {
         let _ = CollagePerf.body("拼图页")
+        Group {
+            // 暗房开着：整页换成暗房工作台（和批量页的审片、连拍挑选一样整个换掉，画布不在视图树里，
+            // 它的 ←→、Esc 就不会和暗房的抢）。
+            if let darkroom = store.darkroom {
+                CollageDarkroomView(model: darkroom, store: store)
+            } else {
+                editor
+            }
+        }
+        .onAppear {
+            attachSession()
+            // 主体蒙版的模型第一次加载要 0.1–1 秒：一进拼图 tab 先在后台空跑一次。
+            CollageMasks.warmUp()
+        }
+        .background(CollageSessionWatch(batchStore: batchStore) { attachSession() })
+        // 有空照片格时导出前问一次（store.export 设 exportConfirm）
+        .alert("有空照片格，仍要导出吗？", isPresented: exportConfirmShown) {
+            Button("仍然导出") { store.export(confirmed: true) }
+            Button("取消", role: .cancel) { store.exportConfirm = nil }
+        } message: {
+            Text((store.exportConfirm ?? "") + "。从托盘拖照片进去，或者选中那一格「删除格子」。")
+        }
+    }
+
+    private var editor: some View {
         VStack(spacing: 0) {
             topBar
             Divider()
@@ -39,19 +64,6 @@ struct CollageView: View {
             bottomStrips
             Divider()
             statusBar
-        }
-        .onAppear {
-            attachSession()
-            // 主体蒙版的模型第一次加载要 0.1–1 秒：一进拼图 tab 先在后台空跑一次。
-            CollageMasks.warmUp()
-        }
-        .background(CollageSessionWatch(batchStore: batchStore) { attachSession() })
-        // 有空照片格时导出前问一次（store.export 设 exportConfirm）
-        .alert("有空照片格，仍要导出吗？", isPresented: exportConfirmShown) {
-            Button("仍然导出") { store.export(confirmed: true) }
-            Button("取消", role: .cancel) { store.exportConfirm = nil }
-        } message: {
-            Text((store.exportConfirm ?? "") + "。从托盘拖照片进去，或者选中那一格「删除格子」。")
         }
     }
 

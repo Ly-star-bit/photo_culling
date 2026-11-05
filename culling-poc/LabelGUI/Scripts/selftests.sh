@@ -22,6 +22,7 @@
 #   --collage-export-selftest  拼图 / 相册导出：PDF 先写临时文件再改名、缺跨页不出 PDF、空照片格先确认
 #   --proof-selftest     选片确认表页面脚本（JavaScriptCore）：套餐张数、每张备注、复制的文字、确认表水印
 #   --film-looks-selftest  光谱胶片色调：表读得到（裸二进制往上找 third_party/film-luts）、名字不带品牌、GPU 和 CPU 同色
+#   --darkroom-selftest  暗房：悬停只预览、整组 / 这一页 / 这一格各改各的、强度、颗粒晕光对整组、←→、原图、撤销
 # 别处跑的（最后那段「CI 登记」核对的就是这张表）：--mcp-selftest 在 mcp_smoke.py、--card-queue-selftest 在
 # card_import_regression.py、--launch-gate-probe 在 cli_guard_regression.py；--film-selftest 要先分析过的真照片，CI 不跑。
 #
@@ -127,6 +128,7 @@ run files --files-selftest
 run collage-export --collage-export-selftest
 run proof --proof-selftest
 run film-looks --film-looks-selftest
+run darkroom --darkroom-selftest
 
 # ---------------------------------------------------------------- CI 登记
 # 这一轮各车道加的自检、回归脚本有一半没进 CI（只在自己的分支上手跑过），合进来以后改坏了 CI 照样绿。这里核对两件事：

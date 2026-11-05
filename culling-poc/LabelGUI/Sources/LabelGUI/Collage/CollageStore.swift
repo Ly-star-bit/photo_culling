@@ -74,6 +74,8 @@ final class CollageStore: ObservableObject {
     }
     /// 双击进入的裁切模式：拖动平移、捏合/滑杆缩放。
     @Published var cropEditing = false
+    /// 暗房开着（CollageDarkroom）：拼图页整页换成暗房工作台，nil = 平常的拼图页。不存盘。
+    @Published private(set) var darkroom: CollageDarkroom?
     /// 正在连续编辑（拖缝、拖字、拖图层）：beginContinuousEdit +1、endContinuousEdit −1，最低 0。
     /// 实时桥据此等用户松手再落 AI 的改动（§9.6b 的 continuous_edit）；以前「正在拖」没有任何可查的状态。
     @Published private(set) var continuousEditDepth = 0
@@ -472,6 +474,8 @@ final class CollageStore: ObservableObject {
             return
         }
         finishCropEditForNavigation()
+        // 换场次：暗房是给上一场开的，关掉（它手里的样张、预览都是上一场的照片）。
+        closeDarkroom()
         flushProjectSave()
         projectURL = newURL
         // 主体蒙版跟着工程放（场次目录 / 拼图资料目录下的 collage_masks/）。
@@ -2070,6 +2074,29 @@ final class CollageStore: ObservableObject {
             out.update(at: path) { node in node.cell?.cutout = cutout }
             return out
         }
+    }
+
+    // MARK: - 暗房
+
+    /// 打开暗房（色调面板的「进暗房…」）。在裁切就先退出裁切。
+    func openDarkroom() {
+        guard darkroom == nil else { return }
+        if cropEditing { exitCropEdit() }
+        darkroom = CollageDarkroom(store: self)
+    }
+
+    func closeDarkroom() {
+        darkroom?.stop()
+        darkroom = nil
+    }
+
+    /// 自检用：整份换成合成的工程（不进撤销、不存盘），撤销栈清空。
+    func loadForTesting(_ p: CollageProject) {
+        project = p
+        pageIndex = 0
+        selection = nil
+        undoStack.removeAll()
+        redoStack.removeAll()
     }
 
     /// 命令行合成数据：直接改托盘里这张照片的人脸框（验多人合影的退让；不进撤销，重新载入就恢复）。
