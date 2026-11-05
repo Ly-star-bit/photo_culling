@@ -158,10 +158,27 @@ enum FileSafetySelfTest {
 
     /// ImageIO 读出来的 xmp:Rating（自己的模板和合并过的写法不一样，按值比）。
     static func rating(_ url: URL) -> String? {
-        guard let data = try? Data(contentsOf: url),
-              let meta = CGImageMetadataCreateFromXMPData(data as CFData),
-              let tag = CGImageMetadataCopyTagWithPath(meta, nil, "xmp:Rating" as CFString) else { return nil }
-        return CGImageMetadataTagCopyValue(tag) as? String
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        if let meta = CGImageMetadataCreateFromXMPData(data as CFData),
+           let tag = CGImageMetadataCopyTagWithPath(meta, nil, "xmp:Rating" as CFString),
+           let value = CGImageMetadataTagCopyValue(tag) as? String {
+            return value
+        }
+        // CI 的 macOS 15 上 ImageIO 读不出本工具自己那份模板里的 xmp:Rating（本机 macOS 26 读得出；app 认自己的 sidecar 靠
+        // 字符串、不靠 ImageIO，LR / C1 自己解析 XML）：退回按文字找属性写法 xmp:Rating="N" 或元素写法 <xmp:Rating>N</xmp:Rating>
+        let text = String(decoding: data, as: UTF8.self)
+        for pattern in [#"xmp:Rating="(-?\d+)""#, #"<xmp:Rating>(-?\d+)</xmp:Rating>"#] {
+            if let r = text.range(of: pattern, options: .regularExpression) {
+                return String(text[r]).components(separatedBy: CharacterSet(charactersIn: "-0123456789").inverted)
+                    .first { !$0.isEmpty && $0 != "-" }
+            }
+        }
+        return nil
+    }
+
+    /// 核对失败时带上文件开头，看得出写进去的到底是什么。
+    static func head(_ url: URL) -> String {
+        String(((try? String(contentsOf: url, encoding: .utf8)) ?? "（读不出）").prefix(400))
     }
 
     /// Lightroom 写的那种 sidecar：带调色参数，xmptk 是 Adobe 的。
@@ -211,7 +228,7 @@ enum FileSafetySelfTest {
         let after = sidecarInodes(store.items)
         let touched = after.filter { before[$0.key] != $0.value }.map { URL(fileURLWithPath: $0.key).lastPathComponent }
         check(touched == ["p1.xmp"], "只写改了的：只换了 p1.xmp", touched.sorted().joined(separator: ","))
-        check(rating(xmp(dir, "p1")) == "3", "p1.xmp 是新的星级（可用 3 星）", rating(xmp(dir, "p1")) ?? "-")
+        check(rating(xmp(dir, "p1")) == "3", "p1.xmp 是新的星级（可用 3 星）", (rating(xmp(dir, "p1")) ?? "-") + " · " + head(xmp(dir, "p1")))
         check((try? Data(contentsOf: xmp(dir, "p3"))) == lrEdited, "LR 里改的 p3 一个字节没动（没被盖回 3 星）")
         check(store.progressText.contains("其余 3 张没动"), "完成提示按实际张数", store.progressText)
         check(store.xmpStaleCount == 0, "写完 XMP 过期 0 张", "\(store.xmpStaleCount)")

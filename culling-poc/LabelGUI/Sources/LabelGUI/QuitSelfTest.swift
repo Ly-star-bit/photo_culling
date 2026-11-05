@@ -591,8 +591,17 @@ final class QuitSelfTestHarness {
         let r2 = coordinator(store, keep).shouldTerminate(reason: .user)
         check(r2 == .terminateCancel && keep.asked == [.askStop(.analysis)] && !store.cancelRequested,
               "选「继续分析」：不退、不叫停")
-        spin(60) { !store.isRunning }
-        check(store.progressText.hasPrefix("完成") && keep.replies.isEmpty, "分析照常跑完（\(store.progressText)）")
+        // 核对的是「选了继续，分析照常往下跑、没被叫停」：进度往前走了（或者已经跑完）就算，不等整批 150 张跑完 ——
+        // CI 的 runner 是虚拟机，分析慢好几倍，等跑完要好几分钟（以前在这里 60 秒等不完就红）。核对完自己叫停，省时间。
+        let atDecision = store.progressFraction ?? 0
+        spin(60) { !store.isRunning || (store.progressFraction ?? 0) > atDecision + 0.02 }
+        let moved = store.isRunning ? (store.progressFraction ?? 0) > atDecision + 0.02 : store.progressText.hasPrefix("完成")
+        check(moved && !store.cancelRequested && keep.replies.isEmpty,
+              "分析照常往下跑（选的时候 \(Int(atDecision * 100))%，现在 \(store.progressText)）")
+        if store.isRunning {
+            store.cancel()
+            spin(60) { !store.isRunning }
+        }
 
         _ = store.switchSession(to: folderB)
         let system = Recorder()

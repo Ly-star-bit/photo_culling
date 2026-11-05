@@ -270,6 +270,10 @@ enum CollageTypeset {
         return resolved
     }
 
+    /// 本机已经装好、能直接用的字体（PostScript 名）。只读一次：app 开着时新装的字体要重开才认，和以前一样。
+    private static let installedPostScriptNames: Set<String> =
+        Set((CTFontManagerCopyAvailablePostScriptNames() as? [String]) ?? [])
+
     /// 按名字建（内置字体不进系统字体表：按名字直接从内嵌数据建）。
     private static func namedFont(_ name: String, size: CGFloat) -> CTFont {
         CollageEmbeddedFonts.font(named: name, size: size) ?? CTFontCreateWithName(name as CFString, size, nil)
@@ -282,7 +286,16 @@ enum CollageTypeset {
         fontLock.unlock()
         if let known { return namedFont(known, size: size) }
         for name in postScriptNames(family, weight, italic: italic) {
-            let f = namedFont(name, size: size)
+            // 没装的（宋体、楷体这类按需下载的系统字体）不拿名字去问 CoreText：它会经 fontd 去找能不能下载，
+            // 没网、或者 CI 的 runner 上那一问一直不回，整个排版卡死。装没装看一次性的已装字体表，没装的直接试下一个。
+            let f: CTFont
+            if let embedded = CollageEmbeddedFonts.font(named: name, size: size) {
+                f = embedded
+            } else if installedPostScriptNames.contains(name) {
+                f = CTFontCreateWithName(name as CFString, size, nil)
+            } else {
+                continue
+            }
             guard (CTFontCopyPostScriptName(f) as String) == name else { continue }
             fontLock.lock()
             nameCache[nameKey] = name
