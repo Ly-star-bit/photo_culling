@@ -2425,9 +2425,17 @@ final class CollageStore: ObservableObject {
     }
 
     /// `coalesce`：滑杆、取色器连续拖动合成一步；点色块、选预设、切开关每次一步。
-    func setStyle(_ style: CollageStyle, coalesce: Bool = true) {
+    /// `filmDefaults`：换进光谱色调时带上这一款的颗粒 / 晕光起始值（CollageFilmEffects.adoptDefaults）；
+    /// 调用方自己明说了颗粒晕光（AI 给了 film_grain / film_halation）时传 false。
+    func setStyle(_ style: CollageStyle, coalesce: Bool = true, filmDefaults: Bool = true) {
         // 婚礼 fine-art 的边距按这本册子算（预设里是 30×30 的数）；别的样式、自己改过边距的原样。
-        let style = CollageStyleFineArt.adapted(style, to: project.canvas) ?? style
+        var style = CollageStyleFineArt.adapted(style, to: project.canvas) ?? style
+        if filmDefaults {
+            var next = project
+            next.style = style
+            CollageFilmEffects.adoptDefaults(before: project, into: &next, look: style.look)
+            style = next.style
+        }
         guard style != project.style else { return }
         pushUndo(coalesce: coalesce)
         project.style = style
@@ -2833,15 +2841,26 @@ final class CollageStore: ObservableObject {
     /// 这一页单独的色调（nil = 跟整个工程）。
     func setPageLook(_ look: CollageLookSetting?, coalesce: Bool = false) {
         guard project.pages.indices.contains(pageIndex), project.pages[pageIndex].look != look else { return }
+        let before = project
         pushUndo(coalesce: coalesce)
         project.pages[pageIndex].look = look
+        // 换进光谱色调：颗粒晕光的起始值记在整组上，和这一下是同一步撤销。
+        CollageFilmEffects.adoptDefaults(before: before, into: &project, look: look?.look)
         commitEdit()
     }
 
     /// 选中格子单独的色调（nil = 跟页面）。只对照片格。
     func setCellLook(_ look: CollageLookSetting?, coalesce: Bool = false) {
         guard selectedCell?.kind == .photo, selectedCell?.look != look else { return }
+        let before = project
         updateSelectedCell(coalesce: coalesce) { $0.look = look }
+        // 同 setPageLook：同一步撤销（快照是 updateSelectedCell 记的，这里接着改不另记）。
+        var next = project
+        CollageFilmEffects.adoptDefaults(before: before, into: &next, look: look?.look)
+        if next.style != project.style {
+            project.style = next.style
+            commitEdit()
+        }
     }
 
     // MARK: - 印样 / 底片条
@@ -4795,7 +4814,8 @@ extension CollageStore {
             if let shape = fields.shape { st.shape = shape }
             if let grain = fields.filmGrain { st.filmGrain = min(1, max(0, grain)) }
             if let halation = fields.filmHalation { st.filmHalation = min(1, max(0, halation)) }
-            setStyle(st)
+            // 明说了颗粒 / 晕光（哪怕是 0）就照给的来，不套起始值。
+            setStyle(st, filmDefaults: fields.filmGrain == nil && fields.filmHalation == nil)
         }
     }
 }

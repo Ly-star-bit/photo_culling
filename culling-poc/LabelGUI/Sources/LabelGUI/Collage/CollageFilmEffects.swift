@@ -10,7 +10,9 @@ import CoreImage
 ///
 /// 晕光（片基反射，上游 apply_halation_um 的第 2 步）：在线性光上
 ///   x' = (x + A ⊙ Σ_k w_k · G(σ_h·√k) * x) / (1 + A)，三次反弹，w_k ∝ 0.5^(k-1)，
-/// σ_h = 片基厚度给的 65 µm（照相片）/ 50 µm（电影片），A = 滑杆 × 上游「没有防光晕层」那一档（0.30, 0.10, 0.015）。
+/// σ_h = 片基厚度给的 65 µm（照相片）/ 50 µm（电影片），A = 滑杆² × 上游「没有防光晕层」那一档（0.30, 0.10, 0.015）。
+/// 平方刻度：真片的晕光都很弱（防光晕层 strong 的红 0.015 ≈ 滑杆 22%，weak 的 0.08 ≈ 52%），线性刻度时有用的那段
+/// 全挤在滑杆最左边一小截，拉满是去掉防光晕层的电影片那种红光（reports/胶片模拟调研_2026-11-05/R8 §1.7）。
 /// 近似：上游是在胶片的曝光量上做（光谱感光度之后），这里直接用照片的线性 sRGB；乳剂里几微米的散射在拼图的
 /// 像素尺寸下看不出来，不做。晕光改的是喂给色调表的光，所以底色跟着变（高光边上泛红）。
 ///
@@ -40,6 +42,9 @@ enum CollageFilmEffects {
         let halationStrengthMax: [Double]
         let halationBounces: Int
         let halationDecay: Double
+        /// 从「没有光谱色调」换进这一款时颗粒 / 晕光的起始值（滑杆刻度；烘焙脚本 RECIPES 的 defaults）。
+        let defaultGrain: Double
+        let defaultHalation: Double
     }
 
     private struct Meta: Decodable {
@@ -54,6 +59,12 @@ enum CollageFilmEffects {
             let bounce_decay: Double
         }
         let halation: Halation
+        struct Defaults: Decodable {
+            let grain: Double
+            let halation: Double
+        }
+        /// 第一版的表没有这一项。
+        let defaults: Defaults?
     }
 
     private static let lock = NSLock()
@@ -114,7 +125,38 @@ enum CollageFilmEffects {
                       film: film, print: print, sigmaUnit: meta.grain_sigma_unit,
                       filmFormatMM: meta.film_format_mm, grainBlurPx: meta.grain_blur_px,
                       halationSigmaUM: meta.halation.sigma_um, halationStrengthMax: meta.halation.strength_max,
-                      halationBounces: max(1, min(6, meta.halation.bounces)), halationDecay: meta.halation.bounce_decay)
+                      halationBounces: max(1, min(6, meta.halation.bounces)), halationDecay: meta.halation.bounce_decay,
+                      defaultGrain: unit(meta.defaults?.grain), defaultHalation: unit(meta.defaults?.halation))
+    }
+
+    private static func unit(_ v: Double?) -> Double {
+        guard let v, v.isFinite else { return 0 }
+        return min(1, max(0, v))
+    }
+
+    /// 套用这个光谱色调时颗粒 / 晕光的起始值；不是光谱色调、读不到数据 = nil。
+    static func defaults(_ look: CollageLook) -> (grain: Double, halation: Double)? {
+        guard let fx = extras(look) else { return nil }
+        return (fx.defaultGrain, fx.defaultHalation)
+    }
+
+    /// 工程里有没有哪一级（整组 / 页 / 格）用着光谱色调。
+    static func usesSpectral(_ p: CollageProject) -> Bool {
+        if p.style.look.isSpectral { return true }
+        return p.pages.contains { page in
+            page.look?.look.isSpectral == true
+                || page.root.leafPaths().contains { page.root.node(at: $0)?.cell?.look?.look.isSpectral == true }
+        }
+    }
+
+    /// 从「没有光谱色调」换进光谱色调（哪一级都算）、颗粒晕光都还是 0：颗粒 / 晕光设成这一款的起始值（R8：整张看就
+    /// 隐约看得见颗粒是胶片味最强的信号之一，以前默认 0，换上去看不出是胶片）。store 套用和暗房的悬停预览都走这里，
+    /// 看到的就是点下去的。已经在用光谱色调时不动：颗粒拉回 0 以后在光谱色调之间换来换去不会再加回来。
+    static func adoptDefaults(before: CollageProject, into after: inout CollageProject, look: CollageLook?) {
+        guard let look, look.isSpectral, after.style.filmGrain == 0, after.style.filmHalation == 0,
+              !usesSpectral(before), let d = defaults(look) else { return }
+        after.style.filmGrain = d.grain
+        after.style.filmHalation = d.halation
     }
 
     private static func rgba(_ t: CollageFilmLUTs.Table) -> Data {
@@ -152,7 +194,8 @@ enum CollageFilmEffects {
 
     /// 片基反射的晕光，线性光进、线性光出。
     static func halate(_ lin: CIImage, fx: Extras, pixelUM: Double, amount: Double, extent: CGRect) -> CIImage {
-        let a = fx.halationStrengthMax.map { $0 * min(1, max(0, amount)) }
+        let s = min(1, max(0, amount))
+        let a = fx.halationStrengthMax.map { $0 * s * s }
         let sigma0 = fx.halationSigmaUM / pixelUM
         guard sigma0 > 0.05, a.contains(where: { $0 > 0 }) else { return lin }
         let weights = (0..<fx.halationBounces).map { pow(fx.halationDecay, Double($0)) }

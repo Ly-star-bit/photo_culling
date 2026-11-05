@@ -96,7 +96,8 @@ enum CollageFilmLooksSelfTest {
             check(backwards < 0.002, "\(look.rawValue) 灰阶亮度从黑到白不往回走", String(format: "最多回落 %.4f", backwards))
             let black = CollageFilmLUTs.map(look, 0, 0, 0)
             let white = CollageFilmLUTs.map(look, 1, 1, 1)
-            check(max(black.0, black.1, black.2) < 0.1 && min(white.0, white.1, white.2) > 0.75,
+            // 第二版的表按「柯达 400」的扫描抬了黑位（淡雅到 L*≈14 ≈ sRGB 0.15）、白提到 L*≥93：这条只防表坏掉 / 反了。
+            check(max(black.0, black.1, black.2) < 0.2 && min(white.0, white.1, white.2) > 0.85,
                   "\(look.rawValue) 黑是暗的、白是亮的",
                   String(format: "黑 %.3f 白 %.3f", max(black.0, black.1, black.2), min(white.0, white.1, white.2)))
             if let cube = CollageLooks.cube(look, strength: 1) {
@@ -167,9 +168,12 @@ enum CollageFilmLooksSelfTest {
                   "\(look.rawValue) film / print 表 \(fx.size)³、σ 三个通道")
             check(fx.halationSigmaUM == 50 || fx.halationSigmaUM == 65, "\(look.rawValue) 晕光 σ 是片基给的 50 / 65 µm",
                   "\(fx.halationSigmaUM)")
+            check((0.1...0.8).contains(fx.defaultGrain) && (0...0.6).contains(fx.defaultHalation),
+                  "\(look.rawValue) 有颗粒 / 晕光的起始值", String(format: "颗粒 %.2f 晕光 %.2f", fx.defaultGrain, fx.defaultHalation))
         }
         grainAndHalation(check)
         styleCoding(check)
+        filmDefaults(check)
 
         print(failures.isEmpty ? "全部通过" : "失败 \(failures.count) 项：" + failures.joined(separator: "；"))
         exit(failures.isEmpty ? 0 : 1)
@@ -301,9 +305,50 @@ enum CollageFilmLooksSelfTest {
         let far = (128 * 256 + 2) * 4
         check(abs(glow[far] - plain[far]) < 0.004, "晕光只在高光附近：离圆远的灰基本不动",
               String(format: "%.4f", glow[far] - plain[far]))
+        // 平方刻度：滑杆 50% 的晕光强度是 100% 的四分之一（再除以 1 + A 归一，比 0.25 稍大）。
+        hops.halation = 0.5
+        let halfGlow = readLinear(CollageFilmEffects.apply(src, ops: hops, frameLongEdge: 4300, seed: "a", extent: disc), disc)
+        let halfRise = Double(halfGlow[i] - plain[i]) / max(1e-6, rise[0])
+        check(halfRise > 0.18 && halfRise < 0.4, "晕光滑杆是平方刻度：50% ≈ 100% 的四分之一", String(format: "%.2f", halfRise))
         hops.halation = 0
         let none = readLinear(CollageFilmEffects.apply(src, ops: hops, frameLongEdge: 4300, seed: "a", extent: disc), disc)
         check(none == plain, "晕光 0：原样", "")
+    }
+
+    /// 换进光谱色调时颗粒 / 晕光的起始值（CollageFilmEffects.adoptDefaults，store 和暗房预览共用）。
+    private static func filmDefaults(_ check: (Bool, String, String) -> Void) {
+        guard let d = CollageFilmEffects.defaults(.filmSunny) else { check(false, "暖阳有起始值", ""); return }
+        var plain = CollageProject()
+        plain.style.look = .film
+        plain.pages = [CollagePage(root: .leaf(.photo("a")))]
+        var next = plain
+        next.style.look = .filmSunny
+        CollageFilmEffects.adoptDefaults(before: plain, into: &next, look: .filmSunny)
+        check(next.style.filmGrain == d.grain && next.style.filmHalation == d.halation,
+              "从普通滤镜换进光谱色调：带上这一款的颗粒 / 晕光起始值", String(format: "%.2f / %.2f", next.style.filmGrain, next.style.filmHalation))
+        var again = next
+        again.style.look = .filmWarmSkin
+        again.style.filmGrain = 0
+        again.style.filmHalation = 0
+        CollageFilmEffects.adoptDefaults(before: next, into: &again, look: .filmWarmSkin)
+        check(again.style.filmGrain == 0 && again.style.filmHalation == 0,
+              "已经在用光谱色调（颗粒拉回 0 了）：换一款光谱色调不再加回来", "")
+        var explicit = plain
+        explicit.style.look = .filmSunny
+        explicit.style.filmGrain = 0.2
+        CollageFilmEffects.adoptDefaults(before: plain, into: &explicit, look: .filmSunny)
+        check(explicit.style.filmGrain == 0.2 && explicit.style.filmHalation == 0, "已经给了颗粒：照给的来", "")
+        var filter = plain
+        filter.style.look = .mono
+        CollageFilmEffects.adoptDefaults(before: plain, into: &filter, look: .mono)
+        check(filter.style.filmGrain == 0, "换普通滤镜：不加颗粒", "")
+        var pageLevel = plain
+        pageLevel.pages[0].look = CollageLookSetting(look: .cineDay, strength: 1)
+        CollageFilmEffects.adoptDefaults(before: plain, into: &pageLevel, look: .cineDay)
+        check(pageLevel.style.filmGrain == CollageFilmEffects.defaults(.cineDay)?.grain,
+              "只给一页设光谱色调：起始值记在整组上（颗粒晕光是整组的）", "")
+        check(CollageFilmEffects.usesSpectral(pageLevel) && !CollageFilmEffects.usesSpectral(plain),
+              "认得出哪一级在用光谱色调（整组 / 页 / 格）", "")
     }
 
     private static func styleCoding(_ check: (Bool, String, String) -> Void) {

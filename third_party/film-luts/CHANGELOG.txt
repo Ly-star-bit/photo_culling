@@ -10,8 +10,16 @@ Changes to the spektrafilm material in this folder (CC BY-SA 4.0)
     diffusion, glare, blur or sharpening; auto exposure off;
   - exposure fixed at mid gray (no auto exposure); before the film, log2 exposure
     around mid gray is scaled by 0.8 below and 1.5 above (an
-    inverse of the camera tone curve already in the photo); scanner white / black
-    point correction on;
+    inverse of the camera tone curve already in the photo; reversal films 1.2 above);
+    scanner white / black point correction on;
+  - per look (since 2026-11-05, see RECIPES in the script): print paper contrast
+    (density curve morph gamma), DIR coupler amount, scanner black level and
+    enlarger Y / M filtration changed from the spektrafilm defaults; one film changed
+    (filmSunny now Kodak UltraMax 400 instead of Gold 200);
+  - after spektrafilm, an output-only "scan correction" (scan_correct in the script:
+    white / black point, cool shadows and warm highlights on near-neutrals, skin /
+    green / blue hue and chroma, saturation) is applied to the look table and to the
+    print table below, so grain stays consistent with the look;
   - renamed with generic look names (file name = look id in the app);
   - <look>.film.cube / <look>.print.cube: the same chain split at the film density
     (spektrafilm's cmy_film tap) into two 24^3 tables, so the app can add grain

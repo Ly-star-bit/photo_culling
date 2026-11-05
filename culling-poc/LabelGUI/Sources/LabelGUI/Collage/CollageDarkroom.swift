@@ -284,6 +284,8 @@ final class CollageDarkroom: ObservableObject {
             guard out.pages.indices.contains(pageIndex), let selection else { return out }
             out.pages[pageIndex].root.update(at: selection) { node in node.cell?.look = setting }
         }
+        // 套用时会带上的颗粒 / 晕光起始值，预览里也带上（看到的就是点下去的）。
+        CollageFilmEffects.adoptDefaults(before: p, into: &out, look: setting.look)
         return out
     }
 

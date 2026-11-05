@@ -184,6 +184,39 @@ enum CollageDarkroomSelfTest {
         check(store.darkroom?.hover == nil, "再打开：没有残留的悬停")
         store.closeDarkroom()
 
+        // ---------------------------------------------------------------- 10. 换进光谱色调带上起始颗粒
+        print("== 起始颗粒")
+        let fresh = CollageStore(dataDir: appDataDir)
+        var filtered = project(album: false)
+        filtered.style.look = .film
+        fresh.loadForTesting(filtered)
+        fresh.openDarkroom()
+        if let fd = fresh.darkroom, let d = CollageFilmEffects.defaults(.filmSunny), let cd = CollageFilmEffects.defaults(.cineDay) {
+            fd.hover = .filmSunny
+            let preview = fd.previewProject.style
+            check(preview.filmGrain == d.grain && preview.filmHalation == d.halation && fresh.project.style.filmGrain == 0,
+                  "悬停在光谱色调上：预览带上这一款的起始颗粒 / 晕光，工程不动",
+                  String(format: "预览 %.2f / %.2f", preview.filmGrain, preview.filmHalation))
+            let p1 = fresh.undoPushes
+            fd.apply(.filmSunny)
+            check(fresh.project.style == preview && fresh.undoPushes == p1 + 1, "套用：和预览一样（色调 + 起始颗粒晕光），一步撤销")
+            fresh.undo()
+            check(fresh.project.style.look == .film && fresh.project.style.filmGrain == 0 && fresh.project.style.filmHalation == 0,
+                  "undo 一下：色调和颗粒晕光一起回去")
+            fd.selectCell([0])
+            let p2 = fresh.undoPushes
+            fd.apply(.cineDay)
+            check(fresh.project.pages[0].root.node(at: [0])?.cell?.look?.look == .cineDay
+                  && fresh.project.style.filmGrain == cd.grain && fresh.undoPushes == p2 + 1,
+                  "只给这一格换光谱色调：起始颗粒记在整组上，同一步撤销")
+            fresh.undo()
+            check(fresh.project.style.filmGrain == 0 && fresh.project.pages[0].root.node(at: [0])?.cell?.look == nil,
+                  "undo 一下：这一格的色调和整组的颗粒一起回去")
+        } else {
+            check(false, "起始颗粒的准备（暗房打开、读得到起始值）")
+        }
+        fresh.closeDarkroom()
+
         finish(failures)
     }
 
