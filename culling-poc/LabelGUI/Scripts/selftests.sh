@@ -44,7 +44,7 @@ mkdir -p "$WORK/mcp-out"
 
 failed=()
 passed=0
-LIMIT="${SELFTEST_TIMEOUT:-180}"
+LIMIT="${SELFTEST_TIMEOUT:-300}"
 timings=""
 ran=" "   # 跑过的自检参数（最后「CI 登记」那段对 AppRuntime.headlessFlags 用）
 run() {
@@ -55,7 +55,7 @@ run() {
     sock="$(mktemp -d "$WORK/sock.XXXXXX")"
     local start=$SECONDS
     # stdin 接 /dev/null：自检不该读终端；LABELGUI_NO_GUI=1：万一哪条走到了开界面那一句，最后一道闸直接退出。
-    # 每条自检单独限时（SELFTEST_TIMEOUT 秒，默认 180）：到点先用 sample 抓一份调用栈（卡在哪），再停掉、点名报出来，后面的照跑。
+    # 每条自检单独限时（SELFTEST_TIMEOUT 秒，默认 300：CI 的虚拟机上 --quit-selftest 要 170 秒左右）：到点先用 sample 抓一份调用栈（卡在哪），再停掉、点名报出来，后面的照跑。
     # 以前整步 10 分钟一到被 CI 杀掉，看不出是哪一条。输出写文件（被停掉时 print 的缓冲本来就会丢，调用栈才是线索）。
     local log="$WORK/out.$$.txt" stack="$WORK/sample.$$.txt" timedout=0 pid
     LABELGUI_DATA_DIR="$data" LABELGUI_NO_GUI=1 LABELGUI_LIVE_SOCK_ROOT="$sock" LABELGUI_MCP_OUT="$WORK/mcp-out" \
