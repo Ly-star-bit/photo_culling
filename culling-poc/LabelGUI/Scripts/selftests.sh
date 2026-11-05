@@ -44,6 +44,8 @@ mkdir -p "$WORK/mcp-out"
 
 failed=()
 passed=0
+LIMIT="${SELFTEST_TIMEOUT:-180}"
+timings=""
 ran=" "   # 跑过的自检参数（最后「CI 登记」那段对 AppRuntime.headlessFlags 用）
 run() {
     local label="$1"; shift
@@ -53,11 +55,21 @@ run() {
     sock="$(mktemp -d "$WORK/sock.XXXXXX")"
     local start=$SECONDS
     # stdin 接 /dev/null：自检不该读终端；LABELGUI_NO_GUI=1：万一哪条走到了开界面那一句，最后一道闸直接退出。
+    # 每条自检单独限时（SELFTEST_TIMEOUT 秒，默认 180）：卡住的那一条到点被 SIGALRM 停掉、点名报出来，后面的照跑。
+    # 以前整步 10 分钟一到被 CI 杀掉，看不出是哪一条。perl 的 alarm 跨 exec 保留，macOS 自带 perl。
     out="$(LABELGUI_DATA_DIR="$data" LABELGUI_NO_GUI=1 LABELGUI_LIVE_SOCK_ROOT="$sock" LABELGUI_MCP_OUT="$WORK/mcp-out" \
-        "$BIN" "$@" </dev/null 2>&1)"
+        perl -e 'alarm shift @ARGV; exec @ARGV or die "exec: $!"' "$LIMIT" "$BIN" "$@" </dev/null 2>&1)"
     rc=$?
     local took=$((SECONDS - start))
-    if [ $rc -eq 0 ]; then
+    timings="$timings $label=${took}s"
+    if [ $rc -eq 142 ]; then
+        failed+=("${label}（超时）")
+        echo "FAIL ${label}：超过 ${LIMIT}s 没跑完，被停掉。最后几行输出："
+        printf '%s\n' "$out" | tail -15 | sed 's/^/    /'
+        if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+            echo "::error title=自检超时 $label::超过 ${LIMIT}s 没跑完。最后一行：$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1 | cut -c1-200)"
+        fi
+    elif [ $rc -eq 0 ]; then
         passed=$((passed + 1))
         echo "PASS $label (${took}s): $(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1)"
     else
@@ -66,6 +78,8 @@ run() {
         printf '%s\n' "$out" | sed 's/^/    /'
         if [ "${GITHUB_ACTIONS:-}" = "true" ]; then echo "::error title=自检 $label::退出码 $rc"; fi
     fi
+    # 被限时停掉的自检来不及收尾（比如 --quit-selftest 起的假 uv / python）：凡是命令行里带着这条自检临时目录的进程都是它起的，一并停掉
+    pkill -f -- "$data/" 2>/dev/null || true
     rm -rf "$data" "$sock"
 }
 
@@ -150,6 +164,9 @@ if [ $real_before -eq 0 ] && [ -e "$REAL_DATA" ]; then
     failed+=("真实数据目录")
     echo "FAIL 跑之前没有 ${REAL_DATA}，跑完有了：哪条自检没走临时数据目录"
 fi
+
+echo "各条用时：$timings"
+if [ "${GITHUB_ACTIONS:-}" = "true" ]; then echo "::notice title=自检用时::$timings"; fi
 
 if [ ${#failed[@]} -gt 0 ]; then
     echo "!! 自检 ${#failed[@]} 条没过：${failed[*]}（通过 $passed 条）" >&2

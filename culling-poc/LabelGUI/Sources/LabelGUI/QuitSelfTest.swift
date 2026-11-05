@@ -312,7 +312,8 @@ final class QuitSelfTestHarness {
         p.arguments = ["-g", "assertions"]
         let out = Pipe()
         p.standardOutput = out
-        p.standardError = Pipe()
+        // stderr 不接 Pipe：没人读的管道写满以后 pmset 就卡住，readDataToEndOfFile 跟着永远等（CI 上自检超时）
+        p.standardError = FileHandle.nullDevice
         guard (try? p.run()) != nil else { return nil }
         let data = out.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()

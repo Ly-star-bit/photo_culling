@@ -85,7 +85,8 @@ jobs:
       # AppRuntime.headlessFlags 里每个 --*-selftest 都有人跑、Scripts/ 下每个 *_regression.py / *_smoke.py 在这个文件里都有一步。
       # 和下面几步一样放在 MCP 冒烟后面（见 MCP 冒烟那段注释）。
       - name: 自检 (--*-selftest)
-        timeout-minutes: 10
+        # 每条自检在 selftests.sh 里单独限时 180 秒（卡住的点名报错、后面照跑）；runner 是虚拟机，Vision 比本机慢得多，整步给足
+        timeout-minutes: 30
         run: culling-poc/LabelGUI/Scripts/selftests.sh culling-poc/LabelGUI/.build/release/LabelGUI
 
       # 合成图跑原生分析：手写几张结果确定的图（平滑渐变、整张死白、截断的 .jpg、带动态照片尾巴的、手写 APP1 拍摄时间 +
