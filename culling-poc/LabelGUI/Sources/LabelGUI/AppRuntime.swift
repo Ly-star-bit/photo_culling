@@ -10,7 +10,7 @@ enum AppRuntime {
         "--ingest", "--card-ui", "--card-queue-selftest",
         "--proof-sheet", "--client-import", "--copy-list", "--copy-originals", "--persist-selftest", "--proof-selftest",
         "--export-jpeg", "--body-offset",
-        "--film-selftest",
+        "--film-selftest", "--film-looks-selftest",
         "--swiss-selftest",
         "--album-selftest",
         "--newspaper-selftest",

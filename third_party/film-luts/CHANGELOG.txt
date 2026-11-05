@@ -1,0 +1,17 @@
+Changes to the spektrafilm material in this folder (CC BY-SA 4.0)
+=================================================================
+
+2026-11-05  选片工具 (https://github.com/Ly-star-bit/photo_culling)
+  Each .cube here was generated with spektrafilm 0.3.4 (Andrea Volpato,
+  https://github.com/andreavolpato/spektrafilm) from one film profile and one print
+  profile (reversal films scanned directly). Changes from a full spektrafilm render:
+  - baked as a 32^3 3D LUT, sRGB gamma-encoded input and output;
+  - per-pixel part only (spektrafilm debug.lut_mode): no grain, halation, coupler
+    diffusion, glare, blur or sharpening; auto exposure off;
+  - exposure fixed at mid gray (no auto exposure); before the film, log2 exposure
+    around mid gray is scaled by 0.8 below and 1.5 above (an
+    inverse of the camera tone curve already in the photo); scanner white / black
+    point correction on;
+  - renamed with generic look names (file name = look id in the app).
+  The app blends each table toward the original with its strength slider at run time.
+  Script: culling-poc/LabelGUI/Scripts/bake_film_luts.py

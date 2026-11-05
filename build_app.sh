@@ -65,6 +65,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>$BUILD_NUMBER</string>${ICON_PLIST}
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>免费、开源：GPL-3.0-or-later，不提供任何担保。源码 github.com/Ly-star-bit/photo_culling</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSRemovableVolumesUsageDescription</key>
@@ -100,6 +102,19 @@ find "$RES" -name __pycache__ -prune -exec rm -rf {} +
 # （CollageEmbeddedFonts.swift），OFL 要求随字体一起分发许可证。
 mkdir -p "$APP/Contents/Resources/fonts"
 cp -R "$ROOT/third_party/fonts/." "$APP/Contents/Resources/fonts/"
+
+# 光谱胶片色调的表（spektrafilm 烘的 LUT，CC BY-SA 4.0）：按原样的 .cube 文本放进 Resources/film-luts，
+# 连同上游的许可全文和改动记录（CC BY-SA 要求署名、注明改动、不加密）。app 在这里读（CollageFilmLUTs）。
+mkdir -p "$APP/Contents/Resources/film-luts"
+cp "$ROOT/third_party/film-luts/"*.cube "$ROOT/third_party/film-luts/SPEKTRAFILM_LICENSE.txt" \
+   "$ROOT/third_party/film-luts/CHANGELOG.txt" "$APP/Contents/Resources/film-luts/"
+CUBES=$(ls "$APP/Contents/Resources/film-luts/"*.cube | wc -l | tr -d ' ')
+[ "$CUBES" -ge 10 ] || { echo "film-luts 里只有 $CUBES 张 .cube（应该 10 张）"; exit 1; }
+
+# 许可（GPL-3.0-or-later）、第三方声明、「关于」面板里的致谢（标准关于面板自动读 Resources/Credits.rtf）。
+cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE.txt"
+cp "$ROOT/THIRD_PARTY_NOTICES.md" "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
+cp "$POC/LabelGUI/Credits.rtf" "$APP/Contents/Resources/Credits.rtf"
 
 echo "==> 签名"
 codesign --force --sign - "$APP"

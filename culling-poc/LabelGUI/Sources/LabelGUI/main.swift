@@ -641,6 +641,8 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--mask-selftest") {
     }
 }
 
+// 光谱胶片色调的表（spektrafilm 烘的 LUT）自检：LABELGUI_DATA_DIR=<临时> LabelGUI --film-looks-selftest（CollageFilmLooksSelfTest.swift）。
+if CommandLine.arguments.contains("--film-looks-selftest") { CollageFilmLooksSelfTest.run() }
 if let i = CommandLine.arguments.firstIndex(of: "--film-selftest") { MainActor.assumeIsolated { CollageStyleFilmSelfTest.run(flagIndex: i) } }  // 底片印样自检：LabelGUI --film-selftest <photo_dir> [--out 目录]
 // 留白杂志模板自检：LabelGUI --minimal-selftest [photo_dir]（见 CollageStyleMinimalSelfTest.swift）。
 if let i = CommandLine.arguments.firstIndex(of: "--minimal-selftest") { MainActor.assumeIsolated { CollageStyleMinimalSelfTest.run(flagIndex: i) } }

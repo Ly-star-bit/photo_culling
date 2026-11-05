@@ -764,6 +764,19 @@ enum CollageLook: String, Codable, CaseIterable, Hashable {
     case none, film, airy, faded, cinema, cool, mono, sepia
     /// 报纸黑白（墨不纯黑、纸不纯白）、高反差黑白（瑞士网格）、哑光（留白杂志）、雅致（婚礼 fine-art）。
     case newsprint, contrastMono, muted, fineArt
+    /// 光谱胶片：spektrafilm 按真实胶片 + 相纸数据算出来、离线烘好的 32³ 表（CollageFilmLUTs，
+    /// Scripts/bake_film_luts.py）。名字、rawValue 都是通用词：哪款对哪支胶片只记在烘焙脚本里，不进界面。
+    case filmSoftSkin, filmWarmSkin, filmRich, filmSunny, filmFresh, filmPastel
+    case slideVivid, slideClean, slideVintage, cineDay
+
+    /// 表从 third_party/film-luts 读，不是 map() 里的解析式。
+    var isSpectral: Bool {
+        switch self {
+        case .filmSoftSkin, .filmWarmSkin, .filmRich, .filmSunny, .filmFresh, .filmPastel,
+             .slideVivid, .slideClean, .slideVintage, .cineDay: return true
+        default: return false
+        }
+    }
 
     /// 黑白、旧照、报纸、高反差：去色永远是全的，强度只管影调（强度 0 也是黑白）。
     var isMonochrome: Bool {
@@ -787,6 +800,16 @@ enum CollageLook: String, Codable, CaseIterable, Hashable {
         case .contrastMono: return "高反差"
         case .muted: return "哑光"
         case .fineArt: return "雅致"
+        case .filmSoftSkin: return "柔肤"
+        case .filmWarmSkin: return "暖肤"
+        case .filmRich: return "浓郁"
+        case .filmSunny: return "暖阳"
+        case .filmFresh: return "清新"
+        case .filmPastel: return "淡雅"
+        case .slideVivid: return "浓艳"
+        case .slideClean: return "清亮"
+        case .slideVintage: return "怀旧"
+        case .cineDay: return "银幕"
         }
     }
 }
