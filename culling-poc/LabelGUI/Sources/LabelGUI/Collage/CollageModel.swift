@@ -935,7 +935,8 @@ struct CollageStyle: Codable, Hashable {
     /// 光谱胶片的颗粒 0…1（只在光谱色调上起作用，CollageFilmEffects）：0.5 = 这款胶片在 35mm 底片上的
     /// 真实颗粒（spektrafilm 的颗粒模型），1 = 两倍。0 = 不加（和没有这一项时逐像素一样）。
     var filmGrain = 0.0
-    /// 光谱胶片的晕光 0…1：高光往外散的红橙光晕（片基反射），1 = 底片没有防光晕层。0 = 不加。
+    /// 光谱胶片的晕光 0…1：高光往外散的红橙光晕（片基反射），平方刻度（0.2 ≈ 有防光晕层的真片），1 = 底片没有
+    /// 防光晕层。0 = 不加。
     var filmHalation = 0.0
     /// 四边不一样的边距（留白杂志、婚礼相册）；nil = 四边都是 margin（旧行为）。
     var insets: CollageInsets?

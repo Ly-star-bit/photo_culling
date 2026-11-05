@@ -212,12 +212,13 @@ struct CollageLookBox: View {
                               display: percentText(store.project.style.filmGrain))
                     .disabled(!store.project.style.look.isSpectral)
                     .help("光谱胶片的颗粒（spektrafilm 的颗粒模型）：50% ≈ 这款胶片在 35mm 底片上的真实颗粒，100% 是两倍。"
-                          + "按每张照片的像素算，导出和放大预览时才看得清；只在光谱胶片色调（柔肤…银幕）上起作用")
+                          + "按每张照片的像素算，导出和放大预览时才看得清；只在光谱胶片色调（柔肤…银幕）上起作用。"
+                          + "从别的色调换进光谱胶片时自动设成这一款的起始值，拉回 0 以后不再自动加")
                 CollageSlider(label: "晕光", value: binding(\.filmHalation), range: 0...1,
                               display: percentText(store.project.style.filmHalation))
                     .disabled(!store.project.style.look.isSpectral)
-                    .help("高光边上泛红的光晕（底片片基的反射）：100% = 没有防光晕层的底片。导出大图时更明显；"
-                          + "只在光谱胶片色调上起作用")
+                    .help("高光边上泛红的光晕（底片片基的反射）：20% 上下是有防光晕层的真片，50% 是防光晕层弱的片子，"
+                          + "100% = 没有防光晕层的底片。导出大图时更明显；只在光谱胶片色调上起作用")
                 CollageSlider(label: "统一色温", value: binding(\.harmonize), range: 0...1,
                               display: percentText(store.project.style.harmonize))
                     .help("其余照片的色温、明暗往主图靠：不同时间、不同光线拍的放在一起才像一组")
@@ -247,8 +248,8 @@ struct CollageLookBox: View {
                 .buttonStyle(.bordered)
                 .tint(Color(red: 1, green: 0.702, blue: 0.251))
                 .disabled(store.page == nil)
-                .help("整页的看片台：大样张按片种排（负片、反转片、电影负片、滤镜），悬停就在大预览里看，拖竖线比原图，"
-                      + "强度试条、颗粒、晕光、1:1 放大镜都在一处；整组、这一页、这一格都能改")
+                .help("整页的看片台：大样张分胶片 / 滤镜两页（胶片按负片、反转片、电影负片分节），悬停就在大预览里看，"
+                      + "拖竖线比原图，强度试条、颗粒、晕光、1:1 细节都在一处；整组、这一页、这一格都能改")
                 Text("整组照片套同一个色调；导出和预览一样。黑白、旧照的强度只管影调。")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)

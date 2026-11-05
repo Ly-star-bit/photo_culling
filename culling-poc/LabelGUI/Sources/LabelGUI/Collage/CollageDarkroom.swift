@@ -3,8 +3,8 @@ import AppKit
 import Combine
 
 /// 拼图的「暗房」：整页的看片 / 印放工作台（色调面板「进暗房…」打开，Esc /「完成」退出；视图见
-/// CollageDarkroomView.swift）。左边看片台按片种排每个色调的样张，中间大预览（拖竖线对比原图、按住空格看原图），
-/// 右边印放（强度试条、统一色温）、质感（颗粒、晕光）、1:1 放大镜，底下是这一页的底片条。
+/// CollageDarkroomView.swift）。左边样张（页签分胶片 / 滤镜，胶片按片种分节），中间大预览（拖竖线对比原图、按住
+/// 空格看原图），右边强度试条、统一色温、颗粒、晕光、1:1 细节，底下是这一页的小样。
 ///
 /// 规则（selftest --darkroom-selftest 一条条核对）：
 /// - 悬停 / ←→ 只是预览：只渲大预览，不碰 store.project、不进撤销。
@@ -33,8 +33,7 @@ final class CollageDarkroom: ObservableObject {
         }
     }
 
-    /// 看片台上的一组：负片画成 135 底片条，反转片装片框，电影负片是方齿孔 + 声带，滤镜是普通方块（不是胶片，
-    /// 没有颗粒、晕光，也就不穿底片的外衣）。
+    /// 样张的一组：负片、反转片、电影负片（光谱胶片，有颗粒晕光）和滤镜（相纸滤镜，没有）。
     enum Kind { case negative, slide, cine, filter }
 
     struct Group: Identifiable {
@@ -52,24 +51,52 @@ final class CollageDarkroom: ObservableObject {
         Group(title: "滤镜", kind: .filter, looks: CollageLook.allCases.filter { !$0.isSpectral }),
     ]
 
-    /// 看片台上的先后（←→ 按这个走）。
+    /// 全部色调的先后。
     static let order: [CollageLook] = groups.flatMap(\.looks)
 
-    /// 片边的帧号：光谱胶片按看片台的先后 1…10；滤镜不是底片，没有帧号。
-    static func frameNumber(_ look: CollageLook) -> Int? {
-        guard look.isSpectral else { return nil }
-        return order.filter(\.isSpectral).firstIndex(of: look).map { $0 + 1 }
+    /// 样张的两个页签：胶片（光谱色调）/ 滤镜（相纸滤镜）。先少给选择（R8 §3.2），←→ 只在这一页签里走。
+    enum Tab: String, CaseIterable, Identifiable {
+        case film, filter
+        var id: String { rawValue }
+        var label: String { self == .film ? "胶片" : "滤镜" }
+        /// 样张一行几张（↑↓ 跳一行）。
+        var columns: Int { self == .film ? 2 : 3 }
     }
 
-    /// 片边字：▶帧号 + 色调名，只此而已。商标红线（reports/胶片模拟调研_2026-11-05/R7）：不印 ISO、型号、
-    /// 品牌 —— 160 / 400 这类数字会把烘焙脚本里「哪款对哪支胶片」从界面上漏出去。
-    static func edgeText(_ look: CollageLook) -> String {
-        guard let n = frameNumber(look) else { return look.label }
-        return "▶\(n) \(look.label)"
+    static func tab(of look: CollageLook) -> Tab { look.isSpectral ? .film : .filter }
+
+    static func looks(in tab: Tab) -> [CollageLook] {
+        groups.filter { ($0.kind == .filter) == (tab == .filter) }.flatMap(\.looks)
     }
 
-    /// 片边上的通用字（和印样模板一样，CollageStyleFilm.swift）。
-    static let rebateText = "SAFETY FILM"
+    /// 样张下面的一句用途。商标红线（R7、R8）：不写片种、型号、ISO —— 160 / 400 这类数字会把烘焙脚本里
+    /// 「哪款对哪支胶片」从界面上漏出去。
+    static func blurb(_ look: CollageLook) -> String {
+        switch look {
+        case .filmSoftSkin: return "低反差、奶油白，皮肤透粉"
+        case .filmWarmSkin: return "金色皮肤、冷影，干净的暖"
+        case .filmRich: return "浓而不艳，饱和色往深里走"
+        case .filmSunny: return "最暖的一款，日光金黄"
+        case .filmFresh: return "偏青绿的日系，清透"
+        case .filmPastel: return "过曝的粉彩，黑位抬起"
+        case .slideVivid: return "风景用的高饱和"
+        case .slideClean: return "最中性、最干净"
+        case .slideVintage: return "红暖蓝深，反差足"
+        case .cineDay: return "暗部青、肤色暖的电影感"
+        case .none: return "不调色"
+        case .film: return "暖、柔，黑位抬一点"
+        case .airy: return "提亮、偏青、反差低"
+        case .faded: return "褪色，偏黄带棕"
+        case .cinema: return "青橙对比，反差大"
+        case .cool: return "冷灰、低饱和"
+        case .mono: return "中性黑白"
+        case .sepia: return "暖棕单色"
+        case .newsprint: return "墨不纯黑、纸不纯白"
+        case .contrastMono: return "黑到底、白到顶"
+        case .muted: return "哑光，反差和饱和都压低"
+        case .fineArt: return "抬黑、柔和，高光微暖"
+        }
+    }
 
     static func kind(of look: CollageLook) -> Kind {
         groups.first { $0.looks.contains(look) }?.kind ?? .filter
@@ -96,6 +123,8 @@ final class CollageDarkroom: ObservableObject {
     @Published var hover: CollageLook? { didSet { if hover != oldValue { hoverChanged() } } }
     /// 键盘焦点（←→ 走、⏎ 套用）。
     @Published var focus: CollageLook = .none
+    /// 样张看哪个页签（打开时跟着现在的色调）。
+    @Published var tab: Tab = .film
     /// 对比竖线的位置：左边这一截看原图（0 = 全是成片）。
     @Published var split = 0.5
     /// 按住空格：整张看原图。
@@ -141,6 +170,7 @@ final class CollageDarkroom: ObservableObject {
             .debounce(for: .milliseconds(120), scheduler: RunLoop.main)
             .sink { [weak self] _ in self?.refresh() }
         focus = current.look
+        tab = Self.tab(of: current.look)
         refresh()
     }
 
@@ -250,10 +280,11 @@ final class CollageDarkroom: ObservableObject {
         store.setStyle(st, coalesce: true)
     }
 
-    /// ←→：在看片台上挪焦点，大预览跟着看（不套用）。到头绕回。
+    /// ←→（↑↓ 跳一行）：在这一页签的样张里挪焦点，大预览跟着看（不套用）。到头绕回；焦点不在这一页签里
+    /// （刚换了页签）从第一张起。
     func moveFocus(_ delta: Int) {
-        let list = Self.order
-        let i = list.firstIndex(of: hover ?? focus) ?? 0
+        let list = Self.looks(in: tab)
+        let i = list.firstIndex(of: hover ?? focus) ?? (delta > 0 ? -1 : 0)
         let next = list[((i + delta) % list.count + list.count) % list.count]
         focus = next
         hover = next

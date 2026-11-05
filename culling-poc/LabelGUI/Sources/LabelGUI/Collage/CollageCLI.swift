@@ -893,7 +893,11 @@ enum CollageUISnapshot {
                     }
                     dr.scope = s
                 }
-                if let h = option("--darkroom-hover").flatMap(CollageLook.init(rawValue:)) { dr.hover = h }
+                if let h = option("--darkroom-hover").flatMap(CollageLook.init(rawValue:)) {
+                    // 鼠标只能停在看得见的样张上：页签跟着悬停的那一款。
+                    dr.tab = CollageDarkroom.tab(of: h)
+                    dr.hover = h
+                }
                 if let v = option("--darkroom-split").flatMap(Double.init) { dr.split = min(1, max(0, v)) }
                 dr.showOriginal = args.contains("--darkroom-original")
             }

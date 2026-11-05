@@ -305,9 +305,12 @@ enum LiveHandlers {
     /// 工程的样式是哪个预设（色调、强度另算，§9.3 的 style / look 分开报）；改过任何一项就不是任何预设 = nil。
     static func styleKey(_ style: CollageStyle) -> String? {
         CollageStyles.all.first { preset in
+            // 色调这一类（色调、强度、光谱胶片的颗粒晕光）不算样式：换进光谱色调会带上起始颗粒，样式还是那一套。
             var s = style
             s.look = preset.style.look
             s.lookStrength = preset.style.lookStrength
+            s.filmGrain = preset.style.filmGrain
+            s.filmHalation = preset.style.filmHalation
             return s == preset.style
         }?.key
     }

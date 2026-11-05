@@ -3,15 +3,15 @@ import Foundation
 /// LABELGUI_DATA_DIR=<临时> LabelGUI --darkroom-selftest
 ///
 /// 暗房（CollageDarkroom）的规则，只验状态、不渲染（渲染看 --collage-ui --darkroom 的快照），不要照片：
-/// 1. 看片台：四组（负片 6、反转片 3、电影负片 1、滤镜 12）合起来正好是全部色调、每个一次；光谱色调只在三组胶片里，
-///    滤镜里一个都没有；片边字只有 ▶帧号 + 名字（帧号 1…10，没有 ISO、型号、品牌）。
+/// 1. 样张：四组（负片 6、反转片 3、电影负片 1、滤镜 12）合起来正好是全部色调、每个一次；光谱色调只在三组胶片里，
+///    滤镜里一个都没有；「胶片」页签 = 10 款光谱色调，「滤镜」页签 = 12 款；每款一句用途，不带片种、型号、ISO。
 /// 2. 打开：整组、看到的就是工程的色调；单张拼图没有「这一页」，没选格子「这一格」退回整组。
 /// 3. 悬停只是预览：工程、撤销步数都不动，预览用的工程里这一级换成了悬停的色调。
 /// 4. 套用：整组 / 这一页 / 这一格各改各的那一级，一次一步撤销，undo 一下回去。
 /// 5. 强度：这一页还没有自己的色调时拖强度 = 用现在看到的色调 + 新强度给这一页设上；连拖合成一步；
 ///    已经有的（包括模板带的）只改强度，fromTemplate 留着。
 /// 6. 颗粒、晕光、统一色温永远改整组，选「这一格」也一样。
-/// 7. ←→ 按看片台的先后走、到头绕回，只预览不套用；⏎（apply(focus)）才套用。
+/// 7. ←→ 只在这一页签里按先后走、到头绕回，只预览不套用；⏎（apply(focus)）才套用；打开时页签跟着现在的色调。
 /// 8. 原图：所有级别不调色、颗粒晕光统一色温都是 0，版式不变。
 /// 9. 撤销清掉选中以后「这一格」退回上一级；关掉暗房清掉悬停。
 /// 全过退出 0，否则 1。
@@ -26,8 +26,8 @@ enum CollageDarkroomSelfTest {
             if !ok { failures.append(name) }
         }
 
-        // ---------------------------------------------------------------- 1. 看片台
-        print("== 看片台")
+        // ---------------------------------------------------------------- 1. 样张
+        print("== 样张")
         let order = CollageDarkroom.order
         check(order.count == CollageLook.allCases.count && Set(order) == Set(CollageLook.allCases),
               "四组合起来正好是全部色调、每个一次", "\(order.count) / \(CollageLook.allCases.count)")
@@ -38,17 +38,18 @@ enum CollageDarkroomSelfTest {
             check(group.looks.allSatisfy { $0.isSpectral == film },
                   film ? "「\(group.title)」里都是光谱胶片" : "「滤镜」里没有光谱胶片（滤镜没有颗粒、晕光，不穿底片外衣）")
         }
-        let numbers = order.compactMap(CollageDarkroom.frameNumber)
-        check(numbers == Array(1...10), "帧号 1…10 只给光谱胶片", "\(numbers)")
-        let brands = ["KODAK", "FUJI", "ILFORD", "PORTRA", "EKTAR", "VELVIA", "PROVIA", "VISION", "ISO", "柯达", "富士"]
+        let filmTab = CollageDarkroom.looks(in: .film), filterTab = CollageDarkroom.looks(in: .filter)
+        check(filmTab.count == 10 && filmTab.allSatisfy(\.isSpectral) && filterTab.count == 12 && !filterTab.contains(where: \.isSpectral),
+              "「胶片」页签 10 款光谱色调、「滤镜」页签 12 款", "\(filmTab.count) / \(filterTab.count)")
+        let brands = ["KODAK", "FUJI", "ILFORD", "PORTRA", "EKTAR", "VELVIA", "PROVIA", "VISION", "GOLD", "ULTRAMAX",
+                      "ISO", "柯达", "富士", "金200"]
         for look in order {
-            let text = CollageDarkroom.edgeText(look)
-            let digits = text.filter(\.isNumber)
-            let expected = CollageDarkroom.frameNumber(look).map(String.init) ?? ""
-            check(digits == expected && !brands.contains(where: { text.uppercased().contains($0) }),
-                  "片边字「\(text)」只有帧号和名字")
+            let text = CollageDarkroom.blurb(look)
+            // 只认阿拉伯数字（含全角）：Character.isNumber 把「一款」「抬一点」的「一」也算成数字。
+            let digits = text.unicodeScalars.contains { CharacterSet.decimalDigits.contains($0) }
+            check(!text.isEmpty && !digits && !brands.contains(where: { text.uppercased().contains($0) }),
+                  "「\(look.label)」的用途「\(text)」不带片种、型号、数字")
         }
-        check(!CollageDarkroom.rebateText.contains(where: \.isNumber), "片边通用字没有数字", CollageDarkroom.rebateText)
 
         // 合成工程：单张拼图，两格照片（不读文件，只验状态）。
         let store = CollageStore(dataDir: appDataDir)
@@ -144,17 +145,25 @@ enum CollageDarkroomSelfTest {
         // ---------------------------------------------------------------- 7. 键盘
         print("== 键盘")
         let kb = CollageDarkroom(store: store, rendering: false)
-        kb.focus = order[0]
+        check(kb.tab == .film, "打开时页签跟着现在的色调（光谱色调 → 胶片）", "\(kb.tab)")
+        kb.focus = filmTab[0]
         kb.moveFocus(-1)
-        check(kb.focus == order.last && kb.hover == order.last, "← 在第一个：绕到最后一个，大预览跟着看")
+        check(kb.focus == filmTab.last && kb.hover == filmTab.last, "← 在第一个：绕到这一页签的最后一个，大预览跟着看")
         kb.moveFocus(1)
-        check(kb.focus == order[0], "→ 再绕回第一个")
+        check(kb.focus == filmTab[0], "→ 再绕回第一个")
         let pk = store.project
         kb.moveFocus(3)
         check(store.project == pk, "←→ 只预览，不套用")
         kb.scope = .project
         kb.apply(kb.focus)
-        check(store.project.style.look == order[3] && kb.hover == nil, "⏎ 套用焦点那一格，悬停清掉")
+        check(store.project.style.look == filmTab[3] && kb.hover == nil, "⏎ 套用焦点那一格，悬停清掉")
+        kb.tab = .filter
+        kb.moveFocus(1)
+        check(kb.focus == filterTab[0], "换到「滤镜」页签：→ 从滤镜的第一个起，不跑回胶片", "\(kb.focus)")
+        kb.moveFocus(-1)
+        check(kb.focus == filterTab.last, "「滤镜」页签里 ← 绕到滤镜的最后一个", "\(kb.focus)")
+        kb.hover = nil
+        kb.tab = .film
 
         // ---------------------------------------------------------------- 8. 原图
         print("== 原图")

@@ -304,14 +304,14 @@ enum MCPToolDefs {
      "annotations":"$WRITE_IDEMPOTENT"},
 
     {"name":"collage_set_style","title":"换样式/色调",
-     "description":"换 app 里当前拼图的样式和色调（= 检视器样式页）：style 是整套「纸、缝、边、框」的预设，look 是整组照片统一的色调，look_strength 是色调强度 0–1；film_grain、film_halation 是光谱胶片色调（filmSoftSkin…cineDay）的颗粒、晕光 0–1（别的色调上不起作用）；margin 外边距（四边一样，会盖掉四边不一样的边距）、gutter 缝宽、corner 圆角、background 底色（设了就是纯色底）、shape 默认的格子形状单独调（给了 style 就在预设上面改）。至少给一个；一次调用是一步撤销。和界面一样，换样式也会改「下次新建拼图沿用的默认样式」。取值见 collage_list_templates。结果里有 app 当前画面的预览图。",
+     "description":"换 app 里当前拼图的样式和色调（= 检视器样式页）：style 是整套「纸、缝、边、框」的预设，look 是整组照片统一的色调，look_strength 是色调强度 0–1；film_grain、film_halation 是光谱胶片色调（filmSoftSkin…cineDay）的颗粒、晕光 0–1（别的色调上不起作用；从别的色调换进光谱胶片、两项都是 0 又没给时，会带上这一款的起始值）；margin 外边距（四边一样，会盖掉四边不一样的边距）、gutter 缝宽、corner 圆角、background 底色（设了就是纯色底）、shape 默认的格子形状单独调（给了 style 就在预设上面改）。至少给一个；一次调用是一步撤销。和界面一样，换样式也会改「下次新建拼图沿用的默认样式」。取值见 collage_list_templates。结果里有 app 当前画面的预览图。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "style":{"type":"string","enum":"$STYLES"},
        "look":{"type":"string","enum":"$LOOKS"},
        "look_strength":{"type":"number","minimum":0,"maximum":1},
        "film_grain":{"type":"number","minimum":0,"maximum":1,"description":"光谱胶片的颗粒：0.5 ≈ 这款胶片在 35mm 底片上的真实颗粒，1 = 两倍；导出、放大才看得清"},
-       "film_halation":{"type":"number","minimum":0,"maximum":1,"description":"光谱胶片的晕光：高光边上泛红的光晕，1 = 底片没有防光晕层"},
+       "film_halation":{"type":"number","minimum":0,"maximum":1,"description":"光谱胶片的晕光：高光边上泛红的光晕，平方刻度：0.2 ≈ 有防光晕层的真片，0.5 ≈ 防光晕层弱的片子，1 = 底片没有防光晕层"},
        "margin":{"type":"number","minimum":0,"maximum":0.25,"description":"外边距，相对画布短边；0 = 铺满"},
        "gutter":{"type":"number","minimum":0,"maximum":0.1,"description":"格子之间的缝宽，相对画布短边；0 = 没有缝"},
        "corner":{"type":"number","minimum":0,"maximum":0.25,"description":"圆角半径（格子形状是 rounded 时），相对画布短边"},
