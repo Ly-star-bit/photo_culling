@@ -759,7 +759,8 @@ enum CollageBorder: String, Codable, CaseIterable, Hashable {
     }
 }
 
-/// 整组统一的色调（程序生成的 3D LUT，不带任何胶片/滤镜品牌名）。新的接在后面：色调总览、缩略图里旧的位置不变。
+/// 整组统一的色调（程序生成的 3D LUT）。色调名不带任何胶片 / 滤镜品牌名；光谱色调用了哪支胶片的数据只写在说明里
+/// （referenceStock）。新的接在后面：色调总览、缩略图里旧的位置不变。
 enum CollageLook: String, Codable, CaseIterable, Hashable {
     case none, film, airy, faded, cinema, cool, mono, sepia
     /// 报纸黑白（墨不纯黑、纸不纯白）、高反差黑白（瑞士网格）、哑光（留白杂志）、雅致（婚礼 fine-art）。
@@ -810,6 +811,25 @@ enum CollageLook: String, Codable, CaseIterable, Hashable {
         case .slideClean: return "清亮"
         case .slideVintage: return "怀旧"
         case .cineDay: return "银幕"
+        }
+    }
+
+    /// 光谱色调用的是哪支胶片的公开数据：暗房右栏、悬停提示、MCP 里写成「参考：…」，名字本身仍是通用词。
+    /// 用户 2026-11-05 定的：片名只出现在说明里、不当色调名用，配免责声明（关于页、THIRD_PARTY_NOTICES）。
+    /// 和烘焙脚本 Scripts/bake_film_luts.py 的 LOOKS 一一对应。
+    var referenceStock: String? {
+        switch self {
+        case .filmSoftSkin: return "Kodak Portra 160"
+        case .filmWarmSkin: return "Kodak Portra 400"
+        case .filmRich: return "Kodak Ektar 100"
+        case .filmSunny: return "Kodak UltraMax 400"
+        case .filmFresh: return "Fujifilm C200"
+        case .filmPastel: return "Fujifilm Pro 400H"
+        case .slideVivid: return "Fujifilm Velvia 100"
+        case .slideClean: return "Fujifilm Provia 100F"
+        case .slideVintage: return "Kodachrome 64"
+        case .cineDay: return "Kodak Vision3 250D + 2383"
+        default: return nil
         }
     }
 }

@@ -70,7 +70,12 @@ enum CollageFilmLooksSelfTest {
             let text = (look.label + " " + look.rawValue).uppercased()
             let hit = brands.filter { text.contains($0) }
             check(hit.isEmpty, "\(look.rawValue)「\(look.label)」不含胶片品牌", hit.joined(separator: " "))
+            // 片名只进「参考」那一行（用户 2026-11-05 定的），每款光谱色调都有，写的是品牌 + 片名。
+            let stock = look.referenceStock ?? ""
+            check(brands.contains(where: { stock.uppercased().contains($0) }), "\(look.rawValue) 有参考片名", stock)
         }
+        check(CollageLook.allCases.filter { !$0.isSpectral }.allSatisfy { $0.referenceStock == nil },
+              "普通滤镜没有参考片名")
 
         // ---------------------------------------------------------------- 3. 取样
         print("== 取样")

@@ -472,6 +472,6 @@ Claude Code 交互模式下，每个工具第一次调用都会问你。建议 9
 
 选片工具免费、开源，按 [GPL-3.0-or-later](LICENSE) 发布，不提供任何担保。每个版本的源码就是 GitHub 上同名的 tag。
 
-- 拼图的「光谱胶片」色调（柔肤、暖肤、浓郁、暖阳、清新、淡雅、浓艳、清亮、怀旧、银幕）是用 [spektrafilm](https://github.com/andreavolpato/spektrafilm)（Andrea Volpato）的胶片和相纸数据离线烘出来的 3D LUT，按 CC BY-SA 4.0 许可，原样放在 `third_party/film-luts/`（app 里在 `Contents/Resources/film-luts/`）。烘焙脚本：`culling-poc/LabelGUI/Scripts/bake_film_luts.py`。表里只有逐像素的颜色和影调；颗粒、晕光是 app 照着 spektrafilm 的模型现算的（同一目录的 `.film.cube` / `.print.cube` / `.json` 是给颗粒用的两半表和参数）。
+- 拼图的「光谱胶片」色调（柔肤、暖肤、浓郁、暖阳、清新、淡雅、浓艳、清亮、怀旧、银幕）是用 [spektrafilm](https://github.com/andreavolpato/spektrafilm)（Andrea Volpato）的胶片和相纸数据离线烘出来的 3D LUT，按 CC BY-SA 4.0 许可，原样放在 `third_party/film-luts/`（app 里在 `Contents/Resources/film-luts/`）。烘焙脚本：`culling-poc/LabelGUI/Scripts/bake_film_luts.py`。表里只有逐像素的颜色和影调；颗粒、晕光是 app 照着 spektrafilm 的模型现算的（同一目录的 `.film.cube` / `.print.cube` / `.json` 是给颗粒用的两半表和参数）。色调名是通用词；暗房和提示里的「参考：Kodak Portra 400」这类片名只说明用了哪支胶片的公开数据，不代表原厂效果，片名是各自所有者的商标，本软件与它们没有关联。
 - 其余第三方组件见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 - 「选片工具」这个名字不随 GPL 授权：fork 出去对外发布的版本请换个名字。

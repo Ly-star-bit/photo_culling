@@ -380,6 +380,7 @@ struct CollageLookBox: View {
         .buttonStyle(.plain)
         .help(look == .none ? "不调色"
               : look.isSpectral ? "整组套「\(look.label)」：光谱胶片，按真实胶片和相纸的数据算的（spektrafilm）"
+                  + (look.referenceStock.map { "；参考：\($0)" } ?? "")
               : "整组套「\(look.label)」")
     }
 }

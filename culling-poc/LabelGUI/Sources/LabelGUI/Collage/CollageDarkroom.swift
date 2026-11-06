@@ -69,8 +69,8 @@ final class CollageDarkroom: ObservableObject {
         groups.filter { ($0.kind == .filter) == (tab == .filter) }.flatMap(\.looks)
     }
 
-    /// 样张下面的一句用途。商标红线（R7、R8）：不写片种、型号、ISO —— 160 / 400 这类数字会把烘焙脚本里
-    /// 「哪款对哪支胶片」从界面上漏出去。
+    /// 一句用途：只讲味道，不写片种、型号、ISO。用了哪支胶片的数据另写在「参考：…」那一行
+    /// （CollageLook.referenceStock，用户 2026-11-05 定的：片名只进说明、配免责声明，不当色调名）。
     static func blurb(_ look: CollageLook) -> String {
         switch look {
         case .filmSoftSkin: return "低反差、奶油白，皮肤透粉"

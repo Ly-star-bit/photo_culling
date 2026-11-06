@@ -120,7 +120,12 @@ enum MCPInProcessTools {
             out["styles"] = CollageStyles.all.map { p -> [String: Any] in ["key": p.key, "name": p.name] }
         }
         if include.contains("looks") {
-            out["looks"] = CollageLook.allCases.map { l -> [String: Any] in ["key": l.rawValue, "name": l.label] }
+            // 光谱色调多一个 reference：用了哪支胶片的公开数据（用户说「用 Portra 400」时 AI 对得上；名字仍是通用词）。
+            out["looks"] = CollageLook.allCases.map { l -> [String: Any] in
+                var item: [String: Any] = ["key": l.rawValue, "name": l.label]
+                if let stock = l.referenceStock { item["reference"] = stock }
+                return item
+            }
         }
         if include.contains("canvases") {
             out["canvases"] = canvasAliases.map { alias -> [String: Any] in

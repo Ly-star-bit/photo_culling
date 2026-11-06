@@ -8,7 +8,8 @@ import AppKit
 /// 照片是唯一的颜色 —— 外壳中性近黑，图片四周中性灰（四周染了色，看色调会偏）；只有一个点缀色琥珀，只表示
 /// 「现在套着的」（2pt 框 + 勾，色盲也认得出）；系统字体，数值用等宽数字、不补前导零；样张用这一页的主图，
 /// 名字在图外；不拟物，「暗房」只留在用词和试条里。R7 的「红色只表示选中」改成了琥珀框加勾，红色不再用。
-/// 商标红线：名字和用途都是通用词，不写片种、型号、ISO。
+/// 片名：色调名和用途都是通用词；光谱色调用了哪支胶片的数据写成右栏、悬停提示里的「参考：…」，右栏底下配一句
+/// 免责声明（用户 2026-11-05 定的）。
 struct CollageDarkroomView: View {
     @ObservedObject var model: CollageDarkroom
     @ObservedObject var store: CollageStore
@@ -334,9 +335,11 @@ private struct DarkroomSwatch: View {
             if inside { model.hover = look } else if model.hover == look { model.hover = nil }
         }
         .onTapGesture { model.apply(look) }
-        .help("\(look.label)：\(CollageDarkroom.blurb(look))。悬停预览，点一下套用")
+        .help("\(look.label)：\(CollageDarkroom.blurb(look))" + (look.referenceStock.map { "（参考 \($0)）" } ?? "")
+              + "。悬停预览，点一下套用")
         .accessibilityElement()
         .accessibilityLabel("\(look.label)，\(CollageDarkroom.kindLabel(look))，\(CollageDarkroom.blurb(look))"
+                            + (look.referenceStock.map { "，参考 \($0)" } ?? "")
                             + (applied ? "，现在套着" : ""))
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { model.apply(look) }
@@ -478,6 +481,9 @@ private struct DarkroomControls: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(setting.look.label).font(.system(size: 20, weight: .semibold)).foregroundStyle(DarkroomPalette.text)
                     Text(CollageDarkroom.blurb(setting.look)).font(.system(size: 12)).foregroundStyle(DarkroomPalette.secondary)
+                    if let stock = setting.look.referenceStock {
+                        Text("参考：\(stock)").font(.system(size: 11)).foregroundStyle(DarkroomPalette.tertiary)
+                    }
                     Text("\(CollageDarkroom.kindLabel(setting.look)) · \(model.effectiveScope.label)"
                          + (model.ownsSetting ? "" : " · 跟着上一级"))
                         .font(.system(size: 11)).foregroundStyle(DarkroomPalette.tertiary)
@@ -533,6 +539,10 @@ private struct DarkroomControls: View {
                 }
 
                 Text("色调和强度改「套用到」选的那一级；颗粒、晕光、统一色温对整组。每一下都是一步撤销（⌘Z）。")
+                    .font(.system(size: 10.5)).foregroundStyle(DarkroomPalette.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("「参考」写的是色调用了哪支胶片的公开数据（经 spektrafilm 模拟、再按扫描调过色），不代表原厂效果；"
+                     + "片名是各自所有者的商标，本软件与它们没有关联。")
                     .font(.system(size: 10.5)).foregroundStyle(DarkroomPalette.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
