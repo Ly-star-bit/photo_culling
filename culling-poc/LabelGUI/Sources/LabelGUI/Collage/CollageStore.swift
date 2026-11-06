@@ -4645,6 +4645,9 @@ extension CollageStore {
     }
 
     /// 预览重渲完没有（结果里要带「用户此刻屏幕上的拼图」，§9.4.3 第 12 步）：等后台渲染任务跑完、没有新的脏标记。
+    /// 画布预览没在渲、也没有等着渲的（perf 场景等它落下）。
+    var previewIdle: Bool { renderTask == nil && !renderDirty }
+
     func previewSettled(timeout: Double) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while renderTask != nil || renderDirty {

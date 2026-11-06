@@ -772,8 +772,9 @@ enum CollageCLI {
 /// [--contact-frames]（印样的「逐帧」一开始就展开）[--light]（浅色外观）[--ax-dump]
 /// [--tray-filter all|unused|used] [--tray-select ID,ID]（托盘的筛选、多选）
 /// [--tray-click ID[+cmd][+shift],…]（界面渲出来以后再在托盘里点：走选中变了以后的刷新，和一开始就选好的截图应该一样）
-/// [--perf place|gutter|slider|title|all|trayclick]（截完图接着跑这个场景，打印每个视图 body 重算几次、
-/// store / 预览 / 缩略图各发了几次 objectWillChange、出了几张预览：CollagePerf）
+/// [--perf place|gutter|slider|exposure|title|all|trayclick|darkroom]（截完图接着跑这个场景，打印每个视图 body 重算几次、
+/// store / 预览 / 缩略图各发了几次 objectWillChange、出了几张预览：CollagePerf；darkroom 要和 --darkroom 一起给，
+/// 报暗房每一类渲染的次数和耗时、松手到全部渲完：CollagePerfDarkroom）
 /// 截图前先改工程（都可选）：--relayout [--count 6]（托盘重新自动排版，几张；工程里还没有版式时也排）、
 /// --layout grid|scatter、--template <模板名>、--title 标题、--subtitle 副标题、--look <色调>、
 /// --film-exposure / --film-warmth / --film-format（冲印区）、--overlay <压字预设>（放在主图那一格并选中它）、--page N（相册第 N 个跨页，从 0 起；先换页再选格子）、

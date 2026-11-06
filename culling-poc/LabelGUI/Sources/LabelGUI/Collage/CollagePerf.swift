@@ -26,6 +26,8 @@ enum CollagePerf {
     static func run(_ scenario: String, store: CollageStore, spin: (Double) -> Void) {
         // 托盘点选单独一套（每一下分开报、托盘大小两档）：CollagePerfTray。
         if scenario == "trayclick" { return trayClicks(store: store, spin: spin) }
+        // 暗房里拖滑杆、悬停：CollagePerfDarkroom。
+        if scenario == "darkroom" { return darkroomScenario(store: store, spin: spin) }
         let names = scenario == "all" ? ["place", "gutter", "slider", "title"] : [scenario]
         for name in names {
             spin(1.5)
@@ -78,11 +80,26 @@ enum CollagePerf {
                 spin(0.016)
             }
             return "边距滑杆 30 下"
+        case "exposure":
+            // 检视器里拖胶片曝光：30 下、每下隔 16 ms，0 → +1.5 档（每 0.1 档一张新的色调表）。不是光谱色调先换上。
+            if !store.project.style.look.isSpectral {
+                var st = store.project.style
+                st.look = .filmWarmSkin
+                store.setStyle(st, coalesce: false)
+                spin(1.5)
+            }
+            for i in 0..<30 {
+                var st = store.project.style
+                st.filmExposure = Double(i + 1) * 0.05
+                store.setStyle(st, coalesce: true)
+                spin(0.016)
+            }
+            return "胶片曝光滑杆 30 下"
         case "title":
             store.setTitle("刷新计数 \(store.project.title.count)")
             return "改标题"
         default:
-            return "不认识的场景（place / gutter / slider / title / all / trayclick）"
+            return "不认识的场景（place / gutter / slider / exposure / title / all / trayclick / darkroom）"
         }
     }
 }

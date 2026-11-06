@@ -411,7 +411,9 @@ final class CollageDarkroom: ObservableObject {
         laneRunning.insert(lane)
         updateBusy()
         Task { @MainActor [weak self] in
+            let start = Date()
             await job()
+            CollagePerf.lane(lane, ms: Date().timeIntervalSince(start) * 1000)
             guard let self else { return }
             self.laneRunning.remove(lane)
             self.pump(lane)

@@ -16,6 +16,7 @@ struct CollageDarkroomView: View {
     @FocusState private var focused: Bool
 
     var body: some View {
+        let _ = CollagePerf.body("暗房")
         VStack(spacing: 0) {
             DarkroomTopBar(model: model, store: store)
             DarkroomHairline()
@@ -227,6 +228,7 @@ private struct DarkroomTopBar: View {
     @ObservedObject var store: CollageStore
 
     var body: some View {
+        let _ = CollagePerf.body("暗房顶栏")
         let scopes: [CollageDarkroom.Scope] = model.pageAvailable ? [.project, .page, .cell] : [.project, .cell]
         HStack(spacing: 12) {
             HStack(spacing: 6) {
@@ -282,6 +284,7 @@ private struct DarkroomSwatches: View {
     @ObservedObject var model: CollageDarkroom
 
     var body: some View {
+        let _ = CollagePerf.body("暗房样张栏")
         let groups = CollageDarkroom.groups.filter { ($0.kind == .filter) == (model.tab == .filter) }
         VStack(spacing: 0) {
             DarkroomSegmented(items: CollageDarkroom.Tab.allCases.map { t in
@@ -323,6 +326,7 @@ private struct DarkroomSwatch: View {
     let small: Bool
 
     var body: some View {
+        let _ = CollagePerf.body("暗房样张")
         let applied = model.current.look == look
         let focused = model.focus == look && !applied
         let hovered = model.hover == look
@@ -372,6 +376,7 @@ private struct DarkroomPreview: View {
     @ObservedObject var model: CollageDarkroom
 
     var body: some View {
+        let _ = CollagePerf.body("暗房预览")
         GeometryReader { geo in
             let area = CGSize(width: max(10, geo.size.width - 64), height: max(10, geo.size.height - 76))
             ZStack {
@@ -494,6 +499,7 @@ private struct DarkroomControls: View {
     @ObservedObject var store: CollageStore
 
     var body: some View {
+        let _ = CollagePerf.body("暗房右栏")
         let setting = model.current
         let spectral = setting.look.isSpectral
         ScrollView {
@@ -612,6 +618,7 @@ private struct DarkroomPrinting: View {
     let spectral: Bool
 
     var body: some View {
+        let _ = CollagePerf.body("暗房冲印")
         let look = model.current.look
         let exposable = spectral && CollageFilmEffects.supportsExposure(look)
         let style = store.project.style
@@ -648,6 +655,7 @@ private struct DarkroomTestStrip: View {
     @ObservedObject var model: CollageDarkroom
 
     var body: some View {
+        let _ = CollagePerf.body("暗房试条")
         let steps = CollageDarkroom.stripSteps
         VStack(spacing: 4) {
             GeometryReader { geo in
@@ -696,6 +704,7 @@ private struct DarkroomLoupe: View {
     @ObservedObject var model: CollageDarkroom
 
     var body: some View {
+        let _ = CollagePerf.body("暗房细节")
         let side = CGFloat(CollageDarkroom.loupeSide)
         ZStack {
             DarkroomPalette.surround
@@ -732,6 +741,7 @@ private struct DarkroomPageStrip: View {
     @ObservedObject var store: CollageStore
 
     var body: some View {
+        let _ = CollagePerf.body("暗房底片条")
         HStack(alignment: .center, spacing: 14) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("这一页").font(.system(size: 12, weight: .semibold)).foregroundStyle(DarkroomPalette.text)

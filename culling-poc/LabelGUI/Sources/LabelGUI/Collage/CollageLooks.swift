@@ -206,6 +206,13 @@ enum CollageLooks {
     static let cubeSize = 32
     private static let cubeLock = NSLock()
     private static var cubeCache: [String: Data] = [:]
+    private static var builds = 0
+    /// 生成过几张表（--perf darkroom 数「新色调表」用）。
+    static var cubeBuilds: Int {
+        cubeLock.lock()
+        defer { cubeLock.unlock() }
+        return builds
+    }
 
     /// 强度按 5% 一档缓存（滑杆拖动时不每个值都生成一次）；冲印区已经量化过（0.1 档 / 5%），只有光谱色调看它。
     static func cube(_ look: CollageLook, strength: Double,
@@ -243,6 +250,7 @@ enum CollageLooks {
         // 一张 LUT 512KB：几个色调来回拖强度会攒到七八十 MB，攒多了清掉重生成（几毫秒一张）。
         if cubeCache.count >= 24 { cubeCache.removeAll() }
         cubeCache[key] = data
+        builds += 1
         cubeLock.unlock()
         return data
     }
