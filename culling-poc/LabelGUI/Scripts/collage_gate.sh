@@ -86,12 +86,12 @@ run() {
     local data
     data="$(fresh "$name")"
     if ! (cd "$OUT" && LABELGUI_DATA_DIR="$data" LABELGUI_STABLE_SEEDS=1 "$BIN" "$@" > "$OUT/logs/$name.log" 2>&1); then
-        FAILS+=("$name（退出码非 0，见 logs/$name.log）")
+        FAILS+=("${name}（退出码非 0，见 logs/$name.log）")
     fi
     # ops 里写错一步只会打印一行接着跑：门禁里不许有跳过的步骤，不然测的不是写的那些。
     # ops 的 expect:… 断言不对打一行「断言失败」：同样算失败。
     if grep -Eq "^(未知操作|参数不对，跳过|断言失败)" "$OUT/logs/$name.log"; then
-        FAILS+=("$name（ops 有跳过的步骤或断言失败：$(grep -Em1 "^(未知操作|参数不对，跳过|断言失败)" "$OUT/logs/$name.log")）")
+        FAILS+=("${name}（ops 有跳过的步骤或断言失败：$(grep -Em1 "^(未知操作|参数不对，跳过|断言失败)" "$OUT/logs/$name.log")）")
     fi
     rm -rf "$data"
 }
