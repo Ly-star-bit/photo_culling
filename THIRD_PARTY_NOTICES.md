@@ -17,7 +17,7 @@
   按 CC BY-SA 4.0 再分发。
 - 选片工具不是 spektrafilm 官方项目，也没有得到它的作者背书。色调用的是通用名，不代表任何胶片厂商的产品。
 - 光谱色调的说明里写了「参考：Kodak Portra 400」这类片名，指的是这款色调用了哪支胶片的公开数据（经 spektrafilm 模拟、
-  再按扫描调过色），不代表原厂效果。Kodak、Portra、Ektar、UltraMax、Kodachrome、Vision3、Fujifilm、Velvia、Provia 等
+  再按扫描调过色），不代表原厂效果。Kodak、Portra、Ektar、Gold、UltraMax、Ektachrome、Kodachrome、Vision3、Fujifilm、X-Tra、Velvia、Provia 等
   是各自所有者的商标；选片工具与这些公司没有关联，也没有得到它们的背书。
 
 ## UnifrakturCook 字体

@@ -769,12 +769,15 @@ enum CollageLook: String, Codable, CaseIterable, Hashable {
     /// Scripts/bake_film_luts.py）。名字、rawValue 都是通用词：哪款对哪支胶片只记在烘焙脚本里，不进界面。
     case filmSoftSkin, filmWarmSkin, filmRich, filmSunny, filmFresh, filmPastel
     case slideVivid, slideClean, slideVintage, cineDay
+    /// 第二批（2026-11-05，用户在样张上挑的）：负片 3 款、反转片 1 款、电影负片 1 款。
+    case filmAmber, filmPushed, filmEveryday, slideCool, cineTungsten
 
     /// 表从 third_party/film-luts 读，不是 map() 里的解析式。
     var isSpectral: Bool {
         switch self {
         case .filmSoftSkin, .filmWarmSkin, .filmRich, .filmSunny, .filmFresh, .filmPastel,
-             .slideVivid, .slideClean, .slideVintage, .cineDay: return true
+             .slideVivid, .slideClean, .slideVintage, .cineDay,
+             .filmAmber, .filmPushed, .filmEveryday, .slideCool, .cineTungsten: return true
         default: return false
         }
     }
@@ -811,6 +814,11 @@ enum CollageLook: String, Codable, CaseIterable, Hashable {
         case .slideClean: return "清亮"
         case .slideVintage: return "怀旧"
         case .cineDay: return "银幕"
+        case .filmAmber: return "金黄"
+        case .filmPushed: return "增感"
+        case .filmEveryday: return "日常"
+        case .slideCool: return "冷透"
+        case .cineTungsten: return "钨光"
         }
     }
 
@@ -829,6 +837,11 @@ enum CollageLook: String, Codable, CaseIterable, Hashable {
         case .slideClean: return "Fujifilm Provia 100F"
         case .slideVintage: return "Kodachrome 64"
         case .cineDay: return "Kodak Vision3 250D + 2383"
+        case .filmAmber: return "Kodak Gold 200"
+        case .filmPushed: return "Kodak Portra 800 Push 2"
+        case .filmEveryday: return "Fujifilm X-Tra 400"
+        case .slideCool: return "Kodak Ektachrome 100"
+        case .cineTungsten: return "Kodak Vision3 500T + 2383"
         default: return nil
         }
     }

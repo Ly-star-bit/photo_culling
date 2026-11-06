@@ -3,8 +3,8 @@ import Foundation
 /// LABELGUI_DATA_DIR=<临时> LabelGUI --darkroom-selftest
 ///
 /// 暗房（CollageDarkroom）的规则，只验状态、不渲染（渲染看 --collage-ui --darkroom 的快照），不要照片：
-/// 1. 样张：四组（负片 6、反转片 3、电影负片 1、滤镜 12）合起来正好是全部色调、每个一次；光谱色调只在三组胶片里，
-///    滤镜里一个都没有；「胶片」页签 = 10 款光谱色调，「滤镜」页签 = 12 款；每款一句用途，不带片种、型号、ISO。
+/// 1. 样张：四组（负片 9、反转片 4、电影负片 2、滤镜 12）合起来正好是全部色调、每个一次；光谱色调只在三组胶片里，
+///    滤镜里一个都没有；「胶片」页签 = 15 款光谱色调，「滤镜」页签 = 12 款；每款一句用途，不带片种、型号、ISO。
 /// 2. 打开：整组、看到的就是工程的色调；单张拼图没有「这一页」，没选格子「这一格」退回整组。
 /// 3. 悬停只是预览：工程、撤销步数都不动，预览用的工程里这一级换成了悬停的色调。
 /// 4. 套用：整组 / 这一页 / 这一格各改各的那一级，一次一步撤销，undo 一下回去。
@@ -32,15 +32,15 @@ enum CollageDarkroomSelfTest {
         check(order.count == CollageLook.allCases.count && Set(order) == Set(CollageLook.allCases),
               "四组合起来正好是全部色调、每个一次", "\(order.count) / \(CollageLook.allCases.count)")
         let counts = CollageDarkroom.groups.map { "\($0.title)\($0.looks.count)" }.joined(separator: " ")
-        check(counts == "负片6 反转片3 电影负片1 滤镜12", "分组和张数", counts)
+        check(counts == "负片9 反转片4 电影负片2 滤镜12", "分组和张数", counts)
         for group in CollageDarkroom.groups {
             let film = group.kind != .filter
             check(group.looks.allSatisfy { $0.isSpectral == film },
                   film ? "「\(group.title)」里都是光谱胶片" : "「滤镜」里没有光谱胶片（滤镜没有颗粒、晕光，不穿底片外衣）")
         }
         let filmTab = CollageDarkroom.looks(in: .film), filterTab = CollageDarkroom.looks(in: .filter)
-        check(filmTab.count == 10 && filmTab.allSatisfy(\.isSpectral) && filterTab.count == 12 && !filterTab.contains(where: \.isSpectral),
-              "「胶片」页签 10 款光谱色调、「滤镜」页签 12 款", "\(filmTab.count) / \(filterTab.count)")
+        check(filmTab.count == 15 && filmTab.allSatisfy(\.isSpectral) && filterTab.count == 12 && !filterTab.contains(where: \.isSpectral),
+              "「胶片」页签 15 款光谱色调、「滤镜」页签 12 款", "\(filmTab.count) / \(filterTab.count)")
         let brands = ["KODAK", "FUJI", "ILFORD", "PORTRA", "EKTAR", "VELVIA", "PROVIA", "VISION", "GOLD", "ULTRAMAX",
                       "ISO", "柯达", "富士", "金200"]
         for look in order {

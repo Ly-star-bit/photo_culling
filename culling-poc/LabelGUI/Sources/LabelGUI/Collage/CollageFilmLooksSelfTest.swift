@@ -35,7 +35,7 @@ enum CollageFilmLooksSelfTest {
 
         // ---------------------------------------------------------------- 1. 表都在
         print("== 表")
-        check(spectral.count == 10, "10 个光谱色调", "\(spectral.count) 个")
+        check(spectral.count == 15, "15 个光谱色调", "\(spectral.count) 个")
         let dir = CollageFilmLUTs.directory
         check(dir != nil, "找得到放表的目录", dir?.path ?? "nil")
         if let dir {

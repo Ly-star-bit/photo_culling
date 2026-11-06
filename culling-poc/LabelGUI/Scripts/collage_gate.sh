@@ -178,9 +178,10 @@ EOF
 
     echo "== 色调"
     local lookops=""
-    # 光谱胶片那 10 个（third_party/film-luts 的表）也一个个导出比：换了表、读不到表都会在这里变。
+    # 光谱胶片那 15 个（third_party/film-luts 的表）也一个个导出比：换了表、读不到表都会在这里变。
     for look in none film airy faded cinema cool mono sepia \
-        filmSoftSkin filmWarmSkin filmRich filmSunny filmFresh filmPastel slideVivid slideClean slideVintage cineDay; do
+        filmSoftSkin filmWarmSkin filmRich filmSunny filmFresh filmPastel slideVivid slideClean slideVintage cineDay \
+        filmAmber filmPushed filmEveryday slideCool cineTungsten; do
         lookops+="look:$look,renderexport:look_$look.png,"
     done
     ops looks looks "${lookops}look:faded,strength:0.5,renderexport:look_faded_s05.png,harmonize:0.6,renderexport:look_faded_h06.png"

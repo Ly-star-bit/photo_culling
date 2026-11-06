@@ -45,9 +45,10 @@ final class CollageDarkroom: ObservableObject {
 
     static let groups: [Group] = [
         Group(title: "负片", kind: .negative,
-              looks: [.filmSoftSkin, .filmWarmSkin, .filmRich, .filmSunny, .filmFresh, .filmPastel]),
-        Group(title: "反转片", kind: .slide, looks: [.slideVivid, .slideClean, .slideVintage]),
-        Group(title: "电影负片", kind: .cine, looks: [.cineDay]),
+              looks: [.filmSoftSkin, .filmWarmSkin, .filmRich, .filmSunny, .filmAmber, .filmFresh, .filmPastel,
+                      .filmEveryday, .filmPushed]),
+        Group(title: "反转片", kind: .slide, looks: [.slideVivid, .slideClean, .slideCool, .slideVintage]),
+        Group(title: "电影负片", kind: .cine, looks: [.cineDay, .cineTungsten]),
         Group(title: "滤镜", kind: .filter, looks: CollageLook.allCases.filter { !$0.isSpectral }),
     ]
 
@@ -83,6 +84,11 @@ final class CollageDarkroom: ObservableObject {
         case .slideClean: return "最中性、最干净"
         case .slideVintage: return "红暖蓝深，反差足"
         case .cineDay: return "暗部青、肤色暖的电影感"
+        case .filmAmber: return "更暖、更复古的金黄"
+        case .filmPushed: return "推两档：反差、饱和更足，颗粒更粗"
+        case .filmEveryday: return "日常卷的绿调，暗部偏青"
+        case .slideCool: return "浓烈清透，偏冷"
+        case .cineTungsten: return "整体偏蓝的冷调电影感"
         case .none: return "不调色"
         case .film: return "暖、柔，黑位抬一点"
         case .airy: return "提亮、偏青、反差低"

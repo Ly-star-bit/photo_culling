@@ -64,6 +64,12 @@ LOOKS = [
     ("slideClean", "fujifilm_provia_100f", "kodak_portra_endura", True),
     ("slideVintage", "kodak_kodachrome_64", "kodak_portra_endura", True),
     ("cineDay", "kodak_vision3_250d", "kodak_2383", False),
+    # 第二批（2026-11-05，用户在样张上挑的）
+    ("filmAmber", "kodak_gold_200", "kodak_portra_endura", False),
+    ("filmPushed", "kodak_portra_800_push2", "kodak_portra_endura", False),
+    ("filmEveryday", "fujifilm_xtra_400", "fujifilm_crystal_archive_typeii", False),
+    ("slideCool", "kodak_ektachrome_100", "kodak_portra_endura", True),
+    ("cineTungsten", "kodak_vision3_500t", "kodak_2383", False),
 ]
 
 _FORBIDDEN = ("napari", "PySide6", "PyQt5", "PyQt6", "qtpy", "spektrafilm_gui", "tkinter")
@@ -139,6 +145,27 @@ RECIPES = {
                     scan=dict(white=93, hi=(2, -3.2), sh=(1.5, -3), rot=(40, 105, -4), skin=(0.7, 50, 1.1),
                               green=(12, 1.0), blue=(12, 1.0), sat=0.95),
                     defaults=dict(grain=0.4, halation=0.3), cap=dict(white=92)),
+    # 第二批
+    "filmAmber": dict(phys=dict(_NEG, black=0.05, gamma=0.66, dir=0.65, yf=-6),
+                       scan=dict(white=94.5, all=(1.5, 1.5), hi=(0.5, 3), sh=(0, -5.5), skin=(0.75, 54, 1.05),
+                                 skinband=(35, 70), green=(-9, 1.05), blue=(8, 1.05), sat=1.1),
+                       defaults=dict(grain=0.6, halation=0.45), cap=dict(hi_b=7.5, sh_b=3, skin_dh=3)),
+    "filmPushed": dict(phys=dict(_NEG, black=0.03, gamma=0.62, dir=0.65, yf=-3),
+                       scan=dict(white=95, hi=(1, 3), sh=(-1, -3), skin=(0.75, 50, 1.0), green=(0, 1.1),
+                                 blue=(8, 1.1), sat=1.08),
+                       defaults=dict(grain=0.75, halation=0.25)),
+    "filmEveryday": dict(phys=dict(_NEG, black=0.05, gamma=0.58),
+                         scan=dict(white=95.5, hi=(0.5, 0), sh=(-1.5, -2), skin=(0.7, 48, 1.15), green=(5, 1.25),
+                                   blue=(6, 1.05), sat=1.03),
+                         defaults=dict(grain=0.6, halation=0.35)),
+    "slideCool": dict(phys=dict(dir=0.6, highlight=1.2),
+                      scan=dict(contrast=0.72, white=96, black=3.5, all=(0, -1.5), hi=(-0.5, -1.5), sh=(-1, -3),
+                                rot=(40, 105, -15), skin=(0.5, 50, 1.0), blue=(5, 1.1), sat=1.05),
+                      defaults=dict(grain=0.2, halation=0.2)),
+    "cineTungsten": dict(phys=dict(_NEG, black=0.03, gamma=0.8, dir=0.7),
+                         scan=dict(white=93, all=(-0.5, -5), hi=(1, -2), sh=(0, -3), skin=(0.95, 50, 1.05),
+                                   skinband=(35, 72), green=(10, 1.0), blue=(8, 1.05), sat=0.95),
+                         defaults=dict(grain=0.6, halation=0.35), cap=dict(white=92)),
 }
 
 

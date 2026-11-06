@@ -343,7 +343,8 @@ enum CollageLooks {
             c[2] -= 0.012 * wh
             return saturate(c, 0.8)
         case .filmSoftSkin, .filmWarmSkin, .filmRich, .filmSunny, .filmFresh, .filmPastel,
-             .slideVivid, .slideClean, .slideVintage, .cineDay:
+             .slideVivid, .slideClean, .slideVintage, .cineDay,
+             .filmAmber, .filmPushed, .filmEveryday, .slideCool, .cineTungsten:
             // 光谱胶片：在烘好的表上三线性取样（表和 cube 同为 32³，cube() 取的正好是格点）。读不到表 = 原样。
             return CollageFilmLUTs.map(look, r, g, b)
         }
