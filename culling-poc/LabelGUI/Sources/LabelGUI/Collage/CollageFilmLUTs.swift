@@ -24,7 +24,13 @@ enum CollageFilmLUTs {
     }
 
     static func sample(_ t: Table, _ r: Double, _ g: Double, _ b: Double) -> (Double, Double, Double) {
-        let n = t.size
+        t.rgb.withUnsafeBufferPointer { sample($0, size: t.size, r, g, b) }
+    }
+
+    /// 同上，表的内存已经借出来了：按格点算一整张色调表时（CollageFilmEffects.Developer）几个线程一起读同一张表，
+    /// 每取一次样都去动数组的引用计数，几个核抢同一个计数，并发反倒比一个线程慢。
+    static func sample(_ rgb: UnsafeBufferPointer<Float>, size n: Int, _ r: Double, _ g: Double,
+                       _ b: Double) -> (Double, Double, Double) {
         let top = Double(n - 1)
         func split(_ v: Double) -> (Int, Double) {
             let x = min(1, max(0, v)) * top
@@ -43,9 +49,9 @@ enum CollageFilmLUTs {
                     let w = wb * wg * (dr == 0 ? 1 - fr : fr)
                     guard w > 0 else { continue }
                     let k = (((bi + db) * n + (gi + dg)) * n + (ri + dr)) * 3
-                    out.0 += w * Double(t.rgb[k])
-                    out.1 += w * Double(t.rgb[k + 1])
-                    out.2 += w * Double(t.rgb[k + 2])
+                    out.0 += w * Double(rgb[k])
+                    out.1 += w * Double(rgb[k + 1])
+                    out.2 += w * Double(rgb[k + 2])
                 }
             }
         }
@@ -62,15 +68,27 @@ enum CollageFilmLUTs {
     static func table(_ look: CollageLook) -> Table? {
         guard look.isSpectral else { return nil }
         lock.lock()
+        if let hit = cache[look] {
+            lock.unlock()
+            return hit
+        }
+        if missing.contains(look) {
+            lock.unlock()
+            return nil
+        }
+        lock.unlock()
+        // 解析一张表（3 万多行文本）不拿着锁：暗房的样张一次要十五款，以前一款一款排队读，别处（主线程上取色、
+        // 判字色深浅）要哪款都得等前面的读完。两个线程同时读同一款就各读一遍，先放进去的那份留着。
+        let loaded = directory.flatMap { load(look, from: $0) }
+        lock.lock()
         defer { lock.unlock() }
         if let hit = cache[look] { return hit }
-        if missing.contains(look) { return nil }
-        if let dir = directory, let t = load(look, from: dir) {
-            cache[look] = t
-            return t
+        if let loaded {
+            cache[look] = loaded
+        } else {
+            missing.insert(look)
         }
-        missing.insert(look)
-        return nil
+        return loaded
     }
 
     static func load(_ look: CollageLook, from dir: URL) -> Table? {

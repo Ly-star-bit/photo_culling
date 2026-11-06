@@ -206,6 +206,11 @@ enum CollageLooks {
     static let cubeSize = 32
     private static let cubeLock = NSLock()
     private static var cubeCache: [String: Data] = [:]
+    /// 用过的先后（最近用的在最后）：满了扔最久没用的那张。
+    private static var cubeOrder: [String] = []
+    /// 一张 512KB，48 张 24MB。暗房的样张一次就要 27 张（每款一张、同一个强度），加上试条 5 张、大预览、画布、
+    /// 冲印区的几档：以前满 24 张就全清，样张一渲就把大预览那张冲印区的表也清掉，下一帧又得重算。
+    static let cubeCacheLimit = 48
     private static var builds = 0
     /// 生成过几张表（--perf darkroom 数「新色调表」用）。
     static var cubeBuilds: Int {
@@ -213,8 +218,16 @@ enum CollageLooks {
         defer { cubeLock.unlock() }
         return builds
     }
+    /// 缓存里现在有几张、先后表里记了几张（--film-looks-selftest 核对满了真的会扔）。
+    static var cubeCacheCounts: (cache: Int, order: Int) {
+        cubeLock.lock()
+        defer { cubeLock.unlock() }
+        return (cubeCache.count, cubeOrder.count)
+    }
 
     /// 强度按 5% 一档缓存（滑杆拖动时不每个值都生成一次）；冲印区已经量化过（0.1 档 / 5%），只有光谱色调看它。
+    /// 每个格点就是 grade(r, g, b)（表、Develop 先备好一次，见 CollageFilmEffects.Developer），按 B 分片并发算：
+    /// 每片只写自己那一段，和一个个格点挨着算逐位相同。
     static func cube(_ look: CollageLook, strength: Double,
                      printing: CollageFilmEffects.Printing = CollageFilmEffects.Printing()) -> Data? {
         let bucket = Int((min(1, max(0, strength)) * 20).rounded())
@@ -222,33 +235,64 @@ enum CollageLooks {
         let key = "\(look.rawValue)#\(bucket)" + (develop.isNeutral ? "" : "#e\(develop.exposure)w\(develop.warmth)")
         cubeLock.lock()
         if let hit = cubeCache[key] {
+            if let i = cubeOrder.lastIndex(of: key), i != cubeOrder.count - 1 {
+                cubeOrder.remove(at: i)
+                cubeOrder.append(key)
+            }
             cubeLock.unlock()
             return hit
         }
         cubeLock.unlock()
         let s = Double(bucket) / 20
         let n = cubeSize
-        var values = [Float](repeating: 0, count: n * n * n * 4)
-        var i = 0
-        for bi in 0..<n {
-            for gi in 0..<n {
-                for ri in 0..<n {
-                    let r = Double(ri) / Double(n - 1)
-                    let g = Double(gi) / Double(n - 1)
-                    let b = Double(bi) / Double(n - 1)
-                    let out = grade(r, g, b, look: look, strength: s, printing: develop)
-                    values[i] = Float(out.0)
-                    values[i + 1] = Float(out.1)
-                    values[i + 2] = Float(out.2)
-                    values[i + 3] = 1
-                    i += 4
+        // 光谱色调：表（和冲印区的两半表）的内存借出来一次，格点上直接读（几个线程不抢数组的引用计数）。
+        let developer = look.isSpectral ? CollageFilmEffects.Developer(look, printing: develop) : nil
+        let slice = n * n * 4
+        var values = [Float](repeating: 0, count: n * slice)
+        let lock = NSLock()
+        func build(_ memory: CollageFilmEffects.Developer.Memory?) {
+            DispatchQueue.concurrentPerform(iterations: n) { bi in
+                var part = [Float](repeating: 0, count: slice)
+                var i = 0
+                for gi in 0..<n {
+                    for ri in 0..<n {
+                        let r = Double(ri) / Double(n - 1)
+                        let g = Double(gi) / Double(n - 1)
+                        let b = Double(bi) / Double(n - 1)
+                        let out: (Double, Double, Double)
+                        if look == .none {
+                            out = (r, g, b)
+                        } else if let memory {
+                            out = mix(r, g, b, toward: CollageFilmEffects.Developer.apply(r, g, b, memory), look: look,
+                                      strength: s)
+                        } else {
+                            out = mix(r, g, b, toward: map(look, r, g, b), look: look, strength: s)
+                        }
+                        part[i] = Float(out.0)
+                        part[i + 1] = Float(out.1)
+                        part[i + 2] = Float(out.2)
+                        part[i + 3] = 1
+                        i += 4
+                    }
                 }
+                lock.lock()
+                values.replaceSubrange(bi * slice ..< (bi + 1) * slice, with: part)
+                lock.unlock()
             }
+        }
+        if let developer {
+            developer.withMemory { build($0) }
+        } else {
+            build(nil)
         }
         let data = values.withUnsafeBufferPointer { Data(buffer: $0) }
         cubeLock.lock()
-        // 一张 LUT 512KB：几个色调来回拖强度会攒到七八十 MB，攒多了清掉重生成（几毫秒一张）。
-        if cubeCache.count >= 24 { cubeCache.removeAll() }
+        if cubeCache[key] == nil {
+            while cubeCache.count >= cubeCacheLimit, !cubeOrder.isEmpty {
+                cubeCache[cubeOrder.removeFirst()] = nil
+            }
+            cubeOrder.append(key)
+        }
         cubeCache[key] = data
         builds += 1
         cubeLock.unlock()
@@ -260,9 +304,15 @@ enum CollageLooks {
     static func grade(_ r: Double, _ g: Double, _ b: Double, look: CollageLook, strength: Double,
                       printing: CollageFilmEffects.Printing = CollageFilmEffects.Printing()) -> (Double, Double, Double) {
         guard look != .none else { return (r, g, b) }
-        let s = min(1, max(0, strength))
         let m = look.isSpectral && !printing.isNeutral
             ? CollageFilmEffects.developed(look, r, g, b, printing: printing) : map(look, r, g, b)
+        return mix(r, g, b, toward: m, look: look, strength: strength)
+    }
+
+    /// grade 的后半：原色往色调结果 m 走 strength 那么多（黑白、旧照从灰度起步）。
+    private static func mix(_ r: Double, _ g: Double, _ b: Double, toward m: (Double, Double, Double),
+                            look: CollageLook, strength: Double) -> (Double, Double, Double) {
+        let s = min(1, max(0, strength))
         let l = luma(r, g, b)
         let r0 = look.isMonochrome ? l : r
         let g0 = look.isMonochrome ? l : g

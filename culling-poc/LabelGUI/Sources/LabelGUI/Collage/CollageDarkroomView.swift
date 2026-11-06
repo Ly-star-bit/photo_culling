@@ -11,20 +11,21 @@ import AppKit
 /// 片名：色调名和用途都是通用词；光谱色调用了哪支胶片的数据写成右栏、悬停提示里的「参考：…」，右栏底下配一句
 /// 免责声明（用户 2026-11-05 定的）。
 struct CollageDarkroomView: View {
-    @ObservedObject var model: CollageDarkroom
-    @ObservedObject var store: CollageStore
+    /// 不订阅：这一层只摆位置、接键盘（键盘的闭包当场读），订阅了每改一下、每出一张预览整棵树都要重新比一遍。
+    let model: CollageDarkroom
+    let store: CollageStore
     @FocusState private var focused: Bool
 
     var body: some View {
         let _ = CollagePerf.body("暗房")
         VStack(spacing: 0) {
-            DarkroomTopBar(model: model, store: store)
+            DarkroomTopBar(model: model, store: store, compare: model.compare)
             DarkroomHairline()
             HStack(spacing: 0) {
                 DarkroomSwatches(model: model)
                     .frame(width: 300)
                 DarkroomHairline(vertical: true)
-                DarkroomPreview(model: model)
+                DarkroomPreview(model: model, output: model.output, compare: model.compare)
                     .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
                 DarkroomHairline(vertical: true)
                 DarkroomControls(model: model, store: store)
@@ -226,6 +227,8 @@ private struct DarkroomCheck: View {
 private struct DarkroomTopBar: View {
     @ObservedObject var model: CollageDarkroom
     @ObservedObject var store: CollageStore
+    /// 「原图」按钮按下的样子。
+    @ObservedObject var compare: CollageDarkroom.Compare
 
     var body: some View {
         let _ = CollagePerf.body("暗房顶栏")
@@ -286,6 +289,7 @@ private struct DarkroomSwatches: View {
     var body: some View {
         let _ = CollagePerf.body("暗房样张栏")
         let groups = CollageDarkroom.groups.filter { ($0.kind == .filter) == (model.tab == .filter) }
+        let applied = model.current.look
         VStack(spacing: 0) {
             DarkroomSegmented(items: CollageDarkroom.Tab.allCases.map { t in
                 .init(id: t.rawValue, label: t.label, selected: model.tab == t,
@@ -305,7 +309,11 @@ private struct DarkroomSwatches: View {
                                 : Array(repeating: GridItem(.fixed(132), spacing: 12, alignment: .top), count: 2)
                             LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
                                 ForEach(group.looks, id: \.self) { look in
-                                    DarkroomSwatch(model: model, look: look, small: group.kind == .filter)
+                                    DarkroomSwatch(model: model, look: look, small: group.kind == .filter,
+                                                   image: model.frames[look], applied: applied == look,
+                                                   focused: model.focus == look && applied != look,
+                                                   hovered: model.hover == look)
+                                        .equatable()
                                 }
                             }
                         }
@@ -320,23 +328,32 @@ private struct DarkroomSwatches: View {
 }
 
 /// 一张样张：悬停 = 预览，点 = 套用；现在套着的是 2pt 琥珀框 + 勾，键盘焦点是一圈淡白框。
-private struct DarkroomSwatch: View {
-    @ObservedObject var model: CollageDarkroom
+/// 不订阅暗房：图、套着没有、焦点、悬停由样张栏传进来，这几样没变就不重算（.equatable()）。以前每张都订阅整个
+/// 暗房：拖对比竖线、大预览每出一张、busy 一闪，十五张样张全跟着重算（拖竖线 30 下 450 次）。
+private struct DarkroomSwatch: View, Equatable {
+    /// 只用来悬停、套用（不订阅）。
+    let model: CollageDarkroom
     let look: CollageLook
     let small: Bool
+    let image: NSImage?
+    let applied: Bool
+    let focused: Bool
+    let hovered: Bool
+
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.model === b.model && a.look == b.look && a.small == b.small && a.image === b.image
+            && a.applied == b.applied && a.focused == b.focused && a.hovered == b.hovered
+    }
 
     var body: some View {
         let _ = CollagePerf.body("暗房样张")
-        let applied = model.current.look == look
-        let focused = model.focus == look && !applied
-        let hovered = model.hover == look
         let corner: CGFloat = small ? 5 : 6
         let border: Color = applied ? DarkroomPalette.accent
             : focused ? Color.white.opacity(0.6) : hovered ? Color.white.opacity(0.3) : DarkroomPalette.hairline
         VStack(alignment: .leading, spacing: 5) {
             ZStack {
                 DarkroomPalette.surround
-                if let image = model.frames[look] {
+                if let image {
                     Image(nsImage: image).resizable().interpolation(.high).aspectRatio(contentMode: .fill)
                         .transition(.opacity)
                 }
@@ -353,7 +370,7 @@ private struct DarkroomSwatch: View {
                 .lineLimit(1)
         }
         .animation(.easeOut(duration: 0.12), value: hovered)
-        .animation(.easeOut(duration: 0.12), value: model.frames[look] != nil)
+        .animation(.easeOut(duration: 0.12), value: image != nil)
         .contentShape(Rectangle())
         .onHover { inside in
             if inside { model.hover = look } else if model.hover == look { model.hover = nil }
@@ -374,6 +391,8 @@ private struct DarkroomSwatch: View {
 
 private struct DarkroomPreview: View {
     @ObservedObject var model: CollageDarkroom
+    @ObservedObject var output: CollageDarkroom.Output
+    @ObservedObject var compare: CollageDarkroom.Compare
 
     var body: some View {
         let _ = CollagePerf.body("暗房预览")
@@ -381,7 +400,7 @@ private struct DarkroomPreview: View {
             let area = CGSize(width: max(10, geo.size.width - 64), height: max(10, geo.size.height - 76))
             ZStack {
                 DarkroomPalette.surround
-                if let image = model.processed {
+                if let image = output.processed {
                     printView(image, fit(image.size, in: area))
                         .offset(y: -8)
                 } else {
@@ -389,10 +408,10 @@ private struct DarkroomPreview: View {
                 }
             }
             .overlay(alignment: .top) {
-                // 有渲染在跑：顶上一条细线（不遮图）。
+                // 有渲染在跑（连着超过 0.25 秒，CollageDarkroom.busyLineDelay）：顶上一条细线（不遮图）。
                 Rectangle().fill(DarkroomPalette.accent.opacity(0.75)).frame(height: 2)
-                    .opacity(model.busy ? 1 : 0)
-                    .animation(.easeOut(duration: 0.2), value: model.busy)
+                    .opacity(output.busyLine ? 1 : 0)
+                    .animation(.easeOut(duration: 0.2), value: output.busyLine)
             }
             .overlay(alignment: .bottom) {
                 Text("←→ 换一款 · ⏎ 套用 · 按住空格看原图 · 点图换 1:1 细节的位置 · Esc 完成")
@@ -407,7 +426,7 @@ private struct DarkroomPreview: View {
     private func printView(_ image: NSImage, _ fitted: CGSize) -> some View {
         ZStack(alignment: .topLeading) {
             Image(nsImage: image).resizable().interpolation(.high)
-            if let original = model.original, model.showOriginal || model.split > 0.001 {
+            if let original = output.original, model.showOriginal || model.split > 0.001 {
                 Image(nsImage: original).resizable().interpolation(.high)
                     .mask(alignment: .leading) {
                         Rectangle().frame(width: fitted.width * (model.showOriginal ? 1 : model.split))
@@ -589,7 +608,7 @@ private struct DarkroomControls: View {
 
                 VStack(alignment: .leading, spacing: 10) {
                     DarkroomSectionTitle(title: "1:1 细节", trailing: "导出尺寸")
-                    DarkroomLoupe(model: model)
+                    DarkroomLoupe(output: model.output)
                     Text("颗粒、晕光在这里看得清。点大预览换位置。")
                         .font(.system(size: 11)).foregroundStyle(DarkroomPalette.tertiary)
                 }
@@ -701,26 +720,26 @@ private struct DarkroomTestStrip: View {
 
 /// 1:1 细节：导出尺寸渲整页、裁一块（1 个导出像素 = 1 pt），圆角方块、1px 发丝边；重渲时旧图压暗。
 private struct DarkroomLoupe: View {
-    @ObservedObject var model: CollageDarkroom
+    @ObservedObject var output: CollageDarkroom.Output
 
     var body: some View {
         let _ = CollagePerf.body("暗房细节")
         let side = CGFloat(CollageDarkroom.loupeSide)
         ZStack {
             DarkroomPalette.surround
-            if let image = model.loupe {
+            if let image = output.loupe {
                 Image(nsImage: image).interpolation(.none).resizable()
                     .frame(width: side, height: side)
-                    .opacity(model.loupeStale ? 0.45 : 1)
+                    .opacity(output.loupeStale ? 0.45 : 1)
             }
-            if model.loupe == nil || model.loupeStale {
+            if output.loupe == nil || output.loupeStale {
                 Text("渲染中…").font(.system(size: 11)).foregroundStyle(DarkroomPalette.text)
             }
         }
         .frame(width: side, height: side)
         .overlay(alignment: .topLeading) {
             // 和导出一样大的像素：颗粒、晕光要在这里判断（缩小的预览会把细颗粒平均掉）。
-            Text(model.loupe == nil || model.loupeStale ? "渲染中" : "全尺寸")
+            Text(output.loupe == nil || output.loupeStale ? "渲染中" : "全尺寸")
                 .font(.system(size: 10, weight: .medium)).foregroundStyle(Color.white)
                 .padding(.horizontal, 6).padding(.vertical, 2)
                 .background(Capsule().fill(Color.black.opacity(0.55)))

@@ -140,15 +140,28 @@ enum CollageFilmEffects {
     static func extras(_ look: CollageLook) -> Extras? {
         guard look.isSpectral else { return nil }
         lock.lock()
+        if let hit = cache[look] {
+            lock.unlock()
+            return hit
+        }
+        if missing.contains(look) {
+            lock.unlock()
+            return nil
+        }
+        lock.unlock()
+        // 读一款要解析四张表、十几万行文本（几十毫秒）：不拿着锁读。以前读的时候整把锁占着，暗房悬停到一款新胶片，
+        // 后台渲大预览在读它，主线程上右栏问「这款能不能调胶片曝光」（supportsExposure）也得等这把锁，界面卡一下。
+        // 两个线程同时读同一款就各读一遍（读出来一样），先放进去的那份留着。
+        let loaded = CollageFilmLUTs.directory.flatMap { load(look, from: $0) }
+        lock.lock()
         defer { lock.unlock() }
         if let hit = cache[look] { return hit }
-        if missing.contains(look) { return nil }
-        if let dir = CollageFilmLUTs.directory, let e = load(look, from: dir) {
-            cache[look] = e
-            return e
+        if let loaded {
+            cache[look] = loaded
+        } else {
+            missing.insert(look)
         }
-        missing.insert(look)
-        return nil
+        return loaded
     }
 
     static func load(_ look: CollageLook, from dir: URL) -> Extras? {
@@ -252,29 +265,103 @@ enum CollageFilmEffects {
     /// d₁ = 曝光后的密度 + 偏移（同颗粒：只用两半表的差，底色还是一步到位那张表）。冲印区不动 = 底色表原样。
     static func developed(_ look: CollageLook, _ r: Double, _ g: Double, _ b: Double,
                           printing: Printing) -> (Double, Double, Double) {
-        let base = CollageFilmLUTs.map(look, r, g, b)
-        guard !printing.isNeutral, let fx = extras(look) else { return base }
-        let dv = develop(fx, printing)
-        guard !dv.isIdentity else { return base }
-        let ext = dv.ext ? fx.ext : nil
-        let film = ext?.film ?? fx.film
-        let print = ext?.print ?? fx.print
-        var in0 = [r, g, b]
-        var in1 = [r, g, b]
-        if let ext {
-            let lin = [decode(r), decode(g), decode(b)]
-            in0 = lin.map { encode(min(1, $0 / ext.head)) }
-            in1 = lin.map { encode(min(1, $0 * dv.inputScale)) }
+        Developer(look, printing: printing).apply(r, g, b)
+    }
+
+    /// developed 拆成两半：表、Develop 先备好一次，apply 再一个颜色一个颜色算。色调表（CollageLooks.cube）32³ 个格点
+    /// 都是同一个色调、同一组冲印区：以前每个格点都重新查一遍表（两把锁）、重推一遍 develop（中灰过两次 film 表、
+    /// 两次 pow），再分配四个小数组，一张表 3 万多遍 —— 拖胶片曝光、冷暖每换一档要 26 ms（release）。
+    /// apply 和原来一步步一样（同样的运算、同样的先后），逐位相同（--film-looks-selftest 拿逐点 grade 的表核对，
+    /// 门禁拿渲染出来的图和改之前逐像素比）。
+    struct Developer {
+        /// 一步到位那张底色表（读不到 = 原样）。
+        let table: CollageFilmLUTs.Table?
+        /// 冲印区用的 film / print 两半表（胶片曝光 ≠ 0 时是放宽表）；冲印区不起作用（不是光谱色调、冲印区不动、
+        /// 读不到颗粒数据、偏移全是 0）= nil，只走底色表。
+        private let film: CollageFilmLUTs.Table?
+        private let print: CollageFilmLUTs.Table?
+        /// 放宽表：线性光 ÷ head 进 film 表；nil = 普通两半表（sRGB 直接进）。
+        private let head: Double?
+        private let inputScale: Double
+        private let bias: (Double, Double, Double)
+
+        init(_ look: CollageLook, printing: Printing) {
+            table = CollageFilmLUTs.table(look)
+            var film: CollageFilmLUTs.Table?, print: CollageFilmLUTs.Table?, head: Double?
+            var inputScale = 1.0, bias = (0.0, 0.0, 0.0)
+            if !printing.isNeutral, let fx = extras(look) {
+                let dv = develop(fx, printing)
+                if !dv.isIdentity {
+                    let ext = dv.ext ? fx.ext : nil
+                    film = ext?.film ?? fx.film
+                    print = ext?.print ?? fx.print
+                    head = ext?.head
+                    inputScale = dv.inputScale
+                    bias = (dv.bias[0], dv.bias[1], dv.bias[2])
+                }
+            }
+            self.film = film
+            self.print = print
+            self.head = head
+            self.inputScale = inputScale
+            self.bias = bias
         }
-        let f0 = CollageFilmLUTs.sample(film, in0[0], in0[1], in0[2])
-        let f1 = CollageFilmLUTs.sample(film, in1[0], in1[1], in1[2])
-        let p0 = CollageFilmLUTs.sample(print, decode(f0.0), decode(f0.1), decode(f0.2))
-        let p1 = CollageFilmLUTs.sample(print, decode(f1.0) + dv.bias[0], decode(f1.1) + dv.bias[1],
-                                        decode(f1.2) + dv.bias[2])
-        func out(_ base: Double, _ a: Double, _ b: Double) -> Double {
-            encode(min(1, max(0, decode(base) + b - a)))
+
+        /// 借出来的表的内存和冲印区的几个数（只在 withMemory 的闭包里有效）：格点上只碰它，不碰带数组的 Developer。
+        struct Memory {
+            let table: UnsafeBufferPointer<Float>?
+            let tableSize: Int
+            let film: UnsafeBufferPointer<Float>?
+            let filmSize: Int
+            let print: UnsafeBufferPointer<Float>?
+            let printSize: Int
+            let head: Double?
+            let inputScale: Double
+            let bias: (Double, Double, Double)
         }
-        return (out(base.0, p0.0, p1.0), out(base.1, p0.1, p1.1), out(base.2, p0.2, p1.2))
+
+        /// 表的内存借出来一次，整张色调表的格点都在里面算：几个线程一起算时不在每个格点上动共享数组的引用计数。
+        func withMemory<R>(_ body: (Memory) -> R) -> R {
+            func lend(_ t: CollageFilmLUTs.Table?, _ next: (UnsafeBufferPointer<Float>?) -> R) -> R {
+                guard let t else { return next(nil) }
+                return t.rgb.withUnsafeBufferPointer { next($0) }
+            }
+            return lend(table) { tb in
+                lend(film) { fb in
+                    lend(print) { pb in
+                        body(Memory(table: tb, tableSize: table?.size ?? 0, film: fb, filmSize: film?.size ?? 0,
+                                    print: pb, printSize: print?.size ?? 0, head: head, inputScale: inputScale,
+                                    bias: bias))
+                    }
+                }
+            }
+        }
+
+        func apply(_ r: Double, _ g: Double, _ b: Double) -> (Double, Double, Double) {
+            withMemory { Self.apply(r, g, b, $0) }
+        }
+
+        static func apply(_ r: Double, _ g: Double, _ b: Double, _ m: Memory) -> (Double, Double, Double) {
+            let base = m.table.map { CollageFilmLUTs.sample($0, size: m.tableSize, r, g, b) } ?? (r, g, b)
+            guard let film = m.film, let print = m.print else { return base }
+            var in0 = (r, g, b)
+            var in1 = (r, g, b)
+            if let head = m.head {
+                let lin = (decode(r), decode(g), decode(b))
+                in0 = (encode(min(1, lin.0 / head)), encode(min(1, lin.1 / head)), encode(min(1, lin.2 / head)))
+                in1 = (encode(min(1, lin.0 * m.inputScale)), encode(min(1, lin.1 * m.inputScale)),
+                       encode(min(1, lin.2 * m.inputScale)))
+            }
+            let f0 = CollageFilmLUTs.sample(film, size: m.filmSize, in0.0, in0.1, in0.2)
+            let f1 = CollageFilmLUTs.sample(film, size: m.filmSize, in1.0, in1.1, in1.2)
+            let p0 = CollageFilmLUTs.sample(print, size: m.printSize, decode(f0.0), decode(f0.1), decode(f0.2))
+            let p1 = CollageFilmLUTs.sample(print, size: m.printSize, decode(f1.0) + m.bias.0, decode(f1.1) + m.bias.1,
+                                            decode(f1.2) + m.bias.2)
+            func out(_ base: Double, _ a: Double, _ b: Double) -> Double {
+                encode(min(1, max(0, decode(base) + b - a)))
+            }
+            return (out(base.0, p0.0, p1.0), out(base.1, p0.1, p1.1), out(base.2, p0.2, p1.2))
+        }
     }
 
     static func decode(_ v: Double) -> Double { v <= 0.04045 ? v / 12.92 : pow((max(0, v) + 0.055) / 1.055, 2.4) }

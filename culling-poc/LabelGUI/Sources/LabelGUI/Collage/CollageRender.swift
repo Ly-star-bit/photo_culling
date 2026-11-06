@@ -68,6 +68,9 @@ enum CollageRender {
         var watermark = false
         /// 导出时收集读不了原图的照片（用了预览图 / 整格空着），导出结束要报出来。
         var report: RenderReport?
+        /// 只要这一块（这次渲染的像素坐标，左上原点；暗房的 1:1 细节）：离它远的照片格不出图（不解码、不调色、
+        /// 不画框和投影），别的照常画 —— 这块里的像素和渲整页逐字节一样，块外面的不能用。nil = 整页。
+        var region: CGRect?
 
         init(scale: Double = 1) { self.scale = scale }
     }
@@ -316,6 +319,13 @@ enum CollageRender {
 
         // 每格这次实际用的取景（调试层画人脸框用：封面取景的格子不是 CollageCrop.window 算出来的那个）。
         var windows: [[Int]: CollageCrop.Window] = [:]
+        // 只要一块（options.region）：照片格画出来的东西出不了「格子 + 铺出血 + 投影」—— 投影的模糊 0.022、往下
+        // 0.006 个短边（乘 style.shadow，存档里收在 0…1），留 0.1 个短边足够。够不着这块的格子不出照片。
+        let regionPad = CGFloat(short * 0.1 * max(1, style.shadow)) + CGFloat(bleed)
+        func outsideRegion(_ rect: CGRect) -> Bool {
+            guard let region = options.region else { return false }
+            return !rect.insetBy(dx: -regionPad, dy: -regionPad).intersects(region)
+        }
         if let sheet = page.contactSheet {
             // 印样 / 底片条：整页按片条画（切分树是一个空叶子，不画）。
             let env = CollageContact.Context(photos: photos, hints: hints, colorOps: colorOps, vars: vars, options: options,
@@ -358,12 +368,14 @@ enum CollageRender {
                     // 抠图格贴不到成品底边（CollageCutout.toEdge）的退回整张照片：cutoutDropped。
                     let cutoutMask = frame.cell.cutout != nil && decided?.cutoutDropped != true ? decided?.mask : nil
                     if let decided { windows[frame.path] = decided.window }
-                    let shown = drawPhoto(ctx, cell: frame.cell, rect: rect, photo: photo, framing: framing, style: style,
-                                          short: short, hints: hints[id], background: bg, sharpenRadius: sharpenRadius,
-                                          options: options, extend: extend,
-                                          color: CollageLooks.ops(colorOps[id], cell: frame.cell),
-                                          window: decided?.window, subjectOnly: cutoutMask != nil,
-                                          screen: screen, keyline: keyline)
+                    // 只要一块、这格够不着它：不出照片（压字、水印下面照常画 —— 它们摆在哪、什么深浅不看照片画没画）。
+                    let shown = outsideRegion(rect) ? nil
+                        : drawPhoto(ctx, cell: frame.cell, rect: rect, photo: photo, framing: framing, style: style,
+                                    short: short, hints: hints[id], background: bg, sharpenRadius: sharpenRadius,
+                                    options: options, extend: extend,
+                                    color: CollageLooks.ops(colorOps[id], cell: frame.cell),
+                                    window: decided?.window, subjectOnly: cutoutMask != nil,
+                                    screen: screen, keyline: keyline)
                     if let shown, style.paperOverPhotos > 0, cutoutMask == nil { paperClips.append(shown.clip) }
                     if let report = options.report, let screen, shown != nil {
                         report.halftone.append(halftoneRecord(screen, owner: ownerName(frame.path), photoID: photo.id))

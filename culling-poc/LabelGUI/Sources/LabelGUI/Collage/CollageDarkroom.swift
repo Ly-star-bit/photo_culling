@@ -131,22 +131,53 @@ final class CollageDarkroom: ObservableObject {
     @Published var focus: CollageLook = .none
     /// 样张看哪个页签（打开时跟着现在的色调）。
     @Published var tab: Tab = .film
-    /// 对比竖线的位置：左边这一截看原图（0 = 全是成片）。
-    @Published var split = 0.5
-    /// 按住空格：整张看原图。
-    @Published var showOriginal = false
+    /// 对比竖线、按住看原图：拖竖线一秒几十下，单独放一个对象，只有大预览和顶栏（「原图」按钮）订阅。以前放在暗房
+    /// 自己身上，拖一下竖线样张栏、右栏、冲印、试条、底片条全跟着重算。
+    final class Compare: ObservableObject {
+        /// 对比竖线的位置：左边这一截看原图（0 = 全是成片）。
+        @Published var split = 0.5
+        /// 按住空格：整张看原图。
+        @Published var showOriginal = false
+    }
+    let compare = Compare()
+    var split: Double {
+        get { compare.split }
+        set { compare.split = newValue }
+    }
+    var showOriginal: Bool {
+        get { compare.showOriginal }
+        set { compare.showOriginal = newValue }
+    }
     /// 1:1 放大镜看哪儿（画布像素坐标，左上原点）；nil = 主图那一格的中心。
     @Published var loupeAnchor: CGPoint? { didSet { scheduleLoupe() } }
 
     @Published private(set) var frames: [CollageLook: NSImage] = [:]
-    @Published private(set) var processed: NSImage?
-    @Published private(set) var original: NSImage?
+    /// 大预览、原图、1:1 细节：拖着滑杆时一秒换十几次，单独放一个对象，只有大预览和 1:1 细节订阅它。
+    /// 以前放在暗房自己身上，每出一张大预览、busy 每闪一下，顶栏、右栏（一排滑杆）、冲印、试条、底片条全跟着重算。
+    final class Output: ObservableObject {
+        @Published fileprivate(set) var processed: NSImage?
+        @Published fileprivate(set) var original: NSImage?
+        @Published fileprivate(set) var loupe: NSImage?
+        /// 放大镜正在重渲（界面上把旧的压暗一点）。
+        @Published fileprivate(set) var loupeStale = false
+        /// 大预览顶上那条「在渲」的细线：busy 连着超过 busyLineDelay 才亮，busy 一停就灭。
+        @Published fileprivate(set) var busyLine = false
+    }
+    let output = Output()
+    var processed: NSImage? { output.processed }
+    var original: NSImage? { output.original }
+    var loupe: NSImage? { output.loupe }
+    var loupeStale: Bool { output.loupeStale }
+    /// 有渲染在跑、或者 1:1 细节等着停手（快照、perf 场景轮询它）。不发通知：界面上只看 busyLine。
+    private(set) var busy = false
+    /// busy 连着这么久，细线才亮（秒）。拖滑杆时大预览一帧一张、一张十几毫秒，busy 一秒开关二十几回；那条线每开关
+    /// 一次都是 0.2 秒的淡入淡出，几乎一直在动画，主线程每一帧都把整个暗房的显示列表过一遍（离屏量：开关一次
+    /// 30 ms，没有动画 2.7 ms）。短的渲染本来也一闪就过，看不出来；要等的（1:1 细节、换色调）照旧亮。
+    static let busyLineDelay = 0.25
+    private var busyLineWork: DispatchWorkItem?
     /// 强度试条：0 / 25 / 50 / 75 / 100%。
     @Published private(set) var testStrip: [NSImage] = []
     static let stripSteps: [Double] = [0, 0.25, 0.5, 0.75, 1]
-    @Published private(set) var loupe: NSImage?
-    /// 放大镜正在重渲（界面上把旧的压暗一点）。
-    @Published private(set) var loupeStale = false
     struct ReelFrame: Identifiable, Hashable {
         let path: [Int]
         let photoID: String
@@ -155,8 +186,6 @@ final class CollageDarkroom: ObservableObject {
     }
     /// 底下的底片条：这一页每一格照片，套着它自己现在的色调。
     @Published private(set) var reel: [ReelFrame] = []
-    /// 有渲染在跑（快照等它）。
-    @Published private(set) var busy = false
 
     /// 大预览可用的像素（视图按自己的尺寸 × 屏幕倍率填）。
     var previewPixels = CGSize(width: 1600, height: 1100) {
@@ -168,20 +197,58 @@ final class CollageDarkroom: ObservableObject {
     }
 
     private var watch: AnyCancellable?
+    /// store 变了、大预览还没跟上的那一次（storeWillChange）。
+    private var previewPending = false
+    /// 停手以后把每一类都看一遍（storeWillChange）。
+    private var settleWork: DispatchWorkItem?
+    /// store 连着变的时候大预览最多隔这么久换一次要渲的那一份（秒）。
+    static let previewInterval = 0.04
+    /// store 停下来这么久，再把样张、底片条、原图、1:1 细节都看一遍（秒；和以前的去抖一样）。
+    static let settleDelay = 0.12
 
     init(store: CollageStore, rendering: Bool = true) {
         self.store = store
         self.rendering = rendering
-        watch = store.objectWillChange
-            .debounce(for: .milliseconds(120), scheduler: RunLoop.main)
-            .sink { [weak self] _ in self?.refresh() }
+        watch = store.objectWillChange.sink { [weak self] _ in self?.storeWillChange() }
         focus = current.look
         tab = Self.tab(of: current.look)
         refresh()
     }
 
+    /// store 一变（objectWillChange 在改之前发，到点再读的是改完的）：
+    /// - 大预览最多每 previewInterval 换一次要渲的那一份，最后那一下一定换到。以前整个暗房是去抖 120 ms：拖滑杆时
+    ///   新值一直来、去抖一直不到点，大预览要等松手（或者停一下）才动 —— 拖着的时候看不到颗粒、曝光在变，倒是藏在
+    ///   后面的画布预览在一张张渲（CollageStore.setNeedsRender）。大预览照旧只渲最新的那一次。
+    /// - 别的几类（样张、试条、底片条、原图、1:1 细节）照旧停手 settleDelay 再看：拖强度时 27 张样张不用每一档渲一遍。
+    private func storeWillChange() {
+        if !previewPending {
+            previewPending = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.previewInterval) { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, self.previewPending else { return }
+                    self.previewPending = false
+                    self.schedulePreview()
+                }
+            }
+        }
+        settleWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.watch != nil else { return }
+                self.refresh()
+            }
+        }
+        settleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.settleDelay, execute: work)
+    }
+
     func stop() {
         watch = nil
+        previewPending = false
+        settleWork?.cancel()
+        settleWork = nil
+        busyLineWork?.cancel()
+        busyLineWork = nil
         loupeTimer?.invalidate()
         loupeTimer = nil
         laneKey.removeAll()
@@ -391,12 +458,33 @@ final class CollageDarkroom: ObservableObject {
 
     // MARK: - 渲染（每一类只渲最新的那一次：跑着的时候来了新的，跑完接着渲最新的）
 
-    private var laneKey: [String: String] = [:]
+    /// 一类渲染的键：渲的那份工程（方案栏清掉 —— 存、删方案不改这一版的样子，和编辑指纹一样不算）+ 别的参数。
+    /// 工程整份逐项比（==）：以前每次都把整份工程编成 JSON 算编辑指纹，315 张 / 30 页的相册一次 8 ms（debug），
+    /// 大预览拖着跟手以后每 40 ms 就要算一次，停手再算原图、1:1 细节两份。没改过的数组和上一份共用内存，一比就过。
+    struct LaneKey: Equatable {
+        var project: CollageProject?
+        var extra: String
+
+        init(_ project: CollageProject, _ extra: String) {
+            var p = project
+            p.variants = []
+            self.project = p
+            self.extra = extra
+        }
+
+        /// 样张、试条、底片条：不看整份工程，键就是它们自己用到的那几样。
+        init(_ extra: String) {
+            project = nil
+            self.extra = extra
+        }
+    }
+
+    private var laneKey: [String: LaneKey] = [:]
     private var laneJob: [String: @MainActor () async -> Void] = [:]
     private var laneRunning: Set<String> = []
     private var loupeTimer: Timer?
 
-    private func submit(_ lane: String, key: String, _ job: @escaping @MainActor () async -> Void) {
+    private func submit(_ lane: String, key: LaneKey, _ job: @escaping @MainActor () async -> Void) {
         guard rendering, laneKey[lane] != key else { return }
         laneKey[lane] = key
         laneJob[lane] = job
@@ -422,10 +510,25 @@ final class CollageDarkroom: ObservableObject {
 
     private func updateBusy() {
         let now = !laneRunning.isEmpty || !laneJob.isEmpty || loupeTimer != nil
-        if busy != now { busy = now }
+        guard busy != now else { return }
+        busy = now
+        busyLineWork?.cancel()
+        busyLineWork = nil
+        if now {
+            let work = DispatchWorkItem { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, self.busy else { return }
+                    self.output.busyLine = true
+                }
+            }
+            busyLineWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.busyLineDelay, execute: work)
+        } else if output.busyLine {
+            output.busyLine = false
+        }
     }
 
-    private func current(_ lane: String, _ key: String) -> Bool { laneKey[lane] == key }
+    private func current(_ lane: String, _ key: LaneKey) -> Bool { laneKey[lane] == key }
 
     /// store 变了（套用、撤销、换页、选中、托盘……）：每一类按自己的 key 看要不要重渲。
     func refresh() {
@@ -458,14 +561,14 @@ final class CollageDarkroom: ObservableObject {
         let project = previewProject
         let scale = previewScale
         let hints = store.hints
-        let key = CollageStore.editDigest(project) + "|\(store.pageIndex)|\(scale)|\(hints.count)"
+        let key = LaneKey(project, "\(store.pageIndex)|\(scale)|\(hints.count)")
         let pageIndex = store.pageIndex
         submit("preview", key: key) { [weak self] in
             let image = await Task.detached(priority: .userInitiated) {
                 Self.renderPage(project, pageIndex: pageIndex, fallback: page, hints: hints, scale: scale)
             }.value
             guard let self, self.current("preview", key) else { return }
-            self.processed = image
+            self.output.processed = image
         }
     }
 
@@ -475,13 +578,16 @@ final class CollageDarkroom: ObservableObject {
         let scale = previewScale
         let hints = store.hints
         let pageIndex = store.pageIndex
-        let key = CollageStore.editDigest(project) + "|\(pageIndex)|\(scale)|\(hints.count)"
+        // 原图哪一级都不调色：整组的强度不影响它（色调是原色时 Ops 是原样），拖强度不重渲原图。只改算键的那一份。
+        var keyed = project
+        keyed.style.lookStrength = 0
+        let key = LaneKey(keyed, "\(pageIndex)|\(scale)|\(hints.count)")
         submit("original", key: key) { [weak self] in
             let image = await Task.detached(priority: .utility) {
                 Self.renderPage(project, pageIndex: pageIndex, fallback: page, hints: hints, scale: scale)
             }.value
             guard let self, self.current("original", key) else { return }
-            self.original = image
+            self.output.original = image
         }
     }
 
@@ -490,13 +596,19 @@ final class CollageDarkroom: ObservableObject {
         let base = store.project
         let hints = store.hints
         let strength = current.strength
-        let key = "\(id)|\(Int((strength * 20).rounded()))|\(base.style.halftone.map { "\($0)" } ?? "")|\(hints[id] != nil)"
+        let looks = Self.order
+        let key = LaneKey("\(id)|\(Int((strength * 20).rounded()))|\(base.style.halftone.map { "\($0)" } ?? "")|\(hints[id] != nil)")
         submit("frames", key: key) { [weak self] in
             let images = await Task.detached(priority: .utility) { () -> [CollageLook: NSImage] in
+                // 27 张互不相干：并发渲（每张和一张张挨着渲逐字节一样）。
                 var out: [CollageLook: NSImage] = [:]
-                for look in Self.order {
-                    out[look] = Self.sample(id, base: base, hints: hints, look: look, strength: strength,
+                let lock = NSLock()
+                DispatchQueue.concurrentPerform(iterations: looks.count) { i in
+                    let image = Self.sample(id, base: base, hints: hints, look: looks[i], strength: strength,
                                             width: 330, height: 220)
+                    lock.lock()
+                    out[looks[i]] = image
+                    lock.unlock()
                 }
                 return out
             }.value
@@ -510,12 +622,21 @@ final class CollageDarkroom: ObservableObject {
         let base = store.project
         let hints = store.hints
         let look = hover ?? current.look
-        let key = "\(id)|\(look.rawValue)|\(hints[id] != nil)"
+        let steps = Self.stripSteps
+        let key = LaneKey("\(id)|\(look.rawValue)|\(hints[id] != nil)")
         submit("strip", key: key) { [weak self] in
             let images = await Task.detached(priority: .utility) { () -> [NSImage] in
-                Self.stripSteps.compactMap { s in
-                    Self.sample(id, base: base, hints: hints, look: look, strength: s, width: 150, height: 100)
+                // 同样并发渲，按强度的先后放回去（渲不出来的那格照旧去掉）。
+                var out = [NSImage?](repeating: nil, count: steps.count)
+                let lock = NSLock()
+                DispatchQueue.concurrentPerform(iterations: steps.count) { i in
+                    let image = Self.sample(id, base: base, hints: hints, look: look, strength: steps[i],
+                                            width: 150, height: 100)
+                    lock.lock()
+                    out[i] = image
+                    lock.unlock()
                 }
+                return out.compactMap { $0 }
             }.value
             guard let self, self.current("strip", key) else { return }
             self.testStrip = images
@@ -527,14 +648,23 @@ final class CollageDarkroom: ObservableObject {
         let pageIndex = store.pageIndex
         let hints = store.hints
         let cells = store.geometry.frames.filter { $0.cell.kind == .photo && $0.cell.photoID != nil }
-        let key = CollageStore.editDigest(project) + "|\(pageIndex)|\(hints.count)"
+        let page = project.pages.indices.contains(pageIndex) ? project.pages[pageIndex] : nil
+        let settings = cells.map { f in
+            f.cell.look ?? page?.look ?? CollageLookSetting(look: project.style.look, strength: project.style.lookStrength)
+        }
+        // 底片条每格是一张单独的样张（sample：一份新样式，只带色调、强度、加网）：键只要每格的照片、它实际的色调和
+        // 强度、加网（纸色跟底色）、路人信息。颗粒、晕光、冲印区、统一色温、边距、字都不进样张 —— 以前键是整个工程的
+        // 指纹，暗房里拖一下颗粒、曝光，底片条整条跟着重渲一遍，渲出来和原来一模一样。
+        let cellsKey = zip(cells, settings).map { f, s in
+            "\(f.path.map(String.init).joined())=\(f.cell.photoID ?? "")@\(s.look.rawValue):\(s.strength):"
+                + "\(hints[f.cell.photoID ?? ""] != nil)"
+        }.joined(separator: ",")
+        let halftone = project.style.halftone.map { "\($0)|\(project.style.background)" } ?? ""
+        let key = LaneKey("\(pageIndex)|\(cellsKey)|\(halftone)|\(hints.count)")
         submit("reel", key: key) { [weak self] in
             let reel = await Task.detached(priority: .utility) { () -> [ReelFrame] in
-                let page = project.pages.indices.contains(pageIndex) ? project.pages[pageIndex] : nil
-                return cells.map { f in
+                zip(cells, settings).map { f, setting in
                     let id = f.cell.photoID ?? ""
-                    let setting = f.cell.look ?? page?.look
-                        ?? CollageLookSetting(look: project.style.look, strength: project.style.lookStrength)
                     let image = Self.sample(id, base: project, hints: hints, look: setting.look,
                                             strength: setting.strength, width: 180, height: 120)
                     return ReelFrame(path: f.path, photoID: id, image: image)
@@ -566,15 +696,15 @@ final class CollageDarkroom: ObservableObject {
         let pageIndex = store.pageIndex
         let scale = Double(CollageStore.exportScale(canvas: project.canvas, options: store.exportOptions))
         let center = loupeCenter
-        let key = CollageStore.editDigest(project) + "|\(pageIndex)|\(scale)|\(Int(center.x)),\(Int(center.y))|\(hints.count)"
-        if laneKey["loupe"] != key { loupeStale = loupe != nil }
+        let key = LaneKey(project, "\(pageIndex)|\(scale)|\(Int(center.x)),\(Int(center.y))|\(hints.count)")
+        if laneKey["loupe"] != key { output.loupeStale = output.loupe != nil }
         submit("loupe", key: key) { [weak self] in
             let image = await Task.detached(priority: .utility) {
                 Self.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints, scale: scale, center: center)
             }.value
             guard let self, self.current("loupe", key) else { return }
-            self.loupe = image
-            self.loupeStale = false
+            self.output.loupe = image
+            self.output.loupeStale = false
         }
         updateBusy()
     }
@@ -615,20 +745,30 @@ final class CollageDarkroom: ObservableObject {
     }
 
     /// 放大镜：导出尺寸（原图解码、导出倍数）渲整页，裁中心附近 side × side 像素（1 个导出像素 = 1 pt）。
-    static let loupeSide = 232
+    /// 只要那一小块：离它远的照片格不出图（CollageRender.Options.region，裁出来的像素和渲整页逐字节一样）。
+    /// 以前整页每格都从原图解、在导出尺寸上调色加颗粒，一次半秒多（1 倍；2、3 倍导出是 4、9 倍的像素），
+    /// 暗房里每改一下停手就来一次，渲的时候 1:1 细节一直压暗、还和大预览抢 CPU。
+    nonisolated static let loupeSide = 232
     nonisolated static func renderLoupe(_ project: CollageProject, pageIndex: Int, fallback: CollagePage,
-                                        hints: [String: CollageCrop.Hints], scale: Double, center: CGPoint) -> NSImage? {
+                                        hints: [String: CollageCrop.Hints], scale: Double, center: CGPoint,
+                                        wholePage: Bool = false) -> NSImage? {
         let page = project.pages.indices.contains(pageIndex) ? project.pages[pageIndex] : fallback
         var opts = CollageRender.Options(scale: scale)
         opts.includeBleed = false
         opts.export = true
         opts.watermark = true
-        guard let cg = CollageRender.render(page: page, project: project, hints: hints, options: opts) else { return nil }
-        let side = min(loupeSide, cg.width, cg.height)
+        // 渲出来的尺寸和 render 里一样算（不带出血）：裁的那块先定下来。
+        let w = Int((Double(project.canvas.width) * scale).rounded())
+        let h = Int((Double(project.canvas.height) * scale).rounded())
+        let side = min(loupeSide, w, h)
+        guard side > 0 else { return nil }
         let cx = Int((center.x * scale).rounded()), cy = Int((center.y * scale).rounded())
-        let x = min(max(0, cx - side / 2), cg.width - side)
-        let y = min(max(0, cy - side / 2), cg.height - side)
-        guard let crop = cg.cropping(to: CGRect(x: x, y: y, width: side, height: side)) else { return nil }
+        let x = min(max(0, cx - side / 2), w - side)
+        let y = min(max(0, cy - side / 2), h - side)
+        let rect = CGRect(x: x, y: y, width: side, height: side)
+        if !wholePage { opts.region = rect }
+        guard let cg = CollageRender.render(page: page, project: project, hints: hints, options: opts),
+              cg.width == w, cg.height == h, let crop = cg.cropping(to: rect) else { return nil }
         return NSImage(cgImage: crop, size: NSSize(width: side, height: side))
     }
 }

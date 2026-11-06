@@ -127,6 +127,8 @@ final class CollageStore: ObservableObject {
     private var thumbTask: Task<Void, Never>?
     /// 每页缩略图渲的时候用的键：这一页、整个工程（除了别的页）、页码、路人信息和蒙版的版本。没变的页不重渲。
     private var pageThumbKeys: [UUID: Int] = [:]
+    /// 暗房开着时要渲的页条、方案缩略图先攒着（schedulePageThumbs），关暗房补。
+    private var thumbsDeferred = false
     /// 方案栏：最近一次存成 / 切到的那个方案（描边；现在的样子和它不一样了标「改过」）。不存盘，换场次清掉。
     @Published private(set) var activeVariantID: String?
     /// 方案缩略图按方案存的那一版认键（不跟路人信息的版本走：每算好一张照片的路人信息不该把三十个方案全重渲一遍）；
@@ -503,6 +505,7 @@ final class CollageStore: ObservableObject {
         clearAlternatives()
         albumDropped = []
         tray.reset()
+        thumbsDeferred = false
         lookThumbKey = ""
         thumbs.looks = [:]
         styleThumbTask?.cancel()
@@ -2122,8 +2125,16 @@ final class CollageStore: ObservableObject {
     }
 
     func closeDarkroom() {
+        let wasOpen = darkroom != nil
         darkroom?.stop()
         darkroom = nil
+        guard wasOpen else { return }
+        // 暗房里攒着没渲的画布预览、页条和方案缩略图（setNeedsRender、schedulePageThumbs）：回到拼图页就补上。
+        if renderDirty { setNeedsRender() }
+        if thumbsDeferred {
+            thumbsDeferred = false
+            schedulePageThumbs()
+        }
     }
 
     /// 自检用：整份换成合成的工程（不进撤销、不存盘），撤销栈清空。
@@ -3516,6 +3527,12 @@ final class CollageStore: ObservableObject {
     /// 相册跨页条：编辑停下 0.25 秒后给变了的页各渲一张小图（一页几毫秒）。以前每改一下就把所有页全渲一遍：
     /// 30 个跨页就是 30 张整页渲染，和大图预览抢 CPU，还把解码缓存挤掉。
     func schedulePageThumbs() {
+        // 暗房开着：页条、方案栏都不在视图树里（暗房底下是自己的底片条）。暗房里改的多半是整组的颗粒、曝光：
+        // 相册三十个跨页每停一下全渲一遍，渲了没人看。记一笔，关暗房再补（closeDarkroom）。
+        if darkroom != nil {
+            thumbsDeferred = true
+            return
+        }
         scheduleVariantThumbs()
         // 单张拼图有好几页（一键成套出的一期杂志、轮播组图）也要页条。
         guard isAlbum || project.pages.count > 1 else {
@@ -3599,6 +3616,17 @@ final class CollageStore: ObservableObject {
 
     func setNeedsRender() {
         renderDirty = true
+        // 暗房开着：拼图页整页换成了暗房，画布不在视图树里，这张预览没人看 —— 以前暗房里拖一下颗粒、曝光，后面
+        // 照样一帧渲一张整页（一次拖 30 下就是 30 张），和暗房的大预览抢 CPU / GPU。先记着脏，关暗房
+        // （closeDarkroom）或者实时桥要预览（previewSettled）时再渲。
+        guard darkroom == nil else { return }
+        startRenderLoop()
+    }
+
+    /// 暗房开着、画布预览攒着没渲：实时桥读预览之前先 previewSettled（它会现渲）。
+    var previewDeferred: Bool { darkroom != nil && renderDirty && renderTask == nil }
+
+    private func startRenderLoop() {
         guard renderTask == nil else { return }
         renderTask = Task { [weak self] in
             while true {
@@ -4644,11 +4672,13 @@ extension CollageStore {
         return true
     }
 
-    /// 预览重渲完没有（结果里要带「用户此刻屏幕上的拼图」，§9.4.3 第 12 步）：等后台渲染任务跑完、没有新的脏标记。
-    /// 画布预览没在渲、也没有等着渲的（perf 场景等它落下）。
-    var previewIdle: Bool { renderTask == nil && !renderDirty }
+    /// 画布预览没在渲、也没有等着渲的（perf 场景等它落下；暗房开着时攒着的不算 —— 那是有意不渲）。
+    var previewIdle: Bool { renderTask == nil && (!renderDirty || darkroom != nil) }
 
+    /// 预览重渲完没有（结果里要带「用户此刻屏幕上的拼图」，§9.4.3 第 12 步）：等后台渲染任务跑完、没有新的脏标记。
     func previewSettled(timeout: Double) async -> Bool {
+        // 暗房开着时画布预览是攒着的（setNeedsRender）：实时桥要看预览，现在就渲。
+        if renderDirty { startRenderLoop() }
         let deadline = Date().addingTimeInterval(timeout)
         while renderTask != nil || renderDirty {
             if Date() >= deadline { return false }

@@ -776,7 +776,7 @@ enum CollageCLI {
 /// store / 预览 / 缩略图各发了几次 objectWillChange、出了几张预览：CollagePerf；darkroom 要和 --darkroom 一起给，
 /// 报暗房每一类渲染的次数和耗时、松手到全部渲完：CollagePerfDarkroom）
 /// 截图前先改工程（都可选）：--relayout [--count 6]（托盘重新自动排版，几张；工程里还没有版式时也排）、
-/// --layout grid|scatter、--template <模板名>、--title 标题、--subtitle 副标题、--look <色调>、
+/// --layout grid|scatter、--template <模板名>、--title 标题、--subtitle 副标题、--style <样式预设 key>、--wm photos:/sig.png[,page:…]（签名水印）、--look <色调>、
 /// --film-exposure / --film-warmth / --film-format（冲印区）、--overlay <压字预设>（放在主图那一格并选中它）、--page N（相册第 N 个跨页，从 0 起；先换页再选格子）、
 /// --select-item N（选中第 N 个自由图层）、--darkroom（开着暗房截，CollageDarkroom：可再给
 /// --darkroom-scope page|cell、--darkroom-hover <色调>、--darkroom-split 0.3、--darkroom-original（按住空格））。
@@ -838,6 +838,14 @@ enum CollageUISnapshot {
         }
         if let title = option("--title") { store.setTitle(title) }
         if let sub = option("--subtitle") { store.setSubtitle(sub) }
+        // --style <预设 key>（同 --collage 的 --style）：先换样式预设，--look 再盖上去。
+        if let key = option("--style") { store.setStyle(CollageStyles.preset(key), coalesce: false) }
+        // --wm photos:/sig.png[,page:/sig.png]：同 --collage-ops 的 wm:（每张照片 / 整页的签名水印）。
+        if let specs = option("--wm") {
+            for spec in specs.split(separator: ",") where !CollageWatermarkCLI.apply("wm", String(spec), store: store) {
+                print("--wm 不认识：\(spec)")
+            }
+        }
         if let look = option("--look").flatMap(CollageLook.init(rawValue:)) {
             var st = store.project.style
             st.look = look

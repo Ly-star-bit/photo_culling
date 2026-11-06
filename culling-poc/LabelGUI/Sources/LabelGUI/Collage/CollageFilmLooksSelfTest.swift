@@ -394,6 +394,47 @@ enum CollageFilmLooksSelfTest {
         let mapSame = CollageFilmEffects.developed(.filmWarmSkin, 0.6, 0.45, 0.4, printing: P())
             == CollageFilmLUTs.map(.filmWarmSkin, 0.6, 0.45, 0.4)
         check(neutralSame && mapSame, "冲印区都是 0：色调表、取色和以前一样", "")
+        // 色调表的快路径（表、Develop 备好一次，按 B 分片并发）和一个个格点调 grade() 逐字节相同：光谱色调带不带
+        // 冲印区（负片的放宽表、反转片的空操作）、相纸滤镜、黑白都核一张。
+        let cases: [(CollageLook, Double, P)] = [
+            (.filmWarmSkin, 0.8, P(exposure: 1, warmth: 0.5)), (.cineTungsten, 0.65, P(exposure: -0.7, warmth: -0.35)),
+            (.slideCool, 1, P(exposure: 1, warmth: 0.25)), (.filmRich, 0.4, P()), (.cinema, 0.8, P()), (.mono, 0.3, P()),
+            (.none, 1, P()),
+        ]
+        for (look, strength, p) in cases {
+            let fast = CollageLooks.cube(look, strength: strength, printing: p)
+            let n = CollageLooks.cubeSize
+            let s = Double(Int((strength * 20).rounded())) / 20
+            let develop = look.isSpectral && !p.isNeutral ? p : P()
+            var ref = [Float]()
+            ref.reserveCapacity(n * n * n * 4)
+            for bi in 0..<n {
+                for gi in 0..<n {
+                    for ri in 0..<n {
+                        let out = CollageLooks.grade(Double(ri) / Double(n - 1), Double(gi) / Double(n - 1),
+                                                     Double(bi) / Double(n - 1), look: look, strength: s, printing: develop)
+                        ref += [Float(out.0), Float(out.1), Float(out.2), 1]
+                    }
+                }
+            }
+            let want = ref.withUnsafeBufferPointer { Data(buffer: $0) }
+            check(fast == want, "色调表 \(look.rawValue) 强度 \(strength) 曝光 \(p.exposure) 冷暖 \(p.warmth)："
+                  + "并发快路径和逐点 grade() 逐字节相同", "")
+        }
+        // 缓存满了按最久没用的扔：连着要 70 张不同的表，缓存不超过上限，先后表和缓存对得上；刚用过的那张还在。
+        let keep = CollageLooks.cube(.filmWarmSkin, strength: 0.8, printing: P(exposure: 1, warmth: 0.5))
+        for k in 0..<70 {
+            _ = CollageLooks.cube(k % 2 == 0 ? .cinema : .filmRich, strength: Double(k / 2 % 21) / 20,
+                                  printing: P(exposure: Double(k / 42) * 0.1))
+            if k % 10 == 0 { _ = CollageLooks.cube(.filmWarmSkin, strength: 0.8, printing: P(exposure: 1, warmth: 0.5)) }
+        }
+        let counts = CollageLooks.cubeCacheCounts
+        let builtBefore = CollageLooks.cubeBuilds
+        let again = CollageLooks.cube(.filmWarmSkin, strength: 0.8, printing: P(exposure: 1, warmth: 0.5))
+        check(counts.cache <= CollageLooks.cubeCacheLimit && counts.cache == counts.order && again == keep
+              && CollageLooks.cubeBuilds == builtBefore,
+              "色调表缓存满了扔最久没用的：不超过 \(CollageLooks.cubeCacheLimit) 张，一直在用的那张没被扔",
+              "缓存 \(counts.cache) 张、先后表 \(counts.order) 张")
         check(P(exposure: 0.04, warmth: 0.02).isNeutral && P(exposure: 7).exposure == 2 && P(exposure: -3).exposure == -1,
               "量化到 0.1 档 / 5%、曝光收在 −1…+2", "")
         // +1 档（冲扫店补回一半）：中灰明显亮、暗部基本不动、高光亮一点（被肩部压住）。

@@ -14,6 +14,8 @@ import Foundation
 /// 7. ←→ 只在这一页签里按先后走、到头绕回，只预览不套用；⏎（apply(focus)）才套用；打开时页签跟着现在的色调。
 /// 8. 原图：所有级别不调色、颗粒晕光统一色温都是 0，版式不变。
 /// 9. 撤销清掉选中以后「这一格」退回上一级；关掉暗房清掉悬停。
+/// 10. 从相纸滤镜换进光谱色调：悬停、套用都带上这一款的起始颗粒晕光。
+/// 11. 暗房开着时画布预览记着脏、先不渲（画布不在视图树里），关暗房马上补渲；实时桥要预览（previewSettled）时现渲。
 /// 全过退出 0，否则 1。
 enum CollageDarkroomSelfTest {
 
@@ -243,6 +245,37 @@ enum CollageDarkroomSelfTest {
             check(false, "起始颗粒的准备（暗房打开、读得到起始值）")
         }
         fresh.closeDarkroom()
+
+        // ---------------------------------------------------------------- 11. 暗房开着时画布预览攒着
+        print("== 画布预览")
+        let behind = CollageStore(dataDir: appDataDir)
+        behind.loadForTesting(project(album: true))
+        behind.openDarkroom()
+        behind.darkroom?.stop()  // 只验 store：暗房自己不渲
+        var grainier = behind.project.style
+        grainier.filmGrain = 0.4
+        behind.setStyle(grainier, coalesce: false)
+        check(behind.previewDeferred && behind.previewIdle,
+              "暗房开着：改了样式，画布预览记着脏、先不渲（画布不在视图树里）")
+        behind.closeDarkroom()
+        check(!behind.previewDeferred && !behind.previewIdle, "关暗房：攒着的画布预览马上补渲")
+        func spin(_ seconds: Double, until done: () -> Bool) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while !done() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        }
+        spin(10) { behind.previewIdle }
+        // 实时桥（collage_get_state 带预览、写完回包带预览）先 previewSettled：暗房开着也现渲一张，不给暗房之前那张。
+        behind.openDarkroom()
+        behind.darkroom?.stop()
+        let stalePreview = behind.preview
+        grainier.filmGrain = 0.7
+        behind.setStyle(grainier, coalesce: false)
+        var settled: Bool?
+        Task { @MainActor in settled = await behind.previewSettled(timeout: 5) }
+        spin(10) { settled != nil }
+        check(settled == true && !behind.previewDeferred && behind.preview != nil && behind.preview !== stalePreview,
+              "暗房开着、实时桥要预览：previewSettled 现渲一张新的", "\(settled.map { "\($0)" } ?? "没等到")")
+        behind.closeDarkroom()
 
         finish(failures)
     }

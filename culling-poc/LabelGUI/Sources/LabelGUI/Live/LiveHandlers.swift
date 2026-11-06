@@ -219,6 +219,9 @@ enum LiveHandlers {
         out["pending_writes"] = live.pendingWrites
         let include = req.params["include_preview"] as? Bool ?? true
         let edge = LiveWire.int(req.params["max_edge"]) ?? 768
+        // 暗房开着时画布预览攒着不渲（CollageStore.setNeedsRender）：要预览就先渲出来，别给暗房之前那张。
+        // 暗房没开时照旧：读手里那张，不等。
+        if include && collage.previewDeferred { _ = await collage.previewSettled(timeout: 1.5) }
         let image: CGImage? = include ? collage.preview?.cgImage(forProposedRect: nil, context: nil, hints: nil) : nil
         // 编辑指纹和预览的编码离开主线程（工程是值类型，复制一份带过去）
         let box = LiveBox((project, image))

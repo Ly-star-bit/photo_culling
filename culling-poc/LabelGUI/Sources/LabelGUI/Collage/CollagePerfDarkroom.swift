@@ -129,6 +129,10 @@ extension CollagePerf {
             _ = CollageDarkroom.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints,
                                             scale: exportScale, center: center)
         }
+        let loupeWhole = median {
+            _ = CollageDarkroom.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints,
+                                            scale: exportScale, center: center, wholePage: true)
+        }
         let digest = median { _ = CollageStore.editDigest(project) }
         // 婚礼相册的量：托盘复制 15 份、页复制到 30 页（暗房每一类的键都要算一次编辑指纹）。
         var big = project
@@ -151,10 +155,43 @@ extension CollagePerf {
             _ = CollageLooks.cube(project.style.look, strength: 0.8, printing: p)
         }
         print(String(format: "perf darkroom 单次：大预览（%.2f 倍）%.1f ms · 原图 %.1f · 样张 %d 张 %.1f · 底片条 %d 格 %.1f · "
-                     + "1:1 细节（%d 倍）%.1f · 冲印区色调表一张 %.1f · 编辑指纹 %.2f ms"
+                     + "1:1 细节（%d 倍）%.1f（渲整页再裁 %.1f）· 冲印区色调表一张 %.1f · 编辑指纹 %.2f ms"
                      + "（%d 张 / %d 页 %.2f ms）",
                      scale, preview, plain, CollageDarkroom.order.count, frames, cells.count, reel, Int(exportScale),
-                     loupe, cube, digest, big.photos.count, big.pages.count, bigDigest))
+                     loupe, loupeWhole, cube, digest, big.photos.count, big.pages.count, bigDigest))
+        loupeIdentity(project, page: page, pageIndex: pageIndex, hints: hints, scale: exportScale,
+                      centers: store.geometry.frames.map { f in
+                          CGPoint(x: Double(f.rect.x0 + f.rect.x1) / 2, y: Double(f.rect.y0 + f.rect.y1) / 2)
+                      } + [CGPoint(x: 0, y: 0), CGPoint(x: Double(c.width), y: Double(c.height)),
+                           CGPoint(x: Double(c.width) / 2, y: Double(c.height) / 2)])
+    }
+
+    /// 1:1 细节只渲够得着的那几格（Options.region）和渲整页再裁，逐字节核对：每格中心、四角里的两个、画布中心。
+    static func loupeIdentity(_ project: CollageProject, page: CollagePage, pageIndex: Int,
+                              hints: [String: CollageCrop.Hints], scale: Double, centers: [CGPoint]) {
+        // 裁出来的 CGImage 和整页共用一块内存（dataProvider 是整页的）：画进一张新的位图再比。
+        func bytes(_ image: NSImage?) -> [UInt8]? {
+            guard let cg = image?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+            var out = [UInt8](repeating: 0, count: cg.width * cg.height * 4)
+            let ok = out.withUnsafeMutableBytes { buf -> Bool in
+                guard let ctx = CGContext(data: buf.baseAddress, width: cg.width, height: cg.height, bitsPerComponent: 8,
+                                          bytesPerRow: cg.width * 4, space: CollageRender.srgb,
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+                ctx.draw(cg, in: CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
+                return true
+            }
+            return ok ? out : nil
+        }
+        var same = 0
+        for center in centers {
+            let culled = CollageDarkroom.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints,
+                                                     scale: scale, center: center)
+            let whole = CollageDarkroom.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints,
+                                                    scale: scale, center: center, wholePage: true)
+            if let a = bytes(culled), a == bytes(whole) { same += 1 }
+        }
+        print((same == centers.count ? "PASS" : "FAIL")
+              + " 1:1 细节只渲够得着的格子：\(same) / \(centers.count) 处和渲整页再裁逐字节相同")
     }
 
     /// 暗房每一类、画布预览都落下来（最多等 90 秒）。返回等了多少毫秒。先等过暗房的 120 ms 去抖和 1:1 细节的
@@ -184,8 +221,8 @@ extension CollagePerf {
         var released: Date?
         var shownWhileDragging = 0
         let subs = [
-            dr.$loupe.dropFirst().sink { _ in loupeAt = Date() },
-            dr.$processed.dropFirst().sink { _ in
+            dr.output.$loupe.dropFirst().sink { _ in loupeAt = Date() },
+            dr.output.$processed.dropFirst().sink { _ in
                 processedAt = Date()
                 if released == nil { shownWhileDragging += 1 }
             },
