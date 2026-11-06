@@ -306,7 +306,9 @@ struct CollageTray: View {
             CollageTrayHeader(store: store, batchStore: batchStore)
             if !store.project.photos.isEmpty {
                 filterBar(usage: usage)
-                if !selected.isEmpty { selectionBar(selected, order: visibleIDs) }
+                // 「已选 N 张」那一行一直占着位置（没选中时是操作提示）：以前第一次选中才冒出来，整列缩略图往下跳 26pt，
+                // 正好跳在鼠标底下，点完像是点错了、卡了一下。
+                selectionBar(selected, order: visibleIDs)
             }
             Divider()
             if store.project.photos.isEmpty {
@@ -356,19 +358,27 @@ struct CollageTray: View {
     private func selectionBar(_ selected: Set<String>, order: [String]) -> some View {
         let n = selected.count
         return HStack(spacing: 6) {
-            Text("已选 \(n) 张").font(.caption).foregroundStyle(.secondary).monospacedDigit()
-            Spacer()
-            Button("移除", role: .destructive) { store.removeFromTray(order.filter(selected.contains)) }
-                .controlSize(.small)
-                .help("从托盘移除选中的 \(n) 张（⌫）：版式里用到的格子留空，⌘Z 一次撤回")
-            Button {
-                tray.clear()
-            } label: {
-                Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+            if n == 0 {
+                Text("单击选中 · ⌘ 加减 · ⇧ 连选 · 拖进画布").font(.caption).foregroundStyle(.tertiary)
+                    .lineLimit(1).minimumScaleFactor(0.8)
+                Spacer(minLength: 0)
+            } else {
+                Text("已选 \(n) 张").font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                Spacer()
+                Button("移除", role: .destructive) { store.removeFromTray(order.filter(selected.contains)) }
+                    .controlSize(.small)
+                    .help("从托盘移除选中的 \(n) 张（⌫）：版式里用到的格子留空，⌘Z 一次撤回")
+                Button {
+                    tray.clear()
+                } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("取消选择（Esc）")
             }
-            .buttonStyle(.plain)
-            .help("取消选择（Esc）")
         }
+        // 选没选中都一样高：网格不跟着上下跳。
+        .frame(height: 20)
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
     }
