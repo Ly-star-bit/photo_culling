@@ -801,6 +801,22 @@
   "bounces": 3,
   "bounce_decay": 0.5
  },
+ "develop": {
+  "warmth_cc_max": 8.0,
+  "warmth_m_ratio": 0.375,
+  "ext_head": 4.6,
+  "exposure_compensation": 0.5,
+  "e_lo": [
+   -0.25,
+   -0.25,
+   -0.25
+  ],
+  "e_hi": [
+   2.055671,
+   1.961233,
+   2.44978
+  ]
+ },
  "defaults": {
   "grain": 0.25,
   "halation": 0.2

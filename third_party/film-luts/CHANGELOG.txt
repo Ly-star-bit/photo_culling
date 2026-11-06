@@ -24,6 +24,11 @@ Changes to the spektrafilm material in this folder (CC BY-SA 4.0)
   - <look>.film.cube / <look>.print.cube: the same chain split at the film density
     (spektrafilm's cmy_film tap) into two 24^3 tables, so the app can add grain
     between them; <look>.json: the density range of that split, the per-channel grain
-    standard deviation derived from spektrafilm's grain model, and its halation preset.
+    standard deviation derived from spektrafilm's grain model, and its halation preset;
+  - <look>.film_e.cube / <look>.print_e.cube (negative and cine films only): the same split
+    with the input extended to 4.6x linear light, so the app can expose the film up to
+    +2 stops (and down) and let the lab compensate half of the mid-gray shift;
+    the app also offsets film density by a constant for enlarger-like warm / cool filtration.
+  These tables are the output of this simulation, not scans of real film.
   The app blends each table toward the original with its strength slider at run time.
   Script: culling-poc/LabelGUI/Scripts/bake_film_luts.py

@@ -45,6 +45,59 @@ enum CollageFilmEffects {
         /// 从「没有光谱色调」换进这一款时颗粒 / 晕光的起始值（滑杆刻度；烘焙脚本 RECIPES 的 defaults）。
         let defaultGrain: Double
         let defaultHalation: Double
+        /// film / print 两半表的密度范围（物理单位）：冷暖的滤色、颗粒 σ 的换算要用。
+        let splitLo: [Double]
+        let splitHi: [Double]
+        /// 冷暖滑杆 ±1 = ±几个 CC 的黄滤色、品滤色跟着走的比例（.json 的 develop；旧表没有 = 冷暖不起作用）。
+        let warmthCCMax: Double
+        let warmthMRatio: Double
+        /// 胶片曝光用的放宽两半表（只有负片、电影负片有）。
+        let ext: Ext?
+        /// 反转片：冷暖的密度偏移反过来加（正片的密度直接挡光，负片还要经过相纸反一次）。
+        let positive: Bool
+    }
+
+    /// 输入放宽到 head 倍线性光的两半表（film_e / print_e）。
+    struct Ext {
+        let film: CollageFilmLUTs.Table
+        let print: CollageFilmLUTs.Table
+        let filmCube: Data
+        let printCube: Data
+        let head: Double
+        /// 冲扫店把中灰的密度位移补回多少（0.5 = 一半）。
+        let compensation: Double
+        let lo: [Double]
+        let hi: [Double]
+    }
+
+    /// 冲印区的两个参数（CollageStyle.filmExposure / filmWarmth），量化到 0.1 档 / 5%：色调表按它缓存，CPU 取色和
+    /// GPU 颗粒用的是同一个值。
+    struct Printing: Hashable {
+        var exposure: Double
+        var warmth: Double
+
+        init(exposure: Double = 0, warmth: Double = 0) {
+            self.exposure = (min(2, max(-1, exposure.isFinite ? exposure : 0)) * 10).rounded() / 10
+            self.warmth = (min(1, max(-1, warmth.isFinite ? warmth : 0)) * 20).rounded() / 20
+        }
+
+        var isNeutral: Bool { exposure == 0 && warmth == 0 }
+    }
+
+    /// 冲印区落到密度上的样子。CPU 算一次，CPU 取色（developed）和 GPU 颗粒（grainPrints）都用它，免得两边推导得不一样。
+    struct Develop {
+        /// true = 走放宽的两半表（胶片曝光 ≠ 0）。
+        let ext: Bool
+        /// 线性光进 film 表之前乘的：放宽表 = 2^EV / head，否则 1。
+        let inputScale: Double
+        /// film 表出来的归一化密度再加的：冲扫店补回的中灰位移 + 冷暖的滤色，按所用那张表的归一化单位。
+        let bias: [Double]
+        /// 颗粒 σ 表按普通 film 表的归一化密度查：所用那张表的密度 d → a·d + b 再查；查出来的 σ 再 × c 换回所用的单位。
+        let sigmaA: [Double]
+        let sigmaB: [Double]
+        let sigmaC: [Double]
+
+        var isIdentity: Bool { !ext && bias.allSatisfy { $0 == 0 } }
     }
 
     private struct Meta: Decodable {
@@ -65,6 +118,18 @@ enum CollageFilmEffects {
         }
         /// 第一版的表没有这一项。
         let defaults: Defaults?
+        let d_lo: [Double]?
+        let d_hi: [Double]?
+        struct DevelopMeta: Decodable {
+            let warmth_cc_max: Double?
+            let warmth_m_ratio: Double?
+            let ext_head: Double?
+            let exposure_compensation: Double?
+            let e_lo: [Double]?
+            let e_hi: [Double]?
+        }
+        /// 第二版之前的表没有这一项（冲印区不起作用）。
+        let develop: DevelopMeta?
     }
 
     private static let lock = NSLock()
@@ -100,6 +165,16 @@ enum CollageFilmEffects {
               meta.halation.strength_max.count == 3, meta.film_format_mm > 0
         else { return nil }
         let n = film.size
+        let dev = meta.develop
+        var ext: Ext?
+        if let head = dev?.ext_head, head > 1, let lo = dev?.e_lo, let hi = dev?.e_hi, lo.count == 3, hi.count == 3,
+           zip(lo, hi).allSatisfy({ $1 > $0 }), let fe = table(".film_e.cube"), let pe = table(".print_e.cube"),
+           fe.size == pe.size {
+            ext = Ext(film: fe, print: pe, filmCube: rgba(fe), printCube: rgba(pe), head: head,
+                      compensation: min(1, max(0, dev?.exposure_compensation ?? 0.5)), lo: lo, hi: hi)
+        }
+        let splitLo = meta.d_lo?.count == 3 ? meta.d_lo! : [0, 0, 0]
+        let splitHi = meta.d_hi?.count == 3 && zip(splitLo, meta.d_hi!).allSatisfy({ $1 > $0 }) ? meta.d_hi! : [1, 1, 1]
         // σ 表：可分离的 3D 表，R 最快、B 最慢（和 CIColorCube 一样）。
         var sigma = [Float](repeating: 0, count: n * n * n * 4)
         func at(_ c: Int, _ t: Double) -> Double {
@@ -126,7 +201,10 @@ enum CollageFilmEffects {
                       filmFormatMM: meta.film_format_mm, grainBlurPx: meta.grain_blur_px,
                       halationSigmaUM: meta.halation.sigma_um, halationStrengthMax: meta.halation.strength_max,
                       halationBounces: max(1, min(6, meta.halation.bounces)), halationDecay: meta.halation.bounce_decay,
-                      defaultGrain: unit(meta.defaults?.grain), defaultHalation: unit(meta.defaults?.halation))
+                      defaultGrain: unit(meta.defaults?.grain), defaultHalation: unit(meta.defaults?.halation),
+                      splitLo: splitLo, splitHi: splitHi,
+                      warmthCCMax: max(0, dev?.warmth_cc_max ?? 0), warmthMRatio: max(0, dev?.warmth_m_ratio ?? 0),
+                      ext: ext, positive: look.isReversal)
     }
 
     private static func unit(_ v: Double?) -> Double {
@@ -138,6 +216,71 @@ enum CollageFilmEffects {
     static func defaults(_ look: CollageLook) -> (grain: Double, halation: Double)? {
         guard let fx = extras(look) else { return nil }
         return (fx.defaultGrain, fx.defaultHalation)
+    }
+
+    /// 这款能不能调胶片曝光（负片、电影负片有放宽表；反转片没有冲扫补偿这一层，过曝就是发白）。
+    static func supportsExposure(_ look: CollageLook) -> Bool { extras(look)?.ext != nil }
+
+    /// 冲印区 → 密度上的偏移（见 Develop）。曝光 ≠ 0 而这款没有放宽表（反转片）：只当冷暖。
+    static func develop(_ fx: Extras, _ p: Printing) -> Develop {
+        // 滑杆 + = 暖 = 黄、品滤色都少加（物理单位：1 CC = 0.01 密度，CMY 的顺序同 cmy_film）。反转片反过来：
+        // 黄、品密度加上去，挡掉蓝、绿光，画面才往暖走。
+        let cc = (fx.positive ? 1 : -1) * p.warmth * fx.warmthCCMax
+        let filter = [0, cc * fx.warmthMRatio / 100, cc / 100]
+        let split = (0..<3).map { fx.splitHi[$0] - fx.splitLo[$0] }
+        if p.exposure != 0, let e = fx.ext {
+            let range = (0..<3).map { e.hi[$0] - e.lo[$0] }
+            func density(_ lin: Double) -> [Double] {
+                let u = encode(min(1, lin / e.head))
+                let v = CollageFilmLUTs.sample(e.film, u, u, u)
+                return [decode(v.0), decode(v.1), decode(v.2)]
+            }
+            // 中灰（线性 0.184）的密度位移，冲扫店补回 compensation 那么多。
+            let d0 = density(0.184)
+            let d1 = density(0.184 * pow(2, p.exposure))
+            return Develop(ext: true, inputScale: pow(2, p.exposure) / e.head,
+                           bias: (0..<3).map { -e.compensation * (d1[$0] - d0[$0]) + filter[$0] / range[$0] },
+                           sigmaA: (0..<3).map { range[$0] / split[$0] },
+                           sigmaB: (0..<3).map { (e.lo[$0] - fx.splitLo[$0]) / split[$0] },
+                           sigmaC: (0..<3).map { split[$0] / range[$0] })
+        }
+        return Develop(ext: false, inputScale: 1, bias: (0..<3).map { filter[$0] / split[$0] },
+                       sigmaA: [1, 1, 1], sigmaB: [0, 0, 0], sigmaC: [1, 1, 1])
+    }
+
+    /// 光谱色调的一个颜色加上冲印区（sRGB 伽马值进出）：底色表 + [print(d₁) − print(d₀)]，d₀ = 原来的密度、
+    /// d₁ = 曝光后的密度 + 偏移（同颗粒：只用两半表的差，底色还是一步到位那张表）。冲印区不动 = 底色表原样。
+    static func developed(_ look: CollageLook, _ r: Double, _ g: Double, _ b: Double,
+                          printing: Printing) -> (Double, Double, Double) {
+        let base = CollageFilmLUTs.map(look, r, g, b)
+        guard !printing.isNeutral, let fx = extras(look) else { return base }
+        let dv = develop(fx, printing)
+        guard !dv.isIdentity else { return base }
+        let ext = dv.ext ? fx.ext : nil
+        let film = ext?.film ?? fx.film
+        let print = ext?.print ?? fx.print
+        var in0 = [r, g, b]
+        var in1 = [r, g, b]
+        if let ext {
+            let lin = [decode(r), decode(g), decode(b)]
+            in0 = lin.map { encode(min(1, $0 / ext.head)) }
+            in1 = lin.map { encode(min(1, $0 * dv.inputScale)) }
+        }
+        let f0 = CollageFilmLUTs.sample(film, in0[0], in0[1], in0[2])
+        let f1 = CollageFilmLUTs.sample(film, in1[0], in1[1], in1[2])
+        let p0 = CollageFilmLUTs.sample(print, decode(f0.0), decode(f0.1), decode(f0.2))
+        let p1 = CollageFilmLUTs.sample(print, decode(f1.0) + dv.bias[0], decode(f1.1) + dv.bias[1],
+                                        decode(f1.2) + dv.bias[2])
+        func out(_ base: Double, _ a: Double, _ b: Double) -> Double {
+            encode(min(1, max(0, decode(base) + b - a)))
+        }
+        return (out(base.0, p0.0, p1.0), out(base.1, p0.1, p1.1), out(base.2, p0.2, p1.2))
+    }
+
+    static func decode(_ v: Double) -> Double { v <= 0.04045 ? v / 12.92 : pow((max(0, v) + 0.055) / 1.055, 2.4) }
+    static func encode(_ v: Double) -> Double {
+        let c = min(1, max(0, v))
+        return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1 / 2.4) - 0.055
     }
 
     /// 工程里有没有哪一级（整组 / 页 / 格）用着光谱色调。
@@ -178,14 +321,16 @@ enum CollageFilmEffects {
         guard let ops, ops.look.isSpectral, ops.strength > 0.001, ops.grain > 0.001 || ops.halation > 0.001,
               frameLongEdge.isFinite, frameLongEdge >= 1, let fx = extras(ops.look)
         else { return CollageLooks.apply(image, ops: ops) }
-        let pixelUM = fx.filmFormatMM * 1000 / frameLongEdge
+        // 画幅：底片越大，同一张照片的像素对应的底片越大，颗粒相对画面越细、晕光越窄。
+        let pixelUM = (ops.formatMM ?? fx.filmFormatMM) * 1000 / frameLongEdge
         var lin = CollageLooks.applyGains(image, ops: ops)
         if ops.halation > 0.001 {
             lin = halate(lin, fx: fx, pixelUM: pixelUM, amount: ops.halation, extent: extent)
         }
         let base = CollageLooks.applyCube(lin, ops: ops)
         guard ops.grain > 0.001,
-              let (p1, p2) = grainPrints(lin, fx: fx, pixelUM: pixelUM, amount: ops.grain, seed: seed, extent: extent)
+              let (p1, p2) = grainPrints(lin, fx: fx, pixelUM: pixelUM, amount: ops.grain, seed: seed, extent: extent,
+                                         develop: develop(fx, ops.printing))
         else { return base }
         // base + s·(p2 − p1)。
         let s = ops.strength
@@ -213,14 +358,20 @@ enum CollageFilmEffects {
         return scale(raised, 1 / (1 + a[0]), 1 / (1 + a[1]), 1 / (1 + a[2])).cropped(to: extent)
     }
 
-    /// 颗粒：print(d)、print(d + δ) 两张（线性光）；颗粒 = 两张之差（均值约 0）。
+    /// 颗粒：print(d)、print(d + δ) 两张（线性光）；颗粒 = 两张之差（均值约 0）。冲印区不动时 d = film(线性光)；
+    /// 动了：d = 曝光后的密度 + 偏移（develop，和 CPU 取色同一套），底色那边的冲印区已经烘进色调表了。
+    /// σ 按胶片实际的密度（曝光后、补回之前）查：补回中灰是印放那一步的事，不改底片上的颗粒。
     static func grainPrints(_ lin: CIImage, fx: Extras, pixelUM: Double, amount: Double, seed: String,
-                            extent: CGRect) -> (CIImage, CIImage)? {
-        guard let film = cube(lin, fx.filmCube, fx.size, colorSpace: CollageRender.srgb) else { return nil }
+                            extent: CGRect, develop dv: Develop) -> (CIImage, CIImage)? {
+        let ext = dv.ext ? fx.ext : nil
+        let input = dv.inputScale == 1 ? lin : scale(lin, dv.inputScale, dv.inputScale, dv.inputScale)
+        guard let film = cube(input, ext?.filmCube ?? fx.filmCube, fx.size, colorSpace: CollageRender.srgb)
+        else { return nil }
         // film 表按 sRGB 编码存的归一化密度：CIColorCubeWithColorSpace 出来回到线性工作空间，正好是归一化密度。
         let k = 2 * min(1, max(0, amount)) / pixelUM
-        guard let sigmaRaw = cube(film, fx.sigmaCube, fx.size, colorSpace: nil) else { return nil }
-        let sigma = scale(sigmaRaw, k, k, k)
+        let sigmaIn = ext == nil ? film : scale(film, dv.sigmaA[0], dv.sigmaA[1], dv.sigmaA[2], biases: dv.sigmaB)
+        guard let sigmaRaw = cube(sigmaIn, fx.sigmaCube, fx.size, colorSpace: nil) else { return nil }
+        let sigma = scale(sigmaRaw, k * dv.sigmaC[0], k * dv.sigmaC[1], k * dv.sigmaC[2])
         let (ox, oy) = offset(seed)
         let twelve = 12.0.squareRoot()
         // 噪声：每个通道独立的均匀分布，挪到均值 0、方差 1。CIRandomGenerator 的 alpha 也是随机的，
@@ -237,9 +388,11 @@ enum CollageFilmEffects {
         if fx.grainBlurPx > 0.05 {
             delta = delta.clampedToExtent().applyingGaussianBlur(sigma: fx.grainBlurPx).cropped(to: extent)
         }
-        let shifted = add(delta, onto: film, extent: extent)
-        guard let p1 = cube(film, fx.printCube, fx.size, colorSpace: nil),
-              let p2 = cube(shifted, fx.printCube, fx.size, colorSpace: nil) else { return nil }
+        let developed = dv.bias.allSatisfy({ $0 == 0 }) ? film : scale(film, 1, 1, 1, biases: dv.bias)
+        let shifted = add(delta, onto: developed, extent: extent)
+        let printCube = ext?.printCube ?? fx.printCube
+        guard let p1 = cube(developed, printCube, fx.size, colorSpace: nil),
+              let p2 = cube(shifted, printCube, fx.size, colorSpace: nil) else { return nil }
         return (p1.cropped(to: extent), p2.cropped(to: extent))
     }
 
@@ -265,13 +418,15 @@ enum CollageFilmEffects {
     }
 
     /// 逐通道乘再加（alpha 不动）。输入的 alpha 要是 1：CIColorMatrix 会先除以 alpha。
-    private static func scale(_ image: CIImage, _ r: Double, _ g: Double, _ b: Double, bias: Double = 0) -> CIImage {
+    private static func scale(_ image: CIImage, _ r: Double, _ g: Double, _ b: Double, bias: Double = 0,
+                              biases: [Double]? = nil) -> CIImage {
         guard let m = CIFilter(name: "CIColorMatrix") else { return image }
         m.setValue(image, forKey: kCIInputImageKey)
         m.setValue(CIVector(x: CGFloat(r), y: 0, z: 0, w: 0), forKey: "inputRVector")
         m.setValue(CIVector(x: 0, y: CGFloat(g), z: 0, w: 0), forKey: "inputGVector")
         m.setValue(CIVector(x: 0, y: 0, z: CGFloat(b), w: 0), forKey: "inputBVector")
-        m.setValue(CIVector(x: CGFloat(bias), y: CGFloat(bias), z: CGFloat(bias), w: 0), forKey: "inputBiasVector")
+        let v = biases ?? [bias, bias, bias]
+        m.setValue(CIVector(x: CGFloat(v[0]), y: CGFloat(v[1]), z: CGFloat(v[2]), w: 0), forKey: "inputBiasVector")
         return m.outputImage ?? image
     }
 

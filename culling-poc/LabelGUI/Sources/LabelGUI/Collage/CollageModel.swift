@@ -822,6 +822,14 @@ enum CollageLook: String, Codable, CaseIterable, Hashable {
         }
     }
 
+    /// 反转片（正片直扫）：密度直接挡光，没有相纸那一次反转 —— 冷暖的密度偏移方向和负片相反。
+    var isReversal: Bool {
+        switch self {
+        case .slideVivid, .slideClean, .slideVintage, .slideCool: return true
+        default: return false
+        }
+    }
+
     /// 光谱色调用的是哪支胶片的公开数据：暗房右栏、悬停提示、MCP 里写成「参考：…」，名字本身仍是通用词。
     /// 用户 2026-11-05 定的：片名只出现在说明里、不当色调名用，配免责声明（关于页、THIRD_PARTY_NOTICES）。
     /// 和烘焙脚本 Scripts/bake_film_luts.py 的 LOOKS 一一对应。
@@ -971,6 +979,13 @@ struct CollageStyle: Codable, Hashable {
     /// 光谱胶片的晕光 0…1：高光往外散的红橙光晕（片基反射），平方刻度（0.2 ≈ 有防光晕层的真片），1 = 底片没有
     /// 防光晕层。0 = 不加。
     var filmHalation = 0.0
+    /// 冲印区（暗房）：光谱胶片的胶片曝光，档 −1…+2。只有负片、电影负片有（反转片没有冲扫补偿这一层）；冲扫店把中灰
+    /// 补回一半：+1 档更亮更通透、+2 档高光被肩部压软。0 = 不动（和没有这一项时逐像素一样）。
+    var filmExposure = 0.0
+    /// 冲印区：冷暖 −1…+1，放大机的黄、品滤色（+ = 暖，往橙走不往黄绿）；反转片上相当于扫描时的色偏校正。0 = 不动。
+    var filmWarmth = 0.0
+    /// 画幅：颗粒、晕光按「整张照片 = 这么大的一格底片」换算（CollageFilmEffects；和印样的画幅同一个类型）。
+    var filmFormat: CollageFilmFormat = .f135
     /// 四边不一样的边距（留白杂志、婚礼相册）；nil = 四边都是 margin（旧行为）。
     var insets: CollageInsets?
     /// 照片加网（报纸风）；nil = 不加。加网的照片不再锐化（锐化会在网点边上起白边）。
@@ -1390,6 +1405,16 @@ enum CollageFilmFormat: String, Codable, CaseIterable, Hashable {
         case .f645: return "6×4.5"
         case .f66: return "6×6"
         case .f67: return "6×7"
+        }
+    }
+
+    /// 光谱胶片的颗粒、晕光按「整张照片 = 这么大的一格底片」换算时的底片长边（mm）：nil = 用表里的 film_format_mm
+    /// （35，135 底片）。同一张照片，画幅越大颗粒相对画面越细、晕光越窄（中画幅婚礼胶片的细腻感）。
+    var grainLongEdgeMM: Double? {
+        switch self {
+        case .f135: return nil
+        case .f645, .f66: return 56
+        case .f67: return 69.5
         }
     }
 
@@ -1915,6 +1940,11 @@ extension CollageStyle {
         filmGrain = grainValue.isFinite ? min(1, max(0, grainValue)) : 0
         let halationValue = c.soft(.filmHalation, d.filmHalation)
         filmHalation = halationValue.isFinite ? min(1, max(0, halationValue)) : 0
+        let exposureValue = c.soft(.filmExposure, d.filmExposure)
+        filmExposure = exposureValue.isFinite ? min(2, max(-1, exposureValue)) : 0
+        let warmthValue = c.soft(.filmWarmth, d.filmWarmth)
+        filmWarmth = warmthValue.isFinite ? min(1, max(-1, warmthValue)) : 0
+        filmFormat = c.soft(.filmFormat, d.filmFormat)
         insets = c.softOptional(.insets)
         halftone = c.softOptional(.halftone)
         let mat = c.soft(.matWidth, d.matWidth)

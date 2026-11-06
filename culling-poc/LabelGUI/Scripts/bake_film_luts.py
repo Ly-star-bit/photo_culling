@@ -343,6 +343,20 @@ SPLIT_SIZE = 24
 # 密度两头各留的余量：噪声把密度推出观测范围时 cube 不夹断（上游 2-LUT 在雾度下面留 0.2）。
 DENSITY_HEADROOM = 0.25
 
+# 冲印区（暗房的「胶片曝光」「冷暖」，2026-11-05 用户选的方向 B；验证见 reports/胶片模拟调研_2026-11-05/R9 之后的记录）：
+#   胶片曝光：负片和电影负片多一对「放宽」的两半表 <look>.film_e.cube / .print_e.cube，输入是 EXT_HEAD 倍的线性光
+#     （+2 档还留一点余量给统一色温的增益），app 里 film_e(enc(lin·2^EV / EXT_HEAD)) 拿到曝光后的密度。冲扫店把中灰的
+#     密度位移补回 EXPOSURE_COMPENSATION（0.5 = 补一半：+1 档更亮更通透、+2 档高光被肩部压软，「过曝的空气感」；
+#     全补回去几档几乎看不出差别）。和 spektrafilm 直接算（印放曝光二分到同样的中灰）比，暖肤 / 银幕 −1…+2 档
+#     灰阶、肤色平均 ΔE 0.6–1.9、最大 ≤ 3.7（24³）。反转片没有冲扫补偿这一层（过曝就是发白），不出这对表、不给曝光。
+#   冷暖：放大机黄滤色 ≈ 底片黄密度加一个常数（CC 单位 = 0.01 密度），品滤色按 WARMTH_M_RATIO 跟着走（往橙暖，不往
+#     黄绿）。滑杆 ±1 = ±WARMTH_CC_MAX CC；和真改 yf / mf 比，中灰的偏移量对得上（倍数 0.89–1.12），±8 CC 时饱和色
+#     平均 ΔE 约 2.5。反转片没有放大机：同样的密度偏移相当于扫描时的色偏校正。
+EXT_HEAD = 4.6
+EXPOSURE_COMPENSATION = 0.5
+WARMTH_CC_MAX = 8.0
+WARMTH_M_RATIO = 3 / 8
+
 
 def bake_split(film, paper, scan_film, n=SPLIT_SIZE, tone=TONE, phys=None, correct=None):
     """film 表的值 = 归一化密度，按 sRGB 编码存（app 用 CIColorCubeWithColorSpace(sRGB) 读，工作空间里拿到的
@@ -362,6 +376,25 @@ def bake_split(film, paper, scan_film, n=SPLIT_SIZE, tone=TONE, phys=None, corre
         out = correct(out)
     print_table = srgb_decode(out).reshape(n, n, n, 3)
     return film_table, print_table, d_lo, d_hi, dp
+
+
+def bake_ext(film, paper, scan_film, n=SPLIT_SIZE, tone=TONE, phys=None, correct=None):
+    """冲印区「胶片曝光」用的放宽两半表：film_e 的输入 = sRGB 编码的 (线性光 / EXT_HEAD)，值 = 放宽范围里的归一化密度
+    （按 sRGB 编码存，和 film 表一样）；print_e = 那段密度 → 线性 sRGB（同一个扫描校正）。返回 (film_e, print_e, e_lo, e_hi)。"""
+    pipe, _ = make_pipeline(film, paper, scan_film, tone, phys)
+    grid = identity_grid(n)
+    dens = np.asarray(pipe.process(pre_tone(EXT_HEAD * srgb_decode(grid), tone), collect="cmy_film"),
+                      dtype=np.float64).reshape(n, n, n, 3)
+    flat = dens.reshape(-1, 3)
+    e_lo = flat.min(axis=0) - DENSITY_HEADROOM
+    e_hi = flat.max(axis=0) + DENSITY_HEADROOM
+    film_e = srgb_encode((dens - e_lo) / (e_hi - e_lo))
+    phys_d = e_lo + grid * (e_hi - e_lo)
+    out = np.clip(np.asarray(pipe.process(phys_d, inject="cmy_film"), dtype=np.float64), 0.0, 1.0)
+    if correct is not None:
+        out = correct(out)
+    print_e = srgb_decode(out).reshape(n, n, n, 3)
+    return film_e, print_e, e_lo, e_hi
 
 
 def grain_sigma_unit(dp, d_lo, d_hi, samples=256):
@@ -526,6 +559,15 @@ def write_all(out_dir):
         write_data_cube(print_t, os.path.join(out_dir, f"{raw}.print.cube"), raw, version,
                         "print: normalized film CMY density in -> linear sRGB out")
         sigma = grain_sigma_unit(dp, d_lo, d_hi)
+        develop = {"warmth_cc_max": WARMTH_CC_MAX, "warmth_m_ratio": WARMTH_M_RATIO}
+        if dp.film.info.type != "positive":
+            fe, pe, e_lo, e_hi = bake_ext(film, paper, scan, tone=look_tone(raw), phys=RECIPES[raw]["phys"], correct=correct)
+            write_data_cube(fe, os.path.join(out_dir, f"{raw}.film_e.cube"), raw, version,
+                            f"film_e: sRGB gamma-encoded (linear / {EXT_HEAD}) in -> normalized film CMY density, stored sRGB-encoded")
+            write_data_cube(pe, os.path.join(out_dir, f"{raw}.print_e.cube"), raw, version,
+                            "print_e: normalized film CMY density (extended range) in -> linear sRGB out")
+            develop.update({"ext_head": EXT_HEAD, "exposure_compensation": EXPOSURE_COMPENSATION,
+                            "e_lo": [round(float(v), 6) for v in e_lo], "e_hi": [round(float(v), 6) for v in e_hi]})
         meta = {
             "look": raw,
             "spektrafilm": version,
@@ -538,6 +580,8 @@ def write_all(out_dir):
             "grain_blur_px": float(GrainParams().blur),
             "grain_sigma_unit": [[round(float(v), 7) for v in sigma[:, c]] for c in range(3)],
             "halation": halation_params(dp),
+            # 冲印区：冷暖的滤色换算；负片 / 电影负片还有胶片曝光用的放宽两半表（film_e / print_e）的范围。
+            "develop": develop,
             # 从「没有光谱色调」换进这一款时颗粒 / 晕光的起始值（滑杆刻度）。
             "defaults": {k: float(v) for k, v in RECIPES[raw]["defaults"].items()},
         }
@@ -577,8 +621,13 @@ def write_all(out_dir):
             "  - renamed with generic look names (file name = look id in the app);\n"
             f"  - <look>.film.cube / <look>.print.cube: the same chain split at the film density\n"
             f"    (spektrafilm's cmy_film tap) into two {SPLIT_SIZE}^3 tables, so the app can add grain\n"
-            "    between them; <look>.json: the density range of that split, the per-channel grain\n"
-            "    standard deviation derived from spektrafilm's grain model, and its halation preset.\n"
+            f"    between them; <look>.json: the density range of that split, the per-channel grain\n"
+            "    standard deviation derived from spektrafilm's grain model, and its halation preset;\n"
+            f"  - <look>.film_e.cube / <look>.print_e.cube (negative and cine films only): the same split\n"
+            f"    with the input extended to {EXT_HEAD}x linear light, so the app can expose the film up to\n"
+            "    +2 stops (and down) and let the lab compensate half of the mid-gray shift;\n"
+            "    the app also offsets film density by a constant for enlarger-like warm / cool filtration.\n"
+            "  These tables are the output of this simulation, not scans of real film.\n"
             "  The app blends each table toward the original with its strength slider at run time.\n"
             "  Script: culling-poc/LabelGUI/Scripts/bake_film_luts.py\n"
         )

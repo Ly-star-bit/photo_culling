@@ -801,6 +801,10 @@
   "bounces": 3,
   "bounce_decay": 0.5
  },
+ "develop": {
+  "warmth_cc_max": 8.0,
+  "warmth_m_ratio": 0.375
+ },
  "defaults": {
   "grain": 0.2,
   "halation": 0.2

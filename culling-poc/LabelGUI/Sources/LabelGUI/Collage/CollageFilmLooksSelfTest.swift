@@ -179,6 +179,7 @@ enum CollageFilmLooksSelfTest {
         grainAndHalation(check)
         styleCoding(check)
         filmDefaults(check)
+        printingChecks(check)
 
         print(failures.isEmpty ? "全部通过" : "失败 \(failures.count) 项：" + failures.joined(separator: "；"))
         exit(failures.isEmpty ? 0 : 1)
@@ -369,13 +370,98 @@ enum CollageFilmLooksSelfTest {
         check(bad?.filmGrain == 1 && bad?.filmHalation == 0, "坏值收到 0…1", "")
     }
 
+    /// sRGB 伽马值 → CIELAB（D65），自检量冷暖、明暗用。
+    private static func lab(_ c: (Double, Double, Double)) -> (L: Double, a: Double, b: Double) {
+        let r = CollageFilmEffects.decode(c.0), g = CollageFilmEffects.decode(c.1), b = CollageFilmEffects.decode(c.2)
+        let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.9505
+        let y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.089
+        func f(_ t: Double) -> Double { t > 0.008856 ? cbrt(t) : 7.787 * t + 16 / 116 }
+        return (116 * f(y) - 16, 500 * (f(x) - f(y)), 200 * (f(y) - f(z)))
+    }
+
+    /// 冲印区（胶片曝光、冷暖）：CollageFilmEffects.Printing / develop / developed。
+    private static func printingChecks(_ check: (Bool, String, String) -> Void) {
+        print("== 冲印区")
+        typealias P = CollageFilmEffects.Printing
+        let gray: [Double] = [0.15, 0.46, 0.85]
+        func L(_ look: CollageLook, _ v: Double, _ p: P) -> (L: Double, a: Double, b: Double) {
+            lab(CollageLooks.grade(v, v, v, look: look, strength: 1, printing: p))
+        }
+        // 都不动：和没有冲印区时一模一样（色调表同一张、取色同一个值）。
+        let neutralSame = CollageLooks.cube(.filmWarmSkin, strength: 0.8, printing: P())
+            == CollageLooks.cube(.filmWarmSkin, strength: 0.8)
+        let mapSame = CollageFilmEffects.developed(.filmWarmSkin, 0.6, 0.45, 0.4, printing: P())
+            == CollageFilmLUTs.map(.filmWarmSkin, 0.6, 0.45, 0.4)
+        check(neutralSame && mapSame, "冲印区都是 0：色调表、取色和以前一样", "")
+        check(P(exposure: 0.04, warmth: 0.02).isNeutral && P(exposure: 7).exposure == 2 && P(exposure: -3).exposure == -1,
+              "量化到 0.1 档 / 5%、曝光收在 −1…+2", "")
+        // +1 档（冲扫店补回一半）：中灰明显亮、暗部基本不动、高光亮一点（被肩部压住）。
+        for look in [CollageLook.filmWarmSkin, .cineDay] {
+            let base = gray.map { L(look, $0, P()) }
+            let up = gray.map { L(look, $0, P(exposure: 1)) }
+            let down = gray.map { L(look, $0, P(exposure: -1)) }
+            let dMid = up[1].L - base[1].L, dSh = up[0].L - base[0].L, dHi = up[2].L - base[2].L
+            check(dMid > 5 && dMid < 20 && abs(dSh) < 7 && dHi > -3 && dHi < dMid,
+                  "\(look.rawValue) 胶片曝光 +1 档：中灰亮、暗部基本不动、高光被肩部压住",
+                  String(format: "ΔL 暗 %+.1f 中 %+.1f 亮 %+.1f", dSh, dMid, dHi))
+            check(down[1].L < base[1].L - 3, "\(look.rawValue) 胶片曝光 −1 档：中灰暗下去",
+                  String(format: "ΔL 中 %+.1f", down[1].L - base[1].L))
+        }
+        check(CollageFilmEffects.supportsExposure(.filmWarmSkin) && !CollageFilmEffects.supportsExposure(.slideClean),
+              "负片能调胶片曝光，反转片不能", "")
+        let slideSame = CollageFilmEffects.developed(.slideClean, 0.5, 0.4, 0.3, printing: P(exposure: 1))
+            == CollageFilmLUTs.map(.slideClean, 0.5, 0.4, 0.3)
+        check(slideSame, "反转片上胶片曝光是空操作（旧工程、AI 给了值也一样）", "")
+        // 冷暖：+ 暖（中灰 b* 升、a* 不往绿走），− 冷。
+        for look in [CollageLook.filmWarmSkin, .filmAmber, .slideClean] {
+            let base = L(look, 0.46, P()), warm = L(look, 0.46, P(warmth: 0.5)), cool = L(look, 0.46, P(warmth: -0.5))
+            check(warm.b > base.b + 1 && warm.a > base.a - 0.3 && cool.b < base.b - 1,
+                  "\(look.rawValue) 冷暖：暖往橙走（b* 升、a* 不往绿）、冷往蓝",
+                  String(format: "暖 Δa %+.1f Δb %+.1f · 冷 Δb %+.1f", warm.a - base.a, warm.b - base.b, cool.b - base.b))
+        }
+        // GPU 和 CPU 同色（Δn、偏移两边推导得一样才过）。
+        let samples: [(Double, Double, Double)] = [(0.82, 0.62, 0.52), (0.25, 0.45, 0.7), (0.5, 0.5, 0.5), (0.12, 0.1, 0.08)]
+        for (look, p) in [(CollageLook.filmWarmSkin, P(exposure: 1, warmth: 0.5)), (.cineTungsten, P(exposure: -1, warmth: -0.5)),
+                          (.slideCool, P(warmth: 0.5))] {
+            var worst = 0.0
+            for c in samples {
+                guard let got = renderSolid(c, look: look, printing: p) else { worst = 1; break }
+                let want = CollageLooks.grade(c.0, c.1, c.2, look: look, strength: 0.8, printing: p)
+                worst = max(worst, abs(got.0 - want.0), abs(got.1 - want.1), abs(got.2 - want.2))
+            }
+            check(worst <= 3.0 / 255, "\(look.rawValue) 曝光 \(p.exposure) 冷暖 \(p.warmth)：渲染出来和 grade() 一样",
+                  String(format: "最大差 %.1f/255", worst * 255))
+        }
+        // 颗粒跟着曝光走：均值不动；画幅 6×4.5 的颗粒约是 135 的 35/56。
+        guard let grayColor = CIColor(red: 0.5, green: 0.45, blue: 0.4, alpha: 1, colorSpace: CollageRender.srgb) else { return }
+        let rect = CGRect(x: 0, y: 0, width: 192, height: 192)
+        let img = CIImage(color: grayColor).cropped(to: rect)
+        var ops = CollageLooks.Ops(gains: nil, look: .filmWarmSkin, strength: 1, printing: P(exposure: 1))
+        let base = readLinear(CollageFilmEffects.apply(img, ops: ops, frameLongEdge: 2000, seed: "a", extent: rect), rect)
+        ops.grain = 0.5
+        let grained = readLinear(CollageFilmEffects.apply(img, ops: ops, frameLongEdge: 2000, seed: "a", extent: rect), rect)
+        let shift = (0..<3).map { abs(stats(grained, $0).mean - stats(base, $0).mean) }.max() ?? 1
+        check(shift <= 0.006 && stats(grained, 1).std > 0.002, "胶片曝光 +1 档上开颗粒：均值不动、颗粒还在",
+              String(format: "最大偏 %.4f σ %.4f", shift, stats(grained, 1).std))
+        ops.printing = P()
+        let g135 = readLinear(CollageFilmEffects.apply(img, ops: ops, frameLongEdge: 2000, seed: "a", extent: rect), rect)
+        ops.formatMM = CollageFilmFormat.f645.grainLongEdgeMM
+        let g645 = readLinear(CollageFilmEffects.apply(img, ops: ops, frameLongEdge: 2000, seed: "a", extent: rect), rect)
+        let flat = readLinear(CollageLooks.apply(img, ops: CollageLooks.Ops(gains: nil, look: .filmWarmSkin, strength: 1)), rect)
+        let s135 = stats(g135, 1).std - stats(flat, 1).std, s645 = stats(g645, 1).std - stats(flat, 1).std
+        let ratio = s645 / max(1e-9, s135)
+        check(ratio > 0.5 && ratio < 0.75, "画幅 6×4.5：颗粒约是 135 的 35/56（0.63）", String(format: "%.2f 倍", ratio))
+    }
+
     /// 一块 8×8 的纯色走 CollageLooks.apply（强度 0.8），读回中间那个像素（sRGB 0…1）。
-    private static func renderSolid(_ c: (Double, Double, Double), look: CollageLook) -> (Double, Double, Double)? {
+    private static func renderSolid(_ c: (Double, Double, Double), look: CollageLook,
+                                    printing: CollageFilmEffects.Printing = CollageFilmEffects.Printing()) -> (Double, Double, Double)? {
         guard let color = CIColor(red: CGFloat(c.0), green: CGFloat(c.1), blue: CGFloat(c.2), alpha: 1,
                                   colorSpace: CollageRender.srgb) else { return nil }
         let rect = CGRect(x: 0, y: 0, width: 8, height: 8)
         let solid = CIImage(color: color).cropped(to: rect)
-        let graded = CollageLooks.apply(solid, ops: CollageLooks.Ops(gains: nil, look: look, strength: 0.8))
+        let graded = CollageLooks.apply(solid, ops: CollageLooks.Ops(gains: nil, look: look, strength: 0.8, printing: printing))
         guard let cg = CollageRender.ciContext.createCGImage(graded, from: rect, format: .RGBA8, colorSpace: CollageRender.srgb),
               let data = cg.dataProvider?.data, let p = CFDataGetBytePtr(data) else { return nil }
         let o = 4 * cg.bytesPerRow + 4 * 4

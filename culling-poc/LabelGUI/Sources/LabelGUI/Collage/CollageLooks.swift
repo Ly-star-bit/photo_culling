@@ -18,6 +18,10 @@ enum CollageLooks {
         /// （CollageRender.cellImage → CollageFilmEffects）起作用，模糊底、CPU 取色都不看。
         var grain = 0.0
         var halation = 0.0
+        /// 冲印区（胶片曝光、冷暖）：烘进色调表（CPU 取色一样），颗粒跟着曝光后的密度走。
+        var printing = CollageFilmEffects.Printing()
+        /// 画幅的底片长边（mm）；nil = 135（表里的 35）。只管颗粒、晕光的尺度。
+        var formatMM: Double?
 
         /// 黑白、旧照强度拖到 0 也还是黑白（以前 0 就变回彩色，1% 又全去色，滑杆在 0 附近跳）。
         var isIdentity: Bool { gains == nil && (look == .none || (strength <= 0.001 && !look.isMonochrome)) }
@@ -31,7 +35,9 @@ enum CollageLooks {
         let onPage = pagePhotoIDs.compactMap { photos[$0] }
         guard !onPage.isEmpty else { return [:] }
         let base = Ops(gains: nil, look: style.look, strength: style.lookStrength,
-                       grain: style.filmGrain, halation: style.filmHalation)
+                       grain: style.filmGrain, halation: style.filmHalation,
+                       printing: CollageFilmEffects.Printing(exposure: style.filmExposure, warmth: style.filmWarmth),
+                       formatMM: style.filmFormat.grainLongEdgeMM)
         var out: [String: Ops] = [:]
         for p in onPage { out[p.id] = base }
         guard style.harmonize > 0.001, onPage.count >= 2,
@@ -184,7 +190,7 @@ enum CollageLooks {
     static func applyCube(_ image: CIImage, ops: Ops) -> CIImage {
         var out = image
         if ops.look != .none, ops.strength > 0.001 || ops.look.isMonochrome,
-           let data = cube(ops.look, strength: ops.strength),
+           let data = cube(ops.look, strength: ops.strength, printing: ops.printing),
            let filter = CIFilter(name: "CIColorCubeWithColorSpace") {
             filter.setValue(out, forKey: kCIInputImageKey)
             filter.setValue(cubeSize, forKey: "inputCubeDimension")
@@ -201,10 +207,12 @@ enum CollageLooks {
     private static let cubeLock = NSLock()
     private static var cubeCache: [String: Data] = [:]
 
-    /// 强度按 5% 一档缓存（滑杆拖动时不每个值都生成一次）。
-    static func cube(_ look: CollageLook, strength: Double) -> Data? {
+    /// 强度按 5% 一档缓存（滑杆拖动时不每个值都生成一次）；冲印区已经量化过（0.1 档 / 5%），只有光谱色调看它。
+    static func cube(_ look: CollageLook, strength: Double,
+                     printing: CollageFilmEffects.Printing = CollageFilmEffects.Printing()) -> Data? {
         let bucket = Int((min(1, max(0, strength)) * 20).rounded())
-        let key = "\(look.rawValue)#\(bucket)"
+        let develop = look.isSpectral && !printing.isNeutral ? printing : CollageFilmEffects.Printing()
+        let key = "\(look.rawValue)#\(bucket)" + (develop.isNeutral ? "" : "#e\(develop.exposure)w\(develop.warmth)")
         cubeLock.lock()
         if let hit = cubeCache[key] {
             cubeLock.unlock()
@@ -221,7 +229,7 @@ enum CollageLooks {
                     let r = Double(ri) / Double(n - 1)
                     let g = Double(gi) / Double(n - 1)
                     let b = Double(bi) / Double(n - 1)
-                    let out = grade(r, g, b, look: look, strength: s)
+                    let out = grade(r, g, b, look: look, strength: s, printing: develop)
                     values[i] = Float(out.0)
                     values[i + 1] = Float(out.1)
                     values[i + 2] = Float(out.2)
@@ -241,11 +249,12 @@ enum CollageLooks {
 
     /// 一个颜色套上色调（sRGB 伽马值 0…1）：LUT 的每个格点、「主图取色」的底色都用它。
     /// 黑白、旧照：强度只管影调，去色永远是全的（半黑白的照片看起来像坏了）。
-    static func grade(_ r: Double, _ g: Double, _ b: Double, look: CollageLook,
-                      strength: Double) -> (Double, Double, Double) {
+    static func grade(_ r: Double, _ g: Double, _ b: Double, look: CollageLook, strength: Double,
+                      printing: CollageFilmEffects.Printing = CollageFilmEffects.Printing()) -> (Double, Double, Double) {
         guard look != .none else { return (r, g, b) }
         let s = min(1, max(0, strength))
-        let m = map(look, r, g, b)
+        let m = look.isSpectral && !printing.isNeutral
+            ? CollageFilmEffects.developed(look, r, g, b, printing: printing) : map(look, r, g, b)
         let l = luma(r, g, b)
         let r0 = look.isMonochrome ? l : r
         let g0 = look.isMonochrome ? l : g

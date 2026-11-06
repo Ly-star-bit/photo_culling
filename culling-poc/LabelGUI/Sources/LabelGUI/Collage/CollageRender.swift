@@ -1777,14 +1777,18 @@ enum CollageRender {
         guard let ops, !ops.isIdentity else { return "-" }
         let gains = ops.gains.map { $0.map { String(Int(($0 * 1000).rounded())) }.joined(separator: ",") } ?? ""
         let film = ops.look.isSpectral && (ops.grain > 0.001 || ops.halation > 0.001)
-            ? "|g\(Int((ops.grain * 100).rounded()))h\(Int((ops.halation * 100).rounded()))" : ""
-        return "\(ops.look.rawValue)|\(Int((ops.strength * 20).rounded()))|\(gains)\(film)"
+            ? "|g\(Int((ops.grain * 100).rounded()))h\(Int((ops.halation * 100).rounded()))"
+                + (ops.formatMM.map { "f\(Int($0))" } ?? "") : ""
+        let develop = ops.look.isSpectral && !ops.printing.isNeutral
+            ? "|e\(ops.printing.exposure)w\(ops.printing.warmth)" : ""
+        return "\(ops.look.rawValue)|\(Int((ops.strength * 20).rounded()))|\(gains)\(film)\(develop)"
     }
 
     /// 主图（调过色）的平均色。
     private static func gradedAverage(_ hero: CollagePhotoRef, style: CollageStyle) -> CollageColor? {
         guard let raw = averageColor(hero) else { return nil }
-        let g = CollageLooks.grade(raw.r, raw.g, raw.b, look: style.look, strength: style.lookStrength)
+        let g = CollageLooks.grade(raw.r, raw.g, raw.b, look: style.look, strength: style.lookStrength,
+                                   printing: CollageFilmEffects.Printing(exposure: style.filmExposure, warmth: style.filmWarmth))
         return CollageColor(r: g.0, g: g.1, b: g.2)
     }
 
@@ -1792,7 +1796,8 @@ enum CollageRender {
     static func gradientColors(_ hero: CollagePhotoRef, style: CollageStyle) -> (top: CollageColor, bottom: CollageColor)? {
         guard let bands = bandColors(hero) else { return nil }
         func prepare(_ c: CollageColor) -> CollageColor {
-            let g = CollageLooks.grade(c.r, c.g, c.b, look: style.look, strength: style.lookStrength)
+            let g = CollageLooks.grade(c.r, c.g, c.b, look: style.look, strength: style.lookStrength,
+                                       printing: CollageFilmEffects.Printing(exposure: style.filmExposure, warmth: style.filmWarmth))
             var color = CollageColor(r: g.0, g: g.1, b: g.2)
             let grey = (color.r + color.g + color.b) / 3
             color = color.mixed(with: CollageColor(r: grey, g: grey, b: grey), 0.15)
