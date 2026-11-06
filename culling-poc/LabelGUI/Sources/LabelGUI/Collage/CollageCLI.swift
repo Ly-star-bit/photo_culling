@@ -771,7 +771,8 @@ enum CollageCLI {
 /// [--crop] [--overlay-index N] [--size 1440x900] [--adopt photos|page[:水印页预设名]] [--inspector-width 300] [--notice 提示文字]
 /// [--contact-frames]（印样的「逐帧」一开始就展开）[--light]（浅色外观）[--ax-dump]
 /// [--tray-filter all|unused|used] [--tray-select ID,ID]（托盘的筛选、多选）
-/// [--perf place|gutter|slider|title|all]（截完图接着跑这个场景，打印每个视图 body 重算几次、
+/// [--tray-click ID[+cmd][+shift],…]（界面渲出来以后再在托盘里点：走选中变了以后的刷新，和一开始就选好的截图应该一样）
+/// [--perf place|gutter|slider|title|all|trayclick]（截完图接着跑这个场景，打印每个视图 body 重算几次、
 /// store / 预览 / 缩略图各发了几次 objectWillChange、出了几张预览：CollagePerf）
 /// 截图前先改工程（都可选）：--relayout [--count 6]（托盘重新自动排版，几张；工程里还没有版式时也排）、
 /// --layout grid|scatter、--template <模板名>、--title 标题、--subtitle 副标题、--look <色调>、
@@ -936,6 +937,17 @@ enum CollageUISnapshot {
             spin(60) { !dr.busy && dr.processed != nil && dr.loupe != nil }
             print("暗房 · 套用到 \(dr.effectiveScope.label) · \(dr.current.look.label) · 样张 \(dr.frames.count) · 试条 \(dr.testStrip.count) · "
                   + "底片条 \(dr.reel.count) · 放大镜 \(dr.loupe == nil ? "无" : "有")")
+        }
+        // --tray-click：渲出来以后再点（每格的选中框各自订阅 tray.mark，这条路一开始就选好的截图走不到）。
+        if let clicks = option("--tray-click") {
+            for spec in clicks.split(separator: ",") {
+                let parts = spec.split(separator: "+").map(String.init)
+                guard let id = parts.first else { continue }
+                let shown = store.tray.visible(store.project.photos, usage: store.photoUsage).map(\.id)
+                store.tray.click(id, command: parts.contains("cmd"), shift: parts.contains("shift"), order: shown)
+                spin(0.5)
+            }
+            print("托盘点完选中: " + store.project.photos.map(\.id).filter(store.tray.selection.contains).joined(separator: ","))
         }
         // --notice <字>：状态栏提示（平常 5 秒就清掉，等不到截图）—— 截图前放上，核对长提示不把状态栏撑高。
         if let text = option("--notice") { store.setNotice(text) }

@@ -315,10 +315,10 @@ struct CollageTray: View {
                 emptyFilter
             } else {
                 // 网格只拿自己要的值：拖缝、拖滑杆、预览重渲这些不改托盘的，整个网格（每格的悬停提示、右键菜单、
-                // 拖拽源）都跳过不重算。
+                // 拖拽源）都跳过不重算。单击换一张也一样：选中框每格自己订阅（tray.mark），网格只拿多选。
                 let placeTarget = store.selection.flatMap { store.root?.node(at: $0)?.isLeaf == true ? $0 : nil }
                 CollageTrayGrid(store: store, tray: tray, photos: visible, usage: usage,
-                                dropped: store.albumDroppedIDs, selection: selected,
+                                dropped: store.albumDroppedIDs, multiSelection: selected.count > 1 ? selected : [],
                                 fineArt: store.isAlbum && store.project.albumTheme == .fineArt,
                                 placeTarget: placeTarget, pagePhotoIDs: store.page?.photoIDs)
                     .equatable()
@@ -348,18 +348,9 @@ struct CollageTray: View {
     /// 全部 / 未用 / 已用：先筛出没用上的再 ⌘A ⌫，就是批量清掉没用的。
     private func filterBar(usage: [String: Int]) -> some View {
         let used = store.project.photos.filter { usage[$0.id] != nil }.count
-        let unused = store.project.photos.count - used
-        return Picker("", selection: $tray.filter) {
-            ForEach(CollageTrayState.Filter.allCases, id: \.self) { f in
-                Text(f == .all ? f.label : f == .unused ? "\(f.label) \(unused)" : "\(f.label) \(used)").tag(f)
-            }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .controlSize(.small)
-        .padding(.horizontal, 10)
-        .padding(.bottom, 6)
-        .help("只看还没上版的 / 已经上版的照片。点选：单击、⌘ 点加减、⇧ 点连选、⌘A 全选；⌫ 移除选中的")
+        return CollageTrayFilterBar(tray: tray, filter: tray.filter, used: used,
+                                    unused: store.project.photos.count - used)
+            .equatable()
     }
 
     private func selectionBar(_ selected: Set<String>, order: [String]) -> some View {
@@ -402,6 +393,34 @@ struct CollageTray: View {
             .foregroundStyle(.tertiary)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding()
+    }
+}
+
+/// 托盘的「全部 / 未用 / 已用」。Equatable：点选换一张时托盘 body 会重算，这一条的分段控件不跟着更新
+/// （每次更新都要把系统分段控件和它的辅助功能属性重设一遍，大托盘采样里占点一下的一成）。
+private struct CollageTrayFilterBar: View, Equatable {
+    /// 只用来改筛选（不订阅：外面的 CollageTray 订阅了，筛选、张数变了才传新的进来）。
+    let tray: CollageTrayState
+    let filter: CollageTrayState.Filter
+    let used: Int
+    let unused: Int
+
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.tray === b.tray && a.filter == b.filter && a.used == b.used && a.unused == b.unused
+    }
+
+    var body: some View {
+        Picker("", selection: Binding(get: { tray.filter }, set: { tray.filter = $0 })) {
+            ForEach(CollageTrayState.Filter.allCases, id: \.self) { f in
+                Text(f == .all ? f.label : f == .unused ? "\(f.label) \(unused)" : "\(f.label) \(used)").tag(f)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .controlSize(.small)
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
+        .help("只看还没上版的 / 已经上版的照片。点选：单击、⌘ 点加减、⇧ 点连选、⌘A 全选；⌫ 移除选中的")
     }
 }
 
@@ -468,7 +487,9 @@ private struct CollageTrayHeader: View {
     }
 }
 
-/// 托盘的照片网格。Equatable：只有显示的照片、上了几次、相似角标、选中、右键菜单要用的两样变了才重算。
+/// 托盘的照片网格。Equatable：只有显示的照片、上了几次、相似角标、多选、右键菜单要用的两样变了才重算。
+/// 以前选中整份传进来，点一下换一张整个网格重算一遍：每格重建点按、拖拽、右键菜单（菜单当场就建）、悬停提示，
+/// 大托盘还要把几百格重新排一遍 —— 每下 2700–3200 万条指令（--perf trayclick），现在 700–1000 万。
 /// 点选：单击只选这一张、⌘ 点加减、⇧ 点从上一次点的那张连到这张；点空白处取消；⌘A 全选显示的；⌫ 移除选中的；Esc 取消。
 private struct CollageTrayGrid: View, Equatable {
     /// 只用来调方法（不订阅；选中由外面的 CollageTray 订阅了传进来）。
@@ -478,7 +499,9 @@ private struct CollageTrayGrid: View, Equatable {
     let photos: [CollagePhotoRef]
     let usage: [String: Int]
     let dropped: Set<String>
-    let selection: Set<String>
+    /// 多选（看得见的选了两张以上）时是选中的那几张，否则空：只有右键菜单要它（对整批的那几项）。
+    /// 单击换一张不改它，网格就不重算；每格的选中框各自订阅 tray.mark。
+    let multiSelection: Set<String>
     let fineArt: Bool
     /// 右键「放进选中的格子」：画布上选中的是一格时它的路径。
     let placeTarget: [Int]?
@@ -490,16 +513,17 @@ private struct CollageTrayGrid: View, Equatable {
 
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.store === b.store && a.tray === b.tray && a.photos == b.photos && a.usage == b.usage
-            && a.dropped == b.dropped && a.selection == b.selection && a.fineArt == b.fineArt
+            && a.dropped == b.dropped && a.multiSelection == b.multiSelection && a.fineArt == b.fineArt
             && a.placeTarget == b.placeTarget && a.pagePhotoIDs == b.pagePhotoIDs
     }
 
     var body: some View {
+        let _ = CollagePerf.body("托盘网格")
         ScrollView {
             LazyVGrid(columns: columns, spacing: 6) {
                 ForEach(photos) { photo in
-                    CollageTrayItem(photo: photo, uses: usage[photo.id] ?? 0, dropped: dropped.contains(photo.id),
-                                    selected: selection.contains(photo.id), active: focused, fineArt: fineArt)
+                    CollageTrayCell(mark: tray.mark(photo.id), photo: photo, uses: usage[photo.id] ?? 0,
+                                    dropped: dropped.contains(photo.id), focused: focused, fineArt: fineArt)
                         .onTapGesture { click(photo.id) }
                         .onDrag { NSItemProvider(object: photo.id as NSString) }
                         .contextMenu { menu(for: photo) }
@@ -534,18 +558,19 @@ private struct CollageTrayGrid: View, Equatable {
         tray.clear()
     }
 
-    /// 选中的（按显示顺序）。
-    private var selectedIDs: [String] { photos.map(\.id).filter(selection.contains) }
+    /// 多选的那几张（按显示顺序）。
+    private var selectedIDs: [String] { photos.map(\.id).filter(multiSelection.contains) }
 
+    /// ⌫：现在选中的（单击换一张网格不重算，这里不能用存下来的值，现读 tray）。
     private func removeSelected() {
-        let ids = selectedIDs
+        let ids = photos.map(\.id).filter(tray.selection.contains)
         if !ids.isEmpty { store.removeFromTray(ids) }
     }
 
     @ViewBuilder
     private func menu(for photo: CollagePhotoRef) -> some View {
         // 右键点在多选里的一张：对整批；点在没选的那张上：只对它（和以前一样）。
-        if selection.count > 1, selection.contains(photo.id) {
+        if multiSelection.contains(photo.id) {
             let ids = selectedIDs
             Button(ids.count > CollageTray.relayoutLimit ? "用这 \(ids.count) 张重新排一版（最多 \(CollageTray.relayoutLimit) 张）"
                                                           : "用这 \(ids.count) 张重新排一版") {
@@ -572,6 +597,22 @@ private struct CollageTrayGrid: View, Equatable {
             Divider()
             Button("从托盘移除", role: .destructive) { store.removeFromTray(photo.id) }
         }
+    }
+}
+
+/// 托盘网格的一格：只订阅这一张的选中标记。active 只在选中时有用（选中框的颜色），没选中的格子传 false ——
+/// 焦点在托盘和画布之间来回时，不让每一格都跟着重算。
+private struct CollageTrayCell: View {
+    @ObservedObject var mark: CollageTrayMark
+    let photo: CollagePhotoRef
+    let uses: Int
+    let dropped: Bool
+    let focused: Bool
+    let fineArt: Bool
+
+    var body: some View {
+        CollageTrayItem(photo: photo, uses: uses, dropped: dropped, selected: mark.selected,
+                        active: mark.selected && focused, fineArt: fineArt)
     }
 }
 

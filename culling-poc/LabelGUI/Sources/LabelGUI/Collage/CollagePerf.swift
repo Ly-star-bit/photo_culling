@@ -9,7 +9,8 @@ import Combine
 @MainActor
 enum CollagePerf {
     static var enabled = false
-    private(set) static var bodies: [String: Int] = [:]
+    /// 托盘点选那套（CollagePerfTray）每一下自己清零。
+    static var bodies: [String: Int] = [:]
 
     /// 放在 body 第一行：`let _ = CollagePerf.body("托盘")`。
     static func body(_ name: String) {
@@ -18,11 +19,13 @@ enum CollagePerf {
     }
 
     /// 报告里按这个顺序列（没数到的写 0）。
-    static let order = ["拼图页", "托盘", "托盘格", "画布", "叠加层", "检视器", "版式面板", "模板库", "模板格", "备选条", "页条", "方案条"]
+    static let order = ["拼图页", "托盘", "托盘网格", "托盘格", "画布", "叠加层", "检视器", "版式面板", "模板库", "模板格", "备选条", "页条", "方案条"]
 
     /// 跑一个场景：settle 之后清零、跑、再等 `tail` 秒让后台的缩略图、预览都落下来，打印一行。
     /// spin 是快照那边的同一个（跑主线程 run loop）。
     static func run(_ scenario: String, store: CollageStore, spin: (Double) -> Void) {
+        // 托盘点选单独一套（每一下分开报、托盘大小两档）：CollagePerfTray。
+        if scenario == "trayclick" { return trayClicks(store: store, spin: spin) }
         let names = scenario == "all" ? ["place", "gutter", "slider", "title"] : [scenario]
         for name in names {
             spin(1.5)
@@ -79,7 +82,7 @@ enum CollagePerf {
             store.setTitle("刷新计数 \(store.project.title.count)")
             return "改标题"
         default:
-            return "不认识的场景（place / gutter / slider / title / all）"
+            return "不认识的场景（place / gutter / slider / title / all / trayclick）"
         }
     }
 }

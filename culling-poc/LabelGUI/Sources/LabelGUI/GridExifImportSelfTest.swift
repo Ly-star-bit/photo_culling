@@ -1,7 +1,8 @@
 import Foundation
+import Combine
 
 /// `--ux-selftest` 里的几组纯函数用例：EXIF 拍摄参数（快门 0 / 极小正数不崩）、网格多选（数字键、剪选中）、
-/// 水印页导入的 RAW+JPG 配对。
+/// 水印页导入的 RAW+JPG 配对、拼图托盘每格的选中标记。
 /// 每条打 PASS / FAIL 一行，返回失败条数（main.swift 加到总数上）。
 enum GridExifImportSelfTest {
     final class Tally {
@@ -14,12 +15,57 @@ enum GridExifImportSelfTest {
         }
     }
 
+    @MainActor
     static func run() -> Int {
         let tally = Tally()
         exifCases(tally)
         gridSelectionCases(tally)
         watermarkCases(tally)
+        trayMarkCases(tally)
         return tally.failed
+    }
+
+    // MARK: - 拼图托盘的选中标记
+
+    /// 托盘网格每格只订阅自己那张的标记（CollageTrayState.mark）：单击换一张只该有两格收到通知，
+    /// ⌘ / ⇧ / ⌘A / 筛掉 / 取消之后每个标记都和 selection 对得上（对不上 = 选中框画错）。
+    @MainActor
+    private static func trayMarkCases(_ t: Tally) {
+        let tray = CollageTrayState()
+        let order = ["a", "b", "c", "d", "e"]
+        let marks = order.map(tray.mark)
+        var fired: [String: Int] = [:]
+        let subs = zip(order, marks).map { id, m in m.objectWillChange.sink { _ in fired[id, default: 0] += 1 } }
+        defer { subs.forEach { $0.cancel() } }
+        func agrees() -> Bool { zip(order, marks).allSatisfy { id, m in m.selected == tray.selection.contains(id) } }
+        func step(_ name: String, _ action: () -> Void, notified: Set<String>? = nil) {
+            fired = [:]
+            action()
+            let shown = order.filter { tray.mark($0).selected }.joined(separator: ",")
+            t.check(agrees(), "托盘标记 " + name + "：每格的选中框和选中一致", "选中 \(tray.selection.sorted())，标记 \(shown)")
+            if let notified {
+                t.check(Set(fired.keys) == notified && fired.values.allSatisfy { $0 == 1 },
+                        "托盘标记 " + name + (notified.isEmpty ? "：一格都不通知"
+                                               : "：只通知 " + notified.sorted().joined(separator: "、")),
+                        "通知了 \(fired.sorted { $0.key < $1.key })")
+            }
+        }
+        step("单击 a", { tray.click("a", command: false, shift: false, order: order) }, notified: ["a"])
+        step("单击换到 c", { tray.click("c", command: false, shift: false, order: order) }, notified: ["a", "c"])
+        step("再单击 c（没变）", { tray.click("c", command: false, shift: false, order: order) }, notified: [])
+        step("⌘ 点 e", { tray.click("e", command: true, shift: false, order: order) }, notified: ["e"])
+        step("⌘ 点 c 去掉", { tray.click("c", command: true, shift: false, order: order) }, notified: ["c"])
+        step("⇧ 点 b（从 c 连到 b）", { tray.click("b", command: false, shift: true, order: order) })
+        step("⌘A", { tray.selectAll(order) })
+        step("筛掉 d、e", { tray.prune(to: ["a", "b", "c"]) }, notified: ["d", "e"])
+        let late = tray.mark("b")
+        t.check(late === marks[1], "托盘标记 同一张拿到的是同一个标记（格子滚出去再回来不换对象）")
+        let fresh = tray.mark("x")
+        t.check(!fresh.selected, "托盘标记 第一次拿的标记按现在的选中定（x 没选）")
+        tray.selection.insert("x")
+        t.check(fresh.selected, "托盘标记 不经过 click 原地往选中里插一张：标记跟上")
+        step("Esc 取消", { tray.clear() })
+        step("换场次 reset", { tray.click("d", command: false, shift: false, order: order); tray.reset() })
     }
 
     // MARK: - EXIF（S18）

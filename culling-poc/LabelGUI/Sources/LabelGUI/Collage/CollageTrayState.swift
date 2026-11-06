@@ -17,12 +17,30 @@ final class CollageTrayState: ObservableObject {
         }
     }
 
-    @Published var selection: Set<String> = []
+    @Published var selection: Set<String> = [] {
+        didSet { syncMarks(from: oldValue) }
+    }
     @Published var filter: Filter = .all {
         didSet { if filter != oldValue { anchor = nil } }
     }
     /// ⇧ 点连选的起点：上一次单击或 ⌘ 点的那张。
     private(set) var anchor: String?
+    /// 每张一个选中标记（托盘网格里每格只订阅自己那一个）。不发布：mark(_:) 在 body 里取。
+    /// 不清（换场次、移出托盘也留着）：格子还拿着旧的标记对象，清了它就再也收不到通知；一张一个小对象，几千张也不占地方。
+    private var marks: [String: CollageTrayMark] = [:]
+
+    /// 这一张的选中标记：网格每格订阅它，点一下只有选上、取消的那几格重算，整个网格不跟着重算。
+    func mark(_ id: String) -> CollageTrayMark {
+        if let m = marks[id] { return m }
+        let m = CollageTrayMark(selected: selection.contains(id))
+        marks[id] = m
+        return m
+    }
+
+    /// 只改变了的那几张（新旧选中的对称差）。
+    private func syncMarks(from old: Set<String>) {
+        for id in old.symmetricDifference(selection) { marks[id]?.selected = selection.contains(id) }
+    }
 
     /// 按筛选留下要显示的（顺序不变 = 带进来的顺序）。usage：每张上了几次（没上的不在里面）。
     func visible(_ photos: [CollagePhotoRef], usage: [String: Int]) -> [CollagePhotoRef] {
@@ -72,4 +90,12 @@ final class CollageTrayState: ObservableObject {
         if kept != selection { selection = kept }
         if let a = anchor, !ids.contains(a) { anchor = nil }
     }
+}
+
+/// 托盘一格的选中状态（CollageTrayState.mark）：只在这一张选上、取消时发通知，只有它那一格重算。
+@MainActor
+final class CollageTrayMark: ObservableObject {
+    @Published fileprivate(set) var selected: Bool
+
+    init(selected: Bool) { self.selected = selected }
 }
