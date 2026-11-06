@@ -64,6 +64,16 @@ jobs:
           python3 -I culling-poc/LabelGUI/Scripts/mcp_smoke.py culling-poc/LabelGUI/.build/release/LabelGUI --ci
           python3 -I culling-poc/LabelGUI/Scripts/mcp_smoke.py "选片工具.app/Contents/MacOS/LabelGUI" --ci --protocol-only
 
+      # 装进 app 的胶片表（Resources/film-luts）：裸二进制往上找到的是仓库里的表，测不出漏装 —— v1.24.0–v1.26.1 漏了
+      # 每款的 .json，颗粒、晕光、冲印区在发出去的 app 里都不起作用。这里用 app 里的二进制跑，读的就是包里那份。
+      - name: 打包后的胶片表 (--film-looks-selftest)
+        timeout-minutes: 5
+        run: |
+          D=$(mktemp -d)
+          mkdir -p "$D/data" "$D/sock" "$D/mcp"
+          LABELGUI_DATA_DIR="$D/data" LABELGUI_NO_GUI=1 LABELGUI_LIVE_SOCK_ROOT="$D/sock" LABELGUI_MCP_OUT="$D/mcp" \
+            "选片工具.app/Contents/MacOS/LabelGUI" --film-looks-selftest
+
       # 实时桥（v1）：起 --live-host（.prohibited，窗口从不显示；不行就 --no-view），经 --mcp 驱动；临时数据目录 + 测试 socket 根目录。
       # 带不带视图：第一次分支 CI（run 41158761483，2026-10-30）探针报「CI 用带视图的 --live-host」，所以钉 --view require ——
       # 以后哪次 runner 上建不了离屏窗口、拍不出快照或标题栏，这一步就红，不会悄悄退到 --no-view 少测 15 条。

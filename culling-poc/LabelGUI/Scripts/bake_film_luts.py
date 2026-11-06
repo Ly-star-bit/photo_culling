@@ -498,6 +498,8 @@ def spektrafilm_version():
         return "unknown"
 
 
+# 表里的数写 4 位小数：0.0001 比 8 位色的一级（1/255 ≈ 0.004）小 40 倍，颗粒用的密度、线性光也够；6 位的时候 33 MB，
+# zlib / LZMA 都压不动后面那两位噪声（v1.26.2 起 4 位，DMG 小一半）。
 def write_cube(table, path, raw_value, version):
     n = table.shape[0]
     with open(path, "w", encoding="utf-8") as fh:
@@ -512,7 +514,7 @@ def write_cube(table, path, raw_value, version):
             for gi in range(n):
                 for ri in range(n):
                     r, g, b = table[bi, gi, ri]
-                    fh.write(f"{r:.6f} {g:.6f} {b:.6f}\n")
+                    fh.write(f"{r:.4f} {g:.4f} {b:.4f}\n")
 
 
 def upstream_license_path():
@@ -539,7 +541,7 @@ def write_data_cube(table, path, raw_value, version, what):
             for gi in range(n):
                 for ri in range(n):
                     r, g, b = table[bi, gi, ri]
-                    fh.write(f"{r:.6f} {g:.6f} {b:.6f}\n")
+                    fh.write(f"{r:.4f} {g:.4f} {b:.4f}\n")
 
 
 def write_all(out_dir):
@@ -603,7 +605,8 @@ def write_all(out_dir):
             f"  Each .cube here was generated with spektrafilm {version} (Andrea Volpato,\n"
             "  https://github.com/andreavolpato/spektrafilm) from one film profile and one print\n"
             "  profile (reversal films scanned directly). Changes from a full spektrafilm render:\n"
-            f"  - baked as a {SIZE}^3 3D LUT, sRGB gamma-encoded input and output;\n"
+            f"  - baked as a {SIZE}^3 3D LUT, sRGB gamma-encoded input and output, values written\n"
+            "    with 4 decimals;\n"
             "  - per-pixel part only (spektrafilm debug.lut_mode): no grain, halation, coupler\n"
             "    diffusion, glare, blur or sharpening; auto exposure off;\n"
             "  - exposure fixed at mid gray (no auto exposure); before the film, log2 exposure\n"

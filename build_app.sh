@@ -84,6 +84,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 plutil -lint "$APP/Contents/Info.plist"
 cp .build/release/LabelGUI "$APP/Contents/MacOS/LabelGUI"
+# 去掉本地符号（-x：只删局部符号，全局符号和 Swift 运行时要的元数据都留着）：28 MB → 14 MB，DMG 小 4 MB 左右。
+# 要在 codesign 之前（签完再改二进制，签名就坏了）。崩溃报告里本地函数名会变成地址，这个工具没有收崩溃报告。
+strip -x "$APP/Contents/MacOS/LabelGUI"
 
 # 精简 Python 运行时进 Resources:只放 layer2.py 及其 import (common.py、
 # prompts/),外加 runtime/ 里的精简 pyproject + 锁文件 —— 改名放到 layer2.py
@@ -105,11 +108,22 @@ cp -R "$ROOT/third_party/fonts/." "$APP/Contents/Resources/fonts/"
 
 # 光谱胶片色调的表（spektrafilm 烘的 LUT，CC BY-SA 4.0）：按原样的 .cube 文本放进 Resources/film-luts，
 # 连同上游的许可全文和改动记录（CC BY-SA 要求署名、注明改动、不加密）。app 在这里读（CollageFilmLUTs）。
+# 每款的 .json（颗粒 σ、晕光、起始值、冲印区的范围）也要带上：v1.24.0–v1.26.1 漏了它，颗粒、晕光、冲印区在
+# 发出去的 app 里全都不起作用（裸二进制往上找到仓库里的表，自检测不出来；CI 另有一步用 app 里的二进制跑）。
 mkdir -p "$APP/Contents/Resources/film-luts"
-cp "$ROOT/third_party/film-luts/"*.cube "$ROOT/third_party/film-luts/SPEKTRAFILM_LICENSE.txt" \
+cp "$ROOT/third_party/film-luts/"*.cube "$ROOT/third_party/film-luts/"*.json \
+   "$ROOT/third_party/film-luts/SPEKTRAFILM_LICENSE.txt" \
    "$ROOT/third_party/film-luts/CHANGELOG.txt" "$APP/Contents/Resources/film-luts/"
-CUBES=$(ls "$APP/Contents/Resources/film-luts/"*.cube | wc -l | tr -d ' ')
-[ "$CUBES" -ge 10 ] || { echo "film-luts 里只有 $CUBES 张 .cube（应该 10 张）"; exit 1; }
+LOOKS=0
+for cube in "$APP/Contents/Resources/film-luts/"*.cube; do
+    case "$cube" in *.film.cube|*.print.cube|*.film_e.cube|*.print_e.cube) continue ;; esac
+    base="${cube%.cube}"
+    for need in "$base.json" "$base.film.cube" "$base.print.cube"; do
+        [ -f "$need" ] || { echo "film-luts 缺 $(basename "$need")"; exit 1; }
+    done
+    LOOKS=$((LOOKS + 1))
+done
+[ "$LOOKS" -ge 15 ] || { echo "film-luts 里只有 $LOOKS 款色调（应该 15 款）"; exit 1; }
 
 # 许可（GPL-3.0-or-later）、第三方声明、「关于」面板里的致谢（标准关于面板自动读 Resources/Credits.rtf）。
 cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE.txt"
@@ -250,7 +264,8 @@ if [ "$detached" = 0 ]; then
     hdiutil detach "$VOL" -force -quiet
 fi
 rm -f "$DMG"
-hdiutil convert "$RW" -format UDZO -o "$DMG" -quiet
+# LZMA（ULMO，macOS 10.15 起都能开；app 最低 14）：色调表是数字文本，zlib 只压到 4 成，LZMA 压到 2 成。
+hdiutil convert "$RW" -format ULMO -o "$DMG" -quiet
 rm -rf "$RW" "$STAGE" "$BG_DIR"
 
 echo "==> 完成: $DMG"
