@@ -738,6 +738,9 @@ enum MCPArgs {
         p["look_strength"] = .number(0...1)
         p["film_grain"] = .number(0...1)
         p["film_halation"] = .number(0...1)
+        p["film_exposure"] = .number(-1...2)
+        p["film_warmth"] = .number(-1...1)
+        p["film_format"] = .oneOf(CollageFilmFormat.allCases.map(\.rawValue))
         p["margin"] = .number(0...0.25)
         p["gutter"] = .number(0...0.1)
         p["corner"] = .number(0...0.25)
@@ -831,9 +834,9 @@ enum MCPArgs {
                                hint: "先 collage_get_state 拿 digest 和 cells[].path，再带着 if_digest 调（用户改过版式以后格子下标会指错地方）")
             }
         case "collage_set_style":
-            guard ["style", "look", "look_strength", "film_grain", "film_halation", "margin", "gutter", "corner", "background",
-                   "shape"].contains(where: given) else {
-                return Problem(message: "collage_set_style 至少要给一个字段：style、look、look_strength、film_grain、film_halation、margin、gutter、corner、background、shape。", hint: "取值见 collage_list_templates")
+            guard ["style", "look", "look_strength", "film_grain", "film_halation", "film_exposure", "film_warmth", "film_format",
+                   "margin", "gutter", "corner", "background", "shape"].contains(where: given) else {
+                return Problem(message: "collage_set_style 至少要给一个字段：style、look、look_strength、film_grain、film_halation、film_exposure、film_warmth、film_format、margin、gutter、corner、background、shape。", hint: "取值见 collage_list_templates")
             }
         case "collage_auto_layout":
             if given("photos") && given("count") {

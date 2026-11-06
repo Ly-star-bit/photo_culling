@@ -219,6 +219,26 @@ struct CollageLookBox: View {
                     .disabled(!store.project.style.look.isSpectral)
                     .help("高光边上泛红的光晕（底片片基的反射）：20% 上下是有防光晕层的真片，50% 是防光晕层弱的片子，"
                           + "100% = 没有防光晕层的底片。导出大图时更明显；只在光谱胶片色调上起作用")
+                CollageSlider(label: "胶片曝光", value: binding(\.filmExposure), range: -1...2,
+                              display: abs(store.project.style.filmExposure) < 0.05 ? "0"
+                                  : String(format: "%+.1f 档", store.project.style.filmExposure))
+                    .disabled(!CollageFilmEffects.supportsExposure(store.project.style.look))
+                    .help("冲印：给底片多（少）几档曝光，冲扫店把亮度拉回一半（+1 档更亮更通透、+2 档高光被肩部压软）。"
+                          + "只在负片、电影负片上有；反转片没有冲扫补偿这一层")
+                CollageSlider(label: "冷暖", value: binding(\.filmWarmth), range: -1...1,
+                              display: abs(store.project.style.filmWarmth) < 0.025 ? "0"
+                                  : (store.project.style.filmWarmth > 0 ? "暖 " : "冷 ")
+                                      + percentText(abs(store.project.style.filmWarmth)))
+                    .disabled(!store.project.style.look.isSpectral)
+                    .help("冲印：放大机的黄、品滤色（暖往橙、冷往蓝），在统一色温之前；只在光谱胶片色调上起作用")
+                Picker("画幅", selection: Binding(get: { store.project.style.filmFormat },
+                                                set: { f in var st = store.project.style; st.filmFormat = f; store.setStyle(st, coalesce: false) })) {
+                    ForEach(CollageFilmFormat.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .font(.caption)
+                .disabled(!store.project.style.look.isSpectral)
+                .help("颗粒、晕光按整张照片 = 一格这么大的底片算：画幅越大，颗粒相对画面越细")
                 CollageSlider(label: "统一色温", value: binding(\.harmonize), range: 0...1,
                               display: percentText(store.project.style.harmonize))
                     .help("其余照片的色温、明暗往主图靠：不同时间、不同光线拍的放在一起才像一组")

@@ -171,13 +171,31 @@ enum CollageDarkroomSelfTest {
         styled.style.filmGrain = 0.8
         styled.style.filmHalation = 0.5
         styled.style.harmonize = 0.4
+        styled.style.filmExposure = 1
+        styled.style.filmWarmth = -0.5
         styled.pages[0].root.update(at: [1]) { $0.cell?.look = CollageLookSetting(look: .mono, strength: 1) }
         let orig = CollageDarkroom.original(styled, pageIndex: 0)
         let cellLooks = orig.pages[0].root.leafPaths().compactMap { orig.pages[0].root.node(at: $0)?.cell?.look }
         check(orig.style.look == .none && orig.style.filmGrain == 0 && orig.style.filmHalation == 0 && orig.style.harmonize == 0
-              && orig.pages[0].look == nil && cellLooks.isEmpty, "原图：哪一级都不调色，颗粒、晕光、统一色温都是 0")
+              && orig.style.filmExposure == 0 && orig.style.filmWarmth == 0 && orig.pages[0].look == nil && cellLooks.isEmpty,
+              "原图：哪一级都不调色，颗粒、晕光、统一色温、冲印区都是 0")
         check(orig.pages[0].root.leafPaths() == styled.pages[0].root.leafPaths() && orig.canvas == styled.canvas
               && orig.style.margin == styled.style.margin, "原图：版式、画布、边距照旧")
+
+        // ---------------------------------------------------------------- 8b. 冲印区、↺
+        print("== 冲印区、↺")
+        let pr = CollageDarkroom(store: store, rendering: false)
+        pr.setStyleValue(\.filmExposure, 5, range: -1...2)
+        pr.setStyleValue(\.filmWarmth, -3, range: -1...1)
+        pr.setFormat(.f67)
+        check(store.project.style.filmExposure == 2 && store.project.style.filmWarmth == -1 && store.project.style.filmFormat == .f67,
+              "胶片曝光收在 +2、冷暖收在 −1、画幅换成 6×7（都改整组）")
+        let pReset = store.undoPushes
+        pr.resetTexture()
+        let d = CollageFilmEffects.defaults(pr.current.look)
+        check(store.project.style.filmExposure == 0 && store.project.style.filmWarmth == 0 && store.project.style.filmFormat == .f135
+              && store.project.style.filmGrain == (d?.grain ?? 0) && store.project.style.filmHalation == (d?.halation ?? 0)
+              && store.undoPushes == pReset + 1, "↺：颗粒晕光回到这一款的起始值、冲印区回到不动，一步撤销")
 
         // ---------------------------------------------------------------- 9. 撤销清选中、关掉
         print("== 撤销、关掉")

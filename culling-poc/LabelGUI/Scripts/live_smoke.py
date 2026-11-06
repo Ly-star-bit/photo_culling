@@ -2578,6 +2578,20 @@ __attribute__((constructor)) static void init(void) {
               f"光谱胶片「filmWarmSkin」+ 颗粒 0.5 + 晕光 0.25：一步，回包和 collage_get_state 都有 film_grain / film_halation；"
               f"app_undo 回去（{b.get('film_grain')} / {(g1 or {}).get('film_grain')}）")
 
+        # ---------- 冲印区：胶片曝光、冷暖、画幅一次给齐是一步，回包和 collage_get_state 读得回来；app_undo 回去
+        s0 = settled()
+        out, b, _ = w("collage_set_style", {"session": KEY, "film_exposure": 1, "film_warmth": -0.5, "film_format": "645"})
+        s1 = st()
+        _, g1, _ = mcp_call(env, "collage_get_state", {"include_preview": False})
+        _, u, _ = w("app_undo", {"target": "collage"})
+        s2 = settled()
+        check(b.get("changed") is True and b.get("film_exposure") == 1 and b.get("film_warmth") == -0.5
+              and b.get("film_format") == "645" and (g1 or {}).get("film_exposure") == 1
+              and (g1 or {}).get("film_format") == "645" and steps(s0, s1) == (0, 1) and "error" not in u
+              and s2["edit_digest"] == s0["edit_digest"],
+              f"冲印区：胶片曝光 +1、冷暖 −0.5、画幅 645 一步，回包和 collage_get_state 读得回来；app_undo 回去"
+              f"（{b.get('film_exposure')} / {b.get('film_warmth')} / {b.get('film_format')}）")
+
         # ---------- 方案栏：存成方案不进撤销、切到方案一步撤销；一模一样的不再存；app_undo 回到切之前（方案栏不变）；
         # 没有的 id、过期的 digest 不执行
         _, cs0, _ = mcp_call(env, "collage_get_state", {"include_preview": False})

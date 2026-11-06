@@ -4787,9 +4787,12 @@ extension CollageStore {
         var shape: CollageShape?
         var filmGrain: Double?
         var filmHalation: Double?
+        var filmExposure: Double?
+        var filmWarmth: Double?
+        var filmFormat: CollageFilmFormat?
         var isEmpty: Bool {
             margin == nil && gutter == nil && corner == nil && background == nil && shape == nil
-                && filmGrain == nil && filmHalation == nil
+                && filmGrain == nil && filmHalation == nil && filmExposure == nil && filmWarmth == nil && filmFormat == nil
         }
     }
 
@@ -4814,6 +4817,9 @@ extension CollageStore {
             if let shape = fields.shape { st.shape = shape }
             if let grain = fields.filmGrain { st.filmGrain = min(1, max(0, grain)) }
             if let halation = fields.filmHalation { st.filmHalation = min(1, max(0, halation)) }
+            if let exposure = fields.filmExposure { st.filmExposure = min(2, max(-1, exposure)) }
+            if let warmth = fields.filmWarmth { st.filmWarmth = min(1, max(-1, warmth)) }
+            if let format = fields.filmFormat { st.filmFormat = format }
             // 明说了颗粒 / 晕光（哪怕是 0）就照给的来，不套起始值。
             setStyle(st, filmDefaults: fields.filmGrain == nil && fields.filmHalation == nil)
         }

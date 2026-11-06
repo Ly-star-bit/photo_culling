@@ -775,7 +775,7 @@ enum CollageCLI {
 /// store / 预览 / 缩略图各发了几次 objectWillChange、出了几张预览：CollagePerf）
 /// 截图前先改工程（都可选）：--relayout [--count 6]（托盘重新自动排版，几张；工程里还没有版式时也排）、
 /// --layout grid|scatter、--template <模板名>、--title 标题、--subtitle 副标题、--look <色调>、
-/// --overlay <压字预设>（放在主图那一格并选中它）、--page N（相册第 N 个跨页，从 0 起；先换页再选格子）、
+/// --film-exposure / --film-warmth / --film-format（冲印区）、--overlay <压字预设>（放在主图那一格并选中它）、--page N（相册第 N 个跨页，从 0 起；先换页再选格子）、
 /// --select-item N（选中第 N 个自由图层）、--darkroom（开着暗房截，CollageDarkroom：可再给
 /// --darkroom-scope page|cell、--darkroom-hover <色调>、--darkroom-split 0.3、--darkroom-original（按住空格））。
 /// --inspector-width N：只截检视器、宽 N pt（高取 --size 的高）—— 窗口里检视器能拖到 300…380，
@@ -839,6 +839,14 @@ enum CollageUISnapshot {
         if let look = option("--look").flatMap(CollageLook.init(rawValue:)) {
             var st = store.project.style
             st.look = look
+            store.setStyle(st)
+        }
+        // 冲印区（截暗房、检视器看滑杆用）：--film-exposure 1 --film-warmth 0.5 --film-format 645
+        if option("--film-exposure") != nil || option("--film-warmth") != nil || option("--film-format") != nil {
+            var st = store.project.style
+            if let v = option("--film-exposure").flatMap(Double.init) { st.filmExposure = min(2, max(-1, v)) }
+            if let v = option("--film-warmth").flatMap(Double.init) { st.filmWarmth = min(1, max(-1, v)) }
+            if let f = option("--film-format").flatMap(CollageFilmFormat.init(rawValue:)) { st.filmFormat = f }
             store.setStyle(st)
         }
         if let key = option("--overlay"), let overlay = CollageOverlays.preset(key), let root = store.root,
@@ -1707,6 +1715,18 @@ enum CollageOpsScript {
                 var st = store.project.style
                 let v = min(1, max(0, Double(arg) ?? 0))
                 if name == "grain" { st.filmGrain = v } else { st.filmHalation = v }
+                store.setStyle(st)
+            case "exposure", "warmth":
+                // exposure:1（胶片曝光，档 −1…+2，只负片、电影负片）/ warmth:-0.5（冷暖 −1…+1）：冲印区。
+                var st = store.project.style
+                let v = Double(arg) ?? 0
+                if name == "exposure" { st.filmExposure = min(2, max(-1, v)) } else { st.filmWarmth = min(1, max(-1, v)) }
+                store.setStyle(st)
+            case "format":
+                // format:645：画幅（135 / 645 / 66 / 67），颗粒、晕光的尺度。
+                guard let f = CollageFilmFormat(rawValue: arg) else { ok = false; break }
+                var st = store.project.style
+                st.filmFormat = f
                 store.setStyle(st)
             case "subtitle":
                 store.setSubtitle(arg)

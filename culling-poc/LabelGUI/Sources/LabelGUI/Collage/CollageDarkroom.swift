@@ -279,11 +279,31 @@ final class CollageDarkroom: ObservableObject {
         }
     }
 
-    /// 颗粒、晕光、统一色温：整组的。
-    func setStyleValue(_ keyPath: WritableKeyPath<CollageStyle, Double>, _ value: Double) {
+    /// 颗粒、晕光、统一色温、冲印区：整组的。range = 这一项的取值范围（胶片曝光 −1…+2、冷暖 −1…+1）。
+    func setStyleValue(_ keyPath: WritableKeyPath<CollageStyle, Double>, _ value: Double,
+                       range: ClosedRange<Double> = 0...1) {
         var st = store.project.style
-        st[keyPath: keyPath] = min(1, max(0, value))
+        st[keyPath: keyPath] = min(range.upperBound, max(range.lowerBound, value))
         store.setStyle(st, coalesce: true)
+    }
+
+    /// 画幅（整组的）：一次一步。
+    func setFormat(_ format: CollageFilmFormat) {
+        var st = store.project.style
+        st.filmFormat = format
+        store.setStyle(st, coalesce: false)
+    }
+
+    /// ↺：颗粒、晕光回到这一款的起始值，冲印区（曝光、冷暖、画幅）回到不动。一步撤销。
+    func resetTexture() {
+        var st = store.project.style
+        let d = CollageFilmEffects.defaults(current.look)
+        st.filmGrain = d?.grain ?? 0
+        st.filmHalation = d?.halation ?? 0
+        st.filmExposure = 0
+        st.filmWarmth = 0
+        st.filmFormat = .f135
+        store.setStyle(st, coalesce: false, filmDefaults: false)
     }
 
     /// ←→（↑↓ 跳一行）：在这一页签的样张里挪焦点，大预览跟着看（不套用）。到头绕回；焦点不在这一页签里
@@ -333,6 +353,8 @@ final class CollageDarkroom: ObservableObject {
         out.style.harmonize = 0
         out.style.filmGrain = 0
         out.style.filmHalation = 0
+        out.style.filmExposure = 0
+        out.style.filmWarmth = 0
         guard out.pages.indices.contains(pageIndex) else { return out }
         out.pages[pageIndex].look = nil
         for path in out.pages[pageIndex].root.leafPaths() {

@@ -136,52 +136,72 @@ private struct DarkroomSegmented: View {
     }
 }
 
-/// 细滑杆：2pt 轨道、琥珀填充、14pt 白钮，只在 0 / 50 / 100 有刻度；右边写百分比（不补前导零）。
-/// 无障碍那边是一根普通的 Slider。
+/// 细滑杆：2pt 轨道、琥珀填充、14pt 白钮，几个刻度（可以带一行小字：「原样」「真片」）；右边写数值（不补前导零）。
+/// 双向的（胶片曝光、冷暖）从 origin 往两边填。无障碍那边是一根普通的 Slider。
 private struct DarkroomSlider: View {
     let label: String
     let value: Double
+    var range: ClosedRange<Double> = 0...1
+    /// 刻度：值 + 可选的小字。
+    var ticks: [(value: Double, text: String?)] = [(0, nil), (0.5, nil), (1, nil)]
+    /// 填充从哪个值开始（双向的滑杆是 0）。
+    var origin = 0.0
+    var display: (Double) -> String = { "\(Int(($0 * 100).rounded()))%" }
     let set: (Double) -> Void
     var help: String = ""
 
     var body: some View {
-        let v = min(1, max(0, value))
-        HStack(spacing: 10) {
+        let lo = range.lowerBound, hi = range.upperBound
+        let v = min(hi, max(lo, value))
+        let frac = { (x: Double) -> CGFloat in CGFloat((x - lo) / (hi - lo)) }
+        let labelled = ticks.contains { $0.text != nil }
+        HStack(alignment: .top, spacing: 10) {
             Text(label).font(.system(size: 12)).foregroundStyle(DarkroomPalette.text)
-                .frame(width: 52, alignment: .leading)
+                .frame(width: 52, height: 24, alignment: .leading)
             GeometryReader { geo in
                 let knob: CGFloat = 14
                 let travel = max(1, geo.size.width - knob)
-                let x = CGFloat(v) * travel
-                ZStack(alignment: .leading) {
-                    ForEach([0.0, 0.5, 1.0], id: \.self) { t in
+                let x = frac(v) * travel
+                let o = frac(origin) * travel
+                ZStack(alignment: .topLeading) {
+                    ForEach(Array(ticks.enumerated()), id: \.offset) { _, t in
+                        let tx = knob / 2 + frac(t.value) * travel
                         Rectangle().fill(DarkroomPalette.tertiary)
                             .frame(width: 1, height: 4)
-                            .offset(x: knob / 2 + CGFloat(t) * travel - 0.5, y: 9)
+                            .offset(x: tx - 0.5, y: 19)
+                        if let text = t.text {
+                            Text(text).font(.system(size: 9)).foregroundStyle(DarkroomPalette.tertiary)
+                                .fixedSize()
+                                .frame(width: 60, alignment: t.value >= hi ? .trailing : t.value <= lo ? .leading : .center)
+                                .offset(x: t.value >= hi ? tx - 60 + 4 : t.value <= lo ? tx - 4 : tx - 30, y: 25)
+                        }
                     }
-                    Capsule().fill(DarkroomPalette.track).frame(height: 2)
-                    Capsule().fill(DarkroomPalette.accent).frame(width: x + knob / 2, height: 2)
+                    Capsule().fill(DarkroomPalette.track).frame(height: 2).offset(y: 11)
+                    Capsule().fill(DarkroomPalette.accent)
+                        .frame(width: abs(x - o) + 1, height: 2)
+                        .offset(x: knob / 2 + min(x, o), y: 11)
                     Circle().fill(Color.white)
                         .frame(width: knob, height: knob)
                         .shadow(color: .black.opacity(0.45), radius: 1.5, y: 1)
-                        .offset(x: x)
+                        .offset(x: x, y: 5)
                 }
-                .frame(width: geo.size.width, height: geo.size.height)
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
                 .contentShape(Rectangle())
                 .gesture(DragGesture(minimumDistance: 0).onChanged { g in
-                    set(Double(min(1, max(0, (g.location.x - knob / 2) / travel))))
+                    let t = Double(min(1, max(0, (g.location.x - knob / 2) / travel)))
+                    set(lo + t * (hi - lo))
                 })
             }
-            .frame(height: 24)
-            Text("\(Int((v * 100).rounded()))%")
+            .frame(height: labelled ? 38 : 24)
+            Text(display(v))
                 .font(.system(size: 12)).monospacedDigit()
                 .foregroundStyle(DarkroomPalette.secondary)
-                .frame(width: 38, alignment: .trailing)
+                .frame(width: 44, height: 24, alignment: .trailing)
                 .accessibilityHidden(true)
         }
         .help(help)
         .accessibilityRepresentation {
-            Slider(value: Binding(get: { value }, set: set), in: 0...1) { Text(label) }
+            Slider(value: Binding(get: { value }, set: set), in: range) { Text(label) }
         }
     }
 }
@@ -509,23 +529,53 @@ private struct DarkroomControls: View {
                         .opacity(setting.look == .none ? 0.4 : 1)
                 }
 
+                DarkroomPrinting(model: model, store: store, spectral: spectral)
+
                 VStack(alignment: .leading, spacing: 10) {
-                    DarkroomSectionTitle(title: "质感", trailing: "对整组")
+                    HStack {
+                        DarkroomSectionTitle(title: "质感", trailing: "对整组")
+                        Button {
+                            model.resetTexture()
+                        } label: {
+                            Image(systemName: "arrow.counterclockwise").font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(DarkroomPalette.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!spectral)
+                        .help("颗粒、晕光回到这一款的起始值，胶片曝光、冷暖、画幅回到不动（一步撤销）")
+                        .accessibilityLabel("恢复这一款的起始值")
+                    }
                     Group {
                         DarkroomSlider(label: "颗粒", value: store.project.style.filmGrain,
+                                       ticks: [(0, nil), (0.5, "原样"), (1, "两倍")],
                                        set: { model.setStyleValue(\.filmGrain, $0) },
-                                       help: "spektrafilm 的颗粒模型：50% ≈ 这款胶片在 35mm 底片上的真实颗粒，100% 是两倍")
+                                       help: "胶片的细小纹理（spektrafilm 的颗粒模型）：50% 就是这款胶片在底片上的真实颗粒，100% 是两倍。"
+                                           + "缩小看的时候细颗粒会被平均掉，要在下面的 1:1 细节里看；先看整张，再看细节")
                         DarkroomSlider(label: "晕光", value: store.project.style.filmHalation,
+                                       ticks: [(0, nil), (0.22, "真片"), (0.52, "弱"), (1, "去掉")],
                                        set: { model.setStyleValue(\.filmHalation, $0) },
-                                       help: "高光边上泛红的光晕：20% 上下是有防光晕层的真片，拉满是没有防光晕层的底片")
+                                       help: "强光穿过胶片、从片基背面反射回来，在亮处边缘形成一圈红光（halation，也叫光晕）。人像胶片都有防光晕层，"
+                                           + "真片的晕光很弱，约 20%；50% 是防光晕层弱的片子；100% = 去掉防光晕层（夜景灯泡一圈红）。管的是范围，不是亮度")
+                        HStack(spacing: 10) {
+                            Text("画幅").font(.system(size: 12)).foregroundStyle(DarkroomPalette.text)
+                                .frame(width: 52, alignment: .leading)
+                            DarkroomSegmented(items: CollageFilmFormat.allCases.map { f in
+                                // 「6×4.5」在四等分的分段里放不下一行：写成通行的「645」。
+                                .init(id: f.rawValue, label: f == .f645 ? "645" : f.label, selected: store.project.style.filmFormat == f,
+                                      help: "颗粒、晕光按整张照片 = 一格 \(f.label) 底片算：画幅越大，颗粒相对画面越细")
+                            }) { id in
+                                if let f = CollageFilmFormat(rawValue: id) { model.setFormat(f) }
+                            }
+                        }
+                        .help("同一张照片，模拟的画幅越小，颗粒相对画面越粗；中画幅（6×4.5 以上）是婚礼胶片常见的细腻感")
                     }
                     .disabled(!spectral)
                     .opacity(spectral ? 1 : 0.4)
                     DarkroomSlider(label: "统一色温", value: store.project.style.harmonize,
                                    set: { model.setStyleValue(\.harmonize, $0) },
-                                   help: "其余照片的色温、明暗往主图靠（对整组）")
+                                   help: "一页里几张照片的冷暖、明暗往主图对齐（对整组），混拍的一页用")
                     if !spectral {
-                        Text("「\(setting.look.label)」是相纸滤镜，没有颗粒、晕光：在「胶片」页签里换一款。")
+                        Text("「\(setting.look.label)」是相纸滤镜，没有颗粒、晕光和冲印：在「胶片」页签里换一款才有。")
                             .font(.system(size: 11)).foregroundStyle(DarkroomPalette.tertiary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -538,7 +588,10 @@ private struct DarkroomControls: View {
                         .font(.system(size: 11)).foregroundStyle(DarkroomPalette.tertiary)
                 }
 
-                Text("色调和强度改「套用到」选的那一级；颗粒、晕光、统一色温对整组。每一下都是一步撤销（⌘Z）。")
+                Text("三步：选一款胶片 → 用试条定强度 → 在 1:1 细节里看颗粒、晕光 → 完成。别的先不用动。")
+                    .font(.system(size: 10.5)).foregroundStyle(DarkroomPalette.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("色调和强度改「套用到」选的那一级；冲印、颗粒、晕光、统一色温对整组。每一下都是一步撤销（⌘Z）。")
                     .font(.system(size: 10.5)).foregroundStyle(DarkroomPalette.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
                 Text("「参考」写的是色调用了哪支胶片的公开数据（经 spektrafilm 模拟、再按扫描调过色），不代表原厂效果；"
@@ -549,6 +602,44 @@ private struct DarkroomControls: View {
             .padding(16)
         }
         .background(DarkroomPalette.sidebar)
+    }
+}
+
+/// 冲印：胶片曝光（负片、电影负片）、冷暖（放大机滤色）。都对整组、都在色调表里（取色、判字深浅一样）。
+private struct DarkroomPrinting: View {
+    @ObservedObject var model: CollageDarkroom
+    @ObservedObject var store: CollageStore
+    let spectral: Bool
+
+    var body: some View {
+        let look = model.current.look
+        let exposable = spectral && CollageFilmEffects.supportsExposure(look)
+        let style = store.project.style
+        VStack(alignment: .leading, spacing: 10) {
+            DarkroomSectionTitle(title: "冲印", trailing: "对整组")
+            DarkroomSlider(label: "胶片曝光", value: style.filmExposure, range: -1...2,
+                           ticks: [(-1, "−1"), (0, "0"), (1, "+1"), (2, "+2")], origin: 0,
+                           display: { abs($0) < 0.05 ? "0" : String(format: "%+.1f 档", $0) },
+                           set: { model.setStyleValue(\.filmExposure, $0, range: -1...2) },
+                           help: "给底片多（少）几档曝光，冲扫店把整体亮度拉回一半：+1 档更亮更通透，+2 档高光被底片的肩部压软"
+                               + "（过曝的空气感），−1 档暗、沉。不是 Lightroom 那种整体提亮")
+                .disabled(!exposable)
+                .opacity(exposable ? 1 : 0.4)
+            DarkroomSlider(label: "冷暖", value: style.filmWarmth, range: -1...1,
+                           ticks: [(-1, "冷"), (0, nil), (1, "暖")], origin: 0,
+                           display: { abs($0) < 0.025 ? "0" : ($0 > 0 ? "暖 " : "冷 ") + "\(Int((abs($0) * 100).rounded()))%" },
+                           set: { model.setStyleValue(\.filmWarmth, $0, range: -1...1) },
+                           help: look.isReversal
+                               ? "反转片上相当于扫描时的色偏校正：暖往橙、冷往蓝。在统一色温之前"
+                               : "放大机的黄、品滤色：暖往橙走（不往黄绿），冷往蓝。在印放那一步改，比套完再调白平衡更像胶片；在统一色温之前")
+                .disabled(!spectral)
+                .opacity(spectral ? 1 : 0.4)
+            if spectral && !exposable {
+                Text("反转片没有冲扫补偿这一层，过曝就是发白：胶片曝光只在负片、电影负片上有。")
+                    .font(.system(size: 11)).foregroundStyle(DarkroomPalette.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }
 
@@ -618,6 +709,15 @@ private struct DarkroomLoupe: View {
             }
         }
         .frame(width: side, height: side)
+        .overlay(alignment: .topLeading) {
+            // 和导出一样大的像素：颗粒、晕光要在这里判断（缩小的预览会把细颗粒平均掉）。
+            Text(model.loupe == nil || model.loupeStale ? "渲染中" : "全尺寸")
+                .font(.system(size: 10, weight: .medium)).foregroundStyle(Color.white)
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(Capsule().fill(Color.black.opacity(0.55)))
+                .padding(6)
+                .accessibilityHidden(true)
+        }
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(DarkroomPalette.hairline, lineWidth: 1))
         .frame(maxWidth: .infinity)

@@ -176,6 +176,9 @@ enum LiveHandlers {
         out["look_strength"] = MCPReadModel.r3(project.style.lookStrength)
         out["film_grain"] = MCPReadModel.r3(project.style.filmGrain)
         out["film_halation"] = MCPReadModel.r3(project.style.filmHalation)
+        out["film_exposure"] = MCPReadModel.r3(project.style.filmExposure)
+        out["film_warmth"] = MCPReadModel.r3(project.style.filmWarmth)
+        out["film_format"] = project.style.filmFormat.rawValue
         out["title"] = project.title
         out["subtitle"] = project.subtitle
         out["masthead"] = project.masthead
@@ -311,6 +314,9 @@ enum LiveHandlers {
             s.lookStrength = preset.style.lookStrength
             s.filmGrain = preset.style.filmGrain
             s.filmHalation = preset.style.filmHalation
+            s.filmExposure = preset.style.filmExposure
+            s.filmWarmth = preset.style.filmWarmth
+            s.filmFormat = preset.style.filmFormat
             return s == preset.style
         }?.key
     }
@@ -1564,6 +1570,9 @@ extension LiveHandlers {
         fields.shape = (req.params["shape"] as? String).flatMap { CollageLayoutSpec.shapes[$0] }
         fields.filmGrain = req.params["film_grain"].flatMap(MCPArgs.number)
         fields.filmHalation = req.params["film_halation"].flatMap(MCPArgs.number)
+        fields.filmExposure = req.params["film_exposure"].flatMap(MCPArgs.number)
+        fields.filmWarmth = req.params["film_warmth"].flatMap(MCPArgs.number)
+        fields.filmFormat = (req.params["film_format"] as? String).flatMap(CollageFilmFormat.init(rawValue:))
         var parts: [String] = []
         if let preset { parts.append("样式「\(CollageStyles.all.first { $0.key == preset }?.name ?? preset)」") }
         if let look { parts.append("色调「\(look.label)」") }
@@ -1575,6 +1584,9 @@ extension LiveHandlers {
         if fields.shape != nil { parts.append("格子形状") }
         if fields.filmGrain != nil { parts.append("颗粒") }
         if fields.filmHalation != nil { parts.append("晕光") }
+        if fields.filmExposure != nil { parts.append("胶片曝光") }
+        if fields.filmWarmth != nil { parts.append("冷暖") }
+        if fields.filmFormat != nil { parts.append("画幅") }
         let before = collage.editDigest
         let pushes = collage.undoPushes
         // = 样式页点预设（不合并），色调、强度在同一步里再改（和界面一样，也会改「下次新建拼图沿用的默认样式」）
@@ -1585,6 +1597,9 @@ extension LiveHandlers {
         body["look_strength"] = MCPReadModel.r3(collage.project.style.lookStrength)
         body["film_grain"] = MCPReadModel.r3(collage.project.style.filmGrain)
         body["film_halation"] = MCPReadModel.r3(collage.project.style.filmHalation)
+        body["film_exposure"] = MCPReadModel.r3(collage.project.style.filmExposure)
+        body["film_warmth"] = MCPReadModel.r3(collage.project.style.filmWarmth)
+        body["film_format"] = collage.project.style.filmFormat.rawValue
         body["style_fields"] = styleFields(collage.project.style)
         return await collageDone(req, live: live, model: model, tool: "collage_set_style", changed: changed,
                                  pushesBefore: pushes, digestBefore: before, summary: summary, body: body)
