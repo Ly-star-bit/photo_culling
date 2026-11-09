@@ -747,7 +747,7 @@ enum CollageOcclusionRule: String, Codable, CaseIterable, Hashable {
 // 界面术语（优化分析 NU10，2026-11-09）：一个词只指一样东西。只管界面上的字，rawValue、存盘的键、CLI、MCP 的键不跟着改。
 // - 色调：统称（整组 / 这一页 / 这一格套的调色），分「胶片」「滤镜」两类，和暗房的两个页签一一对应。
 // - 胶片：只指光谱胶片那 15 款（isSpectral：负片、反转片、电影负片）和它们模拟的真胶片（颗粒、晕光、胶片曝光、画幅）。
-//   老色调 .film「胶片」→「暖柔」，风格预设 film「胶片」→「胶片感」，边框 / 相框 .film「胶片」→「齿孔」。
+//   老色调 .film「胶片」→「奶油」（不叫「暖柔」：和光谱胶片的柔肤、暖肤挨着太像），风格预设 film「胶片」→「胶片感」，边框 / 相框 .film「胶片」→「齿孔」。
 // - 滤镜：暗房「滤镜」页签那 12 款程序调色（没有颗粒、晕光、冲印）。以前也叫「相纸滤镜」，不再用。
 // - 相纸：只指底边宽的白框（边框、相框 .polaroid，风格预设「相纸」）。散落版里的一张照片叫「照片」，印样的纸叫「白纸」。
 // - 齿孔：带齿孔片边的框（边框、相框 .film）。印样 / 底片条是另一样（一整页片条）。
@@ -808,7 +808,7 @@ enum CollageLook: String, Codable, CaseIterable, Hashable {
     var label: String {
         switch self {
         case .none: return "原色"
-        case .film: return "暖柔"
+        case .film: return "奶油"
         case .airy: return "日系"
         case .faded: return "复古"
         case .cinema: return "青橙"
