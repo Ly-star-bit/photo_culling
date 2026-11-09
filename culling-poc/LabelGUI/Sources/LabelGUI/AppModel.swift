@@ -35,6 +35,16 @@ final class AppModel: ObservableObject {
     /// 标题栏副标题的 AI 指示和菜单开关的勾（§9.6a）。没有桥（--app-ui）时文字一直是空的。
     let indicator = LiveIndicator()
 
+    /// 批量页的长任务（导卡、分析、VLM、导出 JPG、复制原片……）在用户不在批量页时跑完 / 出错了：「批量处理」页签上写一句，
+    /// 切回批量页就清（优化分析 NU11）。正在跑的进度直接看 batch 的 isRunning / progressFraction，不另记。
+    @Published var batchTaskEnd: BatchTaskEnd?
+    enum BatchTaskEnd: Equatable { case done, failed }
+    /// 长任务开跑那一刻的红字、导入提醒：跑完时变了（多了一条）才算这一次出错，不把早先没关掉的那条算进来。
+    private var batchErrorAtStart: String?
+    private var batchNoticeAtStart: String?
+    private var batchRunWatch: AnyCancellable?
+    private var tabWatch: AnyCancellable?
+
     /// 批量页切场次 → 拼图工程跟着换。
     private var photoDirWatch: AnyCancellable?
     /// 拼图里在用的照片 → 批量页（「废片移到废纸篓」默认不动它们）。
@@ -71,6 +81,17 @@ final class AppModel: ObservableObject {
         let collage = CollageStore(dataDir: dataDir)
         let model = AppModel(batch: batch, labels: labels, cardCenter: cardCenter,
                              watermark: watermark, collage: collage)
+        // 批量页的长任务跑完时用户在别的页：记下来，「批量处理」页签上写「完成 / 出错」，切回批量页就清（NU11）。
+        // receive(on:) 和下面一样：@Published 在赋值之前就发，跑完那一拍的红字、导入提醒还没写上。
+        model.batchRunWatch = batch.$isRunning.removeDuplicates().dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak model] running in
+                MainActor.assumeIsolated { model?.batchRunningChanged(running) }
+            }
+        model.tabWatch = model.$tab.removeDuplicates()
+            .sink { [weak model] tab in
+                MainActor.assumeIsolated { if tab == .batch { model?.batchTaskEnd = nil } }
+            }
         // 拼图工程启动起就挂到当前场次上（以前要等第一次点开拼图 tab），之后每次切场次跟着换：
         // 不点开拼图 tab，拼图工程也是这一场的。
         model.ensureCollageAttached()
@@ -138,5 +159,57 @@ final class AppModel: ObservableObject {
     func openCollage(watermark request: WatermarkCollageRequest) {
         CollageHandoff.fromWatermark(request, batch: batch, collage: collage)
         tab = .collage
+    }
+}
+
+// MARK: - 「批量处理」页签上的进度（优化分析 NU11）
+
+extension AppModel {
+    /// 批量页的 isRunning 变了（已经回到主线程、那一拍写完了）。开跑：清掉上一次的「完成 / 出错」，记下现在的红字；
+    /// 跑完：用户这时不在批量页才记（在批量页的话底栏就看得见）。
+    fileprivate func batchRunningChanged(_ running: Bool) {
+        if running {
+            batchTaskEnd = nil
+            batchErrorAtStart = batch.lastError
+            batchNoticeAtStart = batch.importNotice
+            return
+        }
+        guard tab != .batch else { return }
+        let error = batch.lastError.flatMap { $0 == batchErrorAtStart ? nil : $0 }
+        let notice = batch.importNotice.flatMap { $0 == batchNoticeAtStart ? nil : $0 }
+        batchTaskEnd = error != nil || notice != nil ? .failed : .done
+    }
+
+    /// 「批量处理」页签上的字（纯函数，`--ux-selftest` 测）：长任务在跑时带上在做什么、几成（没有进度的写「…」）；
+    /// 用户不在批量页时跑完 / 出错了说一句。以前进度条、结果只在批量页底栏：去拼图页、水印页干别的就看不见导卡、
+    /// 分析、导出跑完没有。`job` = QuitGuard.runningJob（⌘Q 的确认框按同一个分类说话）。
+    nonisolated static func batchTabTitle(job: QuitGuard.Job?, fraction: Double?, ended: BatchTaskEnd?) -> String {
+        let name = "批量处理"
+        if let job {
+            let what: String
+            switch job {
+            case .analysis: what = "分析"
+            case .vlm: what = "VLM 判片"
+            case .appeal: what = "复审"
+            case .cardImport: what = "导卡"
+            case .task(let kind): what = kind.label
+            case .pageExport, .other: what = "处理中"
+            }
+            guard let fraction, fraction.isFinite else { return name + " · " + what + "…" }
+            let pct = Int((min(1, max(0, fraction)) * 100).rounded(.down))
+            return name + " · " + what + " \(pct)%"
+        }
+        switch ended {
+        case .done?: return name + " · 完成"
+        case .failed?: return name + " · 出错"
+        case nil: return name
+        }
+    }
+
+    /// 现在这一刻的页签字（ContentView 用；离屏快照 --app-ui 也打印它）。
+    var batchTabTitle: String {
+        let job = QuitGuard.runningJob(isRunning: batch.isRunning, analyzing: batch.analyzing, importing: batch.importing,
+                                       queuedCards: batch.queuedCardImports, longTasks: batch.runningLongTasks)
+        return Self.batchTabTitle(job: job, fraction: batch.progressFraction, ended: batchTaskEnd)
     }
 }

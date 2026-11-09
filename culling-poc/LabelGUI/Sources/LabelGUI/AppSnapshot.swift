@@ -23,7 +23,8 @@ enum AppUISnapshot {
             return args[i + 1]
         }
         guard args.count > flagIndex + 2 else {
-            print("用法: --app-ui <photo_dir> <out.png> [--tab 批量处理|水印|拼图|标注校准] [--size 1440x900] [--wait 4]")
+            print("用法: --app-ui <photo_dir> <out.png> [--tab 批量处理|水印|拼图|标注校准] [--size 1440x900] [--wait 4]"
+                  + " [--batch-task running|done|failed|cycle] [--ax-dump]")
             exit(1)
         }
         // 整套 store 都会写数据目录（sessions.json、拼图工程、水印设置）：只在临时数据目录里跑，
@@ -46,6 +47,17 @@ enum AppUISnapshot {
                                   bridge: .none)
         model.batch.switchSession(to: dir)
         model.tab = tab
+        // --batch-task：假装批量页有长任务在跑（分析到 37%），或者用户在别的页时跑完 / 出错了（「批量处理」页签上的字，NU11）。
+        switch option("--batch-task") {
+        case "running"?:
+            model.batch.isRunning = true
+            model.batch.analyzing = true
+            model.batch.progressText = "分析中 118/320"
+            model.batch.progressFraction = 0.37
+        case "done"?: model.batchTaskEnd = .done
+        case "failed"?: model.batchTaskEnd = .failed
+        default: break
+        }
 
         func spin(_ seconds: Double) {
             let deadline = Date().addingTimeInterval(seconds)
@@ -71,6 +83,54 @@ enum AppUISnapshot {
         } catch {
             print("写不出 \(out.path)")
             exit(1)
+        }
+        if args.contains("--ax-dump") { SnapshotAX.dump(host) }
+        // 页签那一条离屏画不出来（NSTabView 的分段控件是一块空白），辅助功能树里页签也没有字：直接读 NSTabView 的各个页签，
+        // 看 SwiftUI 真的把字交给了 AppKit。
+        func tabLabels(_ view: NSView) -> [String]? {
+            if let tabs = view as? NSTabView { return tabs.tabViewItems.map(\.label) }
+            for sub in view.subviews { if let found = tabLabels(sub) { return found } }
+            return nil
+        }
+        print("页签：" + (tabLabels(host)?.joined(separator: " | ") ?? "（没找到 NSTabView）"))
+        // --batch-task cycle：截完图再走一遍真的接线（AppModel 盯着 isRunning 和 tab 的那两个订阅）：在别的页开跑、跑完、出错、
+        // 切回批量页、在批量页跑完、早先没关掉的红字。每步打一行「页签流程」和该是什么，对不上的行尾标 ✗。
+        if option("--batch-task") == "cycle" {
+            let batch = model.batch
+            func step(_ what: String, want: String, _ change: () -> Void) {
+                change()
+                spin(0.3)
+                let got = model.batchTabTitle
+                print("页签流程 \(what)：\(got)" + (got == want ? "" : " ✗（应为 \(want)）"))
+            }
+            step("在拼图页开跑", want: "批量处理 · 分析…") {
+                model.tab = .collage
+                batch.isRunning = true
+                batch.analyzing = true
+            }
+            step("跑完（用户在拼图页）", want: "批量处理 · 完成") {
+                batch.analyzing = false
+                batch.isRunning = false
+            }
+            step("切回批量页", want: "批量处理") { model.tab = .batch }
+            step("在水印页又跑一个（导出之类，没有进度）", want: "批量处理 · 处理中…") {
+                model.tab = .watermark
+                batch.isRunning = true
+            }
+            step("它出错收尾", want: "批量处理 · 出错") {
+                batch.lastError = "导出 JPG: 2 成功, 1 失败"
+                batch.isRunning = false
+            }
+            step("红字没关，在拼图页再跑完一个", want: "批量处理 · 完成") {
+                model.tab = .collage
+                batch.isRunning = true
+                batch.isRunning = false
+            }
+            step("在批量页跑完", want: "批量处理") {
+                model.tab = .batch
+                batch.isRunning = true
+                batch.isRunning = false
+            }
         }
         // 拼图工程不管拍的是哪个 tab 都打出来：拍批量处理 tab 时拼图页从没出现过，托盘里有照片 = 启动起就 attach 上了。
         let collage = model.collage

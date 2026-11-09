@@ -109,6 +109,12 @@ enum MCPReadModel {
         var xmp: [String: Any] = ["stale_count": xmpStale, "written": s.xmpEverWritten, "shared_sidecar_count": xmpShared]
         // 上次写进 XMP 的时间（带时区的 ISO 8601，xmp_state.json 里记的，不是文件 mtime）：旧版本写的没记这个 = 不报
         if let at = s.xmpLastWritten { xmp["last_written"] = instantFormatter.string(from: at) }
+        // xmp_state.json 在、却读不进来（BatchStore.xmpStateUnknown，优化分析 NR4）：上次写进 XMP 的是什么说不清。以前照旧报
+        // written false、stale_count 0，看着像这一场没写过 XMP、AI 会说「不用重写」。现在三个数都给 null（§3.0：不知道的标量
+        // 是 null），unknown 写原因，另带 warning xmp_state_unknown。读进来了的、没写过的照旧，没有 unknown 这个键。
+        if let unknown = s.xmpStateUnknown {
+            xmp = ["stale_count": NSNull(), "written": NSNull(), "shared_sidecar_count": NSNull(), "unknown": unknown]
+        }
         out["xmp"] = xmp
 
         var thresholds: [String: Any] = ["sharpness": r3(s.sharpnessThreshold)]
@@ -158,6 +164,14 @@ enum MCPReadModel {
         if s.unparsedCount > 0 {
             warnings.append(warning("unparsed_photos", "有 \(s.unparsedCount) 张照片在清单里、但没有分析结果（不在任何计数里）。",
                                     hint: "请用户在 app 里点「重新分析」"))
+        }
+        if let unknown = s.xmpStateUnknown {
+            // 按钮名照批量页「导出」菜单上的字（写过 / 记录读不进来的场次那一项叫「全部重写 XMP」）
+            warnings.append(warning("xmp_state_unknown",
+                                    "这一场上次写 XMP 的记录读不进来（\(unknown)）：说不清哪些照片的 XMP 和现在的判决对不上，"
+                                        + "app 也先不提醒「XMP 待更新」。",
+                                    hint: "要让 Lightroom / Capture One 读到现在的判决，请用户在 app 里点「导出 › 全部重写 XMP (LR/C1 可读)」"
+                                        + "（整场重写，在 LR / C1 里改过的星级会被盖回去，先问用户；MCP 不写 XMP）"))
         }
         let xmpWritable = max(0, xmpStale - xmpShared)
         if xmpWritable > 0 {

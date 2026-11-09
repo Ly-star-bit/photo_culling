@@ -11,6 +11,9 @@ import AppKit
 ///     （导出 JPG / 精华 Top N / 水印页的导出设置那一段）
 /// LabelGUI --batch-ui <photo_dir> <out.png> --body-clock-ui   （状态栏「N 台机身」点开的按机身对时面板）
 /// 都可以加 --ax-dump：截图前打印辅助功能树（输入框、滑杆这类 AppKit 控件带着值），按文字断言。
+/// LabelGUI --batch-ui <photo_dir> <out.png> --perf grid [--copies 15] [--size 2560x1440 -batch.thumbSize 90]
+///     （截完图接着在网格里按 → ← 和数字键，打印每一下哪些视图 body 重算了几次、主线程 CPU、进程指令数：BatchPerf；
+///     --copies N 先把这一场复制成 N 倍的照片）
 ///
 /// 和 --collage-ui 同一套：用 app 里一模一样的视图在一个从不显示的无边框窗口里布局、
 /// 渲染成 PNG。界面不能开，排布有没有挤、时间轴会不会压到别的区域，只能这样看。
@@ -78,6 +81,8 @@ enum BatchUISnapshot {
         let store = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         store.switchSession(to: dir)
         if let gap = option("--gap").flatMap(Double.init) { store.takeGapSec = gap }
+        // --copies N：量刷新要几百张，先把这一场复制成 N 倍（BatchPerf.expand，改的是临时数据目录里的场次文件）。
+        if let copies = option("--copies").flatMap(Int.init) { BatchPerf.expand(store, copies: copies) }
         // --chapter N：先开「只看这一章」（章节号从 1 数，和界面上一样）。
         if let n = option("--chapter").flatMap(Int.init) { store.chapterFilter = n - 1 }
         // --client-only：先开「只看客户选中」（客户选中先用 --client-import --apply 导进同一个数据目录）。
@@ -223,6 +228,10 @@ enum BatchUISnapshot {
             exit(1)
         }
         print("界面快照 \(Int(size.width))x\(Int(size.height)) · \(store.items.count) 张 · 章节 \(store.chapterSegments.count) · \(out.path)")
+        // 截完图再量：按键会改焦点、改判决（数据目录本来就是临时的那份），截图照旧是没按之前的样子。
+        if let scenario = option("--perf") {
+            BatchPerf.run(scenario, store: store, viewport: viewport, spin: spin)
+        }
         exit(0)
     }
 

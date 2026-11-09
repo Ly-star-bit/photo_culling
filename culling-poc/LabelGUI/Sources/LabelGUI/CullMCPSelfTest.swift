@@ -124,7 +124,38 @@ enum CullMCPSelfTest {
         try? FileManager.default.removeItem(at: path)
         let cleared = overviewXMP(open())
         check(cleared.stale == 0 && cleared.written == false && !cleared.warned, "删掉 xmp_state.json 以后回到没写过：\(cleared)")
+        xmpUnknownChecks(check, path: path)
         xmpWrittenAtChecks(check)
+    }
+
+    /// xmp_state.json 在、却解不开（NR4：BatchStore 挪开原件、xmpStateUnknown 记原因）：概览照实说不知道 —— written、
+    /// stale_count、shared_sidecar_count 都是 null，unknown 写原因，带 xmp_state_unknown（hint 指「导出 › 全部重写 XMP」），
+    /// 不带 xmp_stale。以前照旧报 written false、stale 0，看着像这一场没写过 XMP。读得进来的、没写过的没有 unknown 这个键。
+    static func xmpUnknownChecks(_ check: Check, path: URL) {
+        try? Data("{\"marks\": {\"DSCF72".utf8).write(to: path, options: .atomic)
+        // 新建 store 会先自动打开「最近场次」的第一场（就是这一场）：那一下就把坏的挪开了，open() 里再切一次就成了没写过。
+        // 先清掉场次索引，坏的那份留给 open() 里那一次读。
+        try? FileManager.default.removeItem(at: appDataDir.appendingPathComponent("sessions.json"))
+        let store = open()
+        let ov = MCPReadModel.overview(store, session: store.sessionDir.lastPathComponent)
+        let xmp = ov["xmp"] as? [String: Any] ?? [:]
+        let codes = (ov["warnings"] as? [[String: Any]] ?? []).compactMap { $0["code"] as? String }
+        let nulls: Bool = xmp["written"] is NSNull && xmp["stale_count"] is NSNull && xmp["shared_sidecar_count"] is NSNull
+        let reason = xmp["unknown"] as? String ?? ""
+        check(store.xmpStateUnknown != nil && nulls && reason.contains("xmp_state.json") && xmp["last_written"] == nil,
+              "xmp_state.json 解不开：xmp 里 written / stale_count / shared_sidecar_count 是 null、unknown 写原因：\(xmp)")
+        let hint = (ov["warnings"] as? [[String: Any]] ?? []).first { $0["code"] as? String == "xmp_state_unknown" }?["hint"] as? String
+        check(codes.contains("xmp_state_unknown") && !codes.contains("xmp_stale") && (hint ?? "").contains("全部重写 XMP"),
+              "带 xmp_state_unknown（hint 指「导出 › 全部重写 XMP」）、不带 xmp_stale：\(codes) \(hint ?? "nil")")
+        // 挪开的原件留着别的检查用不上：删掉，下面的用例回到没写过
+        let dir = path.deletingLastPathComponent()
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        where name.hasPrefix("xmp_state.corrupt") {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))
+        }
+        let fresh = MCPReadModel.overview(open(), session: store.sessionDir.lastPathComponent)["xmp"] as? [String: Any] ?? [:]
+        check(fresh["unknown"] == nil && fresh["written"] as? Bool == false,
+              "原件挪开以后再打开：回到没写过（written false，没有 unknown 这个键）：\(fresh)")
     }
 
     /// 真写一次 XMP（数据目录里造的假拍摄，照 FileSafetySelfTest.makeShoot；照片旁边写 .xmp）：写之前没有 last_written，

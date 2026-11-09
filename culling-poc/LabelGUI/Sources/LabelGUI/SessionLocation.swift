@@ -95,8 +95,14 @@ enum SessionLocation {
     /// 和「重新定位文件夹…」同一套抽查（relocationCheck：按相对路径找、比大小 / 时间），大多数对得上才改（拷回原位置、改名又
     /// 改回来的照常改）；对不上的 manifest 一字不动，返回 refused（审查：以前不核对就把照片路径改到原路径上那个无关的新文件夹，
     /// 移废片、写 XMP 就作用到新卡里同名的照片上）。
-    static func rebaseManifest(in sessionDir: URL, to folder: URL,
-                               verify: Bool = false) -> (rebase: ManifestRebase?, failed: Bool) {
+    /// `recorded`：调用方已经读出来的 photo_dir（switchSession 按 loadResults 的结构解过一遍）。和 `folder` 是同一个位置就直接
+    /// 回 nil、不读文件（优化分析 NP6：以前没挪过的场次每次打开都先整份 JSONSerialization 一遍，才比出不用改）。nil = 没读过。
+    static func rebaseManifest(in sessionDir: URL, to folder: URL, verify: Bool = false,
+                               recorded: String? = nil) -> (rebase: ManifestRebase?, failed: Bool) {
+        if let recorded {
+            if recorded == folder.path { return (nil, false) }
+            if let a = identity(recorded), let b = identity(folder.path), a == b { return (nil, false) }
+        }
         let url = sessionDir.appendingPathComponent("manifest.json")
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDir), isDir.boolValue,

@@ -20,6 +20,9 @@ final class GridViewport: ObservableObject {
     private var visible: [String: (chapter: Int, cells: Int)] = [:]
     private var scheduled = false
 
+    /// 网格里现在挂着几张照片的格子（Lazy 网格铺出来的，含屏幕外预先铺好的那几行）。只给 --perf grid 报数用。
+    var mountedCells: Int { visible.count }
+
     func appeared(_ id: String, chapter: Int) {
         visible[id] = (chapter, (visible[id]?.cells ?? 0) + 1)
         schedule()
@@ -222,7 +225,7 @@ struct ChapterTimelineLayout: Equatable {
 }
 
 /// 时间轴本体。
-struct ChapterTimeline: View {
+struct ChapterTimeline: View, Equatable {
     let segments: [BatchStore.ChapterSegment]
     @ObservedObject var viewport: GridViewport
     /// 分组模式下在每章上方点出「还有连拍没定」的橙点。
@@ -253,6 +256,13 @@ struct ChapterTimeline: View {
         _hovered = State(initialValue: previewHover)
     }
 
+    /// 批量页每重算一次就新建一份时间轴（焦点一换就是一次）：段、模式、筛选都没变就不重排、不重量标签（批量页那边
+    /// `.equatable()`，优化分析 NP4）。两个闭包不比：点下去时读的是现在的状态。viewport 是同一个对象，它变了自己会通知。
+    static func == (a: ChapterTimeline, b: ChapterTimeline) -> Bool {
+        let shown: Bool = a.segments == b.segments && a.viewport === b.viewport
+        return shown && a.showPending == b.showPending && a.minKeepers == b.minKeepers && a.filtered == b.filtered
+    }
+
     static let markerHeight: CGFloat = 8
     static let barHeight: CGFloat = 8
     static let labelTop: CGFloat = markerHeight + barHeight + 5
@@ -260,6 +270,7 @@ struct ChapterTimeline: View {
     static let cardWidth: CGFloat = 260
 
     var body: some View {
+        let _ = BatchPerf.body("时间轴")
         GeometryReader { geo in
             let layout = ChapterTimelineLayout.compute(segments, width: geo.size.width,
                                                        measure: ChapterTimelineLayout.measureText)

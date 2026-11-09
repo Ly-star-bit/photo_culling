@@ -524,7 +524,7 @@ struct PickView: View {
             for item in frames.prefix(10) {
                 let path = item.previewPath
                 let px = ImageLoader.previewMaxPixel
-                guard ThumbCache.cache.object(forKey: ThumbCache.key(path, px)) == nil else { continue }
+                guard ThumbCache.cached(path, px) == nil else { continue }
                 Task.detached(priority: .utility) { _ = ThumbCache.load(path: path, maxPixel: px) }
             }
         }
