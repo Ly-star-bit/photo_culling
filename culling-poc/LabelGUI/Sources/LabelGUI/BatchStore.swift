@@ -5298,7 +5298,7 @@ final class BatchStore: ObservableObject {
                 if blindCount > 0 {
                     notes.append("注意 \(blindCount) 张是 \(blindNames)：Lightroom Classic 不读这些格式旁边的 .xmp" +
                                  "（它只认文件里内嵌的元数据；Capture One 能读）—— 要在 LR 里按判决筛，" +
-                                 "用「导出 › 复制文件名」粘到图库筛选器「文本 › 文件名」")
+                                 "用「客户 › 复制文件名」粘到图库筛选器「文本 › 文件名」")
                 }
                 if failedIds.isEmpty {
                     var summary: String

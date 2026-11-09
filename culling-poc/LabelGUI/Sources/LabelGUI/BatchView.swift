@@ -401,6 +401,11 @@ struct BatchView: View {
                 Button("从存储卡导入...") {
                     NotificationCenter.default.post(name: .cardImportRequested, object: nil)
                 }
+                // 「废片移到废纸篓」从「导出」挪到这里（优化分析 NU5）：它动的是这一场文件夹里的原片，和打开、导卡、重新定位、
+                // 移除历史记录是一类（Lightroom 的「删除被拒绝的照片」也在图库 / 照片菜单，不在导出里）；「导出」只留往外写文件的。
+                // 顶栏在 1280pt 已经挤满，不另加按钮。
+                Divider()
+                trashMenuButton
                 if !store.recentSessions.isEmpty {
                     Divider()
                     ForEach(store.recentSessions) { session in
@@ -498,19 +503,7 @@ struct BatchView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .frame(width: 220)
-            // 「只看客户选中」：和判决筛选叠加。没导入过客户选择就不占顶栏的地方。
-            if store.clientPickCount > 0 || store.clientPickFilter {
-                Toggle(isOn: $store.clientPickFilter) {
-                    Label {
-                        Text("客户选中 \(store.clientPickCount)")
-                    } icon: {
-                        Image(systemName: "heart.fill").foregroundStyle(store.clientPickFilter ? Color.purple : Color.secondary)
-                    }
-                }
-                .toggleStyle(.button)
-                .fixedSize()
-                .help("只看客户选中的照片（和左边的判决筛选叠加）。没选中照片时，复制文件名、复制原片就按这个范围")
-            }
+            clientMenu
             Picker("排序", selection: $store.sortOrder) {
                 ForEach(BatchStore.SortOrder.allCases, id: \.self) { s in
                     Text(s.rawValue).tag(s)
@@ -562,18 +555,6 @@ struct BatchView: View {
                     .disabled(store.items.isEmpty || store.isRunning)
                 Button("导出高 ISO RAW (降噪)...") { showISOSheet = true }
                     .disabled(store.items.isEmpty || store.isRunning)
-                Divider()
-                clientMenuItems
-                Divider()
-                Button(trashMenuTitle, role: .destructive) {
-                    // 打开确认框之前现取一次拼图在用的（拼图工程先挂到这一场），框上的张数和按下去移的对得上。
-                    store.refreshCollageInUse()
-                    showTrashConfirm = true
-                }
-                // 拼图里在用的默认不移、但确认框里能「连这些一起移」：只有两样都是 0 才灰掉。
-                // 存储卡上的一场（审查 S07）也灰掉：确认框那句「系统废纸篓，可随时恢复」在卡上不成立（顶上横幅说为什么）。
-                .disabled(store.trashableRejectCount + store.collageProtectedRejectCount == 0 || store.isRunning
-                          || store.isCardSession)
             } label: {
                 Label("导出", systemImage: "square.and.arrow.up")
             }
@@ -582,6 +563,42 @@ struct BatchView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.bar)
+    }
+
+    /// 「客户 ▾」（优化分析 NU5）：确认表 → 导入客户选择 → 清除 → 复制文件名 / 复制原片，以前挂在「导出」第二段（「导入」
+    /// 要到「导出」里找）。放在原来「客户选中 N」开关的位置：导入过客户选择以后它是分体按钮 —— 点字还是「只看客户选中」的开关
+    /// （紫色实心 = 开着，和判决筛选叠加），点 ▾ 是菜单。开关、菜单分成两个按钮在 1280pt 的窗口里放不下（量过：有客户选中时
+    /// 文件夹名、「重新分析」被挤出窗口，「导出」被截掉）。
+    @ViewBuilder private var clientMenu: some View {
+        if store.clientPickCount > 0 || store.clientPickFilter {
+            Menu {
+                clientMenuItems
+            } label: {
+                Label {
+                    Text("客户选中 \(store.clientPickCount)")
+                } icon: {
+                    // 菜单按钮上的图默认按模板画（统统一个颜色）：开着时用调色板画成紫色的实心，关着是空心 —— 看得出筛选开没开。
+                    if store.clientPickFilter {
+                        Image(systemName: "heart.fill").symbolRenderingMode(.palette).foregroundStyle(Color.purple)
+                    } else {
+                        Image(systemName: "heart")
+                    }
+                }
+            } primaryAction: {
+                store.clientPickFilter.toggle()
+            }
+            .fixedSize()
+            .help("点字：只看客户选中的照片（紫色实心 = 开着，和左边的判决筛选叠加；没选中照片时，复制文件名、复制原片就按这个范围）。"
+                  + "点 ▾：选片确认表、导入客户选择、清除客户选中、复制文件名、复制原片")
+        } else {
+            Menu {
+                clientMenuItems
+            } label: {
+                Label("客户", systemImage: "heart")
+            }
+            .fixedSize()
+            .help("客户选片：导出选片确认表发给客户，导入客户的选择（紫心），复制文件名、复制原片给修图")
+        }
     }
 
     // MARK: - Bottom status bar (the ONE home for stats + progress)
@@ -617,7 +634,7 @@ struct BatchView: View {
                 if store.clientPickCount > 0 {
                     Label("客户选中 \(store.clientPickCount)", systemImage: "heart.fill")
                         .font(.caption).foregroundStyle(.purple)
-                        .help("导入的客户选择（紫心）。顶栏「客户选中」只看这些；「导出」菜单里复制文件名、复制原片到精修文件夹")
+                        .help("导入的客户选择（紫心）。点顶栏「客户选中」只看这些，它的 ▾ 里复制文件名、复制原片到精修文件夹")
                 }
                 if store.bodies.count >= 2 { bodyClockHint }
             }
@@ -1352,6 +1369,19 @@ struct BatchView: View {
         return "有 \(n) 张的判决、星级或客户选中和上次写进 XMP 的不一样（或者上次没写进去），Lightroom / Capture One 读到的还是旧的。" +
             "点这里只重写这 \(n) 张，其余的一个字节不动（在 LR / C1 里改过星级、这边没动的照片不会被盖回去；别的软件写的 XMP 只改星级/色标，调色等原样保留）。" +
             "sidecar 被删了、被别的软件整份覆盖了，用「导出 › 全部重写 XMP」"
+    }
+
+    /// 文件夹菜单里的「废片移到废纸篓」（优化分析 NU5 以前在「导出」菜单最底下）。
+    private var trashMenuButton: some View {
+        Button(trashMenuTitle, role: .destructive) {
+            // 打开确认框之前现取一次拼图在用的（拼图工程先挂到这一场），框上的张数和按下去移的对得上。
+            store.refreshCollageInUse()
+            showTrashConfirm = true
+        }
+        // 拼图里在用的默认不移、但确认框里能「连这些一起移」：只有两样都是 0 才灰掉。
+        // 存储卡上的一场（审查 S07）也灰掉：确认框那句「系统废纸篓，可随时恢复」在卡上不成立（顶上横幅说为什么）。
+        .disabled(store.trashableRejectCount + store.collageProtectedRejectCount == 0 || store.isRunning
+                  || store.isCardSession)
     }
 
     /// 「废片移到废纸篓」菜单项：拼图里在用的默认不移，单独报出来（不悄悄归零）。
@@ -2173,7 +2203,7 @@ struct BatchView: View {
 
     // MARK: - 客户选片闭环：确认表 → 导入客户选择 → 复制文件名清单 / 复制原片
 
-    /// 「导出」菜单里的这一段。确认表的大小按每张约 120 KB 先估给你看。
+    /// 「客户」菜单（优化分析 NU5 以前是「导出」菜单的第二段）。确认表的大小按每张约 120 KB 先估给你看。
     /// 菜单跟着整页重绘（方向键每按一下都算），这里只数张数；照片 id 等点了再取。
     @ViewBuilder
     private var clientMenuItems: some View {

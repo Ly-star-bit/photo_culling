@@ -1140,7 +1140,7 @@ extension BatchStore {
         return items.filter { passesFilters($0, chapter: chapter) }
     }
 
-    /// 只数张数（「导出」菜单上的范围说明每次重绘都要，别为它建数组）。
+    /// 只数张数（「客户」菜单上的范围说明每次重绘都要，别为它建数组）。
     var filteredCount: Int {
         let chapter = activeChapterFilter
         var n = 0
