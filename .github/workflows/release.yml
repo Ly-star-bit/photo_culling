@@ -1,6 +1,12 @@
-# push 到 main 或 feature/** 分支 → 只构建验证 (CI 先测试);推 v* tag → 构建并自动创建
-# Release 附上 DMG。发版流程:先推 main 等 CI 绿,再打 tag。feature/ 分支推上去就跑同一套测试,
-# 不发 Release (release job 只认 tag),不用再去网页手动点 Run workflow。
+# 同一个提交只跑一遍（优化分析 NE3，用户 2026-11-08 定的；以前 v1.24.0–v1.26.2 每个提交 feature、main、tag 各跑一遍）：
+# - push feature/**（和手动 Run workflow）：完整跑 —— 编译、全部测试、打包和打包后的检查，DMG 传成 artifact，留 14 天，
+#   够跨过「feature 绿 → 合 main → 打 tag」。
+# - push main：check job 先查这个提交在这个 workflow 里有没有绿过的 push run（任何分支都算）：绿过就整个跳过；没绿过
+#   （比如直接往 main 推了没测过的提交）照旧完整跑。
+# - push v* tag：绿过、而且那次的 DMG 还在 → 不重编、不重测，restamp job 下载那份 DMG、版本号换成 tag 的（feature 上打的
+#   包版本号是 0.1，见 build_app.sh）、重签，release job 照旧发 Release（附 release-notes/<tag>.md）；没绿过 / 产物过期了
+#   → 照旧完整跑再发。
+# 发版流程：feature 推上去等绿 → 合进 main 推上去（秒过）→ 打 tag（直接用 feature 那次的包）。
 name: Release
 
 on:
@@ -9,7 +15,7 @@ on:
     tags: ['v*']
   workflow_dispatch: {}
 
-# 默认只读;只有 release job 拿 contents: write (见下)。
+# 默认只读;release job 拿 contents: write，check、restamp 拿 actions: read（查 run、下载别的 run 的产物），见下。
 permissions:
   contents: read
 
@@ -20,7 +26,32 @@ env:
   DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
 
 jobs:
+  # 这次 run 干什么（Scripts/ci_green_run.py）：mode = full（完整跑）/ skip（推 main、绿过了）/ reuse（推 tag、沿用
+  # run_id 那一次的 DMG）。查不了（网络、权限、限流）一律 full；脚本退出码总是 0。摘要页上有一条 notice 说为什么。
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      mode: ${{ steps.green.outputs.mode }}
+      run_id: ${{ steps.green.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: culling-poc/LabelGUI/Scripts/ci_green_run.py
+          sparse-checkout-cone-mode: false
+      # 查的是 checkout 出来的提交（rev-parse HEAD）：带注解的 tag 也落到提交本身，和 API 的 head_sha 对得上。
+      - name: 这个提交绿过没有
+        id: green
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I culling-poc/LabelGUI/Scripts/ci_green_run.py --sha "$(git rev-parse HEAD)"
+
   build:
+    needs: check
+    # mode 没写上（check 自己红了）也当 full：宁可多跑一遍，不能不测。
+    if: ${{ !cancelled() && needs.check.outputs.mode != 'skip' && needs.check.outputs.mode != 'reuse' }}
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +76,7 @@ jobs:
             swiftpm-${{ runner.os }}-${{ steps.swift.outputs.version }}-
 
       # 从这一步到「卸下 DMG」是打包和打包后的检查（构建、DMG 本身、包里的二进制 / 胶片表 / Python 运行时）；再往后是拿
-      # 裸二进制跑的测试。（NE3 还没定：以后要在 build 前面加一个查「这个 SHA 绿过没有」的 job，tag 可能只跑这一段。）
+      # 裸二进制跑的测试。推 tag 沿用 feature 那次的 DMG 时，这些检查不再跑（restamp 只改版本号、重签、验签名）。
       # tee 一份 build.log 给下一步出 annotation。pipefail 要自己开：GitHub 默认的 shell 是 bash -e、不带 pipefail，
       # 管道的退出码是 tee 的 —— 不开的话 build_app.sh 失败这一步照样绿。
       - name: 构建 app + DMG
@@ -208,16 +239,76 @@ jobs:
         timeout-minutes: 10
         run: python3 -I culling-poc/LabelGUI/Scripts/diag_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
 
+      # 留 14 天：推 tag 时沿用的就是它（check 只认没过期的）。
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: PhotoCulling-dmg
           path: 选片工具.dmg
           if-no-files-found: error
+          retention-days: 14
 
+  # 推 tag、这个提交绿过：拿那一次的 DMG，只把版本号换成 tag 的（feature / main 上打的包 CFBundleShortVersionString 是
+  # 0.1：build_app.sh 只从 tag 带版本号；它会出现在「关于」、诊断包、MCP 的 serverInfo 里）。CFBundleVersion 是提交数，
+  # 同一个提交本来就一样。只改 Info.plist、重签（和 build_app.sh 同一句 codesign），代码段、色调表、Python 运行时和那次
+  # 测过的一样；访达排版（.DS_Store、背景图）跟着 DMG 原样留着。传成这次 run 的 PhotoCulling-dmg，release 照旧下载。
+  # 这一步红了不会自动退回完整跑：重跑这个 run，或者在网页上对这个 tag 手动 Run workflow（手动跑一律完整跑，照样发 Release）。
+  restamp:
+    needs: check
+    if: needs.check.outputs.mode == 'reuse'
+    runs-on: macos-15
+    permissions:
+      actions: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: PhotoCulling-dmg
+          run-id: ${{ needs.check.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: 版本号换成 tag 的、重签
+        env:
+          FROM_RUN: ${{ needs.check.outputs.run_id }}
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          RW="$RUNNER_TEMP/restamp.dmg"
+          MNT="$RUNNER_TEMP/restamp"
+          hdiutil convert 选片工具.dmg -format UDRW -o "$RW" -quiet
+          mkdir -p "$MNT"
+          hdiutil attach "$RW" -nobrowse -noautoopen -mountpoint "$MNT" -quiet
+          APP="$MNT/选片工具.app"
+          PLIST="$APP/Contents/Info.plist"
+          OLD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")"
+          BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST")"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${V}" "$PLIST"
+          codesign --force --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")" = "$V" ]
+          detached=0
+          for _ in 1 2 3 4 5; do
+            if hdiutil detach "$MNT" -quiet; then detached=1; break; fi
+            sleep 1
+          done
+          [ "$detached" = 1 ] || hdiutil detach "$MNT" -force -quiet
+          rm -f 选片工具.dmg
+          hdiutil convert "$RW" -format ULMO -o 选片工具.dmg -quiet
+          ls -lh 选片工具.dmg
+          echo "::notice title=沿用 run ${FROM_RUN} 的安装包::版本号 ${OLD} → ${V}（CFBundleVersion ${BUILD} 不变）；只改了 Info.plist、重签，那次编译、测过的包原样发"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhotoCulling-dmg
+          path: 选片工具.dmg
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+
+  # 只认 tag。DMG 从这次 run 里下载：完整跑的是 build 传的，沿用的是 restamp 传的（两个只会跑一个）。build 跳过时 release
+  # 默认也会跟着跳过，所以要 !cancelled()。
   release:
-    needs: build
-    if: github.ref_type == 'tag'
+    needs: [check, build, restamp]
+    if: ${{ !cancelled() && github.ref_type == 'tag' && (needs.build.result == 'success' || needs.restamp.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
