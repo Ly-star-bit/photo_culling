@@ -10,7 +10,8 @@ import CryptoKit
 // 认的顺序：完整文件名（扩展名不论、不分大小写）→ 文件名去掉扩展名 / 照片 id → 文件号（≥3 位数字，
 // 全场只有一张是这个号才算，比如 7221 → DSCF7221）→ 编号（确认表上的 #n：带表号就按那张表，
 // 没带就按最近导出的那张，预览里说是哪张）。12-15 这种范围按编号认（同一个文件夹再导一次另存的交付名 1-2.jpg
-// 也叫这个名字：和表上那几张不是同一批就不猜，见 resolve）。
+// 也叫这个名字：和表上那几张不是同一批就不猜，见 resolve）；表上编号够不着、两头都是全场唯一的文件号的
+// （7207-7215）按文件号区间认。
 
 enum ClientReply {
     struct Resolution {
@@ -33,6 +34,17 @@ enum ClientReply {
         /// 客户给照片写的备注（修图要求）：照片 id → 原话。确认表复制出来的「DSCF7207 备注：去路人」、微信里回的
         /// 「7207 去路人」「DSCF7207：瘦脸」都算（一行开头那张照片带上后面的话，见 noteSplit）；同一张写了几次取最后一次。
         var notes: [String: String] = [:]
+        /// notes 里只凭表上编号认的那几条（「12 去路人」：没写「备注：」，开头是表上第 12 张）：照片 id → 客户写的编号。
+        /// 导入预览单列一行（numberedNotesLine），编号认错了看得见（优化分析 NR2）。
+        var numberedNotes: [String: String] = [:]
+    }
+
+    /// 一行开头的这个词认得出唯一一张，是凭什么认的（noteSplit / markedNote 用）。
+    enum HeadKind {
+        /// 文件名、只指一张的纯数字交付名、全场唯一的 ≥3 位文件号。
+        case unique
+        /// 只有表上的编号对得上（「12 去路人」）：后面的话不带数字才算备注，一行好几段时也不拿它切段。
+        case sheet
     }
 
     /// 分隔符：换行、空格（含全角空格）、Tab、中英文逗号 / 顿号 / 分号 / 冒号 / 句号 / 问号 / 叹号 / 括号。
@@ -193,19 +205,22 @@ enum ClientReply {
     private struct Word {
         var token: String
         var note: String?
+        /// 这条备注只凭表上编号认的（没写「备注」，见 HeadKind.sheet）。
+        var numbered = false
     }
 
     /// 普通文字按行切：整行就是这一场的一个文件名（带空格的文件名「IMG 0001.JPG」，确认表复制出来的
     /// 就是一行一个）就整行当一个词；开头是一张照片、后面是备注的（noteSplit）开头那张带上备注；否则这一行再按分隔符切。
     /// `original` = 没转半角的同一段字（halfwidth 一个字符换一个字符，行和位置都对得上）：备注取它，
-    /// 客户打的全角逗号、括号原样留着。`isHead` = 这个词认得出唯一一张照片（文件名、全场唯一的文件号）。
+    /// 客户打的全角逗号、括号原样留着。`isHead` = 这个词认得出唯一一张照片是凭什么（文件名、全场唯一的文件号、表上编号），nil = 认不出。
     private static func lineTokens(_ text: String, original: String, lookup: Lookup,
-                                   isHead: (String) -> Bool) -> [Word] {
+                                   isHead: (String) -> HeadKind?) -> [Word] {
         let lines = text.components(separatedBy: .newlines)
         let originals = original.components(separatedBy: .newlines)
         var words: [Word] = []
         for (index, line) in lines.enumerated() {
-            if let whole = clean(line), whole.contains(" "), lookup.byFilename(whole) != nil {
+            // 不只看带空格的：「001-婚礼.JPG」整行是文件名，别让 headCuts 在「-婚」那里切开、把后半截当备注（NR2 加了那一刀）。
+            if let whole = clean(line), lookup.byFilename(whole) != nil {
                 words.append(Word(token: whole))
                 continue
             }
@@ -215,17 +230,17 @@ enum ClientReply {
                 continue
             }
             if let split = noteSplit(line, original: raw, lookup: lookup, isHead: isHead) {
-                words.append(Word(token: split.head, note: split.note))
+                words.append(Word(token: split.head, note: split.note, numbered: split.numbered))
                 continue
             }
             // 一行好几张、开头那张带着备注（「7207 去路人，7208 瘦脸」）：按句读后面紧跟的照片切成几段，各带各的备注。
             // 开头那张没带备注的（「DSCF7207, DSCF7208 都要」）不切，照旧按分隔符切、不带备注。
             if let parts = photoSegments(line, original: raw, isHead: isHead), parts.count >= 2,
                let first = noteSplit(parts[0].half, original: parts[0].raw, lookup: lookup, isHead: isHead) {
-                words.append(Word(token: first.head, note: first.note))
+                words.append(Word(token: first.head, note: first.note, numbered: first.numbered))
                 for part in parts.dropFirst() {
                     if let split = noteSplit(part.half, original: part.raw, lookup: lookup, isHead: isHead) {
-                        words.append(Word(token: split.head, note: split.note))
+                        words.append(Word(token: split.head, note: split.note, numbered: split.numbered))
                     } else {
                         words += plainWords(part.half, lookup: lookup, isHead: isHead)
                     }
@@ -242,14 +257,16 @@ enum ClientReply {
     /// 去认（进「没认出」/「（重名）」），备注不要；以前退回按分隔符切，备注「修 3 处」里的 3、「和 DSCF7208 一样」里的
     /// DSCF7208 被当成要的照片。记号前面不是一个像照片的词（这一场的文件名，或带数字的一个词）的不算这个格式，
     /// 照旧按普通文字认（「选好了 备注：7207去路人」）。
+    /// 开头是表上编号的（「12 备注：去路人」）也收备注：显式写了「备注」的一定是备注（优化分析 NR2，以前编号不算开头、备注丢了）。
+    /// 编号和文件号对不上的（「120 备注：…」，见 HeadKind）照旧只交编号去认、报「文件号还是编号？」，备注不要。
     private static func markedNote(_ line: String, original: String, lookup: Lookup,
-                                   isHead: (String) -> Bool) -> Word? {
+                                   isHead: (String) -> HeadKind?) -> Word? {
         guard let mark = line.range(of: #"\s+备注[:：]"#, options: .regularExpression) else { return nil }
         let headText = String(line[..<mark.lowerBound])
         guard let head = clean(headText) else { return nil }
         let oneWord = hasDigit(head) && tokens(headText).count == 1
         guard lookup.byFilename(head) != nil || oneWord else { return nil }
-        guard isHead(head) else { return Word(token: head) }
+        guard isHead(head) != nil else { return Word(token: head) }
         let scalars = Array(line.unicodeScalars)
         let source = Array(original.unicodeScalars)
         let raw = source.count == scalars.count ? source : scalars
@@ -261,20 +278,21 @@ enum ClientReply {
 
     /// 按分隔符切成词。紧贴着汉字写的照片（「7208瘦脸」）拆成这张照片和它的备注 —— 以前整个词进「没认出」；
     /// 这一场的文件名本身带汉字的（「婚礼001.JPG」）不拆。
-    private static func plainWords(_ text: String, lookup: Lookup, isHead: (String) -> Bool) -> [Word] {
+    private static func plainWords(_ text: String, lookup: Lookup, isHead: (String) -> HeadKind?) -> [Word] {
         tokens(text).map { token in
             guard lookup.byFilename(token) == nil, token.unicodeScalars.contains(where: { !$0.isASCII }),
                   let split = noteSplit(token, original: token, lookup: lookup, isHead: isHead) else {
                 return Word(token: token)
             }
-            return Word(token: split.head, note: split.note)
+            return Word(token: split.head, note: split.note, numbered: split.numbered)
         }
     }
 
     /// 一行里在句读（逗号、顿号、分号、句号、叹号、问号）后面紧跟着又一张照片（全场唯一的文件名 / 文件号）的地方切成几段，
     /// 分隔用的句读不要；`half` 是转过半角的、`raw` 是同一段原文。一刀都切不出 = nil。
+    /// 表上编号（HeadKind.sheet）不拿来切段：「7207 去路人，3 处要修」的 3 是备注里的字，不是又一张。
     private static func photoSegments(_ line: String, original: String,
-                                      isHead: (String) -> Bool) -> [(half: String, raw: String)]? {
+                                      isHead: (String) -> HeadKind?) -> [(half: String, raw: String)]? {
         let scalars = Array(line.unicodeScalars)
         let source = Array(original.unicodeScalars)
         let raw = source.count == scalars.count ? source : scalars
@@ -284,7 +302,7 @@ enum ClientReply {
             while start < scalars.count, CharacterSet.whitespaces.contains(scalars[start]) { start += 1 }
             var end = start
             while end < scalars.count, !clauseBreaks.contains(scalars[end]) { end += 1 }
-            guard end > start, startsWithHead(Array(scalars[start..<end]), isHead: isHead) else { continue }
+            guard end > start, startsWithHead(Array(scalars[start..<end]), isHead: { isHead($0) == .unique }) else { continue }
             bounds.append((i, start))
         }
         guard !bounds.isEmpty else { return nil }
@@ -302,16 +320,28 @@ enum ClientReply {
     /// 切段用的句读（转过半角以后的：全角逗号、分号、叹号、问号已经是半角的了）。冒号不算（「DSCF7207：瘦脸」）。
     private static let clauseBreaks = CharacterSet(charactersIn: ",，、;；。!！?？")
 
-    /// 开头那个词可能在哪儿结束：头几个分隔符处，和字母数字后面紧跟汉字的地方（「7207去路人」「DSCF7207瘦脸」）。
+    /// 开头那个词可能在哪儿结束：头几个分隔符处，和字母数字后面紧跟汉字的地方（「7207去路人」「DSCF7207瘦脸」），
+    /// 还有字母数字和汉字中间夹着 - ~ 的地方（「7207-去路人」「DSCF7207～瘦脸」：切在 - 前面，- 由 noteStart 去掉；优化分析 NR2，
+    /// 以前整条进「没认出」）。- 后面跟的是字母数字的不切：「DSCF7207-2」是另存的文件名，「7207-7215」是范围。
+    /// 分隔符那张表（separators）不加 - ~：它不看前后文，「001-婚礼.JPG」这种文件名会被切散。
     private static func headCuts(_ scalars: [Unicode.Scalar]) -> [Int] {
         var cuts: [Int] = []
         for (i, s) in scalars.enumerated() where i > 0 && !separators.contains(scalars[i - 1]) {
-            let boundary = separators.contains(s) || (!s.isASCII && scalars[i - 1].isASCII)
+            let boundary = separators.contains(s) || (!s.isASCII && scalars[i - 1].isASCII) || dashBeforeHan(scalars, at: i)
             guard boundary else { continue }
             cuts.append(i)
             if cuts.count >= 4 { break }
         }
         return cuts
+    }
+
+    /// 第 i 个起是一串 - ~（noteDashes），前面紧挨着字母数字、后面紧跟着汉字。
+    private static func dashBeforeHan(_ scalars: [Unicode.Scalar], at i: Int) -> Bool {
+        guard i > 0, noteDashes.contains(scalars[i]), scalars[i - 1].isASCII,
+              CharacterSet.alphanumerics.contains(scalars[i - 1]) else { return false }
+        var j = i
+        while j < scalars.count, noteDashes.contains(scalars[j]) { j += 1 }
+        return j < scalars.count && scalars[j].properties.isIdeographic
     }
 
     /// 这一段开头是不是这一场的一张照片：整段就是，或者在 headCuts 切下来的开头那段是。
@@ -340,8 +370,10 @@ enum ClientReply {
 
     /// 备注里的这个词还认得出照片吗：它本身、或者它在 ASCII 和汉字交界处切开的每一段（「7208瘦脸」里的 7208，
     /// 和切开头用的同一条规则）是文件名、全场唯一的文件号、范围。
+    /// 「7208-瘦脸」切开是「7208-」「瘦脸」：夹在照片和汉字中间的 - ~ 去掉再认（和 headCuts 那一刀一致，优化分析 NR2）。
     private static func mentionsPhoto(_ word: String, lookup: Lookup) -> Bool {
-        let pieces = [word] + scriptRuns(word).compactMap(clean)
+        let runs = scriptRuns(word).map { $0.trimmingCharacters(in: noteDashes) }
+        let pieces = [word] + runs.compactMap(clean)
         return pieces.contains { lookup.nameLike($0) || isRange(Substring($0)) }
     }
 
@@ -355,8 +387,11 @@ enum ClientReply {
     ///   分隔符切 —— 有文件名、全场唯一的文件号、范围（紧贴着汉字写的「7208瘦脸」也算，见 mentionsPhoto），
     ///   或者全是数字、两个以上数字（「DSCF7207 12 35」「7207、35、78 都要」）。
     ///   只夹着一个小数字的（「修 3 处」）算备注：以前那个 3 会被当成表上第 3 张认进来。
+    /// - 开头是表上编号的（「12 去路人」，HeadKind.sheet）：后面的话一个数字都不带才算备注（用户定的规则，优化分析 NR2）——
+    ///   「12、35 都要」「12 还有 35」照旧都是要的照片；「12 修 3 处」拿不准，也照旧按分隔符切（12 和表上第 3 张都认进来、都看得见）。
+    ///   返回的 numbered = true：导入预览单列一行说是按编号认的。
     private static func noteSplit(_ line: String, original: String, lookup: Lookup,
-                                  isHead: (String) -> Bool) -> (head: String, note: String)? {
+                                  isHead: (String) -> HeadKind?) -> (head: String, note: String, numbered: Bool)? {
         let scalars = Array(line.unicodeScalars)
         let source = Array(original.unicodeScalars)
         let raw = source.count == scalars.count ? source : scalars
@@ -364,12 +399,13 @@ enum ClientReply {
         // （「7207去路人」「DSCF7207瘦脸」）在字母数字和汉字交界处也切一刀。
         for cut in headCuts(scalars).reversed() {
             let headText = String(String.UnicodeScalarView(scalars[..<cut]))
-            guard let head = clean(headText), isHead(head) else { continue }
+            guard let head = clean(headText), let kind = isHead(head) else { continue }
             let restText = String(String.UnicodeScalarView(scalars[cut...]))
             let rest = restText.trimmingCharacters(in: noteLead)
             guard !rest.isEmpty else { return nil }
             // 备注从哪儿开始（在转过半角的这一行上数，原文同一个位置）：前面的分隔去掉，客户自己写的字一个不动。
             var start = noteStart(scalars, from: cut)
+            var numbered = false
             if rest.hasPrefix("备注") {
                 // 只去掉记号自己：「备注」、后面至多一个冒号、空白（「备注：-1档」的 - 是客户写的）。
                 start = cut
@@ -378,6 +414,9 @@ enum ClientReply {
                 if start < scalars.count, scalars[start] == ":" || scalars[start] == "：" { start += 1 }
                 while start < scalars.count, CharacterSet.whitespaces.contains(scalars[start]) { start += 1 }
             } else {
+                // 表上编号开头：后面带一个数字都不算备注（见上）。
+                if kind == .sheet && hasDigit(restText) { return nil }
+                numbered = kind == .sheet
                 // 「第 12 张」「35 号」明说是第几张的：照旧当要的照片（「DSCF7207 第12张 谢谢」）。
                 if restText.range(of: #"第\s*[0-9]+|[0-9]+\s*[张張号號]"#, options: .regularExpression) != nil { return nil }
                 let words = tokens(restText)
@@ -387,13 +426,14 @@ enum ClientReply {
             }
             let note = String(String.UnicodeScalarView(raw[min(start, raw.count)...]))
             let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmedNote.isEmpty ? nil : (head, trimmedNote)
+            return trimmedNote.isEmpty ? nil : (head, trimmedNote, numbered)
         }
         return nil
     }
 
-    /// 备注前面跳过的分隔：空白、逗号、冒号、顿号这些；- ~ — 只在后面跟着空白（或到头）时才算分隔（「DSCF7207 - 去路人」），
-    /// 紧贴着字的是客户写的（「7207 -0.5EV」「DSCF7207：-1档」），以前一起剥掉，负号丢了意思正好反过来。
+    /// 备注前面跳过的分隔：空白、逗号、冒号、顿号这些，和 - ~ —（「DSCF7207 - 去路人」「7207-去路人」「7207 ——去路人」）。
+    /// 后面紧跟着数字的那串 - ~ 是客户写的、留着（「7207 -0.5EV」「DSCF7207：-1档」「~0.5EV」）：以前一起剥掉，负号丢了意思
+    /// 正好反过来。以前只在后面跟着空白时才算分隔，「——去路人」连破折号原样存进备注（优化分析 NR2）。
     private static func noteStart(_ scalars: [Unicode.Scalar], from cut: Int) -> Int {
         var i = cut
         while i < scalars.count {
@@ -404,7 +444,7 @@ enum ClientReply {
             guard noteDashes.contains(scalars[i]) else { break }
             var j = i
             while j < scalars.count, noteDashes.contains(scalars[j]) { j += 1 }
-            guard j == scalars.count || CharacterSet.whitespaces.contains(scalars[j]) else { break }
+            if j < scalars.count, scalars[j].isASCII, CharacterSet.decimalDigits.contains(scalars[j]) { break }
             i = j
         }
         return i
@@ -502,9 +542,15 @@ enum ClientReply {
         var unknownSeen = Set<String>()
         /// 这个词带着的备注：认出照片时记到那张上。
         var pendingNote: String?
+        /// 这条备注只凭表上编号认的：客户写的编号（导入预览单列一行）；nil = 不是。
+        var pendingNumbered: String?
         func hit(_ id: String) {
             if seen.insert(id).inserted { r.ids.append(id) }
-            if let note = pendingNote { r.notes[id] = note }
+            if let note = pendingNote {
+                r.notes[id] = note
+                // 同一张后面又写了一次（文件名 + 备注）：按最后那次，不再算「按编号认的」。
+                r.numberedNotes[id] = pendingNumbered
+            }
             pendingNote = nil
         }
         func miss(_ token: String) { if unknownSeen.insert(token).inserted { r.unknown.append(token) } }
@@ -533,16 +579,39 @@ enum ClientReply {
             if let index = Int(token).flatMap(sheetPhoto), index != file { return false }
             return true
         }
+        /// 开头这个词凭什么认得出唯一一张（见 HeadKind）。表上编号（.sheet）只认「只有编号对得上」的：文件号、纯数字的交付名
+        /// 都没有这个号 —— 和下面主循环 (nil, index?) 那一支同一个条件；对上别的一张的照旧报「文件号还是编号？」，不带备注。
+        func headKind(_ token: String) -> HeadKind? {
+            if uniqueHead(token) { return .unique }
+            guard isDigits(Substring(token)), lookup.deliveredName[token] == nil,
+                  Int(token).flatMap(sheetPhoto) != nil else { return nil }
+            let numbered: Set<String>? = token.count >= 3 ? lookup.byNumber[fileNumber(token) ?? ""] : nil
+            return (numbered ?? []).isEmpty ? .sheet : nil
+        }
+        /// 「7207-7215」按文件号认：两头都是 ≥3 位、全场只有一张是这个号；中间的号要么没有（删掉了、相机跳号）、要么只有一张。
+        /// 认不了（好几张是同一个号、区间太长）= nil。
+        func fileRange(_ from: Substring, _ to: Substring) -> [String]? {
+            guard from.count >= 3, to.count >= 3, let a = Int(from), let b = Int(to), a <= b, b - a < 1000,
+                  lookup.byNumber[String(a)]?.count == 1, lookup.byNumber[String(b)]?.count == 1 else { return nil }
+            var ids: [String] = []
+            for n in a...b {
+                guard let found = lookup.byNumber[String(n)] else { continue }
+                guard found.count == 1, let id = found.first else { return nil }
+                ids.append(id)
+            }
+            return ids
+        }
 
         let spoken = originalRest(text, half: half, rest: rest)
         let parsed = table(spoken, lookup: lookup)
         r.tableColumns = parsed?.columns
         r.tableDropped = Set(parsed?.dropped ?? []).count
         let words = parsed.map { $0.tokens.map { Word(token: $0) } }
-            ?? lineTokens(rest, original: spoken, lookup: lookup, isHead: uniqueHead)
+            ?? lineTokens(rest, original: spoken, lookup: lookup, isHead: headKind)
         for word in words {
             let token = word.token
             pendingNote = word.note
+            pendingNumbered = word.numbered ? token : nil
             if let ids = lookup.byFilename(token) {
                 if ids.count == 1, let id = ids.first { hit(id) } else { miss(token + lookup.ambiguity(token)) }
                 continue
@@ -564,6 +633,14 @@ enum ClientReply {
                     } else {
                         miss(token + (delivered.count > 1 ? "（重名）" : "（交付文件名还是编号？）"))
                     }
+                    continue
+                }
+                // 表上编号够不着（没导出过确认表，或者表上没有这么多张）：两头都是全场唯一的 ≥3 位文件号的，按文件号区间认
+                // （「7207-7215」「7207~7215」，优化分析 NR2；以前整条进「没认出」）。表上够得着其中一部分的、区间里有的号
+                // 好几张都是的拿不准，照旧进「没认出」。
+                let indexReaches: Bool = photos?.contains { $0 != nil } ?? false
+                if byIndex == nil, !indexReaches, let files = fileRange(parts[0], parts[1]) {
+                    files.forEach(hit)
                     continue
                 }
                 guard r.sheet != nil else { r.numbersWithoutSheet = true; miss(token); continue }
@@ -633,6 +710,7 @@ enum ClientReply {
             lines.append("这一场还没导出过确认表，编号认不了（文件名、文件号照样认）")
         }
         if let note = notesLine(r) { lines.append(note) }
+        if let numbered = numberedNotesLine(r) { lines.append(numbered) }
         if let quota = quotaLine(r) { lines.append(quota) }
         if !r.ids.isEmpty {
             let fresh = r.ids.filter { !existing.contains($0) }.count
@@ -656,6 +734,25 @@ enum ClientReply {
         let more: String = noted.count > 3 ? "…" : ""
         let list = shown.joined(separator: "、")
         return "带备注 \(noted.count) 张：\(list)\(more)（存进客户备注，复制原片时写成「精修要求.csv」）"
+    }
+
+    /// 导入预览里「按编号认的备注」那一行的开头（导入框把这一行标成橙色）。
+    static let numberedNotePrefix = "其中按表上编号后面的字当备注"
+
+    /// 「其中按表上编号后面的字当备注 1 张：12 → DSCF7212「去路人」（没写「备注：」，看一眼编号对不对）」：只凭表上编号认的
+    /// 备注（「12 去路人」）和写了「备注：」、写了文件名的分开说（优化分析 NR2）—— 客户按另一张表的编号回、编号打错了，
+    /// 备注会记到别的照片上，在预览里要看得见。没有这种的 = nil。
+    static func numberedNotesLine(_ r: Resolution) -> String? {
+        let noted = r.ids.filter { r.numberedNotes[$0] != nil && r.notes[$0] != nil }
+        guard !noted.isEmpty else { return nil }
+        let shown = noted.prefix(3).map { id -> String in
+            let note = r.notes[id] ?? ""
+            let short = note.count > 12 ? String(note.prefix(12)) + "…" : note
+            return (r.numberedNotes[id] ?? "") + " → " + id + "「" + short + "」"
+        }
+        let more: String = noted.count > 3 ? "…" : ""
+        let list = shown.joined(separator: "、")
+        return numberedNotePrefix + " \(noted.count) 张：\(list)\(more)（没写「备注：」，看一眼编号对不对）"
     }
 
     /// 那张表设了套餐张数：这次认出几张、超没超（只提示）。

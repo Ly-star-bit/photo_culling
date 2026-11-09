@@ -40,6 +40,120 @@ enum ProofSheetSelfTest {
         greetingChecks()
         blankWatermarkChecks()
         retouchLandedChecks()
+        numberedNoteChecks()
+        dashAndRangeChecks()
+    }
+
+    // MARK: 编号开头的修图要求（优化分析 NR2：「12 去路人」「12 备注：去路人」以前备注丢了）
+
+    private static func numberedNoteChecks() {
+        let all = items()
+        let header = "\(ProofSheetPage.header) \(bigSheet.id)\n"
+        func expect(_ text: String, ids: [String], notes: [String: String], numbered: [String: String] = [:],
+                    _ name: String) {
+            let r = ClientReply.resolve(text, items: all, sheets: [bigSheet])
+            let ok = r.ids == ids && r.notes == notes && r.numberedNotes == numbered
+            check(ok, name, "认出 \(r.ids.joined(separator: " ")) · 备注 \(r.notes) · 按编号 \(r.numberedNotes) · 没认出 \(r.unknown)")
+        }
+        // 显式写了「备注」：一定收成备注，不算「按编号认的」。
+        expect("12 备注：去路人", ids: ["DSCF7212"], notes: ["DSCF7212": "去路人"], "「12 备注：去路人」：收成备注")
+        expect(header + "12 备注：修 3 处\n", ids: ["DSCF7212"], notes: ["DSCF7212": "修 3 处"],
+               "带表号、「备注：」后面带数字也整段收（显式写的）")
+        expect("12备注：-1档", ids: ["DSCF7212"], notes: ["DSCF7212": "-1档"], "紧贴着写的「12备注：-1档」：负号留着")
+        // 只凭编号：后面不带数字 = 备注，记下是按编号认的。
+        expect("12 去路人", ids: ["DSCF7212"], notes: ["DSCF7212": "去路人"], numbered: ["DSCF7212": "12"],
+               "「12 去路人」：收成备注，记成按编号认的")
+        expect("12去路人", ids: ["DSCF7212"], notes: ["DSCF7212": "去路人"], numbered: ["DSCF7212": "12"],
+               "紧贴着写的「12去路人」也一样")
+        expect("12 去路人，7208 瘦脸", ids: ["DSCF7212", "DSCF7208"], notes: ["DSCF7212": "去路人", "DSCF7208": "瘦脸"],
+               numbered: ["DSCF7212": "12"], "编号开头、后面又跟一张文件号：各带各的，只有编号那条算按编号认的")
+        expect("12 去路人\nDSCF7212 瘦脸", ids: ["DSCF7212"], notes: ["DSCF7212": "瘦脸"],
+               "同一张后面用文件名又写了一次：按最后那次，不再算按编号认的")
+        // 反例：两个以上编号、后面带数字的，照旧都是要的照片、不当备注。
+        expect("12、35 都要", ids: ["DSCF7212", "DSCF7235"], notes: [:], "反例「12、35 都要」：两张都要、没有备注")
+        expect("12、35、38 都要", ids: ["DSCF7212", "DSCF7235", "DSCF7238"], notes: [:], "反例「12、35、38 都要」：三张都要")
+        expect("12 35、38 都要", ids: ["DSCF7212", "DSCF7235", "DSCF7238"], notes: [:], "反例「12 35、38 都要」：三张都要")
+        expect("12 还有 35 瘦脸", ids: ["DSCF7212", "DSCF7235"], notes: [:], "反例「12 还有 35 瘦脸」：后面带数字，两张都要、不当备注")
+        expect("12 修 3 处", ids: ["DSCF7212", "DSCF7203"], notes: [:],
+               "反例「12 修 3 处」：后面带数字拿不准，照旧都当要的照片（预览里看得见第 3 张）")
+        expect("7207 去路人，3 处要修", ids: ["DSCF7207"], notes: ["DSCF7207": "去路人，3 处要修"],
+               "文件号开头那行里的「3 处」：编号不拿来切段，整句还是 7207 的备注")
+        // 编号也对得上文件号（表上 120 张以上）：照旧说不准、不带备注。
+        let many = (1...130).map { item(String(format: "IMG_%04d", $0 + 1000)) } + [item("DSCF0120")]
+        let manySheet = ProofSheet(id: "20261104-080000", date: Date(), scope: "精选 + 可用", ids: many.map(\.id))
+        let ambiguous = ClientReply.resolve("120 备注：去路人", items: many, sheets: [manySheet])
+        check(ambiguous.notes.isEmpty && ambiguous.unknown.contains { $0.hasPrefix("120") },
+              "「120 备注：…」文件号、编号对不上：照旧说不准、不带备注", "\(ambiguous.ids) \(ambiguous.unknown)")
+        // 没导出过确认表：「12 去路人」认不出 12，照旧列在没认出、不带备注。
+        let noSheet = ClientReply.resolve("12 去路人", items: all, sheets: [])
+        check(noSheet.ids.isEmpty && noSheet.notes.isEmpty && noSheet.numbersWithoutSheet,
+              "没有确认表：「12 去路人」认不了编号、不带备注", "\(noSheet.ids) \(noSheet.notes) \(noSheet.unknown)")
+
+        // 导入预览：按编号认的备注单列一行（橙色那行的开头），「备注：」的不进这一行。
+        let mixed = ClientReply.resolve("12 去路人\nDSCF7207 备注：瘦脸", items: all, sheets: [bigSheet])
+        let lines = ClientReply.summary(mixed, existing: [])
+        let numberedLine = lines.first { $0.hasPrefix(ClientReply.numberedNotePrefix) } ?? ""
+        check(lines.contains { $0.hasPrefix("带备注 2 张：") } && numberedLine.contains("1 张")
+              && numberedLine.contains("12 → DSCF7212「去路人」") && !numberedLine.contains("DSCF7207"),
+              "导入预览：带备注 2 张，另有一行说其中 1 张按编号认（12 → DSCF7212），「备注：」那张不在这行", lines.joined(separator: " / "))
+        let explicit = ClientReply.summary(ClientReply.resolve("12 备注：去路人", items: all, sheets: [bigSheet]), existing: [])
+        check(!explicit.contains { $0.hasPrefix(ClientReply.numberedNotePrefix) }, "只有「备注：」的：没有按编号那一行",
+              explicit.joined(separator: " / "))
+    }
+
+    // MARK: 「7207-去路人」「7207~7215」、破折号（优化分析 NR2）
+
+    private static func dashAndRangeChecks() {
+        let all = items()
+        func expect(_ text: String, pool: [BatchItem]? = nil, sheets: [ProofSheet]? = nil, ids: [String],
+                    notes: [String: String], _ name: String) {
+            let r = ClientReply.resolve(text, items: pool ?? all, sheets: sheets ?? [bigSheet])
+            let ok = r.ids == ids && r.notes == notes
+            check(ok, name, "认出 \(r.ids.joined(separator: " ")) · 备注 \(r.notes) · 没认出 \(r.unknown)")
+        }
+        expect("7207-去路人", ids: ["DSCF7207"], notes: ["DSCF7207": "去路人"], "「7207-去路人」：- 前面切开，备注不带 -")
+        expect("DSCF7207-去路人", ids: ["DSCF7207"], notes: ["DSCF7207": "去路人"], "「DSCF7207-去路人」")
+        expect("DSCF7207～瘦脸", ids: ["DSCF7207"], notes: ["DSCF7207": "瘦脸"], "全角波浪号「DSCF7207～瘦脸」")
+        expect("7207——去路人", ids: ["DSCF7207"], notes: ["DSCF7207": "去路人"], "「7207——去路人」：破折号不进备注")
+        expect("DSCF7207 ——去路人", ids: ["DSCF7207"], notes: ["DSCF7207": "去路人"],
+               "「DSCF7207 ——去路人」：破折号后面不是数字，不进备注")
+        expect("DSCF7207 -1档", ids: ["DSCF7207"], notes: ["DSCF7207": "-1档"], "反例「DSCF7207 -1档」：负号后面是数字，留着")
+        expect("7207-去路人，7208-瘦脸", ids: ["DSCF7207", "DSCF7208"], notes: ["DSCF7207": "去路人", "DSCF7208": "瘦脸"],
+               "一行两张都用 - 连着备注：各带各的")
+        expect("7207 去路人，7208-瘦脸", ids: ["DSCF7207", "DSCF7208"], notes: ["DSCF7207": "去路人", "DSCF7208": "瘦脸"],
+               "后面那张用 - 连着：不被吞进前面那张的备注")
+        // 反例：另存名 DSCF7207-2（- 后面是数字）不切。
+        let saved = all + [item("DSCF7207-2")]
+        expect("DSCF7207-2", pool: saved, ids: ["DSCF7207-2"], notes: [:], "反例「DSCF7207-2」（另存名）：整个认，不切成 7207 和 2")
+        expect("DSCF7207-2 去路人", pool: saved, ids: ["DSCF7207-2"], notes: ["DSCF7207-2": "去路人"], "「DSCF7207-2 去路人」：备注记在另存的那张上")
+        let notHere = ClientReply.resolve("DSCF7207-2", items: all, sheets: [bigSheet])
+        check(notHere.ids.isEmpty && notHere.unknown == ["DSCF7207-2"], "这一场没有 DSCF7207-2：整个列在没认出，不悄悄认成 7207",
+              "\(notHere.ids) \(notHere.unknown)")
+        // 反例：文件名本身是「数字-汉字」（001-婚礼.JPG），001 又是另一张的文件号：整行是文件名，不切。
+        let wedding = [item("DSCF0001"), item("001-婚礼")]
+        expect("001-婚礼.JPG", pool: wedding, sheets: [], ids: ["001-婚礼"], notes: [:], "反例「001-婚礼.JPG」：整行是文件名，不切")
+        expect("001-婚礼.JPG 黑白", pool: wedding, sheets: [], ids: ["001-婚礼"], notes: ["001-婚礼": "黑白"],
+               "「001-婚礼.JPG 黑白」：整个文件名带备注")
+
+        // 范围：表上编号够不着，两头都是全场唯一的文件号 → 按文件号区间认。
+        let span = (7207...7215).map { String(format: "DSCF%d", $0) }
+        expect("7207~7215", ids: span, notes: [:], "「7207~7215」：表上只有 40 张够不着，按文件号区间认 9 张")
+        expect("7207-7215", ids: span, notes: [:], "「7207-7215」一样")
+        expect("7207～7215", ids: span, notes: [:], "全角「7207～7215」一样")
+        expect("7207-7215", sheets: [], ids: span, notes: [:], "没导出过确认表：一样按文件号区间认")
+        let gappy = all.filter { $0.id != "DSCF7210" }
+        expect("7207-7215", pool: gappy, ids: span.filter { $0 != "DSCF7210" }, notes: [:], "区间里缺一张（删掉了）：其余照认")
+        // 反例：12-15 表上够得着，照旧按编号；两头有一头不是唯一的文件号、表上够得着一部分的，拿不准 → 没认出。
+        expect("12-15", ids: ["DSCF7212", "DSCF7213", "DSCF7214", "DSCF7215"], notes: [:], "反例「12-15」：表上够得着，照旧按编号")
+        let twins = all + [item("IMG_7215")]
+        let twin = ClientReply.resolve("7207-7215", items: twins, sheets: [bigSheet])
+        check(twin.ids.isEmpty && twin.unknown == ["7207-7215"], "反例：7215 有两张（两台机身）：拿不准，整条进没认出",
+              "\(twin.ids) \(twin.unknown)")
+        let manyItems = (1...130).map { item(String(format: "IMG_%04d", $0 + 1000)) } + [item("DSCF0125"), item("DSCF0135")]
+        let manySheet = ProofSheet(id: "20261104-080000", date: Date(), scope: "精选 + 可用", ids: manyItems.map(\.id))
+        let partial = ClientReply.resolve("125-135", items: manyItems, sheets: [manySheet])
+        check(partial.ids.isEmpty && partial.unknown == ["125-135"], "反例：表上够得着一部分（130 张）：拿不准，整条进没认出",
+              "\(partial.ids) \(partial.unknown)")
     }
 
     // MARK: 精修要求.csv 按实际落地的文件名写（审查：另存 -2 的指到目标里别的照片、取消了也照样列着）
@@ -663,7 +777,9 @@ enum ProofSheetSelfTest {
         expect("7207去路人", ids: ["DSCF7207"], notes: ["DSCF7207": "去路人"], "中文紧贴着文件号（以前整个算没认出）")
         expect("DSCF7207, DSCF7208 都要", ids: ["DSCF7207", "DSCF7208"], notes: [:], "后面还有文件名：不是备注，两张都要")
         expect("IMG 0001.JPG 黑白", ids: ["IMG 0001"], notes: ["IMG 0001": "黑白"], "带空格的文件名后面跟备注")
-        expect("12 去路人", ids: ["DSCF7212"], notes: [:], "开头是编号不带备注（「12、35 都要」那种不能误当备注）")
+        // 规则改过（优化分析 NR2，用户同意）：一行只有一个表上编号、后面的话一个数字都不带 = 这张的备注（以前丢掉）；
+        // 两个以上编号（「12、35 都要」）照旧都要、不当备注 —— 那几条在 numberedNoteChecks 里。
+        expect("12 去路人", ids: ["DSCF7212"], notes: ["DSCF7212": "去路人"], "开头是表上编号、后面不带数字：收成备注")
         expect("DSCF7207 第12张 谢谢", ids: ["DSCF7207", "DSCF7212"], notes: [:], "后面明说「第 12 张」：照旧是要的照片")
         expect("DSCF7207 修 2 处，这张也要", ids: ["DSCF7207"], notes: ["DSCF7207": "修 2 处，这张也要"],
                "「这张」不是第几张：整句是备注")
