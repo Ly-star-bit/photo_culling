@@ -463,6 +463,47 @@ enum CollageBookCoverRender {
     }
 }
 
+// MARK: - 看版 PDF 的第一页（CollageProofPDF，P5）
+
+extension CollageBookCoverRender {
+    /// 看版 PDF 的封面页：看得见的那块（封底 | 书脊 | 封面，不带包边、出血、参考线），长边 2000 px、JPEG 0.75（同跨页那几页）；
+    /// 页脚第一行「封面 · 标题」，下面是封面上的照片文件名（封面那一页先上后下、先左后右，再是封底那张）。没有封面 = nil。
+    static func proofPage(project: CollageProject, hints: [String: CollageCrop.Hints]) -> CollageProofPDF.Page? {
+        guard project.mode == .album, let cover = project.bookCover else { return nil }
+        let full = cover.layout(canvas: project.canvas, spreads: project.pages.count)
+        let long = Double(max(full.trim.width, full.trim.height))
+        var opts = CollageRender.Options(scale: min(1, CollageProofPDF.longSide / max(1, long)))
+        opts.includeBleed = false
+        opts.export = true
+        opts.watermark = project.watermark?.exportEnabled ?? true
+        guard let image = render(cover: cover, project: project, hints: hints, options: opts),
+              let jpeg = CollageExport.encode(image, format: .jpeg, quality: CollageProofPDF.quality, dpi: 144) else { return nil }
+        let t = project.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return CollageProofPDF.Page(jpeg: jpeg, pixelWidth: image.width, pixelHeight: image.height,
+                                    heading: "封面" + (t.isEmpty ? "" : " · \(t)"), names: proofNames(cover, project: project))
+    }
+
+    /// 封面上的照片文件名（看版页脚）：封面那一页按阅读顺序（上沿差不到页高 2% 算同一行），再是封底那张。
+    static func proofNames(_ cover: CollageBookCover, project: CollageProject) -> [String] {
+        var photos: [String: CollagePhotoRef] = [:]
+        for p in project.photos where photos[p.id] == nil { photos[p.id] = p }
+        func fileName(_ id: String) -> String? {
+            guard let p = photos[id] else { return nil }
+            let name = URL(fileURLWithPath: p.path).lastPathComponent
+            return name.isEmpty ? p.id : name
+        }
+        let canvas = CollageBookCover.frontCanvas(project.canvas)
+        let tolerance = CGFloat(canvas.height) * 0.02
+        let spots = CollageLayout.pageGeometry(cover.front, canvas: canvas, style: project.style).frames
+            .filter { $0.cell.kind == .photo && !$0.rect.isEmpty && $0.cell.photoID != nil }
+            .map { (id: $0.cell.photoID ?? "", rect: $0.rect.cgRect) }
+            .sorted { a, b in
+                abs(a.rect.minY - b.rect.minY) > tolerance ? a.rect.minY < b.rect.minY : a.rect.minX < b.rect.minX
+            }
+        return (spots.map(\.id) + (cover.back.photoID.map { [$0] } ?? [])).compactMap(fileName)
+    }
+}
+
 // MARK: - 导出（C3）：「名_封面.<格式>」+「名_封面.pdf」
 
 extension CollageExport {
@@ -579,13 +620,6 @@ extension CollageExport {
 }
 
 extension CollageStore {
-    /// 这次导出要写的封面文件（相册、有封面才有）：「名_封面.<格式>」，勾了 PDF 再加「名_封面.pdf」。查重名、
-    /// 导出完成那句的文件数都要算上它们。
-    nonisolated static func coverFileNames(base: String, project: CollageProject, options: ExportOptions) -> [String] {
-        guard project.mode == .album, project.bookCover != nil else { return [] }
-        return ["\(base)_封面.\(options.format.ext)"] + (options.pdf ? ["\(base)_封面.pdf"] : [])
-    }
-
     struct CoverExportResult: Sendable {
         var files: [String] = []
         var error: String?
@@ -593,11 +627,11 @@ extension CollageStore {
         var missing: [String] = []
     }
 
-    /// 导出时写封面（startExport 在跨页都写完、写跨页 PDF 之前调）：后台渲成品尺寸 × scale、带包边出血的整张，写图，
-    /// 勾了 PDF 再写封面 PDF（不进跨页 PDF：印厂一般要封面单独一份）。没有封面 = 什么都不写。
-    nonisolated static func exportCover(project: CollageProject, options: ExportOptions, base: String, folder: URL,
+    /// 导出时写封面（startExport 写完跨页 PDF 之后调）：后台渲成品尺寸 × scale、带包边出血的整张，写图，勾了 PDF 再写
+    /// 封面 PDF（不进跨页 PDF：印厂一般要封面单独一份）。names = ExportPlan.cover（图在前、PDF 在后；空 = 什么都不写）。
+    /// 色彩、JPEG 质量同跨页（writePage）：印厂规格选了 Adobe RGB 就转过去再写（嵌 ICC），规格定了 JPEG 质量就用它。
+    nonisolated static func exportCover(project: CollageProject, options: ExportOptions, names: [String], folder: URL,
                                         scale: Int, hints: [String: CollageCrop.Hints]) async -> CoverExportResult {
-        let names = coverFileNames(base: base, project: project, options: options)
         guard let imageName = names.first else { return CoverExportResult() }
         return await Task.detached(priority: .userInitiated) { () -> CoverExportResult in
             var result = CoverExportResult()
@@ -607,15 +641,16 @@ extension CollageStore {
             opts.watermark = project.watermark?.exportEnabled ?? true
             let report = CollageRender.RenderReport()
             opts.report = report
+            let canvas = project.canvas
             guard let cover = project.bookCover,
-                  let image = CollageBookCoverRender.render(project: project, hints: hints, options: opts) else {
+                  let rendered = CollageBookCoverRender.render(project: project, hints: hints, options: opts),
+                  let image = CollageExport.converted(rendered, to: canvas.exportColorSpace) else {
                 result.error = "封面渲染失败"
                 return result
             }
             result.lowRes = report.lowRes
             result.missing = report.missing
-            let canvas = project.canvas
-            var quality = options.quality
+            var quality = canvas.printRules?.jpegQuality ?? options.quality
             if project.style.halftone != nil { quality = max(0.9, quality) }
             let url = folder.appendingPathComponent(imageName)
             do {

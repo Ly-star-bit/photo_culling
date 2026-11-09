@@ -96,6 +96,11 @@ struct CollageBookCover: Codable, Hashable {
     /// （CollageCrop.window，人物挡字的封面取景格不算）。版式本身保证脸只在封面这一页里（不会进书脊、包边），这里管的是
     /// 贴边那几毫米：零边距铺满时脸贴着书脊、贴着折线最容易出事。
     func faceWarnings(project: CollageProject, hints: [String: CollageCrop.Hints]) -> [String] {
+        faceWarningItems(project: project, hints: hints).map(\.text)
+    }
+
+    /// 同 faceWarnings，带上是哪张照片（导出前检查要）。
+    func faceWarningItems(project: CollageProject, hints: [String: CollageCrop.Hints]) -> [(photo: String, text: String)] {
         let canvas = Self.frontCanvas(project.canvas)
         let style = project.style
         let w = Double(canvas.width)
@@ -105,7 +110,7 @@ struct CollageBookCover: Codable, Hashable {
         var photos: [String: CollagePhotoRef] = [:]
         for p in project.photos where photos[p.id] == nil { photos[p.id] = p }
         let frames = CollageLayout.pageGeometry(front, canvas: canvas, style: style).frames
-        var out: [String] = []
+        var out: [(photo: String, text: String)] = []
         for frame in frames where frame.cell.kind == .photo && !CollageCover.applies(to: frame.cell) {
             guard let id = frame.cell.photoID, let photo = photos[id] else { continue }
             let area = CollageCrop.photoArea(cell: frame.cell, rect: frame.rect.cgRect, style: style)
@@ -117,12 +122,24 @@ struct CollageBookCover: Codable, Hashable {
             let faces = CollageCrop.faceBoxes(photo: photo, window: window, in: drawn).map { $0.intersection(area) }
                 .filter { !$0.isNull && $0.width > 0 && $0.height > 0 }
             if faces.contains(where: { Double($0.minX) < hinge }) {
-                out.append(String(format: "%@ 的脸离书脊不到 %.0f mm（翻开时折进书脊那道沟）：在封面里换个取景或往右挪", id, Self.hingeMM))
+                out.append((id, String(format: "%@ 的脸离书脊不到 %.0f mm（翻开时折进书脊那道沟）：在封面里换个取景或往右挪",
+                                       id, Self.hingeMM)))
             } else if faces.contains(where: { Double($0.minY) < safe || Double($0.maxY) > h - safe || Double($0.maxX) > w - safe }) {
-                out.append("\(id) 的脸出了安全区（离包边折线太近，裁切、包边会切到）：在封面里换个取景")
+                out.append((id, "\(id) 的脸出了安全区（离包边折线太近，裁切、包边会切到）：在封面里换个取景"))
             }
         }
         return out
+    }
+
+    /// 导出前检查（CollagePreflight）里封面的几条，都只提醒、不拦、不指到哪个跨页：书脊宽还是估的、书脊太窄印不下字、
+    /// 脸贴着书脊 / 出了安全区。没有封面 = 空。
+    static func preflightIssues(project: CollageProject, hints: [String: CollageCrop.Hints]) -> [CollagePreflightIssue] {
+        guard project.mode == .album, let cover = project.bookCover else { return [] }
+        let notes = cover.notes(spreads: project.pages.count).map { (photo: String?.none, text: $0) }
+        let faces = cover.faceWarningItems(project: project, hints: hints).map { (photo: Optional($0.photo), text: $0.text) }
+        return (notes + faces).map {
+            CollagePreflightIssue(kind: .cover, severity: .warn, page: nil, photoID: $0.photo, message: "封面：" + $0.text)
+        }
     }
 
     // MARK: 照片

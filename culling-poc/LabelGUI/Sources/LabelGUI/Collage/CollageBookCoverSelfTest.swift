@@ -336,6 +336,19 @@ enum CollageBookCoverSelfTest {
         let tight = left.faceWarnings(project: bleed, hints: [:])
         check(tight.count == 1 && tight[0].contains("书脊") && defaultMargin.isEmpty && middle.faceWarnings(project: bleed, hints: [:]).isEmpty,
               "脸贴着书脊（零边距、脸在最左边）：提醒；默认边距、脸在中间：不提醒", tight.first ?? "无")
+        // 导出前检查：书脊是估的、太窄、脸贴书脊各一条提醒（不拦、不指到跨页）；没有封面一条都没有。
+        var pre = bleed
+        var narrowCover = left
+        narrowCover.spineMM = nil
+        narrowCover.sheetMM = 0.02
+        narrowCover.boardMM = 0.5
+        pre.bookCover = narrowCover
+        let issues = CollagePreflight.run(project: pre, hints: [:], texts: false).filter { $0.kind == .cover }
+        let noCover = CollagePreflight.run(project: bleed, hints: [:], texts: false).filter { $0.kind == .cover }
+        check(issues.count == 3 && issues.allSatisfy { $0.severity == .warn && $0.page == nil }
+              && issues.contains { $0.message.contains("估的") } && issues.contains { $0.message.contains("放不下字") }
+              && issues.contains { $0.photoID == "F" && $0.message.contains("书脊") } && noCover.isEmpty,
+              "导出前检查：封面三条提醒（书脊估的、太窄没印字、脸贴书脊）", issues.map(\.message).joined(separator: "；"))
     }
 
     // MARK: - 6. 编辑封面
@@ -538,10 +551,21 @@ enum CollageBookCoverSelfTest {
         var o = CollageStore.ExportOptions()
         o.format = .png
         o.pdf = false
-        check(CollageStore.coverFileNames(base: "春", project: p, options: o) == ["春_封面.png"]
-              && CollageStore.coverFileNames(base: "春", project: p, options: CollageStore.ExportOptions()) == ["春_封面.jpg", "春_封面.pdf"]
-              && CollageStore.coverFileNames(base: "春", project: album(), options: CollageStore.ExportOptions()).isEmpty,
-              "封面文件名：名_封面.<格式>（+ 名_封面.pdf）；没有封面不写", "")
+        let all = CollageStore.ExportOptions()
+        let full = CollageStore.exportPlan(base: "春", project: p, options: all)
+        check(CollageStore.exportPlan(base: "春", project: p, options: o).cover == ["春_封面.png"]
+              && full.cover == ["春_封面.jpg", "春_封面.pdf"] && full.allFiles.suffix(2) == ["春_封面.jpg", "春_封面.pdf"]
+              && CollageStore.exportPlan(base: "春", project: p, options: all, only: [0]).cover.isEmpty
+              && CollageStore.exportPlan(base: "春", project: album(), options: all).cover.isEmpty,
+              "导出清单里的封面：名_封面.<格式>（+ 名_封面.pdf），排在跨页 PDF 后面；部分导出、没有封面不写", "")
+        // 看版 PDF 的封面页：页脚「封面 · 标题」，照片按封面那一页的阅读顺序、再是封底那张。
+        var proofProject = p
+        proofProject.bookCover?.back.photoID = "B"
+        let proof = CollageBookCoverRender.proofPage(project: proofProject, hints: [:])
+        check(proof?.heading == "封面 · 拾光" && proof?.names == ["A.jpg", "B.jpg"]
+              && (proof.map { max($0.pixelWidth, $0.pixelHeight) } ?? 0) <= Int(CollageProofPDF.longSide) + 1,
+              "看版 PDF 的封面页：「封面 · 标题」、封面上的照片文件名、长边不超过 2000", proof.map { "\($0.pixelWidth)×\($0.pixelHeight) " + $0.names.joined(separator: " ") } ?? "nil")
+        check(CollageBookCoverRender.proofPage(project: album(), hints: [:]) == nil, "没有封面：看版不加封面页", "")
     }
 
     /// 合成一块「看得见的」：底色上右上角一块渐变（贴着上边和右边）。镜像只出现在贴边的那一段，别处铺底色。

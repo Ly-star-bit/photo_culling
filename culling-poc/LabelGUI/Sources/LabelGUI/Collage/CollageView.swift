@@ -39,12 +39,12 @@ struct CollageView: View {
             CollageMasks.warmUp()
         }
         .background(CollageSessionWatch(batchStore: batchStore) { attachSession() })
-        // 有空照片格时导出前问一次（store.export 设 exportConfirm）
-        .alert("有空照片格，仍要导出吗？", isPresented: exportConfirmShown) {
+        // 导出前检查有「拦」的（空照片格、放大超过 150%、页数不合规……）时导出前问一次（store.export 设 exportConfirm、标题）
+        .alert(store.exportConfirmTitle, isPresented: exportConfirmShown) {
             Button("仍然导出") { store.export(confirmed: true) }
             Button("取消", role: .cancel) { store.exportConfirm = nil }
         } message: {
-            Text((store.exportConfirm ?? "") + "。从托盘拖照片进去，或者选中那一格「删除格子」。")
+            Text(store.exportConfirm ?? "")
         }
     }
 

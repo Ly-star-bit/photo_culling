@@ -770,6 +770,7 @@ enum CollageCLI {
 /// LabelGUI --collage-ui <photo_dir> <out.png> [--album [--target-spreads 20@1-6] [--album-theme fineArt] [--cover]] [--tab 格式|样式|文档|照片|模板|素材] [--select 路径如 10]
 /// [--crop] [--overlay-index N] [--size 1440x900] [--adopt photos|page[:水印页预设名]] [--inspector-width 300] [--notice 提示文字]
 /// [--contact-frames]（印样的「逐帧」一开始就展开）[--light]（浅色外观）[--ax-dump]
+/// [--spec <印厂规格短名或名字>]（相册套规格）[--export-range current|1-3;7]（「导出 ▾」的范围）
 /// [--tray-filter all|unused|used] [--tray-select ID,ID]（托盘的筛选、多选）[--clear-tray]（清空托盘和版式再截）
 /// [--tray-click ID[+cmd][+shift],…]（界面渲出来以后再在托盘里点：走选中变了以后的刷新，和一开始就选好的截图应该一样）
 /// [--perf place|gutter|slider|exposure|title|all|trayclick|darkroom]（截完图接着跑这个场景，打印每个视图 body 重算几次、
@@ -943,6 +944,9 @@ enum CollageUISnapshot {
         }
         // --contact-frames：印样的「逐帧」一开始就展开（离屏点不了展开箭头）。
         SnapshotPreview.contactFramesOpen = args.contains("--contact-frames")
+        // --spec <短名或名字>：相册套一套印厂规格；--export-range current|1-3;7：「导出 ▾」的范围（不存盘，只能这里给）。
+        if let s = option("--spec"), let spec = CollagePrintSpec.find(s, in: store.userPrintSpecs) { store.applyPrintSpec(spec) }
+        if let r = option("--export-range") { store.exportRange = r == "current" ? .current : .custom(r) }
         // --tab：新名字、老名字都认（CollageNav.snapshotTab）；不认识的照旧当没给（以前也是落回默认页签）。
         let tabName = option("--tab")
         let hasSelection = store.selection != nil || store.selectedItem != nil
@@ -2328,6 +2332,8 @@ enum CollageOpsScript {
                                              quality: 1, dpi: 72)
                     print("  备选缩略图 \(i) → \(file).png（共 \(store.alternativeThumbs.count) 个）")
                 } else { ok = false }
+            case _ where CollagePrintCLI.names.contains(name):
+                ok = CollagePrintCLI.apply(name, arg, store: store, outDir: outDir)
             case "wm", "wmlayer", "wmpos", "wmsize", "wmopacity", "wmmargin", "wmtext", "wmtexton", "wmexif", "wmtile",
                  "wmtiles", "wmsides", "wmskip", "exportwm", "wmcontrast", "wmmarginpref", "wmsigfile", "wmtextpos",
                  "wmtextsize", "wmsig":

@@ -1057,6 +1057,10 @@ struct CollageCanvas: Codable, Hashable {
     var slides: Int = 1
     /// 相册跨页的装订方式（只对 seams == .fold 有意义）。
     var binding: CollageBinding = .layflat
+    /// 印厂规格里像素装不下的那几样（页数、首尾单页、中缝带、色彩、JPEG，见 CollagePrintSpec.swift）。nil = 没套过规格
+    /// （旧工程、社交画布、命令行的 album30 这些）：相册照 CollagePrintRules.standard 查页数，中缝带、导出色彩都和以前一样。
+    /// nil 不写进 JSON（旧工程、模板、state.json 存出来一个字节不变）。
+    var printRules: CollagePrintRules?
 
     init() {}
 
@@ -1081,7 +1085,11 @@ struct CollageCanvas: Codable, Hashable {
 
     /// 中缝每一侧让出多宽（成品像素）：脸、相纸、字都不压进这条带。平铺 = 短边 2%（30×30cm 约 6mm）；
     /// 胶装再放宽到至少 12mm（书脊吃掉的一条加裁切误差）。只对相册跨页有意义。
+    /// 规格里填了这种装订的中缝带（印厂给的数）就照它；没填（nil，内置规格都是）照上面的老算法 —— 求解、避脸一个数都不变。
     var foldBand: Double {
+        if let mm = binding == .glued ? printRules?.gluedFoldMM : printRules?.layflatFoldMM {
+            return max(1, pixels(mm: mm))
+        }
         let base = shortSide * 0.02
         guard binding == .glued else { return base }
         return max(base, pixels(mm: 12))
@@ -2107,6 +2115,8 @@ extension CollageCanvas {
         slides = min(24, max(1, c.soft(.slides, d.slides)))
         // 旧工程没有这个键：按平铺算（和以前的行为一样）。
         binding = c.soft(.binding, d.binding)
+        // 旧工程没有 = nil（没套过规格）；坏了也只丢它。
+        printRules = c.softOptional(.printRules)
         // v1.13 以前的九宫格预设是 2160²（每张只有 720）：存下来的工程、模板、默认画布读回来升到 3240²。
         // 版式都按比例存，画布等比放大不改任何摆法；手填的「自定义」尺寸名字不一样，不动。
         if seams == .grid9, name == "九宫格 1:1", width == 2160, height == 2160 {
