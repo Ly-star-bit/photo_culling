@@ -96,6 +96,33 @@ struct CollageView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.bar)
+        .background(topBarShortcuts)
+    }
+
+    /// 顶栏的快捷键只挂一份：两排（完整 / 紧凑）里的按钮都不挂，这里一组看不见的按钮挂（ViewThatFits 没挑中的那一排
+    /// 不能也接一次 ⌘Z）。能不能按和看得见的那个按钮同一个条件（灰着的时候快捷键也不动）。
+    private var topBarShortcuts: some View {
+        ZStack {
+            Button("撤销") { store.undo() }
+                .keyboardShortcut("z", modifiers: .command)
+                .disabled(!store.canUndo)
+            Button("重做") { store.redo() }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+                .disabled(!store.canRedo)
+            Button("存成方案") { store.saveVariant() }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(store.project.pages.isEmpty || store.isSolving)
+            Button("导出") { store.export() }
+                .keyboardShortcut("e", modifiers: .command)
+                .disabled(store.exportBlockedReason != nil)
+            if store.isExporting {
+                Button("取消导出") { store.cancelExport() }
+                    .keyboardShortcut(.escape, modifiers: [])
+            }
+        }
+        .opacity(0)
+        .frame(width: 0, height: 0)
+        .accessibilityHidden(true)
     }
 
     private func topBarRow(compact: Bool) -> some View {
@@ -122,15 +149,13 @@ struct CollageView: View {
         }
     }
 
-    /// 撤销、重做、参考线、存成方案：只放图标（顶栏在最窄的窗口里已经挤满了）。
+    /// 撤销、重做、参考线、存成方案：只放图标（顶栏在最窄的窗口里已经挤满了）。快捷键在 topBarShortcuts。
     @ViewBuilder
     private var editButtons: some View {
         Button { store.undo() } label: { Image(systemName: "arrow.uturn.backward") }
-            .keyboardShortcut("z", modifiers: .command)
             .disabled(!store.canUndo)
             .help("撤销 (⌘Z)")
         Button { store.redo() } label: { Image(systemName: "arrow.uturn.forward") }
-            .keyboardShortcut("z", modifiers: [.command, .shift])
             .disabled(!store.canRedo)
             .help("重做 (⇧⌘Z)")
         Toggle(isOn: Binding(get: { store.showGuides }, set: { store.showGuides = $0; store.setNeedsRender() })) {
@@ -139,7 +164,6 @@ struct CollageView: View {
         .toggleStyle(.button)
         .help("参考线：安全区、中缝、九宫格/轮播切线（不会导出）")
         Button { store.saveVariant() } label: { Image(systemName: "plus.square.on.square") }
-            .keyboardShortcut("s", modifiers: [.command, .shift])
             .disabled(store.project.pages.isEmpty || store.isSolving)
             .help("把现在这一版存成方案（⇧⌘S）：底下的方案栏里点缩略图随时切回来，可以存好几版比着挑")
     }
@@ -148,7 +172,7 @@ struct CollageView: View {
     private func trailingButtons(compact: Bool) -> some View {
         if store.isExporting {
             Button("取消") { store.cancelExport() }
-                .keyboardShortcut(.escape, modifiers: [])
+                .help("停止导出 (Esc)")
         }
         // 暗房进顶栏（NU2）：以前唯一的入口在样式页色调块最底下。整组进；只改这一页 / 这一格从「格式」里进。
         Button {
@@ -1129,7 +1153,7 @@ struct CollageExportButtons: View {
             } label: {
                 Label(store.isAlbum && !compact ? "导出相册" : "导出", systemImage: "square.and.arrow.up")
             }
-            .keyboardShortcut("e", modifiers: .command)
+            // ⌘E 挂在顶栏那组看不见的快捷键上（CollageView.topBarShortcuts）：顶栏两排里各有一个这个按钮。
             .disabled(store.exportBlockedReason != nil)
             .help(store.exportBlockedReason ?? "按导出设置写到输出目录 (⌘E)；旁边的 ▾ 改文件名、格式、清晰度、输出目录")
             Button {
