@@ -469,7 +469,7 @@ enum MCPToolDefs {
      "annotations":"$WRITE_IDEMPOTENT"},
 
     {"name":"collage_preflight","title":"导出前检查",
-     "description":"导出前检查（= 拼图页「导出 ▾」里的「导出前检查」），整本过一遍，分成 blocks（拦：导出按钮会先问的——空照片格、放大超过 150%、页数不合印厂规格、同一张照片用了两次、胶装时脸压中缝带）和 warnings（提醒：放大 120–150%、平铺时脸压中缝、字出安全区或压进中缝带、贴边的照片没铺进出血、首尾单页那半边有东西、印刷画布上正文还是灰条、封面的书脊是估的 / 太窄 / 脸贴着书脊）。每条有种类 kind、第几个跨页 page（整本的事是 null）、格子 path、照片 id 和一句话。照着改：换照片 collage_replace_photo，挪照片 collage_move_photos，跨页数不合规 collage_pages 加 / 删，规格 collage_print_spec。pages 写要导的跨页（「1-3, 7」）时 export_would_ask 只看那几页（同「导出 ▾」的范围）。texts=false 只查导出按钮看的那几样（不排字，快）。路人信息还没算完时取景可能还会变（hints_pending）。不改任何东西。",
+     "description":"导出前检查（= 拼图页「导出 ▾」里的「导出前检查」），整本过一遍，分成 blocks（拦：导出按钮会先问的——空照片格、放大超过 150%、页数不合印厂规格、同一张照片用了两次、胶装时脸压中缝带、封面上的空照片格 / 放大超过 150%）和 warnings（提醒：放大 120–150%、平铺时脸压中缝、字出安全区或压进中缝带、贴边的照片没铺进出血、首尾单页那半边有东西、印刷画布上正文还是灰条、封面放大 120–150% / 书脊是估的 / 太窄 / 脸贴着书脊）。每条有种类 kind、第几个跨页 page（整本的事和封面是 null）、格子 path（kind=cover 时是封面那一块的格子）、照片 id 和一句话。照着改：换照片 collage_replace_photo，挪照片 collage_move_photos，跨页数不合规 collage_pages 加 / 删，规格 collage_print_spec。pages 写要导的跨页（「1-3, 7」）时 export_would_ask 只看那几页（同「导出 ▾」的范围）。texts=false 只查导出按钮看的那几样（不排字，快）。路人信息还没算完时取景可能还会变（hints_pending）。不改任何东西。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "texts":{"type":"boolean","default":true,"description":"false = 不查字（字出安全区、占位正文），快"},

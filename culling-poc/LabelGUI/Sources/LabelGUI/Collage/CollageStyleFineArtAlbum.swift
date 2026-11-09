@@ -105,9 +105,11 @@ extension CollageStyleFineArt {
     /// 7. 目标跨页数（budget，F06）：先照不指定编；比目标多（目标真卡到了）才按目标定呼吸图张数重编一次（薄册子少放空镜），
     ///    再把落单的单图跨页并起来（compress），不删片。目标不比编出来的少 = 和不指定一字不差。
     /// breathSpreads：内部用（重编那一次）—— 呼吸图张数按几个跨页定；nil = 按照片数估。
+    /// opener = false：不出扉页（锁住的第一个跨页就是扉页，CollageAlbum.lockedOpener）：本来做扉页的那张照常按时间排进
+    /// 它那一章，第一章照旧由（锁住的）扉页开篇。
     static func plan(_ photos: [CollagePhotoRef], dedupe: Bool, chapterMono: Bool, title bookTitle: String = "",
                      similarity: Similarity? = nil, budget: CollageAlbumBudget? = nil,
-                     breathSpreads: Int? = nil) -> CollageAlbum.Plan {
+                     breathSpreads: Int? = nil, opener withOpener: Bool = true) -> CollageAlbum.Plan {
         let pool = candidates(photos)
         let moments = oneMoment(pool)
         var dropped = moments.dropped
@@ -139,14 +141,18 @@ extension CollageStyleFineArt {
             }
         }
 
-        // 扉页：全书景别最宽的那一档里分数最高的。
-        let title = widest(ordered)
+        // 扉页：全书景别最宽的那一档里分数最高的（不出扉页时 = nil）。
+        let title: CollagePhotoRef? = withOpener ? widest(ordered) : nil
         var spreads: [CollageAlbum.Spread] = []
-        spreads.append(spread(.title, [title], chapter: chapterIndex(of: title, in: chapters)))
-        spreads[0].fineArt?.latinTitle = isLatinTitle(bookTitle)
-        var used: Set<String> = [title.id]
+        var used: Set<String> = []
         // 扉页后面紧跟的那个跨页不放和扉页同姿势的（一翻开就连着看到两遍差不多的画面）。
-        var avoidNext = similarSet(title, similar)
+        var avoidNext: Set<String> = []
+        if let title {
+            spreads.append(spread(.title, [title], chapter: chapterIndex(of: title, in: chapters)))
+            spreads[0].fineArt?.latinTitle = isLatinTitle(bookTitle)
+            used.insert(title.id)
+            avoidNext = similarSet(title, similar)
+        }
 
         // 呼吸图：按跨页数定几张（全书 3–4 张），各章轮着挑分数高的。
         let natural = Int((Double(ordered.count) / targetPerSpread).rounded(.up))
@@ -155,7 +161,7 @@ extension CollageStyleFineArt {
         var breathIDs: Set<String> = []
         if quota > 0 {
             var perChapter = chapters.map { c in
-                c.filter { isBreath($0) && $0.id != title.id }.sorted { $0.score > $1.score }
+                c.filter { isBreath($0) && $0.id != title?.id }.sorted { $0.score > $1.score }
             }
             var round = 0
             while breathIDs.count < quota, perChapter.contains(where: { !$0.isEmpty }), round < 64 {
@@ -287,7 +293,7 @@ extension CollageStyleFineArt {
             spreads += chapterSpreads
         }
         // 扉页的色调同样看照片本身。
-        if title.isMonochrome == true { spreads[0].fineArt?.look = monoLook }
+        if title?.isMonochrome == true { spreads[0].fineArt?.look = monoLook }
         if let b = budget?.normalized, spreads.count > b.spreads {
             compress(&spreads, toward: b.spreads, similar: similar)
             // 目标真卡到了：呼吸图按目标定张数重编一次（薄册子少放空镜；去重、相似关系照用这一次的，不再跑 Vision）。
@@ -296,7 +302,7 @@ extension CollageStyleFineArt {
             if breathSpreads == nil, breathQuota(spreads: thin) < quota {
                 let same = Similarity(kept: kept, dropped: dropped, similar: similar)
                 let again = plan(photos, dedupe: dedupe, chapterMono: chapterMono, title: bookTitle, similarity: same,
-                                 budget: budget, breathSpreads: thin)
+                                 budget: budget, breathSpreads: thin, opener: withOpener)
                 if again.spreads.count >= b.spreads, again.spreads.count <= spreads.count { return again }
             }
         }

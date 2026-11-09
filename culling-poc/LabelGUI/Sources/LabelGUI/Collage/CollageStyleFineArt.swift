@@ -712,12 +712,15 @@ enum CollageStyleFineArt {
         for p in photos { map[p.id] = p }
         let layout = CollageLayout.Context(canvas: project.canvas, style: project.style, photos: map,
                                            hints: context.hints, heroID: nil)
+        // 锁住的第一个跨页就是扉页：不再出一个（同自动编排，R1#3；和 locked 一样看切到相册之前的工程）。
+        let opener = !CollageAlbum.lockedOpener(context.project)
         let plan = CollageAlbum.plan(photos, dedupe: true, theme: .fineArt, chapterMono: project.albumChapterMono,
                                      title: project.title,
-                                     budget: CollageAlbum.budget(project.albumBudget, excludingLocked: locked.pages.count))
+                                     budget: CollageAlbum.budget(project.albumBudget, excludingLocked: locked.pages.count),
+                                     opener: opener)
         let pages = CollageAlbum.build(plan, context: layout, seed: context.seed)
         guard !pages.isEmpty else { return nil }
-        project.pages = CollageAlbum.mergeLocked(pages, locked: locked.pages, photos: map)
+        project.pages = CollageAlbum.mergeLocked(pages, locked: locked.pages, photos: map, freshOpener: opener)
         return project
     }
 }

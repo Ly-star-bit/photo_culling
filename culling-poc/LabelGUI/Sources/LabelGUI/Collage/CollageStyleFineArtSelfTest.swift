@@ -140,6 +140,8 @@ enum CollageStyleFineArtSelfTest {
         CollageBookCoverSelfTest.run(check: check)
         // 相册界面（概览、跨页条、⌘← ⌘→、封面卡、编辑封面时哪些不能用）：CollageAlbumUISelfTest.swift。
         CollageAlbumUISelfTest.run(check: check)
+        // 相册审查（2026-11）修补的几条（封面编辑的入口、锁住的扉页、封面检查、撤销跟页）：CollageAlbumReviewSelfTest.swift。
+        CollageAlbumReviewSelfTest.run(check: check)
 
         // ---------------------------------------------------------------- 4. 真照片套合成标记（可选）
         if args.count > flagIndex + 1, !args[flagIndex + 1].hasPrefix("--") {
