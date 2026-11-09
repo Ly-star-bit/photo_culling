@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// LABELGUI_DATA_DIR=<临时> LabelGUI --darkroom-selftest
 ///
@@ -17,7 +18,8 @@ import Foundation
 /// 8. 原图：所有级别不调色、颗粒晕光统一色温都是 0，版式不变。
 /// 9. 撤销清掉选中以后「这一格」退回上一级；关掉暗房清掉悬停。
 /// 10. 从相纸滤镜换进光谱色调：悬停、套用都带上这一款的起始颗粒晕光。
-/// 11. 暗房开着时画布预览记着脏、先不渲（画布不在视图树里），关暗房马上补渲；实时桥要预览（previewSettled）时现渲。
+/// 11. 暗房开着时画布预览记着脏、先不渲（画布不在视图树里），关暗房马上补渲；实时桥要预览（previewSettled）时现渲一张，
+///     渲着的时候暗房里接着拖出来的不跟着渲（照旧攒着）。
 /// 全过退出 0，否则 1。
 enum CollageDarkroomSelfTest {
 
@@ -312,7 +314,33 @@ enum CollageDarkroomSelfTest {
         spin(10) { settled != nil }
         check(settled == true && !behind.previewDeferred && behind.preview != nil && behind.preview !== stalePreview,
               "暗房开着、实时桥要预览：previewSettled 现渲一张新的", "\(settled.map { "\($0)" } ?? "没等到")")
+        // AI 写的时候用户正在暗房里拖滑杆：previewSettled 带起来的渲染循环只渲实时桥要的那一张，渲着的时候暗房里又拖出来
+        // 的脏照旧攒着（以前循环只看脏不看暗房，拖一下渲一张，一直渲到松手）。等循环取走工程、那张正在后台渲
+        // （previewRendering），马上在主线程上连着标脏三下 —— 那张渲完要回主线程，这三下一定落在「渲着的时候」。
+        var canvasRenders = 0
+        let counter = behind.previewState.$image.dropFirst().sink { _ in canvasRenders += 1 }
+        grainier.filmGrain = 0.3
+        behind.setStyle(grainier, coalesce: false)
+        var requested: Bool?
+        Task { @MainActor in requested = await behind.previewSettled(timeout: 5) }
+        let started = Date().addingTimeInterval(5)
+        while !behind.previewRendering && canvasRenders == 0 && Date() < started {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.001))
+        }
+        let caughtRunning = behind.previewRendering && canvasRenders == 0
+        for k in 1...3 {
+            grainier.filmGrain = 0.3 + Double(k) * 0.01
+            behind.setStyle(grainier, coalesce: true)
+        }
+        spin(10) { requested != nil }
+        spin(0.5) { false }  // 以前的循环这时还在接着渲
+        check(caughtRunning && requested == true && canvasRenders == 1 && behind.previewDeferred && behind.previewIdle,
+              "暗房开着、实时桥要预览时用户接着拖：只渲实时桥要的那一张，接着拖出来的照旧攒着",
+              "赶上渲着 \(caughtRunning) · 画布渲了 \(canvasRenders) 张 · 攒着 \(behind.previewDeferred)")
         behind.closeDarkroom()
+        spin(10) { behind.previewIdle }
+        counter.cancel()
+        check(canvasRenders == 2 && !behind.previewDeferred, "关暗房：攒着的那几下补渲成一张", "画布一共 \(canvasRenders) 张")
 
         finish(failures)
     }
