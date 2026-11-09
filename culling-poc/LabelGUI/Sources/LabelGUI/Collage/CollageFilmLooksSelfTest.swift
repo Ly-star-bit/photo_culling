@@ -5,7 +5,8 @@ import CoreImage
 /// LABELGUI_DATA_DIR=<临时> LabelGUI --film-looks-selftest
 ///
 /// 光谱胶片色调（CollageFilmLUTs，spektrafilm 烘的表）的自测，不要照片：
-/// 1. 表都在：每个光谱色调读得到 32³ 的表（.app 里是 Resources/film-luts，裸二进制往上找 third_party/film-luts），
+/// 1. 表都在：每个光谱色调读得到 32³ 的表（.app 里只读 Resources/film-luts、不往上找，裸二进制往上找
+///    third_party/film-luts；在 .app 里跑时核对读的就是包里那份，找目录的规则另拿假路径核对一遍），
 ///    值都在 0…1；目录里还有 SPEKTRAFILM_LICENSE.txt、CHANGELOG.txt（CC BY-SA 的署名和改动说明）；每张 .cube
 ///    文件头写着署名和许可。
 /// 2. 名字：中文名不超过 4 个字（色块下面放得下）、和别的色调不重名；中文名、rawValue 里没有胶片品牌。
@@ -17,7 +18,8 @@ import CoreImage
 /// 5. 渲染：一块纯色走 CollageLooks.apply（CIColorCubeWithColorSpace，sRGB）出来的颜色和 CPU 上 grade() 算的差 ≤ 3/255
 ///    —— 预览、导出（GPU）和主图取色、压字判深浅（CPU）用的是同一个颜色。
 /// 6. 存档：新色调存进 CollageLookSetting 再读回来不变。
-/// 7. 颗粒、晕光（CollageFilmEffects）：每个光谱色调的 film / print 表和 .json 都读得到；两项都是 0 时和
+/// 7. 颗粒、晕光（CollageFilmEffects）：每个光谱色调的 film / print 表和 .json 都读得到，负片都有胶片曝光的放宽表
+///    （_e，反转片没有）；两项都是 0 时和
 ///    CollageLooks.apply 逐字节一样；一块灰上开颗粒，均值不动（≤ 0.004 线性）、每个通道的标准差和 CPU 按
 ///    print 表斜率 × σ(密度) / 像素边长 × 0.65 像素模糊算的差 35% 以内，颗粒跟着像素尺寸变（像素小一半 → 颗粒
 ///    大约大一倍）；同一张照片渲两次逐字节一样、换一张照片噪声不一样；灰底白圆开晕光，圆外的红抬得比绿多、
@@ -42,6 +44,12 @@ enum CollageFilmLooksSelfTest {
         check(spectral.count == 15, "15 个光谱色调", "\(spectral.count) 个")
         let dir = CollageFilmLUTs.directory
         check(dir != nil, "找得到放表的目录", dir?.path ?? "nil")
+        // CI 拿 DMG 里那份 app 跑这条自检：读的必须是包里的表（不往上找到别处的）。
+        if CollageFilmLUTs.isAppBundle(Bundle.main.bundleURL), let dir {
+            check(dir.standardizedFileURL.path.hasPrefix(Bundle.main.bundleURL.standardizedFileURL.path + "/"),
+                  "在 .app 里跑：读的是包里那份", dir.path)
+        }
+        searchRules(check)
         if let dir {
             check(fm.fileExists(atPath: dir.appendingPathComponent("SPEKTRAFILM_LICENSE.txt").path), "目录里有 SPEKTRAFILM_LICENSE.txt")
             check(fm.fileExists(atPath: dir.appendingPathComponent("CHANGELOG.txt").path), "目录里有 CHANGELOG.txt")
@@ -180,6 +188,10 @@ enum CollageFilmLooksSelfTest {
                   "\(fx.halationSigmaUM)")
             check((0.1...0.8).contains(fx.defaultGrain) && (0...0.6).contains(fx.defaultHalation),
                   "\(look.rawValue) 有颗粒 / 晕光的起始值", String(format: "颗粒 %.2f 晕光 %.2f", fx.defaultGrain, fx.defaultHalation))
+            // 负片、电影负片要 _e 两张放宽表 + .json 里的 develop.ext_head，缺了胶片曝光在这一款上不起作用（打包漏了也是这里红）。
+            check((fx.ext != nil) == !look.isReversal,
+                  "\(look.rawValue) " + (look.isReversal ? "是反转片：没有胶片曝光" : "有胶片曝光的放宽表（film_e / print_e）"),
+                  fx.ext == nil ? "没有" : "有")
         }
         grainAndHalation(check)
         styleCoding(check)
@@ -188,6 +200,39 @@ enum CollageFilmLooksSelfTest {
 
         print(failures.isEmpty ? "全部通过" : "失败 \(failures.count) 项：" + failures.joined(separator: "；"))
         exit(failures.isEmpty ? 0 : 1)
+    }
+
+    /// 放表的目录怎么找（CollageFilmLUTs.search，优化分析 NE6）：.app 里只认 Contents/Resources/film-luts，包里没有就是 nil，
+    /// 不往上找到仓库里的 third_party/film-luts（以前会，CI 的打包后检查测不出漏装）；裸二进制先看旁边、再往上找。
+    /// 全是假路径 + 假的「有没有 .cube」，不碰盘、不起任何 .app。
+    private static func searchRules(_ check: (Bool, String, String) -> Void) {
+        let root = URL(fileURLWithPath: "/假的仓库", isDirectory: true)
+        let repo = root.appendingPathComponent("third_party/film-luts")
+        func search(_ bundle: URL, _ have: [URL]) -> String {
+            let res = CollageFilmLUTs.isAppBundle(bundle) ? bundle.appendingPathComponent("Contents/Resources") : bundle
+            let exe = CollageFilmLUTs.isAppBundle(bundle)
+                ? bundle.appendingPathComponent("Contents/MacOS/LabelGUI") : bundle.appendingPathComponent("LabelGUI")
+            let found = CollageFilmLUTs.search(bundle: bundle, resources: res, executable: exe) { url in
+                have.contains { $0.standardizedFileURL.path == url.standardizedFileURL.path }
+            }
+            return found.map { $0.standardizedFileURL.path.replacingOccurrences(of: root.path + "/", with: "") } ?? "nil"
+        }
+        let app = root.appendingPathComponent("选片工具.app", isDirectory: true)
+        let packed = app.appendingPathComponent("Contents/Resources/film-luts")
+        let bare = root.appendingPathComponent("culling-poc/LabelGUI/.build/release", isDirectory: true)
+        let besideBare = bare.appendingPathComponent("film-luts")
+        let cases: [(String, URL, [URL], String)] = [
+            (".app 里包里有：读包里的", app, [packed, repo], "选片工具.app/Contents/Resources/film-luts"),
+            (".app 里包里没有：nil，不往上找到仓库里的 third_party/film-luts", app, [repo], "nil"),
+            ("扩展名大写的 .APP 也算 .app", root.appendingPathComponent("选片工具.APP", isDirectory: true), [repo], "nil"),
+            ("裸二进制：往上找到 third_party/film-luts", bare, [repo], "third_party/film-luts"),
+            ("裸二进制旁边有 film-luts：先读旁边的", bare, [besideBare, repo], "culling-poc/LabelGUI/.build/release/film-luts"),
+            ("裸二进制哪都没有：nil", bare, [], "nil"),
+        ]
+        for (name, bundle, have, want) in cases {
+            let got = search(bundle, have)
+            check(got == want, "找表的目录：" + name, got)
+        }
     }
 
     /// 漏打包（v1.24.0–v1.26.1 那样）：放表的目录指到一个空目录 —— 色调表、颗粒数据都读不到，每款记一行日志

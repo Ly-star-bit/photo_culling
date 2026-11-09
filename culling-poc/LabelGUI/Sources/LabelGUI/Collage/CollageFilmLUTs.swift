@@ -5,8 +5,8 @@ import Foundation
 /// 按原样的 .cube 文本随 app 发（Contents/Resources/film-luts，旁边是 SPEKTRAFILM_LICENSE.txt 和 CHANGELOG.txt），
 /// 不编进二进制、不加密 —— 许可要求别人拿得出来。
 ///
-/// 一个色调一个 <rawValue>.cube。.app 里读 Contents/Resources/film-luts；裸的开发二进制（CI 跑的
-/// .build/release/LabelGUI）往上找仓库里的 third_party/film-luts。读不到 = 这个色调原样（不崩），记一行日志
+/// 一个色调一个 <rawValue>.cube。.app 里只读 Contents/Resources/film-luts（包里没有就是没有，不往上找）；裸的开发
+/// 二进制（CI 跑的 .build/release/LabelGUI）往上找仓库里的 third_party/film-luts。读不到 = 这个色调原样（不崩），记一行日志
 /// （每款一次，缺哪个文件、在哪找的）：v1.24.0–v1.26.1 漏打包了 .json，颗粒、晕光、冲印区三个版本都静默不起作用，
 /// 没人发现。
 /// 只烘了逐像素的那一半：颗粒、晕光这些空间效果不在表里。
@@ -114,7 +114,9 @@ enum CollageFilmLUTs {
     /// 读不到的原因（日志、诊断包用）：没找到放表的目录 / 缺哪几个文件（带目录）/ 文件都在但读不出来。
     static func missingReason(_ files: [String], in dir: URL?) -> String {
         guard let dir else {
-            return "没找到放表的目录（.app 的 Contents/Resources/film-luts、可执行文件往上的 third_party/film-luts 里都没有 .cube）"
+            return isAppBundle(Bundle.main.bundleURL)
+                ? "没找到放表的目录（.app 里只认 Contents/Resources/film-luts，那里没有 .cube：打包漏了）"
+                : "没找到放表的目录（可执行文件旁边的 film-luts、往上的 third_party/film-luts 里都没有 .cube）"
         }
         let fm = FileManager.default
         let absent = files.filter { !fm.fileExists(atPath: dir.appendingPathComponent($0).path) }
@@ -137,15 +139,25 @@ enum CollageFilmLUTs {
     /// （CollageFilmEffects 的也要），不然读过的还在缓存里。
     static var directoryOverride: URL?
 
-    /// 找到的放表目录：.app 的 Resources/film-luts，否则从可执行文件往上找 third_party/film-luts（开发树、CI）。
-    static let foundDirectory: URL? = {
-        let fm = FileManager.default
-        func hasCubes(_ url: URL) -> Bool {
-            ((try? fm.contentsOfDirectory(atPath: url.path)) ?? []).contains { $0.hasSuffix(".cube") }
+    /// 找到的放表目录（怎么找见 search）。
+    static let foundDirectory: URL? = search(
+        bundle: Bundle.main.bundleURL, resources: Bundle.main.resourceURL,
+        executable: (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath())
+
+    /// 放表的目录怎么找。在 .app 里（Bundle.main 是 .app）只认 Contents/Resources/film-luts，包里没有就是 nil（每款记一行
+    /// 日志），不往上找：以前不管在不在 .app 里都会退到往上找，CI 在仓库根目录下跑 选片工具.app 里的二进制，包里漏了表也会
+    /// 往上找到仓库里的 third_party/film-luts，打包后的检查测不出漏装（优化分析 NE6）。裸二进制（.build/release/LabelGUI，
+    /// 开发树、CI 的测试）先看可执行文件旁边的 film-luts，再从可执行文件往上找 third_party/film-luts。
+    /// hasCubes 只有自检换（假路径，不碰盘、不起 .app）。
+    static func search(bundle: URL, resources: URL?, executable: URL,
+                       hasCubes: (URL) -> Bool = CollageFilmLUTs.hasCubes) -> URL? {
+        let res = resources?.appendingPathComponent("film-luts")
+        if isAppBundle(bundle) {
+            guard let res, hasCubes(res) else { return nil }
+            return res
         }
-        if let res = Bundle.main.resourceURL?.appendingPathComponent("film-luts"), hasCubes(res) { return res }
-        let exe = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath()
-        var dir = exe.deletingLastPathComponent()
+        if let res, hasCubes(res) { return res }
+        var dir = executable.deletingLastPathComponent()
         for _ in 0..<8 {
             let cand = dir.appendingPathComponent("third_party/film-luts")
             if hasCubes(cand) { return cand }
@@ -154,7 +166,17 @@ enum CollageFilmLUTs {
             dir = up
         }
         return nil
-    }()
+    }
+
+    /// 是不是 .app（扩展名不分大小写：APFS 默认不分，LaunchServices 也不分）。裸二进制的 bundleURL 是它所在的目录。
+    static func isAppBundle(_ bundle: URL) -> Bool {
+        bundle.pathExtension.lowercased() == "app"
+    }
+
+    /// 目录里有没有 .cube。
+    static func hasCubes(_ url: URL) -> Bool {
+        ((try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []).contains { $0.hasSuffix(".cube") }
+    }
 
     /// .cube 文本 → 表。认 LUT_3D_SIZE、跳过 TITLE / DOMAIN_* / # 注释；格点数不对、有非有限数 = nil。
     static func parse(_ text: String) -> Table? {

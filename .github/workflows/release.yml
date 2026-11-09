@@ -44,6 +44,8 @@ jobs:
           restore-keys: |
             swiftpm-${{ runner.os }}-${{ steps.swift.outputs.version }}-
 
+      # 从这一步到「卸下 DMG」是打包和打包后的检查（构建、DMG 本身、包里的二进制 / 胶片表）；再往后是拿
+      # 裸二进制跑的测试。（NE3 还没定：以后要在 build 前面加一个查「这个 SHA 绿过没有」的 job，tag 可能只跑这一段。）
       # tee 一份 build.log 给下一步出 annotation。pipefail 要自己开：GitHub 默认的 shell 是 bash -e、不带 pipefail，
       # 管道的退出码是 tee 的 —— 不开的话 build_app.sh 失败这一步照样绿。
       - name: 构建 app + DMG
@@ -59,6 +61,28 @@ jobs:
         if: always() && steps.build.outcome != 'skipped'
         run: python3 -I culling-poc/LabelGUI/Scripts/ci_build_annotations.py build.log ${{ steps.build.outcome == 'failure' && '--failed' || '' }}
 
+      # 发出去的就是这个 DMG（NE6）：挂上（只读、不进访达、不自动开窗口），里面那份 app 验签名（--deep --strict），下面几步
+      # 打包后的检查都用挂载点里的二进制（$APP_BIN）跑。以前用仓库根目录下的 选片工具.app：DMG 本身能不能挂上、里面那份全不全、
+      # 签名对不对都没人验。卸下在「卸下 DMG」那一步（前面红了也卸）。
+      - name: 挂上 DMG、验签名
+        run: |
+          MNT="$RUNNER_TEMP/dmg"
+          mkdir -p "$MNT"
+          hdiutil attach 选片工具.dmg -nobrowse -readonly -noautoopen -mountpoint "$MNT"
+          echo "DMG_MNT=$MNT" >> "$GITHUB_ENV"
+          APP="$MNT/选片工具.app"
+          if [ ! -x "$APP/Contents/MacOS/LabelGUI" ]; then
+            echo "::error title=DMG::挂上以后没有 选片工具.app/Contents/MacOS/LabelGUI"
+            ls -la "$MNT"
+            exit 1
+          fi
+          if [ "$(readlink "$MNT/Applications")" != /Applications ]; then
+            echo "::error title=DMG::没有指向 /Applications 的替身（拖进去安装用的）"
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          echo "APP_BIN=$APP/Contents/MacOS/LabelGUI" >> "$GITHUB_ENV"
+
       # 判决层回归：Fixtures/photot-session 的分析结果灌进临时目录跑 --verdicts，和期望
       # 逐字比对。改了分组/判决/提名逻辑而没更新期望值 → 这里红。
       - name: 判决回归 (--verdicts)
@@ -68,23 +92,29 @@ jobs:
       # mcp_smoke 只在 CI 上跑的「不设 LABELGUI_DATA_DIR 也不建目录」那一条要求 runner 上还没有默认数据目录
       # ~/Library/Application Support/选片工具：哪一步先建出它，这一条就只能 skip。所以放得靠前（前面的构建、判决回归都不建它），
       # 往它前面加会起 LabelGUI 的步骤时记着这一条。
-      # 第二行是 build_app.sh 装好的 app 里的二进制（仓库根目录下的 选片工具.app）：脚本只在 --ci 且 GITHUB_ACTIONS=true 时收它，
+      # 第二行是 DMG 里那份 app 的二进制（$APP_BIN，「挂上 DMG」那一步设的）：脚本只在 --ci 且 GITHUB_ACTIONS=true 时收它，
       # 不跑 sandbox 那一组（规则抓到就 SIGKILL）。
       - name: MCP 冒烟 (--mcp)
         timeout-minutes: 10
         run: |
           python3 -I culling-poc/LabelGUI/Scripts/mcp_smoke.py culling-poc/LabelGUI/.build/release/LabelGUI --ci
-          python3 -I culling-poc/LabelGUI/Scripts/mcp_smoke.py "选片工具.app/Contents/MacOS/LabelGUI" --ci --protocol-only
+          python3 -I culling-poc/LabelGUI/Scripts/mcp_smoke.py "$APP_BIN" --ci --protocol-only
 
       # 装进 app 的胶片表（Resources/film-luts）：裸二进制往上找到的是仓库里的表，测不出漏装 —— v1.24.0–v1.26.1 漏了
-      # 每款的 .json，颗粒、晕光、冲印区在发出去的 app 里都不起作用。这里用 app 里的二进制跑，读的就是包里那份。
+      # 每款的 .json，颗粒、晕光、冲印区在发出去的 app 里都不起作用。这里用 DMG 里那份 app 的二进制跑：在 .app 里只读
+      # Contents/Resources/film-luts、不往上找（CollageFilmLUTs.foundDirectory），包里漏了哪张表这里就红（负片缺 _e 表 =
+      # 胶片曝光不起作用，也查）。DMG 挂在仓库外面（$RUNNER_TEMP），往上也找不到仓库，两道保险。
       - name: 打包后的胶片表 (--film-looks-selftest)
         timeout-minutes: 5
         run: |
           D=$(mktemp -d)
           mkdir -p "$D/data" "$D/sock" "$D/mcp"
           LABELGUI_DATA_DIR="$D/data" LABELGUI_NO_GUI=1 LABELGUI_LIVE_SOCK_ROOT="$D/sock" LABELGUI_MCP_OUT="$D/mcp" \
-            "选片工具.app/Contents/MacOS/LabelGUI" --film-looks-selftest
+            "$APP_BIN" --film-looks-selftest
+
+      - name: 卸下 DMG
+        if: always() && env.DMG_MNT != ''
+        run: hdiutil detach "$DMG_MNT" || hdiutil detach "$DMG_MNT" -force
 
       # 实时桥（v1）：起 --live-host（.prohibited，窗口从不显示；不行就 --no-view），经 --mcp 驱动；临时数据目录 + 测试 socket 根目录。
       # 带不带视图：第一次分支 CI（run 41158761483，2026-10-30）探针报「CI 用带视图的 --live-host」，所以钉 --view require ——

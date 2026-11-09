@@ -144,15 +144,24 @@ cp "$ROOT/third_party/film-luts/"*.cube "$ROOT/third_party/film-luts/"*.json \
    "$ROOT/third_party/film-luts/SPEKTRAFILM_LICENSE.txt" \
    "$ROOT/third_party/film-luts/CHANGELOG.txt" "$APP/Contents/Resources/film-luts/"
 LOOKS=0
+NEGATIVES=0
 for cube in "$APP/Contents/Resources/film-luts/"*.cube; do
     case "$cube" in *.film.cube|*.print.cube|*.film_e.cube|*.print_e.cube) continue ;; esac
     base="${cube%.cube}"
-    for need in "$base.json" "$base.film.cube" "$base.print.cube"; do
+    needs=("$base.json" "$base.film.cube" "$base.print.cube")
+    # 负片、电影负片（slide* 反转片以外的，和 CollageLook.isReversal 对着）还要两张放宽表 _e：胶片曝光要用
+    # （CollageFilmEffects.Ext），缺了胶片曝光滑杆在发出去的 app 里不起作用。
+    case "$(basename "$base")" in
+        slide*) ;;
+        *) needs+=("$base.film_e.cube" "$base.print_e.cube"); NEGATIVES=$((NEGATIVES + 1)) ;;
+    esac
+    for need in "${needs[@]}"; do
         [ -f "$need" ] || { echo "film-luts 缺 $(basename "$need")"; exit 1; }
     done
     LOOKS=$((LOOKS + 1))
 done
-[ "$LOOKS" -ge 15 ] || { echo "film-luts 里只有 $LOOKS 款色调（应该 15 款）"; exit 1; }
+[ "$LOOKS" -ge 15 ] || { echo "film-luts 里只有 ${LOOKS} 款色调（应该 15 款）"; exit 1; }
+echo "film-luts：${LOOKS} 款色调都齐（其中负片 ${NEGATIVES} 款带胶片曝光的 _e 表）"
 
 # 许可（GPL-3.0-or-later）、第三方声明、「关于」面板里的致谢（标准关于面板自动读 Resources/Credits.rtf）。
 cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE.txt"
