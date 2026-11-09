@@ -350,6 +350,13 @@ final class CollageStore: ObservableObject {
         CollageLayout.Context(canvas: editCanvas, style: project.style, photos: photoMap, hints: hints, heroID: nil)
     }
 
+    /// 排跨页用的（自动编排、换装订、挪到别的跨页 / 加进别的跨页、「拼图 (N)」分跨页）：永远是工程的跨页画布。
+    /// context 在编辑封面时是封面那一页（半宽、没有中缝）：拿它排跨页，照片会跨中缝、比例按单页解完再拉到 2:1，
+    /// 胶装的整版横图也照旧铺满（allowsCrossFold 在没有中缝的画布上恒为真）。审查发现：编辑封面时点「自动编排」就会这样。
+    var spreadContext: CollageLayout.Context {
+        CollageLayout.Context(canvas: project.canvas, style: project.style, photos: photoMap, hints: hints, heroID: nil)
+    }
+
     /// 成品像素坐标里的几何（画布叠加层、拖缝、落点都用它）。散落版、印样没有格子。
     var geometry: CollageLayout.Geometry {
         // 编辑封面：键 -1（不和任何跨页撞），几何按封面那一页的画布算（坐标是封面那一页自己的，左上原点）。
@@ -2596,7 +2603,7 @@ final class CollageStore: ObservableObject {
         project.canvas.binding = binding
         var fixed = 0
         if binding == .glued {
-            let ctx = context   // 已经是新的装订方式：CollageAlbum.layout 不会再给整版跨页
+            let ctx = spreadContext   // 已经是新的装订方式：CollageAlbum.layout 不会再给整版跨页
             let map = photoMap
             for i in project.pages.indices {
                 if project.pages[i].freeform {
@@ -3166,7 +3173,7 @@ final class CollageStore: ObservableObject {
         let locked = CollageAlbum.lockedSpreads(project)
         let photos = project.photos.filter { !locked.photoIDs.contains($0.id) }
         let map = photoMap
-        let ctx = context
+        let ctx = spreadContext
         // 编排主题跟着工程（「整本婚礼相册」之后再点自动编排还是 fine-art 的规则）。
         let theme = project.albumTheme
         let chapterMono = project.albumChapterMono
@@ -3312,7 +3319,7 @@ final class CollageStore: ObservableObject {
     /// （被作废时照片不会两头都没了，旧 moveSelectedPhoto 躲的就是这个）；回来核对场次和求解代号（中间编辑过、
     /// 撤销过、换了场次 = 作废，什么都不动），land 里自己记撤销、改页、commitEdit。
     private func solvePages(_ jobs: [PageSolve], busy: String, land: @escaping ([CollageNode]) -> Void) {
-        let ctx = context
+        let ctx = spreadContext
         solveSeed &+= 1
         let seed = solveSeed
         let ticket = beginSolve()
