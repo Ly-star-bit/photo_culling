@@ -54,7 +54,7 @@ enum ShortcutsTable {
         switch page {
         case .batch: return ([grid, timeline, batchOther], [pick, review, detail])
         case .watermark: return ([watermarkPhotos], [watermarkExport, other])
-        case .collage: return ([collageTopBar, canvas, layers], [crop, tray, strips, other])
+        case .collage: return ([collageTopBar, canvas, layers], [crop, tray, strips, overview, other])
         case .darkroom: return ([darkroomLooks, darkroomViewing], [darkroomAdjust, darkroomOther])
         }
     }
@@ -126,11 +126,13 @@ enum ShortcutsTable {
 
     // MARK: 拼图
 
-    static let collageTopBar = ShortcutsSection("顶栏", [
+    static let collageTopBar = ShortcutsSection("顶栏、换页", [
         Row("⌘Z  ⇧⌘Z", "撤销 · 重做"),
         Row("⇧⌘S", "存成方案（底下方案栏里点一下切回来）"),
         Row("⌘E", "导出（按导出设置写到输出目录）"),
         Row("Esc", "正在导出时：停止导出"),
+        Row("⌘←  ⌘→", "上一 / 下一跨页（封面在第一个跨页前面；在输入框里打字时是挪光标）"),
+        Row("G", "相册：整本概览（再按一次回到编辑）"),
     ])
     static let canvas = ShortcutsSection("画布（按键先点一下画布）", [
         Row("点", "选中格子、照片上的字、贴纸（右栏切到「格式」）· 点画布外面取消"),
@@ -139,6 +141,10 @@ enum ShortcutsTable {
         Row("拖缝", "调两边格子的大小"),
         Row("拖格子", "拖到另一格中间：互换 · 拖到边上：劈开插进去"),
         Row("← →", "上一个 / 下一个备选（还没有备选时 → 出一批）"),
+        Row("Q  A", "相册：左页换一种切法（上一种 / 下一种，照片不变）"),
+        Row("W  S", "相册：右页换一种切法"),
+        Row("右键格子", "相册：移到第…个跨页"),
+        Row("拖格子到跨页条", "相册：挪到那个跨页（两边都重排）"),
         Row("⌫", "删掉选中的格子（其余自动补位）、贴纸或手写字"),
         Row("Esc", "取消选中（先贴纸，再裁切，再格子）"),
     ])
@@ -163,8 +169,18 @@ enum ShortcutsTable {
     ])
     static let strips = ShortcutsSection("底下几条", [
         Row("点方案", "切到这个方案（⌘Z 回来）· 右键覆盖、改名、删除"),
-        Row("点页", "换到这一页 · 右键往前 / 往后挪、删除"),
+        Row("点页", "换到这一页 · 右键锁住、镜像、往前 / 往后挪、删除"),
+        Row("拖页", "排序 · 托盘的照片拖到页上 = 加进那一页"),
+        Row("点封面", "相册：编辑封面（没做时 = 做一张）；点任何一个跨页回来"),
         Row("点备选", "用这个备选 · 右键去掉、清空"),
+    ])
+    static let overview = ShortcutsSection("整本概览（G）", [
+        Row("点  ⌘点  ⇧点", "选中 · 加减 · 连选"),
+        Row("拖", "排序（多选了拖其中一个 = 整批）· 插入处一条竖线"),
+        Row("双击", "回到编辑这个跨页"),
+        Row("右键", "锁住 / 解锁 · 镜像 · 删除（多选了对整批）"),
+        Row("⌘A  ⌫", "全选 · 删除选中的（⌘Z 撤回）"),
+        Row("Esc", "回到编辑"),
     ])
 
     // MARK: 暗房
@@ -422,7 +438,8 @@ enum ShortcutsSelfTest {
 
         // 3. 代码里绑着的键都列了
         let expected: [(ShortcutsPage, [String])] = [
-            (.collage, ["⌘Z  ⇧⌘Z", "⇧⌘S", "⌘E", "⌥点缝", "双击", "[  ]", "+  -", "⌘A  Esc", "⌫"]),
+            (.collage, ["⌘Z  ⇧⌘Z", "⇧⌘S", "⌘E", "⌥点缝", "双击", "[  ]", "+  -", "⌘A  Esc", "⌫",
+                        "⌘←  ⌘→", "G", "Q  A", "W  S", "右键格子", "⌘A  ⌫"]),
             (.darkroom, ["← →", "↑ ↓", "⏎  点样张", "按住空格", "拖竖线", "⌘←  ⌘→", "⌘Z  ⇧⌘Z", "Esc"]),
             (.watermark, ["⌘O", "⌘⏎", "Esc", "⌫"]),
             (.batch, ["C  D  F", "⌥⌘S", "⇧Esc"]),

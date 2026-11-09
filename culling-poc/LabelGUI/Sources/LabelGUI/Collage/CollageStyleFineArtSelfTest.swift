@@ -138,6 +138,8 @@ enum CollageStyleFineArtSelfTest {
         CollageAlbumEditSelfTest.run(check: check)
         // 相册封面（尺寸、书脊估算、竖排、旧工程读回、编辑封面）：CollageBookCoverSelfTest.swift。
         CollageBookCoverSelfTest.run(check: check)
+        // 相册界面（概览、跨页条、⌘← ⌘→、封面卡、编辑封面时哪些不能用）：CollageAlbumUISelfTest.swift。
+        CollageAlbumUISelfTest.run(check: check)
 
         // ---------------------------------------------------------------- 4. 真照片套合成标记（可选）
         if args.count > flagIndex + 1, !args[flagIndex + 1].hasPrefix("--") {

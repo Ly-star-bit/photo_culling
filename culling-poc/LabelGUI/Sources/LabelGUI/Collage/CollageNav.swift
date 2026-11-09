@@ -30,7 +30,7 @@ enum CollageSpot: String, CaseIterable, Identifiable {
     // 右栏「样式」
     case presets, looks, spacing, background, frame
     // 右栏「文档」
-    case canvas, titles, watermark
+    case canvas, titles, cover, watermark
     // 顶栏、底栏
     case darkroom, export, variants
 
@@ -60,7 +60,7 @@ enum CollageSpot: String, CaseIterable, Identifiable {
         switch self {
         case .format, .textEditor, .overlays, .cellLook, .page, .pageLook, .contact: return .format
         case .presets, .looks, .spacing, .background, .frame: return .style
-        case .canvas, .titles, .watermark: return .document
+        case .canvas, .titles, .cover, .watermark: return .document
         default: return nil
         }
     }
@@ -93,6 +93,7 @@ enum CollageSpot: String, CaseIterable, Identifiable {
         case .frame: return "样式 › 边框与投影"
         case .canvas: return "文档 › 画布"
         case .titles: return "文档 › 标题和刊头"
+        case .cover: return "文档 › 封面"
         case .watermark: return "文档 › 水印"
         case .darkroom: return "顶栏 › 暗房"
         case .export: return "顶栏 › 导出"

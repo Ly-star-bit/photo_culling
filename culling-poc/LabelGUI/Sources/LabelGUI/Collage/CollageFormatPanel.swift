@@ -53,6 +53,12 @@ struct CollageFormatPanel: View {
     @ViewBuilder
     private func cellBoxes(path: [Int], cell: CollageCell) -> some View {
         CollageCellBox(store: store, cell: cell)
+        // 换一张（S6）：同连拍、同场、画面相似的一排候选（编辑封面时没有：封面那块换照片从托盘拖）。
+        if cell.kind == .photo, let id = cell.photoID,
+           CollageAlbumRules.allows(.replacePhoto, editingCover: store.editingCover) {
+            CollageReplaceBox(store: store, path: path, photoID: id)
+                .id(id)
+        }
         if cell.kind == .photo, cell.photoID != nil {
             CollagePhotoCellBoxes(store: store, cell: cell, path: path)
         }
@@ -95,6 +101,8 @@ struct CollageFormatPanel: View {
 struct CollageCellBox: View {
     @ObservedObject var store: CollageStore
     let cell: CollageCell
+    /// 「移到第…个跨页 › 填跨页号…」的小框。
+    @State private var askNumber = false
 
     var body: some View {
         GroupBox("选中的格子") {
@@ -115,14 +123,10 @@ struct CollageCellBox: View {
                     }
                     .help("删掉这一格，其余自动补位 (Delete)")
                 }
-                if store.isAlbum, cell.photoID != nil {
-                    HStack {
-                        Button("移到上一跨页") { store.moveSelectedPhoto(toPage: store.pageIndex - 1) }
-                            .disabled(store.pageIndex == 0)
-                        Button("移到下一跨页") { store.moveSelectedPhoto(toPage: store.pageIndex + 1) }
-                            .disabled(store.pageIndex >= store.project.pages.count - 1)
-                    }
-                    .font(.caption)
+                // 编辑封面时没有：封面那块的照片不属于哪个跨页（store 也拦）。
+                if store.isAlbum, cell.photoID != nil,
+                   CollageAlbumRules.allows(.moveToSpread, editingCover: store.editingCover) {
+                    moveRow
                 }
                 if cell.kind == .photo, let id = cell.photoID {
                     CollageSkipMarkToggle(store: store, photoID: id, boxed: false)
@@ -132,6 +136,23 @@ struct CollageCellBox: View {
             .padding(4)
         }
         .collageSpot(.format, store.nav)
+        .collageMoveNumberAlert(store: store, isPresented: $askNumber, path: nil)
+    }
+
+    /// 移到上一 / 下一跨页、移到第…个（每 10 个一组；画布上右键这一格是同一份菜单）。
+    private var moveRow: some View {
+        HStack(spacing: 6) {
+            Button { store.moveSelectedPhoto(toPage: store.pageIndex - 1) } label: { Image(systemName: "chevron.left") }
+                .disabled(store.pageIndex == 0)
+                .help("移到上一个跨页")
+            Button { store.moveSelectedPhoto(toPage: store.pageIndex + 1) } label: { Image(systemName: "chevron.right") }
+                .disabled(store.pageIndex >= store.project.pages.count - 1)
+                .help("移到下一个跨页")
+            if let path = store.selection {
+                CollageMoveMenu(store: store, path: path, askNumber: $askNumber)
+            }
+        }
+        .font(.caption)
     }
 
     private var cellTitle: String {
@@ -379,7 +400,8 @@ struct CollageDarkroomButton: View {
         .controlSize(prominent ? .large : .regular)
         .buttonStyle(.bordered)
         .tint(CollageDarkroomButton.amber)
-        .disabled(store.page == nil)
+        // 编辑封面时不进暗房：暗房按「当前跨页」套色调，会改到封面底下那个跨页上。
+        .disabled(store.page == nil || !CollageAlbumRules.allows(.darkroom, editingCover: store.editingCover))
     }
 
     /// 暗房的琥珀色（安全灯）：顶栏按钮、样式页的大按钮同一个颜色。
@@ -396,12 +418,19 @@ struct CollagePageBox: View {
     @ObservedObject var store: CollageStore
 
     var body: some View {
-        if store.page == nil {
+        if store.editingCover {
+            // 编辑封面：画布上是整张封面，没有「这个跨页」的那些（色调、存模板、镜像、锁都是跨页的事）。
+            CollageCoverEditBox(store: store)
+        } else if store.page == nil {
             emptyBox
         } else {
             GroupBox(store.isAlbum ? "这个跨页" : "这一页") {
                 VStack(alignment: .leading, spacing: 10) {
                     layoutRows
+                    // 相册：镜像、左页 / 右页换版式、锁住这个跨页（相册 A + B · U4）。
+                    if store.isAlbum {
+                        CollageSpreadActions(store: store)
+                    }
                     Divider()
                     lookRows
                     Divider()

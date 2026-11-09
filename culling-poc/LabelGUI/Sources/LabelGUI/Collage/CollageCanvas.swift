@@ -9,6 +9,24 @@ struct CollageCanvasLayout {
     /// 视图点 / 成品像素。
     let scale: CGFloat
 
+    init(rect: CGRect, scale: CGFloat) {
+        self.rect = rect
+        self.scale = scale
+    }
+
+    /// 编辑封面时画布区的两层摆放：image = 整张封面（封底 | 书脊 | 封面，带包边、出血）铺在视图里；edit = 封面那一页
+    /// （格子、选中框、落点、命中都按它：几何是封面那一页自己的坐标，左上原点）。平常两个一样，都是这个跨页。
+    @MainActor
+    static func display(store: CollageStore, in size: CGSize) -> (image: CollageCanvasLayout, edit: CollageCanvasLayout) {
+        if store.editingCover, let cover = store.coverLayout {
+            let whole = CollageCanvas(name: "封面", width: max(1, cover.width), height: max(1, cover.height))
+            let image = CollageCanvasLayout(canvas: whole, in: size)
+            return (image, CollageCanvasLayout(rect: image.toView(cover.front), scale: image.scale))
+        }
+        let layout = CollageCanvasLayout(canvas: store.project.canvas, in: size)
+        return (layout, layout)
+    }
+
     init(canvas: CollageCanvas, in size: CGSize, padding: CGFloat = 28) {
         let availW = max(10, size.width - padding * 2)
         let availH = max(10, size.height - padding * 2)
@@ -154,16 +172,22 @@ struct CollageCanvasView: View {
     @State private var dropTarget: CollageDropTarget?
     @State private var hoverGutter: CollageLayout.Gutter?
     @State private var magnifyBase: CollageCropOverride?
+    /// 右键「移到第…个跨页（填号）…」的小框、点的是哪一格。
+    @State private var askNumber = false
+    @State private var menuPath: [Int]?
     @FocusState private var focused: Bool
 
     var body: some View {
         let _ = CollagePerf.body("画布")
         GeometryReader { geo in
-            let layout = CollageCanvasLayout(canvas: store.project.canvas, in: geo.size)
+            // 编辑封面：图是整张封面，格子按封面那一页（CollageCanvasLayout.display）。
+            let display = CollageCanvasLayout.display(store: store, in: geo.size)
+            let layout = display.edit
             let geometry = store.geometry
+            let origin = geo.frame(in: .global).origin
             ZStack(alignment: .topLeading) {
                 Color(white: 0.14)
-                canvasImage(layout)
+                canvasImage(display.image)
                 CollageCanvasOverlay(store: store, layout: layout, geometry: geometry,
                                      dropTarget: dropTarget, hoverGutter: hoverGutter)
                     .allowsHitTesting(false)
@@ -171,27 +195,42 @@ struct CollageCanvasView: View {
                     emptyHint
                         .frame(width: geo.size.width, height: geo.size.height)
                 }
+                if store.editingCover {
+                    coverHint.frame(width: geo.size.width, height: geo.size.height, alignment: .bottom)
+                }
             }
+            // 右键一格：「移到第…个跨页」（垫在底下、点击穿过去；右键由它自己的监听接，CollageContextMenuAnchor）。
+            .background(CollageContextMenuAnchor { p in contextMenu(at: p, layout: layout, geometry: geometry) })
             .contentShape(Rectangle())
             .gesture(singleTapGesture(layout: layout, geometry: geometry))
             .simultaneousGesture(doubleTapGesture(layout: layout, geometry: geometry))
-            .simultaneousGesture(dragGesture(layout: layout, geometry: geometry))
+            .simultaneousGesture(dragGesture(layout: layout, geometry: geometry, origin: origin))
             .simultaneousGesture(magnifyGesture(geometry: geometry))
             .onContinuousHover { phase in
                 hover(phase, layout: layout, geometry: geometry)
             }
             .onDrop(of: [.text, .fileURL], delegate: CollageCanvasDropDelegate(
                 store: store, layout: layout, geometry: geometry, isFreeform: store.isFreeform,
-                canvas: store.project.canvas, target: $dropTarget))
-            .onAppear { reportViewport(layout) }
-            .onChange(of: geo.size) { _, _ in reportViewport(layout) }
-            .onChange(of: store.project.canvas) { _, _ in reportViewport(layout) }
+                canvas: store.editCanvas, target: $dropTarget))
+            .onAppear { reportViewport(display.image) }
+            .onChange(of: geo.size) { _, _ in reportViewport(display.image) }
+            .onChange(of: store.project.canvas) { _, _ in reportViewport(display.image) }
+            // 进出封面编辑、书脊宽变了：整张封面的比例不一样，视口跟着报（封面预览按它算缩放）。
+            .onChange(of: store.editingCover) { _, _ in reportViewport(display.image) }
+            .onChange(of: store.coverLayout) { _, _ in reportViewport(display.image) }
         }
+        // 「填跨页号」小框挂在焦点修饰之前（同别处的弹框：挂在 .focusable() 后面有时弹不出来）。
+        .collageMoveNumberAlert(store: store, isPresented: $askNumber, path: menuPath)
         .focusable()
         .focusEffectDisabled()
         .focused($focused)
-        .onKeyPress(.leftArrow) { keyArrow(-1) }
-        .onKeyPress(.rightArrow) { keyArrow(1) }
+        // ⌘← ⌘→ 是换跨页（拼图页的按键监听，CollageAlbumUI.swift）：带 ⌘ 的不当成切备选。
+        .onKeyPress(.leftArrow, phases: [.down, .repeat]) { press in
+            press.modifiers.contains(.command) ? .ignored : keyArrow(-1)
+        }
+        .onKeyPress(.rightArrow, phases: [.down, .repeat]) { press in
+            press.modifiers.contains(.command) ? .ignored : keyArrow(1)
+        }
         .onKeyPress(.upArrow) { keyNudge(dx: 0, dy: -1) }
         .onKeyPress(.downArrow) { keyNudge(dx: 0, dy: 1) }
         .onKeyPress(.escape) { keyEscape() }
@@ -202,6 +241,10 @@ struct CollageCanvasView: View {
         }
         .onKeyPress(characters: CharacterSet(charactersIn: "[]")) { press in
             keyRotate(press.characters)
+        }
+        // Q / A：左页上一种 / 下一种切法；W / S：右页（相册网格跨页，编辑封面时不接）。
+        .onKeyPress(characters: CharacterSet(charactersIn: "qawsQAWS")) { press in
+            keySide(press)
         }
         // 实时桥（§9.6b 的 dragging）：正在拖 / 捏合时 AI 的拼图写等用户松手。只往 store 上记，界面不变。
         // DragMode 带关联值、不是 Equatable，只能看「有没有」
@@ -216,6 +259,37 @@ struct CollageCanvasView: View {
 
     private func canvasImage(_ layout: CollageCanvasLayout) -> some View {
         CollageCanvasImage(preview: store.previewState, rect: layout.rect)
+    }
+
+    /// 编辑封面时画布底下一行：书脊、封底去哪改，怎么回到跨页。
+    private var coverHint: some View {
+        Text("封面：点格子选中、拖照片换、双击改字 · 书脊、封底在右栏「文档 › 封面」· 点跨页条上的跨页回去")
+            .font(.caption2)
+            .foregroundStyle(.white.opacity(0.85))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(.black.opacity(0.55), in: Capsule())
+            .padding(.horizontal, 12)
+            .padding(.bottom, 6)
+            .allowsHitTesting(false)
+    }
+
+    /// 右键点在 p：照片格就先选中它（看得见点的是哪一格），给「移到第…个跨页」菜单；别的不弹。
+    private func contextMenu(at p: CGPoint, layout: CollageCanvasLayout, geometry: CollageLayout.Geometry) -> NSMenu? {
+        guard case .cell(let f) = CollageHit.at(p, geometry: geometry, layout: layout),
+              f.cell.kind == .photo, f.cell.photoID != nil else { return nil }
+        let path = f.path
+        guard let menu = CollageCanvasMenu.build(store: store, path: path, ask: {
+            menuPath = path
+            askNumber = true
+        }) else { return nil }
+        focused = true
+        if store.cropEditing, store.selection != path { store.exitCropEdit() }
+        store.selection = path
+        onSelect()
+        return menu
     }
 
     private var emptyHint: some View {
@@ -315,11 +389,13 @@ struct CollageCanvasView: View {
 
     // MARK: - 拖动：拖缝 / 挪格子 / 裁切平移
 
-    private func dragGesture(layout: CollageCanvasLayout, geometry: CollageLayout.Geometry) -> some Gesture {
+    /// origin：画布在窗口里的左上角（.global）—— 拖一格照片出了画布、指到跨页条的卡片上时按它换算（跨页条记着自己在窗口里的位置）。
+    private func dragGesture(layout: CollageCanvasLayout, geometry: CollageLayout.Geometry,
+                             origin: CGPoint) -> some Gesture {
         DragGesture(minimumDistance: 3, coordinateSpace: .local)
             .onChanged { value in
                 if dragMode == nil { dragMode = beginDrag(at: value.startLocation, layout: layout, geometry: geometry) }
-                updateDrag(value, layout: layout, geometry: geometry)
+                updateDrag(value, layout: layout, geometry: geometry, origin: origin)
             }
             .onEnded { _ in endDrag() }
     }
@@ -367,7 +443,8 @@ struct CollageCanvasView: View {
         }
     }
 
-    private func updateDrag(_ value: DragGesture.Value, layout: CollageCanvasLayout, geometry: CollageLayout.Geometry) {
+    private func updateDrag(_ value: DragGesture.Value, layout: CollageCanvasLayout, geometry: CollageLayout.Geometry,
+                            origin: CGPoint) {
         guard let mode = dragMode else { return }
         switch mode {
         case .gutter(let g):
@@ -375,11 +452,16 @@ struct CollageCanvasView: View {
             let position = g.axis == .row ? Double(c.x) : Double(c.y)
             // 这条缝自己的宽度（相册设了四边边距时中缝比别的缝宽：两页的内边距）。
             let gutterWidth = g.axis == .row ? g.rect.width : g.rect.height
-            let minPixels = store.project.canvas.shortSide * 0.06
+            let minPixels = store.editCanvas.shortSide * 0.06
             let ratio = CollageLayout.ratio(forDrag: position, gutter: g, gutterWidth: gutterWidth, minPixels: minPixels)
             store.setRatio(ratio, at: g.path)
         case .move(let source):
-            dropTarget = CollageHit.dropTarget(value.location, geometry: geometry, layout: layout, excluding: source)
+            // 拖出画布、指到跨页条的卡片上：松手 = 挪到那个跨页（S1 moveCells）；卡片描边，画布上不画落点。
+            let global = CGPoint(x: value.location.x + origin.x, y: value.location.y + origin.y)
+            let hover = spreadTarget(source, at: global)
+            if store.albumUI.stripHover != hover { store.albumUI.stripHover = hover }
+            dropTarget = hover == nil
+                ? CollageHit.dropTarget(value.location, geometry: geometry, layout: layout, excluding: source) : nil
         case .pan(let path, let base, let frame):
             pan(path: path, base: base, frame: frame, translation: value.translation, layout: layout)
         case .item(let base):
@@ -431,16 +513,33 @@ struct CollageCanvasView: View {
         store.setCrop(CollageCropOverride(cx: cx, cy: cy, zoom: zoom), at: path)
     }
 
+    /// 这一格拖到窗口里的 point（.global）时指着跨页条上的第几个跨页（只对相册里的照片格、不在编辑封面）。
+    private func spreadTarget(_ source: [Int], at point: CGPoint) -> Int? {
+        guard store.isAlbum, CollageAlbumRules.allows(.moveToSpread, editingCover: store.editingCover),
+              store.root?.node(at: source)?.cell?.photoID != nil,
+              let page = store.albumUI.stripTarget(at: point), store.project.pages.indices.contains(page) else { return nil }
+        return page
+    }
+
     private func endDrag() {
         defer {
             dragMode = nil
             dropTarget = nil
+            if store.albumUI.stripHover != nil { store.albumUI.stripHover = nil }
         }
         guard let mode = dragMode else { return }
         switch mode {
         case .gutter, .item, .rotate, .resize, .overlay:
             store.endContinuousEdit()
         case .move(let source):
+            // 松手时指着跨页条上别的跨页：挪过去（两边在后台重排，那张卡片上转圈）。
+            if let page = store.albumUI.stripHover {
+                guard page != store.pageIndex, store.project.pages.indices.contains(page) else { return }
+                let id = store.project.pages[page].id
+                store.moveCells([source], toPage: page)
+                store.albumUI.pendingPage = store.isSolving ? id : nil
+                return
+            }
             guard let target = dropTarget else { return }
             if let edge = target.edge {
                 store.move(from: source, to: target.path, edge: edge)
@@ -515,6 +614,16 @@ struct CollageCanvasView: View {
         return .handled
     }
 
+    /// Q / A、W / S：这个跨页的左页 / 右页换一种切法（CollageAlbumRules.sideKey）。
+    private func keySide(_ press: KeyPress) -> KeyPress.Result {
+        guard let key = CollageAlbumRules.sideKey(press.characters, modifiers: press.modifiers), store.isAlbum,
+              CollageAlbumRules.allows(.sideLayout, editingCover: store.editingCover),
+              let page = store.page, !page.freeform, page.contactSheet == nil,
+              store.project.canvas.seams == .fold else { return .ignored }
+        store.cycleSideLayout(key.side, step: key.step)
+        return .handled
+    }
+
     private func keyZoom(_ chars: String) -> KeyPress.Result {
         guard store.cropEditing, let path = store.selection,
               let frame = store.geometry.frames.first(where: { $0.path == path }),
@@ -564,8 +673,17 @@ private struct CollageCanvasImage: View {
     @ObservedObject var preview: CollagePreviewState
     let rect: CGRect
 
+    /// 预览图的比例和画布区对得上（差 1.5% 以内）：刚进 / 出封面编辑时上一张（跨页 / 整张封面）还没换掉，比例不对就先画灰块，
+    /// 不把上一张拉变形铺上去（跨页 2:1，整张封面多了书脊、包边，30×30 的册子差 3%）。
+    private func fits(_ image: NSImage) -> Bool {
+        guard rect.height > 0, image.size.height > 0 else { return false }
+        let want = rect.width / rect.height
+        let got = image.size.width / image.size.height
+        return abs(got / want - 1) < 0.015
+    }
+
     var body: some View {
-        if let image = preview.image {
+        if let image = preview.image, fits(image) {
             Image(nsImage: image)
                 .resizable()
                 .interpolation(.high)

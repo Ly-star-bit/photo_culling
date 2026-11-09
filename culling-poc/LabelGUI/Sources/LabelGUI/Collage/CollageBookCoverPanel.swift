@@ -141,43 +141,15 @@ struct CollageBookCoverBox: View {
         return CGFloat(l.width) / CGFloat(l.height)
     }
 
-    /// 预览跟着变的：封面本身、画布、样式、标题、跨页数（书脊估算）、封面用到的照片、路人信息和蒙版的版本。
-    private var previewKey: Int {
-        var h = Hasher()
-        let p = store.project
-        h.combine(p.bookCover)
-        h.combine(p.canvas)
-        h.combine(p.style)
-        h.combine(p.title)
-        h.combine(p.subtitle)
-        h.combine(p.pages.count)
-        h.combine(p.watermark)
-        let map = store.photoMap
-        for id in p.bookCover?.photoIDs ?? [] { h.combine(map[id]) }
-        h.combine(store.hintsVersion)
-        h.combine(store.masksVersion)
-        return h.finalize()
-    }
+    /// 预览跟着变的（封面、画布、样式、标题、跨页数、封面用到的照片、路人信息和蒙版的版本）：同跨页条的封面卡
+    /// （CollageCoverPreview）。
+    private var previewKey: Int { CollageCoverPreview.key(store) }
 
     private func renderPreview() async {
-        guard let layout = store.coverLayout else {
-            thumb = nil
-            return
-        }
-        let project = store.project
-        let hints = store.hints
         // 检视器约 300pt 宽：渲 600 像素宽（Retina 两倍）够看清书脊字。
-        let scale = min(1, 600 / Double(max(1, layout.width)))
-        let image = await Task.detached(priority: .utility) { () -> CGImage? in
-            var opts = CollageRender.Options(scale: scale)
-            opts.includeBleed = true
-            opts.guides = true
-            opts.placeholders = true
-            opts.watermark = true
-            return CollageBookCoverRender.render(project: project, hints: hints, options: opts)
-        }.value
+        let image = await CollageCoverPreview.render(store, longEdge: 600, guides: true)
         guard !Task.isCancelled else { return }
-        thumb = image.map { NSImage(cgImage: $0, size: NSSize(width: $0.width, height: $0.height)) }
+        thumb = image
     }
 
     private func syncFields(_ cover: CollageBookCover) {

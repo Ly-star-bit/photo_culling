@@ -78,13 +78,22 @@ struct CollageTemplateGallery: View {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 86), spacing: 8)], spacing: 10) {
                 ForEach(templates, id: \.name) { t in
                     CollageTemplateTile(store: store, template: t, thumb: thumbs.templates[t.name],
-                                        aspect: aspect(of: t), trayEmpty: store.project.photos.isEmpty) {
+                                        aspect: aspect(of: t), trayEmpty: store.project.photos.isEmpty,
+                                        coverBlocked: coverBlocked(t)) {
                         onDelete(t.name)
                     }
                     .equatable()
                 }
             }
         }
+    }
+
+    /// 编辑封面时套不了的模板：散落版、印样（封面那块只收切分树，store 的 setPage 会把它们丢掉）。
+    private func coverBlocked(_ t: CollageTemplate) -> Bool {
+        let editing = store.editingCover
+        if t.freeform || t.scatter != nil { return !CollageAlbumRules.allows(.scatter, editingCover: editing) }
+        if t.contactSheet != nil { return !CollageAlbumRules.allows(.contactSheet, editingCover: editing) }
+        return false
     }
 
     /// 相册里套模板不换画布：占位的比例也按相册跨页。
@@ -103,24 +112,27 @@ struct CollageTemplateTile: View, Equatable {
     let thumb: NSImage?
     let aspect: CGFloat
     let trayEmpty: Bool
+    /// 正在编辑封面、这个模板是散落版 / 印样：灰着（封面那块只有格子）。
+    let coverBlocked: Bool
     let onDelete: () -> Void
     /// 缩略图是不是同一张（== 只比这个：NSImage 不是 Sendable，nonisolated 的 == 里不碰它）。
     private let thumbID: ObjectIdentifier?
 
     init(store: CollageStore, template: CollageTemplate, thumb: NSImage?, aspect: CGFloat, trayEmpty: Bool,
-         onDelete: @escaping () -> Void) {
+         coverBlocked: Bool = false, onDelete: @escaping () -> Void) {
         self.store = store
         self.template = template
         self.thumb = thumb
         self.aspect = aspect
         self.trayEmpty = trayEmpty
+        self.coverBlocked = coverBlocked
         self.onDelete = onDelete
         thumbID = thumb.map(ObjectIdentifier.init)
     }
 
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.store === b.store && a.thumbID == b.thumbID && a.aspect == b.aspect && a.trayEmpty == b.trayEmpty
-            && a.template == b.template
+            && a.coverBlocked == b.coverBlocked && a.template == b.template
     }
 
     var body: some View {
@@ -131,8 +143,8 @@ struct CollageTemplateTile: View, Equatable {
             tile
         }
         .buttonStyle(.plain)
-        .disabled(trayEmpty)
-        .help(helpText)
+        .disabled(trayEmpty || coverBlocked)
+        .help(coverBlocked ? "编辑封面时套不了散落版、印样（封面那块只有格子）" : helpText)
         .contextMenu {
             if !template.builtin {
                 Button("删除「\(template.name)」", role: .destructive, action: onDelete)
@@ -714,10 +726,17 @@ struct CollageDecorBox: View {
                             .frame(maxWidth: .infinity)
                     }
                 }
+                .disabled(!CollageAlbumRules.allows(.freeItems, editingCover: store.editingCover))
                 HStack {
                     Button("加手写字") { store.addItemText() }
                         .font(.caption)
+                        .disabled(!CollageAlbumRules.allows(.freeItems, editingCover: store.editingCover))
                     Spacer()
+                }
+                if store.editingCover {
+                    Text("编辑封面时没有贴纸和手写字：封面那块只有格子（照片、文字、留白）。")
+                        .font(.caption2).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Text(store.isFreeform
                      ? "散落版：托盘里的照片拖进画布 = 放一张照片。选中后拖动挪位置，拖上方圆点旋转、右下圆点缩放；[ ] 微调角度。先选中一张照片再加胶带、回形针，会贴在它上沿并跟着它走。"
