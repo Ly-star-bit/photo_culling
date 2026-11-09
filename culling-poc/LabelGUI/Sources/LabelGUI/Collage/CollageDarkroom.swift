@@ -610,11 +610,13 @@ final class CollageDarkroom: ObservableObject {
                           + "|\(Self.printingKey(base.style))")
         submit("frames", key: key) { [weak self] in
             let images = await Task.detached(priority: .utility) { () -> [CollageLook: NSImage] in
-                // 27 张互不相干：并发渲（每张和一张张挨着渲逐字节一样）。
+                // 27 张互不相干：并发渲（每张和一张张挨着渲逐字节一样）。工程是值类型、几个线程只读不改：装进 LiveBox
+                // 递给 concurrentPerform（它的闭包是 @Sendable，CollageProject 没标 Sendable，直接捕获有一条警告）。
+                let shared = LiveBox(base)
                 var out: [CollageLook: NSImage] = [:]
                 let lock = NSLock()
                 DispatchQueue.concurrentPerform(iterations: looks.count) { i in
-                    let image = Self.sample(id, base: base, hints: hints, look: looks[i], strength: strength,
+                    let image = Self.sample(id, base: shared.value, hints: hints, look: looks[i], strength: strength,
                                             width: 330, height: 220)
                     lock.lock()
                     out[looks[i]] = image
@@ -636,11 +638,12 @@ final class CollageDarkroom: ObservableObject {
         let key = LaneKey("\(id)|\(look.rawValue)|\(hints[id] != nil)|\(Self.printingKey(base.style))")
         submit("strip", key: key) { [weak self] in
             let images = await Task.detached(priority: .utility) { () -> [NSImage] in
-                // 同样并发渲，按强度的先后放回去（渲不出来的那格照旧去掉）。
+                // 同样并发渲，按强度的先后放回去（渲不出来的那格照旧去掉）。工程同样装进 LiveBox 递过去。
+                let shared = LiveBox(base)
                 var out = [NSImage?](repeating: nil, count: steps.count)
                 let lock = NSLock()
                 DispatchQueue.concurrentPerform(iterations: steps.count) { i in
-                    let image = Self.sample(id, base: base, hints: hints, look: look, strength: steps[i],
+                    let image = Self.sample(id, base: shared.value, hints: hints, look: look, strength: steps[i],
                                             width: 150, height: 100)
                     lock.lock()
                     out[i] = image
