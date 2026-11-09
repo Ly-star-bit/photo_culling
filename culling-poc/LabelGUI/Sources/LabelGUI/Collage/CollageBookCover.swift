@@ -193,12 +193,14 @@ struct CollageBookCover: Codable, Hashable {
         var extent: Int { wrap + bleed }
         var width: Int { 2 * extent + 2 * pageW + spine }
         var height: Int { 2 * extent + pageH }
-        /// 封底 | 书脊 | 封面（翻开平放看得见的那块，PDF 的 TrimBox）。左上原点。
+        /// 封底 | 书脊 | 封面（翻开平放看得见的那块 = 板子；四条边是包边往里折的折线）。左上原点。
+        /// 封面 PDF 的 TrimBox 不是它，是 wrapRect（封面纸在包边外沿裁）。
         var trim: CGRect { CGRect(x: extent, y: extent, width: 2 * pageW + spine, height: pageH) }
         var back: CGRect { CGRect(x: extent, y: extent, width: pageW, height: pageH) }
         var spineRect: CGRect { CGRect(x: extent + pageW, y: extent, width: spine, height: pageH) }
         var front: CGRect { CGRect(x: extent + pageW + spine, y: extent, width: pageW, height: pageH) }
-        /// 包边折线（= trim 的四条边）以内、出血以内的那一圈（板子包住的部分）。
+        /// 包边外沿以内（出血以内）：板子 + 四周包边。封面纸在这里裁（封面 PDF 的 TrimBox、四角裁切线）；包边从 trim 的
+        /// 四条边往里折到板子背面。
         var wrapRect: CGRect { CGRect(x: bleed, y: bleed, width: width - 2 * bleed, height: height - 2 * bleed) }
     }
 

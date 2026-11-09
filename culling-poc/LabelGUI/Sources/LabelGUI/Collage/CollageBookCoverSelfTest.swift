@@ -522,7 +522,7 @@ enum CollageBookCoverSelfTest {
             }
             check(ink == 0, "书脊 4mm：书脊上没有字", "\(ink) 个深色像素")
         }
-        // 封面 PDF：一页，TrimBox = 看得见的那块，BleedBox = 整张。
+        // 封面 PDF：一页，TrimBox = 包边外沿（封面纸在这里裁），BleedBox = 整张；板子（封底 | 书脊 | 封面）在里面。
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bookcover-pdf-\(UUID().uuidString.prefix(6))")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -541,10 +541,19 @@ enum CollageBookCoverSelfTest {
                         && abs(a.height - b.height) < 0.01
                 }
                 let trimMM = Double(trimBox.width) / 72 * 25.4
+                let trimHMM = Double(trimBox.height) / 72 * 25.4
+                let boardMM = Double(boxes.board.width) / 72 * 25.4
+                // 合成的这本：两页 300mm + 书脊 12.5mm，包边四周各 15mm（cover.wrapMM 默认）。
+                let wrap = 2 * cover.wrapMM
+                let pageHMM = Double(p.canvas.height) / p.canvas.dpi * 25.4
+                let inside = trimBox.minX < boxes.board.minX && trimBox.maxX > boxes.board.maxX
+                    && trimBox.minY < boxes.board.minY && trimBox.maxY > boxes.board.maxY
+                    && bleedBox.minX < trimBox.minX && bleedBox.maxX > trimBox.maxX
                 check(doc?.numberOfPages == 1 && close(trimBox, boxes.trim) && close(bleedBox, boxes.bleed)
-                      && abs(trimMM - (600 + 12.5)) < 1,
-                      "封面 PDF：一页，TrimBox = 封底 | 书脊 | 封面，BleedBox = 整张（带包边出血）",
-                      String(format: "Trim 宽 %.1f mm", trimMM))
+                      && abs(trimMM - (600 + 12.5 + wrap)) < 1 && abs(trimHMM - (pageHMM + wrap)) < 1
+                      && abs(boardMM - (600 + 12.5)) < 1 && inside,
+                      "封面 PDF：一页，TrimBox = 包边外沿（封面纸在这里裁），板子在它里面，BleedBox = 整张（带出血）",
+                      String(format: "Trim %.1f × %.1f mm，板子宽 %.1f mm", trimMM, trimHMM, boardMM))
                 var again = false
                 do {
                     try CollageExport.writeCoverPDF(page: .data(jpeg), layout: l, dpi: p.canvas.dpi * scale, to: url, title: "拾光",

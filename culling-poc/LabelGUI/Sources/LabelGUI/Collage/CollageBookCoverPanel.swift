@@ -132,7 +132,8 @@ struct CollageBookCoverBox: View {
         }
         .aspectRatio(previewAspect, contentMode: .fit)
         .frame(maxWidth: .infinity)
-        .help("只读预览：青线是折线（包边往里折）和书脊，绿虚线是安全区；封面那块的格子、照片、字在画布上编辑")
+        .help("只读预览：青线是折线（包边往里折）和书脊，品红虚线是裁切线（包边外沿，封面纸在这里裁），绿虚线是安全区；"
+              + "封面那块的格子、照片、字在画布上编辑")
         .task(id: previewKey) { await renderPreview() }
     }
 
