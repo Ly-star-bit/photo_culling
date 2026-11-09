@@ -129,6 +129,12 @@ enum ProofSheetSelfTest {
         let notHere = ClientReply.resolve("DSCF7207-2", items: all, sheets: [bigSheet])
         check(notHere.ids.isEmpty && notHere.unknown == ["DSCF7207-2"], "这一场没有 DSCF7207-2：整个列在没认出，不悄悄认成 7207",
               "\(notHere.ids) \(notHere.unknown)")
+        // 反例：精修师改的名「DSCF7207-修.jpg」（这一场没有这个文件）：- 后面是带扩展名的文件名，不切成 7207 + 备注「修.jpg」，
+        // 照旧整个列在没认出（delivery_ledger_regression 的 F 段同一条）。
+        let retouched = ClientReply.resolve("DSCF7207-修.jpg\nDSCF7208-修图", items: all, sheets: [bigSheet])
+        check(retouched.ids == ["DSCF7208"] && retouched.notes == ["DSCF7208": "修图"] && retouched.unknown == ["DSCF7207-修.jpg"],
+              "反例「DSCF7207-修.jpg」：带扩展名的改名不切、进没认出；「DSCF7208-修图」照旧切成备注",
+              "认出 \(retouched.ids) · 备注 \(retouched.notes) · 没认出 \(retouched.unknown)")
         // 反例：文件名本身是「数字-汉字」（001-婚礼.JPG），001 又是另一张的文件号：整行是文件名，不切。
         let wedding = [item("DSCF0001"), item("001-婚礼")]
         expect("001-婚礼.JPG", pool: wedding, sheets: [], ids: ["001-婚礼"], notes: [:], "反例「001-婚礼.JPG」：整行是文件名，不切")

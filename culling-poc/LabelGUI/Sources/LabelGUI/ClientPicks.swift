@@ -335,13 +335,18 @@ enum ClientReply {
         return cuts
     }
 
-    /// 第 i 个起是一串 - ~（noteDashes），前面紧挨着字母数字、后面紧跟着汉字。
+    /// 第 i 个起是一串 - ~（noteDashes），前面紧挨着字母数字、后面紧跟着汉字。汉字那半截一直到空白是个带扩展名的文件名的
+    /// 不算（「DSCF7207-修.jpg」：精修师改的名，不是我们导出的那张）：照旧整个去认、进「没认出」，不把「修.jpg」当备注。
     private static func dashBeforeHan(_ scalars: [Unicode.Scalar], at i: Int) -> Bool {
         guard i > 0, noteDashes.contains(scalars[i]), scalars[i - 1].isASCII,
               CharacterSet.alphanumerics.contains(scalars[i - 1]) else { return false }
         var j = i
         while j < scalars.count, noteDashes.contains(scalars[j]) { j += 1 }
-        return j < scalars.count && scalars[j].properties.isIdeographic
+        guard j < scalars.count, scalars[j].properties.isIdeographic else { return false }
+        var end = j
+        while end < scalars.count, !CharacterSet.whitespaces.contains(scalars[end]) { end += 1 }
+        let tail = String(String.UnicodeScalarView(scalars[j..<end]))
+        return tail.range(of: #"\.[A-Za-z][A-Za-z0-9]{1,4}$"#, options: .regularExpression) == nil
     }
 
     /// 这一段开头是不是这一场的一张照片：整段就是，或者在 headCuts 切下来的开头那段是。
