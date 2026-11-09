@@ -11,7 +11,7 @@ import ImageIO
 ///   - 拷贝出来的副本（原来的还在）不认，照常是新的一场。
 ///   - 从菜单点 / 重开 app：书签跟到新位置，照片路径改过去。
 ///   - 「重新定位文件夹…」：跨卷拷过去、原来的删了（书签解析不到）—— 指给它新位置以后 key 不变、路径改过去；
-///     选错文件夹（一张这一场的照片都没有）不换书签。
+///     选错文件夹（一张这一场的照片都没有）不换书签；同名同大小、EXIF 拍摄时间不一样的（定长 RAW 的另一场）也不换。
 ///   - 书签解析不到（重新定位到的外接盘拔了）、原路径上又有同名不同片的文件夹：从菜单点、导卡自动打开、重开 app 都先抽查，
 ///     对不上不改 manifest、不换书签；照片拷回原路径的照常改过去。
 ///   - 导卡选日期文件夹：yyyyMMdd 被改了名 / 挪走的那一场占着（key 是原路径的哈希）就换成 yyyyMMdd-2。
@@ -61,6 +61,7 @@ enum SessionMoveSelfTest {
         dayFolderAvoidsMovedSession(root.appendingPathComponent("import-day"), batch: model.batch)
         unresolvedBookmarkAtOldPath(root.appendingPathComponent("unplugged"), batch: model.batch)
         relocate(root.appendingPathComponent("relocate"), batch: model.batch)
+        relocateSameSize(root.appendingPathComponent("relocate-same-size"), batch: model.batch)
         liveBridgeDoesNotFollow(root.appendingPathComponent("live"), batch: model.batch)
         liveBridgeAfterGUIRebase(root.appendingPathComponent("live-after-gui"), batch: model.batch)
         cardTable(root.appendingPathComponent("card-table"))
@@ -736,6 +737,82 @@ enum SessionMoveSelfTest {
               "大小变了（别的软件往 JPEG 里写过元数据）、拍摄时间一样 → 还算同一个")
         check(SessionLocation.sameFile(stamp, at: tagged, layer1: ["src_size": 999], captureTime: "2026-03-22T09:00:00") == false,
               "大小变了、拍摄时间也不一样 → 不是")
+        // 大小一样也要比拍摄时间（优化分析 NR3）：未压缩的 RAF / ARW 基本定长，同一台机身另一场的同名 RAW 一字节不差。
+        check(SessionLocation.sameFile(stamp, at: tagged, layer1: ["src_size": 1000], captureTime: "2026-03-22T09:00:00") == false,
+              "大小一样、拍摄时间不一样 → 不是（以前大小一样就算）")
+        check(SessionLocation.sameFile(stamp, at: tagged, layer1: ["src_size": 1000], captureTime: "2026-03-21T10:00:00") == true,
+              "大小一样、拍摄时间也一样 → 同一个")
+        check(SessionLocation.sameFile(stamp, at: plain, layer1: ["src_size": 1000], captureTime: "2026-03-21T10:00:00") == true,
+              "大小一样、文件头里读不到拍摄时间（没有 EXIF / ImageIO 不认的格式）→ 照旧按大小算")
+    }
+
+    /// 一张带 EXIF DateTimeOriginal 的小 JPEG 的字节（重新定位用：日期串换成一样长的另一个，大小一字节不差）。
+    private static func exifJPEGData(dateTimeOriginal: String) -> Data {
+        let data = NSMutableData()
+        guard let ctx = CGContext(data: nil, width: 16, height: 16, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+              let image = ctx.makeImage(),
+              let dest = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else { return Data() }
+        let exif: [CFString: Any] = [kCGImagePropertyExifDateTimeOriginal: dateTimeOriginal]
+        CGImageDestinationAddImage(dest, image, [kCGImagePropertyExifDictionary: exif] as CFDictionary)
+        CGImageDestinationFinalize(dest)
+        return data as Data
+    }
+
+    /// `data` 里所有的 `from` 换成一样长的 `to`（大小不变）。
+    private static func replacingAll(_ data: Data, _ from: String, _ to: String) -> Data {
+        let a = Data(from.utf8), b = Data(to.utf8)
+        guard a.count == b.count, !a.isEmpty else { return data }
+        var out = data
+        var start = out.startIndex
+        while let hit = out.range(of: a, in: start..<out.endIndex) {
+            out.replaceSubrange(hit, with: b)
+            start = hit.upperBound
+        }
+        return out
+    }
+
+    /// 重新定位：同名、大小一字节不差、拍摄时间不一样（纯 RAW 场次选错文件夹）→ 不换；拍摄时间也一样（真的拷过去的）→ 换。
+    private static func relocateSameSize(_ root: URL, batch: BatchStore) {
+        print("== 重新定位：同名同大小、拍摄时间不一样的不认（优化分析 NR3）")
+        let fm = FileManager.default
+        let g = root.appendingPathComponent("纯 RAW 的一场")
+        let h = root.appendingPathComponent("拷到 NAS 上的")
+        let other = root.appendingPathComponent("同一台机身另一场同名同大小的")
+        // manifest 的 capture_time 是 2026-03-21T10:0i:00（writeShoot 按第几张记），文件头里的 EXIF 拍摄时间写成一样的。
+        let rels = ["DSCF0001.JPG", "DSCF0002.JPG", "第二机位/IMG_0003.JPG"]
+        let ids = ["DSCF0001", "DSCF0002", "IMG_0003"]
+        let fakes = rels.indices.map { i in
+            Fake(id: ids[i], raw: rels[i], content: exifJPEGData(dateTimeOriginal: "2026:03:21 10:0\(i):00"))
+        }
+        FileSafetySelfTest.writeShoot(g, fakes)
+        stampLayer1(g)
+        check(batch.switchSession(to: g) && batch.items.count == 3, "打开原来的文件夹")
+        try? fm.copyItem(at: g, to: h)
+        // 另一场：同名、同大小（日期串换成一样长的），拍摄时间是另一天。
+        for rel in rels {
+            guard let data = try? Data(contentsOf: g.appendingPathComponent(rel)) else { continue }
+            let url = other.appendingPathComponent(rel)
+            try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? replacingAll(data, "2026:03:21", "2026:04:22").write(to: url)
+        }
+        let sizes = rels.map { rel in [g, other].map { ImageLoader.FileStamp.of($0.appendingPathComponent(rel))?.size } }
+        let times = rels.map { rel in [g, other].map { SessionLocation.exifCaptureTime($0.appendingPathComponent(rel)) } }
+        check(sizes.allSatisfy { $0[0] != nil && $0[0] == $0[1] } && times.allSatisfy { $0[0] != nil && $0[1] != nil && $0[0] != $0[1] },
+              "（对照）另一场的 3 张和原来的同名、大小一字节不差，EXIF 拍摄时间不一样", "\(sizes) \(times)")
+        try? fm.removeItem(at: g)
+        guard let row = entry(batch, key(g)) else {
+            check(false, "最近场次里有这一场")
+            return
+        }
+        check(!batch.relocateSession(row, to: other) && (batch.lastError ?? "").contains("只有 0 张")
+              && (batch.lastError ?? "").contains("3 张同名"),
+              "指给同名同大小、拍摄时间不一样的文件夹：不换（以前大小一样就认）", batch.lastError ?? "")
+        // 原来的文件夹已经删了（identity 取不到），按 manifest 里写的路径比。
+        check(entry(batch, key(g))?.bookmark == row.bookmark && manifestPhotoDir(key(g)) == g.path,
+              "没换：书签、manifest 都还指着原来的位置", manifestPhotoDir(key(g)) ?? "nil")
+        check(batch.relocateSession(row, to: h) && sameDir(batch.photoDir, h) && manifestAt(key(g), h),
+              "指给真拷过去的（大小、拍摄时间都对得上）：换", batch.lastError ?? "")
     }
 
     /// 一张带 EXIF DateTimeOriginal 的小 JPEG。

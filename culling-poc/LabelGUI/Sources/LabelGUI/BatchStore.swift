@@ -1828,7 +1828,8 @@ final class BatchStore: ObservableObject {
         }
         let dir = dataDir.appendingPathComponent("sessions/\(entry.key)")
         // 防选错（审查）：不只看「有一张同名的」—— 同一台机身的另一场、两台同型号机身都有一堆同名文件。全场抽查、按大小
-        // （老场次按修改时间、拍摄时间）比，大多数对得上才换；对不上就不换，说清楚对上了几张。
+        // 和拍摄时间（大小一样的也比，定长的 RAW 大小骗得过，NR3；老场次按修改时间、拍摄时间）比，大多数对得上才换；
+        // 对不上就不换，说清楚对上了几张。
         if let check = SessionLocation.relocationCheck(sessionDir: dir, under: folder), !check.accepted {
             if check.found == 0 {
                 lastError = "「\(folder.lastPathComponent)」里找不到「\(entry.name)」的照片（按原来的子文件夹和文件名一张都没对上），" +
