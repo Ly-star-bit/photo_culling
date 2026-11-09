@@ -59,6 +59,9 @@ enum CollageAlbumUISelfTest {
         let empty: [T?] = [step(1, 0, 0), step(-1, 0, has: true, 0), step(1, 0, cover: true, has: true, 0)]
         check(empty.allSatisfy { $0 == nil }, "一个跨页都没有：⌘← ⌘→ 都不动（编辑封面时 ⌘→ 也不动）")
         check(step(0, 2) == nil, "delta 0 不动")
+        // 只有一个跨页（最常见的头一回）：⌘→ 不动，有封面 ⌘← 进封面，封面 ⌘→ 回到它。
+        let one: [T?] = [step(1, 0, 1), step(-1, 0, has: true, 1), step(1, 0, cover: true, has: true, 1)]
+        check(one == [nil, .cover, .page(0)], "只有一个跨页：⌘→ 不动、⌘← 进封面、封面 ⌘→ 回来", "\(one)")
     }
 
     // MARK: - 按键

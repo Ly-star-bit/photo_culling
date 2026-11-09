@@ -219,10 +219,11 @@ struct CollageCanvasView: View {
             .onChange(of: store.editingCover) { _, _ in reportViewport(display.image) }
             .onChange(of: store.coverLayout) { _, _ in reportViewport(display.image) }
         }
+        // 「填跨页号」小框挂在焦点修饰之前（同别处的弹框：挂在 .focusable() 后面有时弹不出来）。
+        .collageMoveNumberAlert(store: store, isPresented: $askNumber, path: menuPath)
         .focusable()
         .focusEffectDisabled()
         .focused($focused)
-        .collageMoveNumberAlert(store: store, isPresented: $askNumber, path: menuPath)
         // ⌘← ⌘→ 是换跨页（拼图页的按键监听，CollageAlbumUI.swift）：带 ⌘ 的不当成切备选。
         .onKeyPress(.leftArrow, phases: [.down, .repeat]) { press in
             press.modifiers.contains(.command) ? .ignored : keyArrow(-1)
