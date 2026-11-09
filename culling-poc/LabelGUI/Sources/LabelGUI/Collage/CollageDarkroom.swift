@@ -186,6 +186,10 @@ final class CollageDarkroom: ObservableObject {
     }
     /// 底下的底片条：这一页每一格照片，套着它自己现在的色调。
     @Published private(set) var reel: [ReelFrame] = []
+    /// 表、颗粒数据读不到的光谱色调（右栏「这款的数据没读到」）。只记问过的：现在套着的那一款（probeData）。
+    @Published private(set) var dataMissing: Set<CollageLook> = []
+    /// 正在后台读的（同一款不重复派）。
+    private var probing: Set<CollageLook> = []
 
     /// 大预览可用的像素（视图按自己的尺寸 × 屏幕倍率填）。
     var previewPixels = CGSize(width: 1600, height: 1100) {
@@ -541,6 +545,7 @@ final class CollageDarkroom: ObservableObject {
 
     /// store 变了（套用、撤销、换页、选中、托盘……）：每一类按自己的 key 看要不要重渲。
     func refresh() {
+        probeData(current.look)
         guard rendering else { return }
         if store.selection == nil && scope == .cell { objectWillChange.send() }
         schedulePreview()
@@ -550,6 +555,40 @@ final class CollageDarkroom: ObservableObject {
         scheduleReel()
         scheduleLoupe()
     }
+
+    /// 这一款的表、颗粒数据读到没有（右栏的提示）：只问缓存、不在主线程上读文件（CollageFilmLUTs / CollageFilmEffects
+    /// .cachedState）；还没读过的派到后台读一次，读完再更新 dataMissing。以前右栏 body 里直接 table(look) /
+    /// extras(look)：冷开暗房、刚点了一款样张还没渲完的胶片时，主线程上要解析一张 .cube 加四张表（十几万行文本，
+    /// 几十毫秒）。平常画布、大预览早就在后台用这一款渲过，问的时候已经在缓存里，提示当场就对。
+    private func probeData(_ look: CollageLook) {
+        guard look.isSpectral else { return }
+        let table = CollageFilmLUTs.cachedState(look), extras = CollageFilmEffects.cachedState(look)
+        if table == false || extras == false {
+            setMissing(look, true)
+            return
+        }
+        if table == true && extras == true {
+            setMissing(look, false)
+            return
+        }
+        guard probing.insert(look).inserted else { return }
+        Task { @MainActor [weak self] in
+            let missing = await Task.detached(priority: .utility) {
+                CollageFilmLUTs.table(look) == nil || CollageFilmEffects.extras(look) == nil
+            }.value
+            guard let self else { return }
+            self.probing.remove(look)
+            self.setMissing(look, missing)
+        }
+    }
+
+    private func setMissing(_ look: CollageLook, _ missing: Bool) {
+        guard dataMissing.contains(look) != missing else { return }
+        if missing { dataMissing.insert(look) } else { dataMissing.remove(look) }
+    }
+
+    /// 自检用：后台读完了没有（probeData 派出去的都回来了）。
+    var probingData: Bool { !probing.isEmpty }
 
     private func hoverChanged() {
         // 悬停只换大预览和试条（一帧以内）；样张、底片条不动，放大镜等停下来再渲。

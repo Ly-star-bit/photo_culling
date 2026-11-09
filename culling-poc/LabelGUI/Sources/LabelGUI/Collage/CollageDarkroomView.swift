@@ -581,9 +581,9 @@ private struct DarkroomControls: View {
                         Text(note).font(.system(size: 11)).foregroundStyle(DarkroomPalette.accent)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    // 这一款的表、颗粒数据读不到（漏打包）：以前静默变原样，没人发现（v1.24–v1.26.1）。读过的有缓存，
-                    // 这里问的是现在套着的那一款，进暗房之前画布已经用它渲过。
-                    if spectral, CollageFilmLUTs.table(setting.look) == nil || CollageFilmEffects.extras(setting.look) == nil {
+                    // 这一款的表、颗粒数据读不到（漏打包）：以前静默变原样，没人发现（v1.24–v1.26.1）。只看暗房问好的
+                    // 结果（CollageDarkroom.dataMissing：只问缓存，没读过的在后台读），body 里不读文件。
+                    if spectral, model.dataMissing.contains(setting.look) {
                         Text("这款的数据没读到，颜色 / 颗粒不起作用（缺哪个文件记在日志里）")
                             .font(.system(size: 11)).foregroundStyle(DarkroomPalette.accent)
                             .fixedSize(horizontal: false, vertical: true)

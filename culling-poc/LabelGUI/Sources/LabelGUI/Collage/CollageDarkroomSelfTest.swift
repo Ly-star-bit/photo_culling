@@ -20,6 +20,7 @@ import Combine
 /// 10. 从相纸滤镜换进光谱色调：悬停、套用都带上这一款的起始颗粒晕光。
 /// 11. 暗房开着时画布预览记着脏、先不渲（画布不在视图树里），关暗房马上补渲；实时桥要预览（previewSettled）时现渲一张，
 ///     渲着的时候暗房里接着拖出来的不跟着渲（照旧攒着）。
+/// 12. 「这款的数据没读到」：只问缓存，没读过的在后台读、读完再提示（不在主线程上解析表）。
 /// 全过退出 0，否则 1。
 enum CollageDarkroomSelfTest {
 
@@ -341,6 +342,33 @@ enum CollageDarkroomSelfTest {
         spin(10) { behind.previewIdle }
         counter.cancel()
         check(canvasRenders == 2 && !behind.previewDeferred, "关暗房：攒着的那几下补渲成一张", "画布一共 \(canvasRenders) 张")
+
+        // ---------------------------------------------------------------- 12. 数据没读到的提示
+        print("== 数据没读到的提示")
+        // 放表的目录指到一个空目录（漏打包）：右栏的提示不在主线程上现读 —— 一打开先空着，后台读完再给。
+        let empty = appDataDir.appendingPathComponent("darkroom-selftest-no-luts")
+        try? FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+        CollageFilmLUTs.directoryOverride = empty
+        CollageFilmLUTs.resetForTesting()
+        CollageFilmEffects.resetForTesting()
+        let cold = CollageStore(dataDir: appDataDir)
+        cold.loadForTesting(project(album: false))
+        let blind = CollageDarkroom(store: cold, rendering: false)
+        check(blind.dataMissing.isEmpty, "一打开：提示不在主线程上现读（先空着，后台去读）")
+        spin(5) { !blind.probingData }
+        check(blind.dataMissing == [.filmWarmSkin], "后台读完：「暖肤」的数据没读到，提示出来", "\(blind.dataMissing.map(\.rawValue))")
+        CollageFilmLUTs.directoryOverride = nil
+        CollageFilmLUTs.resetForTesting()
+        CollageFilmEffects.resetForTesting()
+        let found = CollageDarkroom(store: cold, rendering: false)
+        spin(30) { !found.probingData }
+        func said(_ v: Bool?) -> String { v.map { $0 ? "读到" : "读不到" } ?? "没读过" }
+        let states = "色调表 \(said(CollageFilmLUTs.cachedState(.filmWarmSkin))) · 颗粒数据 "
+            + said(CollageFilmEffects.cachedState(.filmWarmSkin))
+        check(found.dataMissing.isEmpty && CollageFilmLUTs.cachedState(.filmWarmSkin) == true
+              && CollageFilmEffects.cachedState(.filmWarmSkin) == true, "表在：后台读到了，不提示", states)
+        let cached = CollageDarkroom(store: cold, rendering: false)
+        check(!cached.probingData && cached.dataMissing.isEmpty, "读过的只问缓存，当场就对（不再派后台读）")
 
         finish(failures)
     }

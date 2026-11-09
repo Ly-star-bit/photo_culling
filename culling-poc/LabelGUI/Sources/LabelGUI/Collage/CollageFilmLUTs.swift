@@ -111,6 +111,16 @@ enum CollageFilmLUTs {
         return loaded
     }
 
+    /// 只问读过没有、不读文件（主线程上用：暗房右栏的「这款的数据没读到」）：true = 读到了，false = 读不到（记过
+    /// 日志），nil = 还没读过（不是光谱色调也是 nil）。table 第一次要解析一张 3 万多行的 .cube（几十毫秒），
+    /// 主线程上不该是第一个读的。
+    static func cachedState(_ look: CollageLook) -> Bool? {
+        lock.lock()
+        defer { lock.unlock() }
+        if cache[look] != nil { return true }
+        return missing.contains(look) ? false : nil
+    }
+
     /// 读不到的原因（日志、诊断包用）：没找到放表的目录 / 缺哪几个文件（带目录）/ 文件都在但读不出来。
     static func missingReason(_ files: [String], in dir: URL?) -> String {
         guard let dir else {
