@@ -446,6 +446,16 @@ enum CollageDarkroomSelfTest {
               && dr.subjectPhotoID == "p3",
               "真渲：换到第 2 个跨页，大预览、原图、1:1 细节、样张、底片条都换成新一页的",
               "底片条 \(before.4) → \(dr.reel.map(\.photoID))")
+        // 真 1:1：视图报来屏幕是 2 倍，1:1 细节渲两倍边长的导出像素，图还是 loupeSide pt 见方。
+        let small = dr.loupe
+        dr.loupeDensity = 2
+        spin(0.6) { false }
+        spin(60) { settled() && dr.loupe !== small }
+        let px = dr.loupe?.cgImage(forProposedRect: nil, context: nil, hints: nil)?.width ?? 0
+        check(small?.size.width == CGFloat(CollageDarkroom.loupeSide) && px == CollageDarkroom.loupeSide * 2
+              && dr.loupe?.size.width == CGFloat(CollageDarkroom.loupeSide),
+              "Retina：1:1 细节渲 \(CollageDarkroom.loupeSide * 2)² 个导出像素、显示 \(CollageDarkroom.loupeSide) pt（一个导出像素 = 一个屏幕像素）",
+              "\(px) 像素 · \(Int(dr.loupe?.size.width ?? 0)) pt")
         live.closeDarkroom()
     }
 
@@ -581,39 +591,43 @@ enum CollageDarkroomSelfTest {
             loupe(middle)
             check(first == (0, 1) && cache.hits == 1 && cache.misses == 1, "原图缓存：同一处再渲一次，原图不重解",
                   "第一次 现解 \(first.1) · 第二次之后 命中 \(cache.hits) 现解 \(cache.misses)")
-            let below = CGPoint(x: middle.x, y: Double(f.rect.y1) + Double(CollageDarkroom.loupeSide) / 2 + 6)
+            let below = CGPoint(x: middle.x, y: Double(f.rect.y1) + Double(CollageDarkroom.loupeSide) + 6)
             let fresh = CollageImages.Recent(capacity: 2)
             _ = CollageDarkroom.loupeImage(p, pageIndex: 0, fallback: p.pages[0], hints: [:], scale: 1, center: below,
-                                           originals: fresh)
+                                           side: CollageDarkroom.loupeSide * 2, originals: fresh)
             check(fresh.hits + fresh.misses == 0, "那一块只落在照片的投影上：照片不解码、不出图", "解了 \(fresh.misses) 张")
         }
 
+        // 两种边长：普通屏 loupeSide、Retina 两倍（真 1:1：一个导出像素 = 一个屏幕像素）。
         for c in cases {
-            let p = c.project
-            let w = Double(p.canvas.width), h = Double(p.canvas.height)
-            var centers: [CGPoint] = []
-            for fy in [1.0 / 6, 0.5, 5.0 / 6] {
-                for fx in [1.0 / 6, 0.5, 5.0 / 6] { centers.append(CGPoint(x: w * fx, y: h * fy)) }
+            for side in [CollageDarkroom.loupeSide, CollageDarkroom.loupeSide * 2] {
+                let p = c.project
+                let w = Double(p.canvas.width), h = Double(p.canvas.height)
+                var centers: [CGPoint] = []
+                for fy in [1.0 / 6, 0.5, 5.0 / 6] {
+                    for fx in [1.0 / 6, 0.5, 5.0 / 6] { centers.append(CGPoint(x: w * fx, y: h * fy)) }
+                }
+                centers += [CGPoint(x: 0, y: 0), CGPoint(x: w, y: 0), CGPoint(x: 0, y: h), CGPoint(x: w, y: h)]
+                // 贴着格子四边外面、刚好碰不到照片的那一块（中心离边 side / 2 + 6 个渲染像素）：只有投影落得进去。
+                let off = (Double(side) / 2 + 6) / c.scale
+                for f in CollageLayout.pageGeometry(p.pages[0].root, canvas: p.canvas, style: p.style).frames {
+                    let r = f.rect
+                    let mx = Double(r.x0 + r.x1) / 2, my = Double(r.y0 + r.y1) / 2
+                    centers.append(CGPoint(x: mx, y: my))
+                    centers.append(CGPoint(x: Double(r.x0), y: Double(r.y0)))
+                    centers += [CGPoint(x: mx, y: Double(r.y1) + off), CGPoint(x: Double(r.x1) + off, y: my),
+                                CGPoint(x: mx, y: Double(r.y0) - off), CGPoint(x: Double(r.x0) - off, y: my)]
+                }
+                for item in p.pages[0].items where item.kind == .photo {
+                    centers.append(CGPoint(x: item.cx * w, y: item.cy * h))
+                }
+                let results = CollageDarkroom.loupeIdentity(p, pageIndex: 0, fallback: p.pages[0], hints: [:],
+                                                            scale: c.scale, centers: centers, side: side)
+                let bad = zip(centers, results).filter { !$0.1 }.map { "(\(Int($0.0.x)),\(Int($0.0.y)))" }
+                check(bad.isEmpty,
+                      "\(c.name)（\(side)²）：\(results.count - bad.count) / \(results.count) 处和渲整页再裁逐字节相同",
+                      bad.isEmpty ? "" : "不同：" + bad.joined(separator: " "))
             }
-            centers += [CGPoint(x: 0, y: 0), CGPoint(x: w, y: 0), CGPoint(x: 0, y: h), CGPoint(x: w, y: h)]
-            // 贴着格子四边外面、刚好碰不到照片的那一块（中心离边 side / 2 + 6 个渲染像素）：只有投影落得进去。
-            let off = (Double(CollageDarkroom.loupeSide) / 2 + 6) / c.scale
-            for f in CollageLayout.pageGeometry(p.pages[0].root, canvas: p.canvas, style: p.style).frames {
-                let r = f.rect
-                let mx = Double(r.x0 + r.x1) / 2, my = Double(r.y0 + r.y1) / 2
-                centers.append(CGPoint(x: mx, y: my))
-                centers.append(CGPoint(x: Double(r.x0), y: Double(r.y0)))
-                centers += [CGPoint(x: mx, y: Double(r.y1) + off), CGPoint(x: Double(r.x1) + off, y: my),
-                            CGPoint(x: mx, y: Double(r.y0) - off), CGPoint(x: Double(r.x0) - off, y: my)]
-            }
-            for item in p.pages[0].items where item.kind == .photo {
-                centers.append(CGPoint(x: item.cx * w, y: item.cy * h))
-            }
-            let results = CollageDarkroom.loupeIdentity(p, pageIndex: 0, fallback: p.pages[0], hints: [:],
-                                                        scale: c.scale, centers: centers)
-            let bad = zip(centers, results).filter { !$0.1 }.map { "(\(Int($0.0.x)),\(Int($0.0.y)))" }
-            check(bad.isEmpty, "\(c.name)：\(results.count - bad.count) / \(results.count) 处和渲整页再裁逐字节相同",
-                  bad.isEmpty ? "" : "不同：" + bad.joined(separator: " "))
         }
     }
 

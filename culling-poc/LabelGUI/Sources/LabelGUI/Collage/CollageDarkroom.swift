@@ -150,6 +150,14 @@ final class CollageDarkroom: ObservableObject {
     }
     /// 1:1 放大镜看哪儿（画布像素坐标，左上原点）；nil = 主图那一格的中心。
     @Published var loupeAnchor: CGPoint? { didSet { scheduleLoupe() } }
+    /// 1:1 细节所在那块屏幕一个 pt 几个像素（视图按 displayScale 填）：按它渲，Retina 上渲 loupeSide × 2 个导出像素、
+    /// 显示在 loupeSide pt 里 —— 一个导出像素 = 一个屏幕像素。以前不管屏幕渲 232 个导出像素、显示成 232 pt，
+    /// 2 倍屏上一个像素占 2×2，看到的是 200%，按它调的颗粒偏小。
+    var loupeDensity: Double = 1 {
+        didSet { if abs(loupeDensity - oldValue) > 0.01 { scheduleLoupe() } }
+    }
+    /// 1:1 细节渲多少个导出像素（边长）。
+    var loupePixels: Int { Int((Double(Self.loupeSide) * max(1, loupeDensity)).rounded()) }
 
     @Published private(set) var frames: [CollageLook: NSImage] = [:]
     /// 大预览、原图、1:1 细节：拖着滑杆时一秒换十几次，单独放一个对象，只有大预览和 1:1 细节订阅它。
@@ -769,12 +777,14 @@ final class CollageDarkroom: ObservableObject {
         let scale = Double(CollageStore.exportScale(canvas: project.canvas, options: store.exportOptions))
         let center = loupeCenter
         let originals = originals
-        let key = LaneKey(project, "\(pageIndex)|\(scale)|\(Int(center.x)),\(Int(center.y))|\(hints.count)")
+        let side = loupePixels
+        let density = max(1, loupeDensity)
+        let key = LaneKey(project, "\(pageIndex)|\(scale)|\(Int(center.x)),\(Int(center.y))|\(hints.count)|\(side)")
         if laneKey["loupe"] != key { output.loupeStale = output.loupe != nil }
         submit("loupe", key: key) { [weak self] in
             let image = await Task.detached(priority: .utility) {
                 Self.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints, scale: scale, center: center,
-                                 originals: originals)
+                                 side: side, density: density, originals: originals)
             }.value
             guard let self, self.current("loupe", key) else { return }
             self.output.loupe = image
@@ -825,7 +835,8 @@ final class CollageDarkroom: ObservableObject {
         return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
     }
 
-    /// 放大镜：导出尺寸（原图解码、导出倍数）渲整页，裁中心附近 side × side 像素（1 个导出像素 = 1 pt）。
+    /// 放大镜：导出尺寸（原图解码、导出倍数）渲整页，裁中心附近 side × side 像素（side = loupeSide × 屏幕倍率：一个导出
+    /// 像素 = 一个屏幕像素；图的 size 按 density 换成 pt，还是 loupeSide pt 见方）。
     /// 只要那一小块：离它远的照片格、只够得着投影的照片格不出图（CollageRender.Options.region，裁出来的像素和渲整页
     /// 逐字节一样，--darkroom-selftest 核对）；原图解码先查 originals（最近两张）。以前整页每格都从原图解、在导出尺寸
     /// 上调色加颗粒，一次半秒多（1 倍；2、3 倍导出是 4、9 倍的像素），暗房里每改一下停手就来一次，渲的时候 1:1 细节
@@ -833,10 +844,12 @@ final class CollageDarkroom: ObservableObject {
     nonisolated static let loupeSide = 232
     nonisolated static func renderLoupe(_ project: CollageProject, pageIndex: Int, fallback: CollagePage,
                                         hints: [String: CollageCrop.Hints], scale: Double, center: CGPoint,
+                                        side: Int = loupeSide, density: Double = 1,
                                         originals: CollageImages.Recent? = nil, wholePage: Bool = false) -> NSImage? {
         guard let own = loupeImage(project, pageIndex: pageIndex, fallback: fallback, hints: hints, scale: scale,
-                                   center: center, originals: originals, wholePage: wholePage) else { return nil }
-        return NSImage(cgImage: own, size: NSSize(width: own.width, height: own.height))
+                                   center: center, side: side, originals: originals, wholePage: wholePage)
+        else { return nil }
+        return NSImage(cgImage: own, size: NSSize(width: Double(own.width) / density, height: Double(own.height) / density))
     }
 
     nonisolated static func loupeImage(_ project: CollageProject, pageIndex: Int, fallback: CollagePage,

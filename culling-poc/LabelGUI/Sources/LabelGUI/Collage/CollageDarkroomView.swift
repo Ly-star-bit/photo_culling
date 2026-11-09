@@ -707,7 +707,7 @@ private struct DarkroomControls: View {
 
                 VStack(alignment: .leading, spacing: 10) {
                     DarkroomSectionTitle(title: "1:1 细节", trailing: "导出尺寸")
-                    DarkroomLoupe(output: model.output)
+                    DarkroomLoupe(model: model, output: model.output)
                     Text("颗粒、晕光在这里看得清。点大预览换位置。")
                         .font(.system(size: 11)).foregroundStyle(DarkroomPalette.tertiary)
                 }
@@ -818,9 +818,13 @@ private struct DarkroomTestStrip: View {
     }
 }
 
-/// 1:1 细节：导出尺寸渲整页、裁一块（1 个导出像素 = 1 pt），圆角方块、1px 发丝边；重渲时旧图压暗。
+/// 1:1 细节：导出尺寸渲整页、裁一块（1 个导出像素 = 1 个屏幕像素：Retina 上渲两倍的像素放进同样大的方块），圆角方块、
+/// 1px 发丝边；重渲时旧图压暗。
 private struct DarkroomLoupe: View {
+    /// 只用来报屏幕倍率（不订阅）。
+    let model: CollageDarkroom
     @ObservedObject var output: CollageDarkroom.Output
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
         let _ = CollagePerf.body("暗房细节")
@@ -850,6 +854,9 @@ private struct DarkroomLoupe: View {
         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(DarkroomPalette.hairline, lineWidth: 1))
         .frame(maxWidth: .infinity)
         .accessibilityLabel("1:1 细节")
+        // 按这块屏幕的倍率渲（窗口拖到另一块屏上会变）。
+        .onAppear { model.loupeDensity = displayScale }
+        .onChange(of: displayScale) { model.loupeDensity = displayScale }
     }
 }
 
