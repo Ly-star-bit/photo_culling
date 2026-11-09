@@ -46,12 +46,16 @@ enum CollagePrintCLI {
     static func describe(_ canvas: CollageCanvas) -> String {
         let size = canvas.pageSizeCM
         let r = canvas.effectivePrintRules
-        let fold = String(format: "%.1fmm", canvas.foldBand / max(1, canvas.dpi) * 25.4)
-        let quality = r.jpegQuality.map { String(format: "%.2f", $0) } ?? "跟导出设置"
-        return "画布 \(canvas.name) · 单页 " + String(format: "%.2f×%.2fcm", size.width, size.height)
-            + " · \(canvas.width)x\(canvas.height)px · \(canvas.binding.label) · 中缝带每侧 \(fold)"
-            + " · 页数 \(r.summary)\(r.singleEnds ? " · 首尾单页" : "") · \(r.colorSpace.label) · JPEG \(quality)"
-            + (canvas.printRules == nil ? "（没套规格：保守默认）" : "")
+        // 只有相册跨页有装订、中缝带（A4 这类单页画布不打）。拆成几个 let：整串 + 拼 6.1.2 编译器类型检查会超时。
+        let fold: String = canvas.seams == .fold
+            ? " · \(canvas.binding.label) · 中缝带每侧 " + String(format: "%.1fmm", canvas.foldBand / max(1, canvas.dpi) * 25.4)
+            : ""
+        let quality: String = r.jpegQuality.map { String(format: "%.2f", $0) } ?? "跟导出设置"
+        let page: String = String(format: "%.2f×%.2fcm", size.width, size.height)
+        let ends: String = r.singleEnds ? " · 首尾单页" : ""
+        let preset: String = canvas.printRules == nil ? "（没套规格：保守默认）" : ""
+        return "画布 \(canvas.name) · 单页 \(page) · \(canvas.width)x\(canvas.height)px\(fold)"
+            + " · 页数 \(r.summary)\(ends) · \(r.colorSpace.label) · JPEG \(quality)\(preset)"
     }
 
     private static func spec(_ arg: String, store: CollageStore) -> Bool {
@@ -241,7 +245,9 @@ enum CollagePrintCLI {
         if let ask = CollageStore.exportConfirmation(store.preflight(texts: false), project: store.project, pages: only) {
             print("  导出按钮会先问：\(ask.title)（这里照「仍然导出」走）")
         }
-        // startExport 写进 store 的输出目录（导出按钮那个）：同 export: 先换成这个目录。
+        // startExport 写进 store 的输出目录（导出按钮那个）：先换成这个目录，导完换回去 —— 不然退出时 flushSaves 把它记进
+        // state.json，同一个数据目录下次在界面里导出就落到这里（export: 不换回去，这一条换）。
+        let savedPath = store.exportOptions.outputPath
         store.exportOptions.outputPath = dir.path
         let options = store.exportOptions
         var outcome: CollageStore.ExportOutcome?
@@ -249,6 +255,7 @@ enum CollagePrintCLI {
                                         pages: only) { outcome = $0 }
         if refused == nil { spin(600) { outcome != nil } }
         spin(5) { !store.isExporting }
+        store.exportOptions.outputPath = savedPath
         guard let outcome else {
             print("  导出超时")
             return true
