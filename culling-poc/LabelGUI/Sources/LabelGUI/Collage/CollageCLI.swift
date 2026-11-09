@@ -767,7 +767,7 @@ enum CollageCLI {
 
 // MARK: - 界面离屏快照（不开 GUI：禁止激活、窗口从不显示）
 
-/// LabelGUI --collage-ui <photo_dir> <out.png> [--album [--target-spreads 20@1-6] [--album-theme fineArt]] [--tab 格式|样式|文档|照片|模板|素材] [--select 路径如 10]
+/// LabelGUI --collage-ui <photo_dir> <out.png> [--album [--target-spreads 20@1-6] [--album-theme fineArt] [--cover]] [--tab 格式|样式|文档|照片|模板|素材] [--select 路径如 10]
 /// [--crop] [--overlay-index N] [--size 1440x900] [--adopt photos|page[:水印页预设名]] [--inspector-width 300] [--notice 提示文字]
 /// [--contact-frames]（印样的「逐帧」一开始就展开）[--light]（浅色外观）[--ax-dump]
 /// [--spec <印厂规格短名或名字>]（相册套规格）[--export-range current|1-3;7]（「导出 ▾」的范围）
@@ -832,6 +832,8 @@ enum CollageUISnapshot {
             if let t = option("--album-theme").flatMap(CollageAlbumTheme.init(rawValue:)) { store.setAlbumTheme(t) }
             store.autoArrangeAlbum(dedupe: true)
             spin(60) { !store.project.pages.isEmpty && store.busyText == nil }
+            // --cover：做好封面再截（看「文档 › 封面」做好之后的样子）。
+            if args.contains("--cover") { CollageBookCoverCLI.prepareSnapshot(store) }
         } else if store.root == nil || args.contains("--relayout") {
             store.autoLayout(count: Int(option("--count") ?? "6") ?? 6)
             spin(60) { store.root != nil && !store.isSolving && store.busyText == nil }
@@ -1136,6 +1138,8 @@ private struct CollageSnapshotHost: View {
 ///     addpage、delpage:N、movepage:N=±k、tonext:P（这一格的照片挪到下一个跨页）、upscale[:1.2]（打印放大超过阈值的照片）、
 ///     crossfold（打印压中缝的跨页）；跨页操作（movecells、addto、movepages、delpages、mirror、side、lockpage、cands、replace、
 ///     arrangeplan、spreaddump、dedupebench）见 CollageAlbumEditCLI。
+/// 相册封面：cover:make|remake|off|edit|done|spine=12.5|auto|wrap=15|board=2|sheet=0.15|title=…|date=…|back=ID|none|backtext=…|dump
+///     （见 CollageBookCoverCLI）；cover:edit 之后 sel、place、swap、tset 落在封面那块上，render / renderclean / renderexport 出整张封面。
 /// 核对：notice（打印状态栏提示）、digest（整个工程的指纹，核对撤销）、tplthumbs[:前缀]（模板缩略图，给了前缀就存 PNG）、
 ///     altthumb:序号=文件名（存第几个备选的缩略图）、render:<文件名>（半尺寸 + 调试框）。
 /// 设计版式：layoutfile:<json>（把版式放进当前页，语法见 CollageLayoutSpec；文件是版式本身，或 {"layout":…,"fit":bool,"canvas":别名}）、
@@ -2629,7 +2633,11 @@ enum CollageOpsScript {
                 print("  " + store.progressText)
                 let found = (try? FileManager.default.subpathsOfDirectory(atPath: arg)) ?? []
                 print("  输出: " + found.sorted().joined(separator: " "))
+            case "cover":
+                ok = CollageBookCoverCLI.apply(arg, store: store)
             case "render", "renderclean", "renderexport":
+                // 编辑封面（cover:edit）时出的是整张封面（CollageBookCoverCLI.render）。
+                if store.editingCover { hintsSettled(); ok = CollageBookCoverCLI.render(name, arg, store: store, outDir: outDir); break }
                 // render = 半尺寸 + 调试框；renderclean = 和界面预览一样（占位、不带出血）；
                 // renderexport = 和导出一样（成品尺寸、带出血、不画占位）。
                 // renderclean:<文件名>@0.3：按这个缩放出预览（界面预览的缩放跟着窗口大小变，常见 0.3 左右）。

@@ -1617,6 +1617,9 @@ struct CollageProject: Codable, Hashable {
     /// 存下来的几版（拼图页底下的「方案」栏，见 CollageVariant）。放在工程里跟着 collage.json 存；不跟着撤销走
     /// （CollageStore.restore 换工程时留现在的方案栏）。编辑指纹、跨页小图的键都不算它。
     var variants: [CollageVariant] = []
+    /// 相册封面（封底 | 书脊 | 封面一整张，CollageBookCover）；nil = 不做封面。旧工程没有这个键 = nil，存盘时 nil 不写这个键
+    /// （旧工程存出来逐字节不变）。不进 pages：usedPhotoIDs、跨页条、跨页 PDF 都不算它。
+    var bookCover: CollageBookCover?
 
     init() {}
 
@@ -1633,14 +1636,17 @@ struct CollageProject: Codable, Hashable {
     /// 不在任何作品里。只读。
     var photoIDsInUseIncludingVariants: Set<String> {
         func ids(_ pages: [CollagePage]) -> [String] { pages.flatMap { $0.photoIDs + ($0.contactSheet?.frames ?? []) } }
-        return Set(ids(pages) + variants.flatMap { ids($0.project.pages) })
+        // 封面上的照片也算（只上了封面的那张不能被当成没用上挪进废纸篓）。
+        func cover(_ p: CollageProject) -> [String] { p.bookCover?.photoIDs ?? [] }
+        return Set(ids(pages) + cover(self) + variants.flatMap { ids($0.project.pages) + cover($0.project) })
     }
 
     /// 存成方案的那一份：不带方案栏，托盘只留这一版用到的照片（切回来时托盘照旧是那时的，缺的补回去）。
     var variantSnapshot: CollageProject {
         var p = self
         p.variants = []
-        let used = usedPhotoIDs
+        // 封面上的照片一起留（只上了封面的那张不留，切回这个方案时封面就成了空格）。
+        let used = usedPhotoIDs.union(bookCover?.photoIDs ?? [])
         p.photos = photos.filter { used.contains($0.id) }
         return p
     }
@@ -2197,6 +2203,8 @@ extension CollageProject {
         albumBudget = c.softOptional(.albumBudget)
         // 旧工程没有这个键 = 没有方案；哪一个坏了只丢它自己。
         variants = c.soft(.variants, [Failable<CollageVariant>]()).compactMap(\.value)
+        // 旧工程没有这个键 = 不做封面；坏了也只丢封面（照常读回）。
+        bookCover = c.softOptional(.bookCover)
     }
 }
 

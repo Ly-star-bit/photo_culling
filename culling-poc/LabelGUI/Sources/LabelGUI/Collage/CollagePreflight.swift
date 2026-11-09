@@ -30,6 +30,8 @@ struct CollagePreflightIssue: Hashable, Identifiable {
         case singleEnd
         /// 印刷画布上正文还是灰条 / 占位字。
         case fillerBody
+        /// 相册封面（CollageBookCover）：书脊宽还是估的、书脊太窄印不下字、脸贴着书脊 / 出了安全区。只提醒。
+        case cover
 
         var label: String {
             switch self {
@@ -42,6 +44,7 @@ struct CollagePreflightIssue: Hashable, Identifiable {
             case .bleed: return "没铺出血"
             case .singleEnd: return "首尾单页"
             case .fillerBody: return "占位正文"
+            case .cover: return "封面"
             }
         }
     }
@@ -288,6 +291,8 @@ enum CollagePreflight {
         }
 
         if texts { out += textIssues(project: project, hints: hints, hidden: hidden, at: at) }
+        // 相册封面：和「文档 › 封面」标橙的是同几句（CollageBookCover.preflightIssues）。
+        if album { out += CollageBookCover.preflightIssues(project: project, hints: hints) }
 
         // 拦在前；同一档按页（整本的事在最前）、再按种类。
         let kindOrder = Dictionary(uniqueKeysWithValues: CollagePreflightIssue.Kind.allCases.enumerated().map { ($1, $0) })
