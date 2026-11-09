@@ -804,37 +804,93 @@ final class CollageDarkroom: ObservableObject {
     }
 
     /// 放大镜：导出尺寸（原图解码、导出倍数）渲整页，裁中心附近 side × side 像素（1 个导出像素 = 1 pt）。
-    /// 只要那一小块：离它远的照片格不出图（CollageRender.Options.region，裁出来的像素和渲整页逐字节一样）。
-    /// 以前整页每格都从原图解、在导出尺寸上调色加颗粒，一次半秒多（1 倍；2、3 倍导出是 4、9 倍的像素），
-    /// 暗房里每改一下停手就来一次，渲的时候 1:1 细节一直压暗、还和大预览抢 CPU。
+    /// 只要那一小块：离它远的照片格不出图（CollageRender.Options.region，裁出来的像素和渲整页逐字节一样，
+    /// --darkroom-selftest 核对）。以前整页每格都从原图解、在导出尺寸上调色加颗粒，一次半秒多（1 倍；2、3 倍导出是
+    /// 4、9 倍的像素），暗房里每改一下停手就来一次，渲的时候 1:1 细节一直压暗、还和大预览抢 CPU。
     nonisolated static let loupeSide = 232
     nonisolated static func renderLoupe(_ project: CollageProject, pageIndex: Int, fallback: CollagePage,
                                         hints: [String: CollageCrop.Hints], scale: Double, center: CGPoint,
                                         wholePage: Bool = false) -> NSImage? {
+        guard let own = loupeImage(project, pageIndex: pageIndex, fallback: fallback, hints: hints, scale: scale,
+                                   center: center, wholePage: wholePage) else { return nil }
+        return NSImage(cgImage: own, size: NSSize(width: own.width, height: own.height))
+    }
+
+    nonisolated static func loupeImage(_ project: CollageProject, pageIndex: Int, fallback: CollagePage,
+                                       hints: [String: CollageCrop.Hints], scale: Double, center: CGPoint,
+                                       side: Int = loupeSide, wholePage: Bool = false) -> CGImage? {
         let page = project.pages.indices.contains(pageIndex) ? project.pages[pageIndex] : fallback
+        guard let rect = loupeRect(canvas: project.canvas, scale: scale, center: center, side: side) else { return nil }
+        var opts = loupeOptions(scale: scale)
+        if !wholePage { opts.region = rect }
+        guard let cg = CollageRender.render(page: page, project: project, hints: hints, options: opts) else { return nil }
+        return ownCrop(cg, rect, canvas: project.canvas, scale: scale)
+    }
+
+    /// 1:1 细节的渲染选项：导出尺寸、原图解码、带水印、不带出血（和导出看到的一样）。核对用的整页也用它，只差 region。
+    nonisolated static func loupeOptions(scale: Double) -> CollageRender.Options {
         var opts = CollageRender.Options(scale: scale)
         opts.includeBleed = false
         opts.export = true
         opts.watermark = true
-        // 渲出来的尺寸和 render 里一样算（不带出血）：裁的那块先定下来。
-        let w = Int((Double(project.canvas.width) * scale).rounded())
-        let h = Int((Double(project.canvas.height) * scale).rounded())
-        let side = min(loupeSide, w, h)
-        guard side > 0 else { return nil }
+        return opts
+    }
+
+    /// 1:1 细节那一块在这次渲染里的位置（像素，左上原点）：side × side，中心尽量落在 center（画布像素），贴边时往里收；
+    /// 画布比 side 还小就取画布的短边。渲出来的尺寸和 render 里一样算（不带出血）。
+    nonisolated static func loupeRect(canvas: CollageCanvas, scale: Double, center: CGPoint, side: Int) -> CGRect? {
+        let w = Int((Double(canvas.width) * scale).rounded())
+        let h = Int((Double(canvas.height) * scale).rounded())
+        let s = min(side, w, h)
+        guard s > 0 else { return nil }
         let cx = Int((center.x * scale).rounded()), cy = Int((center.y * scale).rounded())
-        let x = min(max(0, cx - side / 2), w - side)
-        let y = min(max(0, cy - side / 2), h - side)
-        let rect = CGRect(x: x, y: y, width: side, height: side)
-        if !wholePage { opts.region = rect }
-        guard let cg = CollageRender.render(page: page, project: project, hints: hints, options: opts),
-              cg.width == w, cg.height == h, let crop = cg.cropping(to: rect) else { return nil }
-        // 裁出来的 CGImage 和整页共用一块内存（dataProvider 是整页的）：直接交出去，1:1 细节开着就一直钉着一整张
-        // 导出尺寸的页面位图（印刷跨页约 100 MB）。画进自己的 side × side 位图（和渲染同一种格式：sRGB、8 位、
-        // 不带 alpha，1:1 不缩放，逐字节就是裁出来的那块），整页随这次渲染一起放掉。
-        guard let ctx = CollageRender.makeContext(width: side, height: side) else { return nil }
+        let x = min(max(0, cx - s / 2), w - s)
+        let y = min(max(0, cy - s / 2), h - s)
+        return CGRect(x: x, y: y, width: s, height: s)
+    }
+
+    /// 从整页里裁出那一块，画进自己的位图。裁出来的 CGImage 和整页共用一块内存（dataProvider 是整页的）：直接交出去，
+    /// 1:1 细节开着就一直钉着一整张导出尺寸的页面位图（印刷跨页约 100 MB）。画进自己的 side × side 位图（和渲染同一种
+    /// 格式：sRGB、8 位、不带 alpha，1:1 不缩放，逐字节就是裁出来的那块），整页随这次渲染一起放掉。
+    nonisolated static func ownCrop(_ cg: CGImage, _ rect: CGRect, canvas: CollageCanvas, scale: Double) -> CGImage? {
+        let w = Int((Double(canvas.width) * scale).rounded())
+        let h = Int((Double(canvas.height) * scale).rounded())
+        guard cg.width == w, cg.height == h, let crop = cg.cropping(to: rect) else { return nil }
+        let side = Int(rect.width)
+        guard let ctx = CollageRender.makeContext(width: side, height: Int(rect.height)) else { return nil }
         ctx.interpolationQuality = .none
-        ctx.draw(crop, in: CGRect(x: 0, y: 0, width: side, height: side))
-        guard let own = ctx.makeImage() else { return nil }
-        return NSImage(cgImage: own, size: NSSize(width: side, height: side))
+        ctx.draw(crop, in: CGRect(x: 0, y: 0, width: side, height: Int(rect.height)))
+        return ctx.makeImage()
+    }
+
+    /// 1:1 细节只渲够得着的那一块（Options.region）和渲整页再裁逐字节比：每个中心一个结果（整页只渲一次）。
+    /// region 的安全边距是按效果估的（CollageRender 里的 regionPad），以后哪个效果画出了这个范围，1:1 细节就会悄悄缺
+    /// 一块 —— --darkroom-selftest 用几种模板核对、不同就失败；--perf darkroom 在真照片上打印。
+    nonisolated static func loupeIdentity(_ project: CollageProject, pageIndex: Int, fallback: CollagePage,
+                                          hints: [String: CollageCrop.Hints], scale: Double, centers: [CGPoint],
+                                          side: Int = loupeSide) -> [Bool] {
+        let page = project.pages.indices.contains(pageIndex) ? project.pages[pageIndex] : fallback
+        let whole = CollageRender.render(page: page, project: project, hints: hints, options: loupeOptions(scale: scale))
+        return centers.map { center in
+            guard let whole, let rect = loupeRect(canvas: project.canvas, scale: scale, center: center, side: side),
+                  let expected = ownCrop(whole, rect, canvas: project.canvas, scale: scale).flatMap(pixels),
+                  let culled = loupeImage(project, pageIndex: pageIndex, fallback: fallback, hints: hints, scale: scale,
+                                          center: center, side: side).flatMap(pixels)
+            else { return false }
+            return expected == culled
+        }
+    }
+
+    /// 一张图的 RGBA 字节（画进一张新的位图再读：和格式、行宽无关）。
+    nonisolated static func pixels(_ cg: CGImage) -> [UInt8]? {
+        var out = [UInt8](repeating: 0, count: cg.width * cg.height * 4)
+        let ok = out.withUnsafeMutableBytes { buf -> Bool in
+            guard let ctx = CGContext(data: buf.baseAddress, width: cg.width, height: cg.height, bitsPerComponent: 8,
+                                      bytesPerRow: cg.width * 4, space: CollageRender.srgb,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
+            return true
+        }
+        return ok ? out : nil
     }
 }

@@ -1,5 +1,7 @@
 import Foundation
 import Combine
+import CoreGraphics
+import ImageIO
 
 /// LABELGUI_DATA_DIR=<临时> LabelGUI --darkroom-selftest
 ///
@@ -21,6 +23,8 @@ import Combine
 /// 11. 暗房开着时画布预览记着脏、先不渲（画布不在视图树里），关暗房马上补渲；实时桥要预览（previewSettled）时现渲一张，
 ///     渲着的时候暗房里接着拖出来的不跟着渲（照旧攒着）。
 /// 12. 「这款的数据没读到」：只问缓存，没读过的在后台读、读完再提示（不在主线程上解析表）。
+/// 13. 1:1 细节只渲够得着的那一块，和渲整页再裁逐字节相同：合成照片，投影 + 圆角 + 模糊填（1 倍、0.75 倍）、抠图格、
+///     卡纸 + 细线 + 纸纹、报纸网点、每张照片 + 整页水印、模板库的散落相纸和封面刊头，都套光谱色调 + 颗粒 + 晕光。
 /// 全过退出 0，否则 1。
 enum CollageDarkroomSelfTest {
 
@@ -370,7 +374,208 @@ enum CollageDarkroomSelfTest {
         let cached = CollageDarkroom(store: cold, rendering: false)
         check(!cached.probingData && cached.dataMissing.isEmpty, "读过的只问缓存，当场就对（不再派后台读）")
 
+        // ---------------------------------------------------------------- 13. 1:1 细节只渲那一块
+        print("== 1:1 细节只渲够得着的那一块：和渲整页再裁逐字节比")
+        loupeIdentity(check)
+
         finish(failures)
+    }
+
+    /// 13. 1:1 细节（Options.region：离那一块远的格子不出图）和渲整页再裁逐字节相同。region 的安全边距是按效果估的
+    /// （CollageRender 的 regionPad：投影、出血），以后哪个效果画出了这个范围，1:1 细节会悄悄缺一块 —— 以前只在
+    /// --perf darkroom 里打印 PASS / FAIL，不影响退出码。合成照片（渐变天、硬边柱子、高光点：颗粒、晕光、锐化、
+    /// Lanczos 都有东西可算）写进隔离的数据目录；每种模板都套光谱色调 + 颗粒 + 晕光，量每格中心、每格左上角（缝、投影
+    /// 落的地方）、九宫点、画布四角、散落版每张相纸的中心。
+    @MainActor
+    private static func loupeIdentity(_ check: (Bool, String, String) -> Void) {
+        guard CollageFilmEffects.extras(.filmWarmSkin) != nil else {
+            check(false, "准备：光谱色调的颗粒、晕光数据读得到（third_party/film-luts）", "")
+            return
+        }
+        let dir = appDataDir.appendingPathComponent("darkroom-selftest-photos")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var photos: [CollagePhotoRef] = []
+        for (i, size) in [(1500, 1000), (1000, 1500), (1500, 1000), (1200, 1200)].enumerated() {
+            let url = dir.appendingPathComponent("p\(i + 1).jpg")
+            guard writePhoto(url, width: size.0, height: size.1, variant: i) else {
+                check(false, "准备：合成照片写得出来", url.lastPathComponent)
+                return
+            }
+            var p = CollagePhotoRef(id: "p\(i + 1)", path: url.path, width: size.0, height: size.1)
+            p.score = Double(4 - i)
+            photos.append(p)
+        }
+        // 抠图格那张：一张脸 + 一直到底边的身子（合成蒙版，不跑 Vision）。
+        let face: [Double] = [0.42, 0.2, 0.58, 0.36]
+        photos[3].faces = [face]
+        let mw = 256, mh = 256
+        var mask = [UInt8](repeating: 0, count: mw * mh)
+        for y in 0..<mh {
+            for x in 0..<mw {
+                let u = (Double(x) + 0.5) / Double(mw), v = (Double(y) + 0.5) / Double(mh)
+                let du = (u - 0.5) / 0.1, dv = (v - 0.28) / 0.1
+                if du * du + dv * dv <= 1 || (u >= 0.3 && u <= 0.7 && v >= 0.36) { mask[y * mw + x] = 255 }
+            }
+        }
+        CollageMasks.inject(CollageMasks.synthetic(mask, width: mw, height: mh, faces: [face]), for: photos[3])
+
+        let canvas = CollageCanvas(name: "自检 3:2", width: 1500, height: 1000)
+        func project(_ style: CollageStyle, root: CollageNode, canvas: CollageCanvas = canvas) -> CollageProject {
+            var p = CollageProject()
+            p.photos = photos
+            p.canvas = canvas
+            p.style = style
+            p.style.look = .filmWarmSkin
+            p.style.lookStrength = 0.8
+            p.style.filmGrain = 0.6
+            p.style.filmHalation = 0.5
+            p.pages = [CollagePage(root: root)]
+            return p
+        }
+        func cell(_ id: String) -> CollageNode { .leaf(.photo(id)) }
+
+        var cases: [(name: String, project: CollageProject, scale: Double)] = []
+        // 投影（最重的那一档）+ 圆角 + 完整显示带本图模糊填：投影是 region 外扩的主要原因。
+        var shadow = CollageStyles.preset("grid")
+        shadow.shadow = 1
+        shadow.corner = 0.02
+        shadow.margin = 0.05
+        shadow.gutter = 0.03
+        var blurred = CollageCell.photo("p2")
+        blurred.contain = true
+        blurred.containBlur = true
+        let grid = CollageNode.split(.row, 0.55, cell("p1"), .split(.column, 0.5, .leaf(blurred), cell("p3")))
+        cases.append(("投影 + 圆角 + 模糊填", project(shadow, root: grid), 1))
+        cases.append(("投影 + 圆角 + 模糊填（0.75 倍导出）", project(shadow, root: grid), 0.75))
+        // 大边距里只够得着投影、够不着照片的那一块（下面另加贴着四边外面的几处）：region 的外扩就是为它留的。
+        var wide = shadow
+        wide.margin = 0.32
+        let roomy = CollageCanvas(name: "自检 大边距", width: 2400, height: 1600)
+        cases.append(("大边距 + 投影（那一块只落在投影上）", project(wide, root: cell("p1"), canvas: roomy), 1))
+        // 抠图格：白边 + 投影，主体切图要整张 tile。
+        var cutout = CollageCell.photo("p4")
+        cutout.cutout = CollageCutout(stroke: 0.01, shadow: 0.6)
+        var plain = CollageStyles.preset("grid")
+        plain.margin = 0
+        plain.gutter = 0.01
+        cases.append(("抠图格（白边、投影）", project(plain, root: .split(.row, 0.5, .leaf(cutout), cell("p1"))), 1))
+        // 婚礼 fine-art：卡纸 + 细线（画在照片外面）+ 纸纹压照片。
+        cases.append(("卡纸 + 细线 + 纸纹",
+                      project(CollageStyleFineArt.style, root: .split(.row, 0.5, cell("p1"), cell("p3"))), 1))
+        // 报纸风网点：加网替代锐化。
+        var screened = CollageStyles.preset("grid")
+        screened.halftone = CollageHalftone()
+        cases.append(("报纸网点", project(screened, root: .split(.row, 0.5, cell("p1"), cell("p2"))), 1))
+        // 每张照片 + 整页的水印（字 + 签名），压在投影那一版上。
+        var marked = project(shadow, root: grid)
+        var wm = CollageStyleFilmSelfTest.pageWatermark(.bottomRight, signature: CollageStyleFilmSelfTest.makeSignature())
+        var text = CollageMarkText()
+        text.customText = "© 自检"
+        text.position = .bottomLeft
+        var layer = CollageMarkLayer()
+        layer.position = .bottomLeft
+        layer.text = text
+        wm.photos = layer
+        marked.watermark = wm
+        cases.append(("每张照片 + 整页水印", marked, 1))
+        // 模板库里的两种：散落相纸（相纸带投影、图层）、封面刊头（压字）。
+        let map = Dictionary(uniqueKeysWithValues: photos.map { ($0.id, $0) })
+        for name in ["手账 · 胶片散落", "封面 · 刊头大图"] {
+            guard let template = CollageTemplates.find(name) else {
+                check(false, "准备：模板「\(name)」找得到", "")
+                continue
+            }
+            let c = template.canvas ?? canvas
+            let style = template.style ?? CollageStyles.preset("grid")
+            let page = CollageTemplates.apply(template, photos: photos,
+                                              context: CollageLayout.Context(canvas: c, style: style, photos: map))
+            var p = project(style, root: page.root, canvas: c)
+            p.pages = [page]
+            p.title = "自检"
+            // 印刷画布（几千像素）缩到长边约 1500 再比：核对的是 region，不是尺寸。
+            cases.append(("模板「\(name)」", p, min(1, 1500 / Double(max(c.width, c.height)))))
+        }
+
+        // 模板真的走到了要核对的那条路（出图记录）：抠图格用主体蒙版抠了、网点出了点、两层水印都画了。
+        func report(_ name: String) -> CollageRender.RenderReport? {
+            guard let c = cases.first(where: { $0.name.hasPrefix(name) }) else { return nil }
+            var opts = CollageDarkroom.loupeOptions(scale: c.scale)
+            let r = CollageRender.RenderReport()
+            opts.report = r
+            _ = CollageRender.render(page: c.project.pages[0], project: c.project, hints: [:], options: opts)
+            return r
+        }
+        check(report("抠图格")?.masks.contains { $0.cutout } == true, "准备：抠图格真的按主体蒙版抠了", "")
+        check(report("报纸网点")?.halftone.contains { $0.screened } == true, "准备：报纸网点真的出了点", "")
+        let layers = Set(report("每张照片")?.marks.filter { $0.kind != nil }.map(\.layer) ?? [])
+        check(layers == ["photo", "page"], "准备：每张照片、整页两层水印都画了", layers.sorted().joined(separator: "、"))
+
+        for c in cases {
+            let p = c.project
+            let w = Double(p.canvas.width), h = Double(p.canvas.height)
+            var centers: [CGPoint] = []
+            for fy in [1.0 / 6, 0.5, 5.0 / 6] {
+                for fx in [1.0 / 6, 0.5, 5.0 / 6] { centers.append(CGPoint(x: w * fx, y: h * fy)) }
+            }
+            centers += [CGPoint(x: 0, y: 0), CGPoint(x: w, y: 0), CGPoint(x: 0, y: h), CGPoint(x: w, y: h)]
+            // 贴着格子四边外面、刚好碰不到照片的那一块（中心离边 side / 2 + 6 个渲染像素）：只有投影落得进去。
+            let off = (Double(CollageDarkroom.loupeSide) / 2 + 6) / c.scale
+            for f in CollageLayout.pageGeometry(p.pages[0].root, canvas: p.canvas, style: p.style).frames {
+                let r = f.rect
+                let mx = Double(r.x0 + r.x1) / 2, my = Double(r.y0 + r.y1) / 2
+                centers.append(CGPoint(x: mx, y: my))
+                centers.append(CGPoint(x: Double(r.x0), y: Double(r.y0)))
+                centers += [CGPoint(x: mx, y: Double(r.y1) + off), CGPoint(x: Double(r.x1) + off, y: my),
+                            CGPoint(x: mx, y: Double(r.y0) - off), CGPoint(x: Double(r.x0) - off, y: my)]
+            }
+            for item in p.pages[0].items where item.kind == .photo {
+                centers.append(CGPoint(x: item.cx * w, y: item.cy * h))
+            }
+            let results = CollageDarkroom.loupeIdentity(p, pageIndex: 0, fallback: p.pages[0], hints: [:],
+                                                        scale: c.scale, centers: centers)
+            let bad = zip(centers, results).filter { !$0.1 }.map { "(\(Int($0.0.x)),\(Int($0.0.y)))" }
+            check(bad.isEmpty, "\(c.name)：\(results.count - bad.count) / \(results.count) 处和渲整页再裁逐字节相同",
+                  bad.isEmpty ? "" : "不同：" + bad.joined(separator: " "))
+        }
+    }
+
+    /// 合成照片：竖向渐变的天、暖色地面、一个过曝的太阳（晕光）、几根深色柱子（硬边：锐化、Lanczos）、一块红、一个
+    /// 肤色椭圆。variant 换颜色和位置。写成 JPEG。
+    private static func writePhoto(_ url: URL, width: Int, height: Int, variant: Int) -> Bool {
+        guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CollageRender.srgb,
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return false }
+        let w = CGFloat(width), h = CGFloat(height)
+        let k = CGFloat(variant) * 0.07
+        let sky = CGGradient(colorsSpace: CollageRender.srgb,
+                             colors: [CGColor(srgbRed: 0.85, green: 0.9, blue: 0.95, alpha: 1),
+                                      CGColor(srgbRed: 0.12 + k, green: 0.3, blue: 0.72 - k, alpha: 1)] as CFArray,
+                             locations: [0, 1])
+        let ground = CGGradient(colorsSpace: CollageRender.srgb,
+                                colors: [CGColor(srgbRed: 0.25, green: 0.18 + k, blue: 0.1, alpha: 1),
+                                         CGColor(srgbRed: 0.62, green: 0.5, blue: 0.32 + k, alpha: 1)] as CFArray,
+                                locations: [0, 1])
+        // CG 的原点在左下：天在上面 60%。
+        if let sky { ctx.drawLinearGradient(sky, start: CGPoint(x: 0, y: h * 0.4), end: CGPoint(x: 0, y: h), options: []) }
+        ctx.saveGState()
+        ctx.clip(to: CGRect(x: 0, y: 0, width: w, height: h * 0.4))
+        if let ground { ctx.drawLinearGradient(ground, start: .zero, end: CGPoint(x: 0, y: h * 0.4), options: []) }
+        ctx.restoreGState()
+        ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 0.97, alpha: 1))
+        let r = min(w, h) * 0.06
+        ctx.fillEllipse(in: CGRect(x: w * (0.68 - k) - r, y: h * 0.78 - r, width: 2 * r, height: 2 * r))
+        ctx.setFillColor(CGColor(srgbRed: 0.07, green: 0.06, blue: 0.06, alpha: 1))
+        for i in 0..<5 {
+            ctx.fill(CGRect(x: w * (0.08 + 0.18 * CGFloat(i) + k / 3), y: h * 0.1, width: w * 0.02, height: h * 0.5))
+        }
+        ctx.setFillColor(CGColor(srgbRed: 0.78, green: 0.12, blue: 0.1, alpha: 1))
+        ctx.fill(CGRect(x: w * 0.15, y: h * (0.45 + k), width: w * 0.12, height: h * 0.1))
+        ctx.setFillColor(CGColor(srgbRed: 0.93, green: 0.76, blue: 0.64, alpha: 1))
+        ctx.fillEllipse(in: CGRect(x: w * 0.42, y: h * 0.3, width: w * 0.16, height: h * 0.3))
+        guard let image = ctx.makeImage(),
+              let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) else { return false }
+        CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: 0.92] as CFDictionary)
+        return CGImageDestinationFinalize(dest)
     }
 
     private static func finish(_ failures: [String]) -> Never {

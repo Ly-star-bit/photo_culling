@@ -167,29 +167,11 @@ extension CollagePerf {
     }
 
     /// 1:1 细节只渲够得着的那几格（Options.region）和渲整页再裁，逐字节核对：每格中心、四角里的两个、画布中心。
+    /// 核对本身在 CollageDarkroom.loupeIdentity（--darkroom-selftest 用合成图核对同一个函数，不同就失败）。
     static func loupeIdentity(_ project: CollageProject, page: CollagePage, pageIndex: Int,
                               hints: [String: CollageCrop.Hints], scale: Double, centers: [CGPoint]) {
-        // 裁出来的 CGImage 和整页共用一块内存（dataProvider 是整页的）：画进一张新的位图再比。
-        func bytes(_ image: NSImage?) -> [UInt8]? {
-            guard let cg = image?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
-            var out = [UInt8](repeating: 0, count: cg.width * cg.height * 4)
-            let ok = out.withUnsafeMutableBytes { buf -> Bool in
-                guard let ctx = CGContext(data: buf.baseAddress, width: cg.width, height: cg.height, bitsPerComponent: 8,
-                                          bytesPerRow: cg.width * 4, space: CollageRender.srgb,
-                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
-                ctx.draw(cg, in: CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
-                return true
-            }
-            return ok ? out : nil
-        }
-        var same = 0
-        for center in centers {
-            let culled = CollageDarkroom.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints,
-                                                     scale: scale, center: center)
-            let whole = CollageDarkroom.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints,
-                                                    scale: scale, center: center, wholePage: true)
-            if let a = bytes(culled), a == bytes(whole) { same += 1 }
-        }
+        let same = CollageDarkroom.loupeIdentity(project, pageIndex: pageIndex, fallback: page, hints: hints, scale: scale,
+                                                 centers: centers).filter { $0 }.count
         print((same == centers.count ? "PASS" : "FAIL")
               + " 1:1 细节只渲够得着的格子：\(same) / \(centers.count) 处和渲整页再裁逐字节相同")
     }
