@@ -44,7 +44,7 @@ jobs:
           restore-keys: |
             swiftpm-${{ runner.os }}-${{ steps.swift.outputs.version }}-
 
-      # 从这一步到「卸下 DMG」是打包和打包后的检查（构建、DMG 本身、包里的二进制 / 胶片表）；再往后是拿
+      # 从这一步到「卸下 DMG」是打包和打包后的检查（构建、DMG 本身、包里的二进制 / 胶片表 / Python 运行时）；再往后是拿
       # 裸二进制跑的测试。（NE3 还没定：以后要在 build 前面加一个查「这个 SHA 绿过没有」的 job，tag 可能只跑这一段。）
       # tee 一份 build.log 给下一步出 annotation。pipefail 要自己开：GitHub 默认的 shell 是 bash -e、不带 pipefail，
       # 管道的退出码是 tee 的 —— 不开的话 build_app.sh 失败这一步照样绿。
@@ -111,6 +111,24 @@ jobs:
           mkdir -p "$D/data" "$D/sock" "$D/mcp"
           LABELGUI_DATA_DIR="$D/data" LABELGUI_NO_GUI=1 LABELGUI_LIVE_SOCK_ROOT="$D/sock" LABELGUI_MCP_OUT="$D/mcp" \
             "$APP_BIN" --film-looks-selftest
+
+      # 包里的 Python 运行时（NE5）：VLM 那一段在用户机器上跑的就是 Contents/Resources/culling-poc（app 每次启动同步到数据目录的
+      # runtime/culling-poc，在那里 uv run python layer2.py），CI 以前从来没跑过它 —— 和 v1.26.2 以前漏 .json 是同一类。
+      # 照 app 的做法拷到仓库外面再跑（仓库里往上找得到开发用的 pyproject，包里漏了文件也测不出）：--locked 要求包里的 uv.lock
+      # 和 pyproject 对得上；--help 走一遍顶层的 import（requests、tqdm、common）；pillow 在 layer2.py 里用到才 import，另起一次，
+      # 带 --offline（装过一次以后不联网也起得来）。包里不带 uv、Python、依赖：用户第一次跑 VLM 要联网（uv 下 CPython 3.12 和
+      # 三个包），这里 runner 联网。
+      - name: 包里的 Python 运行时 (layer2.py)
+        timeout-minutes: 10
+        run: |
+          R="$RUNNER_TEMP/runtime/culling-poc"
+          rm -rf "$R"
+          mkdir -p "$(dirname "$R")"
+          cp -R "$DMG_MNT/选片工具.app/Contents/Resources/culling-poc" "$R"
+          cd "$R"
+          test -f prompts/judge_prompt.txt || { echo "::error title=包里的 Python 运行时::没有 prompts/judge_prompt.txt"; exit 1; }
+          uv run --locked python layer2.py --help
+          uv run --locked --offline python -c "import PIL, requests, tqdm; from PIL import Image; print('pillow', PIL.__version__, 'requests', requests.__version__, 'tqdm', tqdm.__version__)"
 
       - name: 卸下 DMG
         if: always() && env.DMG_MNT != ''
