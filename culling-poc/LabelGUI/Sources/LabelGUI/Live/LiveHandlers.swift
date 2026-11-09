@@ -1408,8 +1408,9 @@ extension LiveHandlers {
             return .failure("invalid_state", "这一场的方案已经满了（\(CollageStore.maxVariants) 个）。",
                             ["hint": "请用户在拼图页的方案栏里右键删掉几个不要的"])
         }
-        guard !collage.isSolving else {
-            return .failure("invalid_state", "app 还在排版（还没落地），现在存下来的会是落地之前的样子。",
+        // 挪照片 / 加照片落下以后还在后台精排（isRefining，一般不到 0.1 秒）：存下来的会是精排之前的快版。
+        guard !collage.isSolving, !collage.isRefining else {
+            return .failure("invalid_state", "app 还在排版（还没排完），现在存下来的会是排完之前的样子。",
                             ["hint": "过一两秒再调"])
         }
         let before = collage.editDigest
@@ -1513,8 +1514,8 @@ extension LiveHandlers {
             return .failure("invalid_state", "拼图里还没有任何一页，没什么可导出。",
                             ["hint": "先 collage_apply_template 或 collage_run_kit 排一版", "executed": false])
         }
-        guard !collage.isSolving else {
-            return .failure("invalid_state", "app 还在排版（还没落地），现在导出的会是落地之前的样子。",
+        guard !collage.isSolving, !collage.isRefining else {
+            return .failure("invalid_state", "app 还在排版（还没排完），现在导出的会是排完之前的样子。",
                             ["hint": "过一两秒再调", "executed": false])
         }
         // 批量页这一场开在存储卡上（审查 S07）：默认的「拼图导出/」在卡上不给，选的目录也不能在卡上 —— 不往卡上写。
