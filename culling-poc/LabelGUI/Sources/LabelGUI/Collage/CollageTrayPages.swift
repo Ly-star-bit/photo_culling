@@ -165,8 +165,10 @@ struct CollageMyTemplatesBox: View {
                 HStack {
                     TextField("把这一页的版式存成模板…", text: $templateName)
                         .onSubmit { saveTemplate() }
+                    // 编辑封面时不存：模板按跨页画布存，封面那块是单页。
                     Button("存") { saveTemplate() }
-                        .disabled(templateName.trimmingCharacters(in: .whitespaces).isEmpty || store.root == nil)
+                        .disabled(templateName.trimmingCharacters(in: .whitespaces).isEmpty || store.root == nil
+                                  || !CollageAlbumRules.allows(.saveTemplate, editingCover: store.editingCover))
                 }
                 Toggle("套用时按照片比例自适应", isOn: Binding(get: { fitsOnSave }, set: { templateFits = $0 }))
                     .font(.caption)
@@ -189,6 +191,7 @@ struct CollageMyTemplatesBox: View {
     private var fitsOnSave: Bool { templateFits ?? !(store.page?.fixedAspects ?? false) }
 
     private func saveTemplate() {
+        guard CollageAlbumRules.allows(.saveTemplate, editingCover: store.editingCover) else { return }
         store.saveTemplate(named: templateName, fitAspects: fitsOnSave)
         templateName = ""
         templateFits = nil
@@ -265,7 +268,9 @@ struct CollageAssetsPage: View {
         GroupBox("印样") {
             VStack(alignment: .leading, spacing: 8) {
                 Button("改成印样") { store.makeContactSheet() }
-                    .disabled(store.project.photos.isEmpty)
+                    // 编辑封面时没有印样（封面那块只有格子）。
+                    .disabled(store.project.photos.isEmpty
+                              || !CollageAlbumRules.allows(.contactSheet, editingCover: store.editingCover))
                     .help("托盘的照片按拍摄先后排成一卷：连续的片条、齿孔、帧号，精选红圈、废片打叉（可以撤销）"
                           + (store.isAlbum ? "。相册跨页里印样放在右页，不跨中缝；别的跨页用了的照片不拿" : ""))
                 CollageJumpText(store: store, lead: "这一页换成一卷印样（托盘的照片按拍摄先后排）。规格、记号、改回网格在右栏",

@@ -771,6 +771,9 @@ enum CollageCLI {
 /// [--crop] [--overlay-index N] [--size 1440x900] [--adopt photos|page[:水印页预设名]] [--inspector-width 300] [--notice 提示文字]
 /// [--contact-frames]（印样的「逐帧」一开始就展开）[--light]（浅色外观）[--ax-dump]
 /// [--spec <印厂规格短名或名字>]（相册套规格）[--export-range current|1-3;7]（「导出 ▾」的范围）
+/// 相册界面（第 2 波 U）：[--lock 1,3]（锁住这几个跨页，从 0 起）[--cover-edit]（编辑封面，没有封面先做一张；在 --page 之后、
+/// --select 之前生效，--select 选的是封面那块的格子）[--overview]（整本概览摊开）[--overview-select 0,2]（概览里选中这几个，
+/// 从 0 起）[--overview-size 140]（概览缩略图宽 pt，110–260）；相册时截完打印「相册界面」一行，选中照片格时再打印「换一张」的候选
 /// [--tray-filter all|unused|used] [--tray-select ID,ID]（托盘的筛选、多选）[--clear-tray]（清空托盘和版式再截）
 /// [--tray-click ID[+cmd][+shift],…]（界面渲出来以后再在托盘里点：走选中变了以后的刷新，和一开始就选好的截图应该一样）
 /// [--perf place|gutter|slider|exposure|title|all|trayclick|darkroom]（截完图接着跑这个场景，打印每个视图 body 重算几次、
@@ -886,6 +889,18 @@ enum CollageUISnapshot {
         if let p = option("--page").flatMap(Int.init), store.project.pages.indices.contains(p) {
             store.pageIndex = p
         }
+        // --lock 1,3：锁住这几个跨页（从 0 起），看跨页条、整本概览上的锁和「这个跨页」的勾。
+        if let s = option("--lock") {
+            let picked = IndexSet(s.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) })
+            store.setPagesLocked(picked, true)
+        }
+        // --cover-edit：编辑封面（还没有封面先做一张）。在 --page 之后（换跨页会退出封面编辑）、--select 之前（--select 选的是
+        // 封面那块的格子）。
+        if args.contains("--cover-edit") {
+            if store.project.bookCover == nil { CollageBookCoverCLI.prepareSnapshot(store) }
+            store.setEditingCover(true)
+            print("编辑封面：" + (store.editingCover ? "是" : "进不去（不是相册或没有封面）"))
+        }
         if let sel = option("--select") {
             store.selection = sel.compactMap { $0.wholeNumberValue }
             if args.contains("--crop"), let path = store.selection { store.enterCropEdit(path) }
@@ -941,6 +956,18 @@ enum CollageUISnapshot {
                 if let v = option("--darkroom-split").flatMap(Double.init) { dr.split = min(1, max(0, v)) }
                 dr.showOriginal = args.contains("--darkroom-original")
             }
+        }
+        // --overview：整本概览摊开（同跨页条的「整本」、G）；--overview-select 0,2：概览里选中这几个跨页（从 0 起）；
+        // --overview-size 140：缩略图宽（pt，110–260）。
+        if args.contains("--overview") { store.albumUI.overviewShown = store.isAlbum }
+        if let s = option("--overview-select") {
+            let picked = IndexSet(s.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) })
+            store.albumUI.overviewSelection = Set(picked.filter { store.project.pages.indices.contains($0) }
+                .map { store.project.pages[$0].id })
+        }
+        if let w = option("--overview-size").flatMap(Double.init) {
+            let r = CollageAlbumUI.cardWidthRange
+            store.albumUI.overviewCardWidth = min(r.upperBound, max(r.lowerBound, w))
         }
         // --contact-frames：印样的「逐帧」一开始就展开（离屏点不了展开箭头）。
         SnapshotPreview.contactFramesOpen = args.contains("--contact-frames")
@@ -1039,9 +1066,40 @@ enum CollageUISnapshot {
                   + (shown && wm?.exportEnabled == false ? " · 「这个拼图导出时不带水印」说明行" : ""))
         }
         if args.contains("--ax-dump") { SnapshotAX.dump(host) }
+        if store.isAlbum { for line in albumUILines(store) { print(line) } }
         if let scenario = option("--perf") { CollagePerf.run(scenario, store: store) { spin($0) } }
         print("界面快照 \(Int(host.frame.width))x\(Int(size.height)) · 托盘 \(store.project.photos.count) 张 · \(store.project.pages.count) 页 · 备选 \(store.alternatives.count) · \(out.path)")
         exit(0)
+    }
+
+    /// 相册界面的几行（截图核对用）：几个跨页、封面、编辑封面、概览开没开选了哪几个、锁住哪几个；选中照片格时「换一张」的候选。
+    @MainActor
+    static func albumUILines(_ store: CollageStore) -> [String] {
+        let pages = store.project.pages
+        let ui = store.albumUI
+        func list(_ s: IndexSet) -> String { s.isEmpty ? "无" : s.map { String($0) }.joined(separator: ",") }
+        let locked = IndexSet(pages.indices.filter { pages[$0].locked })
+        // 一段一段拼（一整串 + 加三元，CI 的 6.1.2 类型检查会超时）。
+        var parts: [String] = ["\(pages.count) 个跨页"]
+        parts.append(store.project.bookCover == nil ? "封面没有" : "封面有")
+        parts.append(store.editingCover ? "编辑封面 是" : "编辑封面 否")
+        parts.append("当前第 \(store.pageIndex) 个")
+        parts.append((ui.overviewShown ? "概览 开" : "概览 关") + " 选中 " + list(ui.selectedIndices(pages)))
+        parts.append("锁住 " + list(locked))
+        var out = ["相册界面：" + parts.joined(separator: " · ")]
+        if let path = store.selection, let id = store.root?.node(at: path)?.cell?.photoID,
+           CollageAlbumRules.allows(.replacePhoto, editingCover: store.editingCover) {
+            let album = store.isAlbum
+            let cands = store.replacementCandidates(forPhoto: id).map { c -> String in
+                var tags = [c.reason.label]
+                if let badge = CollageAlbumRules.usedBadge(page: c.page, current: store.pageIndex, album: album,
+                                                           pageCount: pages.count) { tags.append(badge) }
+                if c.reject { tags.append("废片") }
+                return c.photoID + "(" + tags.joined(separator: "·") + ")"
+            }
+            out.append("换一张 \(id)：" + (cands.isEmpty ? "没有候选" : cands.joined(separator: " ")))
+        }
+        return out
     }
 }
 

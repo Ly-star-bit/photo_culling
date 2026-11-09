@@ -60,9 +60,8 @@ struct CollageView: View {
                 CollageLeftPane(store: store, batchStore: batchStore)
                     .frame(minWidth: 230, idealWidth: 250, maxWidth: 340)
                 // 选中画布上的照片、文字、贴纸：右栏切到「格式」（NU3）；双击文字 / 照片上的字：切过去并滚到编辑器。
-                CollageCanvasView(store: store,
-                                  onEditText: { spot in store.go(spot) },
-                                  onSelect: { store.nav.showFormat() })
+                // 相册开着整本概览时这一块换成网格（CollageAlbumOverview）。
+                CollageCanvasArea(store: store, isAlbum: store.isAlbum)
                     .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
                 CollageInspector(store: store, watermarkStore: watermarkStore)
                     .frame(minWidth: 300, idealWidth: 330, maxWidth: 380)
@@ -79,6 +78,8 @@ struct CollageView: View {
         // ? 开关快捷键一览（焦点不在画布、托盘上也接；正在输入框里打字时不接，见 ShortcutsKey）。暗房开着时编辑器不在视图树里，
         // 暗房自己接 ?。
         .shortcutsHotkey(isPresented: $showShortcuts)
+        // ⌘← ⌘→ 换跨页（封面在第一个跨页前面）、G 整本概览：同 ? 键，输入框里打字时不接（⌘← 是挪到行首）。
+        .collageAlbumKeys(store: store)
     }
 
     private var exportConfirmShown: Binding<Bool> {
@@ -193,8 +194,9 @@ struct CollageView: View {
         }
         .buttonStyle(.bordered)
         .tint(CollageDarkroomButton.amber)
-        .disabled(store.page == nil)
-        .help(CollageDarkroomButton.projectHelp)
+        // 编辑封面时不进暗房（暗房按「当前跨页」套色调，会改到封面底下那个跨页上）。
+        .disabled(store.page == nil || !CollageAlbumRules.allows(.darkroom, editingCover: store.editingCover))
+        .help(store.editingCover ? "编辑封面时不进暗房：先点跨页条上的一个跨页" : CollageDarkroomButton.projectHelp)
         .collageSpot(.darkroom, store.nav)
         CollageExportButtons(store: store, compact: compact)
             .collageSpot(.export, store.nav)
@@ -331,6 +333,35 @@ struct CollageView: View {
             return "\(c.name) · " + String(format: "%.1f×%.1fcm @%.0fdpi", w, h, c.dpi)
         }
         return "\(c.name) · \(size)"
+    }
+}
+
+// MARK: - 画布区：画布 / 整本概览
+
+/// 中间那一块：平常是画布；相册开着整本概览（跨页条的「整本」、G）时换成网格。只订阅 albumUI（开关概览），
+/// isAlbum 由 CollageView 传（它本来就订阅 store）：切回单张时概览自己关掉。
+private struct CollageCanvasArea: View {
+    let store: CollageStore
+    @ObservedObject var ui: CollageAlbumUI
+    let isAlbum: Bool
+
+    init(store: CollageStore, isAlbum: Bool) {
+        self.store = store
+        self.ui = store.albumUI
+        self.isAlbum = isAlbum
+    }
+
+    var body: some View {
+        Group {
+            if ui.overviewShown && isAlbum {
+                CollageAlbumOverview(store: store)
+            } else {
+                CollageCanvasView(store: store,
+                                  onEditText: { spot in store.go(spot) },
+                                  onSelect: { store.nav.showFormat() })
+            }
+        }
+        .onChange(of: isAlbum) { _, album in if !album, ui.overviewShown { ui.overviewShown = false } }
     }
 }
 
@@ -1070,76 +1101,322 @@ struct CollageVariantStrip: View {
     }
 }
 
+/// 跨页条（相册；单张拼图有好几页时是页条）。相册最前面一张「封面」卡（不算在跨页数里；没做封面时是「+ 封面」），
+/// 左边「整本」开整本概览。卡片：点一下换到那一页（封面卡 = 编辑封面）；拖动排序（插入的位置画竖线）；托盘的照片拖到卡片上 =
+/// 加进那一页、画布上的格子拖到卡片上 = 挪过去（画布自己的拖动手势，按 store.albumUI 记的位置认卡片）；锁住的画一把锁；
+/// 右键挪、锁、镜像、删。
 struct CollagePageStrip: View {
     @ObservedObject var store: CollageStore
     /// 跨页缩略图在 store.thumbs 里（渲好一批只刷新这一条，不是整个拼图页）。
     @ObservedObject var thumbs: CollageThumbs
+    /// 画布拖格子经过哪张卡片、哪张卡片在排（store.albumUI）。
+    @ObservedObject var ui: CollageAlbumUI
+    /// 正在拖着排序的那一页、指针在条里的位置（内容坐标）。
+    @State private var drag: StripDrag?
+
+    private struct StripDrag: Equatable {
+        var id: UUID
+        var location: CGPoint
+    }
+
+    init(store: CollageStore, thumbs: CollageThumbs) {
+        self.store = store
+        self.thumbs = thumbs
+        self.ui = store.albumUI
+    }
+
+    static let space = "pageStrip"
+    static let thumbHeight: CGFloat = 52
+    static let spacing: CGFloat = 8
 
     /// 相册叫「跨页」，单张拼图的多页叫「页」。
     private var unit: String { store.isAlbum ? "跨页" : "页" }
 
+    /// 卡片宽：缩略图按画布比例（30×30 的跨页 2:1 = 104pt）；封面卡同宽（整张封面缩进去）。
+    private var cardWidth: CGFloat {
+        let c = store.project.canvas
+        return min(150, max(40, (Self.thumbHeight * CGFloat(c.width) / CGFloat(max(1, c.height))).rounded()))
+    }
+
+    /// 前面几张不是跨页（相册的封面卡）。
+    private var leadingSlots: Int { store.isAlbum ? 1 : 0 }
+
+    private var metrics: CollageAlbumRules.GridMetrics {
+        let slots = leadingSlots + store.project.pages.count
+        return CollageAlbumRules.GridMetrics(columns: max(1, slots), cell: CGSize(width: cardWidth, height: Self.thumbHeight + 16),
+                                             spacing: Self.spacing)
+    }
+
     var body: some View {
         let _ = CollagePerf.body("页条")
+        let m = metrics
         HStack(spacing: 8) {
-            VStack(spacing: 2) {
-                Text(unit).font(.caption).foregroundStyle(.secondary)
-                // 相册：几个跨页（指定了跨页数是「现在 / 目标」，多了标橙）。
-                if store.isAlbum { CollageAlbumSpreadCount(store: store) }
-            }
-            .frame(width: 40)
+            leftColumn
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(Array(store.project.pages.enumerated()), id: \.element.id) { item in
-                        pageCard(index: item.offset, page: item.element)
-                    }
-                    Button {
-                        store.addPage()
-                    } label: {
-                        Image(systemName: "plus")
-                            .frame(width: 40, height: 56)
-                            .background(Color.gray.opacity(0.15), in: RoundedRectangle(cornerRadius: 4))
-                    }
-                    .buttonStyle(.plain)
-                    .help("在当前\(unit)后面加一个空\(unit)")
-                }
-                .padding(.vertical, 6)
+                cards(m)
+                    .padding(.vertical, 6)
             }
+            .background(viewportReader)
         }
         .padding(.horizontal, 10)
         .frame(height: 86)
+        .onAppear { record(m) }
+        .onChange(of: m) { _, now in record(now) }
+        .onChange(of: store.project.pages.count) { _, _ in record(metrics) }
+        // 排完了（托盘照片、画布格子落下来）：卡片上不再转圈。
+        .onChange(of: store.isSolving) { _, solving in if !solving, ui.pendingPage != nil { ui.pendingPage = nil } }
     }
 
-    private func pageCard(index: Int, page: CollagePage) -> some View {
-        let selected = index == store.pageIndex
-        return Button {
-            store.pageIndex = index
-        } label: {
-            VStack(spacing: 2) {
-                Group {
-                    if let thumb = thumbs.pages[page.id] {
-                        Image(nsImage: thumb).resizable().aspectRatio(contentMode: .fit)
-                    } else {
-                        Rectangle().fill(Color.gray.opacity(0.2))
-                    }
-                }
-                .frame(height: 52)
-                .overlay(RoundedRectangle(cornerRadius: 2)
-                    .strokeBorder(selected ? Color.accentColor : Color.clear, lineWidth: 2.5))
-                // 超出目标跨页数的那几个跨页：页码标橙（印厂 / 套餐放不下的就是它们）。
-                let over: Bool = store.isAlbum && (store.project.albumBudget.map { index >= $0.spreads } ?? false)
-                let tint: AnyShapeStyle = over ? AnyShapeStyle(Color.orange)
-                    : selected ? AnyShapeStyle(HierarchicalShapeStyle.primary) : AnyShapeStyle(HierarchicalShapeStyle.secondary)
-                Text("\(index + 1)").font(.caption2).foregroundStyle(tint)
+    /// 画布拖格子时按这几个数认卡片（不发布：只在拖的时候现查）。
+    private func record(_ m: CollageAlbumRules.GridMetrics) {
+        ui.stripMetrics = m
+        ui.stripLeadingSlots = leadingSlots
+        ui.stripPageCount = store.project.pages.count
+    }
+
+    /// 左边：「跨页」、几个（多了、页数不合规标橙）、「整本」。
+    private var leftColumn: some View {
+        VStack(spacing: 3) {
+            Text(unit).font(.caption).foregroundStyle(.secondary)
+            // 相册：几个跨页（指定了跨页数是「现在 / 目标」，多了标橙）。封面不算在里面。
+            if store.isAlbum {
+                CollageAlbumSpreadCount(store: store)
+                overviewButton
             }
         }
-        .buttonStyle(.plain)
-        .contextMenu {
-            Button("往前挪") { store.movePage(index, by: -1) }.disabled(index == 0)
-            Button("往后挪") { store.movePage(index, by: 1) }.disabled(index == store.project.pages.count - 1)
-            Divider()
-            Button("删除这个\(unit)", role: .destructive) { store.deletePage(index) }
+        .frame(width: 44)
+    }
+
+    /// 「整本」：开着概览时实心（再点一下回编辑）。
+    @ViewBuilder
+    private var overviewButton: some View {
+        let label = Text("整本").font(.caption2)
+        if ui.overviewShown {
+            Button { ui.toggleOverview(store) } label: { label }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .help("回到编辑这个跨页 (G、Esc)")
+        } else {
+            Button { ui.toggleOverview(store) } label: { label }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("整本概览：摊开全部跨页，拖动排序、多选锁住 / 镜像 / 删除 (G)")
         }
-        .help("\(unit) \(index + 1) · \(page.photoIDs.count) 张（右键挪动/删除）")
+    }
+
+    private func cards(_ m: CollageAlbumRules.GridMetrics) -> some View {
+        HStack(spacing: Self.spacing) {
+            if store.isAlbum { coverCard }
+            ForEach(Array(store.project.pages.enumerated()), id: \.element.id) { item in
+                pageCard(index: item.offset, page: item.element, metrics: m)
+            }
+            Button {
+                store.addPage()
+            } label: {
+                Image(systemName: "plus")
+                    .frame(width: 40, height: 56)
+                    .background(Color.gray.opacity(0.15), in: RoundedRectangle(cornerRadius: 4))
+            }
+            .buttonStyle(.plain)
+            .help("在当前\(unit)后面加一个空\(unit)")
+        }
+        .coordinateSpace(name: Self.space)
+        .overlay(alignment: .topLeading) { insertionLine(m) }
+        .background(contentReader)
+    }
+
+    /// 卡片们在窗口里的位置（画布拖格子出来时按它认卡片）。
+    private var contentReader: some View {
+        GeometryReader { g in
+            Color.clear
+                .onAppear { ui.stripContent = g.frame(in: .global) }
+                .onChange(of: g.frame(in: .global)) { _, f in ui.stripContent = f }
+        }
+    }
+
+    /// 条看得见的那一截（滚出去的卡片不算）。
+    private var viewportReader: some View {
+        GeometryReader { g in
+            Color.clear
+                .onAppear { ui.stripViewport = g.frame(in: .global) }
+                .onChange(of: g.frame(in: .global)) { _, f in ui.stripViewport = f }
+        }
+    }
+
+    // MARK: 封面卡（U8）
+
+    private var coverCard: some View {
+        let made = store.project.bookCover != nil
+        let editing = store.editingCover
+        return VStack(spacing: 2) {
+            ZStack {
+                if made {
+                    CollageCoverThumb(store: store, longEdge: 300)
+                } else {
+                    RoundedRectangle(cornerRadius: 4)
+                        .strokeBorder(Color.secondary.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                    Label("封面", systemImage: "plus").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: cardWidth, height: Self.thumbHeight)
+            .overlay(RoundedRectangle(cornerRadius: 2)
+                .strokeBorder(editing ? Color.accentColor : Color.clear, lineWidth: 2.5))
+            Text("封面").font(.caption2).foregroundStyle(editing ? .primary : .secondary)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { openCover() }
+        .contextMenu { coverMenu(made: made) }
+        .help(made ? "封面（不算在跨页数里）：点一下编辑封面那一块；书脊、封底在「文档 › 封面」。点任何一个跨页回去"
+              : "做封面：主图用扉页那张，标题、日期照扉页（⌘Z 撤回）；做好就编辑它")
+    }
+
+    private func openCover() {
+        if store.project.bookCover == nil {
+            guard store.makeCover() else { return }
+        }
+        ui.overviewShown = false
+        CollageAlbumKeys.open(.cover, store: store)
+    }
+
+    @ViewBuilder
+    private func coverMenu(made: Bool) -> some View {
+        if made {
+            Button("编辑封面") { openCover() }
+            Button("按扉页重做") { store.makeCover(replace: true) }
+            Divider()
+            Button("去掉封面", role: .destructive) { store.removeCover() }
+        } else {
+            Button("做封面") { openCover() }
+        }
+    }
+
+    // MARK: 跨页卡片
+
+    private func pageCard(index: Int, page: CollagePage, metrics m: CollageAlbumRules.GridMetrics) -> some View {
+        let selected = index == store.pageIndex && !store.editingCover
+        // 超出目标跨页数的那几个跨页：页码标橙（印厂 / 套餐放不下的就是它们）。
+        let over: Bool = store.isAlbum && (store.project.albumBudget.map { index >= $0.spreads } ?? false)
+        let card = CollageStripCard(thumb: thumbs.pages[page.id], width: cardWidth, number: index + 1, locked: page.locked,
+                                    selected: selected, over: over, hover: ui.stripHover == index,
+                                    pending: ui.pendingPage == page.id && store.isSolving,
+                                    onDropPhoto: { id in CollageAlbumDrops.photo(id, onPage: page.id, store: store) })
+        return card
+            .opacity(drag?.id == page.id ? 0.35 : 1)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                // 点一个跨页 = 去编辑它（开着整本概览也回到画布；退出封面编辑，见 CollageAlbumKeys.open）。
+                if ui.overviewShown { ui.overviewShown = false }
+                CollageAlbumKeys.open(.page(index), store: store)
+            }
+            .gesture(reorder(page.id, metrics: m))
+            .contextMenu { pageMenu(index: index, page: page) }
+            .help(cardHelp(index, page))
+    }
+
+    private func cardHelp(_ index: Int, _ page: CollagePage) -> String {
+        let lock = page.locked ? " · 锁住" : ""
+        return "\(unit) \(index + 1) · \(page.photoIDs.count) 张\(lock)（拖动排序；托盘照片、画布上的格子拖上来 = 放进这一\(unit)；"
+            + "右键锁住、镜像、挪、删）"
+    }
+
+    @ViewBuilder
+    private func pageMenu(index: Int, page: CollagePage) -> some View {
+        Button("往前挪") { store.movePage(index, by: -1) }.disabled(index == 0)
+        Button("往后挪") { store.movePage(index, by: 1) }.disabled(index == store.project.pages.count - 1)
+        if store.isAlbum {
+            Divider()
+            Button(page.locked ? "解锁这个跨页" : "锁住这个跨页") {
+                store.setPagesLocked(IndexSet(integer: index), !page.locked)
+            }
+            Button("镜像这个跨页") { store.mirrorPage(index) }
+                .disabled(page.contactSheet != nil)
+        }
+        Divider()
+        Button("删除这个\(unit)", role: .destructive) { store.deletePage(index) }
+    }
+
+    // MARK: 拖动排序（U2）
+
+    private func reorder(_ id: UUID, metrics m: CollageAlbumRules.GridMetrics) -> some Gesture {
+        DragGesture(minimumDistance: 5, coordinateSpace: .named(Self.space))
+            .onChanged { value in
+                if drag == nil {
+                    drag = StripDrag(id: id, location: value.location)
+                } else {
+                    drag?.location = value.location
+                }
+            }
+            .onEnded { value in
+                defer { drag = nil }
+                guard let dest = destination(id, at: value.location, metrics: m),
+                      let from = store.project.pages.firstIndex(where: { $0.id == id }) else { return }
+                store.movePages(IndexSet(integer: from), to: dest)
+            }
+    }
+
+    /// 拖到这里松手插在第几个前面（movePages 的 destination）；顺序不变 = nil。
+    private func destination(_ id: UUID, at p: CGPoint, metrics m: CollageAlbumRules.GridMetrics) -> Int? {
+        let count = store.project.pages.count
+        guard let from = store.project.pages.firstIndex(where: { $0.id == id }) else { return nil }
+        let slot = CollageAlbumRules.insertion(at: p, slots: leadingSlots + count, metrics: m).slot
+        let dest = CollageAlbumRules.pageDestination(slot: slot, leadingSlots: leadingSlots, pageCount: count)
+        return CollageAlbumRules.moveChangesOrder(IndexSet(integer: from), to: dest, count: count) ? dest : nil
+    }
+
+    @ViewBuilder
+    private func insertionLine(_ m: CollageAlbumRules.GridMetrics) -> some View {
+        if let drag, let dest = destination(drag.id, at: drag.location, metrics: m) {
+            let x = CGFloat(dest + leadingSlots) * m.pitchX - m.spacing / 2 - 1.5
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(Color.accentColor)
+                .frame(width: 3, height: Self.thumbHeight + 4)
+                .offset(x: x, y: -2)
+                .allowsHitTesting(false)
+        }
+    }
+}
+
+/// 跨页条上的一张卡片：缩略图、锁、页码（多了标橙）；当前页描边，托盘照片、画布格子拖上来描边，在排的时候转圈。
+private struct CollageStripCard: View {
+    let thumb: NSImage?
+    let width: CGFloat
+    let number: Int
+    let locked: Bool
+    let selected: Bool
+    let over: Bool
+    /// 画布上的格子拖着指到这张卡片。
+    let hover: Bool
+    let pending: Bool
+    let onDropPhoto: (String) -> Void
+    @State private var targeted = false
+
+    var body: some View {
+        VStack(spacing: 2) {
+            ZStack {
+                if let thumb {
+                    Image(nsImage: thumb).resizable().aspectRatio(contentMode: .fit)
+                } else {
+                    Rectangle().fill(Color.gray.opacity(0.2))
+                }
+                if pending { ProgressView().controlSize(.small) }
+            }
+            .frame(width: width, height: CollagePageStrip.thumbHeight)
+            .overlay(alignment: .topLeading) {
+                if locked { CollageLockBadge() }
+            }
+            .overlay(RoundedRectangle(cornerRadius: 2)
+                .strokeBorder(hover || targeted || selected ? Color.accentColor : Color.clear,
+                              lineWidth: hover || targeted ? 3.5 : 2.5))
+            Text("\(number)").font(.caption2).foregroundStyle(tint)
+        }
+        .onDrop(of: [.text], isTargeted: $targeted) { providers in
+            CollageAlbumDrops.loadText(providers, onDropPhoto)
+        }
+    }
+
+    private var tint: AnyShapeStyle {
+        if over { return AnyShapeStyle(Color.orange) }
+        return selected ? AnyShapeStyle(HierarchicalShapeStyle.primary) : AnyShapeStyle(HierarchicalShapeStyle.secondary)
     }
 }
 

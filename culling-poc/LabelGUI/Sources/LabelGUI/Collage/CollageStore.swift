@@ -130,6 +130,8 @@ final class CollageStore: ObservableObject {
     let tray = CollageTrayState()
     /// 左栏 / 右栏的页签、「去那儿」（CollageNav.swift）：只有检视器、左栏、顶栏的「导出 ▾」订阅。
     let nav = CollageNav()
+    /// 相册界面状态（整本概览、跨页条拖动，CollageAlbumUI.swift）：只有跨页条、画布区、概览订阅。
+    let albumUI = CollageAlbumUI()
     var preview: NSImage? { previewState.image }
     /// 相册跨页条的缩略图（按页 id）。
     var pageThumbs: [UUID: NSImage] { thumbs.pages }
@@ -3540,20 +3542,35 @@ final class CollageStore: ObservableObject {
     /// S3：第 index 个跨页左右镜像（CollageAlbum.mirrored：只翻几何，照片不翻像素、取景不变、字的左右对齐不变）。
     /// 一步撤销；再做一次翻回来。印样不翻（按拍摄先后排的片条）。
     func mirrorPage(_ index: Int) {
-        guard project.pages.indices.contains(index) else { return }
-        guard project.pages[index].contactSheet == nil else {
+        mirrorPages(IndexSet(integer: index))
+    }
+
+    /// 几个跨页一起镜像（整本概览里多选了右键「镜像」）：一步撤销；印样跳过（全是印样就说一句）。
+    func mirrorPages(_ indices: IndexSet) {
+        let valid = indices.filter { project.pages.indices.contains($0) }
+        guard !valid.isEmpty else { return }
+        let flip = valid.filter { project.pages[$0].contactSheet == nil }
+        guard !flip.isEmpty else {
             setNotice("印样按拍摄先后排，不镜像")
             return
         }
-        if index == pageIndex { cancelSolveIfRunning() }
+        // 画布上正在编辑的这一页翻了：选中、备选作废（编辑封面时画布上是封面，跨页条右键翻它底下那个跨页不动封面的选中）。
+        let onCanvas = !editingCover && flip.contains(pageIndex)
+        if onCanvas { cancelSolveIfRunning() }
         pushUndo()
-        project.pages[index] = CollageAlbum.mirrored(project.pages[index])
-        if index == pageIndex {
+        for i in flip { project.pages[i] = CollageAlbum.mirrored(project.pages[i]) }
+        if onCanvas {
             selection = nil
             clearAlternatives()
         }
         commitEdit()
-        setNotice("第 \(index + 1) 个\(pageUnit)左右镜像了（照片本身没翻；再镜像一次翻回来）")
+        let skipped = valid.count - flip.count
+        if flip.count == 1, skipped == 0, let index = flip.first {
+            setNotice("第 \(index + 1) 个\(pageUnit)左右镜像了（照片本身没翻；再镜像一次翻回来）")
+        } else {
+            setNotice("\(flip.count) 个\(pageUnit)左右镜像了（照片本身没翻；⌘Z 一次撤回）"
+                      + (skipped > 0 ? "；印样 \(skipped) 个没翻" : ""))
+        }
     }
 
     /// S4 的缓存：这一页、这一边算出来的几种切法（第 0 个是算的时候的样子），现在用的是第几个。换页、编辑过（工程版本号
