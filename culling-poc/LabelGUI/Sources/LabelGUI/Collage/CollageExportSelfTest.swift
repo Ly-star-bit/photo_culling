@@ -19,6 +19,7 @@ import ImageIO
 /// 5. 写 PDF 时退出 / 崩溃留下的隐藏临时文件：sweepStalePDFTemps 只删输出目录第一层、名字是 writePDF 那种
 ///    （.<名字>.pdf.<8 位大写十六进制>.tmp，和 writePDF 真起的名字对得上）、普通文件、10 分钟没动过的；新的、预览缓存那种
 ///    .jpg 的、小写 / 7 位的、看得见的、目录、符号链接（目标也不碰）、子目录里的都不动；startExport 开工时清一遍。
+/// 6. 印厂规格、导出前检查、色彩（sRGB 逐字节不变 / Adobe RGB）、只导某几个跨页、看版 PDF：见 CollagePrintSelfTest。
 /// 全过退出 0，否则 1。
 enum CollageExportSelfTest {
 
@@ -43,6 +44,8 @@ enum CollageExportSelfTest {
         print("== 空照片格")
         emptySlots(check: check)
         emptySlotConfirm(store, root.appendingPathComponent("confirm"), check: check)
+        // 相册 B · P 道：范围、页数规则、印厂规格、导出前检查、色彩、部分导出、看版 PDF（CollagePrintSelfTest）。
+        CollagePrintSelfTest.run(store, root: root.appendingPathComponent("print"), check: check)
 
         try? FileManager.default.removeItem(at: root)
         if check.failures.isEmpty {

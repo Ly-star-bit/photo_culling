@@ -251,9 +251,15 @@ final class CollageStore: ObservableObject {
     @Published private(set) var progressFraction: Double?
     /// 一设上就记进状态栏提示的历史和持久日志（ErrorHistory，审查 D03）。
     @Published var lastError: String? { didSet { ErrorHistory.shared.record(lastError, source: .collage) } }
-    /// 导出按钮要先问一句的话（有空照片格，emptySlotWarning）：界面弹确认框，点「仍然导出」= export(confirmed: true)。
-    /// nil = 不用问。
+    /// 导出按钮要先问一句的话（导出前检查里有「拦」的：空照片格、放大超过 150%、页数不合规……，见 exportConfirmation）：
+    /// 界面弹确认框，点「仍然导出」= export(confirmed: true)。nil = 不用问。
     @Published var exportConfirm: String?
+    /// 确认框的标题，和 exportConfirm 一起设（只有空照片格时还是以前那句「有空照片格，仍要导出吗？」）。
+    private(set) var exportConfirmTitle = "有空照片格，仍要导出吗？"
+    /// 「导出 ▾」里的范围（只对相册）：全部 / 当前跨页 / 自定义「1-3, 7」。不存盘（同 exportName，每次导出自己选）。
+    @Published var exportRange: CollageExportRange = .all
+    /// 「存成规格…」存的印厂规格（全局：state.json 的 printSpecs，跟模板、默认样式放一起）。
+    @Published private(set) var userPrintSpecs: [CollagePrintSpec] = []
     @Published private(set) var notice: String?
     @Published private(set) var busyText: String?
     /// 相册去重拿掉的照片（可以一键加回）。
@@ -2735,52 +2741,14 @@ final class CollageStore: ObservableObject {
         Self.upscaleIssues(project: project, hints: hints, limit: limit)
     }
 
+    /// 每张照片画在哪、取景是什么（封面取景、人物挡字的格子按 CollageCover 的决定）在 CollagePreflight.placements：
+    /// 导出前检查（放大、脸压中缝、贴边没铺出血）和这里共用一套。
     static func upscaleIssues(project: CollageProject, hints: [String: CollageCrop.Hints],
                               limit: Double = upscaleLimit) -> [UpscaleIssue] {
-        let canvas = project.canvas
-        let style = project.style
-        var photos: [String: CollagePhotoRef] = [:]
-        for p in project.photos where photos[p.id] == nil { photos[p.id] = p }
         var out: [UpscaleIssue] = []
-        for (i, page) in project.pages.enumerated() {
-            if !page.freeform {
-                let frames = CollageLayout.pageGeometry(page.root, canvas: canvas, style: style).frames
-                // 封面取景、人物挡字的格子按 CollageCover 的决定（封面会拉近，放大倍数要按它算）；
-                // 这一页没有这种格子就照旧（不算占位符、底色）。
-                let covered = frames.contains { CollageCover.applies(to: $0.cell) }
-                let paged = CollageLooks.project(project, page: page)
-                let ids = page.photoIDs
-                let pageVars = covered ? CollageTypeset.variables(project: paged, root: page.root, photos: photos,
-                                                                  pagePhotoIDs: ids, pageID: page.id) : [:]
-                let bg = covered ? CollageRender.backgroundColor(project: paged, pagePhotoIDs: ids, photos: photos)
-                    : style.background
-                for f in frames where f.cell.kind == .photo {
-                    guard let id = f.cell.photoID, let photo = photos[id] else { continue }
-                    let framing = CollageLayout.effectiveFraming(path: f.path, cell: f.cell, in: frames, photos: photos,
-                                                                 tight: style.tightSmallCells)
-                    let area = CollageCrop.photoArea(cell: f.cell, rect: f.rect.cgRect, style: style)
-                    let window = CollageCover.applies(to: f.cell)
-                        ? CollageRender.cellWindow(cell: f.cell, frameRect: f.rect.cgRect, project: paged, photo: photo,
-                                                   framing: framing, hints: hints[id],
-                                                   vars: CollageTypeset.cellVariables(pageVars, photo: photo),
-                                                   background: bg)
-                        : CollageCrop.window(for: photo, cell: f.cell, cellAspect: CollageCrop.aspect(of: area),
-                                             framing: framing, hints: hints[id])
-                    let drawn = CollageCrop.drawnRect(window: window, photo: photo, cell: f.cell, in: area)
-                    let k = CollageCrop.upscale(photo: photo, window: window, drawn: drawn)
-                    if k > limit { out.append(UpscaleIssue(page: i, photoID: id, factor: k)) }
-                }
-            }
-            // 相纸（散落版整页、网格版上贴的）：和 CollageItems.drawPhotoItem 同一个取景。
-            for item in page.items where item.kind == .photo {
-                guard let id = item.photoID, let photo = photos[id] else { continue }
-                let inner = CollageItems.photoArea(item.frame, outer: CollageItems.localRect(item, canvas: canvas))
-                let framing: CollageFraming = item.framing == .auto ? .full : item.framing
-                let window = CollageCrop.window(for: photo, cellAspect: CollageCrop.aspect(of: inner), framing: framing,
-                                                override: nil, hints: hints[id])
-                let k = CollageCrop.upscale(photo: photo, window: window, drawn: inner)
-                if k > limit { out.append(UpscaleIssue(page: i, photoID: id, factor: k)) }
-            }
+        for p in CollagePreflight.placements(project: project, hints: hints) {
+            let k = CollageCrop.upscale(photo: p.photo, window: p.window, drawn: p.drawn)
+            if k > limit { out.append(UpscaleIssue(page: p.page, photoID: p.photo.id, factor: k)) }
         }
         return out.sorted { $0.factor > $1.factor }
     }
@@ -3712,7 +3680,17 @@ final class CollageStore: ObservableObject {
         if outputFolder == nil, onCardSession { return "照片在存储卡上：先选一个不在卡上的输出目录（或者先导入这张卡）" }
         if outputFolder == nil { return "先选择输出目录" }
         if let why = cardOutputRefusal { return why }
+        if case .failure(let bad) = exportPageSelection { return "导出范围：" + bad.message }
         return nil
+    }
+
+    /// 这次导哪几个跨页（从 0 起）：nil = 全部（选的正好是全部也算全部，照常出 PDF）。只有相册看「导出 ▾」的范围。
+    var exportPageSelection: Result<[Int]?, CollageExportRange.Bad> {
+        guard isAlbum else { return .success(nil) }
+        return exportRange.resolve(pageCount: project.pages.count, current: pageIndex).map { only in
+            guard let only, only.count < project.pages.count else { return nil }
+            return only
+        }
     }
 
     /// 输出目录在存储卡上（批量页这一场开在卡上，审查 S07）：给的原因；nil = 照常导。
@@ -3735,16 +3713,18 @@ final class CollageStore: ObservableObject {
         var scale = 1
     }
 
-    /// 导出按钮（⌘E）。有空照片格时先不导，exportConfirm 写上那句话等用户点一下（只在有空格时问，不是每次都弹）；
-    /// confirmed = 用户已经点了「仍然导出」。
+    /// 导出按钮（⌘E）。导出前检查（CollagePreflight）里有「拦」的（空照片格、放大超过 150%、页数不合规、同一张用了两次、
+    /// 胶装脸压中缝）先不导，exportConfirm 写上前几条等用户点一下（只在有「拦」时问，不是每次都弹）；confirmed = 用户已经点了
+    /// 「仍然导出」。只导几个跨页时只看那几个跨页上的（页数是整本的事，不拦）。字出安全区这类「提醒」不弹，列在「导出 ▾」里。
     func export(confirmed: Bool = false) {
-        guard exportBlockedReason == nil else { return }
-        if !confirmed, let ask = Self.emptySlotWarning(Self.emptyPhotoSlots(project: project), project: project) {
-            exportConfirm = ask
+        guard exportBlockedReason == nil, case .success(let only) = exportPageSelection else { return }
+        if !confirmed, let ask = Self.exportConfirmation(preflight(texts: false), project: project, pages: only) {
+            exportConfirmTitle = ask.title
+            exportConfirm = ask.message
             return
         }
         exportConfirm = nil
-        startExport(project: project, options: exportOptions, name: exportName, reveal: true)
+        startExport(project: project, options: exportOptions, name: exportName, reveal: true, pages: only)
     }
 
     /// 输出目录落在这一场的拍摄文件夹里面、下次分析会扫到（审查 S11，ExportFolderGuard）：拦下的那句话；能导 = nil。
@@ -3790,8 +3770,11 @@ final class CollageStore: ObservableObject {
     /// 导出按钮和 AI 的 collage_export 共用。project 是要导出的那一版（AI 可以直接导存着的方案）；options、name 只管
     /// 这一次（AI 给的倍数、格式不改导出页上的设置）。reveal：做完在访达里选中（AI 调的不弹）。done 在主线程上、
     /// 导出结束时恰好回调一次（开始不了也回，failure 写原因）。返回开始不了的原因，nil = 开始了。
+    /// pages：只导这几页（从 0 起；「导出 ▾」的范围）。nil = 全部。部分导出只写那几张跨页图、不出印刷 PDF（缺页的 PDF
+    /// 不能拿去印，和 pdfSkippedNote 同一个道理），文件名里的序号还是原来的跨页号。
     @discardableResult
     func startExport(project snapshot: CollageProject, options: ExportOptions, name: String, reveal: Bool,
+                     pages only: [Int]? = nil,
                      done: (@MainActor (ExportOutcome) -> Void)? = nil) -> String? {
         func refuse(_ why: String, folder: URL? = nil) -> String {
             done?(ExportOutcome(folder: folder, failure: why))
@@ -3799,6 +3782,10 @@ final class CollageStore: ObservableObject {
         }
         if isExporting { return refuse("正在导出") }
         if snapshot.pages.isEmpty { return refuse("还没有版式") }
+        // 范围里越界的页丢掉、去重排好；选的正好是全部 = 全部。
+        let picked = only.map { Array(Set($0.filter { snapshot.pages.indices.contains($0) })).sorted() }
+        if let picked, picked.isEmpty { return refuse("没有要导的跨页（范围里的跨页号都不在这本里）") }
+        let subset = picked.flatMap { $0.count < snapshot.pages.count ? $0 : nil }
         guard let folder = outputFolder else {
             return refuse(onCardSession ? "照片在存储卡上：先选一个不在卡上的输出目录（或者先导入这张卡）" : "先选择输出目录")
         }
@@ -3823,14 +3810,18 @@ final class CollageStore: ObservableObject {
         }
         // 以前写 PDF 时退出 / 崩溃留下的隐藏半截 PDF（.<名字>.pdf.<随机>.tmp，超过 10 分钟没动过的）顺手清掉。
         CollageExport.sweepStalePDFTemps(in: folder)
-        let base = exportBase(in: folder, project: snapshot, options: options, name: name)
-        let plan = Self.exportPlan(base: base, project: snapshot, options: options)
+        let base = exportBase(in: folder, name: name, ext: options.format.ext) {
+            Self.exportPlan(base: $0, project: snapshot, options: options, only: subset).allFiles
+        }
+        let plan = Self.exportPlan(base: base, project: snapshot, options: options, only: subset)
+        // 这次真要渲的页（部分导出时只有选中的那几个）。
+        let order = plan.indices
         isExporting = true
         exportCancelled = false
         lastError = nil
         progressFraction = 0
-        progressText = "导出 0/\(snapshot.pages.count)…"
-        let wantPDF = snapshot.mode == .album && options.pdf
+        progressText = "导出 0/\(order.count)…"
+        let wantPDF = plan.pdf != nil
         let scale = Self.exportScale(canvas: snapshot.canvas, options: options)
         let faults = testExportFailPages
         let pdfFaults = testExportFailPDFEncodePages
@@ -3849,7 +3840,8 @@ final class CollageStore: ObservableObject {
             var missing: [String] = []
             var signatureLost = false
             var fillerBody = false
-            for (i, page) in snapshot.pages.enumerated() {
+            for (n, i) in order.enumerated() {
+                let page = snapshot.pages[i]
                 if self?.exportCancelled ?? true { break }
                 let result = await Task.detached(priority: .userInitiated) { () -> PageResult in
                     var opts = CollageRender.Options(scale: Double(scale))
@@ -3897,8 +3889,8 @@ final class CollageStore: ObservableObject {
                     outcome.failure = "导出中断（拼图页关了）"
                     return
                 }
-                self.progressFraction = Double(i + 1) / Double(snapshot.pages.count)
-                self.progressText = "导出 \(i + 1)/\(snapshot.pages.count)…"
+                self.progressFraction = Double(n + 1) / Double(order.count)
+                self.progressText = "导出 \(n + 1)/\(order.count)…"
             }
             // 缺页的 PDF 不能拿去印（页序整体前移、文件名照常，最容易直接发给印厂）：有跨页没写出来就不出 PDF。
             if wantPDF, plan.pdf != nil, !pdfMissing.isEmpty, !(self?.exportCancelled ?? true) {
@@ -3934,10 +3926,13 @@ final class CollageStore: ObservableObject {
                 self.progressText = ""
                 self.lastError = "导出失败: \(failure)"
             } else {
-                let files = plan.pages.flatMap { $0 } + (plan.pdf.map { [$0] } ?? [])
+                let files = plan.allFiles
                 let main = plan.pdf ?? files.first ?? base
                 let clean = snapshot.watermark.map { !$0.exportEnabled && $0.anyLayerOn } == true ? "（不带水印）" : ""
-                self.progressText = "导出完成\(clean) → \(main)" + (files.count > 1 ? "（共 \(files.count) 个文件）" : "")
+                // 部分导出：说清只导了哪几个、没出 PDF（选了「另出印刷 PDF」也不出）。
+                let partial = subset.map { "（只导了第 \(CollageExportRange.label($0)) 个跨页"
+                    + (snapshot.mode == .album && options.pdf ? "，部分导出不出 PDF）" : "）") } ?? ""
+                self.progressText = "导出完成\(clean)\(partial) → \(main)" + (files.count > 1 ? "（共 \(files.count) 个文件）" : "")
                 if reveal { AppRuntime.revealInFinder(files.map { folder.appendingPathComponent($0) }) }
             }
             if let warning = Self.exportWarning(missing: missing, lowRes: lowRes, signatureLost: signatureLost,
@@ -3949,6 +3944,98 @@ final class CollageStore: ObservableObject {
                     self.lastError = warning
                 }
                 outcome.warning = warning
+            }
+        }
+        return nil
+    }
+
+    /// 「导出 ▾ › 出看版 PDF」（相册 B · P5，CollageProofPDF）：每个跨页低清一页、页脚印跨页号和照片文件名，写进输出目录
+    /// 「名_看版.pdf」（名字同导出：手填的或时间；同名加 -2，不覆盖）。和导出共用「正在导出」：两样不同时跑，取消也是同一个。
+    /// folder：写到哪（nil = 输出目录，同导出那几道拦：卡上、拍摄文件夹里不写）；命令行 ops 的 proofpdf 给 --out。
+    /// done 在主线程上恰好回一次：成了是文件名，失败 / 取消是那句话。返回开始不了的原因。
+    @discardableResult
+    func startProofPDF(project snapshot: CollageProject, name: String, folder override: URL? = nil, reveal: Bool,
+                       done: (@MainActor (Result<String, CollageExportRange.Bad>) -> Void)? = nil) -> String? {
+        func refuse(_ why: String) -> String {
+            done?(.failure(CollageExportRange.Bad(message: why)))
+            return why
+        }
+        if isExporting { return refuse("正在导出") }
+        guard snapshot.mode == .album, !snapshot.pages.isEmpty else { return refuse("还没有跨页") }
+        guard let folder = override ?? outputFolder else {
+            return refuse(onCardSession ? "照片在存储卡上：先选一个不在卡上的输出目录（或者先导入这张卡）" : "先选择输出目录")
+        }
+        if override == nil {
+            if let why = cardOutputRefusal ?? exportFolderRefusal(folder) {
+                lastError = why
+                return refuse(why)
+            }
+        }
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        } catch {
+            lastError = "无法创建输出目录: \(error.localizedDescription)"
+            return refuse(lastError ?? "无法创建输出目录")
+        }
+        CollageExport.sweepStalePDFTemps(in: folder)
+        let base = exportBase(in: folder, name: name, ext: "pdf") { [CollageProofPDF.fileName(base: $0)] }
+        let file = CollageProofPDF.fileName(base: base)
+        let hints = self.hints
+        let count = snapshot.pages.count
+        isExporting = true
+        exportCancelled = false
+        lastError = nil
+        progressFraction = 0
+        progressText = "出看版 0/\(count)…"
+        Task { [weak self] in
+            var result: Result<String, CollageExportRange.Bad> = .failure(.init(message: "出看版中断（拼图页关了）"))
+            defer { done?(result) }
+            // 封面（C 道合进来以后接这里）：有封面就先渲它一页、放在最前面（heading「封面 · 标题」，names 是封面上的照片）。
+            let leading: [CollageProofPDF.Page] = []
+            var pages: [CollageProofPDF.Page] = leading
+            var failure: String?
+            for i in 0..<count {
+                if self?.exportCancelled ?? true { break }
+                let page = await Task.detached(priority: .userInitiated) {
+                    CollageProofPDF.render(i, project: snapshot, hints: hints)
+                }.value
+                guard let page else {
+                    failure = "第 \(i + 1) 个跨页渲染失败"
+                    break
+                }
+                pages.append(page)
+                guard let self else { return }
+                self.progressFraction = Double(i + 1) / Double(count)
+                self.progressText = "出看版 \(i + 1)/\(count)…"
+            }
+            let cancelled = self?.exportCancelled ?? true
+            if failure == nil, !cancelled {
+                self?.progressText = "写看版 PDF…"
+                let url = folder.appendingPathComponent(file)
+                let all = pages
+                failure = await Task.detached(priority: .userInitiated) { () -> String? in
+                    do {
+                        try CollageProofPDF.write(all, to: url, title: snapshot.title)
+                        return nil
+                    } catch {
+                        return error.localizedDescription
+                    }
+                }.value
+            }
+            guard let self else { return }
+            self.isExporting = false
+            self.progressFraction = nil
+            if self.exportCancelled {
+                self.progressText = "看版已取消（没写 PDF）"
+                result = .failure(.init(message: "取消了"))
+            } else if let failure {
+                self.progressText = ""
+                self.lastError = "看版 PDF 没出来: \(failure)"
+                result = .failure(.init(message: failure))
+            } else {
+                self.progressText = "看版 PDF → \(file)（\(pages.count) 页）"
+                result = .success(file)
+                if reveal { AppRuntime.revealInFinder([folder.appendingPathComponent(file)]) }
             }
         }
         return nil
@@ -4060,15 +4147,15 @@ final class CollageStore: ObservableObject {
     /// 一页落盘：单张按画布切缝写九宫格/轮播；相册每个跨页一张（带出血）。
     /// `wantPDF` 时返回这一页进 PDF 用的 JPEG（JPEG 格式就是写在盘上的那个文件，PNG / TIFF 另编一份数据）。
     /// 文件名：手动填的，或者导出那一刻的时间（精确到秒）。输出目录里已经有同名的就加 -2、-3……
-    /// （按这次要写的每一个文件查，不覆盖以前导出的）。
-    private func exportBase(in folder: URL, project: CollageProject, options: ExportOptions, name: String) -> String {
-        let typed = Self.cleanFileName(name, ext: options.format.ext)
+    /// （按这次要写的每一个文件查，不覆盖以前导出的）。`files`：这个名字开头这次要写哪些文件（导出 = exportPlan 的
+    /// allFiles，看版 PDF = 那一个）。
+    private func exportBase(in folder: URL, name: String, ext: String, files: (String) -> [String]) -> String {
+        let typed = Self.cleanFileName(name, ext: ext)
         let root = typed.isEmpty ? Self.stampFormatter.string(from: Date()) : typed
         var candidate = root
         var n = 2
         while n < 1000 {
-            let plan = Self.exportPlan(base: candidate, project: project, options: options)
-            let names = plan.pages.flatMap { $0 } + (plan.pdf.map { [$0] } ?? [])
+            let names = files(candidate)
             let taken = names.contains { FileManager.default.fileExists(atPath: folder.appendingPathComponent($0).path) }
             if !taken { break }
             candidate = "\(root)-\(n)"
@@ -4092,16 +4179,33 @@ final class CollageStore: ObservableObject {
 
     /// 这次导出每一页写哪几个文件（都直接在输出目录里，同一个名字开头），相册另有一份 PDF。
     /// 写文件和查重名用同一份清单。
+    /// 以后多一种产物（比如封面「名_封面.jpg / .pdf」）：在这里加一个字段，allFiles 里带上它（查重名、「共 N 个文件」、
+    /// 访达里选中都看 allFiles），startExport 写完 PDF 之后接着写它、写成了 append 进 outcome.files。
     struct ExportPlan: Sendable {
+        /// 每页（从 0 起）写哪几个文件；部分导出时没选的页是空的 —— 页号不重排，文件名里的序号还是原来的跨页号。
         var pages: [[String]]
+        /// 相册的印刷 PDF；单张、没勾「另出印刷 PDF」、部分导出 = nil。
         var pdf: String?
+
+        /// 这次要渲的页（从 0 起、按顺序）。
+        var indices: [Int] { pages.indices.filter { !pages[$0].isEmpty } }
+
+        /// 这次要写的全部文件名（按写的顺序：各页、PDF）。
+        var allFiles: [String] { pages.flatMap { $0 } + (pdf.map { [$0] } ?? []) }
     }
 
-    nonisolated static func exportPlan(base: String, project: CollageProject, options: ExportOptions) -> ExportPlan {
+    /// only：部分导出时只导这几页（从 0 起；nil = 全部）。部分导出不出 PDF（缺页的 PDF 不能拿去印）。
+    nonisolated static func exportPlan(base: String, project: CollageProject, options: ExportOptions,
+                                       only: [Int]? = nil) -> ExportPlan {
         let ext = options.format.ext
         let count = project.pages.count
+        let picked = only.map(Set.init)
         var pages: [[String]] = []
         for i in 0..<count {
+            if let picked, !picked.contains(i) {
+                pages.append([])
+                continue
+            }
             let two = String(format: "%02d", i + 1)
             if project.mode == .album {
                 pages.append(["\(base)_跨页_\(two).\(ext)"])
@@ -4119,19 +4223,25 @@ final class CollageStore: ObservableObject {
             }
             pages.append(files)
         }
-        let pdf: String? = project.mode == .album && options.pdf ? "\(base).pdf" : nil
+        let pdf: String? = project.mode == .album && options.pdf && only == nil ? "\(base).pdf" : nil
         return ExportPlan(pages: pages, pdf: pdf)
     }
 
     /// `files`：这一页的文件名（exportPlan 给的：第一个是整张，后面是九宫格 / 轮播切片）。
     /// `scale`：image 是按几倍渲的（exportScale）；出血跟着乘。dpi 照画布写：放大的只有社交尺寸，那里的 72 只是个标记。
-    nonisolated private static func writePage(_ image: CGImage, files: [String], project: CollageProject,
+    /// 印厂规格（canvas.printRules）选了 Adobe RGB：在这里把 sRGB 渲好的图转过去再写（跨页图、PDF 那份都是转过的，ImageIO
+    /// 嵌 Adobe RGB 的 ICC）；sRGB（默认、旧工程）converted 原样返回同一张图，输出逐字节不变。规格定了 JPEG 质量就用它。
+    nonisolated private static func writePage(_ rendered: CGImage, files: [String], project: CollageProject,
                                               options base: ExportOptions, scale: Int, dir: URL,
                                               wantPDF: Bool) throws -> CollageExport.PDFPage? {
         let canvas = project.canvas
         guard let mainName = files.first else { return nil }
-        // 加了网的照片：JPEG 质量低于 0.9 网点边上会起振铃（一圈脏点），压到 0.9 以上。
+        guard let image = CollageExport.converted(rendered, to: canvas.exportColorSpace) else {
+            throw CollageExport.ExportError.encode(mainName)
+        }
         var options = base
+        if let quality = canvas.printRules?.jpegQuality { options.quality = quality }
+        // 加了网的照片：JPEG 质量低于 0.9 网点边上会起振铃（一圈脏点），压到 0.9 以上。
         if project.style.halftone != nil { options.quality = max(0.9, options.quality) }
         if project.mode == .album {
             let url = dir.appendingPathComponent(mainName)
@@ -4170,6 +4280,72 @@ final class CollageStore: ObservableObject {
                                     quality: options.quality, dpi: canvas.dpi)
         }
         return nil
+    }
+
+    // MARK: - 印厂规格（相册 B · P1；模型在 CollagePrintSpec.swift）
+
+    /// 「文档 › 画布」菜单里列的：内置的在前，「存成规格…」的在后。
+    var printSpecs: [CollagePrintSpec] { CollagePrintSpec.builtin + userPrintSpecs }
+
+    /// 套一套规格（只对相册）：画布换成它的尺寸、出血、安全区、规则，装订换成它的 —— 合成一步撤销。换装订走 setBinding
+    /// （换成胶装时整版铺满两页的单张改成「左页日期 + 右页大图」，和点装订的分段一样）。版式按比例缩放，同换画布。
+    func applyPrintSpec(_ spec: CollagePrintSpec) {
+        guard isAlbum else { return }
+        var target = spec.canvas
+        asOneUndoStep {
+            target.binding = project.canvas.binding
+            setCanvas(target)
+            setBinding(spec.binding)
+        }
+    }
+
+    /// 改这本的规则（页数、首尾单页、中缝带、色彩、JPEG 质量），尺寸、装订不动。coalesce：步进器连着点合成一步撤销。
+    func setPrintRules(_ rules: CollagePrintRules, coalesce: Bool = false) {
+        var c = project.canvas
+        guard c.printRules != rules else { return }
+        c.printRules = rules
+        setCanvas(c, coalesce: coalesce)
+    }
+
+    /// 「文档 › 画布」的自定义尺寸（相册填单页的 cm）：跨页宽 = 2 × 单页宽；dpi、出血、安全区、装订、规则照旧，
+    /// 名字改成「自定义 单页 30×30cm」。尺寸超出 5–80cm 不改。
+    func setPageSizeCM(width: Double, height: Double) {
+        let range = CollagePrintSpec.pageCMRange
+        guard isAlbum, width.isFinite, height.isFinite, range.contains(width), range.contains(height) else { return }
+        var c = project.canvas
+        let dpi = max(1, c.dpi)
+        c.width = CollageCanvas.px(cm: width * 2, dpi: dpi)
+        c.height = CollageCanvas.px(cm: height, dpi: dpi)
+        func n(_ v: Double) -> String { v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v) }
+        c.name = "自定义 单页 \(n(width))×\(n(height))cm"
+        setCanvas(c)
+    }
+
+    /// 「存成规格…」：现在的画布（尺寸、出血、安全区、装订、规则）存成一条全局规格，画布名字跟着改成它（菜单上打勾）。
+    /// 和自己存过的同名 = 覆盖那一条；和内置的同名加「（我的）」。名字是空的、不是相册 = nil。立刻写 state.json（同模板）。
+    @discardableResult
+    func savePrintSpec(named raw: String) -> String? {
+        guard isAlbum, var name = CollagePrintSpec.cleanName(raw) else { return nil }
+        if CollagePrintSpec.builtin.contains(where: { $0.name == name }) { name += "（我的）" }
+        var canvas = project.canvas
+        canvas.name = name
+        canvas.printRules = canvas.printRules ?? .standard
+        let spec = CollagePrintSpec(name: name, canvas: canvas)
+        if let i = userPrintSpecs.firstIndex(where: { $0.name == name }) {
+            userPrintSpecs[i] = spec
+        } else {
+            userPrintSpecs.append(spec)
+        }
+        setCanvas(canvas)
+        flushStateSave(force: true)
+        return name
+    }
+
+    /// 删掉一条「存成规格…」存的（内置的删不了）。用着它的画布不变（只是菜单里没有了）。
+    func deletePrintSpec(named name: String) {
+        guard userPrintSpecs.contains(where: { $0.name == name }) else { return }
+        userPrintSpecs.removeAll { $0.name == name }
+        flushStateSave(force: true)
     }
 
     // MARK: - 提示
@@ -4299,6 +4475,8 @@ final class CollageStore: ObservableObject {
         var canvas = CollageCanvas()
         var export = ExportOptions()
         var layoutStyle: LayoutStyle = .grid
+        /// 「存成规格…」的印厂规格；没有 = nil（不写这个键，没存过规格的 state.json 和以前一样）。
+        var printSpecs: [CollagePrintSpec]?
 
         init() {}
 
@@ -4309,6 +4487,9 @@ final class CollageStore: ObservableObject {
             canvas = (try? c.decodeIfPresent(CollageCanvas.self, forKey: .canvas)) ?? nil ?? CollageCanvas()
             export = (try? c.decodeIfPresent(ExportOptions.self, forKey: .export)) ?? nil ?? ExportOptions()
             layoutStyle = (try? c.decodeIfPresent(LayoutStyle.self, forKey: .layoutStyle)) ?? nil ?? .grid
+            // 哪一条坏了只丢它自己。
+            printSpecs = ((try? c.decodeIfPresent([CollageLossy<CollagePrintSpec>].self, forKey: .printSpecs)) ?? nil)?
+                .compactMap(\.value)
         }
     }
 
@@ -4339,6 +4520,8 @@ final class CollageStore: ObservableObject {
         defaultCanvas = state.canvas
         exportOptions = state.export
         layoutStyle = state.layoutStyle
+        var seenSpecs = Set<String>()
+        userPrintSpecs = (state.printSpecs ?? []).filter { seenSpecs.insert($0.name).inserted }
         stateSaveTask?.cancel()
         stateDirty = false
     }
@@ -4368,6 +4551,7 @@ final class CollageStore: ObservableObject {
         state.canvas = defaultCanvas
         state.export = exportOptions
         state.layoutStyle = layoutStyle
+        state.printSpecs = userPrintSpecs.isEmpty ? nil : userPrintSpecs
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
