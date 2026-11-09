@@ -222,8 +222,14 @@ EOF
     ops ops_album_client album_client "mode:album,clientpicks:DSCF7231;DSCF7222;DSCF7228;DSCF7230,arrange,albumdump,expect:clientplaced,albumtheme:fineArt,arrange,albumdump,expect:clientplaced,cleartray,importclient,expect:trayisclient,mode:album,arrange,albumdump,expect:clientplaced"
     echo "== ops：相册目标跨页数（只看断言，不出图）"
     # 关掉相似去重（arrange:all）21 张全上：5 个跨页正好；3 个放不下就多出来、一张不丢；fine-art 带上 6 张客户选中的
-    # 不指定是 7 个跨页，往 4 个并（每跨页最多 3 张，并到 5 个），客户选中的照样都在。
-    ops ops_album_budget album_budget "mode:album,spreads:5,arrange:all,albumdump,expect:spreads=5,expect:alltray,expect:perspread=1-6,spreads:6@2-4,arrange:all,albumdump,expect:spreads=6,expect:perspread=2-4,expect:alltray,spreads:3,arrange:all,albumdump,expect:alltray,albumtheme:fineArt,clientpicks:DSCF7228;DSCF7230;DSCF7231;DSCF7222;DSCF7209;DSCF7211,spreads:off,arrange,albumdump,spreads:4,arrange,albumdump,expect:spreads<=5,expect:clientplaced"
+    # 不指定是 8 个跨页（扉页、对页 ×3、单张 7211、对页 7228+7231、横图 7230、章末单张 7232，一章），往 4 个并只并得动一对、
+    # 停在 7 个，客户选中的照样都在。7 是这本的下限，不是压页没起作用：fine-art 压页守版式规则、宁可多几个跨页（97d58be），
+    # 单张 7211 不管并进前面还是后面的对页，都连成 4 个多图跨页（R4），和前面那对里还有一张同姿势（R10）；对页 + 对页、
+    # 一主两辅 + 单张都超过每跨页 3 张；扉页不并。能并的两对（对页 7228+7231 + 横图 7230、7230 + 章末 7232）共用 7230，
+    # 只并得了一对（先并正文落单的：一主两辅）。
+    # 以前断言「≤ 5 个」是 664fe3d 加目标跨页数时写的，那时压页还不看 R4 / R10（v1.23.0 起一直红）。断言卡死 7：
+    # 多了 = 压页没起作用，少了 = 压页破了规则。不带客户选中的那本（6 张、4 个跨页）设 2 个照样并到 3 个。
+    ops ops_album_budget album_budget "mode:album,spreads:5,arrange:all,albumdump,expect:spreads=5,expect:alltray,expect:perspread=1-6,spreads:6@2-4,arrange:all,albumdump,expect:spreads=6,expect:perspread=2-4,expect:alltray,spreads:3,arrange:all,albumdump,expect:alltray,albumtheme:fineArt,clientpicks:DSCF7228;DSCF7230;DSCF7231;DSCF7222;DSCF7209;DSCF7211,spreads:off,arrange,albumdump,spreads:4,arrange,albumdump,expect:spreads=7,expect:clientplaced"
     echo "== ops：水印两层"
     ops ops_wm wm "wm:photos:$INPUTS/sig.png,wm:page,wmtext:page:拾光 · 门禁,wmpos:page:bottom_center,renderclean:wm_p.png@0.5,renderexport:wm_e.png,wmtile:photos:on,renderexport:wm_tile.png,wmtile:photos:off,mode:album,arrange,page:1,renderclean:wm_album_p.png@0.3,renderexport:wm_album.png"
     echo "== ops：自由文字图层花字投影（S0 修过：预览里的投影按缩放算）"
