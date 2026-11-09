@@ -3,7 +3,8 @@ import CoreGraphics
 
 /// --album-selftest 里相册跨页操作的几条（相册 A + B · S；合成数据，不要照片、不跑 Vision）：
 /// F1 / F2 单张跨页、F3 切页、F4 跨页里的先后、F5 同一张不上两个跨页、F6 编排前那句话、F7 去重上限、
-/// S1 照片挪跨页、S2 挪 / 删跨页、S3 镜像两次还原、S4 只换一边的版式、S5 锁住的跨页编排时原样留着、S6 换照片候选的排序。
+/// S1 照片挪跨页、S2 挪 / 删跨页、S3 镜像两次还原、S4 只换一边的版式、S5 锁住的跨页编排时原样留着、S6 换照片候选的排序；
+/// 挪照片 / 加照片 / 「拼图 (N)」当场落下、后台精排（审查 R1#2 / R1#4 / R1#10，checkSyncLanding）。
 /// 有照片的（真出图）在门禁 collage_gate.sh 的 ops_album_edit。
 enum CollageAlbumEditSelfTest {
 
@@ -32,6 +33,7 @@ enum CollageAlbumEditSelfTest {
             checkSides(check: check)
             checkLockedModel(check: check)
             checkStore(check: check)
+            checkSyncLanding(check: check)
         }
     }
 
@@ -577,7 +579,7 @@ enum CollageAlbumEditSelfTest {
         store.pageIndex = 0
         let d0 = store.undoDepth
         store.moveCells([[0]], toPage: 3)
-        spin(60) { !store.isSolving && store.busyText == nil }
+        spin(60) { !store.isSolving && !store.isRefining && store.busyText == nil }
         let moved = store.project.pages
         check(!moved[0].photoIDs.contains("E0") && moved[3].photoIDs.contains("E0") && Set(moved[3].photoIDs) == ["E0", "E6", "E7"]
               && moved[0].photoIDs == ["E1"] && store.undoDepth == d0 + 1,
@@ -594,7 +596,7 @@ enum CollageAlbumEditSelfTest {
         extra.photos.append(photo("EX", 100))
         store.loadForTesting(extra)
         store.addPhotos(["E2", "EX"], toPage: 4)
-        spin(60) { !store.isSolving && store.busyText == nil }
+        spin(60) { !store.isSolving && !store.isRefining && store.busyText == nil }
         check(Set(store.project.pages[4].photoIDs) == ["E8", "E9", "EX"] && store.project.pages[1].photoIDs.contains("E2")
               && (store.notice ?? "").contains("第 2 个跨页上了"),
               "S1 托盘照片放进第 4 个跨页；E2 在第 1 个跨页上：不放、说一句（F5）", store.notice ?? "")
@@ -634,5 +636,169 @@ enum CollageAlbumEditSelfTest {
         store.mirrorPage(1)
         check(store.project.pages[1].root.children.map { $0.cell?.photoID } == ["E2", "E3"] && store.undoDepth == 2,
               "S3 再镜像一次：回到原样（每次一步撤销）")
+    }
+
+    // MARK: - 当场落下、后台精排（审查 R1#2 / R1#4 / R1#10）
+
+    /// 挪照片、加照片、「拼图 (N)」以前整个放在后台排，和「换一批」共用一个作废号：被用户接着的一下作废就悄悄没了。
+    /// 现在当场落下、后台精排各有各的号（CollageStore.refinePages）。连着加两个跨页、加完马上编辑当前页、F3 之后马上往
+    /// 新跨页拖一张，是审查里复现「操作悄悄丢掉」的几种做法。
+    @MainActor
+    static func checkSyncLanding(check: Check) {
+        print("== 挪照片 / 加照片 / 「拼图 (N)」当场落下、后台精排（R1#2 / R1#4 / R1#10）")
+        let store = CollageStore(dataDir: appDataDir)
+        var photos = (0..<10).map { photo("E\($0)", Double($0) * 5, portrait: $0 % 3 != 0, score: 3 - Double($0) * 0.1) }
+        photos += ["EX", "EY", "EZ"].enumerated().map { photo($0.element, 60 + Double($0.offset), portrait: $0.offset != 1) }
+        photos += (0..<7).map { photo("F\($0)", 100 + Double($0) * 3, portrait: $0 % 2 == 0) }
+        func spread(_ a: String, _ b: String) -> CollagePage {
+            CollagePage(root: .split(.row, 0.5, .leaf(.photo(a)), .leaf(.photo(b))))
+        }
+        var project = CollageProject()
+        project.mode = .album
+        project.canvas = album30
+        project.photos = photos
+        project.pages = [spread("E0", "E1"), spread("E2", "E3"), spread("E4", "E5"), spread("E6", "E7"), spread("E8", "E9")]
+        func idle() { spin(60) { !store.isSolving && !store.isRefining } }
+        func on(_ id: String) -> [Int] { store.project.pages.indices.filter { store.project.pages[$0].photoIDs.contains(id) } }
+        func sig(_ i: Int) -> String { store.project.pages.indices.contains(i) ? store.project.pages[i].root.signature : "-" }
+
+        // 精排 = 以前的后台求解（同一个 Request、种子、次数）：新 store 第一次求解的种子是 8（solveSeed 从 7 起，加一）。
+        store.loadForTesting(project)
+        store.addPhotos(["EX"], toPage: 4)
+        let synced = store.project.pages[4].root
+        check(Set(synced.photoIDs) == ["E8", "E9", "EX"] && store.isRefining && store.undoDepth == 1 && !store.isSolving,
+              "加照片当场落下（一步撤销），后台还在精排，不占「正在排」", synced.signature)
+        let ctx = store.spreadContext
+        let want = CollageLayout.solve(CollageLayout.Request(photos: ["E8", "E9", "EX"].compactMap { ctx.photos[$0] },
+                                                             context: ctx, tries: 16000, keep: 1, seed: 8)).first?.root
+        idle()
+        check(want != nil && store.project.pages[4].root == want && want != synced && store.undoDepth == 1,
+              "精排落下来 = 以前后台求解的那一版（同一个种子、16000 次），不另记撤销", sig(4))
+        store.undo()
+        check(store.project.pages == project.pages, "撤销一次回到加之前")
+
+        // 两次连着加到不同跨页：都落下（以前第二次把第一次作废了）。
+        store.loadForTesting(project)
+        store.addPhotos(["EX"], toPage: 3)
+        store.addPhotos(["EY"], toPage: 1)
+        idle()
+        check(on("EX") == [3] && on("EY") == [1] && store.undoDepth == 2, "连着加到两个跨页：两次都落下、各一步撤销",
+              "EX \(on("EX")) EY \(on("EY"))")
+
+        // 加到别的跨页以后马上编辑当前页（对调两格）：加的照片照样在，对调也在。
+        store.loadForTesting(project)
+        store.pageIndex = 0
+        store.addPhotos(["EX"], toPage: 2)
+        store.swap([0], [1])
+        idle()
+        check(on("EX") == [2] && store.project.pages[0].photoIDs == ["E1", "E0"],
+              "加到别的跨页后马上在当前页对调两格：照片照样在第 2 个跨页上", "EX \(on("EX")) · " + sig(0))
+
+        // 精排落下之前就被清掉（自检换工程 = 换场次）：落不到新工程上，也不让人一直等。
+        store.loadForTesting(project)
+        store.addPhotos(["EX"], toPage: 4)
+        store.loadForTesting(project)
+        check(!store.isRefining, "换工程以后不再等上一份的精排")
+        spin(1) { false }
+        check(store.project.pages == project.pages, "上一份的精排回来也不落到新工程上")
+
+        // R1#4：精排落下之前镜像了那一页 → 镜像留着（那一页被用户动过，精排跳过）。
+        store.loadForTesting(project)
+        store.addPhotos(["EX"], toPage: 4)
+        let landed4 = store.project.pages[4]
+        store.mirrorPages(IndexSet(integer: 4))
+        idle()
+        check(store.project.pages[4].root == CollageAlbum.mirrored(landed4).root,
+              "精排落下之前镜像了那一页：镜像留着，精排不盖", sig(4))
+
+        // 挪照片 + 精排落下之前又做了一步（镜像第 1 个跨页）：精排落下；撤销一次只退镜像（精排的版留着），再撤销一次回到挪之前。
+        store.loadForTesting(project)
+        store.pageIndex = 0
+        store.moveCells([[0]], toPage: 3)
+        let src = store.project.pages[0].root
+        let dst = store.project.pages[3].root
+        check(on("E0") == [3] && src.children.first?.cell?.kind == .empty && store.isRefining,
+              "挪照片当场落下：源页只剩一张 = 放右页、左页留白（单张那一支，不用等精排）", src.signature + " · " + dst.signature)
+        store.mirrorPages(IndexSet(integer: 1))
+        idle()
+        let refined = store.project.pages[3].root
+        check(store.project.pages[0].root == src && Set(refined.photoIDs) == ["E0", "E6", "E7"] && store.undoDepth == 2,
+              "精排落下（目标页）、源页就是同步那一版", refined.signature)
+        store.undo()
+        check(store.project.pages[1] == project.pages[1] && store.project.pages[3].root == refined,
+              "撤销一次只退镜像：精排的版留着（补进了镜像之前那一步的快照）", sig(3))
+        store.undo()
+        check(store.project.pages == project.pages, "再撤销一次回到挪之前（操作之前那一步的快照没被精排碰）")
+        store.redo()
+        check(store.project.pages[3].root == refined, "重做：回来的是精排的版", sig(3))
+
+        // F3：「拼图 (7)」以后马上往第一个新跨页拖一张：两个新跨页都有照片，「放了 7 张」说的时候照片已经在上面。
+        store.loadForTesting(project)
+        store.pageIndex = 4
+        let seven = (0..<7).map { "F\($0)" }
+        store.layoutRequestedForTesting(seven)
+        let fresh = Array(store.project.pages.dropFirst(5))
+        check((store.notice ?? "").contains("放了 7 张") && fresh.count == 2 && fresh.allSatisfy { !$0.photoIDs.isEmpty }
+              && Set(fresh.flatMap(\.photoIDs)) == Set(seven) && store.pageIndex == 5 && store.undoDepth == 1,
+              "F3 提示出来的时候照片已经在新跨页上（一步撤销）",
+              (store.notice ?? "") + " · " + fresh.map { $0.photoIDs.joined(separator: "+") }.joined(separator: " | "))
+        store.addPhotos(["EZ"], toPage: 5)
+        idle()
+        let after = Array(store.project.pages.dropFirst(5))
+        check(after.count == 2 && after.allSatisfy { $0.photoIDs.count >= 3 } && Set(after.flatMap(\.photoIDs)) == Set(seven + ["EZ"])
+              && on("EZ") == [5] && store.undoDepth == 2,
+              "F3 之后马上往第一个新跨页拖一张：另一个新跨页照样排好（以前一直空着）",
+              after.map { $0.photoIDs.joined(separator: "+") }.joined(separator: " | "))
+        store.undo()
+        store.undo()
+        check(store.project.pages == project.pages, "撤销两次：新跨页都没了")
+
+        // R1#10 + side_layout 的结局：第一次后台算、落下来记一步；换一批在算的时候走缓存再轮一下，换一批作废、刚切的留着。
+        var three = project
+        three.pages[0] = CollagePage(root: .split(.row, 0.5, .leaf(.photo("E0")),
+                                                  .split(.column, 0.5, .leaf(.photo("E1")), .leaf(.photo("E2")))))
+        three.pages[1] = spread("E3", "E4")
+        store.loadForTesting(three)
+        var got: CollageStore.SideCycleOutcome?
+        let gen = store.cycleSideLayout(.right, step: 1) { got = $0 }
+        idle()
+        var landedPushes = -1
+        if case .landed(let pushes, _, _) = got { landedPushes = pushes }
+        let cycled = store.project.pages[0].root
+        check(gen != nil && landedPushes == store.undoPushes && store.undoDepth == 1 && cycled != three.pages[0].root,
+              "右页换一种切法：后台算完落下来，结局回调带落地那一刻的撤销计数", cycled.signature)
+        store.regenerate()
+        check(store.isSolving, "点了「换一批」，正在算")
+        got = nil
+        let cached = store.cycleSideLayout(.right, step: 1) { got = $0 }
+        let second = store.project.pages[0].root
+        var cachedLanded = false
+        if case .landed = got { cachedLanded = true }
+        check(cached == nil && cachedLanded && !store.isSolving && second != cycled,
+              "走缓存再轮一下：当场落下、还在算的「换一批」作废（R1#10）", second.signature)
+        idle()
+        check(store.project.pages[0].root == second, "「换一批」不会落下来盖掉刚切的", sig(0))
+
+        // side_layout 等的是自己这一票：后台在算时用户点了「换一批」= 代号变了、结局是作废；截止时撤回自己这一票。
+        store.loadForTesting(three)
+        got = nil
+        let mine = store.cycleSideLayout(.right, step: 1) { got = $0 }
+        store.regenerate()
+        check(mine != nil && store.currentSolveGeneration != mine, "算的时候用户点了「换一批」：求解代号变了（桥立刻回 superseded）")
+        idle()
+        spin(30) { got != nil }
+        var superseded = false
+        if case .superseded = got { superseded = true }
+        check(superseded, "结局回调：作废")
+        store.loadForTesting(three)
+        got = nil
+        let late = store.cycleSideLayout(.right, step: 1) { got = $0 }
+        let before = store.project
+        check(late.map { store.cancelSolve(generation: $0) } == true && !store.isSolving, "截止时撤回自己这一票")
+        // 撤回以后不算「正在排」了，idle 当场就过：等后台那一次真算完、回调来了再看
+        spin(30) { got != nil }
+        superseded = false
+        if case .superseded = got { superseded = true }
+        check(superseded && store.project == before && store.undoDepth == 0, "撤回的那一票不会过后又落下来")
     }
 }

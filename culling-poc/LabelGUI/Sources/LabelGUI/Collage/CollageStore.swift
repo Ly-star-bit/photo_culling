@@ -108,6 +108,11 @@ final class CollageStore: ObservableObject {
     private var thumbsBatch = -1
     /// 每次求解 +1：后发先至时只认最新的那一次。
     private var solveGeneration = 0
+    /// 同步落下、在后台精排的那几次（挪照片、加照片、「拼图 (N)」分跨页）：各有各的号，不走 solveGeneration（见 refinePages）。
+    private var pendingRefines: Set<Int> = []
+    private var refineSerial = 0
+    /// 换场次、自检整份换工程时 +1：还没回来的精排落不到新工程上，也不让命令行 / 自检一直等它。
+    private var refineEpoch = 0
     /// 每次换场次换一个：后台任务（导入、编排、求解）回来时场次变了就丢弃结果。
     private var sessionToken = UUID()
     /// 只有测试宿主（--live-host 的 test.delay_next）会设：下一次一键成套算完以后、落地之前多等几秒，
@@ -525,6 +530,8 @@ final class CollageStore: ObservableObject {
         sessionToken = UUID()
         solveGeneration += 1
         isSolving = false
+        pendingRefines.removeAll()
+        refineEpoch += 1
         busyText = nil
         hintTask?.cancel()
         maskTask?.cancel()
@@ -813,7 +820,9 @@ final class CollageStore: ObservableObject {
     /// 别的跨页上的照片还会出现两次），已经在相册里的不重复放。
     /// 相册（F3）：按拍摄先后切成几个新跨页，每跨页最多照默认编排（CollageAlbum.handoffCap：目标跨页数的每跨页最多、
     /// 没设是 5 张；婚礼相册 3 张，不套 fine-art 的版式规则）—— 以前没上过版的全塞进一个跨页，40 张就是 40 格。
-    /// 新跨页先插上（空的）、再在后台一起排好落下来（和开新跨页算同一步撤销）。
+    /// 新跨页当场按 PageSolve.quickTries 搜一小会儿排好、插上，再说「放了 N 张」（提示出来的时候照片已经在上面了）；
+    /// 之后在后台精排（refinePages），不另记撤销。以前是先插空跨页、整个放到后台排，被用户接着的一下（往第一个新跨页
+    /// 拖一张、打个字）作废就一直空着，提示却早说放好了（审查 R1#2）。
     /// `recordUndo = false`：跟着别的操作一起（交接），排版落下来不另记撤销。
     private func layoutRequested(_ ids: [String], recordUndo: Bool = true) {
         guard !ids.isEmpty else { return }
@@ -832,31 +841,28 @@ final class CollageStore: ObservableObject {
                                                 cap: CollageAlbum.handoffCap(theme: project.albumTheme,
                                                                              budget: project.albumBudget))
         guard !groups.isEmpty else { return }
-        if recordUndo { pushUndo() }
-        let at = min(project.pages.count, pageIndex + 1)
-        let blanks = groups.map { _ in CollagePage(root: CollageLayout.blankRoot(for: project.canvas)) }
-        project.pages.insert(contentsOf: blanks, at: at)
-        pageIndex = at
-        commitEdit()
-        let pageIDs = blanks.map(\.id)
+        // 以前后台排版发起时（beginSolve）顺带作废了还在算的那次（这一页的「换一批」）；现在不发起后台求解，照旧作废 ——
+        // 马上要翻到新跨页，它回来也落不下，按钮却一直灰着。
+        cancelSolveIfRunning()
+        // 种子同以前（solvePages）：这一次加一，第几个新跨页再加几。同步这一步和精排用同一个种子。
+        let ctx = spreadContext
+        solveSeed &+= 1
+        let seed = solveSeed
         let fallback = CollageLayout.blankRoot(for: project.canvas)
         let jobs = groups.map { PageSolve(photos: $0, fallback: fallback) }
-        // 新跨页和排版算同一步撤销：落下来不另记，排的时候又记了几步（改水印、样式）的，那几步的快照里也换上排好的页。
-        let pushes = undoPushes
-        solvePages(jobs, busy: "排新跨页…") { [weak self] roots in
-            guard let self else { return }
-            var landed: [CollagePage] = []
-            for (id, root) in zip(pageIDs, roots) {
-                guard let i = self.project.pages.firstIndex(where: { $0.id == id }) else { continue }
-                self.project.pages[i].root = root
-                landed.append(self.project.pages[i])
-            }
-            self.carryPagesIntoLaterSteps(landed, since: pushes)
-            self.clearAlternatives()
-            self.commitEdit()
-        }
+        let seeds = jobs.indices.map { seed &+ UInt64($0) }
+        let pages = zip(jobs, seeds).map { CollagePage(root: $0.landing(ctx, seed: $1)) }
+        if recordUndo { pushUndo() }
+        let at = min(project.pages.count, pageIndex + 1)
+        project.pages.insert(contentsOf: pages, at: at)
+        pageIndex = at
+        clearAlternatives()
+        commitEdit()
         let range = groups.count == 1 ? "第 \(at + 1) 个跨页" : "第 \(at + 1)–\(at + groups.count) 个跨页"
         setNotice("在\(range)放了 \(fresh.count) 张" + (fresh.count < ids.count ? "（其余已经在相册里）" : ""))
+        // 新跨页和排版算同一步撤销：精排落下来不另记（交接时这一步是外面那一组的）。
+        refinePages(zip(pages, zip(jobs, seeds)).map { RefineJob(pageID: $0.id, job: $1.0, seed: $1.1, landed: $0.root) },
+                    context: ctx)
     }
 
     /// `layout`：读完直接排一版（同批量页「拼图 (N)」）。
@@ -2255,6 +2261,14 @@ final class CollageStore: ObservableObject {
         selection = nil
         undoStack.removeAll()
         redoStack.removeAll()
+        // 上一份合成工程还没回来的精排：页 id 是同一批（自检反复 load 同一份），不能落到这一份上。
+        pendingRefines.removeAll()
+        refineEpoch += 1
+    }
+
+    /// 自检：托盘里这几张按「拼图 (N)」那一路（F3）排进新跨页（不经批量页、不读照片）。
+    func layoutRequestedForTesting(_ ids: [String]) {
+        layoutRequested(ids)
     }
 
     /// 命令行合成数据：直接改托盘里这张照片的人脸框（验多人合影的退让；不进撤销，重新载入就恢复）。
@@ -3292,6 +3306,7 @@ final class CollageStore: ObservableObject {
 
     /// 一页要重新求解的：照片、文字格；locks 里有锁定格就按它只排其余（solveKeepingLocks），没照片可排时用 fallback；
     /// 压字、单格色调从 carry 那棵树按照片带过来（挪过来的照片带着自己的字）。
+    /// S1 的两页 locks 就是同步落下的那棵树（照片插进去 / 拿掉以后收拢的）；F3 的新跨页没有（同步那一步搜一小会儿）。
     private struct PageSolve {
         var photos: [CollagePhotoRef]
         var texts: [CollageCell] = []
@@ -3299,53 +3314,133 @@ final class CollageStore: ObservableObject {
         var fallback: CollageNode
         var carry: CollageNode?
 
-        func run(_ ctx: CollageLayout.Context, seed: UInt64) -> CollageNode {
+        /// F3 新跨页同步那一步搜几次（主线程上）。命令行 landbench 在 photot 上量（2–4 张的跨页）：中位 1 ms 上下，最慢 8 ms
+        /// （撞上求解器放宽范围、再搜 2000 次的那一支）；精排还是 16000 次，后台 35–65 ms。插照片、拿照片不搜，0.01 ms。
+        static let quickTries = 300
+
+        /// 有锁定格：精排走 solveKeepingLocks 那一支。
+        var hasLocks: Bool { locks?.leaves.contains(where: \.locked) == true }
+
+        /// 求解器在这一页上是定的、不用搜：没照片（fallback），或者只有一张、没文字格、没锁（单张那一支，不碰随机数：
+        /// 竖图放右页、左页留白，够宽的横图中缝没脸才铺满）。同步那一步就是最后的结果，不用精排。
+        var isFixed: Bool { photos.isEmpty || (photos.count == 1 && texts.isEmpty && !hasLocks) }
+
+        func run(_ ctx: CollageLayout.Context, seed: UInt64, tries: Int = 16000) -> CollageNode {
             guard !photos.isEmpty else { return fallback }
             var root: CollageNode
-            if let locks, locks.leaves.contains(where: \.locked) {
+            if hasLocks, let locks {
                 root = CollageLayout.solveKeepingLocks(current: locks, context: ctx, tries: 6000, keep: 1, seed: seed)
                     .first?.root ?? locks
             } else {
                 root = CollageLayout.solve(CollageLayout.Request(photos: photos, textCells: texts, context: ctx,
-                                                                 tries: 16000, keep: 1, seed: seed)).first?.root
+                                                                 tries: tries, keep: 1, seed: seed)).first?.root
                     ?? CollageAlbum.fallbackRow(photos, context: ctx)
             }
             if let carry { root = CollageLayout.carryOverlays(from: carry, into: root) }
             return root
         }
+
+        /// 同步落下的那一版（主线程）：定的就是求解结果本身；有现成的树（S1：插进去 / 拿掉以后收拢的，同旧
+        /// moveSelectedPhoto）就用它，不搜索；都没有（F3）按 quickTries 搜 —— 和精排同一个种子，精排是同一串随机数接着往后搜。
+        func landing(_ ctx: CollageLayout.Context, seed: UInt64) -> CollageNode {
+            if isFixed { return run(ctx, seed: seed) }
+            if let locks { return locks }
+            return run(ctx, seed: seed, tries: Self.quickTries)
+        }
     }
 
-    /// 几页一起在后台排好、回来一起落（S1 挪照片的源页 + 目标页、F3 一次开的几个新跨页）：算的时候不先动任何一页
-    /// （被作废时照片不会两头都没了，旧 moveSelectedPhoto 躲的就是这个）；回来核对场次和求解代号（中间编辑过、
-    /// 撤销过、换了场次 = 作废，什么都不动），land 里自己记撤销、改页、commitEdit。
-    private func solvePages(_ jobs: [PageSolve], busy: String, land: @escaping ([CollageNode]) -> Void) {
-        let ctx = spreadContext
-        solveSeed &+= 1
-        let seed = solveSeed
-        let ticket = beginSolve()
-        busyText = busy
+    /// 同步落下之后要在后台精排的一页：哪一页（按 id）、怎么排、种子（同以前 solvePages：一次操作 solveSeed 加一，
+    /// 第几页再加几）、同步落下的是哪一版。
+    private struct RefineJob {
+        let pageID: UUID
+        let job: PageSolve
+        let seed: UInt64
+        let landed: CollageNode
+    }
+
+    /// 还有精排没回来（命令行 ops 的 idle、自检、实时桥等它；界面不看 —— 照片已经落下了，按钮不用灰）。
+    var isRefining: Bool { !pendingRefines.isEmpty }
+
+    /// 这一次的精排（moveCells / addPhotos 返回的号）还没回来。
+    func isRefining(_ ticket: Int) -> Bool { pendingRefines.contains(ticket) }
+
+    /// 同步落下以后在后台精排（S1 挪照片 / 加照片、F3「拼图 (N)」分跨页）。审查发现（R1#2）：以前这几样整个放在后台、
+    /// 和「换一批」共用 solveGeneration，回来时代号变了就悄悄丢掉 —— 往别的卡片上拖了一张、马上在这一页打个字或者
+    /// 拖一下缝、再往另一张卡片拖一张，前面那次挪的 / 加的就没了（F3 更糟：提示说「放了 N 张」，新跨页却一直空着）。
+    /// 现在照片当场落下（一步撤销），精排各有各的号：cancelSolveIfRunning / cancelPendingSolve / beginSolve 都不作废它；
+    /// 回来时逐页核对，那一页还在、版式和同步落下的完全一样（没被用户动过）才换成精排的，动过的跳过、留用户的
+    /// （精排落下之前镜像过的页也就不会被盖掉，R1#4）。不另记撤销：落地之后压的那几步快照里也换上（⌘Z 一步回到操作之前）。
+    /// 种子、次数、Context 和以前的后台求解一模一样，最后的版式也一样（门禁）。
+    /// 返回精排的号；这几页都是定的（没照片、只有一张，同步那一步就是结果）= nil。
+    @discardableResult
+    private func refinePages(_ jobs: [RefineJob], context ctx: CollageLayout.Context) -> Int? {
+        let work = jobs.filter { !$0.job.isFixed }
+        guard !work.isEmpty else { return nil }
+        refineSerial += 1
+        let ticket = refineSerial
+        pendingRefines.insert(ticket)
+        let session = sessionToken
+        let epoch = refineEpoch
+        // 同步落地压的那一步之后又压了几步，回来时只往那几步的快照里补。
+        let pushes = undoPushes
+        var locked: [UUID: Bool] = [:]
+        for page in project.pages where work.contains(where: { $0.pageID == page.id }) { locked[page.id] = page.locked }
         Task { [weak self] in
             let roots = await Task.detached(priority: .userInitiated) {
-                jobs.enumerated().map { $0.element.run(ctx, seed: seed &+ UInt64($0.offset)) }
+                work.map { $0.job.run(ctx, seed: $0.seed) }
             }.value
-            guard let self, self.sessionToken == ticket.session else { return }
-            if self.busyText == busy { self.busyText = nil }
-            guard ticket.generation == self.solveGeneration else { return }
-            self.isSolving = false
-            land(roots)
+            guard let self, self.refineEpoch == epoch else { return }
+            self.pendingRefines.remove(ticket)
+            guard self.sessionToken == session else { return }
+            self.landRefined(Array(zip(work, roots)), locked: locked, since: pushes)
         }
+        return ticket
     }
 
-    /// 不另记撤销的几页（F3 新开的跨页）落下来时：发起之后又记的几步撤销快照里也换上排好的这几页（同 carryIntoLaterSteps）。
-    private func carryPagesIntoLaterSteps(_ pages: [CollagePage], since pushes: Int) {
-        let later = min(undoPushes - pushes, undoStack.count)
-        guard later > 0, !pages.isEmpty else { return }
-        for i in undoStack.indices.suffix(later) {
-            for p in pages {
-                guard let j = undoStack[i].pages.firstIndex(where: { $0.id == p.id }) else { continue }
-                undoStack[i].pages[j] = p
-            }
+    /// 精排回来：逐页核对（见 refinePages），对得上的换成精排的。
+    private func landRefined(_ done: [(RefineJob, CollageNode)], locked: [UUID: Bool], since pushes: Int) {
+        let onCanvas = page?.id
+        let keep = selectedCell?.photoID
+        var landed: [RefinedPage] = []
+        for (r, root) in done where root != r.landed {
+            guard let i = project.pages.firstIndex(where: { $0.id == r.pageID }) else { continue }   // 删掉了
+            let now = project.pages[i]
+            // 用户动过这一页（打字、拖缝、换一批、镜像、撤销、改成散落版、锁住……）：留用户的。
+            guard now.root == r.landed, now.locked == locked[r.pageID], !now.freeform, now.contactSheet == nil else { continue }
+            // 画布上这一页正在裁切（双击进去、还没挪）：不在手底下换树。
+            if now.id == onCanvas, cropEditing { continue }
+            project.pages[i].root = root
+            landed.append(RefinedPage(id: r.pageID, from: r.landed, to: root))
         }
+        guard !landed.isEmpty else { return }
+        // 落地之后又压的几步（改别的跨页、改标题……）、撤销以后的重做：快照里这一页还是同步那一版的也换上精排的 ——
+        // 撤销那一步只退那一步，不连精排一起退。操作之前那一步的快照里是操作之前的版，对不上，不碰。
+        let later = min(max(0, undoPushes - pushes), undoStack.count)
+        for s in undoStack.indices.suffix(later) { undoStack[s] = Self.patched(undoStack[s], landed) }
+        for s in redoStack.indices { redoStack[s] = Self.patched(redoStack[s], landed) }
+        if let onCanvas, landed.contains(where: { $0.id == onCanvas }) {
+            // 画布上这一页换了树：选中跟着那张照片走（找不到就清掉）；备选作废（画布上已经不是其中的任何一版）。
+            let root = page?.root
+            selection = keep.flatMap { id in root?.leafPaths().first { root?.node(at: $0)?.cell?.photoID == id } }
+            clearAlternatives()
+        }
+        commitEdit()
+    }
+
+    private struct RefinedPage {
+        let id: UUID
+        let from: CollageNode
+        let to: CollageNode
+    }
+
+    /// 快照里这几页（按 id）还是同步落下的那一版的，换成精排的。
+    private nonisolated static func patched(_ snapshot: CollageProject, _ landed: [RefinedPage]) -> CollageProject {
+        var out = snapshot
+        for l in landed {
+            guard let j = out.pages.firstIndex(where: { $0.id == l.id }), out.pages[j].root == l.from else { continue }
+            out.pages[j].root = l.to
+        }
+        return out
     }
 
     /// 这几张照片从一棵树里拿掉（按照片 id 一张张找、一张张删：删一格上面那一刀会合并，按路径删第二格就错了）。
@@ -3402,13 +3497,15 @@ final class CollageStore: ObservableObject {
         return items
     }
 
-    /// S1：当前跨页上这几格的照片挪到第 target 个跨页（从 0 起；可以挪多张，一步撤销）。目标跨页按「加进现在的版式
-    /// （重排）」那套：保住锁定格、重新求解；原跨页拿掉那几格以后同样重新求解（锁定格保住）。目标是散落版照旧放相纸。
-    /// 两页在后台一起排好再一起落（solvePages）。挪过去的照片裁切、锁定、完整显示清掉，字跟着照片走。
-    func moveCells(_ paths: [[Int]], toPage target: Int) {
-        if refuseWhileEditingCover("挪到别的跨页") { return }
+    /// S1：当前跨页上这几格的照片挪到第 target 个跨页（从 0 起；可以挪多张，一步撤销）。当场落下（同旧 moveSelectedPhoto）：
+    /// 照片插进目标页（插在最大那格旁边、有空照片格先放空格），原跨页拿掉那几格、收拢（一页只剩一张 = 放右页、左页留白，
+    /// 求解器单张那一支）；之后两页在后台按「加进现在的版式（重排）」那套精排（保住锁定格，refinePages），不另记撤销。
+    /// 目标是散落版照旧放相纸。挪过去的照片裁切、锁定、完整显示清掉，字跟着照片走。返回精排的号（实时桥等它）。
+    @discardableResult
+    func moveCells(_ paths: [[Int]], toPage target: Int) -> Int? {
+        if refuseWhileEditingCover("挪到别的跨页") { return nil }
         guard let source = page, !source.freeform, source.contactSheet == nil,
-              project.pages.indices.contains(target), target != pageIndex else { return }
+              project.pages.indices.contains(target), target != pageIndex else { return nil }
         var seen = Set<String>()
         var moved: [CollageCell] = []
         for path in paths {
@@ -3419,11 +3516,11 @@ final class CollageStore: ObservableObject {
             cell.contain = false
             moved.append(cell)
         }
-        guard !moved.isEmpty else { return }
+        guard !moved.isEmpty else { return nil }
         let destination = project.pages[target]
         guard destination.contactSheet == nil else {
             setNotice("第 \(target + 1) 个\(pageUnit)是印样：照片按拍摄先后排，拖进那一页的片条里")
-            return
+            return nil
         }
         // 还在算的这一页「换一批」里带着这几张：算完回来它们就两个跨页上都有了。
         cancelSolveIfRunning()
@@ -3434,31 +3531,36 @@ final class CollageStore: ObservableObject {
         var jobs = [PageSolve(photos: restPhotos, texts: rest.leaves.filter { $0.kind == .text }, locks: rest,
                               fallback: rest, carry: source.root)]
         if !destination.freeform { jobs.append(joinJob(destination, adding: moved)) }
-        let sourceID = source.id
-        let targetID = destination.id
-        solvePages(jobs, busy: "挪到第 \(target + 1) 个\(pageUnit)…") { [weak self] roots in
-            guard let self, let si = self.project.pages.firstIndex(where: { $0.id == sourceID }),
-                  let ti = self.project.pages.firstIndex(where: { $0.id == targetID }) else { return }
-            self.pushUndo()
-            self.project.pages[si].root = roots[0]
-            if self.project.pages[ti].freeform {
-                self.project.pages[ti].items = self.photoItems(ids, into: self.project.pages[ti])
-            } else {
-                self.project.pages[ti].root = roots[1]
-            }
-            self.selection = nil
-            self.clearAlternatives()
-            self.commitEdit()
-            let what = ids.count == 1 ? "" : " \(ids.count) 张"
-            self.setNotice("已移到第 \(ti + 1) 个\(self.pageUnit)\(what)（两边都重排了；⌘Z 撤回）"
-                           + (self.project.pages[ti].freeform ? "：放在照片少的那半页，拖到想要的位置" : ""))
+        // 种子同以前（solvePages）：这一次加一，源页 +0、目标页 +1。
+        let ctx = spreadContext
+        solveSeed &+= 1
+        let seeds = jobs.indices.map { solveSeed &+ UInt64($0) }
+        let landed = zip(jobs, seeds).map { $0.landing(ctx, seed: $1) }
+        pushUndo()
+        project.pages[pageIndex].root = landed[0]
+        if destination.freeform {
+            project.pages[target].items = photoItems(ids, into: destination)
+        } else {
+            project.pages[target].root = landed[1]
         }
+        selection = nil
+        clearAlternatives()
+        commitEdit()
+        let what = ids.count == 1 ? "" : " \(ids.count) 张"
+        setNotice("已移到第 \(target + 1) 个\(pageUnit)\(what)（两边都重排了；⌘Z 撤回）"
+                  + (destination.freeform ? "：放在照片少的那半页，拖到想要的位置" : ""))
+        let pageIDs = [source.id, destination.id]
+        return refinePages(jobs.indices.map { RefineJob(pageID: pageIDs[$0], job: jobs[$0], seed: seeds[$0], landed: landed[$0]) },
+                           context: ctx)
     }
 
-    /// S1：托盘里的几张放进第 target 个跨页（从 0 起），同「加进现在的版式（重排）」：保住锁定格、重新求解；散落版放相纸。
-    /// 相册里已经排在别的跨页上的不放（F5，说一句），已经在这个跨页上的跳过。一步撤销，画面不跳过去。
-    func addPhotos(_ ids: [String], toPage target: Int) {
-        guard project.pages.indices.contains(target) else { return }
+    /// S1：托盘里的几张放进第 target 个跨页（从 0 起），同「加进现在的版式（重排）」：当场插进去（有空照片格先放空格、
+    /// 没有就插在最大那格旁边；全空的跨页放一张 = 求解器单张那一支），之后在后台精排（保住锁定格，refinePages）；
+    /// 散落版放相纸。相册里已经排在别的跨页上的不放（F5，说一句），已经在这个跨页上的跳过。一步撤销，画面不跳过去。
+    /// 返回精排的号（实时桥等它）。
+    @discardableResult
+    func addPhotos(_ ids: [String], toPage target: Int) -> Int? {
+        guard project.pages.indices.contains(target) else { return nil }
         let map = photoMap
         let destination = project.pages[target]
         let here = Set(destination.photoIDs)
@@ -3473,10 +3575,10 @@ final class CollageStore: ObservableObject {
         }
         let fresh = wanted.filter { id in !elsewhere.contains { $0.id == id } }
         if let first = elsewhere.first { setNotice(Self.otherSpreadNotice(first.id, page: first.page, count: elsewhere.count)) }
-        guard !fresh.isEmpty else { return }
+        guard !fresh.isEmpty else { return nil }
         guard destination.contactSheet == nil else {
             setNotice("第 \(target + 1) 个\(pageUnit)是印样：照片按拍摄先后排，拖进那一页的片条里")
-            return
+            return nil
         }
         cancelSolveIfRunning()
         let skipped = elsewhere.first.map { "；" + Self.otherSpreadNotice($0.id, page: $0.page, count: elsewhere.count) } ?? ""
@@ -3485,21 +3587,65 @@ final class CollageStore: ObservableObject {
             project.pages[target].items = photoItems(fresh, into: destination)
             commitEdit()
             setNotice("第 \(target + 1) 个\(pageUnit)加了 \(fresh.count) 张" + skipped)
-            return
+            return nil
         }
-        let targetID = destination.id
-        solvePages([joinJob(destination, adding: fresh.map { CollageCell.photo($0) })],
-                   busy: "排第 \(target + 1) 个\(pageUnit)…") { [weak self] roots in
-            guard let self, let ti = self.project.pages.firstIndex(where: { $0.id == targetID }) else { return }
-            self.pushUndo()
-            self.project.pages[ti].root = roots[0]
-            if ti == self.pageIndex {
-                self.selection = nil
-                self.clearAlternatives()
-            }
-            self.commitEdit()
-            self.setNotice("第 \(ti + 1) 个\(self.pageUnit)加了 \(fresh.count) 张，重排了" + skipped)
+        // 种子同以前（solvePages）：这一次加一。
+        let job = joinJob(destination, adding: fresh.map { CollageCell.photo($0) })
+        let ctx = spreadContext
+        solveSeed &+= 1
+        let seed = solveSeed
+        let landed = job.landing(ctx, seed: seed)
+        pushUndo()
+        project.pages[target].root = landed
+        // 加进的是画布上这一页（编辑封面时画布上是封面，不算）：选中、备选作废。
+        if destination.id == page?.id {
+            selection = nil
+            clearAlternatives()
         }
+        commitEdit()
+        setNotice("第 \(target + 1) 个\(pageUnit)加了 \(fresh.count) 张，重排了" + skipped)
+        return refinePages([RefineJob(pageID: destination.id, job: job, seed: seed, landed: landed)], context: ctx)
+    }
+
+    /// 命令行 landbench（审查 R1#2 的修法要量的）：同步落地那一步在每个网格跨页上的主线程耗时（毫秒）——
+    /// 拿掉第一张以后源页那一版（removing + 收拢 / 单张那一支）、托盘里一张没上版的插进来（inserting，没有空闲的就不量）、
+    /// 这一页的照片当成 F3 的新跨页按 quickTries 搜（种子 1…reps，中位数和最慢的：最慢的那次可能撞上求解器放宽范围
+    /// 再搜 2000 次的那一支）；另附精排（16000 次，后台跑）一次要多久作对照。
+    func landingBench(reps: Int = 7) -> [String] {
+        let ctx = spreadContext
+        let map = photoMap
+        let used = usedPhotoIDs
+        let spare = project.photos.first { !used.contains($0.id) }
+        let blank = CollageLayout.blankRoot(for: project.canvas)
+        func ms(_ body: () -> Void) -> Double {
+            let t0 = DispatchTime.now().uptimeNanoseconds
+            body()
+            return Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
+        }
+        func median(_ xs: [Double]) -> Double { xs.sorted()[xs.count / 2] }
+        let n = max(1, reps)
+        var lines: [String] = []
+        for (i, p) in project.pages.enumerated() where !p.freeform && p.contactSheet == nil {
+            let ids = p.root.photoIDs
+            guard let first = ids.first else { continue }
+            let remove = median((0..<n).map { _ in
+                ms {
+                    let rest = removing([first], from: p.root)
+                    let job = PageSolve(photos: rest.photoIDs.compactMap { map[$0] }, texts: rest.leaves.filter { $0.kind == .text },
+                                        locks: rest, fallback: rest, carry: p.root)
+                    _ = job.landing(ctx, seed: 1)
+                }
+            })
+            let insert = spare.map { s in median((0..<n).map { _ in ms { _ = joinJob(p, adding: [.photo(s.id)]).landing(ctx, seed: 1) } }) }
+            let fresh = PageSolve(photos: ids.compactMap { map[$0] }, fallback: blank)
+            let quick = (0..<n).map { k in ms { _ = fresh.landing(ctx, seed: UInt64(k + 1)) } }
+            let full = ms { _ = fresh.run(ctx, seed: 1) }
+            let insertText = insert.map { String(format: "%.2f", $0) } ?? "—"
+            lines.append(String(format: "  跨页 %d（%d 张）：拿掉一张 %.2f ms · 插一张 %@ ms · F3 同步（%d 次）中位 %.1f ms、最慢 %.1f ms"
+                                + " · 精排（16000 次，后台）%.0f ms",
+                                i, ids.count, remove, insertText, PageSolve.quickTries, median(quick), quick.max() ?? 0, full))
+        }
+        return lines
     }
 
     /// 跨页条、提示里的单位：相册 = 跨页，单张拼图的几页 = 页。
@@ -3591,18 +3737,49 @@ final class CollageStore: ObservableObject {
     }
     private var sideCycle: SideCycle?
 
+    /// 单边换版式的结局（实时桥的 side_layout 要分清，同 KitOutcome）。落下来那一刻的撤销计数、深度、提示在回调里当场取
+    /// （同 KitLanding：回调之后桥要等主线程下一拍才接着跑，这中间用户按的键会先落下来）。
+    enum SideCycleOutcome {
+        case landed(pushes: Int, depth: Int, notice: String?)
+        /// 这一边换不了（只有一张、有锁住的格子、找不到中缝、没有别的切法、不是相册的网格跨页）：状态栏上那一句。
+        case refused(String)
+        /// 算的时候被作废（用户做了新的操作、翻了页、换了场次）：没落地、没记撤销。
+        case superseded(SupersededBy)
+    }
+
+    /// 现在的求解代号（实时桥等 cycleSideLayout 返回的那一票：代号变了 = 被后来的操作作废了）。
+    var currentSolveGeneration: Int { solveGeneration }
+
+    /// 实时桥等单边换版式等到了截止时间：那一次还在算、还是最新的一次，就作废它 —— 不在回复「没有落地」之后又悄悄落下来。
+    /// 作废了回 true。
+    @discardableResult
+    func cancelSolve(generation: Int) -> Bool {
+        guard isSolving, solveGeneration == generation else { return false }
+        cancelPendingSolve()
+        return true
+    }
+
     /// S4：只换左页或右页的版式（照片不变、不跨中缝）：这一边的几种结构不同的切法里往前 / 往后轮 step 个。
     /// 第一次在后台算（CollageLayout.sideAlternatives），之后在缓存里轮。婚礼相册的跨页也能换（版式规则管哪几张同页，
     /// 不管这一页怎么切）。这一边只有一张：说「这一页只有一张」。
-    func cycleSideLayout(_ side: CollageSpreadSide, step: Int) {
-        if refuseWhileEditingCover("左页、右页分开换版式") { return }
+    /// 第一次算的是画布上这一页，照旧在「后做的说了算」的作废机制里（算的时候用户又编辑了这一页 = 不落）。
+    /// `outcome` 在每种结局里恰好调一次（缓存里轮、当场挡下的当场调）。返回后台那一次的求解代号（没进后台 = nil）。
+    @discardableResult
+    func cycleSideLayout(_ side: CollageSpreadSide, step: Int, outcome: ((SideCycleOutcome) -> Void)? = nil) -> Int? {
+        if refuseWhileEditingCover("左页、右页分开换版式") {
+            outcome?(.refused(notice ?? "正在编辑封面"))
+            return nil
+        }
         guard let page, let root, !page.freeform, page.contactSheet == nil, project.canvas.seams == .fold else {
-            setNotice("左页、右页分开换版式只对相册的网格跨页")
-            return
+            let text = "左页、右页分开换版式只对相册的网格跨页"
+            setNotice(text)
+            outcome?(.refused(text))
+            return nil
         }
         if let c = sideCycle, c.pageID == page.id, c.side == side, c.revision == projectRevision, c.roots.count > 1 {
             applySideCycle(c, step: step)
-            return
+            outcome?(.landed(pushes: undoPushes, depth: undoDepth, notice: notice))
+            return nil
         }
         cancelSolveIfRunning()
         solveSeed &+= 1
@@ -3613,25 +3790,38 @@ final class CollageStore: ObservableObject {
             let result = await Task.detached(priority: .userInitiated) {
                 CollageLayout.sideAlternatives(root, side: side, context: ctx, seed: seed)
             }.value
-            guard let self, ticket.generation == self.solveGeneration else { return }
+            var end = SideCycleOutcome.superseded(.sessionSwitched)
+            defer { outcome?(end) }
+            guard let self else { return }
+            if ticket.session == self.sessionToken { end = .superseded(.userEdit) }
+            guard ticket.generation == self.solveGeneration else { return }
             self.isSolving = false
             guard ticket.session == self.sessionToken, ticket.pageID == self.page?.id else { return }
+            let refused: String
             switch result {
-            case .notSpread: self.setNotice("这一页找不到中缝那一刀（不是左右两页的跨页）：先点「换一批」")
-            case .single: self.setNotice("这一页只有一张")
-            case .locked: self.setNotice("\(side.label)有锁住的格子：先解锁再换这一页的版式")
+            case .notSpread: refused = "这一页找不到中缝那一刀（不是左右两页的跨页）：先点「换一批」"
+            case .single: refused = "这一页只有一张"
+            case .locked: refused = "\(side.label)有锁住的格子：先解锁再换这一页的版式"
             case .options(let roots):
                 guard roots.count > 1 else {
-                    self.setNotice("\(side.label)没有别的切法了")
-                    return
+                    refused = "\(side.label)没有别的切法了"
+                    break
                 }
                 self.applySideCycle(SideCycle(pageID: page.id, side: side, revision: self.projectRevision, roots: roots),
                                     step: step)
+                end = .landed(pushes: self.undoPushes, depth: self.undoDepth, notice: self.notice)
+                return
             }
+            self.setNotice(refused)
+            end = .refused(refused)
         }
+        return ticket.generation
     }
 
     private func applySideCycle(_ cycle: SideCycle, step: Int) {
+        // 走缓存的这一下（Q / A / W / S 第二次起）也是对这一页的编辑：还在算的「换一批」作废，不然它落下来把刚切的盖掉
+        // （审查 R1#10）。后台算完走到这里时 isSolving 已经是 false，这一句什么都不做。
+        cancelSolveIfRunning()
         var c = cycle
         let n = c.roots.count
         c.index = ((c.index + step) % n + n) % n

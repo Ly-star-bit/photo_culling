@@ -215,7 +215,8 @@ enum LiveHandlers {
         // 最上面那一步是不是 AI 做的、现在还能不能用 app_undo 撤（和 app_undo 同一个判断）
         undo["top_is_ai"] = model.aiLog.canUndo(.collage, pushes: collage.undoPushes, depth: collage.undoDepth)
         out["undo"] = undo
-        out["busy"] = ["solving": collage.isSolving, "hints_pending": collage.hintsPending]
+        // refining：挪照片、加照片、「拼图 (N)」已经落下，后台还在精排（落下来版式会再变一次，不另压撤销）
+        out["busy"] = ["solving": collage.isSolving, "refining": collage.isRefining, "hints_pending": collage.hintsPending]
         out["tab"] = LiveServer.tabName(model.tab)
         let (_, ws) = live.windowState()
         out["window_state"] = ws
