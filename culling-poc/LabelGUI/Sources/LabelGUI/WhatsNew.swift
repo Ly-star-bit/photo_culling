@@ -30,11 +30,11 @@ enum WhatsNew {
         let entries: [Entry]
     }
 
-    /// 这一版新增的条目。占位：发版前换成 v1.27.0 的（两三条就好，一条一句话，能「带我去」的都带上）。
+    /// 这一版新增的条目（两三条到五条，一条一句话，能「带我去」的都带上）。发下一版时整张换掉、version 跟着改。
     static let notes = Notes(version: "1.27.0", entries: [
         Entry(id: "inspector",
               title: "右栏跟着选中走",
-              detail: "点画布上的照片、文字、贴纸，右栏自动切到「格式」；点空白处是这一页的设置。",
+              detail: "点画布上的照片、文字、贴纸，右栏自动切到「格式」、只显示它的设置；点空白处是这一页的设置。",
               destination: .collage(.format)),
         Entry(id: "left-pane",
               title: "模板、素材搬到左栏",
@@ -42,8 +42,16 @@ enum WhatsNew {
               destination: .collage(.kits)),
         Entry(id: "darkroom",
               title: "暗房进了顶栏",
-              detail: "顶栏「暗房」一点就进；只想调一格，选中它在「格式 › 色调」里点「在暗房里挑…」。",
+              detail: "顶栏「暗房」一点就进；暗房里 ⌘Z 能撤销，⌘← / ⌘→ 换跨页。只调一格：选中它，在「格式 › 色调」里点「在暗房里挑…」。",
               destination: .collage(.darkroom)),
+        Entry(id: "client-menu",
+              title: "批量页的「客户 ▾」",
+              detail: "确认表、导入客户选择、复制原片都在这里；「废片移到废纸篓」挪到了文件夹菜单。",
+              destination: .batch),
+        Entry(id: "renames",
+              title: "几样东西改了名",
+              detail: "「胶片」只指暗房里的 15 款光谱胶片：原来的色调「胶片」叫「奶油」，「电影」叫「青橙」，「报纸」叫「新闻纸」。",
+              destination: .collage(.looks)),
     ])
 
     /// 记「上次见过哪一版」的键（app 自己的 UserDefaults 域；自检写进参数域，不碰这里）。
