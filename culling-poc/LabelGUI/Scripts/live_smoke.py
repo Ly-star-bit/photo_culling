@@ -2007,13 +2007,19 @@ __attribute__((constructor)) static void init(void) {
               and ov.get("pending_writes") == 0 and not any(k in ov for k in ("recently_modified_sec", "dedupe")),
               "概览：settings.source=app、analysis.running、pending_writes；没有 §10.1 删掉的字段")
         xmp = ov.get("xmp") or {}
-        xmp_ok = (isinstance(xmp.get("stale_count"), int) and isinstance(xmp.get("written"), bool)
-                  and isinstance(xmp.get("shared_sidecar_count"), int)
-                  and ("xmp_stale" in warn_codes(ov)) == (xmp.get("stale_count", 0) - xmp.get("shared_sidecar_count", 0) > 0)
-                  and ("xmp_shared_sidecar" in warn_codes(ov)) == (xmp.get("shared_sidecar_count", 0) > 0)
-                  and (not CI or xmp == {"stale_count": 0, "written": False, "shared_sidecar_count": 0}))
+        if isinstance(xmp.get("unknown"), str):
+            # 上次写 XMP 的记录读不进来（本地拿真数据跑才可能碰到）：三个数都是 null、带 xmp_state_unknown、不带 xmp_stale
+            xmp_ok = (not CI and xmp.get("written") is None and xmp.get("stale_count") is None
+                      and xmp.get("shared_sidecar_count") is None
+                      and "xmp_state_unknown" in warn_codes(ov) and "xmp_stale" not in warn_codes(ov))
+        else:
+            xmp_ok = (isinstance(xmp.get("stale_count"), int) and isinstance(xmp.get("written"), bool)
+                      and isinstance(xmp.get("shared_sidecar_count"), int) and "xmp_state_unknown" not in warn_codes(ov)
+                      and ("xmp_stale" in warn_codes(ov)) == (xmp.get("stale_count", 0) - xmp.get("shared_sidecar_count", 0) > 0)
+                      and ("xmp_shared_sidecar" in warn_codes(ov)) == (xmp.get("shared_sidecar_count", 0) > 0)
+                      and (not CI or xmp == {"stale_count": 0, "written": False, "shared_sidecar_count": 0}))
         check(xmp_ok, f"概览的 xmp：stale_count、written、shared_sidecar_count，写得了的过期了才带 xmp_stale、"
-              f"有同名冲突才带 xmp_shared_sidecar（fixture 没写过 XMP：0、false、0）：{xmp}")
+              f"有同名冲突才带 xmp_shared_sidecar（fixture 没写过 XMP：0、false、0；记录读不进来：null 加 unknown）：{xmp}")
         groups, cur, pages = [], None, 0
         while pages < 20:
             a = {"session": KEY, "kind": "scene", "limit": 2}

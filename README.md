@@ -307,7 +307,7 @@ app 没开时也能用的只有前 3 个；其余 21 个要 app 开着、而且 
 | 1 | `app_status` 状态自检 | 版本、数据目录、app 开没开、能不能实时操作（`live.state`）、app 当前打开的场次（`live.open_session`）和页、各种上限。AI 第一个调它 | 能用 |
 | 2 | `cull_list_sessions` 列出已分析的场次 | 侧栏「最近场次」里的场次（最多 15 场）：照片文件夹、张数、在不在线、是不是在受保护位置、是不是 app 当前打开的那一场 | 能用 |
 | 3 | `collage_list_templates` 拼图模板与成套 | 内置模板（分类、照片格数、要几张横图竖图）、一键成套、样式、色调、画布能填的值；`include` 里写 `layout_grammar` 拿设计版式的语法 | 能用 |
-| 4 | `cull_session_overview` 场次概览 | 精选 / 可用 / 废片各多少张、废片理由、阈值、章节、场和近似重复、还没处理的场、多机身对时；XMP 待更新几张（`xmp.stale_count`：上次写 XMP 之后判决、星级或客户选中变了的，过期了带 `xmp_stale` 警告；其中同名不同格式共用一个 .xmp、app 写不了的单独报 `shared_sidecar_count`；`xmp.written` 为 false 是这一场还没写过；`xmp.last_written` 是上次写的时间，老版本写的没记就没有）、人工改判里 AI 改的有几张（`ai_override_count`）、设置（去重只管这一场 `dedupe_scope=session`，每章节最少保留所有场次通用 `min_keepers_scope=all_sessions`） | `app_not_running` |
+| 4 | `cull_session_overview` 场次概览 | 精选 / 可用 / 废片各多少张、废片理由、阈值、章节、场和近似重复、还没处理的场、多机身对时；XMP 待更新几张（`xmp.stale_count`：上次写 XMP 之后判决、星级或客户选中变了的，过期了带 `xmp_stale` 警告；其中同名不同格式共用一个 .xmp、app 写不了的单独报 `shared_sidecar_count`；`xmp.written` 为 false 是这一场还没写过；`xmp.last_written` 是上次写的时间，老版本写的没记就没有；上次写 XMP 的记录 xmp_state.json 读不进来时 `written`、`stale_count`、`shared_sidecar_count` 都是 null、`xmp.unknown` 写原因，带 `xmp_state_unknown` 警告：说不清过期了几张，不是没写过）、人工改判里 AI 改的有几张（`ai_override_count`）、设置（去重只管这一场 `dedupe_scope=session`，每章节最少保留所有场次通用 `min_keepers_scope=all_sessions`） | `app_not_running` |
 | 5 | `cull_list_photos` 列照片 | 按条件列照片，每张一行（判决、理由、时间、场、锐度、人脸和闭眼、是否人工改判……；`changed_by` 是 `ai` = AI 改的、`user` = 你亲手改的），分页 | `app_not_running` |
 | 6 | `cull_get_photos` 照片详情 | 1–20 张的完整分析：EXIF、每张脸的位置和睁闭眼、复审结果、人工改判（AI 改的带 `ai_override`：哪一次、什么时候、改之前是什么）和客户选中 | `app_not_running` |
 | 7 | `cull_list_groups` 分组 | 章节、场（一串连拍，带名次和推荐的那张）、近似重复组的成员 | `app_not_running` |

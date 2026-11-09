@@ -784,6 +784,10 @@ by_name = {t["name"]: t for t in TL_LIVE}
 ro = {n for n, t in by_name.items() if t["annotations"]["readOnlyHint"]}
 check(ro == set(TOOLS_ALL[:9]), f"只读的是第 1–9 个：{sorted(ro)}")
 check([n for n, t in by_name.items() if t["annotations"]["destructiveHint"]] == ["app_open_session"], "只有 app_open_session 是 destructive")
+# 概览的 xmp：上次写 XMP 的记录读不进来时照实说不知道（null + unknown + xmp_state_unknown），说明里写着，AI 才不会当成没写过
+ov_desc = by_name["cull_session_overview"]["description"]
+check("xmp.unknown" in ov_desc and "xmp_state_unknown" in ov_desc and "null" in ov_desc,
+      "cull_session_overview 的说明写了 XMP 记录读不进来时是 null、xmp.unknown、xmp_state_unknown")
 
 # 错误码（§1.2）
 s.send_raw(b'{"jsonrpc":"2.0","id":10,"method":\n')
