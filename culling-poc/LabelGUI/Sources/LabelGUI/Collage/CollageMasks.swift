@@ -260,6 +260,7 @@ enum CollageMasks {
         let t0 = Date()
         guard let preview = CollageImages.preview(photo, need: ImageLoader.previewMaxPixel) else { return nil }
         let request = VNGenerateForegroundInstanceMaskRequest()
+        CollageVision.pinForGate(request)
         let handler = VNImageRequestHandler(cgImage: preview, options: [:])
         guard (try? handler.perform([request])) != nil, let obs = request.results?.first,
               !obs.allInstances.isEmpty else { return nil }
@@ -396,6 +397,7 @@ enum CollageMasks {
         // 1. 人体框（全身模式）。
         let bodies = VNDetectHumanRectanglesRequest()
         bodies.upperBodyOnly = false
+        CollageVision.pinForGate(bodies)
         try? handler.perform([bodies])
         for o in bodies.results ?? [] {
             let r = o.boundingBox
@@ -414,6 +416,7 @@ enum CollageMasks {
                 let crop = CGRect(x: cx, y: cy, width: cw, height: ch)
                 guard crop.width > 16, crop.height > 16, let tile = preview.cropping(to: crop) else { continue }
                 let pose = VNDetectHumanBodyPoseRequest()
+                CollageVision.pinForGate(pose)
                 try? VNImageRequestHandler(cgImage: tile, options: [:]).perform([pose])
                 for o in pose.results ?? [] {
                     guard let points = try? o.recognizedPoints(.all) else { continue }

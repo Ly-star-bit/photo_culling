@@ -2,6 +2,7 @@ import Foundation
 import CoreGraphics
 import ImageIO
 import Vision
+import CoreML
 
 /// 批量页 → 拼图：照片引用（文档自带的元数据）。
 enum CollageBridge {
@@ -130,6 +131,21 @@ enum CollageVision {
     private static var hintCache: [String: CollageCrop.Hints] = [:]
     private static var printCache: [String: VNFeaturePrintObservation] = [:]
 
+    /// 门禁（LABELGUI_STABLE_SEEDS=1，Scripts/collage_gate.sh 设）里拼图用的 Vision 一律在 CPU 上算。神经网络引擎被别的
+    /// 进程占着时，Vision 会换到 GPU / CPU 上算，特征、检测框差一点点，挑片顺序就变了：2026-11-08 机器忙时同一个程序和
+    /// 空闲时出的基线差 142 张（自动挑片的 album、grid9、scatter、sheet、split）。钉在 CPU 上，忙不忙都算出同一个数。
+    /// 平常不设：照旧让 Vision 自己挑（神经网络引擎快得多）。
+    static func pinForGate(_ request: VNRequest) {
+        guard AppRuntime.stableSeeds, let stages = try? request.supportedComputeStageDevices else { return }
+        for (stage, devices) in stages {
+            let cpu = devices.first { device in
+                if case .cpu = device { return true }
+                return false
+            }
+            if let cpu { request.setComputeDevice(cpu, for: stage) }
+        }
+    }
+
     /// 缓存按文件（路径 + 尺寸）记，不按照片 id：批量页的 id 就是文件名，两个场次都有
     /// DSC_0001 时，按 id 记会把上一场的路人框、相似度套到这一场的同名照片上。
     static func cacheKey(_ photo: CollagePhotoRef) -> String {
@@ -158,6 +174,7 @@ enum CollageVision {
         let upperBody = VNDetectHumanRectanglesRequest()
         upperBody.upperBodyOnly = true
         let faces = VNDetectFaceRectanglesRequest()
+        [fullBody, upperBody, faces].forEach(pinForGate)
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         try? handler.perform([fullBody, upperBody, faces])
         let humanObservations = (fullBody.results ?? []) + (upperBody.results ?? [])
@@ -326,6 +343,7 @@ enum CollageVision {
         lock.unlock()
         guard let image = CollageImages.preview(photo, need: 512) else { return nil }
         let request = VNGenerateImageFeaturePrintRequest()
+        pinForGate(request)
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         guard (try? handler.perform([request])) != nil,
               let obs = request.results?.first else { return nil }
