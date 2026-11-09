@@ -46,7 +46,7 @@ enum WhatsNew {
               destination: .collage(.darkroom)),
     ])
 
-    /// 记「上次见过哪一版」的键（app 自己的 UserDefaults 域；自检用独立的 suite，不碰这里）。
+    /// 记「上次见过哪一版」的键（app 自己的 UserDefaults 域；自检写进参数域，不碰这里）。
     static let defaultsKey = "whatsNew.lastSeenVersion"
 
     /// 这个程序的版本号（打包时写进 Info.plist；裸二进制是 dev）。
@@ -91,14 +91,25 @@ enum WhatsNew {
 
     // MARK: 记账
 
-    /// 上次见过的版本号：读写一个 UserDefaults（app 里是 .standard，自检给独立的 suite）。
+    /// 上次见过的版本号。读一律走 UserDefaults.standard；写：app 里写它自己的设置域（.standard），自检写参数域
+    /// （.argumentDomain：只在这个进程的内存里、读的时候排在最前，和 AppRuntime.pinBatchSettings 同一个办法）——
+    /// 以前试过独立的 suite，removePersistentDomain 以后 cfprefsd 过一会儿还会在 ~/Library/Preferences 留一个空 plist。
     struct Ledger {
-        let defaults: UserDefaults
+        let write: (String) -> Void
 
-        var lastSeen: String? { defaults.string(forKey: WhatsNew.defaultsKey) }
+        var lastSeen: String? { UserDefaults.standard.string(forKey: WhatsNew.defaultsKey) }
 
-        func record(_ version: String) {
-            defaults.set(version, forKey: WhatsNew.defaultsKey)
+        func record(_ version: String) { write(version) }
+
+        static var standard: Ledger { Ledger { UserDefaults.standard.set($0, forKey: WhatsNew.defaultsKey) } }
+
+        static var argumentDomain: Ledger {
+            Ledger { version in
+                let defaults = UserDefaults.standard
+                var domain = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+                domain[WhatsNew.defaultsKey] = version
+                defaults.setVolatileDomain(domain, forName: UserDefaults.argumentDomain)
+            }
         }
     }
 
@@ -116,7 +127,7 @@ enum WhatsNew {
         let headless = AppRuntime.headless || ProcessInfo.processInfo.environment["LABELGUI_NO_GUI"] == "1"
         let current = appVersion
         guard !headless, parse(current) != nil else { return }
-        let ledger = Ledger(defaults: .standard)
+        let ledger = Ledger.standard
         let show = shouldShow(current: current, lastSeen: ledger.lastSeen, notesVersion: notes.version,
                               hasHistory: !model.batch.recentSessions.isEmpty, headless: headless)
         guard show else {
@@ -126,7 +137,7 @@ enum WhatsNew {
         // 等窗口站稳了再弹（第一次出现的那一帧就弹 sheet 有时弹不出来）。
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             guard model.cardCenter.offer == nil else { return }
-            Ledger(defaults: .standard).record(current)
+            Ledger.standard.record(current)
             model.whatsNewShown = true
         }
     }
@@ -198,8 +209,7 @@ struct WhatsNewSheet: View {
 
 // MARK: - 自检（--ux-selftest）
 
-/// 版本号的比较、弹不弹的判断表、记账只写给它的那个 UserDefaults（独立的 suite，跑完删掉；app 自己的域一个键都不动）、
-/// 数据表本身。返回没过的条数。
+/// 版本号的比较、弹不弹的判断表、记账只写参数域（内存里；app 自己的设置域一个键都不动）、数据表本身。返回没过的条数。
 @MainActor
 enum WhatsNewSelfTest {
     static func run() -> Int {
@@ -238,30 +248,29 @@ enum WhatsNewSelfTest {
         }
         check(AppRuntime.headless, "--ux-selftest 跑在无头模式（checkOnLaunch 走不到弹）")
 
-        // 记账：独立的 suite，跑完删掉；app 自己的域那个键跑前跑后一样
-        let real = UserDefaults.standard.object(forKey: WhatsNew.defaultsKey) as? String
-        let suite = "local.culling.labelgui.selftest.whatsnew.\(UUID().uuidString)"
-        if let defaults = UserDefaults(suiteName: suite) {
-            let ledger = WhatsNew.Ledger(defaults: defaults)
-            check(ledger.lastSeen == nil, "新的 suite 里没记过")
-            ledger.record("1.27.0")
-            check(ledger.lastSeen == "1.27.0"
-                  && !WhatsNew.shouldShow(current: "1.27.0", lastSeen: ledger.lastSeen, notesVersion: n,
-                                          hasHistory: true, headless: false),
-                  "记下 1.27.0 以后同一版不再弹")
-            defaults.removePersistentDomain(forName: suite)
-            check(UserDefaults(suiteName: suite)?.string(forKey: WhatsNew.defaultsKey) == nil, "suite 删干净了")
-            // removePersistentDomain 以后 cfprefsd 还会留一个空的 <suite>.plist：同步以后连文件一起删（跑一次留一个空文件不好看）。
-            CFPreferencesAppSynchronize(suite as CFString)
-            let plist = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Preferences/\(suite).plist")
-            try? FileManager.default.removeItem(at: plist)
-            check(!FileManager.default.fileExists(atPath: plist.path), "suite 的空 plist 也删了")
-        } else {
-            check(false, "建不出独立的 suite")
+        // 记账：写进参数域（内存里），读照样走 UserDefaults.standard；app 自己的设置域那个键跑前跑后一样、一次没写
+        let prefsDomain: String = Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName
+        func persisted() -> String? {
+            UserDefaults.standard.persistentDomain(forName: prefsDomain)?[WhatsNew.defaultsKey] as? String
         }
-        check((UserDefaults.standard.object(forKey: WhatsNew.defaultsKey) as? String) == real,
-              "app 自己的设置一个键没动", "\(String(describing: real))")
+        let before = persisted()
+        let ledger = WhatsNew.Ledger.argumentDomain
+        ledger.record("1.26.3")
+        check(ledger.lastSeen == "1.26.3"
+              && WhatsNew.shouldShow(current: "1.27.0", lastSeen: ledger.lastSeen, notesVersion: n, hasHistory: true,
+                                     headless: false),
+              "记下 1.26.3（参数域）读得回来：升到 1.27.0 要弹", ledger.lastSeen ?? "nil")
+        ledger.record("1.27.0")
+        check(ledger.lastSeen == "1.27.0"
+              && !WhatsNew.shouldShow(current: "1.27.0", lastSeen: ledger.lastSeen, notesVersion: n, hasHistory: true,
+                                      headless: false),
+              "记下 1.27.0 以后同一版不再弹", ledger.lastSeen ?? "nil")
+        check(persisted() == before, "app 自己的设置域（\(prefsDomain)）里 \(WhatsNew.defaultsKey) 一次没写",
+              "\(String(describing: before)) → \(String(describing: persisted()))")
+        // 参数域里的拿掉（同一个进程后面的自检别读到它）
+        var domain = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        domain[WhatsNew.defaultsKey] = nil
+        UserDefaults.standard.setVolatileDomain(domain, forName: UserDefaults.argumentDomain)
 
         // 数据表
         let notes = WhatsNew.notes
