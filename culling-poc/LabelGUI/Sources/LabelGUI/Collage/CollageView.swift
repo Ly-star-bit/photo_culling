@@ -230,11 +230,10 @@ struct CollageView: View {
 
     private var bottomStrips: some View {
         VStack(spacing: 0) {
-            // 存过方案才显示（入口是顶栏的「存成方案」）。
-            if !store.variants.isEmpty {
-                CollageVariantStrip(store: store, thumbs: store.thumbs)
-                Divider()
-            }
+            // 方案栏常驻（NU6）：以前存过才出现，没存过的人不知道有；空的时候是矮矮一条「+ 存成方案（⇧⌘S）」。
+            CollageVariantStrip(store: store, thumbs: store.thumbs)
+                .collageSpot(.variants, store.nav)
+            Divider()
             // 相册的跨页条；单张拼图有好几页（一键成套的一期杂志、小红书轮播组图）时也显示（页条）。
             if store.isAlbum || store.project.pages.count > 1 {
                 CollagePageStrip(store: store, thumbs: store.thumbs)
@@ -848,7 +847,7 @@ private struct CollageAlternativeThumbs: View, Equatable {
 
 /// 方案栏：存下来的几版（CollageVariant）。点缩略图切过去（一步撤销），右键覆盖 / 改名 / 删除（这三样不进撤销：
 /// 覆盖、删除先问一句），最后一格「+」存现在这一版。和现在一模一样的描蓝边；最近存的 / 切到的那个之后又改过，
-/// 名字后面标「改过」（右键「用现在的样子覆盖它」）。
+/// 名字后面标「改过」（右键「用现在的样子覆盖它」）。一直显示：没存过时是一条「+ 存成方案（⇧⌘S）」。
 struct CollageVariantStrip: View {
     @ObservedObject var store: CollageStore
     /// 方案缩略图在 store.thumbs 里。
@@ -865,9 +864,39 @@ struct CollageVariantStrip: View {
 
     var body: some View {
         let _ = CollagePerf.body("方案条")
+        if store.variants.isEmpty {
+            emptyStrip
+        } else {
+            strip
+        }
+    }
+
+    /// 还没存过方案：一个按钮 + 一句话（不占缩略图那么高，画布少让一点）。
+    private var emptyStrip: some View {
+        HStack(spacing: 8) {
+            Text("方案").font(.caption).foregroundStyle(.secondary)
+                .frame(width: 32)
+            Button {
+                store.saveVariant()
+            } label: {
+                Label("存成方案（⇧⌘S）", systemImage: "plus")
+            }
+            .controlSize(.small)
+            .disabled(store.project.pages.isEmpty || store.isSolving)
+            .help("把现在这一版存成方案：画布、样式、文字、所有页、水印一起存，点缩略图随时切回来")
+            Text("存好几版并排比着挑，点一下切回来（⌘Z 回到切之前）")
+                .font(.caption).foregroundStyle(.tertiary)
+                .lineLimit(1).truncationMode(.tail)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 32)
+    }
+
+    private var strip: some View {
         let current = store.currentVariantIDs
         let modifiedID = store.activeVariantModified ? store.activeVariantID : nil
-        HStack(spacing: 8) {
+        return HStack(spacing: 8) {
             Text("方案").font(.caption).foregroundStyle(.secondary)
                 .frame(width: 32)
             ScrollView(.horizontal, showsIndicators: false) {
