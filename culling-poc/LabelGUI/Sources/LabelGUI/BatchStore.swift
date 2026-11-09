@@ -1368,9 +1368,18 @@ final class BatchStore: ObservableObject {
     /// true only after an analysis rewrote previews/*.jpg — that is the only
     /// case the thumbnail caches must be dropped (they used to be wiped on
     /// every session switch, VLM pass and trash run, re-decoding everything).
-    private func postResultsChanged(previewsChanged: Bool) {
-        NotificationCenter.default.post(name: .analysisDidFinish, object: nil,
-                                        userInfo: ["dir": sessionDir, "previewsChanged": previewsChanged])
+    /// `stalePaths`：要清的那几张的预览、原图路径（ThumbCache.invalidate(paths:)）；previewsChanged = true 时才有。
+    private func postResultsChanged(previewsChanged: Bool, stalePaths: [String] = []) {
+        var info: [String: Any] = ["dir": sessionDir, "previewsChanged": previewsChanged]
+        if previewsChanged { info["stalePaths"] = stalePaths }
+        NotificationCenter.default.post(name: .analysisDidFinish, object: nil, userInfo: info)
+    }
+
+    /// 分析收尾要清缓存的路径（纯函数，`--ux-selftest` 直接测）：分析前就在网格里、这一次又写了预览图的照片，
+    /// 它们的预览和原图路径（原图改过才会重新分析，100% 原图、大图解码都是旧的）。新拷进来的照片以前没有缓存，
+    /// 不用清；原样复用的一张不清。`before` 是分析开始时网格里每张的 [预览路径, 原图路径]。
+    nonisolated static func stalePreviewPaths(before: [String: [String]], written: [String]) -> [String] {
+        written.flatMap { before[$0] ?? [] }
     }
 
     // MARK: - 旧 id 留下的孤儿键（已中招场次的回配，审查 S03）
@@ -2837,6 +2846,9 @@ final class BatchStore: ObservableObject {
         // replacements (flushProvisional swaps by id).
         provisionalBuffer = []
         provisionalCount = 0
+        // 分析前网格里每张的预览 / 原图路径：收尾时只清这里面重写了预览的（stalePreviewPaths）。
+        let cachedPaths = Dictionary(items.map { ($0.id, [$0.previewPath, $0.decodePath]) },
+                                     uniquingKeysWith: { first, _ in first })
         let sleepGuard = longTasks.begin(.analysis)
         // 「上次分析没跑完」的标记（QuitSafety.swift）：跑完、取消、出错都在 isRunning 落下之前删掉；崩溃、强退删不到。
         UnfinishedAnalysis.begin(in: data)
@@ -2910,7 +2922,10 @@ final class BatchStore: ObservableObject {
                 self.isRunning = false
                 self.analyzing = false
                 if !self.items.isEmpty { self.touchSessionIndex() }
-                self.postResultsChanged(previewsChanged: true)
+                // 以前无条件 previewsChanged: true，网格收到就把四个图片缓存整份清掉、看得见的格子全部重解：
+                // 「重新分析」一张没重做、或者只新拷进 20 张也一样。现在只清真重写了预览的旧照片。
+                let stale = Self.stalePreviewPaths(before: cachedPaths, written: summary.previewsWritten)
+                self.postResultsChanged(previewsChanged: !stale.isEmpty, stalePaths: stale)
             }
         }
     }

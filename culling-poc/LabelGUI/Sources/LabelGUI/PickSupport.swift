@@ -108,7 +108,7 @@ enum CompareZoom {
     }
 
     private static func cacheKey(_ item: BatchItem) -> String {
-        "\(ThumbCache.generation)|\(item.decodePath)"
+        "\(ThumbCache.generation(of: item.decodePath))|\(item.decodePath)"
     }
 
     /// 界面用：后台解码，最多两张并行。cancel 置位后还没开始的就不解了 —— 连按 Z、

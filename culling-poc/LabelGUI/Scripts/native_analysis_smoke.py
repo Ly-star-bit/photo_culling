@@ -12,7 +12,8 @@ EXIF 方向和拍摄时间、Vision、锐度 / 裁切、截断 JPEG、pHash 分�
                   预览按方向转正（竖的，左上角是原图的左下角 —— 蓝）
     other_c.jpg   象限上下对调、再晚 1 秒：时间窗口里、pHash 差得远 → 另一组
 sips 出的图没有拍摄时间（没有时间的每张单独成组），所以分组要手写 APP1。
-第二次 --analyze 应该全部复用（0 analyzed）。
+第二次 --analyze 应该全部复用（0 analyzed），一张预览都不写（Previews written 那行没有：界面分析收尾一张缓存都不清）；
+再把 white 的修改时间往后拨、删掉 control 的预览，第三次只有这两张写预览（重新分析 1 张 + 补回 1 张预览）。
 
 最后是规模守护：把 photot-session 的 21 行克隆成 2000 / 8000 行（只有 JSON，不要图），给 `--verdicts` 计时；
 共享 runner 计时抖得厉害，只卡很宽的上限和「8000 比 2000 的耗时比」（线性 ≈ 4，O(n²) ≈ 16），各取几次里最快的。
@@ -184,6 +185,8 @@ def native_section():
     check(re.search(r"^Failed ", out, re.M) is None, "没有解码失败的")
     check(re.search(r"^Corrupt \(1\): trunc$", out, re.M) is not None,
           f"Corrupt 只列截断的那张（动态照片的尾巴不算）：{(re.search(r'^Corrupt.*$', out, re.M) or ['（没有 Corrupt 行）'])[0]}")
+    check(re.search(r"^Previews written \(8\): ", out, re.M) is not None,
+          f"8 张都写了预览：{(re.search(r'^Previews written.*$', out, re.M) or ['（没有 Previews written 行）'])[0]}")
 
     key = session_key(photos)
     sdir = os.path.join(data, "sessions", key)
@@ -238,6 +241,22 @@ def native_section():
     check(r.returncode == 0 and re.search(r"^Done: 0 analyzed, 8 reused in ", r.stdout, re.M) is not None,
           f"没变的 8 张全部复用（{dt:.1f}s）：{(re.search(r'^Done: .*$', r.stdout, re.M) or [r.stderr[-200:]])[0]}")
     check(re.search(r"^Corrupt \(1\): trunc$", r.stdout, re.M) is not None, "复用的结果里截断那张照样报损坏")
+    check(re.search(r"^Previews written", r.stdout, re.M) is None,
+          "全部复用：一张预览都没写（界面分析收尾一张缓存都不清）")
+
+    print("2b. 改过一张原图、丢了一张预览：只有这两张写预览")
+    os.remove(os.path.join(sdir, "previews", "control.jpg"))
+    white = os.path.join(photos, "white.jpg")
+    st = os.stat(white)
+    os.utime(white, (st.st_atime, st.st_mtime + 10))
+    r, dt = run(["--analyze", photos], data)
+    check(r.returncode == 0 and re.search(r"^Done: 1 analyzed, 7 reused in ", r.stdout, re.M) is not None,
+          f"改过的 white 重新分析、其余复用（{dt:.1f}s）：{(re.search(r'^Done: .*$', r.stdout, re.M) or [r.stderr[-200:]])[0]}")
+    m = re.search(r"^Previews written \((\d+)\): (.*)$", r.stdout, re.M)
+    written = sorted(m.group(2).split(", ")) if m else []
+    check(written == ["control", "white"],
+          f"写了预览的只有 white（重新分析）和 control（预览丢了补回来）：{m.group(0) if m else '（没有 Previews written 行）'}")
+    check(os.path.isfile(os.path.join(sdir, "previews", "control.jpg")), "control 的预览补回来了")
 
     print("3. --verdicts --per-photo")
     r, dt = run(["--verdicts", photos, "--per-photo"], data)

@@ -228,9 +228,11 @@ struct BatchView: View {
         // 重新分析会原地覆盖预览图 —— 不清缓存的话数值更新了、图还是旧的。
         // 只有分析真的重写了预览才清；切场次/VLM/废纸篓也发同一通知，
         // 以前跟着一起清空，切回来整个网格重新解码一遍。
+        // 而且只清重写了预览的那几张（stalePaths：分析前就在网格里的照片的预览、原图路径）：全部复用时一张不清，
+        // 新拷进来的照片本来就是新键。
         .onReceive(NotificationCenter.default.publisher(for: .analysisDidFinish)) { note in
             if note.userInfo?["previewsChanged"] as? Bool == true {
-                ThumbCache.invalidate()
+                ThumbCache.invalidate(paths: note.userInfo?["stalePaths"] as? [String] ?? [])
             }
         }
         // 废片进废纸篓后这些 id 就没了，留着同样会写到不存在的照片上。
@@ -2747,21 +2749,44 @@ enum ThumbCache {
 
     /// Re-analysis overwrites previews/<id>.jpg in place, so a purely
     /// path-keyed cache kept serving the old picture (new numbers, stale
-    /// thumbnail) until relaunch. Bumping this on every analysisDidFinish
-    /// changes the cache key AND the `.task(id:)` of every ThumbnailView, so
-    /// visible cells re-decode instead of sitting on their @State copy.
-    nonisolated(unsafe) private(set) static var generation = 0
+    /// thumbnail) until relaunch. 每条路径带一个代数，进缓存键：分析收尾时只给真重写了预览的那几张
+    /// （预览和原图两条路径）加一，它们的键和 ThumbnailView 的 `.task(id:)` 跟着变，看得见的格子只重解这几张。
+    /// 以前是一个全局代数 + 四个缓存整份清空：重新分析一张都没重做、或者只新拷进 20 张，整个网格也全部重解、灰一下。
+    private final class Generations: @unchecked Sendable {
+        private let lock = NSLock()
+        private var byPath: [String: Int] = [:]
 
+        func of(_ path: String) -> Int {
+            lock.lock(); defer { lock.unlock() }
+            return byPath[path] ?? 0
+        }
+
+        func bump(_ paths: [String]) {
+            lock.lock(); defer { lock.unlock() }
+            for p in Set(paths) { byPath[p, default: 0] += 1 }
+        }
+    }
+    private static let generations = Generations()
+
+    /// 这条路径现在的代数（缓存键用；后台线程上也能查）。
+    static func generation(of path: String) -> Int { generations.of(path) }
+
+    /// 这些照片的预览图 / 原图换过了：它们的键全部作废（旧的那份留在 NSCache 里，按内存上限自己挤掉），
+    /// 原图那两个按路径存的缓存（100% 原图、人脸小图）直接拿掉，读过的文件头也忘掉。别的照片一个不动。
     @MainActor
-    static func invalidate() {
-        generation += 1
-        cache.removeAllObjects()
-        FullResCache.cache.removeAllObjects()
-        FaceStripCache.cache.removeAllObjects()
+    static func invalidate(paths: [String]) {
+        guard !paths.isEmpty else { return }
+        generations.bump(paths)
+        for path in paths {
+            FullResCache.cache.removeObject(forKey: path as NSString)
+            FaceStripCache.cache.removeObject(forKey: path as NSString)
+        }
+        FitCache.forgetHeaders(paths)
     }
 
-    static func key(_ path: String, _ maxPixel: Int) -> NSString {
-        "\(generation)|\(maxPixel)|\(path)" as NSString
+    /// `suffix` 加在路径后面（锐化成品的 "#sharp"），代数照样按原路径算。
+    static func key(_ path: String, _ maxPixel: Int, suffix: String = "") -> NSString {
+        "\(generation(of: path))|\(maxPixel)|\(path)\(suffix)" as NSString
     }
 
     static func load(path: String, maxPixel: Int = 512) -> NSImage? {
@@ -2921,6 +2946,11 @@ enum FitCache {
             headers[path] = header
         }
 
+        func forgetHeaders(_ paths: [String]) {
+            lock.lock(); defer { lock.unlock() }
+            for p in paths { headers[p] = nil }
+        }
+
         /// 这个键已经有人在解就交出那一份，没有才 `start` 一个（在锁里登记，start 出来的任务要等锁放了才能 finish）。
         func task(for key: String, start: () -> Task<NSImage?, Never>) -> Task<NSImage?, Never> {
             lock.lock(); defer { lock.unlock() }
@@ -2939,6 +2969,9 @@ enum FitCache {
 
     /// 读过的文件头（不读文件）。nil = 这张还没读过。
     static func cachedHeader(path: String) -> Header? { book.header(path) }
+
+    /// 原图换过了（重新分析时文件改过）：下次重读文件头。
+    static func forgetHeaders(_ paths: [String]) { book.forgetHeaders(paths) }
 
     /// 只读文件头（不解码），按路径记住，一张只读一次。读不出 = nil（按 4096 走老路，不记）。
     static func header(path: String) -> Header? {
@@ -2994,7 +3027,7 @@ enum FitCache {
 
     /// 锐化成品的键：(文件, 目标长边)。SharpImageView 和预取都按它存取。
     static func renderedKey(path: String, edge: Int) -> NSString {
-        ThumbCache.key(path + "#sharp", edge)
+        ThumbCache.key(path, edge, suffix: "#sharp")
     }
 
     /// 锐化成品（Lanczos 缩到 edge + 屏幕输出锐化，进缓存）。已经有了就直接给。

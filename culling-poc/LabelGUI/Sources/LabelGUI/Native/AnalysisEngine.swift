@@ -85,6 +85,9 @@ enum AnalysisEngine {
         /// 解得出来、但文件是坏的（JPEG 截断）：照常进网格，带「文件损坏」判废片。
         let corrupt: [String]
         let cancelled: Bool
+        /// 这一次写了预览图（previews/<id>.jpg）的照片，按文件夹顺序：分析了的（新的、改过的）和分析结果还能用、
+        /// 只是预览图没了补回来的。原样复用的不在里面。界面只清这些照片的缓存（BatchStore.runAnalysis 收尾）。
+        var previewsWritten: [String] = []
     }
 
     /// Thread-safe cooperative cancellation flag shared with the UI.
@@ -292,8 +295,11 @@ enum AnalysisEngine {
         try writeManifest(orderedIds.compactMap { manifestByID[$0] }, idOnly: idOnly, photoDir: photoDir, dataDir: dataDir)
         try writeLayer1(orderedIds.compactMap { layer1ByID[$0] }, dataDir: dataDir)
         let corrupt = orderedIds.filter { layer1ByID[$0]?["file_corrupt"] as? Bool == true }
+        let regeneratedIDs = missing.filter { regenerated[$0] }.map { candidates[$0].file.stem }
+        let written = Set(regeneratedIDs).union(completedIds)
         return Summary(analyzed: completed.count, reused: reusedFinal.count,
-                       failed: failed, corrupt: corrupt, cancelled: cancelled)
+                       failed: failed, corrupt: corrupt, cancelled: cancelled,
+                       previewsWritten: orderedIds.filter(written.contains))
     }
 
     // MARK: - Per-photo

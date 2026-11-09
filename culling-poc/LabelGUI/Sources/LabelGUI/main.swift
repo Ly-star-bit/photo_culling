@@ -138,6 +138,10 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--analyze"),
         if !summary.corrupt.isEmpty {
             print("Corrupt (\(summary.corrupt.count)): \(summary.corrupt.joined(separator: ", "))")
         }
+        // 写了预览图的（分析了的 + 预览丢了补回来的）：界面分析收尾只清这些照片的缓存。全部复用 = 没有这一行。
+        if !summary.previewsWritten.isEmpty {
+            print("Previews written (\(summary.previewsWritten.count)): \(summary.previewsWritten.joined(separator: ", "))")
+        }
         print("Artifacts: \(sessionDir.path)")
         exit(0)
     } catch {

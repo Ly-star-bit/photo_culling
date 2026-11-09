@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import AppKit
 
 /// `--ux-selftest` 里的几组纯函数用例：EXIF 拍摄参数（快门 0 / 极小正数不崩）、网格多选（数字键、剪选中）、
 /// 水印页导入的 RAW+JPG 配对、拼图托盘每格的选中标记、审片 / 检视器大图的解码尺寸。
@@ -23,7 +24,49 @@ enum GridExifImportSelfTest {
         watermarkCases(tally)
         trayMarkCases(tally)
         fitDecodeCases(tally)
+        cacheInvalidationCases(tally)
         return tally.failed
+    }
+
+    // MARK: - 分析收尾只清重写了预览的照片
+
+    /// 分析收尾的缓存清理（BatchStore.stalePreviewPaths + ThumbCache.invalidate(paths:)）：只有分析前就在网格里、
+    /// 这次又写了预览的照片作废，别的照片的键、缓存里的图一个不动。
+    @MainActor
+    private static func cacheInvalidationCases(_ t: Tally) {
+        let tag = "/selftest-" + String(UUID().uuidString.prefix(8))
+        let (aPrev, aRaw, bPrev, bRaw) = (tag + "/previews/A.jpg", tag + "/A.JPG", tag + "/previews/B.jpg", tag + "/B.JPG")
+        let before = ["A": [aPrev, aRaw], "B": [bPrev, bRaw]]
+        let none = BatchStore.stalePreviewPaths(before: before, written: [])
+        t.check(none.isEmpty, "分析收尾 全部复用 → 一张不清", "得到 \(none)")
+        let fresh = BatchStore.stalePreviewPaths(before: before, written: ["N1", "N2"])
+        t.check(fresh.isEmpty, "分析收尾 只新拷进来的照片写了预览 → 一张不清（新照片本来就是新键）", "得到 \(fresh)")
+        let one = BatchStore.stalePreviewPaths(before: before, written: ["A", "N1"])
+        t.check(one == [aPrev, aRaw], "分析收尾 改过的 A 重写了预览 → 只清 A 的预览和原图路径", "得到 \(one)")
+
+        let image = NSImage(size: NSSize(width: 4, height: 4))
+        let keys = [aPrev: ThumbCache.key(aPrev, 512), bPrev: ThumbCache.key(bPrev, 512)]
+        let fitB = FitCache.renderedKey(path: bRaw, edge: 2560)
+        let fitA = FitCache.renderedKey(path: aRaw, edge: 2560)
+        for key in keys.values { ThumbCache.cache.setObject(image, forKey: key) }
+        FitCache.cache.setObject(image, forKey: fitB)
+        FullResCache.cache.setObject(image, forKey: aRaw as NSString)
+        FullResCache.cache.setObject(image, forKey: bRaw as NSString)
+        ThumbCache.invalidate(paths: one)
+        let aThumbMoved: Bool = ThumbCache.key(aPrev, 512) != keys[aPrev]
+        let aSharpMoved: Bool = FitCache.renderedKey(path: aRaw, edge: 2560) != fitA
+        t.check(aThumbMoved && aSharpMoved, "分析收尾 A 的缩略图键、锐化成品键都换了（看得见的格子会重解 A）")
+        let bThumbKey: Bool = ThumbCache.key(bPrev, 512) == keys[bPrev]
+        let bSharpKey: Bool = FitCache.renderedKey(path: bRaw, edge: 2560) == fitB
+        let bThumbHeld: Bool = ThumbCache.cache.object(forKey: ThumbCache.key(bPrev, 512)) != nil
+        let bSharpHeld: Bool = FitCache.cache.object(forKey: fitB) != nil
+        t.check(bThumbKey && bSharpKey && bThumbHeld && bSharpHeld, "分析收尾 B 的键没变、缓存里的图还在（不重解、不灰一下）")
+        let aFullGone: Bool = FullResCache.cache.object(forKey: aRaw as NSString) == nil
+        let bFullHeld: Bool = FullResCache.cache.object(forKey: bRaw as NSString) != nil
+        t.check(aFullGone && bFullHeld, "分析收尾 100% 原图缓存只拿掉 A 的")
+        for key in keys.values { ThumbCache.cache.removeObject(forKey: key) }
+        FitCache.cache.removeObject(forKey: fitB)
+        FullResCache.cache.removeObject(forKey: bRaw as NSString)
     }
 
     // MARK: - 大图解码尺寸
