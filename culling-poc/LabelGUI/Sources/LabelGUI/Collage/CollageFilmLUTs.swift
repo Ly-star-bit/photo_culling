@@ -6,7 +6,9 @@ import Foundation
 /// 不编进二进制、不加密 —— 许可要求别人拿得出来。
 ///
 /// 一个色调一个 <rawValue>.cube。.app 里读 Contents/Resources/film-luts；裸的开发二进制（CI 跑的
-/// .build/release/LabelGUI）往上找仓库里的 third_party/film-luts。读不到 = 这个色调原样（不崩）。
+/// .build/release/LabelGUI）往上找仓库里的 third_party/film-luts。读不到 = 这个色调原样（不崩），记一行日志
+/// （每款一次，缺哪个文件、在哪找的）：v1.24.0–v1.26.1 漏打包了 .json，颗粒、晕光、冲印区三个版本都静默不起作用，
+/// 没人发现。
 /// 只烘了逐像素的那一半：颗粒、晕光这些空间效果不在表里。
 enum CollageFilmLUTs {
 
@@ -64,7 +66,16 @@ enum CollageFilmLUTs {
     private static var cache: [CollageLook: Table] = [:]
     private static var missing: Set<CollageLook> = []
 
+    /// 自检用：清掉读过的表和「读不到」的记录（换了 directoryOverride 以后重读、重新记日志）。
+    static func resetForTesting() {
+        lock.lock()
+        cache.removeAll()
+        missing.removeAll()
+        lock.unlock()
+    }
+
     /// 这个色调的表（第一次用时读，之后常驻；10 张一共约 4 MB）。不是光谱色调、读不到都是 nil。
+    /// 读不到时记一行日志：每款只记一次（读不到的记进 missing，之后直接返回 nil、不再读）。
     static func table(_ look: CollageLook) -> Table? {
         guard look.isSpectral else { return nil }
         lock.lock()
@@ -79,16 +90,38 @@ enum CollageFilmLUTs {
         lock.unlock()
         // 解析一张表（3 万多行文本）不拿着锁：暗房的样张一次要十五款，以前一款一款排队读，别处（主线程上取色、
         // 判字色深浅）要哪款都得等前面的读完。两个线程同时读同一款就各读一遍，先放进去的那份留着。
-        let loaded = directory.flatMap { load(look, from: $0) }
+        let dir = directory
+        let loaded = dir.flatMap { load(look, from: $0) }
         lock.lock()
-        defer { lock.unlock() }
-        if let hit = cache[look] { return hit }
+        if let hit = cache[look] {
+            lock.unlock()
+            return hit
+        }
+        var first = false
         if let loaded {
             cache[look] = loaded
         } else {
-            missing.insert(look)
+            first = missing.insert(look).inserted
+        }
+        lock.unlock()
+        if first {
+            AppLog.warning("film", "光谱色调「\(look.label)」（\(look.rawValue)）的色调表没读到，这一款不调色（原样）："
+                           + missingReason([look.rawValue + ".cube"], in: dir))
         }
         return loaded
+    }
+
+    /// 读不到的原因（日志、诊断包用）：没找到放表的目录 / 缺哪几个文件（带目录）/ 文件都在但读不出来。
+    static func missingReason(_ files: [String], in dir: URL?) -> String {
+        guard let dir else {
+            return "没找到放表的目录（.app 的 Contents/Resources/film-luts、可执行文件往上的 third_party/film-luts 里都没有 .cube）"
+        }
+        let fm = FileManager.default
+        let absent = files.filter { !fm.fileExists(atPath: dir.appendingPathComponent($0).path) }
+        if absent.isEmpty {
+            return "\(files.joined(separator: "、")) 都在 \(dir.path)，但读不出来（格式不对或者没有读权限）"
+        }
+        return "缺 \(absent.joined(separator: "、"))（在 \(dir.path) 里找的）"
     }
 
     static func load(_ look: CollageLook, from dir: URL) -> Table? {
@@ -97,8 +130,15 @@ enum CollageFilmLUTs {
         return parse(text)
     }
 
-    /// 放表的目录：.app 的 Resources/film-luts，否则从可执行文件往上找 third_party/film-luts（开发树、CI）。
-    static let directory: URL? = {
+    /// 放表的目录（自检指到别处时是 directoryOverride）。
+    static var directory: URL? { directoryOverride ?? foundDirectory }
+
+    /// 自检用：把放表的目录指到别处（空目录 = 模拟漏打包）。nil = 照常找。改了以后要 resetForTesting
+    /// （CollageFilmEffects 的也要），不然读过的还在缓存里。
+    static var directoryOverride: URL?
+
+    /// 找到的放表目录：.app 的 Resources/film-luts，否则从可执行文件往上找 third_party/film-luts（开发树、CI）。
+    static let foundDirectory: URL? = {
         let fm = FileManager.default
         func hasCubes(_ url: URL) -> Bool {
             ((try? fm.contentsOfDirectory(atPath: url.path)) ?? []).contains { $0.hasSuffix(".cube") }

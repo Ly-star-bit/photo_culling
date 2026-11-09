@@ -37,6 +37,8 @@ struct CollageDarkroomView: View {
         }
         .background(DarkroomPalette.shell)
         .environment(\.colorScheme, .dark)
+        // 滑杆松手 = 这一次拖动结束（DarkroomSlider 读它，CollageStore.endCoalescing）。
+        .environment(\.collageUndo, store)
         .focusable()
         .focused($focused)
         .focusEffectDisabled()
@@ -151,6 +153,8 @@ private struct DarkroomSlider: View {
     var display: (Double) -> String = { "\(Int(($0 * 100).rounded()))%" }
     let set: (Double) -> Void
     var help: String = ""
+    /// 松手时告诉 store：再拖是新的一步撤销（拖着的时候连成一步）。
+    @Environment(\.collageUndo) private var undo
 
     var body: some View {
         let lo = range.lowerBound, hi = range.upperBound
@@ -192,6 +196,8 @@ private struct DarkroomSlider: View {
                 .gesture(DragGesture(minimumDistance: 0).onChanged { g in
                     let t = Double(min(1, max(0, (g.location.x - knob / 2) / travel)))
                     set(lo + t * (hi - lo))
+                }.onEnded { _ in
+                    undo?.endCoalescing()
                 })
             }
             .frame(height: labelled ? 38 : 24)
@@ -203,7 +209,9 @@ private struct DarkroomSlider: View {
         }
         .help(help)
         .accessibilityRepresentation {
-            Slider(value: Binding(get: { value }, set: set), in: range) { Text(label) }
+            Slider(value: Binding(get: { value }, set: set), in: range) { Text(label) } onEditingChanged: { editing in
+                if !editing { undo?.endCoalescing() }
+            }
         }
     }
 }
@@ -252,6 +260,16 @@ private struct DarkroomTopBar: View {
             }
             .frame(width: CGFloat(scopes.count) * 76)
             Spacer(minLength: 12)
+            // 撤销 / 重做：暗房开着时拼图的顶栏（⌘Z 绑在它上面）不在视图树里，以前暗房里按 ⌘Z 没人接，界面却写着
+            // 「⌘Z 一步步撤」。条件、提示和拼图顶栏的一样。
+            HStack(spacing: 2) {
+                undoButton("arrow.uturn.backward", "撤销", enabled: store.canUndo) { store.undo() }
+                    .keyboardShortcut("z", modifiers: .command)
+                    .help("撤销 (⌘Z)")
+                undoButton("arrow.uturn.forward", "重做", enabled: store.canRedo) { store.redo() }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+                    .help("重做 (⇧⌘Z)")
+            }
             Text("原图")
                 .font(.system(size: 12, weight: model.showOriginal ? .semibold : .regular))
                 .foregroundStyle(model.showOriginal ? DarkroomPalette.text : DarkroomPalette.secondary)
@@ -278,6 +296,23 @@ private struct DarkroomTopBar: View {
         .padding(.horizontal, 14)
         .frame(height: 44)
         .background(DarkroomPalette.sidebar)
+    }
+
+    /// 顶栏的小图标按钮（撤销、重做）：和「原图」同样的发丝边，灰掉时压暗。
+    private func undoButton(_ symbol: String, _ label: String, enabled: Bool,
+                            _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(DarkroomPalette.secondary)
+                .frame(width: 30, height: 24)
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(DarkroomPalette.hairline, lineWidth: 1))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
+        .accessibilityLabel(label)
     }
 }
 
@@ -521,6 +556,9 @@ private struct DarkroomControls: View {
         let _ = CollagePerf.body("暗房右栏")
         let setting = model.current
         let spectral = setting.look.isSpectral
+        // 质感、冲印都记在整组上：灰不灰掉按整个工程用没用着光谱色调（和检视器同一个口径，CollageFilmEffects.filmControls），
+        // 不只看「套用到」那一级 —— 整组是滤镜、这一页单独套了光谱色调时，那一页带着颗粒，这里也得调得动。
+        let film = CollageFilmEffects.filmControls(store.project)
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 5) {
@@ -543,6 +581,13 @@ private struct DarkroomControls: View {
                         Text(note).font(.system(size: 11)).foregroundStyle(DarkroomPalette.accent)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    // 这一款的表、颗粒数据读不到（漏打包）：以前静默变原样，没人发现（v1.24–v1.26.1）。读过的有缓存，
+                    // 这里问的是现在套着的那一款，进暗房之前画布已经用它渲过。
+                    if spectral, CollageFilmLUTs.table(setting.look) == nil || CollageFilmEffects.extras(setting.look) == nil {
+                        Text("这款的数据没读到，颜色 / 颗粒不起作用（缺哪个文件记在日志里）")
+                            .font(.system(size: 11)).foregroundStyle(DarkroomPalette.accent)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
@@ -554,7 +599,7 @@ private struct DarkroomControls: View {
                         .opacity(setting.look == .none ? 0.4 : 1)
                 }
 
-                DarkroomPrinting(model: model, store: store, spectral: spectral)
+                DarkroomPrinting(model: model, store: store, film: film)
 
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
@@ -594,13 +639,15 @@ private struct DarkroomControls: View {
                         }
                         .help("同一张照片，模拟的画幅越小，颗粒相对画面越粗；中画幅（6×4.5 以上）是婚礼胶片常见的细腻感")
                     }
-                    .disabled(!spectral)
-                    .opacity(spectral ? 1 : 0.4)
+                    .disabled(!film.texture)
+                    .opacity(film.texture ? 1 : 0.4)
                     DarkroomSlider(label: "统一色温", value: store.project.style.harmonize,
                                    set: { model.setStyleValue(\.harmonize, $0) },
                                    help: "一页里几张照片的冷暖、明暗往主图对齐（对整组），混拍的一页用")
                     if !spectral {
-                        Text("「\(setting.look.label)」是相纸滤镜，没有颗粒、晕光和冲印：在「胶片」页签里换一款才有。")
+                        Text(film.texture
+                             ? "「\(setting.look.label)」是相纸滤镜，这一级没有颗粒、晕光和冲印；上面几项对整组，管的是别的页、格用着的光谱胶片。"
+                             : "「\(setting.look.label)」是相纸滤镜，没有颗粒、晕光和冲印：在「胶片」页签里换一款才有。")
                             .font(.system(size: 11)).foregroundStyle(DarkroomPalette.tertiary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -631,15 +678,16 @@ private struct DarkroomControls: View {
 }
 
 /// 冲印：胶片曝光（负片、电影负片）、冷暖（放大机滤色）。都对整组、都在色调表里（取色、判字深浅一样）。
+/// film：整个工程用着光谱色调没有、里面有没有能调曝光的（CollageFilmEffects.filmControls）。
 private struct DarkroomPrinting: View {
     @ObservedObject var model: CollageDarkroom
     @ObservedObject var store: CollageStore
-    let spectral: Bool
+    let film: CollageFilmEffects.FilmControls
 
     var body: some View {
         let _ = CollagePerf.body("暗房冲印")
         let look = model.current.look
-        let exposable = spectral && CollageFilmEffects.supportsExposure(look)
+        let exposable = film.exposure
         let style = store.project.style
         VStack(alignment: .leading, spacing: 10) {
             DarkroomSectionTitle(title: "冲印", trailing: "对整组")
@@ -658,9 +706,9 @@ private struct DarkroomPrinting: View {
                            help: look.isReversal
                                ? "反转片上相当于扫描时的色偏校正：暖往橙、冷往蓝。在统一色温之前"
                                : "放大机的黄、品滤色：暖往橙走（不往黄绿），冷往蓝。在印放那一步改，比套完再调白平衡更像胶片；在统一色温之前")
-                .disabled(!spectral)
-                .opacity(spectral ? 1 : 0.4)
-            if spectral && !exposable {
+                .disabled(!film.texture)
+                .opacity(film.texture ? 1 : 0.4)
+            if film.reversalOnly {
                 Text("反转片没有冲扫补偿这一层，过曝就是发白：胶片曝光只在负片、电影负片上有。")
                     .font(.system(size: 11)).foregroundStyle(DarkroomPalette.tertiary)
                     .fixedSize(horizontal: false, vertical: true)

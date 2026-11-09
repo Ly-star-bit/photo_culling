@@ -136,7 +136,16 @@ enum CollageFilmEffects {
     private static var cache: [CollageLook: Extras] = [:]
     private static var missing: Set<CollageLook> = []
 
+    /// 自检用：清掉读过的数据和「读不到」的记录（同 CollageFilmLUTs.resetForTesting）。
+    static func resetForTesting() {
+        lock.lock()
+        cache.removeAll()
+        missing.removeAll()
+        lock.unlock()
+    }
+
     /// 这个光谱色调的颗粒、晕光数据（<rawValue>.film.cube / .print.cube / .json）。读不到 = nil（两项都不做）。
+    /// 读不到、或者负片 / 电影负片缺胶片曝光的放宽表时记一行日志，每款只记一次（同 CollageFilmLUTs.table）。
     static func extras(_ look: CollageLook) -> Extras? {
         guard look.isSpectral else { return nil }
         lock.lock()
@@ -152,14 +161,30 @@ enum CollageFilmEffects {
         // 读一款要解析四张表、十几万行文本（几十毫秒）：不拿着锁读。以前读的时候整把锁占着，暗房悬停到一款新胶片，
         // 后台渲大预览在读它，主线程上右栏问「这款能不能调胶片曝光」（supportsExposure）也得等这把锁，界面卡一下。
         // 两个线程同时读同一款就各读一遍（读出来一样），先放进去的那份留着。
-        let loaded = CollageFilmLUTs.directory.flatMap { load(look, from: $0) }
+        let dir = CollageFilmLUTs.directory
+        let loaded = dir.flatMap { load(look, from: $0) }
         lock.lock()
-        defer { lock.unlock() }
-        if let hit = cache[look] { return hit }
+        if let hit = cache[look] {
+            lock.unlock()
+            return hit
+        }
+        var first = false
         if let loaded {
             cache[look] = loaded
         } else {
-            missing.insert(look)
+            first = missing.insert(look).inserted
+        }
+        lock.unlock()
+        let name = "光谱色调「\(look.label)」（\(look.rawValue)）"
+        if first {
+            let files = [".film.cube", ".print.cube", ".json"].map { look.rawValue + $0 }
+            AppLog.warning("film", name + "的颗粒、晕光、冲印区数据没读到，这三样不起作用（色调表照常）："
+                           + CollageFilmLUTs.missingReason(files, in: dir))
+        } else if let loaded, loaded.ext == nil, !look.isReversal {
+            // 读到了、只缺放宽表（负片、电影负片才有）：胶片曝光不起作用。进缓存的只有这一次，不会重复记。
+            let files = [".film_e.cube", ".print_e.cube", ".json"].map { look.rawValue + $0 }
+            AppLog.warning("film", name + "的胶片曝光放宽表没读到，胶片曝光不起作用（.json 里没有 develop.ext_head 也算）："
+                           + CollageFilmLUTs.missingReason(files, in: dir))
         }
         return loaded
     }
@@ -377,6 +402,38 @@ enum CollageFilmEffects {
             page.look?.look.isSpectral == true
                 || page.root.leafPaths().contains { page.root.node(at: $0)?.cell?.look?.look.isSpectral == true }
         }
+    }
+
+    /// 工程里哪一级（整组 / 页 / 格）用着的光谱色调。
+    static func spectralLooks(_ p: CollageProject) -> Set<CollageLook> {
+        var out: Set<CollageLook> = []
+        if p.style.look.isSpectral { out.insert(p.style.look) }
+        for page in p.pages {
+            if let look = page.look?.look, look.isSpectral { out.insert(look) }
+            for path in page.root.leafPaths() {
+                if let look = page.root.node(at: path)?.cell?.look?.look, look.isSpectral { out.insert(look) }
+            }
+        }
+        return out
+    }
+
+    /// 整组的颗粒、晕光、冷暖、画幅（texture）和胶片曝光（exposure）起不起作用 —— 检视器、暗房灰不灰掉这几根滑杆
+    /// 用同一个口径：它们都记在整组上（CollageStyle），哪一级用着光谱色调就作用到哪一级（相册某几页、某几格单独套
+    /// 光谱色调，整组是滤镜，颗粒照样加在那几页上）。以前检视器只看整组的色调，这种时候颗粒带着却关不掉；暗房只看
+    /// 「套用到」那一级。胶片曝光要用着的光谱色调里有一款能调（负片、电影负片；反转片没有）。
+    struct FilmControls {
+        /// 颗粒、晕光、冷暖、画幅：用着任何一款光谱色调。
+        let texture: Bool
+        /// 胶片曝光：用着的里有一款能调。
+        let exposure: Bool
+        /// 用着的全是反转片（胶片曝光灰掉是因为这个，不是数据没读到）。
+        let reversalOnly: Bool
+    }
+
+    static func filmControls(_ p: CollageProject) -> FilmControls {
+        let looks = spectralLooks(p)
+        return FilmControls(texture: !looks.isEmpty, exposure: looks.contains(where: supportsExposure),
+                            reversalOnly: !looks.isEmpty && looks.allSatisfy(\.isReversal))
     }
 
     /// 从「没有光谱色调」换进光谱色调（哪一级都算）、颗粒晕光都还是 0：颗粒 / 晕光设成这一款的起始值（R8：整张看就

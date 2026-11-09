@@ -319,21 +319,22 @@ final class CollageDarkroom: ObservableObject {
 
     /// 强度：同一级上改；这一页 / 这一格还没有自己的色调时，用现在看到的色调 + 新强度给它设上。
     /// 已经有的就只改强度（模板带的 fromTemplate 留着：换模板时它照旧不跟着照片走）。
+    /// 连拖合成一步只和同一级的强度合并（撤销的 key：整组是样式里的强度，这一页 / 这一格带上是哪一页、哪一格）。
     func setStrength(_ value: Double, coalesce: Bool = true) {
         let v = min(1, max(0, value))
         switch effectiveScope {
         case .project:
             var st = store.project.style
             st.lookStrength = v
-            store.setStyle(st, coalesce: coalesce)
+            store.setStyle(st, coalesce: coalesce, key: \CollageStyle.lookStrength)
         case .page:
             var s = store.page?.look ?? CollageLookSetting(look: current.look, strength: v)
             s.strength = v
-            store.setPageLook(s, coalesce: coalesce)
+            store.setPageLook(s, coalesce: coalesce, key: "页的强度 \(store.page?.id.uuidString ?? "")")
         case .cell:
             var s = store.selectedCell?.look ?? CollageLookSetting(look: current.look, strength: v)
             s.strength = v
-            store.setCellLook(s, coalesce: coalesce)
+            store.setCellLook(s, coalesce: coalesce, key: "格的强度 \(store.page?.id.uuidString ?? "") \(store.selection ?? [])")
         }
     }
 
@@ -347,11 +348,12 @@ final class CollageDarkroom: ObservableObject {
     }
 
     /// 颗粒、晕光、统一色温、冲印区：整组的。range = 这一项的取值范围（胶片曝光 −1…+2、冷暖 −1…+1）。
+    /// 连拖合成一步只和同一项合并（撤销的 key 就是这一项的 keyPath）：拖完颗粒马上拖晕光是两步。
     func setStyleValue(_ keyPath: WritableKeyPath<CollageStyle, Double>, _ value: Double,
                        range: ClosedRange<Double> = 0...1) {
         var st = store.project.style
         st[keyPath: keyPath] = min(range.upperBound, max(range.lowerBound, value))
-        store.setStyle(st, coalesce: true)
+        store.setStyle(st, coalesce: true, key: keyPath)
     }
 
     /// 画幅（整组的）：一次一步。
@@ -530,6 +532,13 @@ final class CollageDarkroom: ObservableObject {
 
     private func current(_ lane: String, _ key: LaneKey) -> Bool { laneKey[lane] == key }
 
+    /// 样张、试条、底片条的键里的冲印区：量化到色调表用的那一档（0.1 档 / 5%，CollageFilmEffects.Printing），
+    /// 拖胶片曝光、冷暖时落在同一档里的几下不重渲。
+    nonisolated static func printingKey(_ style: CollageStyle) -> String {
+        let p = CollageFilmEffects.Printing(exposure: style.filmExposure, warmth: style.filmWarmth)
+        return "\(p.exposure),\(p.warmth)"
+    }
+
     /// store 变了（套用、撤销、换页、选中、托盘……）：每一类按自己的 key 看要不要重渲。
     func refresh() {
         guard rendering else { return }
@@ -597,7 +606,8 @@ final class CollageDarkroom: ObservableObject {
         let hints = store.hints
         let strength = current.strength
         let looks = Self.order
-        let key = LaneKey("\(id)|\(Int((strength * 20).rounded()))|\(base.style.halftone.map { "\($0)" } ?? "")|\(hints[id] != nil)")
+        let key = LaneKey("\(id)|\(Int((strength * 20).rounded()))|\(base.style.halftone.map { "\($0)" } ?? "")|\(hints[id] != nil)"
+                          + "|\(Self.printingKey(base.style))")
         submit("frames", key: key) { [weak self] in
             let images = await Task.detached(priority: .utility) { () -> [CollageLook: NSImage] in
                 // 27 张互不相干：并发渲（每张和一张张挨着渲逐字节一样）。
@@ -623,7 +633,7 @@ final class CollageDarkroom: ObservableObject {
         let hints = store.hints
         let look = hover ?? current.look
         let steps = Self.stripSteps
-        let key = LaneKey("\(id)|\(look.rawValue)|\(hints[id] != nil)")
+        let key = LaneKey("\(id)|\(look.rawValue)|\(hints[id] != nil)|\(Self.printingKey(base.style))")
         submit("strip", key: key) { [weak self] in
             let images = await Task.detached(priority: .utility) { () -> [NSImage] in
                 // 同样并发渲，按强度的先后放回去（渲不出来的那格照旧去掉）。
@@ -652,15 +662,15 @@ final class CollageDarkroom: ObservableObject {
         let settings = cells.map { f in
             f.cell.look ?? page?.look ?? CollageLookSetting(look: project.style.look, strength: project.style.lookStrength)
         }
-        // 底片条每格是一张单独的样张（sample：一份新样式，只带色调、强度、加网）：键只要每格的照片、它实际的色调和
-        // 强度、加网（纸色跟底色）、路人信息。颗粒、晕光、冲印区、统一色温、边距、字都不进样张 —— 以前键是整个工程的
-        // 指纹，暗房里拖一下颗粒、曝光，底片条整条跟着重渲一遍，渲出来和原来一模一样。
+        // 底片条每格是一张单独的样张（sample：一份新样式，只带色调、强度、加网、冲印区）：键只要每格的照片、它实际的
+        // 色调和强度、加网（纸色跟底色）、冲印区（量化以后的，和色调表缓存同一档）、路人信息。颗粒、晕光、统一色温、
+        // 边距、字都不进样张 —— 以前键是整个工程的指纹，暗房里拖一下颗粒，底片条整条跟着重渲一遍，渲出来和原来一模一样。
         let cellsKey = zip(cells, settings).map { f, s in
             "\(f.path.map(String.init).joined())=\(f.cell.photoID ?? "")@\(s.look.rawValue):\(s.strength):"
                 + "\(hints[f.cell.photoID ?? ""] != nil)"
         }.joined(separator: ",")
         let halftone = project.style.halftone.map { "\($0)|\(project.style.background)" } ?? ""
-        let key = LaneKey("\(pageIndex)|\(cellsKey)|\(halftone)|\(hints.count)")
+        let key = LaneKey("\(pageIndex)|\(cellsKey)|\(halftone)|\(hints.count)|\(Self.printingKey(project.style))")
         submit("reel", key: key) { [weak self] in
             let reel = await Task.detached(priority: .utility) { () -> [ReelFrame] in
                 zip(cells, settings).map { f, setting in
@@ -722,6 +732,11 @@ final class CollageDarkroom: ObservableObject {
     }
 
     /// 一张照片的样张（3:2，满版，不要边距、底色、水印），套 look / strength。和色调面板的样张同一条路，只是横的。
+    /// 冲印区（胶片曝光、冷暖）跟着工程带上：它烘在色调表里（CollageLooks.cube，一张 0.8 ms），大预览、1:1 细节都有，
+    /// 样张、试条、底片条不带就和点下去的对不上（调过曝光、冷暖再挑一款，样张上看到的不是套上去的样子）。
+    /// 只对光谱色调起作用（滤镜、反转片的曝光照旧不动，同 CollageFilmEffects.Developer）。颗粒、晕光照旧不进样张：
+    /// 样张缩得很小，颗粒平均掉了，每张还多一遍 Core Image。统一色温不进：它是这一页几张照片往主图靠的增益，
+    /// 一张照片的样张没有「别的照片」（CollageLooks.ops 要两张以上），样张默认用的就是主图，大预览里主图也不动。
     nonisolated static func sample(_ photoID: String, base: CollageProject, hints: [String: CollageCrop.Hints],
                                    look: CollageLook, strength: Double, width: Int, height: Int) -> NSImage? {
         var p = base
@@ -730,6 +745,8 @@ final class CollageDarkroom: ObservableObject {
         style.margin = 0
         style.look = look
         style.lookStrength = strength
+        style.filmExposure = base.style.filmExposure
+        style.filmWarmth = base.style.filmWarmth
         if var h = base.style.halftone {
             h.paper = CollageScreening.paper(h, background: base.style.background)
             h.pitch = 0.001
@@ -769,6 +786,13 @@ final class CollageDarkroom: ObservableObject {
         if !wholePage { opts.region = rect }
         guard let cg = CollageRender.render(page: page, project: project, hints: hints, options: opts),
               cg.width == w, cg.height == h, let crop = cg.cropping(to: rect) else { return nil }
-        return NSImage(cgImage: crop, size: NSSize(width: side, height: side))
+        // 裁出来的 CGImage 和整页共用一块内存（dataProvider 是整页的）：直接交出去，1:1 细节开着就一直钉着一整张
+        // 导出尺寸的页面位图（印刷跨页约 100 MB）。画进自己的 side × side 位图（和渲染同一种格式：sRGB、8 位、
+        // 不带 alpha，1:1 不缩放，逐字节就是裁出来的那块），整页随这次渲染一起放掉。
+        guard let ctx = CollageRender.makeContext(width: side, height: side) else { return nil }
+        ctx.interpolationQuality = .none
+        ctx.draw(crop, in: CGRect(x: 0, y: 0, width: side, height: side))
+        guard let own = ctx.makeImage() else { return nil }
+        return NSImage(cgImage: own, size: NSSize(width: side, height: side))
     }
 }

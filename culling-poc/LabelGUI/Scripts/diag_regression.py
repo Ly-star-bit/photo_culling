@@ -4,7 +4,7 @@
 这里验它们在命令行出口上接上了：
 
 1. --diag-export：造一个数据目录（sessions.json 带客户名的场次文件夹和 bookmark、场次 JSON、客户备注、预览图、带路径的日志）
-   和一个崩溃报告目录 → zip 里有说明 / 诊断信息 / 提示 / 场次概况 / 目录结构 / 日志 / 最近的崩溃报告；没有图片文件、
+   和一个崩溃报告目录 → zip 里有说明 / 诊断信息 / 提示 / 场次概况 / 目录结构 / 光谱胶片的表 / 日志 / 最近的崩溃报告；没有图片文件、
    没有客户原话、bookmark、场次文件夹名、家目录；日志里的路径换成了 <场次 N>。
 1b. --diag-export 的目标已经有东西（文件夹、带结尾斜杠、名字以 .zip 结尾的文件夹、数据目录本身、「.」、已有的文件）→ 退出码 2，
    一个字节都不动；不以 .zip 结尾的新名字也拒绝；还没有的 .zip 照常写。
@@ -163,8 +163,8 @@ def section_export():
     top = {n.split("/")[0] for n in names}
     check(len(top) == 1 and next(iter(top)).startswith("xuanpian-diagnostics-"), f"最外层一个「xuanpian-diagnostics-时间」文件夹：{sorted(top)}")
     rel = sorted(n.split("/", 1)[1] for n in names)
-    want = sorted(["README.txt", "info.txt", "recent-messages.txt", "sessions.txt", "data-dir.txt", "logs/app.log",
-                   "crash-reports/LabelGUI-2026-11-03-101010.ips"])
+    want = sorted(["README.txt", "info.txt", "recent-messages.txt", "sessions.txt", "data-dir.txt", "film-luts.txt",
+                   "logs/app.log", "crash-reports/LabelGUI-2026-11-03-101010.ips"])
     check(rel == want, f"文件正好是这几个（场次 JSON、sessions.json、别的程序的崩溃报告不放）：{rel}")
     listed = [l.strip() for l in r.stdout.splitlines() if l.startswith("  ")]
     check(sorted(listed) == sorted(names), "命令行打印的就是 zip 里的")

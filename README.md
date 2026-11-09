@@ -182,7 +182,7 @@ swift build -c release
 #   渲染件：halftone:dot|line[;点距;网角;锐度;网点增大;墨色;纸色|page] / halftone:none（照片加网，点距相对短边默认 0.004，
 #   不到 3 像素只调影调不出点；page = 纸色跟页面（模糊 / 渐变底跟底色块），深色页配深墨时换成纸白；marks.json 的 halftone 记实际点距、出没出点、
 #   墨色纸色）、border:mat=F6F1E7 / mat:0.07（卡纸边 + 细线）、
-#   paperover:0.5（纸纹压在照片上）/ grain:0.4、sticker:barcode|greasePencil、itemmark:N=circle|cross|dot|cropLine、
+#   paperover:0.5（纸纹压在照片上）/ papergrain:0.4（底下的纸纹；grain: 是光谱胶片的颗粒）、sticker:barcode|greasePencil、itemmark:N=circle|cross|dot|cropLine、
 #   itemcolor:N=C8302A、itemlabel:N=字（条码编的字）；色调多了 newsprint / contrastMono / muted / fineArt
 #   印样 / 底片条：contact:135|645|66|67|auto[;每条帧数;条数;sheet|strip]（这一页改成印样，托盘按拍摄先后排成一卷）/ contact:off、
 #   contactset:键=值;…（upright fill marks cross color roll note edge iso edgeprint jitter tilt margin circles gap…）、

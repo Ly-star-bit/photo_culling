@@ -39,21 +39,39 @@ struct CollageInspector: View {
                 .padding(10)
             }
         }
+        // 滑杆松手 = 这一次拖动结束（CollageSlider 读它，CollageStore.endCoalescing）。
+        .environment(\.collageUndo, store)
     }
 }
 
 // MARK: - 小组件
+
+/// 滑杆松手时要告诉的 store（检视器、暗房在最外层放进环境）：松手 = 一次拖动结束，再拖同一根滑杆是新的一步撤销
+/// （CollageStore.endCoalescing）。放 store 本身不放闭包：闭包每次重算 body 都是新的，读它的滑杆就跟着全部重算。
+private struct CollageUndoKey: EnvironmentKey {
+    static var defaultValue: CollageStore? { nil }
+}
+
+extension EnvironmentValues {
+    var collageUndo: CollageStore? {
+        get { self[CollageUndoKey.self] }
+        set { self[CollageUndoKey.self] = newValue }
+    }
+}
 
 struct CollageSlider: View {
     let label: String
     @Binding var value: Double
     let range: ClosedRange<Double>
     let display: String
+    @Environment(\.collageUndo) private var undo
 
     var body: some View {
         HStack(spacing: 6) {
             Text(label).font(.caption).frame(width: 56, alignment: .leading)
-            Slider(value: $value, in: range)
+            Slider(value: $value, in: range) { editing in
+                if !editing { undo?.endCoalescing() }
+            }
             Text(display).font(.caption).monospacedDigit().frame(width: 44, alignment: .trailing)
         }
     }
@@ -527,7 +545,8 @@ struct CollageStylePanel: View {
                 set: { v in
                     var s = store.project.style
                     s[keyPath: keyPath] = v
-                    store.setStyle(s)
+                    // 连拖合成一步只和同一根滑杆合并（key 是这一项）。
+                    store.setStyle(s, key: keyPath)
                 })
     }
 
@@ -672,7 +691,7 @@ struct CollageStylePanel: View {
                 set: { v in
                     var s = store.project.style
                     s.insets?[keyPath: keyPath] = min(0.4, max(0, v))
-                    store.setStyle(s)
+                    store.setStyle(s, key: keyPath)
                 })
     }
 

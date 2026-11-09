@@ -11,6 +11,8 @@ import Foundation
 /// 5. 强度：这一页还没有自己的色调时拖强度 = 用现在看到的色调 + 新强度给这一页设上；连拖合成一步；
 ///    已经有的（包括模板带的）只改强度，fromTemplate 留着。
 /// 6. 颗粒、晕光、统一色温永远改整组，选「这一格」也一样。
+///    撤销按项、按手势合并：两根滑杆连着拖（0.6 秒以内）是两步；同一根拖、松手（endCoalescing）、再拖是两步；
+///    强度、颗粒来回换，每换一根新开一步。
 /// 7. ←→ 只在这一页签里按先后走、到头绕回，只预览不套用；⏎（apply(focus)）才套用；打开时页签跟着现在的色调。
 /// 8. 原图：所有级别不调色、颗粒晕光统一色温都是 0，版式不变。
 /// 9. 撤销清掉选中以后「这一格」退回上一级；关掉暗房清掉悬停。
@@ -143,6 +145,41 @@ enum CollageDarkroomSelfTest {
         check(store.project.style.filmGrain == 0.6 && store.project.style.filmHalation == 0.3 && store.project.style.harmonize == 0.2,
               "选着「这一格」改颗粒、晕光、统一色温：改的是工程样式")
         check(store.project.pages[0].root.node(at: [0])?.cell?.look == nil, "这一格的色调没被顺手设上")
+
+        // ---------------------------------------------------------------- 6b. 撤销按项、按手势合并
+        print("== 撤销按项、按手势合并")
+        store.endCoalescing()
+        let twoBefore = store.project.style
+        p0 = store.undoPushes
+        album.setStyleValue(\.filmGrain, 0.5)
+        album.setStyleValue(\.filmGrain, 0.52)
+        album.setStyleValue(\.filmHalation, 0.4)
+        album.setStyleValue(\.filmHalation, 0.42)
+        check(store.undoPushes == p0 + 2, "拖完颗粒马上拖晕光（0.6 秒以内）：两步撤销，不并成一步", "\(store.undoPushes - p0) 步")
+        store.undo()
+        check(store.project.style.filmHalation == twoBefore.filmHalation && store.project.style.filmGrain == 0.52,
+              "撤一下：只有晕光回去，颗粒还是拖到的值",
+              String(format: "颗粒 %.2f 晕光 %.2f", store.project.style.filmGrain, store.project.style.filmHalation))
+        store.undo()
+        check(store.project.style == twoBefore, "再撤一下：颗粒也回去")
+        p0 = store.undoPushes
+        album.setStyleValue(\.filmGrain, 0.3)
+        album.setStyleValue(\.filmGrain, 0.33)
+        store.endCoalescing()  // 松手（DarkroomSlider 的 DragGesture.onEnded）
+        album.setStyleValue(\.filmGrain, 0.36)
+        album.setStyleValue(\.filmGrain, 0.4)
+        check(store.undoPushes == p0 + 2, "同一根滑杆拖一下、松手、再拖（0.6 秒以内）：两步撤销", "\(store.undoPushes - p0) 步")
+        store.undo()
+        check(store.project.style.filmGrain == 0.33, "撤一下回到松手时的值",
+              String(format: "%.2f", store.project.style.filmGrain))
+        store.endCoalescing()
+        album.scope = .project
+        p0 = store.undoPushes
+        album.setStrength(0.55)
+        album.setStyleValue(\.filmGrain, 0.45)
+        album.setStrength(0.6)
+        check(store.undoPushes == p0 + 3, "强度、颗粒、强度来回拖：每换一根滑杆新开一步", "\(store.undoPushes - p0) 步")
+        store.endCoalescing()
 
         // ---------------------------------------------------------------- 7. 键盘
         print("== 键盘")

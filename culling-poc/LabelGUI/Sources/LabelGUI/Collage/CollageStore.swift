@@ -181,6 +181,8 @@ final class CollageStore: ObservableObject {
     private var redoStack: [CollageProject] = []
     private var lastUndoPush = Date.distantPast
     private var lastPushCoalesced = false
+    /// 上一次合并的是哪一项（pushUndo 的 key）：换了一项就新开一步。
+    private var lastCoalesceKey: AnyHashable?
     /// 几样改动合成一步撤销的期间（见 asOneUndoStep）：开头已经记过一步，这期间的 pushUndo 都不再记。
     private var undoGroupOpen = false
     /// 真记进撤销栈的次数（合并掉的、组里压住的不算）：不另记撤销的求解落下来时，看发起之后又记过几步。
@@ -1748,10 +1750,10 @@ final class CollageStore: ObservableObject {
         }
     }
 
-    private func mutateRoot(coalesce: Bool = false, _ body: (CollageNode) -> CollageNode) {
+    private func mutateRoot(coalesce: Bool = false, key: AnyHashable? = nil, _ body: (CollageNode) -> CollageNode) {
         guard let root else { return }
         cancelSolveIfRunning()
-        pushUndo(coalesce: coalesce)
+        pushUndo(coalesce: coalesce, key: key)
         setRoot(body(root))
         commitEdit()
     }
@@ -1857,9 +1859,9 @@ final class CollageStore: ObservableObject {
         commitEdit()
     }
 
-    private func updateSelectedCell(coalesce: Bool = false, _ body: (inout CollageCell) -> Void) {
+    private func updateSelectedCell(coalesce: Bool = false, key: AnyHashable? = nil, _ body: (inout CollageCell) -> Void) {
         guard let selection else { return }
-        mutateRoot(coalesce: coalesce) { r in
+        mutateRoot(coalesce: coalesce, key: key) { r in
             var out = r
             out.update(at: selection) { node in
                 guard var cell = node.cell else { return }
@@ -2435,10 +2437,11 @@ final class CollageStore: ObservableObject {
         return newFirst ? .split(axis, share, leaf, node) : .split(axis, 1 - share, node, leaf)
     }
 
-    /// `coalesce`：滑杆、取色器连续拖动合成一步；点色块、选预设、切开关每次一步。
+    /// `coalesce`：滑杆、取色器连续拖动合成一步；点色块、选预设、切开关每次一步。`key`：哪一根滑杆（样式里的那一项，
+    /// 见 pushUndo）—— 两根滑杆连着拖记两步。
     /// `filmDefaults`：换进光谱色调时带上这一款的颗粒 / 晕光起始值（CollageFilmEffects.adoptDefaults）；
     /// 调用方自己明说了颗粒晕光（AI 给了 film_grain / film_halation）时传 false。
-    func setStyle(_ style: CollageStyle, coalesce: Bool = true, filmDefaults: Bool = true) {
+    func setStyle(_ style: CollageStyle, coalesce: Bool = true, key: AnyHashable? = nil, filmDefaults: Bool = true) {
         // 婚礼 fine-art 的边距按这本册子算（预设里是 30×30 的数）；别的样式、自己改过边距的原样。
         var style = CollageStyleFineArt.adapted(style, to: project.canvas) ?? style
         if filmDefaults {
@@ -2448,7 +2451,7 @@ final class CollageStore: ObservableObject {
             style = next.style
         }
         guard style != project.style else { return }
-        pushUndo(coalesce: coalesce)
+        pushUndo(coalesce: coalesce, key: key)
         project.style = style
         // 下次新建拼图沿用：只在你改过之后才记（以前退出时把出厂值写回 state.json）。fine-art 的边距按新建时的画布记
         // （单张画布 = 预设本来的数），不把这本册子重算过的带到下一张拼图上。
@@ -2849,22 +2852,22 @@ final class CollageStore: ObservableObject {
 
     // MARK: - 分层色调
 
-    /// 这一页单独的色调（nil = 跟整个工程）。
-    func setPageLook(_ look: CollageLookSetting?, coalesce: Bool = false) {
+    /// 这一页单独的色调（nil = 跟整个工程）。`key`：同 setStyle（暗房拖这一页的强度）。
+    func setPageLook(_ look: CollageLookSetting?, coalesce: Bool = false, key: AnyHashable? = nil) {
         guard project.pages.indices.contains(pageIndex), project.pages[pageIndex].look != look else { return }
         let before = project
-        pushUndo(coalesce: coalesce)
+        pushUndo(coalesce: coalesce, key: key)
         project.pages[pageIndex].look = look
         // 换进光谱色调：颗粒晕光的起始值记在整组上，和这一下是同一步撤销。
         CollageFilmEffects.adoptDefaults(before: before, into: &project, look: look?.look)
         commitEdit()
     }
 
-    /// 选中格子单独的色调（nil = 跟页面）。只对照片格。
-    func setCellLook(_ look: CollageLookSetting?, coalesce: Bool = false) {
+    /// 选中格子单独的色调（nil = 跟页面）。只对照片格。`key`：同 setStyle（暗房拖这一格的强度）。
+    func setCellLook(_ look: CollageLookSetting?, coalesce: Bool = false, key: AnyHashable? = nil) {
         guard selectedCell?.kind == .photo, selectedCell?.look != look else { return }
         let before = project
-        updateSelectedCell(coalesce: coalesce) { $0.look = look }
+        updateSelectedCell(coalesce: coalesce, key: key) { $0.look = look }
         // 同 setPageLook：同一步撤销（快照是 updateSelectedCell 记的，这里接着改不另记）。
         var next = project
         CollageFilmEffects.adoptDefaults(before: before, into: &next, look: look?.look)
@@ -3426,14 +3429,19 @@ final class CollageStore: ObservableObject {
 
     /// coalesce：滑杆连续拖动 0.6 秒内只记一次。只和紧挨着的上一次「也是连续调整」的合并 ——
     /// 刚点完「换一批」马上拖滑杆，不能把滑杆的改动并进换一批那一步（撤销会一次退两步）。
-    private func pushUndo(coalesce: Bool = false) {
+    /// key：改的是哪一项（样式里的那一项、这一页 / 这一格的强度……），只和同一项合并：拖完颗粒马上拖晕光，以前 0.6 秒
+    /// 以内就并成一步，撤一下两根滑杆一起回去。没给 key 的（打字、拖图层、取色器……）照旧只和没给 key 的合并。
+    /// 滑杆松手时调 endCoalescing（暗房的滑杆、检视器的 CollageSlider）：同一根滑杆松手再拖是新的一步。时间窗留着
+    /// 兜底：键盘连按、没有「编辑结束」回调的地方，停手 0.6 秒照旧算新的一步（一次拖动中途停住超过 0.6 秒也会拆开）。
+    private func pushUndo(coalesce: Bool = false, key: AnyHashable? = nil) {
         guard !undoGroupOpen else { return }
         let now = Date()
-        if coalesce, lastPushCoalesced, now.timeIntervalSince(lastUndoPush) < 0.6 {
+        if coalesce, lastPushCoalesced, key == lastCoalesceKey, now.timeIntervalSince(lastUndoPush) < 0.6 {
             lastUndoPush = now
             return
         }
         lastPushCoalesced = coalesce
+        lastCoalesceKey = coalesce ? key : nil
         lastUndoPush = now
         undoStack.append(project)
         undoPushes += 1
@@ -3459,6 +3467,12 @@ final class CollageStore: ObservableObject {
             redoStack = redo
             updateUndoFlags()
         }
+    }
+
+    /// 一次手势结束（滑杆松手）：下一次连续调整从新的一步开始，不并进刚才那一下（就算同一根滑杆、0.6 秒以内）。
+    func endCoalescing() {
+        lastPushCoalesced = false
+        lastCoalesceKey = nil
     }
 
     func undo() {
