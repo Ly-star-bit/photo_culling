@@ -193,7 +193,8 @@ struct CollageLookBox: View {
                 set: { v in
                     var s = store.project.style
                     s[keyPath: keyPath] = v
-                    store.setStyle(s)
+                    // 连拖合成一步只和同一根滑杆合并（key 是这一项）：拖完颗粒马上拖晕光是两步撤销。
+                    store.setStyle(s, key: keyPath)
                 })
     }
 

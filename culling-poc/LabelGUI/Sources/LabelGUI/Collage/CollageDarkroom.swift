@@ -319,21 +319,22 @@ final class CollageDarkroom: ObservableObject {
 
     /// 强度：同一级上改；这一页 / 这一格还没有自己的色调时，用现在看到的色调 + 新强度给它设上。
     /// 已经有的就只改强度（模板带的 fromTemplate 留着：换模板时它照旧不跟着照片走）。
+    /// 连拖合成一步只和同一级的强度合并（撤销的 key：整组是样式里的强度，这一页 / 这一格带上是哪一页、哪一格）。
     func setStrength(_ value: Double, coalesce: Bool = true) {
         let v = min(1, max(0, value))
         switch effectiveScope {
         case .project:
             var st = store.project.style
             st.lookStrength = v
-            store.setStyle(st, coalesce: coalesce)
+            store.setStyle(st, coalesce: coalesce, key: \CollageStyle.lookStrength)
         case .page:
             var s = store.page?.look ?? CollageLookSetting(look: current.look, strength: v)
             s.strength = v
-            store.setPageLook(s, coalesce: coalesce)
+            store.setPageLook(s, coalesce: coalesce, key: "页的强度 \(store.page?.id.uuidString ?? "")")
         case .cell:
             var s = store.selectedCell?.look ?? CollageLookSetting(look: current.look, strength: v)
             s.strength = v
-            store.setCellLook(s, coalesce: coalesce)
+            store.setCellLook(s, coalesce: coalesce, key: "格的强度 \(store.page?.id.uuidString ?? "") \(store.selection ?? [])")
         }
     }
 
@@ -347,11 +348,12 @@ final class CollageDarkroom: ObservableObject {
     }
 
     /// 颗粒、晕光、统一色温、冲印区：整组的。range = 这一项的取值范围（胶片曝光 −1…+2、冷暖 −1…+1）。
+    /// 连拖合成一步只和同一项合并（撤销的 key 就是这一项的 keyPath）：拖完颗粒马上拖晕光是两步。
     func setStyleValue(_ keyPath: WritableKeyPath<CollageStyle, Double>, _ value: Double,
                        range: ClosedRange<Double> = 0...1) {
         var st = store.project.style
         st[keyPath: keyPath] = min(range.upperBound, max(range.lowerBound, value))
-        store.setStyle(st, coalesce: true)
+        store.setStyle(st, coalesce: true, key: keyPath)
     }
 
     /// 画幅（整组的）：一次一步。

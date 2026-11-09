@@ -37,6 +37,8 @@ struct CollageDarkroomView: View {
         }
         .background(DarkroomPalette.shell)
         .environment(\.colorScheme, .dark)
+        // 滑杆松手 = 这一次拖动结束（DarkroomSlider 读它，CollageStore.endCoalescing）。
+        .environment(\.collageUndo, store)
         .focusable()
         .focused($focused)
         .focusEffectDisabled()
@@ -151,6 +153,8 @@ private struct DarkroomSlider: View {
     var display: (Double) -> String = { "\(Int(($0 * 100).rounded()))%" }
     let set: (Double) -> Void
     var help: String = ""
+    /// 松手时告诉 store：再拖是新的一步撤销（拖着的时候连成一步）。
+    @Environment(\.collageUndo) private var undo
 
     var body: some View {
         let lo = range.lowerBound, hi = range.upperBound
@@ -192,6 +196,8 @@ private struct DarkroomSlider: View {
                 .gesture(DragGesture(minimumDistance: 0).onChanged { g in
                     let t = Double(min(1, max(0, (g.location.x - knob / 2) / travel)))
                     set(lo + t * (hi - lo))
+                }.onEnded { _ in
+                    undo?.endCoalescing()
                 })
             }
             .frame(height: labelled ? 38 : 24)
@@ -203,7 +209,9 @@ private struct DarkroomSlider: View {
         }
         .help(help)
         .accessibilityRepresentation {
-            Slider(value: Binding(get: { value }, set: set), in: range) { Text(label) }
+            Slider(value: Binding(get: { value }, set: set), in: range) { Text(label) } onEditingChanged: { editing in
+                if !editing { undo?.endCoalescing() }
+            }
         }
     }
 }
