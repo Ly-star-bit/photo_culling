@@ -316,7 +316,12 @@ TOOLS_ALL = ["app_status", "cull_list_sessions", "collage_list_templates", "cull
             "cull_get_photos", "cull_list_groups", "cull_preview_photos", "collage_get_state", "app_open_session",
             "cull_set_verdicts", "cull_show_photos", "collage_apply_template", "collage_run_kit", "collage_next_cover",
             "collage_set_text", "collage_set_style", "app_undo", "collage_save_variant", "collage_open_variant",
-            "collage_export", "collage_set_layout", "collage_auto_layout", "cull_import_client_picks"]
+            "collage_export", "collage_set_layout", "collage_auto_layout", "cull_import_client_picks",
+            # 相册整本（相册 A + B 第 2 波 · M）：接在最后，不动旧编号
+            "collage_pages", "collage_move_photos", "collage_replace_photo", "collage_preflight", "collage_print_spec",
+            "collage_cover"]
+# 只读的：前 9 个 + 导出前检查（第 28 个）
+READ_ONLY = set(TOOLS_ALL[:9]) | {"collage_preflight"}
 ALWAYS = TOOLS_ALL[:3]
 APP_TOOLS = TOOLS_ALL[3:]
 # 描述里出现的 app_* / cull_* / collage_* 名字里，这些是错误码不是工具。
@@ -681,7 +686,7 @@ s.request("tl", "tools/list")
 tl = s.reply("tl")
 tools = (tl or {}).get("result", {}).get("tools", [])
 names = [t.get("name") for t in tools]
-check(names == TOOLS_ALL, f"tools/list 恰好 24 个、顺序同 §10.1（再接方案栏的 2 个、导出、设计版式的 2 个和导入客户选择）：{names}")
+check(names == TOOLS_ALL, f"tools/list 恰好 30 个、顺序同 §10.1（再接方案栏的 2 个、导出、设计版式的 2 个、导入客户选择和相册整本的 6 个）：{names}")
 TL_LIVE = tools
 
 
@@ -782,8 +787,21 @@ def check_tool_list(tools, instructions, expect, label):
 check_tool_list(TL_LIVE, INSTRUCTIONS, TOOLS_ALL, "LIVE")
 by_name = {t["name"]: t for t in TL_LIVE}
 ro = {n for n, t in by_name.items() if t["annotations"]["readOnlyHint"]}
-check(ro == set(TOOLS_ALL[:9]), f"只读的是第 1–9 个：{sorted(ro)}")
+check(ro == READ_ONLY, f"只读的是第 1–9 个和第 28 个（collage_preflight）：{sorted(ro)}")
 check([n for n, t in by_name.items() if t["annotations"]["destructiveHint"]] == ["app_open_session"], "只有 app_open_session 是 destructive")
+# README 的放行清单跟着工具走（用户照抄那段 JSON：加了工具忘了加就红）：除 app_open_session 以外全在、不重复。
+# 工具表的标题和行只打一行提醒（表的排版改了不该让 MCP 冒烟红）
+README = os.path.join(os.path.dirname(os.path.dirname(ROOT)), "README.md")
+if os.path.isfile(README):
+    readme = open(README, encoding="utf-8").read()
+    allowed = re.findall(r'"mcp__xuanpian__([a-z_]+)"', readme)
+    check(sorted(allowed) == sorted(set(TOOLS_ALL) - {"app_open_session"}) and len(allowed) == len(set(allowed)),
+          f"README 的放行清单 {len(allowed)} 个：除了 app_open_session 全在、不重复")
+    rows = [n for _, n in re.findall(r"^\| (\d+) \| `([a-z_]+)`", readme, re.M)]
+    if f"### {len(TOOLS_ALL)} 个工具" not in readme or rows != TOOLS_ALL:
+        print(f"  提醒：README 的工具表（标题「{len(TOOLS_ALL)} 个工具」、一行一个）和 tools/list 对不上，记得改：{rows}")
+else:
+    print(f"  （没找到 {README}：README 那一条不查）")
 # 概览的 xmp：上次写 XMP 的记录读不进来时照实说不知道（null + unknown + xmp_state_unknown），说明里写着，AI 才不会当成没写过
 ov_desc = by_name["cull_session_overview"]["description"]
 check("xmp.unknown" in ov_desc and "xmp_state_unknown" in ov_desc and "null" in ov_desc,
@@ -1263,7 +1281,7 @@ if not PROTOCOL_ONLY:
           "参数不对 → invalid_argument（limit:0、limit:true、app_status 带参数）")
     res, lt, lt_text = s.tool("a6", "collage_list_templates")
     check_templates(s, lt, lt_text)
-    # 18 个要 app 的工具：带合理参数、也带空参数，一律 app_not_running + hint（§10.2）
+    # 27 个要 app 的工具：带合理参数、也带空参数，一律 app_not_running + hint（§10.2）
     sample = {"session": KEY, "ids": ["DSCF7208"], "kind": "scene", "verdict": "pick", "template": "时尚刊",
               "kit": "fashionIssue", "target": "collage"}
     wrong = []
@@ -1274,7 +1292,7 @@ if not PROTOCOL_ONLY:
             if not (res.get("isError") and (b or {}).get("error", {}).get("code") == "app_not_running"
                     and (b or {}).get("error", {}).get("hint")):
                 wrong.append(n)
-    check(not wrong, f"18 个要 app 的工具都回 app_not_running、带 hint {sorted(set(wrong))}")
+    check(not wrong, f"{len(APP_TOOLS)} 个要 app 的工具都回 app_not_running、带 hint {sorted(set(wrong))}")
     rc, dt = s.close()
     socks = [os.path.join(dp, f) for dp, _, fs in os.walk(SOCK_ROOT) for f in fs]
     check(not socks, f"socket 根目录里什么都没有：{socks}")

@@ -539,12 +539,14 @@ APP_TOOLS = ["cull_session_overview", "cull_list_photos", "cull_get_photos", "cu
              "collage_get_state", "app_open_session", "cull_set_verdicts", "cull_show_photos", "collage_apply_template",
              "collage_run_kit", "collage_next_cover", "collage_set_text", "collage_set_style", "app_undo",
              "collage_save_variant", "collage_open_variant", "collage_export", "collage_set_layout", "collage_auto_layout",
-             "cull_import_client_picks"]
-# hello 里的 capabilities（§10.4 的 12 个 + 方案栏的 2 个 + 导出 + 设计版式的 2 个 + 导入客户选择，按名字排）
+             "cull_import_client_picks", "collage_pages", "collage_move_photos", "collage_replace_photo", "collage_preflight",
+             "collage_print_spec", "collage_cover"]
+# hello 里的 capabilities（§10.4 的 12 个 + 方案栏的 2 个 + 导出 + 设计版式的 2 个 + 导入客户选择 + 相册整本的 6 个，按名字排）
 ALL_CAPS = sorted(["cull.read", "cull.preview", "collage.state", "session.open", "cull.set_verdicts", "cull.show",
                    "collage.apply_template", "collage.run_kit", "collage.next_cover", "collage.set_text", "collage.set_style",
                    "undo", "collage.save_variant", "collage.open_variant", "collage.export", "collage.set_layout",
-                   "collage.auto_layout", "cull.import_client_picks"])
+                   "collage.auto_layout", "cull.import_client_picks", "collage.pages", "collage.move_photos",
+                   "collage.replace_photo", "collage.preflight", "collage.print_spec", "collage.cover"])
 
 
 def minimal_args(tool, session):
@@ -572,6 +574,15 @@ def minimal_args(tool, session):
         a["layout"] = {"photo": "DSCF7208"}
     if tool == "cull_import_client_picks":
         a["text"] = "DSCF7208"
+    if tool == "collage_pages":
+        a["action"] = "go"
+        a["page"] = 1
+    if tool == "collage_move_photos":
+        a["photos"] = ["DSCF7208"]
+        a["to"] = 1
+    if tool == "collage_replace_photo":
+        a["path"] = ""
+        a["with"] = "DSCF7208"
     return a
 
 
@@ -844,6 +855,391 @@ def edata(body):
     return ((body or {}).get("error") or {}).get("data") or {}
 
 
+# ---------------------------------------------------------------- 相册整本（M 组；相册 A + B 第 2 波 · M）
+
+def album_section():
+    """相册整本的 6 个工具 + 并进旧工具的参数，经 --mcp 驱动一个合成图宿主（照片 6 张，排出来的跨页数不定：不够的用
+    collage_pages add 补；有的前提不成立就 skip、说清楚为什么）。每个写都核对撤销栈（一步）、app_undo 回到原样。"""
+    syn = synth_session("M")
+    h = Host("M", data=syn["data"], photos=syn["dir"])
+    env = h.env()
+    key = syn["key"]
+    ids = syn["ids"]
+
+    def st():
+        return state(h)
+
+    def settled(timeout=60):
+        deadline = time.monotonic() + timeout * SLACK
+        s_ = st()
+        while s_.get("hints_pending") and time.monotonic() < deadline:
+            time.sleep(0.2)
+            s_ = st()
+        return s_
+
+    def w(tool, args, timeout=90):
+        out_, body_, _ = mcp_full(env, tool, {"session": key, **args}, timeout)
+        return out_, body_ or {}
+
+    def get(**extra):
+        return mcp_call(env, "collage_get_state", {"session": key, "include_preview": False, **extra})[1] or {}
+
+    def steps(x, y):
+        return y["collage_undo"]["pushes"] - x["collage_undo"]["pushes"]
+
+    def spreads(g):
+        return (g.get("album") or {}).get("spreads") or []
+
+    def where(g, pid):
+        return [s_["page"] for s_ in spreads(g) if pid in (s_.get("photos") or [])]
+
+    def undo():
+        return mcp_full(env, "app_undo", {"target": "collage"})[1] or {}
+
+    try:
+        # ---------- 还不是相册：跨页类、印厂规格、封面的写都说清楚为什么不行（照片先进托盘）
+        w("collage_set_layout", {"layout": {"split": "row", "items": [{"photo": i} for i in ids[:2]]}})
+        w("collage_set_layout", {"layout": {"split": "row", "items": [{"photo": i} for i in ids[2:4]]}})
+        w("collage_set_layout", {"layout": {"split": "row", "items": [{"photo": i} for i in ids[4:6]]}})
+        settled()
+        _, n1 = w("collage_pages", {"action": "lock"})
+        _, n2 = w("collage_print_spec", {"spec": "sq25-flat"})
+        _, n3 = w("collage_cover", {"action": "make"})
+        _, n4 = w("collage_export", {"proof": True})
+        check(all(err_code(x) == "invalid_state" for x in (n1, n2, n3, n4)),
+              f"单张拼图：锁跨页、套印厂规格、做封面、看版 PDF 都回 invalid_state（{err_code(n1)} {err_code(n2)} {err_code(n3)} {err_code(n4)}）")
+        _, kit = w("collage_run_kit", {"kit": "weddingAlbum"}, timeout=150)
+        g0 = get()
+        if g0.get("mode") != "album" or not spreads(g0):
+            skip(f"整本婚礼相册没排出来（{err_code(kit)}，{g0.get('mode')}，{len(spreads(g0))} 个跨页）：相册整本那一组跳过")
+            return
+        settled()
+        # 至少 3 个跨页：不够就在最后补空跨页
+        while len(spreads(get())) < 3:
+            w("collage_pages", {"action": "add", "page": len(spreads(get()))})
+        g0 = get()
+        n = len(spreads(g0))
+        album0 = g0.get("album") or {}
+        check(len(spreads(g0)) == g0.get("pages") and g0.get("editing_cover") is False
+              and [s_["page"] for s_ in spreads(g0)] == list(range(1, n + 1))
+              and all(isinstance(s_.get("photos"), list) and s_.get("locked") is False for s_ in spreads(g0))
+              and (album0.get("print") or {}).get("pages_p") == 2 * n and (album0.get("cover") or {}).get("exists") is False,
+              f"collage_get_state 的 album：{n} 个跨页、每个的照片和锁、印厂规格的页数（{(album0.get('print') or {}).get('page_problem')}）、还没封面")
+
+        # ---------- 翻页：不进撤销，画面换了；越界说一共几个
+        s0 = st()
+        _, go2 = w("collage_pages", {"action": "go", "page": 2})
+        s1 = st()
+        _, go99 = w("collage_pages", {"action": "go", "page": 99})
+        check(go2.get("page") == 2 and go2.get("view_changed") is True and go2.get("changed") is False and steps(s0, s1) == 0
+              and ((s1.get("collage") or {}).get("notice") or "").startswith("AI：翻到第 2")
+              and err_code(go99) == "invalid_argument" and f"一共 {n}" in ((go99.get("error") or {}).get("message") or ""),
+              f"翻到第 2 个跨页：不进撤销（{steps(s0, s1)} 步），状态栏有提示；第 99 个 → invalid_argument（{err_code(go99)}）")
+
+        # ---------- 加一个空跨页、删掉、挪
+        s0 = st()
+        _, add = w("collage_pages", {"action": "add", "page": 1})
+        s1 = st()
+        ga = get()
+        check(add.get("changed") is True and steps(s0, s1) == 1 and ga.get("pages") == n + 1 and ga.get("page") == 2
+              and spreads(ga)[1].get("photos") == [],
+              f"在第 1 个后面加一个空跨页：一步撤销，翻到了第 2 个（{ga.get('page')}），那一页没有照片")
+        _, dl = w("collage_pages", {"action": "delete", "pages": "2"})
+        gd = get()
+        check(dl.get("changed") is True and gd.get("pages") == n and [s_["photos"] for s_ in spreads(gd)] == [s_["photos"] for s_ in spreads(g0)],
+              "删掉刚加的那个：回到原来的几个跨页")
+        _, dl_all = w("collage_pages", {"action": "delete", "pages": f"1-{n}"})
+        check(err_code(dl_all) == "invalid_argument" and get().get("pages") == n, f"不能全删（{err_code(dl_all)}）")
+        order0 = [s_["photos"] for s_ in spreads(g0)]
+        s0 = st()
+        _, mv = w("collage_pages", {"action": "move", "pages": "1", "to": n})
+        s1 = st()
+        gm = get()
+        check(mv.get("changed") is True and steps(s0, s1) == 1 and [s_["photos"] for s_ in spreads(gm)] == order0[1:] + order0[:1],
+              f"第 1 个跨页挪到第 {n} 个：一步撤销，顺序 {[len(x) for x in order0]} → {[len(s_['photos']) for s_ in spreads(gm)]}")
+        _, mv_back = w("collage_pages", {"action": "move", "pages": str(n), "to": 1})
+        _, mv_bad = w("collage_pages", {"action": "move", "pages": "1-2", "to": n})
+        check([s_["photos"] for s_ in spreads(get())] == order0 and err_code(mv_bad) == "invalid_argument",
+              f"挪回来顺序还原；两个跨页挪到第 {n} 个开始越界 → invalid_argument（{err_code(mv_bad)}）")
+
+        # ---------- 锁住 / 解锁：album.locked 跟着变，已经是这样就不压步
+        s0 = st()
+        _, lk = w("collage_pages", {"action": "lock", "pages": "1-2"})
+        s1 = st()
+        _, lk2 = w("collage_pages", {"action": "lock", "pages": "1-2"})
+        s2 = st()
+        check(lk.get("changed") is True and steps(s0, s1) == 1 and (get().get("album") or {}).get("locked") == [1, 2]
+              and lk2.get("changed") is False and s2["collage_undo"]["depth"] == s1["collage_undo"]["depth"],
+              "锁住第 1–2 个跨页：一步撤销，album.locked = [1, 2]；再锁一次 changed:false、不压步")
+        _, ul = w("collage_pages", {"action": "unlock", "pages": "1-2"})
+        check(ul.get("changed") is True and (get().get("album") or {}).get("locked") == [], "解锁回来")
+
+        # ---------- 镜像：格子左右对调，照片不变；app_undo 回到原样
+        target = next((s_["page"] for s_ in spreads(get()) if len(s_.get("photos") or []) >= 2), None)
+        if target:
+            w("collage_pages", {"action": "go", "page": target})
+            gb = get()
+            s0 = st()
+            _, mr = w("collage_pages", {"action": "mirror"})
+            s1 = st()
+            gm = get()
+            rects0 = {c.get("photo_id"): c.get("rect") for c in gb.get("cells") or []}
+            rects1 = {c.get("photo_id"): c.get("rect") for c in gm.get("cells") or []}
+            flipped = all(abs((r0[0] + r0[2] / 2) - (1 - (rects1[p][0] + rects1[p][2] / 2))) < 0.01
+                          for p, r0 in rects0.items() if p and r0 and rects1.get(p))
+            u = undo()
+            check(mr.get("changed") is True and steps(s0, s1) == 1 and set(rects0) == set(rects1) and flipped
+                  and "error" not in u and st()["edit_digest"] == s0["edit_digest"],
+                  f"镜像第 {target} 个跨页：每格中心 x → 1 − x、照片不变，一步撤销；app_undo 回到原样")
+        else:
+            skip("没有放了两张以上的跨页：镜像那一条跳过")
+        # 几个跨页一起镜像：mirrorPage 每页各 commitEdit 一次，整次调用照样一步撤销，一次 app_undo 几页都回去
+        s0 = st()
+        _, mr2 = w("collage_pages", {"action": "mirror", "pages": "1-3"})
+        s1 = st()
+        u = undo()
+        check(mr2.get("changed") is True and steps(s0, s1) == 1 and mr2.get("targets") == [1, 2, 3] and "error" not in u
+              and st()["edit_digest"] == s0["edit_digest"],
+              f"镜像第 1–3 个跨页：一步撤销（{steps(s0, s1)} 步），一次 app_undo 三页都回去")
+
+        # ---------- 单边换版式：找一边有两张以上的跨页；照片不变、一步撤销；只有一张的那一边 invalid_state。
+        # 婚礼编排的跨页常常一边只有一张：都换不了时，把托盘里没上版的和一个两张的跨页上的挪到最后新加的空跨页，凑一页多张的再试
+        def try_sides(g):
+            out = []
+            for s_ in spreads(g):
+                for side in ("left", "right"):
+                    s0_ = st()
+                    _, sl_ = w("collage_pages", {"action": "side_layout", "page": s_["page"], "side": side}, timeout=120)
+                    out.append((s_["page"], side, err_code(sl_)))
+                    if sl_.get("changed") is True:
+                        return (s_["page"], side, sl_, s0_, st()), out
+            return None, out
+
+        g_pre = get()
+        done, tried = try_sides(g_pre)
+        if not done:
+            spare = [p.get("id") for p in get().get("tray_photos") or [] if not p.get("used")]
+            pair = next((s_ for s_ in spreads(g_pre) if len(s_.get("photos") or []) >= 2), None)
+            w("collage_pages", {"action": "add", "page": len(spreads(g_pre))})
+            last = len(spreads(get()))
+            if spare:
+                w("collage_move_photos", {"photos": spare, "to": last}, timeout=120)
+            if pair:
+                w("collage_move_photos", {"photos": pair["photos"], "to": last}, timeout=120)
+            g_pre = get()
+            done, more = try_sides(g_pre)
+            tried += more
+        if done:
+            page_, side, sl, s0, s1 = done
+            g_sl = get()
+            check(steps(s0, s1) == 1 and g_sl.get("page") == page_ and sl.get("action") == "side_layout"
+                  and set(where_all(g_sl, page_)) == set(where_all(g_pre, page_)) and g_sl.get("layout") is not None,
+                  f"第 {page_} 个跨页的{side}换了一种切法：一步撤销、照片没变（{tried}）")
+            _, sl2 = w("collage_pages", {"action": "side_layout", "side": side, "step": -1})
+            check(sl2.get("changed") is True or err_code(sl2) == "invalid_state",
+                  f"往回轮一种：缓存里同步换（{sl2.get('changed')} {err_code(sl2)}）")
+        else:
+            skip(f"没有一边能换切法的跨页（{tried}）：单边换版式那一条只核对了都回 invalid_state")
+            check(all(c == "invalid_state" for _, _, c in tried), f"换不了的都回 invalid_state：{tried}")
+
+        # ---------- 照片挪到别的跨页：从一个跨页挪到新加的空跨页，一步撤销；app_undo 挪回去
+        g1 = get()
+        src = next((s_ for s_ in spreads(g1) if len(s_.get("photos") or []) >= 2), None)
+        if src:
+            w("collage_pages", {"action": "add", "page": len(spreads(g1))})
+            g2 = get()
+            last = len(spreads(g2))
+            pid = src["photos"][0]
+            s0 = settled()
+            _, mp = w("collage_move_photos", {"photos": [pid], "to": last}, timeout=120)
+            s1 = st()
+            g3 = get()
+            check(mp.get("changed") is True and steps(s0, s1) == 1 and where(g3, pid) == [last] and mp.get("from") == src["page"]
+                  and mp.get("to") == last and where(mp, pid) == [last],
+                  f"{pid} 从第 {src['page']} 个跨页挪到第 {last} 个：一步撤销，结果里的 album.spreads 已经是挪完的（{err_code(mp)} {(mp.get('error') or {}).get('message')}）")
+            _, again = w("collage_move_photos", {"photos": [pid], "to": last})
+            check(again.get("changed") is False and again.get("already_there") == [pid], "已经在那个跨页上：changed:false、列在 already_there")
+            u = undo()
+            check("error" not in u and where(get(), pid) == [src["page"]], f"app_undo：{pid} 回到第 {src['page']} 个跨页")
+            other = next((s_ for s_ in spreads(get()) if s_["page"] != src["page"] and s_.get("photos")), None)
+            if other:
+                _, mixed = w("collage_move_photos", {"photos": [src["photos"][0], other["photos"][0]], "to": last})
+                check(err_code(mixed) == "invalid_argument", f"两个跨页上的照片一起挪 → invalid_argument（{err_code(mixed)}）")
+            _, bad_to = w("collage_move_photos", {"photos": [pid], "to": 99})
+            _, bad_id = w("collage_move_photos", {"photos": ["没有这张"], "to": 1})
+            check(err_code(bad_to) == "invalid_argument" and err_code(bad_id) == "invalid_argument",
+                  f"跨页号越界、照片不在托盘 → invalid_argument（{err_code(bad_to)} {err_code(bad_id)}）")
+            w("collage_pages", {"action": "delete", "pages": str(last)})
+        else:
+            skip("没有放了两张以上的跨页：挪照片那几条跳过")
+
+        # ---------- 换照片：候选在 collage_get_state 里；换成别的跨页上的 = 两格对调，一步撤销
+        g4 = get()
+        here_page = next((s_ for s_ in spreads(g4) if s_.get("photos") and s_.get("kind") == "grid"), None)
+        cell = None
+        if here_page:
+            w("collage_pages", {"action": "go", "page": here_page["page"]})
+            g5 = get()
+            cell = next((c for c in g5.get("cells") or [] if c.get("kind") == "photo" and c.get("photo_id")), None)
+        if here_page and cell:
+            cands = get(candidates_for=cell["photo_id"], candidates_limit=5).get("candidates") or {}
+            rows = cands.get("rows")
+            check(cands.get("photo") == cell["photo_id"] and isinstance(rows, list) and len(rows) <= 5
+                  and all(r_.get("reason") in ("burst", "take", "similar") and "score" in r_ and "page" in r_ for r_ in rows),
+                  f"candidates_for：理由 burst / take / similar、分数、在第几个跨页（{len(rows or [])} 个）")
+            other_page = next((s_ for s_ in spreads(g5) if s_["page"] != here_page["page"] and s_.get("photos")), None)
+            if other_page:
+                newcomer = other_page["photos"][0]
+                s0 = st()
+                _, rp = w("collage_replace_photo", {"path": cell["path"], "with": newcomer})
+                s1 = st()
+                g6 = get()
+                check(rp.get("changed") is True and steps(s0, s1) == 1 and where(g6, newcomer) == [here_page["page"]]
+                      and where(g6, cell["photo_id"]) == [other_page["page"]] and (rp.get("swapped") or {}).get("page") == other_page["page"],
+                      f"换成第 {other_page['page']} 个跨页上的 {newcomer}：两格对调、一步撤销（{err_code(rp)} {rp.get('swapped')}）")
+                u = undo()
+                check("error" not in u and where(get(), newcomer) == [other_page["page"]], "app_undo：对调回去")
+            else:
+                skip("只有一个跨页有照片：对调那一条跳过")
+            _, rp_bad = w("collage_replace_photo", {"path": cell["path"], "with": "没有这张"})
+            _, rp_path = w("collage_replace_photo", {"path": "7777", "with": cell["photo_id"]})
+            check(err_code(rp_bad) == "invalid_argument" and err_code(rp_path) == "invalid_argument",
+                  f"托盘里没有的照片、不存在的格子 → invalid_argument（{err_code(rp_bad)} {err_code(rp_path)}）")
+        else:
+            skip("没有放了照片的跨页：换照片那几条跳过")
+
+        # ---------- 导出前检查：拦和提醒分开，页数不合规是「拦」（几个跨页 < 20P）；只读；pages 写错 invalid_argument
+        s0 = st()
+        _, pf, _ = mcp_call(env, "collage_preflight", {"session": key})
+        _, pf_fast, _ = mcp_call(env, "collage_preflight", {"session": key, "texts": False, "pages": "1"})
+        _, pf_bad, _ = mcp_call(env, "collage_preflight", {"session": key, "pages": "99"})
+        pf = pf or {}
+        rows = (pf.get("blocks") or []) + (pf.get("warnings") or [])
+        check("page_count" in [r_.get("kind") for r_ in pf.get("blocks") or []] and pf.get("export_would_ask") is not None
+              and all({"kind", "severity", "message", "page", "path"} <= set(r_) for r_ in rows)
+              and (pf_fast or {}).get("pages") == [1] and err_code(pf_bad) == "invalid_argument"
+              and st()["edit_digest"] == s0["edit_digest"],
+              f"collage_preflight：{pf.get('summary')}（页数不合规在 blocks 里，导出按钮会问）；pages=1 只看第 1 个；写错 invalid_argument；什么都没改")
+
+        # ---------- 印厂规格：读、套一套（尺寸、装订一起换，一步撤销）、改页数规则；app_undo 回去
+        s0 = st()
+        _, ps = w("collage_print_spec", {})
+        specs = ps.get("specs") or []
+        check(ps.get("changed") is False and any(x.get("key") == "sq25-glued" for x in specs) and (ps.get("current") or {}).get("name")
+              and st()["edit_digest"] == s0["edit_digest"],
+              f"collage_print_spec 不给参数：只读，现在是「{(ps.get('current') or {}).get('name')}」，{len(specs)} 套规格")
+        _, ps2 = w("collage_print_spec", {"spec": "sq25-glued"})
+        s1 = st()
+        cur = ps2.get("current") or {}
+        check(ps2.get("changed") is True and steps(s0, s1) == 1 and cur.get("binding") == "glued" and cur.get("spec") == "sq25-glued",
+              f"套「方册 25×25 胶装」：一步撤销，装订换成胶装（{cur.get('binding')} {cur.get('spec')}）")
+        pages_now = get().get("pages") or 0
+        _, ps3 = w("collage_print_spec", {"min_pages": 2, "max_pages": 400, "page_step": 2, "color": "adobe_rgb"})
+        cur3 = ps3.get("current") or {}
+        check(ps3.get("changed") is True and cur3.get("page_problem") is None and cur3.get("color") == "adobe_rgb"
+              and cur3.get("min_pages") == 2 and cur3.get("pages_p") == 2 * pages_now,
+              f"改页数规则 2–400P、Adobe RGB：现在 {pages_now} 个跨页合规（{cur3.get('page_problem')}）")
+        _, ps4 = w("collage_print_spec", {"fold_mm": 8})
+        _, ps5 = w("collage_print_spec", {"auto": ["fold_mm"]})
+        c4, c5 = ps4.get("current") or {}, ps5.get("current") or {}
+        check(c4.get("fold_mm") == 8 and c4.get("fold_auto") is False and c5.get("fold_auto") is True,
+              f"中缝带改成每侧 8mm，再 auto 改回自动（{c4.get('fold_mm')} {c4.get('fold_auto')} → {c5.get('fold_auto')}）")
+        _, ps_bad = w("collage_print_spec", {"spec": "没有这套"})
+        _, ps_bad2 = w("collage_print_spec", {"min_pages": 40, "max_pages": 20})
+        check(err_code(ps_bad) == "invalid_argument" and err_code(ps_bad2) == "invalid_argument",
+              f"没有的规格、最少比最多大 → invalid_argument（{err_code(ps_bad)} {err_code(ps_bad2)}）")
+        for _ in range(4):
+            undo()
+        check(st()["edit_digest"] == s0["edit_digest"], "app_undo 四次：规格回到原来")
+
+        # ---------- 封面：做、改书脊、进 / 出编辑（编辑时「当前页」类工具的规矩）、去掉
+        _, cv0 = w("collage_cover", {})
+        s0 = st()
+        out_c, cv = w("collage_cover", {"action": "make", "spine_mm": 12.5})
+        s1 = st()
+        info = cv.get("cover") or {}
+        blocks_c = image_blocks(out_c)
+        prev = cv.get("preview") or {}
+        check((cv0.get("cover") or {}).get("exists") is False and cv.get("changed") is True and steps(s0, s1) == 1
+              and info.get("exists") is True and info.get("spine_mm") == 12.5 and info.get("spine_estimated") is False
+              and cv.get("preview_kind") == "cover" and len(blocks_c) == 1 and (prev.get("width") or 0) > 1.5 * (prev.get("height") or 1),
+              f"做封面 + 书脊 12.5mm：一步撤销，预览是整张封面（{prev.get('width')}×{prev.get('height')}）")
+        _, cv_again = w("collage_cover", {"action": "make"})
+        _, cv_auto = w("collage_cover", {"spine_auto": True})
+        check(err_code(cv_again) == "invalid_state" and (cv_auto.get("cover") or {}).get("spine_estimated") is True,
+              f"已经有封面再 make → invalid_state（{err_code(cv_again)}）；spine_auto 改回估的")
+        s0 = st()
+        _, cvf = w("collage_cover", {"back_photo": ids[0], "back_text": "2026 · 春", "spine_title": "冒烟", "wrap_mm": 18})
+        s1 = st()
+        ci = cvf.get("cover") or {}
+        _, cv_badback = w("collage_cover", {"back_photo": "没有这张"})
+        check(cvf.get("changed") is True and steps(s0, s1) == 1 and ci.get("back_photo") == ids[0] and ci.get("back_text") == "2026 · 春"
+              and ci.get("spine_title") == "冒烟" and ci.get("wrap_mm") == 18 and err_code(cv_badback) == "invalid_argument",
+              f"封底照片、封底的字、书脊标题、包边一次改完是一步撤销；封底放托盘里没有的照片 → invalid_argument（{err_code(cv_badback)}）")
+        _, ed = w("collage_cover", {"action": "edit"})
+        ge = get()
+        _, ed_layout = w("collage_set_layout", {"layout": {"photo": ids[0]}})
+        _, ed_auto = w("collage_auto_layout", {})
+        _, ed_tpl = w("collage_apply_template", {"template": "时尚刊"})
+        check(ed.get("editing_cover") is True and ge.get("editing_cover") is True and ge.get("page_kind") == "cover"
+              and any(c.get("kind") == "photo" for c in ge.get("cells") or [])
+              and all(err_code(x) == "invalid_state" and edata(x).get("reason") == "editing_cover" for x in (ed_layout, ed_auto, ed_tpl)),
+              f"进封面编辑：collage_get_state 的 page_kind 是 cover；设计版式、引擎排版、套模板回 invalid_state（{err_code(ed_layout)} {err_code(ed_auto)} {err_code(ed_tpl)}）")
+        cover_cell = next((c for c in ge.get("cells") or [] if c.get("kind") == "photo"), None)
+        swap_in = next((i for i in ids if i != (cover_cell or {}).get("photo_id")), None)
+        if cover_cell and swap_in:
+            s0 = st()
+            _, rc = w("collage_replace_photo", {"path": cover_cell["path"], "with": swap_in})
+            s1 = st()
+            front = (w("collage_cover", {})[1].get("cover") or {}).get("front_photos") or []
+            check(rc.get("changed") is True and rc.get("target") == "cover" and steps(s0, s1) == 1 and swap_in in front,
+                  f"编辑封面时 collage_replace_photo 换的是封面那块的格子（{err_code(rc)} {rc.get('target')}，封面上 {front}）")
+        _, lk_c = w("collage_pages", {"action": "lock", "pages": "1"})
+        check(lk_c.get("editing_cover") is False and get().get("editing_cover") is False, "跨页类的写先退出封面编辑")
+        w("collage_pages", {"action": "unlock", "pages": "1"})
+        _, rm = w("collage_cover", {"action": "remove"})
+        u = undo()
+        check((rm.get("cover") or {}).get("exists") is False and "error" not in u
+              and ((get().get("album") or {}).get("cover") or {}).get("exists") is True,
+              "去掉封面、app_undo 回来")
+
+        # ---------- 导出：只导第 1 个跨页（文件名序号还是 01、不出 PDF、带导出前检查）；看版 PDF（有封面放第一页）
+        exp_dir = os.path.join(WORK, "M-export")
+        set_dir = (test_call(h, "test.set_export_dir", {"path": exp_dir}) or {}).get("result") or {}
+        if set_dir.get("path") != exp_dir:
+            raise RuntimeError(f"test.set_export_dir 没设上：{set_dir}")
+        s0 = st()
+        _, e1 = w("collage_export", {"pages": "1", "name": "部分"}, timeout=180)
+        files1 = [f_.get("name") for f_ in e1.get("files") or []]
+        pre = e1.get("preflight") or {}
+        need_warn = any(r_.get("kind") != "empty_slot" for r_ in pre.get("blocks") or [])
+        check("error" not in e1 and files1 == ["部分_跨页_01.jpg"] and e1.get("pages") == [1]
+              and isinstance(pre.get("blocks"), list) and pre.get("pages") == [1]
+              and ("preflight_blocks" in warn_codes(e1)) == need_warn and st()["edit_digest"] == s0["edit_digest"],
+              f"只导第 1 个跨页：{files1}，preflight（{pre.get('summary')}），有别的「拦」才有 preflight_blocks；拼图没变"
+              f"（{err_code(e1)} {(e1.get('error') or {}).get('message')}）")
+        _, e2 = w("collage_export", {"proof": True, "name": "看版"}, timeout=180)
+        f2 = (e2.get("files") or [{}])[0]
+        pages_now = get().get("pages") or 0
+        check("error" not in e2 and e2.get("proof") is True and f2.get("name") == "看版_看版.pdf" and os.path.exists(f2.get("path", ""))
+              and f2.get("pdf_pages") == pages_now + 1,
+              f"看版 PDF：{f2.get('name')}，{f2.get('pdf_pages')} 页（{pages_now} 个跨页 + 封面）（{err_code(e2)} {(e2.get('error') or {}).get('message')}）")
+        _, e3 = w("collage_export", {"pages": "99"})
+        _, e4 = w("collage_export", {"proof": True, "pages": "1"})
+        check(err_code(e3) == "invalid_argument" and err_code(e4) == "invalid_argument",
+              f"pages 越界、proof 带 pages → invalid_argument（{err_code(e3)} {err_code(e4)}）")
+    finally:
+        h.term()
+
+
+def where_all(g, page):
+    """collage_get_state 的 album.spreads 里第 page 个跨页的照片。"""
+    for s_ in (g.get("album") or {}).get("spreads") or []:
+        if s_.get("page") == page:
+            return s_.get("photos") or []
+    return []
+
+
 # ---------------------------------------------------------------- 第 4 道闸自己的自检：假的 .app 路径，脚本必须在起任何进程之前 exit 2
 
 def bundle_gate_selfcheck():
@@ -1039,7 +1435,7 @@ try:
         check((st.get("live") or {}) == {"state": "not_running"} and st.get("gui_running") is False
               and st.get("next") == "请用户自己打开选片工具", f"没有锁文件：live={st.get('live')}（{ms:.0f} ms）")
         codes = all_tools(env, KEY)
-        check(set(codes.values()) == {"app_not_running"}, f"18 个要 app 的工具都回 app_not_running：{set(codes.values())}")
+        check(set(codes.values()) == {"app_not_running"}, f"{len(APP_TOOLS)} 个要 app 的工具都回 app_not_running：{set(codes.values())}")
         check(not os.path.exists(os.path.join(data, ".live.lock")) and not os.listdir(os.path.join(SOCKS, os.path.basename(root))),
               "--mcp 跑完：数据目录里没有 .live.lock，socket 根目录里什么都没有（--mcp 不建锁、不建目录、不 bind）")
         # 锁文件在、但没人拿着（app 退了）
@@ -1681,7 +2077,7 @@ try:
         st, ms = status(env)
         codes = all_tools(env, KEY)
         check(stale and (st.get("live") or {}).get("state") == "not_running" and set(codes.values()) == {"app_not_running"},
-              f"T5b 残留的 socket 文件还在：not_running（{ms:.0f} ms），18 个工具都 app_not_running")
+              f"T5b 残留的 socket 文件还在：not_running（{ms:.0f} ms），{len(APP_TOOLS)} 个工具都 app_not_running")
         # T6 新宿主接手残留的 socket
         h2 = Host("C2", data=h.data, root=h.root)
         st, _ = status(env)
@@ -4120,6 +4516,12 @@ __attribute__((constructor)) static void init(void) {
     else:
         skip(f"整本婚礼相册没出来（{err_code(kit2)}）：目标跨页数那几条跳过")
     hl.term()
+
+    # ============================================================ 相册整本（相册 A + B 第 2 波 · M）：翻页、加删挪锁跨页、镜像、
+    # 单边换版式、照片挪到别的跨页、换照片和候选、导出前检查、印厂规格、封面、只导几个跨页、看版 PDF。合成图场次（6 张）：
+    # 先 collage_set_layout 把 6 张都带进托盘，再 collage_run_kit 排一本婚礼相册
+    print("M 相册整本")
+    album_section()
 
     # ============================================================ grep：Live/ 的禁用词（§5 第 7 层、§9.5.6）
     print("grep")

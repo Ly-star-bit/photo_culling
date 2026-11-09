@@ -9,7 +9,7 @@ import Foundation
 ///    --json 时每一行判断打一行 JSON（mcp_smoke.py 用自己的一份规则再核一遍）。
 /// 2. MCPJSON：NaN / inf → null、不转义斜杠、键排序、编不了不抛异常、超长截断。
 /// 3. MCPServerMain.mode：只认整个参数相等的 --mcp / --mcp-tools / --mcp-call。
-/// 4. 工具定义：24 个 / 3 个、顺序、schema 规则（§3.0）、enum 和代码里的名单一致、没有漏填的占位；
+/// 4. 工具定义：30 个 / 3 个、顺序、schema 规则（§3.0）、enum 和代码里的名单一致、没有漏填的占位；
 ///    collage_get_state 的描述说了会顺带存一次 collage.json。
 /// 5–8. 受保护位置、session 参数、逐段解析、拼图静态表（S2，MCPSelfTestPaths.swift）。--json 时第 5 组每条也打一行。
 /// 9–11. 实时桥的判定表（含数据目录 stat 被拒、§6.3 设了 LABELGUI_DATA_DIR 的那一句）、状态 → 错误码、路由（含截止时间）、
@@ -18,6 +18,7 @@ import Foundation
 /// 16–18. 写工具的参数、app_undo 的判定（LiveAILog）、忙信号挡哪些写（STEP 3b，MCPSelfTestWrite.swift）。
 /// 19–20. 标题栏指示、桥停了（锁丢了、开桥失败）回什么和标题栏说什么、菜单关了说菜单那一项的全名（STEP 3b，MCPSelfTestWrite.swift）。
 /// 21–23. 设计版式的语法：解析、错误表、读出来再发回去不改东西、改了一处留下什么（MCPSelfTestLayout.swift）。
+/// 25–27. 相册整本的工具（相册 A + B · M）：参数表、定义和路由、桥上的纯函数（MCPSelfTestAlbum.swift）。
 enum MCPSelfTest {
     private struct Variant {
         let label: String
@@ -136,8 +137,10 @@ enum MCPSelfTest {
                            "collage_get_state", "app_open_session", "cull_set_verdicts", "cull_show_photos",
                            "collage_apply_template", "collage_run_kit", "collage_next_cover", "collage_set_text",
                            "collage_set_style", "app_undo", "collage_save_variant", "collage_open_variant",
-                           "collage_export", "collage_set_layout", "collage_auto_layout", "cull_import_client_picks"]
-        check(liveNames == expectNames, "24 个工具的名字或顺序不对：\(liveNames)")
+                           "collage_export", "collage_set_layout", "collage_auto_layout", "cull_import_client_picks",
+                           "collage_pages", "collage_move_photos", "collage_replace_photo", "collage_preflight",
+                           "collage_print_spec", "collage_cover"]
+        check(liveNames == expectNames, "30 个工具的名字或顺序不对：\(liveNames)")
         let disabledNames = MCPToolDefs.tools(live: false).compactMap { $0["name"] as? String }
         check(disabledNames == MCPToolDefs.alwaysAvailable, "LABELGUI_MCP_LIVE=0 时应该只有 3 个：\(disabledNames)")
         for live in [true, false] {
@@ -188,6 +191,8 @@ enum MCPSelfTest {
         writeChecks(check)
         // 21–23. 设计版式的语法（MCPSelfTestLayout.swift）
         layoutChecks(check)
+        // 25–27. 相册整本的工具：参数、定义、桥上的纯函数（MCPSelfTestAlbum.swift）
+        albumChecks(check)
         // 24. 启动和无头命令的护栏：真实数据目录、GUI 启动门控（GuardSelfTest.swift，不在 MCP/ 里）
         guardChecks(check)
 

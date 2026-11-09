@@ -176,6 +176,9 @@ extension MCPSelfTest {
             "collage_save_variant": "collage.save_variant", "collage_open_variant": "collage.open_variant",
             "collage_export": "collage.export", "collage_set_layout": "collage.set_layout",
             "collage_auto_layout": "collage.auto_layout", "cull_import_client_picks": "cull.import_client_picks",
+            "collage_pages": "collage.pages", "collage_move_photos": "collage.move_photos",
+            "collage_replace_photo": "collage.replace_photo", "collage_preflight": "collage.preflight",
+            "collage_print_spec": "collage.print_spec", "collage_cover": "collage.cover",
         ]
         let appTools = MCPToolDefs.tools(live: true).compactMap { $0["name"] as? String }.dropFirst(3)
         check(Set(appTools) == Set(methods.keys) && Set(MCPLiveTools.routes.keys) == Set(methods.keys),
@@ -184,7 +187,8 @@ extension MCPSelfTest {
             check(MCPLiveTools.routes[tool]?.method == method, "\(tool) 应该转给 \(method)")
         }
         let deadlines: [String: Int] = ["cull_preview_photos": 30_000, "collage_run_kit": 50_000, "collage_next_cover": 50_000,
-                                        "collage_export": 50_000, "collage_set_layout": 50_000, "collage_auto_layout": 50_000]
+                                        "collage_export": 50_000, "collage_set_layout": 50_000, "collage_auto_layout": 50_000,
+                                        "collage_pages": 50_000, "collage_move_photos": 50_000, "collage_preflight": 30_000]
         for (tool, route) in MCPLiveTools.routes {
             check(route.deadlineMs == (deadlines[tool] ?? 10_000), "\(tool) 的默认截止时间 \(route.deadlineMs) ms（§10.2）")
         }
