@@ -379,6 +379,28 @@ enum CollageFilmEffects {
         }
     }
 
+    /// 工程里哪一级（整组 / 页 / 格）用着的光谱色调。
+    static func spectralLooks(_ p: CollageProject) -> Set<CollageLook> {
+        var out: Set<CollageLook> = []
+        if p.style.look.isSpectral { out.insert(p.style.look) }
+        for page in p.pages {
+            if let look = page.look?.look, look.isSpectral { out.insert(look) }
+            for path in page.root.leafPaths() {
+                if let look = page.root.node(at: path)?.cell?.look?.look, look.isSpectral { out.insert(look) }
+            }
+        }
+        return out
+    }
+
+    /// 整组的颗粒、晕光、冷暖、画幅（texture）和胶片曝光（exposure）起不起作用 —— 检视器、暗房灰不灰掉这几根滑杆
+    /// 用同一个口径：它们都记在整组上（CollageStyle），哪一级用着光谱色调就作用到哪一级（相册某几页、某几格单独套
+    /// 光谱色调，整组是滤镜，颗粒照样加在那几页上）。以前检视器只看整组的色调，这种时候颗粒带着却关不掉；暗房只看
+    /// 「套用到」那一级。胶片曝光要用着的光谱色调里有一款能调（负片、电影负片；反转片没有）。
+    static func filmControls(_ p: CollageProject) -> (texture: Bool, exposure: Bool) {
+        let looks = spectralLooks(p)
+        return (!looks.isEmpty, looks.contains(where: supportsExposure))
+    }
+
     /// 从「没有光谱色调」换进光谱色调（哪一级都算）、颗粒晕光都还是 0：颗粒 / 晕光设成这一款的起始值（R8：整张看就
     /// 隐约看得见颗粒是胶片味最强的信号之一，以前默认 0，换上去看不出是胶片）。store 套用和暗房的悬停预览都走这里，
     /// 看到的就是点下去的。已经在用光谱色调时不动：颗粒拉回 0 以后在光谱色调之间换来换去不会再加回来。

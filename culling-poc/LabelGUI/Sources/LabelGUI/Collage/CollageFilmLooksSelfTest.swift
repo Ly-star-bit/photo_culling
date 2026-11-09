@@ -19,7 +19,9 @@ import CoreImage
 ///    CollageLooks.apply 逐字节一样；一块灰上开颗粒，均值不动（≤ 0.004 线性）、每个通道的标准差和 CPU 按
 ///    print 表斜率 × σ(密度) / 像素边长 × 0.65 像素模糊算的差 35% 以内，颗粒跟着像素尺寸变（像素小一半 → 颗粒
 ///    大约大一倍）；同一张照片渲两次逐字节一样、换一张照片噪声不一样；灰底白圆开晕光，圆外的红抬得比绿多、
-///    绿比蓝多，晕光 0 时原样；CollageStyle 里的颗粒、晕光存了读回来不变，旧 JSON 没有这两项是 0、坏值收到 0…1。
+///    绿比蓝多，晕光 0 时原样；CollageStyle 里的颗粒、晕光存了读回来不变，旧 JSON 没有这两项是 0、坏值收到 0…1；
+///    检视器、暗房的颗粒 / 冲印滑杆按整个工程用着的光谱色调启用（filmControls：只有一页、一格用着也算，
+///    用着的全是反转片时胶片曝光灰掉）。
 /// 全过退出 0，否则 1。
 enum CollageFilmLooksSelfTest {
 
@@ -355,6 +357,19 @@ enum CollageFilmLooksSelfTest {
               "只给一页设光谱色调：起始值记在整组上（颗粒晕光是整组的）", "")
         check(CollageFilmEffects.usesSpectral(pageLevel) && !CollageFilmEffects.usesSpectral(plain),
               "认得出哪一级在用光谱色调（整组 / 页 / 格）", "")
+        // 检视器、暗房的颗粒 / 晕光 / 冷暖 / 画幅 / 胶片曝光灰不灰掉（filmControls）：按整个工程，不只看整组的色调。
+        let none = CollageFilmEffects.filmControls(plain)
+        let page = CollageFilmEffects.filmControls(pageLevel)
+        check(!none.texture && !none.exposure, "整组滤镜、哪一级都没光谱色调：颗粒、冲印都灰掉", "\(none)")
+        check(page.texture && page.exposure, "整组滤镜、只有一页是电影负片：颗粒、晕光、冷暖、画幅、胶片曝光都能调", "\(page)")
+        var slideCell = plain
+        slideCell.pages[0].root.update(at: []) { $0.cell?.look = CollageLookSetting(look: .slideVivid, strength: 1) }
+        let slide = CollageFilmEffects.filmControls(slideCell)
+        check(CollageFilmEffects.spectralLooks(slideCell) == [.slideVivid] && slide.texture && !slide.exposure,
+              "只有一格是反转片：颗粒能调、胶片曝光灰掉（反转片没有冲扫补偿）", "\(slide)")
+        var mixed = slideCell
+        mixed.style.look = .filmWarmSkin
+        check(CollageFilmEffects.filmControls(mixed).exposure, "整组负片 + 一格反转片：胶片曝光能调（用着的里有一款能调）", "")
     }
 
     private static func styleCoding(_ check: (Bool, String, String) -> Void) {

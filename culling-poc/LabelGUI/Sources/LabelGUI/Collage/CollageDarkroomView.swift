@@ -556,6 +556,9 @@ private struct DarkroomControls: View {
         let _ = CollagePerf.body("暗房右栏")
         let setting = model.current
         let spectral = setting.look.isSpectral
+        // 质感、冲印都记在整组上：灰不灰掉按整个工程用没用着光谱色调（和检视器同一个口径，CollageFilmEffects.filmControls），
+        // 不只看「套用到」那一级 —— 整组是滤镜、这一页单独套了光谱色调时，那一页带着颗粒，这里也得调得动。
+        let film = CollageFilmEffects.filmControls(store.project)
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 5) {
@@ -589,7 +592,7 @@ private struct DarkroomControls: View {
                         .opacity(setting.look == .none ? 0.4 : 1)
                 }
 
-                DarkroomPrinting(model: model, store: store, spectral: spectral)
+                DarkroomPrinting(model: model, store: store, film: film)
 
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
@@ -629,13 +632,15 @@ private struct DarkroomControls: View {
                         }
                         .help("同一张照片，模拟的画幅越小，颗粒相对画面越粗；中画幅（6×4.5 以上）是婚礼胶片常见的细腻感")
                     }
-                    .disabled(!spectral)
-                    .opacity(spectral ? 1 : 0.4)
+                    .disabled(!film.texture)
+                    .opacity(film.texture ? 1 : 0.4)
                     DarkroomSlider(label: "统一色温", value: store.project.style.harmonize,
                                    set: { model.setStyleValue(\.harmonize, $0) },
                                    help: "一页里几张照片的冷暖、明暗往主图对齐（对整组），混拍的一页用")
                     if !spectral {
-                        Text("「\(setting.look.label)」是相纸滤镜，没有颗粒、晕光和冲印：在「胶片」页签里换一款才有。")
+                        Text(film.texture
+                             ? "「\(setting.look.label)」是相纸滤镜，这一级没有颗粒、晕光和冲印；上面几项对整组，管的是别的页、格用着的光谱胶片。"
+                             : "「\(setting.look.label)」是相纸滤镜，没有颗粒、晕光和冲印：在「胶片」页签里换一款才有。")
                             .font(.system(size: 11)).foregroundStyle(DarkroomPalette.tertiary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -666,15 +671,16 @@ private struct DarkroomControls: View {
 }
 
 /// 冲印：胶片曝光（负片、电影负片）、冷暖（放大机滤色）。都对整组、都在色调表里（取色、判字深浅一样）。
+/// film：整个工程用着光谱色调没有、里面有没有能调曝光的（CollageFilmEffects.filmControls）。
 private struct DarkroomPrinting: View {
     @ObservedObject var model: CollageDarkroom
     @ObservedObject var store: CollageStore
-    let spectral: Bool
+    let film: (texture: Bool, exposure: Bool)
 
     var body: some View {
         let _ = CollagePerf.body("暗房冲印")
         let look = model.current.look
-        let exposable = spectral && CollageFilmEffects.supportsExposure(look)
+        let exposable = film.exposure
         let style = store.project.style
         VStack(alignment: .leading, spacing: 10) {
             DarkroomSectionTitle(title: "冲印", trailing: "对整组")
@@ -693,9 +699,9 @@ private struct DarkroomPrinting: View {
                            help: look.isReversal
                                ? "反转片上相当于扫描时的色偏校正：暖往橙、冷往蓝。在统一色温之前"
                                : "放大机的黄、品滤色：暖往橙走（不往黄绿），冷往蓝。在印放那一步改，比套完再调白平衡更像胶片；在统一色温之前")
-                .disabled(!spectral)
-                .opacity(spectral ? 1 : 0.4)
-            if spectral && !exposable {
+                .disabled(!film.texture)
+                .opacity(film.texture ? 1 : 0.4)
+            if film.texture && !exposable {
                 Text("反转片没有冲扫补偿这一层，过曝就是发白：胶片曝光只在负片、电影负片上有。")
                     .font(.system(size: 11)).foregroundStyle(DarkroomPalette.tertiary)
                     .fixedSize(horizontal: false, vertical: true)

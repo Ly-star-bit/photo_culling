@@ -199,6 +199,9 @@ struct CollageLookBox: View {
     }
 
     var body: some View {
+        // 颗粒、晕光、冷暖、画幅、胶片曝光记在整组上，哪一级用着光谱色调就作用到哪一级：按整个工程看，不只看整组的
+        // 色调（和暗房同一个口径，CollageFilmEffects.filmControls）。
+        let film = CollageFilmEffects.filmControls(store.project)
         GroupBox("色调") {
             VStack(alignment: .leading, spacing: 8) {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 60), spacing: 6)], spacing: 8) {
@@ -211,35 +214,42 @@ struct CollageLookBox: View {
                     .disabled(store.project.style.look == .none)
                 CollageSlider(label: "颗粒", value: binding(\.filmGrain), range: 0...1,
                               display: percentText(store.project.style.filmGrain))
-                    .disabled(!store.project.style.look.isSpectral)
+                    .disabled(!film.texture)
                     .help("光谱胶片的颗粒（spektrafilm 的颗粒模型）：50% ≈ 这款胶片在 35mm 底片上的真实颗粒，100% 是两倍。"
-                          + "按每张照片的像素算，导出和放大预览时才看得清；只在光谱胶片色调（柔肤…银幕）上起作用。"
-                          + "从别的色调换进光谱胶片时自动设成这一款的起始值，拉回 0 以后不再自动加")
+                          + "按每张照片的像素算，导出和放大预览时才看得清；只在光谱胶片（负片、反转片、电影负片）上起作用，"
+                          + "整组、哪一页、哪一格用着都算。从别的色调换进光谱胶片时自动设成这一款的起始值，拉回 0 以后不再自动加")
                 CollageSlider(label: "晕光", value: binding(\.filmHalation), range: 0...1,
                               display: percentText(store.project.style.filmHalation))
-                    .disabled(!store.project.style.look.isSpectral)
+                    .disabled(!film.texture)
                     .help("高光边上泛红的光晕（底片片基的反射）：20% 上下是有防光晕层的真片，50% 是防光晕层弱的片子，"
-                          + "100% = 没有防光晕层的底片。导出大图时更明显；只在光谱胶片色调上起作用")
+                          + "100% = 没有防光晕层的底片。导出大图时更明显；只在光谱胶片（负片、反转片、电影负片）上起作用")
                 CollageSlider(label: "胶片曝光", value: binding(\.filmExposure), range: -1...2,
                               display: abs(store.project.style.filmExposure) < 0.05 ? "0"
                                   : String(format: "%+.1f 档", store.project.style.filmExposure))
-                    .disabled(!CollageFilmEffects.supportsExposure(store.project.style.look))
+                    .disabled(!film.exposure)
                     .help("冲印：给底片多（少）几档曝光，冲扫店把亮度拉回一半（+1 档更亮更通透、+2 档高光被肩部压软）。"
                           + "只在负片、电影负片上有；反转片没有冲扫补偿这一层")
+                if film.texture && !film.exposure {
+                    hint("用着的光谱胶片都是反转片：没有冲扫补偿这一层，胶片曝光只在负片、电影负片上有。")
+                }
                 CollageSlider(label: "冷暖", value: binding(\.filmWarmth), range: -1...1,
                               display: abs(store.project.style.filmWarmth) < 0.025 ? "0"
                                   : (store.project.style.filmWarmth > 0 ? "暖 " : "冷 ")
                                       + percentText(abs(store.project.style.filmWarmth)))
-                    .disabled(!store.project.style.look.isSpectral)
-                    .help("冲印：放大机的黄、品滤色（暖往橙、冷往蓝），在统一色温之前；只在光谱胶片色调上起作用")
+                    .disabled(!film.texture)
+                    .help("冲印：放大机的黄、品滤色（暖往橙、冷往蓝），在统一色温之前；只在光谱胶片（负片、反转片、电影负片）上起作用")
                 Picker("画幅", selection: Binding(get: { store.project.style.filmFormat },
                                                 set: { f in var st = store.project.style; st.filmFormat = f; store.setStyle(st, coalesce: false) })) {
                     ForEach(CollageFilmFormat.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .font(.caption)
-                .disabled(!store.project.style.look.isSpectral)
+                .disabled(!film.texture)
                 .help("颗粒、晕光按整张照片 = 一格这么大的底片算：画幅越大，颗粒相对画面越细")
+                // 灰掉的滑杆说一句为什么（禁用控件上的悬停提示不一定出得来）。
+                if !film.texture {
+                    hint("整组、各页、各格都没用光谱胶片（负片、反转片、电影负片）：颗粒、晕光、胶片曝光、冷暖、画幅不起作用。")
+                }
                 CollageSlider(label: "统一色温", value: binding(\.harmonize), range: 0...1,
                               display: percentText(store.project.style.harmonize))
                     .help("其余照片的色温、明暗往主图靠：不同时间、不同光线拍的放在一起才像一组")
@@ -284,6 +294,12 @@ struct CollageLookBox: View {
         // 开了加网，色调样张也按加网画（纸色跟页面底色，所以底色变了也要重画）。
         .onChange(of: store.project.style.halftone) { _, _ in store.renderLookThumbs() }
         .onChange(of: store.project.style.background) { _, _ in store.renderLookThumbs() }
+    }
+
+    private func hint(_ text: String) -> some View {
+        Text(text)
+            .font(.caption2).foregroundStyle(.tertiary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     /// 照片加网（报纸风）：开关、网型、点距、网点增大、墨色、纸色。纸色默认跟页面底色（深色页上换成纸白）。
