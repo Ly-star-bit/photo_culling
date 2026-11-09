@@ -260,6 +260,16 @@ private struct DarkroomTopBar: View {
             }
             .frame(width: CGFloat(scopes.count) * 76)
             Spacer(minLength: 12)
+            // 撤销 / 重做：暗房开着时拼图的顶栏（⌘Z 绑在它上面）不在视图树里，以前暗房里按 ⌘Z 没人接，界面却写着
+            // 「⌘Z 一步步撤」。条件、提示和拼图顶栏的一样。
+            HStack(spacing: 2) {
+                undoButton("arrow.uturn.backward", "撤销", enabled: store.canUndo) { store.undo() }
+                    .keyboardShortcut("z", modifiers: .command)
+                    .help("撤销 (⌘Z)")
+                undoButton("arrow.uturn.forward", "重做", enabled: store.canRedo) { store.redo() }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+                    .help("重做 (⇧⌘Z)")
+            }
             Text("原图")
                 .font(.system(size: 12, weight: model.showOriginal ? .semibold : .regular))
                 .foregroundStyle(model.showOriginal ? DarkroomPalette.text : DarkroomPalette.secondary)
@@ -286,6 +296,23 @@ private struct DarkroomTopBar: View {
         .padding(.horizontal, 14)
         .frame(height: 44)
         .background(DarkroomPalette.sidebar)
+    }
+
+    /// 顶栏的小图标按钮（撤销、重做）：和「原图」同样的发丝边，灰掉时压暗。
+    private func undoButton(_ symbol: String, _ label: String, enabled: Bool,
+                            _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(DarkroomPalette.secondary)
+                .frame(width: 30, height: 24)
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(DarkroomPalette.hairline, lineWidth: 1))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
+        .accessibilityLabel(label)
     }
 }
 
