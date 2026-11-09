@@ -1130,7 +1130,8 @@ private struct CollageSnapshotHost: View {
 ///     itemrot:N=角度、itemsize:N=倍数、itemfront:N / itemback:N（叠放顺序）、itemdel:N、itemdup:N。
 /// 相册：mode:album|single、canvas:<同 --canvas>、binding:layflat|glued、arrange[:all]（自动编排；all = 不去重）、page:N、
 ///     addpage、delpage:N、movepage:N=±k、tonext:P（这一格的照片挪到下一个跨页）、upscale[:1.2]（打印放大超过阈值的照片）、
-///     crossfold（打印压中缝的跨页）。
+///     crossfold（打印压中缝的跨页）；跨页操作（movecells、addto、movepages、delpages、mirror、side、lockpage、cands、replace、
+///     arrangeplan、spreaddump、dedupebench）见 CollageAlbumEditCLI。
 /// 核对：notice（打印状态栏提示）、digest（整个工程的指纹，核对撤销）、tplthumbs[:前缀]（模板缩略图，给了前缀就存 PNG）、
 ///     altthumb:序号=文件名（存第几个备选的缩略图）、render:<文件名>（半尺寸 + 调试框）。
 /// 设计版式：layoutfile:<json>（把版式放进当前页，语法见 CollageLayoutSpec；文件是版式本身，或 {"layout":…,"fit":bool,"canvas":别名}）、
@@ -2560,6 +2561,8 @@ enum CollageOpsScript {
             case "tonext":
                 store.selection = path(arg)
                 store.moveSelectedPhoto(toPage: store.pageIndex + 1)
+                idle()
+            case _ where CollageAlbumEditCLI.names.contains(name): ok = CollageAlbumEditCLI.apply(name, arg, store: store, wait: idle)
             case "variantsave":
                 switch store.saveVariant(name: arg.isEmpty ? nil : arg) {
                 case .saved(let v): print("  存成方案 \(v.name)（\(v.id)）")

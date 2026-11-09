@@ -691,8 +691,10 @@ enum CollageStyleFineArt {
     /// 托盘、标题、副标题、刊头、水印跟着工程走。照片不够（托盘空）= nil。
     static func weddingAlbum(_ context: CollageKits.Context) -> CollageProject? {
         var project = context.project
+        // 已经是相册、有锁住的跨页（S5）：和「自动编排」一样原样留着，上面的照片不参与编排，编完按时间插回去。
+        let locked = CollageAlbum.lockedSpreads(project)
         // 废片不要，客户选中的废片要（和编排同一条：CollageStyleFineArt.candidates）。
-        var photos = candidates(context.tray)
+        var photos = candidates(context.tray).filter { !locked.photoIDs.contains($0.id) }
         guard !photos.isEmpty else { return nil }
         // 亮度、黑白从路人信息补（托盘里的 ref 一般已经抄过；刚带进来、还没算到的从 hints 拿）。
         for i in photos.indices {
@@ -711,10 +713,11 @@ enum CollageStyleFineArt {
         let layout = CollageLayout.Context(canvas: project.canvas, style: project.style, photos: map,
                                            hints: context.hints, heroID: nil)
         let plan = CollageAlbum.plan(photos, dedupe: true, theme: .fineArt, chapterMono: project.albumChapterMono,
-                                     title: project.title, budget: project.albumBudget)
+                                     title: project.title,
+                                     budget: CollageAlbum.budget(project.albumBudget, excludingLocked: locked.pages.count))
         let pages = CollageAlbum.build(plan, context: layout, seed: context.seed)
         guard !pages.isEmpty else { return nil }
-        project.pages = pages
+        project.pages = CollageAlbum.mergeLocked(pages, locked: locked.pages, photos: map)
         return project
     }
 }

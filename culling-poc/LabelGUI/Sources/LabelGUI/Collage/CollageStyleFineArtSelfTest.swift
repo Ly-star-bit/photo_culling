@@ -134,6 +134,8 @@ enum CollageStyleFineArtSelfTest {
 
         // 客户选中无条件保留（F19）等相册编排的另外几条：CollageAlbumPlanSelfTest.swift。
         CollageAlbumPlanSelfTest.run(book: book, check: check)
+        // 跨页操作（相册 A + B · S：F1–F7、S1–S6）：CollageAlbumEditSelfTest.swift。
+        CollageAlbumEditSelfTest.run(check: check)
 
         // ---------------------------------------------------------------- 4. 真照片套合成标记（可选）
         if args.count > flagIndex + 1, !args[flagIndex + 1].hasPrefix("--") {

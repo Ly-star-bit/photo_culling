@@ -1557,6 +1557,10 @@ struct CollagePage: Codable, Hashable, Identifiable {
     /// 这一页是套固定比例的模板（fitAspects = false，严格栅格）来的：存成「我的模板」时「按照片比例自适应」
     /// 默认关，存出来的格子比例和原来一样。旧工程 = false。
     var fixedAspects = false
+    /// 相册里锁住的跨页（S5）：「自动编排」、一键成套「整本婚礼相册」原样留着它、上面的照片不参与编排。锁的是编排：
+    /// 删、挪、换一批、手动改照常可以。换版式、换一批、套模板落下来的同一页（同一个 id）还锁着（CollageStore.setPage）。
+    /// 旧工程 = false。
+    var locked = false
 
     init(root: CollageNode) { self.root = root }
 
@@ -2122,6 +2126,7 @@ extension CollagePage {
         look = c.softOptional(.look)
         contactSheet = c.softOptional(.contactSheet)
         fixedAspects = c.soft(.fixedAspects, false)
+        locked = c.soft(.locked, false)
     }
 }
 

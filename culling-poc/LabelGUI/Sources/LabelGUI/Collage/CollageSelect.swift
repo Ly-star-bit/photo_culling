@@ -355,9 +355,27 @@ enum CollageVision {
 
     static func distance(_ a: CollagePhotoRef, _ b: CollagePhotoRef) -> Double? {
         guard let fa = featurePrint(a), let fb = featurePrint(b) else { return nil }
+        return distance(fa, fb)
+    }
+
+    static func distance(_ fa: VNFeaturePrintObservation, _ fb: VNFeaturePrintObservation) -> Double? {
         var d: Float = 0
         guard (try? fa.computeDistance(&d, to: fb)) != nil else { return nil }
         return Double(d)
+    }
+
+    /// 已经算好的画面特征（没算过 = nil，不现算）：主线程上用（换照片的候选），不在主线程上现跑 Vision。
+    static func cachedFeaturePrint(_ photo: CollagePhotoRef) -> VNFeaturePrintObservation? {
+        let key = cacheKey(photo)
+        lock.lock()
+        defer { lock.unlock() }
+        return printCache[key]
+    }
+
+    /// 两张都已经算好特征时的距离；有一张没算 = nil。
+    static func cachedDistance(_ a: CollagePhotoRef, _ b: CollagePhotoRef) -> Double? {
+        guard let fa = cachedFeaturePrint(a), let fb = cachedFeaturePrint(b) else { return nil }
+        return distance(fa, fb)
     }
 }
 
@@ -458,19 +476,38 @@ enum CollageSelect {
     /// 按分数从高到低过，精选天然先留。返回同地同姿势的两两关系，编排时一个跨页里别堆
     /// 三张这样的。特征算不出来时原样返回。
     /// keeping：这几张无条件留下（相册编排传客户选中）；它们照样算进「已经留下的」，和它们是连拍、同姿势的别的照片照常拿掉。
+    /// 相册去重最多比分数前多少张（F7 / 审查 P06b）：以前 120，300 张的婚礼精选后面 180 张不去重、也不判同姿势。
+    /// 两两距离一次只要几微秒，真正贵的是画面特征（一张十几毫秒）—— 现在路人信息的后台任务顺手先算好
+    /// （CollageStore.computeHints），编排时多半已经在缓存里。
+    static let dedupeLimit = 500
+    /// 同地同姿势的线：两两距离中位数的 76%（相册去重、编排顺延、换照片的「相似」都用它）。
+    static let samePoseFactor = 0.76
+
     static func distinctMoments(_ photos: [CollagePhotoRef], keeping keep: Set<String> = [])
         -> (kept: [CollagePhotoRef], dropped: [CollagePhotoRef], similar: [String: Set<String>]) {
         let sorted = photos.sorted { $0.score > $1.score }
-        let head = Array(sorted.prefix(120))
-        let measure = distanceOverride ?? CollageVision.distance
-        var dist: [String: Double] = [:]
+        let head = Array(sorted.prefix(dedupeLimit))
+        let n = head.count
+        // 距离按下标存（n × n，以前按 "id|id" 字符串当键：几百张就是几十万个字符串）。nan = 算不出来。
+        var dist = [Double](repeating: .nan, count: n * n)
         var all: [Double] = []
-        for i in 0..<head.count {
-            for j in (i + 1)..<head.count {
-                if let d = measure(head[i], head[j]) {
-                    dist[head[i].id + "|" + head[j].id] = d
-                    dist[head[j].id + "|" + head[i].id] = d
-                    all.append(d)
+        all.reserveCapacity(n * (n - 1) / 2)
+        func record(_ i: Int, _ j: Int, _ d: Double?) {
+            guard let d else { return }
+            dist[i * n + j] = d
+            dist[j * n + i] = d
+            all.append(d)
+        }
+        if let measure = distanceOverride {
+            for i in 0..<n { for j in (i + 1)..<n { record(i, j, measure(head[i], head[j])) } }
+        } else {
+            // 特征先一次取齐（缓存里没有的现算），两两只算距离 —— 以前每一对都按文件路径拼两次缓存键、上两次锁。
+            let prints = head.map(CollageVision.featurePrint)
+            for i in 0..<n {
+                guard let fi = prints[i] else { continue }
+                for j in (i + 1)..<n {
+                    guard let fj = prints[j] else { continue }
+                    record(i, j, CollageVision.distance(fi, fj))
                 }
             }
         }
@@ -478,25 +515,51 @@ enum CollageSelect {
         all.sort()
         let median = all[all.count / 2]
         var similar: [String: Set<String>] = [:]
-        for (key, d) in dist where d < 0.76 * median {
-            let parts = key.split(separator: "|").map(String.init)
-            guard parts.count == 2 else { continue }
-            similar[parts[0], default: []].insert(parts[1])
+        for i in 0..<n {
+            for j in 0..<n where i != j {
+                let d = dist[i * n + j]
+                if !d.isNaN, d < samePoseFactor * median { similar[head[i].id, default: []].insert(head[j].id) }
+            }
         }
 
+        // 按分数从高到低过（sorted 的前 n 张就是 head，下标一样）；第 n 张以后没有距离，照旧留下。
         var kept: [CollagePhotoRef] = []
+        var keptIndex: [Int] = []
         var dropped: [CollagePhotoRef] = []
-        for p in sorted {
-            let distances = kept.compactMap { dist[p.id + "|" + $0.id] }
-            let nearest = distances.min() ?? .infinity
-            let samePose = distances.filter { $0 < 0.76 * median }.count
+        for (s, p) in sorted.enumerated() {
+            var nearest = Double.infinity
+            var samePose = 0
+            if s < n {
+                for k in keptIndex {
+                    let d = dist[s * n + k]
+                    guard !d.isNaN else { continue }
+                    nearest = min(nearest, d)
+                    if d < samePoseFactor * median { samePose += 1 }
+                }
+            }
             if !keep.contains(p.id), nearest < 0.54 * median || (!p.isPick && samePose >= 2) {
                 dropped.append(p)
             } else {
                 kept.append(p)
+                if s < n { keptIndex.append(s) }
             }
         }
         return (kept, dropped, similar)
+    }
+
+    /// 托盘这几张（调用方按分数取前 dedupeLimit 张）两两画面距离的中位数，只用已经算好的特征（换照片的「相似」那条线，
+    /// 在主线程上问）。一对都算不出来 = nil。
+    static func cachedDistanceMedian(_ photos: [CollagePhotoRef]) -> Double? {
+        let prints = photos.compactMap(CollageVision.cachedFeaturePrint)
+        var all: [Double] = []
+        for i in prints.indices {
+            for j in (i + 1)..<prints.count {
+                if let d = CollageVision.distance(prints[i], prints[j]) { all.append(d) }
+            }
+        }
+        guard !all.isEmpty else { return nil }
+        all.sort()
+        return all[all.count / 2]
     }
 
     /// 时间顺序（没时间的排最后，按 id）。
