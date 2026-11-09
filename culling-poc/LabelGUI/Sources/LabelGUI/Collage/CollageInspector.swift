@@ -363,11 +363,11 @@ struct CollageStylePanel: View {
                               display: String(format: "%.2f", store.project.style.sharpen))
                     // 加了网的照片不锐化（锐化会在网点边上起白边）。
                     .disabled(store.project.style.halftone != nil)
-                    .help(store.project.style.halftone != nil ? "照片加了网（报纸）不锐化：锐化会在网点边上起白边"
+                    .help(store.project.style.halftone != nil ? "照片加了网（报纸风）不锐化：锐化会在网点边上起白边"
                           : "照片缩到格子大小之后补的锐化（预览和导出一样）")
                 // 灰掉的滑杆说一句为什么（禁用控件上的悬停提示不一定出得来）。
                 if store.project.style.halftone != nil {
-                    gridOnlyHint("照片加了网（报纸）：输出锐化不起作用，锐化会在网点边上起白边。")
+                    gridOnlyHint("照片加了网（报纸风）：输出锐化不起作用，锐化会在网点边上起白边。")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -488,7 +488,7 @@ struct CollageStylePanel: View {
     private var frameBox: some View {
         GroupBox("边框与投影") {
             VStack(alignment: .leading, spacing: 8) {
-                if store.isFreeform { gridOnlyHint("散落版的相框、投影按张调：点画布上的一张相纸，在「格式」里。") }
+                if store.isFreeform { gridOnlyHint("散落版的相框、投影按张调：点画布上的一张照片，在「格式」里。") }
                 if store.isContactSheet { gridOnlyHint("印样的片条自己有片边，不加边框、投影。") }
                 frameControls.disabled(store.isFreeform || store.isContactSheet)
             }

@@ -379,7 +379,7 @@ private struct DarkroomSwatches: View {
         VStack(spacing: 0) {
             DarkroomSegmented(items: CollageDarkroom.Tab.allCases.map { t in
                 .init(id: t.rawValue, label: t.label, selected: model.tab == t,
-                      help: t == .film ? "光谱胶片：有颗粒、晕光" : "相纸滤镜：没有颗粒、晕光")
+                      help: t == .film ? "胶片：按真实胶片的数据算的，有颗粒、晕光、冲印" : "滤镜：程序调色，没有颗粒、晕光、冲印")
             }) { id in
                 if let t = CollageDarkroom.Tab(rawValue: id) { model.tab = t }
             }
@@ -698,8 +698,8 @@ private struct DarkroomControls: View {
                                    help: "一页里几张照片的冷暖、明暗往主图对齐（对整组），混拍的一页用")
                     if !spectral {
                         Text(film.texture
-                             ? "「\(setting.look.label)」是相纸滤镜，这一级没有颗粒、晕光和冲印；上面几项对整组，管的是别的页、格用着的光谱胶片。"
-                             : "「\(setting.look.label)」是相纸滤镜，没有颗粒、晕光和冲印：在「胶片」页签里换一款才有。")
+                             ? "「\(setting.look.label)」是滤镜，这一级没有颗粒、晕光和冲印；上面几项对整组，管的是别的页、格用着的胶片。"
+                             : "「\(setting.look.label)」是滤镜，没有颗粒、晕光和冲印：在「胶片」页签里换一款才有。")
                             .font(.system(size: 11)).foregroundStyle(DarkroomPalette.tertiary)
                             .fixedSize(horizontal: false, vertical: true)
                     }

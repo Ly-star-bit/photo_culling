@@ -165,7 +165,7 @@ struct CollageView: View {
         .help("参考线：安全区、中缝、九宫格/轮播切线（不会导出）")
         Button { store.saveVariant() } label: { Image(systemName: "plus.square.on.square") }
             .disabled(store.project.pages.isEmpty || store.isSolving)
-            .help("把现在这一版存成方案（⇧⌘S）：底下的方案栏里点缩略图随时切回来，可以存好几版比着挑")
+            .help("把现在的拼图存成方案（⇧⌘S）：底下的方案栏里点缩略图随时切回来，可以存好几个比着挑")
     }
 
     @ViewBuilder
@@ -632,7 +632,7 @@ private struct CollageTrayGrid: View, Equatable {
             if let page = pagePhotoIDs {
                 let extra = ids.filter { !page.contains($0) }
                 if !extra.isEmpty {
-                    Button("加进当前版（重排，\(extra.count) 张）") { toCanvas { store.relayout(photoIDs: page + extra) } }
+                    Button("加进现在的版式（重排，\(extra.count) 张）") { toCanvas { store.relayout(photoIDs: page + extra) } }
                         .disabled(page.count + extra.count > CollageTray.relayoutLimit)
                 }
             }
@@ -644,7 +644,7 @@ private struct CollageTrayGrid: View, Equatable {
             }
             Button("只用这张重新排一版") { toCanvas { store.relayout(photoIDs: [photo.id]) } }
             if let ids = pagePhotoIDs, !ids.contains(photo.id) {
-                Button("加进当前版（重排）") { toCanvas { store.relayout(photoIDs: ids + [photo.id]) } }
+                Button("加进现在的版式（重排）") { toCanvas { store.relayout(photoIDs: ids + [photo.id]) } }
             }
             Divider()
             Button("从托盘移除", role: .destructive) { store.removeFromTray(photo.id) }
@@ -773,7 +773,7 @@ struct CollageAlternativeStrip: View {
                     Label("清空", systemImage: "xmark.circle")
                 }
                 .controlSize(.small)
-                .help("清空这一排备选：画布上现在这一版留着。右键缩略图可以只去掉一版，或者连画布一起清")
+                .help("清空这一排备选：画布上现在的版式留着。右键缩略图可以只去掉一个，或者连画布一起清")
             }
         }
         .padding(.horizontal, 10)
@@ -789,16 +789,16 @@ struct CollageAlternativeStrip: View {
                 HStack(spacing: 4) {
                     Button { store.previousAlternative() } label: { Image(systemName: "chevron.left") }
                         .disabled(store.alternatives.isEmpty)
-                        .help("上一版 (←)")
+                        .help("上一个备选 (←)")
                     Button { store.nextAlternative() } label: { Image(systemName: "chevron.right") }
                         .disabled(store.root == nil || store.isContactSheet)
-                        .help("下一版 (→)")
+                        .help("下一个备选 (→)")
                 }
                 .controlSize(.small)
                 Button("换一批") { store.regenerate() }
                     .controlSize(.small)
                     .disabled(store.root == nil || store.isSolving || store.isContactSheet)
-                    .help(store.isContactSheet ? "印样按拍摄先后排，没有别的版：改规格、每条帧数在右栏「格式 › 印样」里"
+                    .help(store.isContactSheet ? "印样按拍摄先后排，没有备选：改规格、每条帧数在右栏「格式 › 印样」里"
                           : store.isAlbum ? "当前跨页重新求解；锁定的格子不动" : "同样的照片重新求解一批备选；锁定的格子不动")
             }
         }
@@ -871,13 +871,13 @@ private struct CollageAlternativeThumbs: View, Equatable {
                     }
                     .buttonStyle(.plain)
                     .contextMenu {
-                        Button("用这一版") { store.applyAlternative(item.offset) }
+                        Button("用这个备选") { store.applyAlternative(item.offset) }
                         Button("从备选里去掉") { store.removeAlternative(item.offset) }
                         Divider()
                         Button("清空备选") { store.clearAlternativeStrip() }
                         Button(clearCanvasLabel, role: .destructive) { store.deletePage(store.pageIndex) }
                     }
-                    .help("第 \(item.offset + 1) 版（右键：去掉这一版、清空备选）")
+                    .help("第 \(item.offset + 1) 个备选（右键：从备选里去掉、清空备选）")
                 }
             }
             .padding(.vertical, 6)
@@ -925,8 +925,8 @@ struct CollageVariantStrip: View {
             }
             .controlSize(.small)
             .disabled(store.project.pages.isEmpty || store.isSolving)
-            .help("把现在这一版存成方案：画布、样式、文字、所有页、水印一起存，点缩略图随时切回来")
-            Text("存好几版并排比着挑，点一下切回来（⌘Z 回到切之前）")
+            .help("把现在的拼图存成方案：画布、样式、文字、所有页、水印一起存，点缩略图随时切回来")
+            Text("存好几个方案并排比着挑，点一下切过去（⌘Z 回到切之前）")
                 .font(.caption).foregroundStyle(.tertiary)
                 .lineLimit(1).truncationMode(.tail)
             Spacer(minLength: 0)
@@ -955,7 +955,7 @@ struct CollageVariantStrip: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(!current.isEmpty || store.project.pages.isEmpty || store.isSolving)
-                    .help(!current.isEmpty ? "现在这一版已经存过了" : "把现在这一版存成方案（⇧⌘S）")
+                    .help(!current.isEmpty ? "现在的拼图已经存过了" : "把现在的拼图存成方案（⇧⌘S）")
                 }
                 .padding(.vertical, 6)
             }
@@ -991,7 +991,7 @@ struct CollageVariantStrip: View {
 
     private var confirmTitle: String {
         switch pending {
-        case .overwrite(let id): return "用现在这一版覆盖「\(name(id))」？"
+        case .overwrite(let id): return "用现在的拼图覆盖「\(name(id))」？"
         case .delete(let id): return "删除「\(name(id))」？"
         default: return ""
         }
@@ -1029,9 +1029,9 @@ struct CollageVariantStrip: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            Button("切到这一版") { store.openVariant(v.id) }.disabled(current)
+            Button("切到这个方案") { store.openVariant(v.id) }.disabled(current)
             // 现在这一版已经存成某个方案了就不让覆盖（不然两个方案一模一样）
-            Button("用现在的样子覆盖它…") { pending = .overwrite(v.id) }
+            Button("用现在的拼图覆盖它…") { pending = .overwrite(v.id) }
                 .disabled(anyCurrent || store.project.pages.isEmpty || store.isSolving)
             Button("改名…") {
                 draft = v.name
@@ -1040,7 +1040,7 @@ struct CollageVariantStrip: View {
             Divider()
             Button("删除…", role: .destructive) { pending = .delete(v.id) }
         }
-        .help("\(v.name) · \(v.project.pages.count) 页 · 点一下切到这一版（⌘Z 回来）；右键覆盖、改名、删除")
+        .help("\(v.name) · \(v.project.pages.count) 页 · 点一下切到这个方案（⌘Z 回来）；右键覆盖、改名、删除")
     }
 }
 

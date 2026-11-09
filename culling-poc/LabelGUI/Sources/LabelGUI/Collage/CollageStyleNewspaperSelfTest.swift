@@ -346,7 +346,7 @@ enum CollageStyleNewspaperSelfTest {
         }
         if let a4 = CollageCanvas.social.first(where: { $0.isPrint }), let ht = paper.frontStyle.halftone {
             let spec = CollageScreening.spec(ht, canvas: a4, scale: 1, background: paper.paper)
-            check(spec?.screened ?? false, "「报纸」预设套到 A4：出点", String(format: "%.1f px", spec?.pitchPx ?? 0))
+            check(spec?.screened ?? false, "「报纸风」预设套到 A4：出点", String(format: "%.1f px", spec?.pitchPx ?? 0))
         }
 
         // ---------------------------------------------------------------- 11. 平衡分栏

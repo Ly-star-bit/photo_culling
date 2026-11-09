@@ -53,6 +53,13 @@ enum CollageDarkroomSelfTest {
         let filmTab = CollageDarkroom.looks(in: .film), filterTab = CollageDarkroom.looks(in: .filter)
         check(filmTab.count == 15 && filmTab.allSatisfy(\.isSpectral) && filterTab.count == 12 && !filterTab.contains(where: \.isSpectral),
               "「胶片」页签 15 款光谱色调、「滤镜」页签 12 款", "\(filmTab.count) / \(filterTab.count)")
+        // 界面术语（NU10，CollageModel 里那张表）：「胶片」只指胶片页签那 15 款；色调名不和风格预设、边框、相框撞名
+        // （以前色调「胶片」「电影」「报纸」和同名的风格预设、边框是不同的东西）。
+        let lookNames = Set(CollageLook.allCases.map(\.label))
+        let otherNames = CollageStyles.all.map(\.name) + CollageBorder.allCases.map(\.label) + CollageItemFrame.allCases.map(\.label)
+        let clash = otherNames.filter { lookNames.contains($0) || $0 == "胶片" }
+            + filterTab.map(\.label).filter { $0.contains("胶片") }
+        check(clash.isEmpty, "术语：滤镜、风格预设、边框、相框都不叫「胶片」，色调名不和它们撞名", clash.joined(separator: " "))
         let brands = ["KODAK", "FUJI", "ILFORD", "PORTRA", "EKTAR", "VELVIA", "PROVIA", "VISION", "GOLD", "ULTRAMAX",
                       "ISO", "柯达", "富士", "金200"]
         for look in order {

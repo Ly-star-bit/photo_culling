@@ -17,7 +17,7 @@ struct CollageWatermarkPanel: View {
         CollageMarkLayerBox(store: store, kind: .page)
         CollageWatermarkAdoptBox(store: store, watermarkStore: watermarkStore)
         CollageJumpText(store: store, lead: "相框和画布比例只在水印页单张导出时生效；拼图里要白边请用", spot: .frame,
-                        tail: "。水印不压中缝、切线和安全区，不躲进贴纸、相纸底下，每张照片的水印让着整页的：格子太小、签名或字放不下、怎么翻都躲不开时，那一处就不画。")
+                        tail: "。水印不压中缝、切线和安全区，不躲进贴纸、散落的照片底下，每张照片的水印让着整页的：格子太小、签名或字放不下、怎么翻都躲不开时，那一处就不画。")
     }
 }
 

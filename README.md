@@ -202,7 +202,7 @@ swift build -c release
 #   weddingAlbum = 整本婚礼相册。ops：kit:<成套>（先等路人信息算完）、nextcover[:N]（换封面：主图候选往后轮 N 张，只换封面那张）、
 #   herodump（出一期挑封面的候选：按真套上封面的人物挡字打分，打印罚分和原因）
 # 杂志风格(模板分类 时尚刊 / 底片印样 / 留白杂志 / 报纸风 / 瑞士网格 / 婚礼相册；--template-sheet sheet.jpg --only 时尚刊 看一类):
-#   样式预设 --style（ops style:）fashion 时尚刊、minimal 留白杂志、newspaper 报纸（米色纸、圆点网 4.5‰、纸纹压照片）、swiss 瑞士、
+#   样式预设 --style（ops style:）fashion 时尚刊、minimal 留白杂志、newspaper 报纸风（米色纸、圆点网 4.5‰、纸纹压照片）、swiss 瑞士、
 #   weddingFineArt 婚礼 fine-art（象牙纸、自然白卡纸 + 细线、雅致色调）、weddingCanon 婚礼 · 古典版心；两个婚礼预设按册子尺寸重算边距
 #   （max(12% 页边, 25mm)，自己改过边距的不动）
 #   相册 --album-theme fineArt（婚礼 fine-art 编排：废片不要、同一场只留精选、扉页取宽景、每章疏 → 密 → 精选收尾、竖图成对、每跨页最多 3 张；

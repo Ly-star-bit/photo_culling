@@ -744,6 +744,21 @@ enum CollageOcclusionRule: String, Codable, CaseIterable, Hashable {
 
 // MARK: - 样式
 
+// 界面术语（优化分析 NU10，2026-11-09）：一个词只指一样东西。只管界面上的字，rawValue、存盘的键、CLI、MCP 的键不跟着改。
+// - 色调：统称（整组 / 这一页 / 这一格套的调色），分「胶片」「滤镜」两类，和暗房的两个页签一一对应。
+// - 胶片：只指光谱胶片那 15 款（isSpectral：负片、反转片、电影负片）和它们模拟的真胶片（颗粒、晕光、胶片曝光、画幅）。
+//   老色调 .film「胶片」→「暖柔」，风格预设 film「胶片」→「胶片感」，边框 / 相框 .film「胶片」→「齿孔」。
+// - 滤镜：暗房「滤镜」页签那 12 款程序调色（没有颗粒、晕光、冲印）。以前也叫「相纸滤镜」，不再用。
+// - 相纸：只指底边宽的白框（边框、相框 .polaroid，风格预设「相纸」）。散落版里的一张照片叫「照片」，印样的纸叫「白纸」。
+// - 齿孔：带齿孔片边的框（边框、相框 .film）。印样 / 底片条是另一样（一整页片条）。
+// - 电影感：风格预设 cinema + 模板分类「电影感」；色调 .cinema「电影」→「青橙」；「电影负片」是胶片的片种。
+// - 报纸风：风格预设 newspaper + 模板分类「报纸风」+ 照片加网；色调 .newsprint「报纸」→「新闻纸」。
+// - 婚礼 · 雅致（风格预设 weddingFineArt）、婚礼相册（相册编排 .fineArt）：界面上不出现「fine-art」。
+// - 这一版：只指 app 的版本（「这一版新增」）。换一批出来的叫「备选」（第 N 个），存下来的叫「方案」，画布上的叫「现在的拼图」。
+// - 格式：只指右栏「格式」页签；导出设置里的是「文件格式」，花字的现成搭配叫「搭配」（「样式」是右栏页签）。
+// - 本地模型：批量页里在本机跑的看图模型（复审废片、精审幸存照片）；「AI」只指经 MCP 接进来的 AI 助手。
+// 模板名、模板分类是键（applytpl:、--only、MCP 的 template、门禁的文件名），不在这张表里改。
+
 enum CollageBorder: String, Codable, CaseIterable, Hashable {
     /// mat = 卡纸窗口（婚礼 fine-art）：照片四周一圈卡纸（style.matWidth，底边加宽），照片外几毫米一道细线。
     case none, hairline, polaroid, film, mat
@@ -753,7 +768,7 @@ enum CollageBorder: String, Codable, CaseIterable, Hashable {
         case .none: return "无"
         case .hairline: return "细线"
         case .polaroid: return "相纸"
-        case .film: return "胶片"
+        case .film: return "齿孔"
         case .mat: return "卡纸"
         }
     }
@@ -793,14 +808,14 @@ enum CollageLook: String, Codable, CaseIterable, Hashable {
     var label: String {
         switch self {
         case .none: return "原色"
-        case .film: return "胶片"
+        case .film: return "暖柔"
         case .airy: return "日系"
         case .faded: return "复古"
-        case .cinema: return "电影"
+        case .cinema: return "青橙"
         case .cool: return "冷淡"
         case .mono: return "黑白"
         case .sepia: return "旧照"
-        case .newsprint: return "报纸"
+        case .newsprint: return "新闻纸"
         case .contrastMono: return "高反差"
         case .muted: return "哑光"
         case .fineArt: return "雅致"
@@ -1129,7 +1144,7 @@ enum CollageItemFrame: String, Codable, CaseIterable, Hashable {
         case .polaroid: return "相纸"
         case .white: return "白边"
         case .none: return "无框"
-        case .film: return "胶片"
+        case .film: return "齿孔"
         case .mounts: return "相角"
         }
     }

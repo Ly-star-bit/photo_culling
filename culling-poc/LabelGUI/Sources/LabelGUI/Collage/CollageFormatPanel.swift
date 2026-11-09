@@ -434,7 +434,7 @@ struct CollagePageBox: View {
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         } else if store.isFreeform {
-            Text("散落版：托盘里的照片拖进画布 = 放一张相纸。选中后拖动挪位置，拖上方圆点旋转、右下圆点缩放；[ ] 微调角度。")
+            Text("散落版：托盘里的照片拖进画布 = 放一张照片。选中后拖动挪位置，拖上方圆点旋转、右下圆点缩放；[ ] 微调角度。")
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
@@ -443,8 +443,8 @@ struct CollagePageBox: View {
                     .disabled(store.root == nil)
                     .help("结构不变，按照片原比例重算每条缝的位置（手动拖过的缝会被重算）")
                 if !store.alternatives.isEmpty {
-                    Text(store.alternativeIndex < 0 ? "备选 \(store.alternatives.count) 版"
-                         : "第 \(store.alternativeIndex + 1)/\(store.alternatives.count) 版")
+                    Text(store.alternativeIndex < 0 ? "备选 \(store.alternatives.count) 个"
+                         : "第 \(store.alternativeIndex + 1)/\(store.alternatives.count) 个备选")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }

@@ -656,7 +656,7 @@ enum CollageContact {
 
     /// 常用的几张纸（检视器「印样」框里挑）：白相纸（RC 光面相纸的白，带一点点暖）、米色纸、暖黑（社交底片条）。
     static let papers: [(name: String, color: CollageColor)] = [
-        ("白相纸", CollageColor(hex: 0xF6F5F1)), ("米色纸", CollageColor(hex: 0xECE4D4)), ("暖黑", CollageColor(hex: 0x252321)),
+        ("白纸", CollageColor(hex: 0xF6F5F1)), ("米色纸", CollageColor(hex: 0xECE4D4)), ("暖黑", CollageColor(hex: 0x252321)),
     ]
 
     /// 换排法时换上的纸：印样印在白相纸上（黑场压在白纸上才是印样）；底片条放在暖黑上（社交图、片条带投影）。

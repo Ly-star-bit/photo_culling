@@ -307,6 +307,6 @@ enum CollageStyleNewspaper {
 
     /// 「报纸」：今日头版那一套纸和网点，套在任何版式上。
     static let presets: [CollageStyles.Preset] = [
-        CollageStyles.Preset(key: "newspaper", name: "报纸", style: frontStyle),
+        CollageStyles.Preset(key: "newspaper", name: "报纸风", style: frontStyle),
     ]
 }

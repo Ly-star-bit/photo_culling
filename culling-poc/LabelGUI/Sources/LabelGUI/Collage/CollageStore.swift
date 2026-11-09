@@ -1240,7 +1240,7 @@ final class CollageStore: ObservableObject {
         }
         if page.contactSheet != nil {
             // 印样的版式由帧和规格定（一卷就是一卷），没有「换一版」。
-            setNotice("印样按拍摄先后排，没有别的版：改规格、每条帧数在右栏「格式 › 印样」里（点画布空白处）")
+            setNotice("印样按拍摄先后排，没有备选：改规格、每条帧数在右栏「格式 › 印样」里（点画布空白处）")
             return
         }
         if page.freeform {
@@ -4432,7 +4432,7 @@ extension CollageStore {
         }
         if let id = currentVariantID, let same = project.variants.first(where: { $0.id == id }) {
             activeVariantID = id
-            setNotice("现在这一版就是「\(same.name)」，没再存一份")
+            setNotice("现在的拼图就是「\(same.name)」，没再存一份")
             return .same(same)
         }
         guard project.variants.count < Self.maxVariants else {
@@ -4482,7 +4482,7 @@ extension CollageStore {
             computeHints(for: missing)
         }
         let back = missing.isEmpty ? "" : " · 补回 \(missing.count) 张照片进托盘"
-        setNotice("切到「\(variant.name)」\(back) · ⌘Z 回到刚才那一版")
+        setNotice("切到「\(variant.name)」\(back) · ⌘Z 回到刚才的拼图")
         return missing.count
     }
 
@@ -4495,7 +4495,7 @@ extension CollageStore {
         activeVariantID = id
         scheduleProjectSave()
         scheduleVariantThumbs()
-        setNotice("「\(project.variants[i].name)」换成了现在这一版")
+        setNotice("「\(project.variants[i].name)」换成了现在的拼图")
     }
 
     /// 改名（不进撤销）；空的、和原来一样的不改。

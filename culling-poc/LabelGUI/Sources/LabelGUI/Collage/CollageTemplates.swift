@@ -28,7 +28,7 @@ enum CollageStyles {
             s.margin = 0.07
             s.gutter = 0.02
         }),
-        Preset(key: "film", name: "胶片", style: make { s in
+        Preset(key: "film", name: "胶片感", style: make { s in
             s.background = CollageColor(hex: 0x2A2826)
             s.border = .film
             s.margin = 0.05
@@ -79,7 +79,7 @@ enum CollageStyles {
             s.lookStrength = 0.7
             s.harmonize = 0.5
         }),
-        Preset(key: "cinema", name: "电影", style: make { s in
+        Preset(key: "cinema", name: "电影感", style: make { s in
             s.background = CollageColor(hex: 0x0E0E0F)
             s.margin = 0.03
             s.gutter = 0.012
