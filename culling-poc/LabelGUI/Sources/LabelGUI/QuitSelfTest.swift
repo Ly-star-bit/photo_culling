@@ -772,8 +772,10 @@ final class QuitSelfTestHarness {
 
         // 真的 store、真的分析（合成色块 JPEG）。
         let store = newStore()
-        let photoCount = 150  // 够多：快的机器上按 ⌘Q 那一下也还没分析完
-        let folderA = makePhotoFolder("photos-s05d-a", count: photoCount, width: 1600, height: 1066)
+        // 张数够多：快的机器上按 ⌘Q 那一下也还没分析完（本机 16 核、8 路并发，叫停时才分析完一成左右）。
+        // 尺寸小一点（以前 1600×1066，3072 以内分析不缩图、整张算）：这一条以前占 CI 自检步骤七成左右（优化分析 NE4）。
+        let photoCount = 150
+        let folderA = makePhotoFolder("photos-s05d-a", count: photoCount, width: 640, height: 426)
         let folderB = makePhotoFolder("photos-s05d-b", count: 30)
         _ = store.switchSession(to: folderA)
         let idle = Recorder()
@@ -915,6 +917,8 @@ final class QuitSelfTestHarness {
             let reply = AppDelegate().applicationShouldTerminate(NSApplication.shared)
             check(reply == .terminateNow && !store.cancelRequested, "AppDelegate 在无头进程里：直接退、不叫停、不弹框")
             check(QuitAlert.ask(.askStop(.analysis)), "QuitAlert 在无头进程里不弹框，直接当成退出那一边")
+            // 核对完自己叫停（和上面「选继续」一样）：以前等它把剩下的一百多张跑完（最多等 60 秒），要核对的上面两行已经核对完了。
+            if store.isRunning { store.cancel() }
             spin(60) { !store.isRunning }
             AppDelegate.batch = nil
         } else {
@@ -1178,7 +1182,8 @@ final class QuitSelfTestHarness {
     func unfinishedAnalysisMarker() {
         print("— 上次分析没跑完：开跑时在场次目录写标记，跑完 / 取消 / 出错删掉；崩溃、强退留下的，下次打开这一场提示「点重新分析补上」")
         let store = newStore()
-        let folder = makePhotoFolder("photos-unfinished", count: 40, width: 1200, height: 800)
+        // 只核对标记（开跑写、跑完 / 取消 / 出错删、留下的提示），和张数、尺寸无关：6 张小图就够（以前 40 张 1200×800）。
+        let folder = makePhotoFolder("photos-unfinished", count: 6)
         let other = work.appendingPathComponent("photos-unfinished-other", isDirectory: true)
         try? fm.createDirectory(at: other, withIntermediateDirectories: true)
         _ = store.switchSession(to: folder)
