@@ -501,6 +501,7 @@ if CommandLine.arguments.contains("--ux-selftest") {
         }
         failed += GridExifImportSelfTest.run()  // EXIF 快门 0 不崩、网格多选规则、水印页 RAW+JPG 配对
         failed += CollageNavSelfTest.run()      // 拼图检视器重排：去那儿（页签、滚动请求）、--tab 新老名字、色调两节
+        failed += WhatsNewSelfTest.run()        // 这一版新增：版本号、弹不弹、记账只写独立的 suite、数据表
         exit(failed == 0 ? 0 : 1)
     }
 }
@@ -779,6 +780,9 @@ struct LabelGUIApp: App {
                 // 深色是产品的一部分，不跟随系统外观：照片必须在中性深底上
                 // 判断，浅色系统下半白半黑的窗口曾被当成"主题坏了"报障。
                 .preferredColorScheme(.dark)
+                // 升级后第一次打开弹「这一版新增」（只有这条开界面的路查：--app-ui、--live-host 用的是同一个 ContentView，
+                // 但不经过这里；WhatsNew.checkOnLaunch 自己也看无头、看版本号是不是 dev）。
+                .onAppear { WhatsNew.checkOnLaunch(model) }
         }
         .defaultSize(width: 1280, height: 850)
         // 没有「新建窗口」（⌘N）：五个 store 只有一份（AppModel），第二个窗口和第一个共用同一套 store、同一个 tab，
@@ -797,7 +801,7 @@ struct LabelGUIApp: App {
             // 系统默认的「帮助」只有一项、点了说「帮助不可用」（没有帮助手册）。换成：快捷键一览、使用说明、导出 / 复制诊断信息、
             // 日志文件夹（审查 D03，见 Diagnostics/Diagnostics.swift）。
             CommandGroup(replacing: .help) {
-                HelpMenuItems()
+                HelpMenuItems { model.whatsNewShown = true }
             }
         }
         // 「帮助 › 快捷键一览」：状态栏键盘按钮、? 键弹的同一张表，在哪个页面都能打开。只有一个，不进 ⌘N。

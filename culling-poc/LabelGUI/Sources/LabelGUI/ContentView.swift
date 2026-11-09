@@ -60,6 +60,14 @@ struct ContentView: View {
             CardImportSheet(center: cardCenter, store: batchStore) { model.tab = .batch }
         }
         .onAppear { cardCenter.start() }
+        // 「这一版新增」（升级后第一次打开弹一次、「帮助 › 这一版新增」随时再看）：「带我去」先关弹框再去。
+        .sheet(isPresented: $model.whatsNewShown) {
+            WhatsNewSheet(notes: WhatsNew.notes, onGo: { destination in
+                model.whatsNewShown = false
+                // 等弹框收起再切页签、描边（不然描边亮在弹框底下）。
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { model.go(destination) }
+            }, onClose: { model.whatsNewShown = false })
+        }
         // 标题栏副标题：AI 连着 / 正在操作 / 刚做了什么（§9.6a，四个 tab 都在）。不连 AI 时是空的，和以前一样。
         .modifier(LiveIndicatorSubtitle(indicator: model.indicator))
     }

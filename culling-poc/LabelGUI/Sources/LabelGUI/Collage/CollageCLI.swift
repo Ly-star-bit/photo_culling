@@ -778,7 +778,7 @@ enum CollageCLI {
 /// 截图前先改工程（都可选）：--relayout [--count 6]（托盘重新自动排版，几张；工程里还没有版式时也排）、
 /// --layout grid|scatter、--template <模板名>、--title 标题、--subtitle 副标题、--style <样式预设 key>、--wm photos:/sig.png[,page:…]（签名水印）、--look <色调>、
 /// --film-exposure / --film-warmth / --film-format（冲印区）、--overlay <压字预设>（放在主图那一格并选中它）、--page N（相册第 N 个跨页，从 0 起；先换页再选格子）、
-/// --select-item N（选中第 N 个自由图层）、--add-item text|<贴纸 rawValue>（加一个手写字 / 贴纸并选中）、--darkroom（开着暗房截，CollageDarkroom：可再给
+/// --whats-new（只截「这一版新增」的弹框）、--select-item N（选中第 N 个自由图层）、--add-item text|<贴纸 rawValue>（加一个手写字 / 贴纸并选中）、--darkroom（开着暗房截，CollageDarkroom：可再给
 /// --darkroom-scope page|cell、--darkroom-hover <色调>、--darkroom-split 0.3、--darkroom-original（按住空格））。
 /// --inspector-width N：只截检视器、宽 N pt（高取 --size 的高）—— 窗口里检视器能拖到 300…380，
 /// 分栏视图给多宽外面定不准，单独截才能逐个宽度看有没有挤出去。
@@ -959,9 +959,11 @@ enum CollageUISnapshot {
 
         // 离屏截图里 AppKit 面板底色会画成白的，深色模式的白字就看不见了：--light 用浅色看控件。
         let light = args.contains("--light")
-        let inspectorWidth = option("--inspector-width").flatMap(Double.init).map { CGFloat($0) }
+        // --whats-new：只截「这一版新增」的弹框（宽 480，高取 --size 的高）；离屏截不到真的 sheet。
+        let whatsNew = args.contains("--whats-new")
+        let inspectorWidth = whatsNew ? 480 : option("--inspector-width").flatMap(Double.init).map { CGFloat($0) }
         let view = CollageSnapshotHost(store: store, batchStore: batch, watermarkStore: watermarkStore,
-                                       inspectorWidth: inspectorWidth)
+                                       inspectorWidth: inspectorWidth, whatsNew: whatsNew)
             .frame(width: inspectorWidth ?? size.width, height: size.height)
             .environment(\.colorScheme, light ? .light : .dark)
         let host = NSHostingView(rootView: view)
@@ -1040,11 +1042,16 @@ private struct CollageSnapshotHost: View {
     let watermarkStore: WatermarkStore
     /// 只截检视器（--inspector-width）。
     let inspectorWidth: CGFloat?
+    /// 只截「这一版新增」的弹框（--whats-new）。
+    var whatsNew = false
 
     var body: some View {
         // 离屏没有窗口底色：不垫一层，透明处存成 PNG 是黑的，黑字就看不见了。
         Group {
-            if inspectorWidth != nil {
+            if whatsNew {
+                WhatsNewSheet(notes: WhatsNew.notes, onGo: { _ in }, onClose: {})
+                    .frame(maxHeight: .infinity, alignment: .top)
+            } else if inspectorWidth != nil {
                 CollageInspector(store: store, watermarkStore: watermarkStore)
             } else {
                 CollageView(store: store, batchStore: batchStore, watermarkStore: watermarkStore)
