@@ -3,7 +3,7 @@ import CoreGraphics
 
 /// 相册整本的桥方法（相册 A + B 第 2 波 · M）：分析里说的「MCP 只能操作当前跨页，AI 改不了整本」补上。
 /// - collage.pages（collage_pages）：翻页、加 / 删 / 挪 / 锁 / 解锁 / 镜像跨页、单边换版式；
-/// - collage.move_photos：照片挪到别的跨页（CollageStore.moveCells / addPhotos）；
+/// - collage.move_photos：照片挪到别的跨页（CollageStore.moveCells / addPhotos：当场落下，后台再精排）；
 /// - collage.replace_photo：换一格照片（replacePhoto；编辑封面时 placeOnCover）；
 /// - collage.preflight（只读）：导出前检查（CollagePreflight.run，离开主线程跑）；
 /// - collage.print_spec：印厂规格读 / 套 / 改规则；
@@ -207,62 +207,25 @@ extension LiveHandlers {
         return out
     }
 
-    // MARK: - 后台排版落下来（挪照片、单边换版式第一次）
+    // MARK: - 用户自己在排的时候（挪照片、单边换版式）
 
-    /// moveCells / addPhotos / cycleSideLayout 第一次在后台排（CollageStore.solvePages、sideAlternatives），落下来时自己压一步
-    /// 撤销。等它落下来（同 ops 的 idle：isSolving 变 false），再按 verify 看落下的是不是这一步：
-    /// - 落下来、这中间只多了这一步撤销 = AI 的一步（记 aiLog，app_undo 能撤）；
-    /// - 落下来了、可用户这中间也压了撤销步（改标题这类不作废排版的）：分不清栈顶是谁的，照样回 changed，但不记成 AI 的一步
-    ///   （app_undo 回 undo_not_ours，不会撤到用户那一步），另给一条 undo_mixed；
-    /// - 没落下来：换了场次、翻了页（pageID 给了的话）、工程被用户改过 = superseded；什么都没变 = store 自己拦下了，回它在
-    ///   状态栏上说的那一句（invalid_state）。
-    static func awaitLanding(_ req: Request, live: LiveServer, model: AppModel, tool: String, before: String, pushes: Int,
-                             epoch: Int, pageID: UUID?, summary: String, body: [String: Any], warnings: [[String: Any]],
-                             verify: () -> Bool) async -> Reply {
-        let collage = model.collage
-        let limit = max(1_000, remainingMs(req) - 1_000)
+    /// 用户自己点的排版还在后台算（换一批、加进现在的版式、自动编排……）：挪照片、换单边切法都会把它作废（store 里后做的
+    /// 说了算），AI 不该替用户丢掉它（审查 R3#3：以前 collage_move_photos 不看这个，用户拖的那一下还在排就被 AI 作废了）。
+    /// 先等它落下来（最多 min(剩余 − 5 s, 10 s)，Task.sleep，主线程空着）；还在算就回 invalid_state，什么都没做。
+    static func waitForUserSolve(_ req: Request, _ collage: CollageStore) async -> Reply? {
+        let limit = max(0, min(remainingMs(req) - 5_000, 10_000))
         let start = LiveWire.nowMs()
         while collage.isSolving {
-            if LiveWire.nowMs() - start >= limit {
-                var data: [String: Any] = ["hint": "app 还在排，这一步会接着落下来（落下来是一步撤销）：过几秒 collage_get_state 看结果，不要重来"]
-                data["executed"] = NSNull()
-                return .failure("deadline_exceeded", "app 在截止时间内还没排完", data)
-            }
+            if LiveWire.nowMs() - start >= limit { return solvingRefusal() }
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
-        guard model.aiLog.sessionEpoch == epoch else {
-            var data = notExecuted("用户切了场次：先 app_status 看 open_session")
-            data["reason"] = "session_switched"
-            return .failure("superseded", "排的时候用户切了场次，这一次作废了：没有落地，没有压撤销", data)
-        }
-        guard verify() else {
-            if let pageID, collage.page?.id != pageID { return pageMoved() }
-            if collage.editDigest != before {
-                var data = notExecuted("用户在拼图里做了新的操作：先 collage_get_state 看现在的样子，再决定要不要重来")
-                data["reason"] = "user_edit"
-                return .failure("superseded", "排的时候用户在拼图里做了新的操作，这一次作废了：没有落地", data)
-            }
-            let why = collage.notice ?? "app 没有排这一步"
-            return .failure("invalid_state", why + "：这一次什么都没改",
-                            notExecuted("先 collage_get_state 看现在的样子"))
-        }
-        if collage.undoPushes == pushes + 1 {
-            return await collageDone(req, live: live, model: model, tool: tool, changed: true, pushesBefore: pushes,
-                                     digestBefore: before, summary: summary, body: body, warnings: warnings)
-        }
-        collage.flushSaves()
-        let text = "AI：" + summary + " · 在拼图页 ⌘Z 撤销"
-        collage.setNotice(text)
-        if req.params["reveal"] as? Bool == true { model.tab = .collage }
-        var b = body
-        b["changed"] = true
-        var all = warnings
-        all.append(MCPReadModel.warning("undo_mixed",
-                                        "排版落下来的前后用户也改了拼图：这一步照样生效了，但分不清撤销栈最上面是谁的，app_undo 撤不了它。",
-                                        hint: "要撤请用户自己在拼图页 ⌘Z"))
-        let undo = undoInfo(.collage, added: 1, model: model)
-        return await collageReply(req, live: live, model: model, body: b, digestBefore: before, undo: undo, notice: text,
-                                  warnings: all)
+        return nil
+    }
+
+    static func solvingRefusal() -> Reply {
+        var data = notExecuted("过几秒再调（collage_get_state 的 busy.solving 变成 false 以后）")
+        data["reason"] = "solving"
+        return .failure("invalid_state", "app 还在排用户刚点的那一版（还没落地）：现在动手会把它作废，这一次什么都没改", data)
     }
 
     // MARK: - collage.pages（翻页 / 改跨页）
@@ -354,6 +317,11 @@ extension LiveHandlers {
     }
 
     /// side_layout：只给一边换切法（CollageStore.cycleSideLayout）。第一次在后台算几种切法，之后在缓存里轮（同步）。
+    /// 等的是自己这一票（cycleSideLayout 返回的求解代号 + 结局回调，审查 R3#6）：以前等的是「任何求解」（isSolving），
+    /// 用户在等的时候点了自动编排，这一步早被作废了还一直等到截止，回 deadline_exceeded 说「会接着落下来」，其实不会；
+    /// 真超时后落下来的又没记成 AI 的一步（app_undo 回 undo_not_ours）。现在：落下来 = AI 的一步（计数、深度按落地那一刻
+    /// 的记，同 KitLanding）；代号变了 = 立刻回 superseded；到截止还在算 = 把自己这一票作废，回 deadline_exceeded（没有
+    /// 落地，过后也不会落）。用户自己的排版还在算时先等它落下来（waitForUserSolve），不替用户把它作废。
     static func sideLayout(_ req: Request, live: LiveServer, model: AppModel) async -> Reply {
         let collage = model.collage
         let gate = Gate(scope: .collage, digest: true)
@@ -395,26 +363,70 @@ extension LiveHandlers {
         if let stop = refusal() { return stop }
         let budget = min(remainingMs(req) - 5_000, 20_000) / 1_000
         let settled = await collage.hintsSettled(timeout: max(0, budget))
+        if let stop = await waitForUserSolve(req, collage) { return stop }
         if let stop = await settle(req, gate, live: live, model: model) { return stop }
+        // settle 等用户停手的时候用户又点了「换一批」：照样不替用户作废它
+        if collage.isSolving { return solvingRefusal() }
         if let stop = refusal() { return stop }
         goTo((asked ?? collage.pageIndex + 1) - 1, collage: collage)
         let pageID = collage.page?.id
         let before = collage.editDigest
-        let pushes = collage.undoPushes
         let epoch = model.aiLog.sessionEpoch
-        collage.cycleSideLayout(side, step: step)
-        var warnings: [[String: Any]] = []
-        if !settled {
-            warnings.append(MCPReadModel.warning("hints_pending", "路人信息还没算完：这一边的取景待会儿可能还会变。",
-                                                 hint: "过一会儿调 collage_get_state 看预览"))
-        }
         let index = collage.pageIndex
-        return await awaitLanding(req, live: live, model: model, tool: "collage_pages", before: before, pushes: pushes,
-                                  epoch: epoch, pageID: pageID, summary: "第 \(index + 1) 个跨页的\(side.label)换了一种切法",
-                                  body: ["action": "side_layout", "side": side == .left ? "left" : "right", "step": step],
-                                  warnings: warnings) {
-            collage.page?.id == pageID && collage.editDigest != before
-        }.withAlbum(collage)
+        let box = SideCycleBox()
+        let generation = collage.cycleSideLayout(side, step: step) { box.outcome = $0 }
+        // 缓存里轮的、当场挡下的：回调已经来了（generation = nil）。后台那一次：等自己这一票。
+        if let generation {
+            let limit = max(1_000, remainingMs(req) - 1_000)
+            let start = LiveWire.nowMs()
+            while box.outcome == nil, collage.currentSolveGeneration == generation {
+                if LiveWire.nowMs() - start >= limit {
+                    guard collage.cancelSolve(generation: generation) else { break }
+                    var data = notExecuted("这一次撤回了：没有落地、没有压撤销，过后也不会落下来；可以带长一点的 deadline_seconds 重来")
+                    data["reason"] = "deadline"
+                    return .failure("deadline_exceeded", "app 在截止时间内没算完这一边的切法", data)
+                }
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+        }
+        // 代号变了、回调还没来（后台那一次要算完才回调，不等它）= 被后来的操作作废了
+        guard let outcome = box.outcome else { return sideSuperseded(model, epoch: epoch, pageID: pageID) }
+        switch outcome {
+        case .superseded:
+            return sideSuperseded(model, epoch: epoch, pageID: pageID)
+        case .refused(let text):
+            return .failure("invalid_state", text + "：这一次什么都没改", notExecuted("先 collage_get_state 看现在的样子"))
+        case .landed(let pushes, let depth, _):
+            var warnings: [[String: Any]] = []
+            if !settled {
+                warnings.append(MCPReadModel.warning("hints_pending", "路人信息还没算完：这一边的取景待会儿可能还会变。",
+                                                     hint: "过一会儿调 collage_get_state 看预览"))
+            }
+            // 落下来压了恰好一步（applySideCycle）；计数、深度取落地那一刻的：之后用户按的键不算进 AI 这一步
+            let at = LandedCounts(pushes: pushes, depth: depth, epoch: epoch)
+            return await collageDone(req, live: live, model: model, tool: "collage_pages", changed: true, pushesBefore: pushes - 1,
+                                     digestBefore: before, summary: "第 \(index + 1) 个跨页的\(side.label)换了一种切法",
+                                     body: ["action": "side_layout", "side": side == .left ? "left" : "right", "step": step],
+                                     warnings: warnings, landed: at).withAlbum(collage)
+        }
+    }
+
+    /// cycleSideLayout 的结局回调写到这里（桥在主线程上每 20 ms 看一次）。
+    final class SideCycleBox {
+        var outcome: CollageStore.SideCycleOutcome?
+    }
+
+    /// 单边换版式被作废了：换了场次、翻了页、还是用户在拼图里做了新的操作。没落地、没压撤销。
+    static func sideSuperseded(_ model: AppModel, epoch: Int, pageID: UUID?) -> Reply {
+        guard model.aiLog.sessionEpoch == epoch else {
+            var data = notExecuted("用户切了场次：先 app_status 看 open_session")
+            data["reason"] = "session_switched"
+            return .failure("superseded", "算的时候用户切了场次，这一次作废了：没有落地，没有压撤销", data)
+        }
+        if model.collage.page?.id != pageID { return pageMoved() }
+        var data = notExecuted("用户在拼图里做了新的操作：先 collage_get_state 看现在的样子，再决定要不要重来")
+        data["reason"] = "user_edit"
+        return .failure("superseded", "算的时候用户在拼图里做了新的操作，这一次作废了：没有落地，没有压撤销", data)
     }
 
     // MARK: - collage.move_photos（照片挪到别的跨页）
@@ -492,6 +504,11 @@ extension LiveHandlers {
         return .ok(plan)
     }
 
+    /// 照片挪到别的跨页（moveCells / addPhotos）。照片当场落下（同步的一步撤销，externalEdit 保证恰好一步），AI 的一步就是
+    /// 这一步（aiLog 照记、app_undo 撤得回）；后台还有一次精排（CollageStore.refinePages，不另记撤销，用户动过的页不落）。
+    /// 以前整个放在后台排、等任何求解落下来（审查 R1#2 / R3#6），中间被作废就悄悄没了。现在等的是自己这一次精排：落下来再
+    /// 回，回复里的预览、digest_after 就是最后的样子（不然 AI 下一次带的 if_digest 一落就过期）；到截止前还没落下照样算成功，
+    /// 多一条 refining。用户自己的排版还在算时先等它落下来（waitForUserSolve），不替用户把它作废（审查 R3#3）。
     static func movePhotos(_ req: Request, live: LiveServer, model: AppModel) async -> Reply {
         if let bad = checkArgs("collage_move_photos", req) { return bad }
         let collage = model.collage
@@ -507,7 +524,10 @@ extension LiveHandlers {
         // 两页都按人脸排：和成套一样先等路人信息
         let budget = min(remainingMs(req) - 5_000, 20_000) / 1_000
         let settled = await collage.hintsSettled(timeout: max(0, budget))
+        if let stop = await waitForUserSolve(req, collage) { return stop }
         if let stop = await settle(req, gate, live: live, model: model) { return stop }
+        // settle 等用户停手的时候用户又点了「换一批」：照样不替用户作废它
+        if collage.isSolving { return solvingRefusal() }
         let plan: MovePlan
         switch movePlan(ids, to: target, collage: collage) {
         case .stop(let stop): return stop
@@ -523,29 +543,46 @@ extension LiveHandlers {
         }
         if collage.editingCover { collage.setEditingCover(false) }
         if let s = plan.source { goTo(s, collage: collage) }
-        let targetID = collage.project.pages[target].id
         let pushes = collage.undoPushes
         let epoch = model.aiLog.sessionEpoch
-        if plan.source != nil {
-            collage.moveCells(plan.paths, toPage: target)
-        } else {
-            collage.addPhotos(plan.moving, toPage: target)
+        var ticket: Int?
+        let changed = collage.externalEdit {
+            if plan.source != nil {
+                ticket = collage.moveCells(plan.paths, toPage: target)
+            } else {
+                ticket = collage.addPhotos(plan.moving, toPage: target)
+            }
+        }
+        // 计数、深度取落地那一刻的（同 KitLanding）：等精排的时候用户按的键不算进 AI 这一步
+        let at = LandedCounts(pushes: collage.undoPushes, depth: collage.undoDepth, epoch: epoch)
+        guard changed else {
+            // store 自己挡下了（状态栏上说了为什么）；movePlan 已经挡掉了能想到的几种，走到这里很少见
+            let why = collage.notice ?? "app 没有挪这几张"
+            return .failure("invalid_state", why + "：这一次什么都没改", notExecuted("先 collage_get_state 看现在的样子"))
         }
         var warnings: [[String: Any]] = []
         if !settled {
             warnings.append(MCPReadModel.warning("hints_pending", "路人信息还没算完：这两页的取景待会儿可能还会变。",
                                                  hint: "过一会儿调 collage_get_state 看预览"))
         }
+        if let ticket {
+            let limit = max(0, remainingMs(req) - 2_500)
+            let start = LiveWire.nowMs()
+            while collage.isRefining(ticket), LiveWire.nowMs() - start < limit {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            if collage.isRefining(ticket) {
+                warnings.append(MCPReadModel.warning("refining",
+                                                     "照片已经挪过去了（一步撤销），app 还在后台精排这两页：精排落下来时版式会再变一次（不另压撤销，digest 也跟着变）。",
+                                                     hint: "过几秒 collage_get_state 看最后的样子（busy.refining 变成 false 以后）"))
+            }
+        }
         let unit = collage.isAlbum ? "个跨页" : "页"
         let what = plan.source.map { "从第 \($0 + 1) \(unit)" } ?? "从托盘"
         let summary = "\(what)挪了 \(plan.moving.count) 张到第 \(target + 1) \(unit)"
-        let moving = plan.moving
-        return await awaitLanding(req, live: live, model: model, tool: "collage_move_photos", before: before, pushes: pushes,
-                                  epoch: epoch, pageID: nil, summary: summary, body: extra, warnings: warnings) {
-            guard let page = collage.project.pages.first(where: { $0.id == targetID }) else { return false }
-            let here = Set(page.photoIDs)
-            return moving.allSatisfy(here.contains)
-        }.withAlbum(collage)
+        return await collageDone(req, live: live, model: model, tool: "collage_move_photos", changed: true, pushesBefore: pushes,
+                                 digestBefore: before, summary: summary, body: extra, warnings: warnings, landed: at)
+            .withAlbum(collage)
     }
 
     // MARK: - collage.replace_photo（换一格照片）

@@ -15,12 +15,14 @@ import Foundation
 ///   arrangeplan            打印「自动编排」前要问的那句话（F6；不用问 = 「不用问」）
 ///   spreaddump             每个跨页：锁没锁、左页 | 右页的照片和拍摄时间、先后对不对（F4）
 ///   dedupebench:300        相册去重的耗时（F7）：用托盘照片轮着凑 N 张（特征缓存键各不相同），先算画面特征、再去重
+///   landbench[:7]          挪照片 / 加照片 / 「拼图 (N)」同步落地那一步每个跨页的主线程耗时（审查 R1#2，CollageStore.landingBench）
 /// 编排结果的断言另有几条（expect:unique / order / locked=N / noemptyslots / on=ID@N / here=ID / notice~字，见 editExpect）。
+/// movecells、addto、frombatch 照片当场落下，后台还有一次精排：wait（ops 的 idle）连它一起等完（CollageStore.isRefining）。
 @MainActor
 enum CollageAlbumEditCLI {
 
     static let names: Set<String> = ["movecells", "addto", "movepages", "delpages", "mirror", "side", "lockpage",
-                                     "unlockpage", "cands", "replace", "arrangeplan", "spreaddump", "dedupebench"]
+                                     "unlockpage", "cands", "replace", "arrangeplan", "spreaddump", "dedupebench", "landbench"]
 
     /// 参数不对 = false（ops 打「参数不对，跳过」）。wait = 等后台排版落下来（ops 的 idle）。
     static func apply(_ name: String, _ arg: String, store: CollageStore, wait: () -> Void) -> Bool {
@@ -89,6 +91,11 @@ enum CollageAlbumEditCLI {
         case "dedupebench":
             guard let n = Int(arg), n > 0 else { return false }
             dedupeBench(store, count: n)
+        case "landbench":
+            guard arg.isEmpty || (Int(arg) ?? 0) > 0 else { return false }
+            let lines = store.landingBench(reps: Int(arg) ?? 7)
+            print("  同步落地的主线程耗时（\(lines.count) 个网格跨页）" + (lines.isEmpty ? "：没有网格跨页" : "："))
+            for line in lines { print(line) }
         default:
             return false
         }

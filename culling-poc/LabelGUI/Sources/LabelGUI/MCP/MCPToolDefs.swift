@@ -424,7 +424,7 @@ enum MCPToolDefs {
      "annotations":"$WRITE_IDEMPOTENT"},
 
     {"name":"collage_pages","title":"翻页 / 改跨页",
-     "description":"相册的跨页（单张拼图有好几页时同样，叫「页」）：action=go 翻到第 page 个（= 跨页条上点它）；add 在第 page 个（不给 = 当前这个）后面加一个空跨页并翻过去；delete 删掉 pages 里的（不能全删）；move 把 pages 里的几个一起挪到第 to 个的位置（挪完它们从第 to 个开始、保持原来的先后）；lock / unlock 锁住 / 解锁（锁住的跨页「自动编排」和整本婚礼相册原样留着、上面的照片不参与编排；删、挪照样可以）；mirror 左右镜像（只翻版式，照片本身不翻、取景不变，再镜像一次翻回来）；side_layout 只给第 page 个（不给 = 当前）跨页的左页或右页换一种切法（side=left / right，step=1 往后轮、-1 往前轮；照片不变、不跨中缝；这一边只有一张、有锁住的格子回 invalid_state）。跨页号从 1 起，看 collage_get_state 的 page、pages 和 album.spreads；pages 和「导出 ▾」的范围一样写：「3」「1-3, 7」，不给 = 当前跨页。lock、unlock、mirror、side_layout 只对相册。每个 action 都先退出封面编辑。go 只换画面、不进撤销；别的一次调用一步撤销（拼图页 ⌘Z，或 app_undo target=collage）。side_layout 第一次要在后台算几种切法（几秒），等的时候用户动了拼图、翻了页回 superseded，什么都没改。结果里有现在是第几个跨页、album.spreads 和 app 当前画面的预览图。",
+     "description":"相册的跨页（单张拼图有好几页时同样，叫「页」）：action=go 翻到第 page 个（= 跨页条上点它）；add 在第 page 个（不给 = 当前这个）后面加一个空跨页并翻过去；delete 删掉 pages 里的（不能全删）；move 把 pages 里的几个一起挪到第 to 个的位置（挪完它们从第 to 个开始、保持原来的先后）；lock / unlock 锁住 / 解锁（锁住的跨页「自动编排」和整本婚礼相册原样留着、上面的照片不参与编排；删、挪照样可以）；mirror 左右镜像（只翻版式，照片本身不翻、取景不变，再镜像一次翻回来）；side_layout 只给第 page 个（不给 = 当前）跨页的左页或右页换一种切法（side=left / right，step=1 往后轮、-1 往前轮；照片不变、不跨中缝；这一边只有一张、有锁住的格子回 invalid_state）。跨页号从 1 起，看 collage_get_state 的 page、pages 和 album.spreads；pages 和「导出 ▾」的范围一样写：「3」「1-3, 7」，不给 = 当前跨页。lock、unlock、mirror、side_layout 只对相册。每个 action 都先退出封面编辑。go 只换画面、不进撤销；别的一次调用一步撤销（拼图页 ⌘Z，或 app_undo target=collage）。side_layout 第一次要在后台算几种切法（几秒），等的时候用户动了拼图、翻了页回 superseded，截止时间内没算完回 deadline_exceeded（这一次撤回了，过后也不会落），都什么都没改；用户自己点的排版（换一批、自动编排）还在算时先等它落下来，等不到回 invalid_state。结果里有现在是第几个跨页、album.spreads 和 app 当前画面的预览图。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "action":{"type":"string","enum":["go","add","delete","move","lock","unlock","mirror","side_layout"]},
@@ -442,7 +442,7 @@ enum MCPToolDefs {
      "annotations":"$WRITE"},
 
     {"name":"collage_move_photos","title":"照片挪到别的跨页",
-     "description":"照片挪到相册的另一个跨页（= 右键那一格「移到第…个跨页」，或把托盘里的照片拖到跨页卡片上）：photos 里的照片放进第 to 个跨页，那一页按「加进现在的版式（重排）」重新排（锁住的格子不动；散落版放一张相纸）。photos 要么都在同一个跨页上（挪过去：app 先翻到那个跨页，那一页拿掉它们以后也重排；挪过去的裁切、锁定清掉，压在上面的字跟着走），要么都是托盘里还没上版的（放进去）；混着的、分在几个跨页上的分几次调。已经在第 to 个跨页上的跳过（列在 already_there）。同一张照片不会出现在两个跨页上。要在后台排（几秒），等的时候用户动了拼图、切了场次回 superseded，什么都没改。目标是印样页、照片不在托盘里回 invalid_state / invalid_argument。先退出封面编辑。一次调用一步撤销（拼图页 ⌘Z，或 app_undo target=collage）。结果里有 album.spreads（照片现在在哪个跨页）和 app 当前画面的预览图。",
+     "description":"照片挪到相册的另一个跨页（= 右键那一格「移到第…个跨页」，或把托盘里的照片拖到跨页卡片上）：photos 里的照片放进第 to 个跨页，那一页按「加进现在的版式（重排）」重新排（锁住的格子不动；散落版放一张相纸）。photos 要么都在同一个跨页上（挪过去：app 先翻到那个跨页，那一页拿掉它们以后也重排；挪过去的裁切、锁定清掉，压在上面的字跟着走），要么都是托盘里还没上版的（放进去）；混着的、分在几个跨页上的分几次调。已经在第 to 个跨页上的跳过（列在 already_there）。同一张照片不会出现在两个跨页上。照片当场挪过去（一步撤销），app 再在后台把这两页精排一遍（不另压撤销；精排落下之前用户动过的页留用户的）：等精排落下来再回，截止前没落下照样成功、多一条 refining 警告（collage_get_state 的 busy.refining）。用户自己点的排版（换一批、自动编排）还在算时先等它落下来，等不到回 invalid_state，什么都没改。目标是印样页、照片不在托盘里回 invalid_state / invalid_argument。先退出封面编辑。一次调用一步撤销（拼图页 ⌘Z，或 app_undo target=collage）。结果里有 album.spreads（照片现在在哪个跨页）和 app 当前画面的预览图。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "photos":{"type":"array","items":{"type":"string","minLength":1,"maxLength":256},"minItems":1,"maxItems":36,"uniqueItems":true,"description":"要挪的照片 id"},

@@ -1245,7 +1245,8 @@ enum CollageOpsScript {
             noteHintsTimeout()
         }
         func idle() {
-            spin(60) { !store.isSolving && store.busyText == nil && !store.hintsPending }
+            // 挪照片、加照片、「拼图 (N)」照片当场落下、后台还在精排（isRefining）：连它一起等完再出图、再断言。
+            spin(60) { !store.isSolving && !store.isRefining && store.busyText == nil && !store.hintsPending }
             noteHintsTimeout()
         }
         func path(_ s: String) -> [Int] { s == "r" ? [] : s.compactMap { $0.wholeNumberValue } }
@@ -2491,7 +2492,7 @@ enum CollageOpsScript {
                     }
                     CollageHandoff.fromWatermark(req, batch: batch, collage: store)
                     spin(30) { watch(); return store.busyText == nil }
-                    spin(60) { watch(); return !store.isSolving && store.busyText == nil }
+                    spin(60) { watch(); return !store.isSolving && !store.isRefining && store.busyText == nil }
                     CollageWatermarkCLI.report(store, refShort: refShort, notices: notices)
                 } else { ok = false }
             case "undo":
