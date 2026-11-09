@@ -767,7 +767,8 @@ struct CollageAlternativeStrip: View {
     @ViewBuilder
     private var emptyHint: some View {
         if store.root == nil {
-            Text("自动排版后这里是几十个备选版式，← → 切换")
+            Text(store.isAlbum ? "点「自动编排」把托盘编成跨页；每个跨页「换一批」出备选版式，← → 切换"
+                 : "自动排版后这里是几十个备选版式，← → 切换")
                 .font(.caption).foregroundStyle(.tertiary)
         } else if fineArtAlbum {
             // 婚礼 fine-art 编排的相册没有「换一批」：别叫人去点它。

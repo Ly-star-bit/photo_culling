@@ -244,7 +244,7 @@ swift build -c release
 # 拼图界面离屏快照(测试用): LABELGUI_DATA_DIR=/tmp/lg LabelGUI --collage-ui <照片文件夹> out.png [--album [--target-spreads 20@1-6] [--album-theme fineArt]] [--tab 格式] [--light]
 #   --tab 格式|样式|文档（右栏）|照片|模板|素材（左栏）；老名字照样认：版式 → 格式，文字 → 选中了东西是格式、没选中是文档的标题和刊头，
 #   水印 → 文档滚到水印，导出 → 顶栏「导出 ▾」摊开画在顶栏下面（离屏截不到弹出框）；--tray 照片|模板|素材 单独给左栏；
-#   --go looks|kits|watermark|…（CollageSpot）= 截图前点一下指路的字（切页签、滚过去、描边）；--add-item text|washi|… 加一个手写字 / 贴纸并选中
+#   --go looks|kits|watermark|…（CollageSpot）= 截图前点一下指路的字（切页签、滚过去、描边）；--add-item text|washi|… 加一个手写字 / 贴纸并选中；--clear-tray 清空托盘和版式再截
 #   [--select 路径 [--overlay-index N]]（选中照片上第 N 个字块）[--contact-frames]（印样的「逐帧」一开始就展开）
 #   只截检视器: --inspector-width 300；--ax-dump 打印滑杆 / 分段控件的值；--notice "提示文字" 截图前放一条状态栏提示
 # 水印页离屏快照(测试用): LABELGUI_DATA_DIR=/tmp/lg LabelGUI --watermark-ui <照片文件夹> out.png [--width 960] [--light] [--signature sig.png]

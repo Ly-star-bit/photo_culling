@@ -770,7 +770,7 @@ enum CollageCLI {
 /// LabelGUI --collage-ui <photo_dir> <out.png> [--album [--target-spreads 20@1-6] [--album-theme fineArt]] [--tab 格式|样式|文档|照片|模板|素材] [--select 路径如 10]
 /// [--crop] [--overlay-index N] [--size 1440x900] [--adopt photos|page[:水印页预设名]] [--inspector-width 300] [--notice 提示文字]
 /// [--contact-frames]（印样的「逐帧」一开始就展开）[--light]（浅色外观）[--ax-dump]
-/// [--tray-filter all|unused|used] [--tray-select ID,ID]（托盘的筛选、多选）
+/// [--tray-filter all|unused|used] [--tray-select ID,ID]（托盘的筛选、多选）[--clear-tray]（清空托盘和版式再截）
 /// [--tray-click ID[+cmd][+shift],…]（界面渲出来以后再在托盘里点：走选中变了以后的刷新，和一开始就选好的截图应该一样）
 /// [--perf place|gutter|slider|exposure|title|all|trayclick|darkroom]（截完图接着跑这个场景，打印每个视图 body 重算几次、
 /// store / 预览 / 缩略图各发了几次 objectWillChange、出了几张预览：CollagePerf；darkroom 要和 --darkroom 一起给，
@@ -902,6 +902,8 @@ enum CollageUISnapshot {
                 print("--add-item 不认识：\(kind)")
             }
         }
+        // --clear-tray：清空托盘和版式（= 托盘「带照片 › 清空托盘和版式」），看空托盘、空画布、模板页灰着的样子。
+        if args.contains("--clear-tray") { store.clearTray() }
         // --tray-filter all|unused|used、--tray-select ID,ID：截托盘的筛选和多选（离屏点不了）。
         if let f = option("--tray-filter").flatMap(CollageTrayState.Filter.init(rawValue:)) { store.tray.filter = f }
         if let ids = option("--tray-select") { store.tray.selection = Set(ids.split(separator: ",").map(String.init)) }

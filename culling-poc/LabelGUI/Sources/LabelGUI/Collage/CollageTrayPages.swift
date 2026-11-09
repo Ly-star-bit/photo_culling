@@ -71,6 +71,7 @@ struct CollageTemplatesPage: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
+                    if store.project.photos.isEmpty { emptyNotice }
                     kitsBox
                     CollageTemplateGallery(store: store) { templateToDelete = $0 }
                         .collageSpot(.templates, store.nav)
@@ -88,6 +89,23 @@ struct CollageTemplatesPage: View {
             Button("删除「\(name)」", role: .destructive) { store.deleteTemplate(name) }
             Button("取消", role: .cancel) {}
         }
+    }
+
+    /// 托盘空时模板全灰：把原因直接写出来（以前只在悬停提示里，NU7）。
+    private var emptyNotice: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("托盘里还没有照片，模板先灰着", systemImage: "info.circle")
+                .font(.caption.weight(.semibold))
+            CollageJumpText(store: store, lead: "模板要往格子里放照片：先在", spot: .photos, tail: "里点「带照片」，",
+                            title: "照片")
+            Text(store.batch == nil ? "或者把照片文件拖到左栏。"
+                 : "或者直接点下面的一键成套（从批量页的选片结果拿照片）。")
+                .font(.caption2).foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
     }
 
     /// 一键成套：放最上面，一套一个按钮（以前是「版式」页最底下一个小菜单）。

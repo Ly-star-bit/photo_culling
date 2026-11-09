@@ -223,7 +223,8 @@ struct CollageCanvasView: View {
             Image(systemName: "rectangle.3.offgrid")
                 .font(.system(size: 38))
                 .foregroundStyle(.secondary)
-            Text("把托盘里的照片拖进来，或点「自动排版」")
+            // 相册的按钮叫「自动编排」（NU7：以前提示一律说「自动排版」，相册里找不到这个按钮）。
+            Text(store.isAlbum ? "把托盘里的照片拖进来，或点「自动编排」" : "把托盘里的照片拖进来，或点「自动排版」")
                 .foregroundStyle(.secondary)
             Text("批量页多选后点「拼图」也能直接带过来")
                 .font(.caption)
