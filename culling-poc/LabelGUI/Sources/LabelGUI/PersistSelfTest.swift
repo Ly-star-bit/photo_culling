@@ -28,6 +28,7 @@ enum PersistSelfTest {
         t.removeSessionKeepsVerdicts()
         t.corruptFilesKept()
         t.unreadableFileRefused()
+        t.xmpStateGuarded()
         t.corruptCollageKept()
         t.sessionsIndexTolerant()
         t.writeFailureVisible()
@@ -274,6 +275,83 @@ final class PersistSelfTestHarness {
         store.switchSession(to: makeSession("s02a-locked-other").folder)
         store.switchSession(to: s.folder)
         check(store.overrides["DSCF7207"] == .reject, "权限恢复后重新打开：原来的改判读回来了")
+    }
+
+    // MARK: - NR4 xmp_state.json 读坏了
+
+    /// 照片文件夹里有几个 .xmp（这几场的照片文件夹是空的，写出来的 sidecar 一数就知道）。
+    func xmpCount(_ folder: URL) -> Int {
+        let names = (fm.enumerator(atPath: folder.path)?.allObjects as? [String]) ?? []
+        return names.filter { $0.lowercased().hasSuffix(".xmp") }.count
+    }
+
+    func xmpStateGuarded() {
+        print("— NR4 xmp_state.json 读坏了：解不开的挪开保住原件、提示；「只更新改了的」不退化成整场重写；读不出来的这一场不改写它")
+        freshIndex()
+        let s = makeSession("nr4-corrupt")
+        let url = s.dir.appendingPathComponent("xmp_state.json")
+        let garbage = Data("{\"marks\": {\"DSCF7207\": {\"v\": \"精选\", \"s\": 4}, \"DSCF72".utf8)  // 截断
+        try? garbage.write(to: url)
+        let store = newStore()
+        store.switchSession(to: s.folder)
+        guard !store.items.isEmpty else {
+            check(false, "fixture 读进来了")
+            return
+        }
+        let aside = corruptCopies(of: "xmp_state.json", in: s.dir)
+        check(aside.count == 1 && read(aside[0]) == garbage && !exists(url),
+              "解不开的 xmp_state.json 挪成 \(aside.first?.lastPathComponent ?? "—")，内容一字不差")
+        let notice = store.dataNotice ?? ""
+        check(notice.contains("xmp_state.json") && notice.contains("解不开") && notice.contains("全部重写"),
+              "提示点名 xmp_state.json、说了「全部重写」会整场盖：\(notice)")
+        check(store.xmpStateUnknown != nil && store.xmpStaleCount == 0 && store.hasWrittenXMP,
+              "按「不知道」处理：「XMP 待更新」不提醒，菜单照实叫「全部重写 XMP」")
+        store.exportXMP(.changed)
+        spin(10) { !store.isRunning }
+        check(xmpCount(s.folder) == 0 && (store.lastError ?? "").contains("全部重写 XMP"),
+              "「只更新改了的」不退化成整场写：一个 .xmp 都没写，说清楚（\(store.lastError ?? "nil")）")
+        store.exportXMP(.all)
+        spin(30) { !store.isRunning }
+        let rewritten = exists(url) && (read(url).flatMap { try? JSONSerialization.jsonObject(with: $0) } != nil)
+        check(xmpCount(s.folder) == store.items.count && rewritten && store.xmpStateUnknown == nil && read(aside[0]) == garbage,
+              "菜单「全部重写 XMP」照常整场写、记下新的 xmp_state.json（又「知道」了），挪开的原件没被碰（\(xmpCount(s.folder)) 个 .xmp）")
+
+        // 读不出来（权限）：不挪、提示，「只更新改了的」不写，「全部重写」也不改写 xmp_state.json。
+        freshIndex()
+        let locked = makeSession("nr4-locked")
+        let lockedURL = locked.dir.appendingPathComponent("xmp_state.json")
+        let original = Data("{\"marks\":{\"DSCF7207\":{\"v\":\"精选\",\"s\":4}},\"foreign\":[]}".utf8)
+        try? original.write(to: lockedURL)
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: lockedURL.path)
+        defer { try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: lockedURL.path) }
+        guard (try? Data(contentsOf: lockedURL)) == nil else {
+            print("SKIP root 跑时 chmod 000 挡不住读：xmp_state.json 读不出来那一段测不了")
+            return
+        }
+        let store2 = newStore()
+        store2.switchSession(to: locked.folder)
+        let lockedNotice = store2.dataNotice ?? ""
+        check(lockedNotice.contains("xmp_state.json") && lockedNotice.contains("读不出来")
+              && corruptCopies(of: "xmp_state.json", in: locked.dir).isEmpty,
+              "读不出来：提示、没挪：\(lockedNotice)")
+        check(store2.xmpStateUnknown != nil && store2.xmpStaleCount == 0, "读不出来：「XMP 待更新」不提醒（不当 0 张待更新的「写过」，也不当没写过）")
+        store2.exportXMP(.changed)
+        spin(10) { !store2.isRunning }
+        check(xmpCount(locked.folder) == 0 && (store2.lastError ?? "").contains("读不出来"),
+              "读不出来：「只更新改了的」一个 .xmp 都不写，说清楚为什么（\(store2.lastError ?? "nil")）")
+        store2.exportXMP(.all)
+        spin(30) { !store2.isRunning }
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: lockedURL.path)
+        check(read(lockedURL) == original && store2.xmpStateUnknown != nil,
+              "读不出来：「全部重写 XMP」写了 sidecar，xmp_state.json 原件一个字节没动（这一场不改写它）")
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: lockedURL.path)
+        store2.exportXMP(.changed)
+        spin(10) { !store2.isRunning }
+        check((store2.lastError ?? "").contains("读不出来"), "整场重写过一次以后，「只更新改了的」照样不写（还是不知道盘上那份）")
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: lockedURL.path)
+        store2.switchSession(to: makeSession("nr4-locked-other").folder)
+        store2.switchSession(to: locked.folder)
+        check(store2.xmpStateUnknown == nil && store2.hasWrittenXMP, "权限恢复后重新打开：原来那份读回来了")
     }
 
     // MARK: - S02b 拼图工程读坏了
