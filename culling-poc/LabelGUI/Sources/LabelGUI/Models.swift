@@ -56,10 +56,42 @@ struct Photo: Codable, Identifiable {
 struct Manifest: Codable {
     let photoDir: String
     let photos: [Photo]
+    /// 这一次没分析成、只记了 id 的那几张（PhotoIDMemory 的 idOnlyKey：取消时没轮到的、解码失败的），只有 id、raw_path、
+    /// decode_path。打开场次时认旧键（BatchStore.remapOrphanKeys）它们也算照片。老 manifest 没有；这一列解不开只当没有，
+    /// 不连累 photos。
+    var photosWithoutResults: [IDOnlyRow]? = nil
+
+    /// photos_without_results 的一行：每个字段解不开就当没有（和以前按字典读、`as? String` 一样宽）。
+    struct IDOnlyRow: Codable {
+        var id: String?
+        var rawPath: String?
+        var decodePath: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case rawPath = "raw_path"
+            case decodePath = "decode_path"
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try? c.decodeIfPresent(String.self, forKey: .id)
+            rawPath = try? c.decodeIfPresent(String.self, forKey: .rawPath)
+            decodePath = try? c.decodeIfPresent(String.self, forKey: .decodePath)
+        }
+    }
 
     enum CodingKeys: String, CodingKey {
         case photoDir = "photo_dir"
         case photos
+        case photosWithoutResults = "photos_without_results"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        photoDir = try c.decode(String.self, forKey: .photoDir)
+        photos = try c.decode([Photo].self, forKey: .photos)
+        photosWithoutResults = try? c.decodeIfPresent([IDOnlyRow].self, forKey: .photosWithoutResults)
     }
 }
 

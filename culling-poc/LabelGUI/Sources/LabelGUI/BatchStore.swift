@@ -856,6 +856,24 @@ final class BatchStore: ObservableObject {
         saveXMPState(state)
     }
 
+    /// 移进废纸篓的照片从 XMP 记录里拿掉（优化分析 NP6）：以前留着，写过 XMP 又移过废片的场次（正常流程）以后每次打开都有
+    /// 「对不上照片的键」，remapOrphanKeys 每次都去认一遍。照片连同旁边的 .xmp 进了废纸篓；放回原处、重新分析以后按没写过算
+    /// （「XMP 待更新」里有它，点一下照常写）。只动 marks / foreign / sharedSidecar，复查标记、上次写的时间原样留着；
+    /// 记录读不进来（xmpState 是 nil）、原件不让改写（xmpStateWriteRefused）的照旧不碰。不是 private：--persist-selftest
+    /// 直接调它（真移废片会往系统废纸篓里放东西，自检不走那一步）。
+    func dropXMPMarks(_ ids: Set<String>) {
+        guard var state = xmpState else { return }
+        var changed = false
+        for id in ids {
+            if state.marks.removeValue(forKey: id) != nil { changed = true }
+            if state.foreign.remove(id) != nil { changed = true }
+            if state.sharedSidecar?.remove(id) != nil { changed = true }
+        }
+        guard changed else { return }
+        xmpState = state
+        writeXMPState(state)
+    }
+
     private func saveXMPState(_ state: XMPState) {
         var state = state
         // 这里写下的 foreign 都是按现在的规则判的（导出时逐张判过，或者刚复查过）。
@@ -1324,8 +1342,14 @@ final class BatchStore: ObservableObject {
         // 再读 —— 不然移废片、写 XMP、导出都按旧路径走（审查 S04）。实时桥不跟书签，也不改。
         // 书签解析不到（挪去的外接盘拔了）、也不是上面认回的：给的文件夹没人核对过，先抽查是不是这一场的照片再改（审查）。
         let verifyRebase = !access.followed && moved == nil
-        let rebase = followBookmark ? SessionLocation.rebaseManifest(in: sessionDir, to: resolved, verify: verifyRebase)
+        // manifest.json 打开一场只解析一遍（优化分析 NP6）：以前 rebaseManifest 先整份 JSONSerialization 一遍才比出 photo_dir 没变
+        // （没挪过的场次每次都白解）、loadResults 再解一遍、有对不上照片的键时 remapOrphanKeys 第三遍（3000 张一遍几十毫秒）。
+        // 现在先按 loadResults 的结构读一遍、三处共用；真改了路径（挪过的场次）rebaseManifest 照旧自己解、写，写完再读一遍。
+        var manifest = Self.readManifest(in: sessionDir)
+        let rebase = followBookmark
+            ? SessionLocation.rebaseManifest(in: sessionDir, to: resolved, verify: verifyRebase, recorded: manifest?.photoDir)
             : (rebase: nil, failed: false)
+        if let r = rebase.rebase, r.rows > 0 { manifest = Self.readManifest(in: sessionDir) }
         // 对不上（原路径上是新导的一张卡、同名不同片）：这一场不认它 —— 照片文件夹按 manifest 记的位置算（现在打不开），重新分析、
         // 导出、移废片、写 XMP 都落不到给的文件夹里；touchSessionIndex 给打不开的位置建不了书签，原来指着那块盘的书签留着。
         let refusedFrom: String? = rebase.rebase?.refused != nil ? rebase.rebase?.from : nil
@@ -1343,8 +1367,8 @@ final class BatchStore: ObservableObject {
         loadClientNotes()
         loadXMPState()
         loadBodyOffsets()
-        loadResults()
-        remapOrphanKeys()
+        loadResults(manifest: manifest)
+        remapOrphanKeys(manifest: manifest)
         recheckForeignSidecars()
         applyThresholds()
         // Cached results load happily from a folder that no longer exists — say
@@ -1427,6 +1451,31 @@ final class BatchStore: ObservableObject {
 
     // MARK: - 旧 id 留下的孤儿键（已中招场次的回配，审查 S03）
 
+    /// manifest 里的每一张（photos 和 photos_without_results）：id 和 raw_path、decode_path（有的才列，先 raw 后 decode），
+    /// 外加记的 photo_dir。`manifest` 是按 loadResults 的结构读好的；nil（读不到、解不开）就照以前按字典读一遍 —— 某一行缺了
+    /// loadResults 要的字段时它解不开，以前这里照样能认。都读不到 = nil。
+    private static func manifestRows(_ manifest: Manifest?,
+                                     sessionDir: URL) -> (rows: [(id: String, paths: [String])], photoDir: String?)? {
+        if let manifest {
+            var rows = manifest.photos.map { ($0.id, [$0.rawPath] + ($0.decodePath.map { [$0] } ?? [])) }
+            for row in manifest.photosWithoutResults ?? [] {
+                guard let id = row.id else { continue }
+                rows.append((id, [row.rawPath, row.decodePath].compactMap { $0 }))
+            }
+            return (rows, manifest.photoDir)
+        }
+        let manifestURL = sessionDir.appendingPathComponent("manifest.json")
+        guard let data = try? Data(contentsOf: manifestURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let analyzed = json["photos"] as? [[String: Any]] else { return nil }
+        let dicts = analyzed + (json[ImageLoader.PreviousIDs.idOnlyKey] as? [[String: Any]] ?? [])
+        let rows = dicts.compactMap { row -> (id: String, paths: [String])? in
+            guard let id = row["id"] as? String else { return nil }
+            return (id, ["raw_path", "decode_path"].compactMap { row[$0] as? String })
+        }
+        return (rows, json["photo_dir"] as? String)
+    }
+
     /// 老版本只看「这一次」有没有撞名来起名：两个子文件夹里各有一张 DSC_0001，移走一张、重新分析以后，留下那张从
     /// 仪式_DSC_0001 变成 DSC_0001，改判、客户选中、XMP 记录还挂在 仪式_DSC_0001 上，对不上任何照片（现在 id 沿用
     /// 上一次的，不会再这样变；可已经变过的不会自己回来）。打开场次时（switchSession 读完以后）对一遍：
@@ -1435,7 +1484,7 @@ final class BatchStore: ObservableObject {
     /// 全场只有一张照片拼得出它、这张在那份表里自己还没有记录，才挪过去，记日志。裸文件名的不认（是删掉的那张的，
     /// 还是剩下这张的，分不出来）；对上几张的、两个旧键对上同一张的、目标已经有记录的都原样留着，不猜。
     /// 挪完键就对上了，再打开什么也不做，不用另记标记；平常没有对不上的键，不读盘。
-    private func remapOrphanKeys() {
+    private func remapOrphanKeys(manifest: Manifest?) {
         let itemIDs = Set(items.map(\.id))
         var keys = Set(overrides.keys).union(clientPicks).union(clientNotes.keys)
         if let state = xmpState {
@@ -1446,25 +1495,23 @@ final class BatchStore: ObservableObject {
         guard keys.contains(where: { !itemIDs.contains($0) }) else { return }
         // 照片以 manifest 为准：没有 layer1 结果的那几行、这一次没分析成的（photos_without_results：取消时没轮到、
         // 解码失败）也是照片 —— 它们的键不算孤儿，它们的路径也算候选（不然那张的旧键会被挪到同一个位置上的别的文件）。
-        let manifestURL = sessionDir.appendingPathComponent("manifest.json")
-        guard let data = try? Data(contentsOf: manifestURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let analyzed = json["photos"] as? [[String: Any]] else { return }
-        let rows = analyzed + (json[ImageLoader.PreviousIDs.idOnlyKey] as? [[String: Any]] ?? [])
-        let photoIDs = Set(rows.compactMap { $0["id"] as? String })
+        // manifest 是 switchSession 读好的那一份（NP6，不再自己解）；按 loadResults 的结构解不开的才照旧按字典读一遍。
+        guard let listed = Self.manifestRows(manifest, sessionDir: sessionDir) else { return }
+        let rows = listed.rows
+        let photoIDs = Set(rows.map(\.id))
         let orphans = keys.subtracting(photoIDs)
         guard !orphans.isEmpty else { return }
 
         // 带文件夹的旧 id → 拼得出它的照片。路径先相对 manifest 的 photo_dir（上一次分析起名时的根目录），再相对现在的。
         var roots: [String] = []
-        if let old = json["photo_dir"] as? String, !old.isEmpty { roots.append(old) }
+        if let old = listed.photoDir, !old.isEmpty { roots.append(old) }
         if let dir = photoDir { roots.append(dir.path) }
         let relativizer = ImageLoader.PathRelativizer(roots: roots)
         var owners: [String: Set<String>] = [:]
         for row in rows {
-            guard let id = row["id"] as? String else { continue }
-            for field in ["raw_path", "decode_path"] {
-                guard let path = row[field] as? String, let rel = relativizer.relative(path) else { continue }
+            let id = row.id
+            for path in row.paths {
+                guard let rel = relativizer.relative(path) else { continue }
                 let parts = ImageLoader.PathRelativizer.dropExtension(rel).split(separator: "/")
                 guard parts.count >= 2 else { continue }
                 let scoped = parts.joined(separator: "_")
@@ -3269,10 +3316,21 @@ final class BatchStore: ObservableObject {
     @Published private(set) var unparsedCount = 0
 
     func loadResults() {
+        loadResults(manifest: Self.readManifest(in: sessionDir))
+    }
+
+    /// 这一场的 manifest.json 按 loadResults 的结构读出来（读不到、解不开 = nil）。打开场次时读一遍，rebaseManifest、
+    /// loadResults、remapOrphanKeys 共用（优化分析 NP6）。
+    nonisolated static func readManifest(in sessionDir: URL) -> Manifest? {
+        guard let data = try? Data(contentsOf: sessionDir.appendingPathComponent("manifest.json")) else { return nil }
+        return try? JSONDecoder().decode(Manifest.self, from: data)
+    }
+
+    /// `manifest` = readManifest 读好的（nil = 读不到、解不开：网格清空）。
+    private func loadResults(manifest: Manifest?) {
         let decoder = JSONDecoder()
 
-        guard let manifestData = try? Data(contentsOf: sessionDir.appendingPathComponent("manifest.json")),
-              let manifest = try? decoder.decode(Manifest.self, from: manifestData) else {
+        guard let manifest else {
             items = []
             unparsedCount = 0
             rebuildGroupSizes()
@@ -4518,6 +4576,7 @@ final class BatchStore: ObservableObject {
                     self.clientPicks.subtract(trashed)
                     self.saveClientPicks()
                 }
+                self.dropXMPMarks(trashed)
                 self.rebuildGroupSizes()
                 self.purgeFromArtifacts(ids: trashed)
                 self.applyThresholds()

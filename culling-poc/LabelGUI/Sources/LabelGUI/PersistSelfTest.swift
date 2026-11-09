@@ -29,6 +29,7 @@ enum PersistSelfTest {
         t.corruptFilesKept()
         t.unreadableFileRefused()
         t.xmpStateGuarded()
+        t.trashDropsXMPMarks()
         t.corruptCollageKept()
         t.sessionsIndexTolerant()
         t.writeFailureVisible()
@@ -352,6 +353,42 @@ final class PersistSelfTestHarness {
         store2.switchSession(to: makeSession("nr4-locked-other").folder)
         store2.switchSession(to: locked.folder)
         check(store2.xmpStateUnknown == nil && store2.hasWrittenXMP, "权限恢复后重新打开：原来那份读回来了")
+    }
+
+    // MARK: - NP6 移废片收尾把移走的照片从 XMP 记录里拿掉
+
+    func trashDropsXMPMarks() {
+        print("— NP6 移废片收尾：移走的照片从 xmp_state.json 里拿掉（以前留着，每次打开这一场都有对不上照片的键）")
+        freshIndex()
+        let s = makeSession("np6-trash")
+        let url = s.dir.appendingPathComponent("xmp_state.json")
+        let probe = newStore()
+        probe.switchSession(to: s.folder)
+        let ids = probe.items.map(\.id).sorted()
+        guard ids.count >= 3 else {
+            check(false, "fixture 读进来了")
+            return
+        }
+        let (gone, kept, other) = (ids[0], ids[1], ids[2])
+        let state: [String: Any] = [
+            "marks": [gone: ["v": "废片", "s": -1], kept: ["v": "可用", "s": 3]],
+            "foreign": [gone, other], "sharedSidecar": [gone], "foreignRechecked": true, "writtenAt": 815_000_000.0,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: state) else { return }
+        try? data.write(to: url, options: .atomic)
+        let store = newStore()
+        store.switchSession(to: s.folder)
+        store.dropXMPMarks([gone])
+        let after = read(url).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        let marks = (after["marks"] as? [String: Any]).map { Array($0.keys).sorted() } ?? []
+        let foreign = (after["foreign"] as? [String]) ?? []
+        let shared = (after["sharedSidecar"] as? [String]) ?? []
+        let rest: Bool = after["foreignRechecked"] as? Bool == true && after["writtenAt"] as? Double == 815_000_000
+        check(marks == [kept] && foreign == [other] && shared.isEmpty && rest,
+              "移走的 \(gone)：marks / foreign / sharedSidecar 里都拿掉，别的照片、复查标记、上次写的时间原样（marks \(marks) · foreign \(foreign) · sharedSidecar \(shared)）")
+        let bytes = read(url)
+        store.dropXMPMarks(["不在记录里的"])
+        check(read(url) == bytes, "记录里本来就没有的：不重写 xmp_state.json")
     }
 
     // MARK: - S02b 拼图工程读坏了
