@@ -15,11 +15,13 @@ struct CollageDarkroomView: View {
     let model: CollageDarkroom
     let store: CollageStore
     @FocusState private var focused: Bool
+    /// 快捷键一览（顶栏键盘按钮、? 键）。
+    @State private var showShortcuts = false
 
     var body: some View {
         let _ = CollagePerf.body("暗房")
         VStack(spacing: 0) {
-            DarkroomTopBar(model: model, store: store, compare: model.compare)
+            DarkroomTopBar(model: model, store: store, compare: model.compare, showShortcuts: $showShortcuts)
             DarkroomHairline()
             HStack(spacing: 0) {
                 DarkroomSwatches(model: model)
@@ -59,6 +61,11 @@ struct CollageDarkroomView: View {
         .onKeyPress(.return) { model.apply(model.focus); return .handled }
         .onKeyPress(.space, phases: [.down, .up]) { press in
             model.showOriginal = press.phase == .down
+            return .handled
+        }
+        // 暗房里没有输入框，焦点一直在这一层：? 和批量页一样用 onKeyPress 接。
+        .onKeyPress(characters: .init(charactersIn: "?")) { _ in
+            showShortcuts.toggle()
             return .handled
         }
     }
@@ -246,6 +253,7 @@ private struct DarkroomTopBar: View {
     @ObservedObject var store: CollageStore
     /// 「原图」按钮按下的样子。
     @ObservedObject var compare: CollageDarkroom.Compare
+    @Binding var showShortcuts: Bool
 
     var body: some View {
         let _ = CollagePerf.body("暗房顶栏")
@@ -275,6 +283,12 @@ private struct DarkroomTopBar: View {
             .fixedSize()
             .padding(.horizontal, 12)
             HStack(spacing: 12) {
+                // 快捷键一览（? 键也开，CollageDarkroomView 接）：翻到暗房那页。
+                undoButton("keyboard", "快捷键一览", enabled: true) { showShortcuts.toggle() }
+                    .help("快捷键一览 (?)")
+                    .popover(isPresented: $showShortcuts, arrowEdge: .bottom) {
+                        ShortcutsPanel(page: .darkroom).environment(\.colorScheme, .dark)
+                    }
                 // 撤销 / 重做：暗房开着时拼图的顶栏（⌘Z 绑在它上面）不在视图树里，以前暗房里按 ⌘Z 没人接，界面却写着
                 // 「⌘Z 一步步撤」。条件、提示和拼图顶栏的一样。
                 HStack(spacing: 2) {
@@ -501,7 +515,7 @@ private struct DarkroomPreview: View {
             }
             .overlay(alignment: .bottom) {
                 Text("←→ 换一款 · ⏎ 套用 · 按住空格看原图 · 点图换 1:1 细节的位置"
-                     + (model.pageCount > 1 ? " · ⌘←→ 换\(model.store.isAlbum ? "跨页" : "页")" : "") + " · Esc 完成")
+                     + (model.pageCount > 1 ? " · ⌘←→ 换\(model.store.isAlbum ? "跨页" : "页")" : "") + " · Esc 完成 · ? 全部快捷键")
                     .font(.system(size: 11)).foregroundStyle(DarkroomPalette.tertiary)
                     .padding(.bottom, 12)
             }

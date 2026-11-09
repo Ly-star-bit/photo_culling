@@ -60,7 +60,7 @@ enum SelfTestRegistry {
 
     /// 先后 = selftests.sh 跑的先后；同一段里命令行同时带两条自检时，排在前面的那条先跑（跑完就退出）。
     static let all: [Entry] = [
-        .init("--ux-selftest", "网格改判后焦点落在哪（BatchView.placeAfterChange）；另挂 EXIF 快门 0、网格多选规则、水印页 RAW+JPG 配对、拼图检视器的去那儿、这一版新增",
+        .init("--ux-selftest", "网格改判后焦点落在哪（BatchView.placeAfterChange）；另挂 EXIF 快门 0、网格多选规则、水印页 RAW+JPG 配对、拼图检视器的去那儿、这一版新增、快捷键一览（? 键的判断表、每页列了绑着的键）",
               ci: .selftests()) { _ in UXSelfTest.run() },
         .init("--timeline-selftest", "时间轴 3000 组随机章节不出界、不重叠；随机数按 seed 播种（--seed N 或 LABELGUI_SELFTEST_SEED，--trial K 只重跑那一组），CI 跑三个 seed（三批互不相同的 3000 组，自检开头核对）",
               ci: .selftests(["--seed", "{seed}"])) { _ in ChapterTimelineSelfTest.runFromCommandLine() },
@@ -177,6 +177,7 @@ enum UXSelfTest {
         failed += GridExifImportSelfTest.run()  // EXIF 快门 0 不崩、网格多选规则、水印页 RAW+JPG 配对
         failed += CollageNavSelfTest.run()      // 拼图检视器重排：去那儿（页签、滚动请求）、--tab 新老名字、色调两节
         failed += WhatsNewSelfTest.run()        // 这一版新增：版本号、弹不弹、记账只写独立的 suite、数据表
+        failed += ShortcutsSelfTest.run()       // 快捷键一览：? 键的判断表、每页的表、拼图 / 暗房 / 水印绑着的键都列了
         exit(failed == 0 ? 0 : 1)
     }
 }

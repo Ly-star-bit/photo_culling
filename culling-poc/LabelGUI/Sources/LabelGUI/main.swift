@@ -675,7 +675,8 @@ struct LabelGUIApp: App {
         }
         // 「帮助 › 快捷键一览」：状态栏键盘按钮、? 键弹的同一张表，在哪个页面都能打开。只有一个，不进 ⌘N。
         Window("快捷键一览", id: ShortcutsWindow.id) {
-            ShortcutsPanel()
+            // 打开时翻到主窗口现在在的那一页（批量处理 / 水印 / 拼图 / 暗房），顶上可以换。
+            ShortcutsPanel(page: ShortcutsPage.current(model))
                 .preferredColorScheme(.dark)
         }
         .windowResizability(.contentSize)

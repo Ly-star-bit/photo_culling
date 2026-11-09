@@ -12,6 +12,8 @@ struct WatermarkView: View {
     @State private var presetToDelete: String?
     @State private var presetToOverwrite: String?
     @State private var isDropTargeted = false
+    /// 快捷键一览（状态栏键盘按钮、? 键；正在输入框里打字时 ? 照样打进去，见 ShortcutsKey）。
+    @State private var showShortcuts = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -28,6 +30,7 @@ struct WatermarkView: View {
             Divider()
             statusBar
         }
+        .shortcutsHotkey(isPresented: $showShortcuts)
     }
 
     // MARK: - 顶栏
@@ -145,6 +148,11 @@ struct WatermarkView: View {
             if let fraction = store.progressFraction {
                 ProgressView(value: fraction).frame(width: 140)
             }
+            Button { showShortcuts.toggle() } label: { Image(systemName: "keyboard") }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("快捷键一览 (?)")
+                .popover(isPresented: $showShortcuts, arrowEdge: .top) { ShortcutsPanel(page: .watermark) }
         }
         .animation(.default, value: store.notice)
         .padding(.horizontal, 12)
