@@ -2912,7 +2912,8 @@ enum ThumbCache {
     }
 
     /// 纯解码，不进缓存 —— 大图那条线用自己的 FitCache，别把网格缩略图挤出去。
-    static func decode(path: String, maxPixel: Int) -> NSImage? {
+    /// `embeddedMinEdge`：RAW 内嵌的 JPEG 至少要多大才用（长边，像素）；nil = min(2000, maxPixel / 2)，大图那条线一直用的门槛。
+    static func decode(path: String, maxPixel: Int, embeddedMinEdge: Int? = nil) -> NSImage? {
         guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil) else { return nil }
         // RAW-only 场次的适应视图：先试相机内嵌的 JPEG 预览（相机自己锐化过，
         // 解码只要几十毫秒），够大才用；不够大（很多 RAW 只嵌了 160px 缩略图）
@@ -2925,7 +2926,7 @@ enum ThumbCache {
                kCGImageSourceThumbnailMaxPixelSize: maxPixel,
                kCGImageSourceCreateThumbnailWithTransform: true,
            ] as CFDictionary),
-           max(embedded.width, embedded.height) >= min(2000, maxPixel / 2) {
+           max(embedded.width, embedded.height) >= (embeddedMinEdge ?? min(2000, maxPixel / 2)) {
             return NSImage(cgImage: embedded, size: NSSize(width: embedded.width, height: embedded.height))
         }
         guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
@@ -3653,27 +3654,51 @@ enum FaceStripCache {
     /// waiting happens on this queue, not on parked cooperative-pool threads.
     static let decodeQueue = DispatchQueue(label: "facestrip.decode", qos: .userInitiated)
 
+    /// RAW 内嵌的 JPEG 至少要这么大才拿来裁脸（长边）：走到原图解码就是脸在 1024 的分析预览上太小，内嵌的也只有 1024
+    /// 左右（不少机身只嵌一张小的）就白取了，照旧整幅解。1.5 倍预览：索尼 1616、富士 1920、佳能 / 尼康整幅的都够。
+    static let embeddedMinEdge = ImageLoader.previewMaxPixel * 3 / 2
+
+    /// 一次原图解码请求的取消旗（优化分析 NP5）：串行队列取消不了，以前翻得快、连拍挑选换组时排着的整幅 RAW 解码一个不少地
+    /// 跑完。现在格子不在了（FaceCropView 的任务取消）就立起来，排到它时直接跳过。
+    private final class Request: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        func cancel() {
+            lock.lock(); defer { lock.unlock() }
+            cancelled = true
+        }
+
+        var isCancelled: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return cancelled
+        }
+    }
+
+    /// 原图解码（2048，进缓存）。纯 RAW 场次先取相机内嵌的 JPEG（和网格、大图同一条路：ThumbCache.decode），够大才用；
+    /// 不够大、或者不是 RAW 的照旧整幅解（参数和以前一样）。调用的任务取消了、排到时还没开始解的就不解，返回 nil。
     static func decode(path: String) async -> NSImage? {
         if let hit = cache.object(forKey: path as NSString) { return hit }
-        return await withCheckedContinuation { continuation in
-            decodeQueue.async {
-                if let hit = cache.object(forKey: path as NSString) {
-                    continuation.resume(returning: hit)
-                    return
+        let request = Request()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                decodeQueue.async {
+                    if let hit = cache.object(forKey: path as NSString) {
+                        continuation.resume(returning: hit)
+                        return
+                    }
+                    guard !request.isCancelled,
+                          let image = ThumbCache.decode(path: path, maxPixel: 2048, embeddedMinEdge: embeddedMinEdge)
+                    else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    cache.setObject(image, forKey: path as NSString, cost: Int(image.size.width * image.size.height * 4))
+                    continuation.resume(returning: image)
                 }
-                guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
-                      let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                          kCGImageSourceCreateThumbnailFromImageAlways: true,
-                          kCGImageSourceThumbnailMaxPixelSize: 2048,
-                          kCGImageSourceCreateThumbnailWithTransform: true,
-                      ] as CFDictionary) else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                let image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
-                cache.setObject(image, forKey: path as NSString, cost: cg.width * cg.height * 4)
-                continuation.resume(returning: image)
             }
+        } onCancel: {
+            request.cancel()
         }
     }
 
@@ -3785,18 +3810,20 @@ struct FaceCropView: View {
             let path = decodePath
             let preview = previewPath
             let bbox = face.bbox
-            let result = await Task.detached(priority: .userInitiated) { () -> NSImage? in
+            let work = Task.detached(priority: .userInitiated) { () -> LiveBox<NSImage?> in
                 guard bbox.count == 4,
                       let decoded = await FaceStripCache.source(previewPath: preview, decodePath: path, bbox: bbox),
-                      let cg = decoded.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+                      let cg = decoded.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return LiveBox(nil) }
                 let w = CGFloat(cg.width), h = CGFloat(cg.height)
                 let rect = CGRect(x: bbox[0] * w, y: bbox[1] * h,
                                   width: (bbox[2] - bbox[0]) * w, height: (bbox[3] - bbox[1]) * h)
-                guard let cropped = cg.cropping(to: rect), let owned = Self.ownPixels(cropped) else { return nil }
-                return NSImage(cgImage: owned, size: NSSize(width: owned.width, height: owned.height))
-            }.value
+                guard let cropped = cg.cropping(to: rect), let owned = Self.ownPixels(cropped) else { return LiveBox(nil) }
+                return LiveBox(NSImage(cgImage: owned, size: NSSize(width: owned.width, height: owned.height)))
+            }
+            // detached 的任务不跟着这个 .task 取消：格子不在了要转告它，FaceStripCache 排着队的原图解码才跳得过去（NP5）。
+            let result = await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
             guard !Task.isCancelled else { return }
-            crop = result
+            crop = result.value
         }
     }
 }

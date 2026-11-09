@@ -5,7 +5,8 @@ import ImageIO
 import UniformTypeIdentifiers
 
 /// `--ux-selftest` 里的几组纯函数用例：EXIF 拍摄参数（快门 0 / 极小正数不崩）、网格多选（数字键、剪选中）、
-/// 水印页导入的 RAW+JPG 配对、拼图托盘每格的选中标记、审片 / 检视器大图的解码尺寸、1024 预览和网格缩略图分开存。
+/// 水印页导入的 RAW+JPG 配对、拼图托盘每格的选中标记、审片 / 检视器大图的解码尺寸、1024 预览和网格缩略图分开存、
+/// 人脸小图的原图解码可以取消。
 /// 每条打 PASS / FAIL 一行，返回失败条数（main.swift 加到总数上）。
 enum GridExifImportSelfTest {
     final class Tally {
@@ -28,6 +29,7 @@ enum GridExifImportSelfTest {
         fitDecodeCases(tally)
         cacheInvalidationCases(tally)
         previewCacheCases(tally)
+        faceStripCancelCases(tally)
         return tally.failed
     }
 
@@ -79,6 +81,59 @@ enum GridExifImportSelfTest {
         for key in fillers { ThumbCache.previews.removeObject(forKey: key) }
         ThumbCache.previews.removeObject(forKey: bigKey)
         ThumbCache.cache.removeObject(forKey: smallKey)
+    }
+
+    // MARK: - 人脸小图的原图解码可以取消（优化分析 NP5）
+
+    private final class Outcomes: @unchecked Sendable {
+        private let lock = NSLock()
+        private var got: [String: Bool] = [:]
+        func set(_ name: String, _ value: Bool) {
+            lock.lock(); defer { lock.unlock() }
+            got[name] = value
+        }
+        func get(_ name: String) -> Bool? {
+            lock.lock(); defer { lock.unlock() }
+            return got[name]
+        }
+    }
+
+    /// FaceStripCache.decode 是串行队列：先用一个等信号的块把队列堵住，两张照片的请求排上，取消第一个再放行 ——
+    /// 取消的那个不解、不进缓存、回 nil，另一个照常解。不靠时间赛跑：第一个哪怕还没排上队就被取消，进来时也直接立旗。
+    @MainActor
+    private static func faceStripCancelCases(_ t: Tally) {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("facestrip-selftest-" + UUID().uuidString)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let a = dir.appendingPathComponent("A.JPG").path, b = dir.appendingPathComponent("B.JPG").path
+        guard writeJPEG(URL(fileURLWithPath: a), width: 64, height: 48),
+              writeJPEG(URL(fileURLWithPath: b), width: 64, height: 48) else {
+            t.check(false, "人脸小图 写不出测试 JPEG")
+            return
+        }
+        let gate = DispatchSemaphore(value: 0)
+        FaceStripCache.decodeQueue.async { gate.wait() }
+        let outcomes = Outcomes()
+        let done = DispatchSemaphore(value: 0)
+        let first = Task.detached {
+            outcomes.set("A", await FaceStripCache.decode(path: a) != nil)
+            done.signal()
+        }
+        Task.detached {
+            outcomes.set("B", await FaceStripCache.decode(path: b) != nil)
+            done.signal()
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+        first.cancel()
+        gate.signal()
+        let finished: Bool = done.wait(timeout: .now() + 10) == .success && done.wait(timeout: .now() + 10) == .success
+        let aCached: Bool = FaceStripCache.cache.object(forKey: a as NSString) != nil
+        let bCached: Bool = FaceStripCache.cache.object(forKey: b as NSString) != nil
+        t.check(finished && outcomes.get("A") == false && !aCached,
+                "人脸小图 格子不在了（任务取消）：排着的原图解码跳过、不进缓存", "\(finished) \(String(describing: outcomes.get("A"))) \(aCached)")
+        t.check(finished && outcomes.get("B") == true && bCached, "人脸小图 没取消的照常解、进缓存",
+                "\(String(describing: outcomes.get("B"))) \(bCached)")
+        FaceStripCache.cache.removeObject(forKey: b as NSString)
     }
 
     // MARK: - 分析收尾只清重写了预览的照片
