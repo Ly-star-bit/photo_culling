@@ -510,6 +510,28 @@ enum CollageDarkroomSelfTest {
         let layers = Set(report("每张照片")?.marks.filter { $0.kind != nil }.map(\.layer) ?? [])
         check(layers == ["photo", "page"], "准备：每张照片、整页两层水印都画了", layers.sorted().joined(separator: "、"))
 
+        // 原图解码缓存（1:1 细节停手一次渲一次）：同一处再渲一次一张原图都不重解；那一块只落在投影上：照片不解码。
+        if let roomyCase = cases.first(where: { $0.name.hasPrefix("大边距") }),
+           let f = CollageLayout.pageGeometry(roomyCase.project.pages[0].root, canvas: roomy, style: wide).frames.first {
+            let p = roomyCase.project
+            let cache = CollageImages.Recent(capacity: 2)
+            let middle = CGPoint(x: Double(f.rect.x0 + f.rect.x1) / 2, y: Double(f.rect.y0 + f.rect.y1) / 2)
+            func loupe(_ at: CGPoint) {
+                _ = CollageDarkroom.loupeImage(p, pageIndex: 0, fallback: p.pages[0], hints: [:], scale: 1, center: at,
+                                               originals: cache)
+            }
+            loupe(middle)
+            let first = (cache.hits, cache.misses)
+            loupe(middle)
+            check(first == (0, 1) && cache.hits == 1 && cache.misses == 1, "原图缓存：同一处再渲一次，原图不重解",
+                  "第一次 现解 \(first.1) · 第二次之后 命中 \(cache.hits) 现解 \(cache.misses)")
+            let below = CGPoint(x: middle.x, y: Double(f.rect.y1) + Double(CollageDarkroom.loupeSide) / 2 + 6)
+            let fresh = CollageImages.Recent(capacity: 2)
+            _ = CollageDarkroom.loupeImage(p, pageIndex: 0, fallback: p.pages[0], hints: [:], scale: 1, center: below,
+                                           originals: fresh)
+            check(fresh.hits + fresh.misses == 0, "那一块只落在照片的投影上：照片不解码、不出图", "解了 \(fresh.misses) 张")
+        }
+
         for c in cases {
             let p = c.project
             let w = Double(p.canvas.width), h = Double(p.canvas.height)

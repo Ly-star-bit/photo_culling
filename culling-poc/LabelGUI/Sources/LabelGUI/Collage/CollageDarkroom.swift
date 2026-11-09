@@ -257,6 +257,7 @@ final class CollageDarkroom: ObservableObject {
         loupeTimer = nil
         laneKey.removeAll()
         laneJob.removeAll()
+        originals.removeAll()
     }
 
     // MARK: - 哪一级
@@ -487,6 +488,9 @@ final class CollageDarkroom: ObservableObject {
 
     private var laneKey: [String: LaneKey] = [:]
     private var laneJob: [String: @MainActor () async -> Void] = [:]
+    /// 1:1 细节的原图解码：最近用的两张（一般就是那一格，压着缝时是两格）。停手一次渲一次，以前每次都从原图整张重解
+    /// （纯 RAW 场次一次一整幅 RAW）。关暗房就清掉（导出尺寸的解码一张几十上百 MB）。
+    let originals = CollageImages.Recent(capacity: 2)
     private var laneRunning: Set<String> = []
     private var loupeTimer: Timer?
 
@@ -748,11 +752,13 @@ final class CollageDarkroom: ObservableObject {
         let pageIndex = store.pageIndex
         let scale = Double(CollageStore.exportScale(canvas: project.canvas, options: store.exportOptions))
         let center = loupeCenter
+        let originals = originals
         let key = LaneKey(project, "\(pageIndex)|\(scale)|\(Int(center.x)),\(Int(center.y))|\(hints.count)")
         if laneKey["loupe"] != key { output.loupeStale = output.loupe != nil }
         submit("loupe", key: key) { [weak self] in
             let image = await Task.detached(priority: .utility) {
-                Self.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints, scale: scale, center: center)
+                Self.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints, scale: scale, center: center,
+                                 originals: originals)
             }.value
             guard let self, self.current("loupe", key) else { return }
             self.output.loupe = image
@@ -804,24 +810,27 @@ final class CollageDarkroom: ObservableObject {
     }
 
     /// 放大镜：导出尺寸（原图解码、导出倍数）渲整页，裁中心附近 side × side 像素（1 个导出像素 = 1 pt）。
-    /// 只要那一小块：离它远的照片格不出图（CollageRender.Options.region，裁出来的像素和渲整页逐字节一样，
-    /// --darkroom-selftest 核对）。以前整页每格都从原图解、在导出尺寸上调色加颗粒，一次半秒多（1 倍；2、3 倍导出是
-    /// 4、9 倍的像素），暗房里每改一下停手就来一次，渲的时候 1:1 细节一直压暗、还和大预览抢 CPU。
+    /// 只要那一小块：离它远的照片格、只够得着投影的照片格不出图（CollageRender.Options.region，裁出来的像素和渲整页
+    /// 逐字节一样，--darkroom-selftest 核对）；原图解码先查 originals（最近两张）。以前整页每格都从原图解、在导出尺寸
+    /// 上调色加颗粒，一次半秒多（1 倍；2、3 倍导出是 4、9 倍的像素），暗房里每改一下停手就来一次，渲的时候 1:1 细节
+    /// 一直压暗、还和大预览抢 CPU。够得着的格子照旧整格调色加颗粒（只出一截不逐字节一样，见 CollageRender.cellImage）。
     nonisolated static let loupeSide = 232
     nonisolated static func renderLoupe(_ project: CollageProject, pageIndex: Int, fallback: CollagePage,
                                         hints: [String: CollageCrop.Hints], scale: Double, center: CGPoint,
-                                        wholePage: Bool = false) -> NSImage? {
+                                        originals: CollageImages.Recent? = nil, wholePage: Bool = false) -> NSImage? {
         guard let own = loupeImage(project, pageIndex: pageIndex, fallback: fallback, hints: hints, scale: scale,
-                                   center: center, wholePage: wholePage) else { return nil }
+                                   center: center, originals: originals, wholePage: wholePage) else { return nil }
         return NSImage(cgImage: own, size: NSSize(width: own.width, height: own.height))
     }
 
     nonisolated static func loupeImage(_ project: CollageProject, pageIndex: Int, fallback: CollagePage,
                                        hints: [String: CollageCrop.Hints], scale: Double, center: CGPoint,
-                                       side: Int = loupeSide, wholePage: Bool = false) -> CGImage? {
+                                       side: Int = loupeSide, originals: CollageImages.Recent? = nil,
+                                       wholePage: Bool = false) -> CGImage? {
         let page = project.pages.indices.contains(pageIndex) ? project.pages[pageIndex] : fallback
         guard let rect = loupeRect(canvas: project.canvas, scale: scale, center: center, side: side) else { return nil }
         var opts = loupeOptions(scale: scale)
+        opts.originals = originals
         if !wholePage { opts.region = rect }
         guard let cg = CollageRender.render(page: page, project: project, hints: hints, options: opts) else { return nil }
         return ownCrop(cg, rect, canvas: project.canvas, scale: scale)
@@ -863,7 +872,8 @@ final class CollageDarkroom: ObservableObject {
         return ctx.makeImage()
     }
 
-    /// 1:1 细节只渲够得着的那一块（Options.region）和渲整页再裁逐字节比：每个中心一个结果（整页只渲一次）。
+    /// 1:1 细节只渲够得着的那一块（Options.region，原图走 originals 缓存）和渲整页再裁（原图现解）逐字节比：每个中心
+    /// 一个结果（整页只渲一次）。
     /// region 的安全边距是按效果估的（CollageRender 里的 regionPad），以后哪个效果画出了这个范围，1:1 细节就会悄悄缺
     /// 一块 —— --darkroom-selftest 用几种模板核对、不同就失败；--perf darkroom 在真照片上打印。
     nonisolated static func loupeIdentity(_ project: CollageProject, pageIndex: Int, fallback: CollagePage,
@@ -871,11 +881,12 @@ final class CollageDarkroom: ObservableObject {
                                           side: Int = loupeSide) -> [Bool] {
         let page = project.pages.indices.contains(pageIndex) ? project.pages[pageIndex] : fallback
         let whole = CollageRender.render(page: page, project: project, hints: hints, options: loupeOptions(scale: scale))
+        let originals = CollageImages.Recent(capacity: 2)
         return centers.map { center in
             guard let whole, let rect = loupeRect(canvas: project.canvas, scale: scale, center: center, side: side),
                   let expected = ownCrop(whole, rect, canvas: project.canvas, scale: scale).flatMap(pixels),
                   let culled = loupeImage(project, pageIndex: pageIndex, fallback: fallback, hints: hints, scale: scale,
-                                          center: center, side: side).flatMap(pixels)
+                                          center: center, side: side, originals: originals).flatMap(pixels)
             else { return false }
             return expected == culled
         }

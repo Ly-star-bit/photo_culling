@@ -331,7 +331,8 @@ enum CollageItems {
             if let tile = CollageRender.cellImage(photo: photo, window: w, width: pw, height: ph,
                                                   sharpen: dc.sharpen, radius: dc.sharpenRadius,
                                                   export: dc.options.export, report: dc.options.report,
-                                                  color: dc.colorOps[id], screen: dc.screen) {
+                                                  color: dc.colorOps[id], screen: dc.screen,
+                                                  originals: dc.options.originals) {
                 if let report = dc.options.report, let screen = dc.screen {
                     report.halftone.append(CollageRender.halftoneRecord(screen, owner: "item\(index)", photoID: id))
                 }

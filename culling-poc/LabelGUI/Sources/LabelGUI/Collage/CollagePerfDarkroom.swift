@@ -125,7 +125,13 @@ extension CollagePerf {
             }
         }
         let center = dr.loupeCenter
+        // 暗房里的样子：原图解码在缓存里（停手一次渲一次，同几格照片）；另量一次原图现解（刚换位置、刚换页）。
+        let originals = CollageImages.Recent(capacity: 2)
         let loupe = median {
+            _ = CollageDarkroom.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints,
+                                            scale: exportScale, center: center, originals: originals)
+        }
+        let loupeCold = median {
             _ = CollageDarkroom.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints,
                                             scale: exportScale, center: center)
         }
@@ -155,10 +161,10 @@ extension CollagePerf {
             _ = CollageLooks.cube(project.style.look, strength: 0.8, printing: p)
         }
         print(String(format: "perf darkroom 单次：大预览（%.2f 倍）%.1f ms · 原图 %.1f · 样张 %d 张 %.1f · 底片条 %d 格 %.1f · "
-                     + "1:1 细节（%d 倍）%.1f（渲整页再裁 %.1f）· 冲印区色调表一张 %.1f · 编辑指纹 %.2f ms"
+                     + "1:1 细节（%d 倍）%.1f（原图现解 %.1f · 渲整页再裁 %.1f）· 冲印区色调表一张 %.1f · 编辑指纹 %.2f ms"
                      + "（%d 张 / %d 页 %.2f ms）",
                      scale, preview, plain, CollageDarkroom.order.count, frames, cells.count, reel, Int(exportScale),
-                     loupe, loupeWhole, cube, digest, big.photos.count, big.pages.count, bigDigest))
+                     loupe, loupeCold, loupeWhole, cube, digest, big.photos.count, big.pages.count, bigDigest))
         loupeIdentity(project, page: page, pageIndex: pageIndex, hints: hints, scale: exportScale,
                       centers: store.geometry.frames.map { f in
                           CGPoint(x: Double(f.rect.x0 + f.rect.x1) / 2, y: Double(f.rect.y0 + f.rect.y1) / 2)
