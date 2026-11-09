@@ -254,7 +254,7 @@ struct BatchView: View {
         .confirmationDialog(acceptTitle, isPresented: $showAcceptAllConfirm) {
             Button("定案 · \(acceptPreview.rejects) 张设为废片") {
                 let scope = acceptScope
-                withAnimation { store.acceptAllRecommendations(inChapter: scope) }
+                withAnimation { _ = store.acceptAllRecommendations(inChapter: scope) }
                 selectedIDs.removeAll()
             }
             Button("取消", role: .cancel) {}
@@ -2972,9 +2972,9 @@ struct ThumbnailView: View {
             guard !Task.isCancelled else { return }
             let p = path
             let px = maxPixel
-            let loaded = await Task.detached(priority: .utility) { ThumbCache.load(path: p, maxPixel: px) }.value
+            let loaded = await Task.detached(priority: .utility) { LiveBox(ThumbCache.load(path: p, maxPixel: px)) }.value
             guard !Task.isCancelled else { return }
-            image = loaded
+            image = loaded.value
         }
     }
 }
@@ -3050,7 +3050,8 @@ enum FitCache {
     private final class Book: @unchecked Sendable {
         private let lock = NSLock()
         private var headers: [String: Header] = [:]
-        private var running: [String: Task<NSImage?, Never>] = [:]
+        /// 解好的图装在 LiveBox 里（NSImage 在 15.x SDK 里不是 Sendable，任务的结果要跨线程交出去）。
+        private var running: [String: Task<LiveBox<NSImage?>, Never>] = [:]
 
         func header(_ path: String) -> Header? {
             lock.lock(); defer { lock.unlock() }
@@ -3068,7 +3069,7 @@ enum FitCache {
         }
 
         /// 这个键已经有人在解就交出那一份，没有才 `start` 一个（在锁里登记，start 出来的任务要等锁放了才能 finish）。
-        func task(for key: String, start: () -> Task<NSImage?, Never>) -> Task<NSImage?, Never> {
+        func task(for key: String, start: () -> Task<LiveBox<NSImage?>, Never>) -> Task<LiveBox<NSImage?>, Never> {
             lock.lock(); defer { lock.unlock() }
             if let inFlight = running[key] { return inFlight }
             let made = start()
@@ -3101,20 +3102,20 @@ enum FitCache {
     }
 
     /// 解码（进缓存）。同一个键已经有人在解（预取还没解完就翻到了、量到尺寸以后任务重进）就等那一份，
-    /// 不另起一张 —— 一张 40 MP 整张解要 160 MB 临时内存。
-    static func load(path: String, maxPixel: Int, priority: TaskPriority = .userInitiated) async -> NSImage? {
+    /// 不另起一张 —— 一张 40 MP 整张解要 160 MB 临时内存。结果装在 LiveBox 里交回去（主线程上的大图也调它）。
+    static func load(path: String, maxPixel: Int, priority: TaskPriority = .userInitiated) async -> LiveBox<NSImage?> {
         let cacheKey = ThumbCache.key(path, maxPixel)
-        if let hit = cache.object(forKey: cacheKey) { return hit }
+        if let hit = cache.object(forKey: cacheKey) { return LiveBox(hit) }
         let name = cacheKey as String
         let task = book.task(for: name) {
-            Task.detached(priority: priority) { () -> NSImage? in
+            Task.detached(priority: priority) { () -> LiveBox<NSImage?> in
                 let image = ThumbCache.decode(path: path, maxPixel: maxPixel)
                 if let image {
                     cache.setObject(image, forKey: name as NSString,
                                     cost: Int(image.size.width * image.size.height * 4))
                 }
                 book.finish(name)
-                return image
+                return LiveBox(image)
             }
         }
         return await task.value
@@ -3126,7 +3127,7 @@ enum FitCache {
     static func prefetch(path: String, display: Int, sharp: (edge: Int, aspect: CGFloat)? = nil) async {
         let head = header(path: path)
         let size = decodeSize(header: head, display: display)
-        guard let decoded = await load(path: path, maxPixel: size, priority: .utility),
+        guard let decoded = await load(path: path, maxPixel: size, priority: .utility).value,
               let sharp, let head, head.width > 0, head.height > 0 else { return }
         let aspect = CGFloat(head.width) / CGFloat(head.height)
         guard abs(aspect - sharp.aspect) <= sharp.aspect * 0.02 else { return }
@@ -3256,7 +3257,8 @@ struct SharpImageView: View {
             let warm = FitCache.cache.object(forKey: decodedKey)
             if warm == nil, loaded?.key != decodedKey, loaded?.key != renderedKey {
                 let p = previewPath
-                let quick = await Task.detached(priority: .userInitiated) { ThumbCache.load(path: p, maxPixel: 1024) }.value
+                let quick = await Task.detached(priority: .userInitiated) { LiveBox(ThumbCache.load(path: p, maxPixel: 1024)) }
+                    .value.value
                 if let quick {
                     guard !Task.isCancelled else { return }
                     loaded = (decodedKey, quick)
@@ -3264,7 +3266,7 @@ struct SharpImageView: View {
             }
             // 2. 解码（尺寸见 FitCache.decodeSize；预取在解的同一张就等它，不另解）。
             var decodedImage = warm
-            if decodedImage == nil { decodedImage = await FitCache.load(path: d, maxPixel: px) }
+            if decodedImage == nil { decodedImage = await FitCache.load(path: d, maxPixel: px).value }
             guard let decoded = decodedImage, !Task.isCancelled else { return }
             loaded = (decodedKey, decoded)
             // 3. 还没量到尺寸就先停在这，量到后 renderedKey 变化会再进来。
@@ -3284,9 +3286,10 @@ struct SharpImageView: View {
                 try? await Task.sleep(for: .milliseconds(80))
                 guard !Task.isCancelled else { return }
             }
+            let source = LiveBox(decoded)
             let rendered = await Task.detached(priority: .userInitiated) {
-                FitCache.sharpened(decoded, path: d, edge: edge)
-            }.value
+                LiveBox(FitCache.sharpened(source.value, path: d, edge: edge))
+            }.value.value
             guard !Task.isCancelled, let rendered else { return }
             loaded = (renderedKey, rendered)
             lastRender = (d, edge)
@@ -4261,8 +4264,9 @@ struct PhotoInspector: View {
         let path = item.decodePath
         let requestedID = item.id
         Task.detached(priority: .userInitiated) {
-            let image = FullResCache.load(path: path)
+            let loaded = LiveBox(FullResCache.load(path: path))
             await MainActor.run {
+                let image = loaded.value
                 loadingFullRes = false
                 // 一张 40MP 原图要解码约 1 秒，期间用户可能已经 ←/→ 翻走了。
                 // 不校验的话放大窗里是上一张、而头部信息和判决键作用在这一张。
@@ -4711,8 +4715,9 @@ struct ReviewView: View {
         let path = item.decodePath
         let requestedID = item.id
         Task.detached(priority: .userInitiated) {
-            let image = FullResCache.load(path: path)
+            let loaded = LiveBox(FullResCache.load(path: path))
             await MainActor.run {
+                let image = loaded.value
                 loadingZoom = false
                 // 解码期间可能已经翻页了 —— 否则放大的是上一张，而数字键判在这一张。
                 guard requestedID == focusedID else { return }

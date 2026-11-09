@@ -2943,6 +2943,15 @@ final class BatchStore: ObservableObject {
         let sleepGuard = longTasks.begin(.analysis)
         // 「上次分析没跑完」的标记（QuitSafety.swift）：跑完、取消、出错都在 isRunning 落下之前删掉；崩溃、强退删不到。
         UnfinishedAnalysis.begin(in: data)
+        // 引擎在并发线程上回调（@Sendable）：回到主线程要做的两件事在这里先做好、各自 [weak self]，跳回主线程的那一下只捕获它们。
+        // 以前写在下面 Task.detached { [weak self] in … } 里，内层的 [weak self] 读的是外层那个 weak var（Swift 6 语言模式下是错误）。
+        let showPhoto: @MainActor @Sendable (AnalysisEngine.PhotoAnalysis) -> Void = { [weak self] analysis in
+            self?.appendProvisional(analysis)
+        }
+        let showProgress: @MainActor @Sendable (String, Double?) -> Void = { [weak self] message, fraction in
+            self?.progressText = message
+            self?.progressFraction = fraction
+        }
 
         Task.detached { [weak self] in
             defer { sleepGuard.end() }  // 所有出口都放掉防睡眠（审查 S05c）
@@ -2955,16 +2964,11 @@ final class BatchStore: ObservableObject {
                 summary = try AnalysisEngine.analyzeFolder(
                     dir, dataDir: data, cancel: flag,
                     onPhoto: { analysis in
-                        Task { @MainActor [weak self] in
-                            self?.appendProvisional(analysis)
-                        }
+                        Task { @MainActor in showPhoto(analysis) }
                     }
                 ) { message in
                     let fraction = Self.parseFraction(message)
-                    Task { @MainActor [weak self] in
-                        self?.progressText = message
-                        self?.progressFraction = fraction
-                    }
+                    Task { @MainActor in showProgress(message, fraction) }
                 }
             } catch {
                 UnfinishedAnalysis.end(in: data)
