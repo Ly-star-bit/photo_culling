@@ -588,6 +588,6 @@ extension CollageCLI {
             let detail = bad.map { "第\($0.offset + 1)个 \($0.element) 张" }.joined(separator: " ")
             return .fail("不在 \(b.minPerSpread)–\(b.maxPerSpread) 张里：\(detail)")
         }
-        return .unknown
+        return editExpect(store, what)
     }
 }

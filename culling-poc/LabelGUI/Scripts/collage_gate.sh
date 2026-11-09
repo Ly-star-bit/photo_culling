@@ -230,6 +230,13 @@ EOF
     # 以前断言「≤ 5 个」是 664fe3d 加目标跨页数时写的，那时压页还不看 R4 / R10（v1.23.0 起一直红）。断言卡死 7：
     # 多了 = 压页没起作用，少了 = 压页破了规则。不带客户选中的那本（6 张、4 个跨页）设 2 个照样并到 3 个。
     ops ops_album_budget album_budget "mode:album,spreads:5,arrange:all,albumdump,expect:spreads=5,expect:alltray,expect:perspread=1-6,spreads:6@2-4,arrange:all,albumdump,expect:spreads=6,expect:perspread=2-4,expect:alltray,spreads:3,arrange:all,albumdump,expect:alltray,albumtheme:fineArt,clientpicks:DSCF7228;DSCF7230;DSCF7231;DSCF7222;DSCF7209;DSCF7211,spreads:off,arrange,albumdump,spreads:4,arrange,albumdump,expect:spreads=7,expect:clientplaced"
+    echo "== ops：相册跨页操作（F1–F5、S1–S6；断言 + 0.2 倍预览）"
+    # 先删掉起手那一页（单张 3:4 的版切成相册不重排，会压中缝），从空相册开始：
+    # F1 平铺对裱往空跨页放竖图 7216（右页完整、左页留白、不压中缝）· F2 胶装放 7231（左页是留白格，导出不问空格）·
+    # F5 再放一次 7216（不放、提示在第 1 个跨页）· F3「拼图 (7)」切成 4 + 3 两个新跨页、左早右晚 ·
+    # S1 两张挪到第 3 个跨页 · S2 挪页（当前页跟着走）、删页 · S5 锁住一页再 arrange:all（锁住的原样、照片一张不丢、一张不重复）·
+    # S4 第 6 个跨页只换右页 · S3 镜像出图再镜像回去 · S6 打印 7212 的候选、换成别的跨页上的 7211（两格对调）· 解锁。
+    ops ops_album_edit album_edit "mode:album,delpage:0,addpage,place:DSCF7216>r,expect:nofoldcross,renderclean:edit_f1.png@0.2,binding:glued,addpage,place:DSCF7231>r,expect:noemptyslots,renderclean:edit_f2.png@0.2,binding:layflat,place:DSCF7216>r,expect:notice~这张在第 1 个跨页上了,frombatch:DSCF7207;DSCF7209;DSCF7211;DSCF7213;DSCF7221;DSCF7223;DSCF7224,expect:notice~放了 7 张,expect:unique,expect:order,spreaddump,renderclean:edit_f3.png@0.2,movecells:110;111>3,expect:on=DSCF7211@3,expect:unique,expect:order,page:3,renderclean:edit_moved.png@0.2,page:2,movepages:2;3>0,expect:here=DSCF7207,delpages:3,expect:unique,spreaddump,lockpage:1,arrangeplan,arrange:all,expect:locked=1,expect:alltray,expect:unique,expect:order,spreaddump,page:6,side:right+1,renderclean:edit_side.png@0.2,mirror,renderclean:edit_mirror.png@0.2,mirror,page:4,cands:DSCF7212,replace:0=DSCF7211,expect:on=DSCF7211@4,expect:on=DSCF7212@3,expect:unique,renderclean:edit_replace.png@0.2,unlockpage:3,expect:locked=0,albumdump"
     echo "== ops：水印两层"
     ops ops_wm wm "wm:photos:$INPUTS/sig.png,wm:page,wmtext:page:拾光 · 门禁,wmpos:page:bottom_center,renderclean:wm_p.png@0.5,renderexport:wm_e.png,wmtile:photos:on,renderexport:wm_tile.png,wmtile:photos:off,mode:album,arrange,page:1,renderclean:wm_album_p.png@0.3,renderexport:wm_album.png"
     echo "== ops：自由文字图层花字投影（S0 修过：预览里的投影按缩放算）"

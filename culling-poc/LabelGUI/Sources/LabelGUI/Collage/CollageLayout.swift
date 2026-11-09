@@ -491,16 +491,26 @@ enum CollageLayout {
         var rng = SeededRandom(seed: req.seed)
 
         if cells.count == 1 {
-            // 胶装跨页只排一张：放右页（左页留一个空位），不让它横跨中缝；和右页比例差得多就完整显示。
             let canvas = req.context.canvas
-            if canvas.seams == .fold, !canvas.allowsCrossFold {
+            if canvas.seams == .fold {
+                // 跨页只排一张（F1）：平铺对裱上够宽的横图（≥ 1.4，同编排的 .solo）、中缝两侧没有脸，才铺满整个跨页 ——
+                // 以前平铺对裱一律整格铺满：竖图被裁成 2:1 的横条、只剩半身，脸正好压在中缝上（往「+」加的空跨页里放一张）。
+                if canvas.allowsCrossFold, cells[0].kind == .photo, let id = cells[0].photoID,
+                   let p = req.context.photos[id], p.aspect >= 1.4 {
+                    var wide = cells[0]
+                    wide.framing = .full
+                    let scored = score(.leaf(wide), m: nil, context: req.context)
+                    if scored.seamFaces == 0, scored.cutFaces == 0 { return [scored] }
+                }
+                // 其余（竖图、不够宽的横图、胶装）：照片放右页，不横跨中缝；和右页比例差得多就完整显示。左页是留白格（F2：
+                // .empty —— 以前胶装留的是空照片格，导出前的空格确认会报它；往留白格里拖照片照样能放，见 CollageStore.place）。
                 var cell = cells[0]
                 let pageW = max(1, (width - foldG) / 2)
                 if cell.kind == .photo, let id = cell.photoID, let p = req.context.photos[id] {
                     let win = CollageCrop.maxWindow(photoAspect: p.aspect, cellAspect: pageW / max(1, height))
                     if 1 - win.w * win.h > 0.12 { cell.contain = true }
                 }
-                let root = CollageNode.split(.row, 0.5, .leaf(CollageCell(kind: .photo)), .leaf(cell))
+                let root = CollageNode.split(.row, 0.5, .leaf(CollageCell(kind: .empty)), .leaf(cell))
                 return [score(root, m: nil, context: req.context)]
             }
             let root = CollageNode.leaf(cells[0])
@@ -539,11 +549,16 @@ enum CollageLayout {
 
     /// 跨页：根是一刀 0.5 的竖切（缝正好压在中缝上），左右两页各自随机切分、各自按比例解。
     /// 一页只有一张照片时比例和页面差得多就完整显示（四周留白），不把竖图硬裁成方的。
+    /// 照片按拍摄先后排（F4，CollageAlbum.shotEarlier）：左页放早的、右页放晚的；randomShape 按切片递归、叶子的阅读顺序
+    /// （先第一个孩子：先左后右、先上后下）就是给它的顺序，页内也照时间读下来。以前整组打乱再分左右，同一个跨页里常常
+    /// 左页晚、右页早（photot 第 4 个跨页左 7212、右 7211 / 7213）。只随机切在第几张、两页各怎么切；文字格没有时间，
+    /// 随机插在照片之间（照片之间的先后不变）。换一批、编排的多图跨页、散落版的底稿都走这里。
     private static func solveSpread(cells: [CollageCell], aspects: [Double], width: Double, height: Double,
                                     g: Double, foldG: Double, req: Request) -> [Scored] {
         let n = cells.count
         let pageW = max(1, (width - foldG) / 2)
         var rng = SeededRandom(seed: req.seed)
+        let timeOrder = CollageAlbum.timeOrderedCells(cells, photos: req.context.photos)
         func page(_ slice: [Int], _ lo: Double, _ hi: Double) -> CollageNode? {
             if slice.count == 1 {
                 var cell = cells[slice[0]]
@@ -561,7 +576,8 @@ enum CollageLayout {
         func search(_ lo: Double, _ hi: Double, tries: Int) -> [String: Scored] {
             var best: [String: Scored] = [:]
             for _ in 0..<max(1, tries) {
-                let order = Array(0..<n).shuffled(using: &rng)
+                var order = timeOrder.photos
+                for t in timeOrder.others { order.insert(t, at: Int.random(in: 0...order.count, using: &rng)) }
                 let k = Int.random(in: 1..<n, using: &rng)
                 guard let left = page(Array(order[..<k]), lo, hi),
                       let right = page(Array(order[k...]), lo, hi) else { continue }
@@ -788,6 +804,8 @@ enum CollageLayout {
 
         let photoMap = context.photos
         let aspects = movable.map { preferredAspect($0, photos: photoMap) }
+        // 相册跨页：没锁的照片按拍摄先后分进各个自由区（F4；自由区按树的阅读顺序，左页的在右页的前面），文字格随机插。
+        let timed = context.canvas.seams == .fold ? CollageAlbum.timeOrderedCells(movable, photos: photoMap) : nil
         let g = Double(gutterPixels(canvas: context.canvas, style: context.style))
         let areas = regionRects.map { Double($0.area) }
         let totalArea = max(1, areas.reduce(0, +))
@@ -818,7 +836,13 @@ enum CollageLayout {
                 counts[pickIndex] += 1
                 remaining -= 1
             }
-            let order = Array(0..<movable.count).shuffled(using: &rng)
+            var order: [Int]
+            if let timed {
+                order = timed.photos
+                for t in timed.others { order.insert(t, at: Int.random(in: 0...order.count, using: &rng)) }
+            } else {
+                order = Array(0..<movable.count).shuffled(using: &rng)
+            }
             var cursor = 0
             var assembled = current
             var ok = true

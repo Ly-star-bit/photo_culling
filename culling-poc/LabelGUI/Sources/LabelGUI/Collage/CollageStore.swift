@@ -42,7 +42,8 @@ final class CollageStore: ObservableObject {
     }
     @Published var pageIndex = 0 {
         didSet {
-            guard pageIndex != oldValue else { return }
+            // 挪跨页（movePages、deletePages）以后跟着当前这一页换下标：还是同一页，选中、备选、裁切都留着。
+            guard pageIndex != oldValue, !pageIndexFollowsPage else { return }
             finishCropEditForNavigation()
             selection = nil
             selectedItem = nil
@@ -50,6 +51,8 @@ final class CollageStore: ObservableObject {
             setNeedsRender()
         }
     }
+    /// 只在 followCurrentPage 里设：pageIndex 改了、可当前页还是同一页（只是挪了位置），didSet 不清选中。
+    private var pageIndexFollowsPage = false
     /// 选中的格子（当前页的叶子路径）。和选中的图层互斥。
     @Published var selection: [Int]? {
         didSet {
@@ -787,8 +790,11 @@ final class CollageStore: ObservableObject {
     }
 
     /// 批量页「拼图 (N)」带进来的这几张：单张拼图按开关上的网格 / 散落排（以前一律排成网格）；相册在
-    /// 当前跨页后面新开一个跨页放它们（以前直接把当前跨页换掉 —— 那一页原来的照片从书里没了，已经在
+    /// 当前跨页后面新开跨页放它们（以前直接把当前跨页换掉 —— 那一页原来的照片从书里没了，已经在
     /// 别的跨页上的照片还会出现两次），已经在相册里的不重复放。
+    /// 相册（F3）：按拍摄先后切成几个新跨页，每跨页最多照默认编排（CollageAlbum.handoffCap：目标跨页数的每跨页最多、
+    /// 没设是 5 张；婚礼相册 3 张，不套 fine-art 的版式规则）—— 以前没上过版的全塞进一个跨页，40 张就是 40 格。
+    /// 新跨页先插上（空的）、再在后台一起排好落下来（和开新跨页算同一步撤销）。
     /// `recordUndo = false`：跟着别的操作一起（交接），排版落下来不另记撤销。
     private func layoutRequested(_ ids: [String], recordUndo: Bool = true) {
         guard !ids.isEmpty else { return }
@@ -802,14 +808,36 @@ final class CollageStore: ObservableObject {
             setNotice("这几张已经都在相册的跨页里了")
             return
         }
+        let map = photoMap
+        let groups = CollageAlbum.handoffChunks(fresh.compactMap { map[$0] },
+                                                cap: CollageAlbum.handoffCap(theme: project.albumTheme,
+                                                                             budget: project.albumBudget))
+        guard !groups.isEmpty else { return }
         if recordUndo { pushUndo() }
         let at = min(project.pages.count, pageIndex + 1)
-        project.pages.insert(CollagePage(root: CollageLayout.blankRoot(for: project.canvas)), at: at)
+        let blanks = groups.map { _ in CollagePage(root: CollageLayout.blankRoot(for: project.canvas)) }
+        project.pages.insert(contentsOf: blanks, at: at)
         pageIndex = at
         commitEdit()
-        // 新跨页和排版算同一步撤销。
-        solve(photoIDs: fresh, recordUndo: false)
-        setNotice("在第 \(at + 1) 个跨页放了 \(fresh.count) 张" + (fresh.count < ids.count ? "（其余已经在相册里）" : ""))
+        let pageIDs = blanks.map(\.id)
+        let fallback = CollageLayout.blankRoot(for: project.canvas)
+        let jobs = groups.map { PageSolve(photos: $0, fallback: fallback) }
+        // 新跨页和排版算同一步撤销：落下来不另记，排的时候又记了几步（改水印、样式）的，那几步的快照里也换上排好的页。
+        let pushes = undoPushes
+        solvePages(jobs, busy: "排新跨页…") { [weak self] roots in
+            guard let self else { return }
+            var landed: [CollagePage] = []
+            for (id, root) in zip(pageIDs, roots) {
+                guard let i = self.project.pages.firstIndex(where: { $0.id == id }) else { continue }
+                self.project.pages[i].root = root
+                landed.append(self.project.pages[i])
+            }
+            self.carryPagesIntoLaterSteps(landed, since: pushes)
+            self.clearAlternatives()
+            self.commitEdit()
+        }
+        let range = groups.count == 1 ? "第 \(at + 1) 个跨页" : "第 \(at + 1)–\(at + groups.count) 个跨页"
+        setNotice("在\(range)放了 \(fresh.count) 张" + (fresh.count < ids.count ? "（其余已经在相册里）" : ""))
     }
 
     /// `layout`：读完直接排一版（同批量页「拼图 (N)」）。
@@ -938,7 +966,14 @@ final class CollageStore: ObservableObject {
             await previous?.value
             for p in todo {
                 if Task.isCancelled { return }
-                let h = await Task.detached(priority: .utility) { CollageVision.hints(for: p) }.value
+                // 画面特征（相册去重、换照片的「相似」用）顺手先算好（F7 / 审查 P06b：一张十几毫秒，以前编排时才现算，
+                // 去重只敢比分数前 120 张）。废片不算（编排不要它们，客户选中的除外）。
+                let print = p.verdict != .reject || p.clientPick
+                let h = await Task.detached(priority: .utility) { () -> CollageCrop.Hints in
+                    let h = CollageVision.hints(for: p)
+                    if print { _ = CollageVision.featurePrint(p) }
+                    return h
+                }.value
                 guard let self, self.sessionToken == token else { return }
                 self.hints[p.id] = h
             }
@@ -1114,11 +1149,21 @@ final class CollageStore: ObservableObject {
     }
 
     /// 托盘菜单「只用这张 / 加进当前版」：按这一页现在的排法重排（散落版不能被换成网格）。
+    /// 相册里已经排在别的跨页上的不放（F5），其余照排；剩下的和这一页现在的一样就不动。
     func relayout(photoIDs: [String]) {
+        var ids = photoIDs
+        if isAlbum {
+            let elsewhere = Set(usedOnOtherSpreads(ids))
+            if !elsewhere.isEmpty {
+                _ = refuseOtherSpreads(ids)
+                ids = ids.filter { !elsewhere.contains($0) }
+                guard !ids.isEmpty, Set(ids) != Set(page?.photoIDs ?? []) else { return }
+            }
+        }
         if isFreeform {
-            scatter(photoIDs: photoIDs, spec: page?.scatter ?? CollageScatterSpec())
+            scatter(photoIDs: ids, spec: page?.scatter ?? CollageScatterSpec())
         } else {
-            solve(photoIDs: photoIDs)
+            solve(photoIDs: ids)
         }
     }
 
@@ -1750,13 +1795,16 @@ final class CollageStore: ObservableObject {
         }
     }
 
-    /// 整页换掉（版式 + 图层 + 是不是散落版）；没有页就新建一页。
+    /// 整页换掉（版式 + 图层 + 是不是散落版）；没有页就新建一页。同一页（同一个 id：换一批、换备选、套模板、切网格 / 散落）
+    /// 落下来还锁着（S5：锁的是编排，不是这一页的样子）。
     private func setPage(_ newPage: CollagePage) {
         if project.pages.isEmpty {
             project.pages = [newPage]
             pageIndex = 0
         } else if project.pages.indices.contains(pageIndex) {
-            project.pages[pageIndex] = newPage
+            var p = newPage
+            if p.id == project.pages[pageIndex].id { p.locked = project.pages[pageIndex].locked }
+            project.pages[pageIndex] = p
         }
     }
 
@@ -1806,6 +1854,21 @@ final class CollageStore: ObservableObject {
             } else {
                 swap(existing, target)
             }
+            return
+        }
+        // F5：相册里同一张不能上两个跨页（以前只查这一页，拖托盘能把别的跨页上的照片再放一次，MCP 会拒）。
+        if refuseOtherSpreads([photoID]) { return }
+        // F1：全空的跨页（「+」新开的、照片都挪走了的）：按这张照片重新求解这一页 —— 竖图放一页完整显示，够宽的横图
+        // 中缝没脸才铺满跨页（CollageLayout.solve 单张那一支）。以前平铺对裱整页一格，竖图被裁成 2:1、脸压中缝。
+        // 一张照片不用搜（求解器单张那一支是定的），当场落下来：拖进去马上看得到，命令行的 place 也不用等。
+        if isAlbum, let page, Self.isBlankSpread(page), let photo = photoMap[photoID],
+           let scored = CollageLayout.solve(CollageLayout.Request(photos: [photo], context: context, tries: 1, keep: 1)).first {
+            cancelSolveIfRunning()
+            pushUndo()
+            applyScored(scored)
+            clearAlternatives()
+            selection = nil
+            commitEdit()
             return
         }
         if let edge {
@@ -3026,18 +3089,23 @@ final class CollageStore: ObservableObject {
     }
 
     /// 托盘里的全部照片自动编排成相册（去重可关）。有目标跨页数（project.albumBudget）就往那么多个跨页里塞，不删片。
+    /// 锁住的跨页（S5）原样留着：上面的照片不参与编排，目标跨页数减掉锁住的个数，编完按锁住页最早一张的拍摄时间插回去
+    /// （CollageAlbum.mergeLocked）。界面先问一句（arrangeConfirmation）；命令行、--collage-ui、MCP 直接调这里，不问。
     func autoArrangeAlbum(dedupe: Bool) {
-        let photos = project.photos
-        guard !photos.isEmpty else {
+        guard !project.photos.isEmpty else {
             setNotice("托盘是空的：先带精选进来")
             return
         }
+        let locked = CollageAlbum.lockedSpreads(project)
+        let photos = project.photos.filter { !locked.photoIDs.contains($0.id) }
+        let map = photoMap
         let ctx = context
         // 编排主题跟着工程（「整本婚礼相册」之后再点自动编排还是 fine-art 的规则）。
         let theme = project.albumTheme
         let chapterMono = project.albumChapterMono
         let title = project.title
-        let budget = project.albumBudget
+        let target = project.albumBudget
+        let budget = CollageAlbum.budget(target, excludingLocked: locked.pages.count)
         busyText = "编排相册…"
         // 编排也在作废机制里：编排期间切回单张、撤销、套模板，结果回来不能盖掉。
         let ticket = beginSolve()
@@ -3047,13 +3115,16 @@ final class CollageStore: ObservableObject {
                                              budget: budget)
                 // fine-art：拿掉的分开说（同一场只留精选一直开着，「相似只留一张」只管画面相似的）。
                 let note = theme == .fineArt && !plan.dropped.isEmpty ? CollageStyleFineArt.droppedNote(photos, plan: plan) : nil
+                let pages = CollageAlbum.mergeLocked(CollageAlbum.build(plan, context: ctx, seed: 11), locked: locked.pages,
+                                                     photos: map)
                 var tail: [String] = []
-                let placed = plan.spreads.reduce(0) { $0 + $1.photos.count }
-                if let target = CollageAlbumBudget.outcome(spreads: plan.spreads.count, budget: budget, photos: placed,
-                                                           fineArt: theme == .fineArt) { tail.append(target) }
+                // 和目标比的是整本（锁住的也算在里面）。
+                let placed = pages.reduce(0) { $0 + $1.photoIDs.count }
+                if let outcome = CollageAlbumBudget.outcome(spreads: pages.count, budget: target, photos: placed,
+                                                            fineArt: theme == .fineArt) { tail.append(outcome) }
                 if let client = CollageAlbum.clientPickNote(photos, plan: plan) { tail.append(client) }
-                return (CollageAlbum.build(plan, context: ctx, seed: 11), plan.dropped, note,
-                        tail.isEmpty ? nil : tail.joined(separator: "；"))
+                if !locked.pages.isEmpty { tail.append("锁住的 \(locked.pages.count) 个跨页没动") }
+                return (pages, plan.dropped, note, tail.isEmpty ? nil : tail.joined(separator: "；"))
             }.value
             // 编排期间换了场次：结果属于上一个场次，丢掉（不能写进新场次的项目）。
             guard let self, self.sessionToken == ticket.session else { return }
@@ -3076,6 +3147,16 @@ final class CollageStore: ObservableObject {
         }
     }
 
+    /// F6：「自动编排」（和一键成套「整本婚礼相册」）会替换哪些跨页：相册里已经有跨页、至少一个跨页上有照片时给那句话，
+    /// 界面（CollageView 的「自动编排」、左栏「一键成套」）先弹确认；nil = 不用问（还没排过）。store 自己不拦：命令行的
+    /// arrange、--collage-ui、MCP 都直接调 autoArrangeAlbum / applyKit，不会被确认框挡住。
+    var arrangeConfirmation: String? {
+        guard isAlbum, project.pages.contains(where: { !$0.photoIDs.isEmpty }) else { return nil }
+        let locked = project.pages.filter(\.locked).count
+        return "重排会替换没锁的 \(project.pages.count - locked) 个跨页"
+            + (locked > 0 ? "（锁住的 \(locked) 个不动）" : "") + "；⌘Z 能撤回"
+    }
+
     func addPage() {
         pushUndo()
         let blank = CollagePage(root: CollageLayout.blankRoot(for: project.canvas))
@@ -3086,90 +3167,471 @@ final class CollageStore: ObservableObject {
     }
 
     func deletePage(_ index: Int) {
-        guard project.pages.indices.contains(index) else { return }
+        deletePages(IndexSet(integer: index))
+    }
+
+    /// 跨页条右键「往前挪 / 往后挪」：挪一格（S2 的 movePages），画面跟着挪的那一页。
+    func movePage(_ index: Int, by delta: Int) {
+        let target = index + delta
+        guard project.pages.indices.contains(index), project.pages.indices.contains(target), delta != 0 else { return }
+        movePages(IndexSet(integer: index), to: delta > 0 ? target + 1 : target)
+        pageIndex = target
+    }
+
+    /// 选中的照片挪到别的跨页（格式面板「移到上一跨页 / 下一跨页」、右键「移到第…个跨页」）= moveCells。
+    func moveSelectedPhoto(toPage target: Int) {
+        guard let selection else { return }
+        moveCells([selection], toPage: target)
+    }
+
+    // MARK: - 相册：跨页操作（相册 A + B · S；界面在第 2 波接，命令行 CollageAlbumEditCLI）
+
+    /// F5：这几张里有已经排在相册别的跨页上的（usedOnOtherSpreads，和 MCP 拒绝的同一个判断）：说一句、返回 true。
+    /// 单张拼图、全在这一页上的 = false。
+    private func refuseOtherSpreads(_ ids: [String]) -> Bool {
+        let elsewhere = usedOnOtherSpreads(ids)
+        guard let first = elsewhere.first else { return false }
+        let at = project.pages.indices.first { $0 != pageIndex && project.pages[$0].photoIDs.contains(first) } ?? pageIndex
+        setNotice(Self.otherSpreadNotice(first, page: at, count: elsewhere.count))
+        return true
+    }
+
+    nonisolated static func otherSpreadNotice(_ id: String, page: Int, count: Int) -> String {
+        let move = "要挪过来，右键那一格「移到第…个跨页」"
+        guard count > 1 else { return "这张在第 \(page + 1) 个跨页上了：" + move }
+        return "\(id) 等 \(count) 张已经在别的跨页上了（\(id) 在第 \(page + 1) 个），没放：" + move
+    }
+
+    /// 全空的跨页：没有照片、没有文字格（只有空照片格、留白格；贴纸、手写字不算）。往里放照片 = 按照片重新求解（F1）。
+    nonisolated static func isBlankSpread(_ page: CollagePage) -> Bool {
+        guard !page.freeform, page.contactSheet == nil, page.photoIDs.isEmpty else { return false }
+        return page.root.leaves.allSatisfy { $0.kind != .text }
+    }
+
+    /// 一页要重新求解的：照片、文字格；locks 里有锁定格就按它只排其余（solveKeepingLocks），没照片可排时用 fallback；
+    /// 压字、单格色调从 carry 那棵树按照片带过来（挪过来的照片带着自己的字）。
+    private struct PageSolve {
+        var photos: [CollagePhotoRef]
+        var texts: [CollageCell] = []
+        var locks: CollageNode?
+        var fallback: CollageNode
+        var carry: CollageNode?
+
+        func run(_ ctx: CollageLayout.Context, seed: UInt64) -> CollageNode {
+            guard !photos.isEmpty else { return fallback }
+            var root: CollageNode
+            if let locks, locks.leaves.contains(where: \.locked) {
+                root = CollageLayout.solveKeepingLocks(current: locks, context: ctx, tries: 6000, keep: 1, seed: seed)
+                    .first?.root ?? locks
+            } else {
+                root = CollageLayout.solve(CollageLayout.Request(photos: photos, textCells: texts, context: ctx,
+                                                                 tries: 16000, keep: 1, seed: seed)).first?.root
+                    ?? CollageAlbum.fallbackRow(photos, context: ctx)
+            }
+            if let carry { root = CollageLayout.carryOverlays(from: carry, into: root) }
+            return root
+        }
+    }
+
+    /// 几页一起在后台排好、回来一起落（S1 挪照片的源页 + 目标页、F3 一次开的几个新跨页）：算的时候不先动任何一页
+    /// （被作废时照片不会两头都没了，旧 moveSelectedPhoto 躲的就是这个）；回来核对场次和求解代号（中间编辑过、
+    /// 撤销过、换了场次 = 作废，什么都不动），land 里自己记撤销、改页、commitEdit。
+    private func solvePages(_ jobs: [PageSolve], busy: String, land: @escaping ([CollageNode]) -> Void) {
+        let ctx = context
+        solveSeed &+= 1
+        let seed = solveSeed
+        let ticket = beginSolve()
+        busyText = busy
+        Task { [weak self] in
+            let roots = await Task.detached(priority: .userInitiated) {
+                jobs.enumerated().map { $0.element.run(ctx, seed: seed &+ UInt64($0.offset)) }
+            }.value
+            guard let self, self.sessionToken == ticket.session else { return }
+            if self.busyText == busy { self.busyText = nil }
+            guard ticket.generation == self.solveGeneration else { return }
+            self.isSolving = false
+            land(roots)
+        }
+    }
+
+    /// 不另记撤销的几页（F3 新开的跨页）落下来时：发起之后又记的几步撤销快照里也换上排好的这几页（同 carryIntoLaterSteps）。
+    private func carryPagesIntoLaterSteps(_ pages: [CollagePage], since pushes: Int) {
+        let later = min(undoPushes - pushes, undoStack.count)
+        guard later > 0, !pages.isEmpty else { return }
+        for i in undoStack.indices.suffix(later) {
+            for p in pages {
+                guard let j = undoStack[i].pages.firstIndex(where: { $0.id == p.id }) else { continue }
+                undoStack[i].pages[j] = p
+            }
+        }
+    }
+
+    /// 这几张照片从一棵树里拿掉（按照片 id 一张张找、一张张删：删一格上面那一刀会合并，按路径删第二格就错了）。
+    /// 拿空了 = 这一页的空版。
+    private func removing(_ ids: [String], from root: CollageNode) -> CollageNode {
+        var out = root
+        for id in ids {
+            guard let path = out.leafPaths().first(where: { out.node(at: $0)?.cell?.photoID == id }) else { continue }
+            out = out.isLeaf ? CollageLayout.blankRoot(for: project.canvas)
+                             : CollageLayout.remove(at: path, from: out, canvas: project.canvas)
+        }
+        return out
+    }
+
+    /// 几格照片插进一页（各自插在那一页最大的照片格旁边：宽格往右劈、高格往下劈；有空照片格先放进最大的空格）——
+    /// 有锁定格时 solveKeepingLocks 从这棵树出发重排没锁的，没锁时它只是压字的来源。
+    private func inserting(_ cells: [CollageCell], into root: CollageNode) -> CollageNode {
+        var out = root
+        for cell in cells {
+            let frames = CollageLayout.pageGeometry(out, canvas: project.canvas, style: project.style).frames
+            if let slot = frames.filter({ $0.cell.kind == .photo && $0.cell.photoID == nil }).max(by: { $0.rect.area < $1.rect.area }) {
+                out.update(at: slot.path) { $0.cell = cell }
+                continue
+            }
+            let photoFrames = frames.filter { $0.cell.kind != .text }
+            guard let anchor = (photoFrames.isEmpty ? frames : photoFrames).max(by: { $0.rect.area < $1.rect.area }) else {
+                out = .leaf(cell)
+                continue
+            }
+            out = CollageLayout.insert(cell, at: anchor.path, edge: anchor.rect.aspect >= 1 ? .right : .bottom, into: out)
+        }
+        return out
+    }
+
+    /// 一页加上这几格照片以后要怎么排（S1）：同「加进现在的版式（重排）」—— 照片 + 这一页的文字格重新求解，有锁定格的保住锁定格。
+    private func joinJob(_ page: CollagePage, adding cells: [CollageCell]) -> PageSolve {
+        let map = photoMap
+        let joined = inserting(cells, into: page.root)
+        let photos = Self.unique(page.root.photoIDs + cells.compactMap(\.photoID)).compactMap { map[$0] }
+        return PageSolve(photos: photos, texts: page.root.leaves.filter { $0.kind == .text }, locks: joined,
+                         fallback: joined, carry: joined)
+    }
+
+    /// 散落版目标：放一张相纸（散落版不画切分树，插进树里就看不见了），放在相纸少的那半页正中（跨页正中是中缝）。
+    private func photoItems(_ ids: [String], into page: CollagePage) -> [CollageItem] {
+        var items = page.items
+        for id in ids {
+            guard let photo = photoMap[id] else { continue }
+            let others = items.filter { $0.kind == .photo }
+            let leftCount = others.filter { $0.cx < 0.5 }.count
+            let x: Double = project.canvas.seams == .fold ? (leftCount <= others.count - leftCount ? 0.25 : 0.75) : 0.5
+            items.append(Self.photoItem(photo, frame: page.scatter?.frame ?? .polaroid, at: CGPoint(x: x, y: 0.5)))
+        }
+        return items
+    }
+
+    /// S1：当前跨页上这几格的照片挪到第 target 个跨页（从 0 起；可以挪多张，一步撤销）。目标跨页按「加进现在的版式
+    /// （重排）」那套：保住锁定格、重新求解；原跨页拿掉那几格以后同样重新求解（锁定格保住）。目标是散落版照旧放相纸。
+    /// 两页在后台一起排好再一起落（solvePages）。挪过去的照片裁切、锁定、完整显示清掉，字跟着照片走。
+    func moveCells(_ paths: [[Int]], toPage target: Int) {
+        guard let source = page, !source.freeform, source.contactSheet == nil,
+              project.pages.indices.contains(target), target != pageIndex else { return }
+        var seen = Set<String>()
+        var moved: [CollageCell] = []
+        for path in paths {
+            guard var cell = source.root.node(at: path)?.cell, cell.kind == .photo, let id = cell.photoID,
+                  seen.insert(id).inserted else { continue }
+            cell.crop = nil
+            cell.locked = false
+            cell.contain = false
+            moved.append(cell)
+        }
+        guard !moved.isEmpty else { return }
+        let destination = project.pages[target]
+        guard destination.contactSheet == nil else {
+            setNotice("第 \(target + 1) 个\(pageUnit)是印样：照片按拍摄先后排，拖进那一页的片条里")
+            return
+        }
+        // 还在算的这一页「换一批」里带着这几张：算完回来它们就两个跨页上都有了。
+        cancelSolveIfRunning()
+        let ids = moved.compactMap(\.photoID)
+        let map = photoMap
+        let rest = removing(ids, from: source.root)
+        let restPhotos = rest.photoIDs.compactMap { map[$0] }
+        var jobs = [PageSolve(photos: restPhotos, texts: rest.leaves.filter { $0.kind == .text }, locks: rest,
+                              fallback: rest, carry: source.root)]
+        if !destination.freeform { jobs.append(joinJob(destination, adding: moved)) }
+        let sourceID = source.id
+        let targetID = destination.id
+        solvePages(jobs, busy: "挪到第 \(target + 1) 个\(pageUnit)…") { [weak self] roots in
+            guard let self, let si = self.project.pages.firstIndex(where: { $0.id == sourceID }),
+                  let ti = self.project.pages.firstIndex(where: { $0.id == targetID }) else { return }
+            self.pushUndo()
+            self.project.pages[si].root = roots[0]
+            if self.project.pages[ti].freeform {
+                self.project.pages[ti].items = self.photoItems(ids, into: self.project.pages[ti])
+            } else {
+                self.project.pages[ti].root = roots[1]
+            }
+            self.selection = nil
+            self.clearAlternatives()
+            self.commitEdit()
+            let what = ids.count == 1 ? "" : " \(ids.count) 张"
+            self.setNotice("已移到第 \(ti + 1) 个\(self.pageUnit)\(what)（两边都重排了；⌘Z 撤回）"
+                           + (self.project.pages[ti].freeform ? "：放在照片少的那半页，拖到想要的位置" : ""))
+        }
+    }
+
+    /// S1：托盘里的几张放进第 target 个跨页（从 0 起），同「加进现在的版式（重排）」：保住锁定格、重新求解；散落版放相纸。
+    /// 相册里已经排在别的跨页上的不放（F5，说一句），已经在这个跨页上的跳过。一步撤销，画面不跳过去。
+    func addPhotos(_ ids: [String], toPage target: Int) {
+        guard project.pages.indices.contains(target) else { return }
+        let map = photoMap
+        let destination = project.pages[target]
+        let here = Set(destination.photoIDs)
+        let wanted = Self.unique(ids).filter { map[$0] != nil && !here.contains($0) }
+        var elsewhere: [(id: String, page: Int)] = []
+        if isAlbum {
+            for id in wanted {
+                if let at = project.pages.indices.first(where: { $0 != target && project.pages[$0].photoIDs.contains(id) }) {
+                    elsewhere.append((id, at))
+                }
+            }
+        }
+        let fresh = wanted.filter { id in !elsewhere.contains { $0.id == id } }
+        if let first = elsewhere.first { setNotice(Self.otherSpreadNotice(first.id, page: first.page, count: elsewhere.count)) }
+        guard !fresh.isEmpty else { return }
+        guard destination.contactSheet == nil else {
+            setNotice("第 \(target + 1) 个\(pageUnit)是印样：照片按拍摄先后排，拖进那一页的片条里")
+            return
+        }
+        cancelSolveIfRunning()
+        let skipped = elsewhere.first.map { "；" + Self.otherSpreadNotice($0.id, page: $0.page, count: elsewhere.count) } ?? ""
+        if destination.freeform {
+            pushUndo()
+            project.pages[target].items = photoItems(fresh, into: destination)
+            commitEdit()
+            setNotice("第 \(target + 1) 个\(pageUnit)加了 \(fresh.count) 张" + skipped)
+            return
+        }
+        let targetID = destination.id
+        solvePages([joinJob(destination, adding: fresh.map { CollageCell.photo($0) })],
+                   busy: "排第 \(target + 1) 个\(pageUnit)…") { [weak self] roots in
+            guard let self, let ti = self.project.pages.firstIndex(where: { $0.id == targetID }) else { return }
+            self.pushUndo()
+            self.project.pages[ti].root = roots[0]
+            if ti == self.pageIndex {
+                self.selection = nil
+                self.clearAlternatives()
+            }
+            self.commitEdit()
+            self.setNotice("第 \(ti + 1) 个\(self.pageUnit)加了 \(fresh.count) 张，重排了" + skipped)
+        }
+    }
+
+    /// 跨页条、提示里的单位：相册 = 跨页，单张拼图的几页 = 页。
+    private var pageUnit: String { isAlbum ? "跨页" : "页" }
+
+    /// 挪了页之后（还是同一页，下标变了）：pageIndex 跟着它，不清选中、备选（S2）。
+    private func followCurrentPage(_ id: UUID?) {
+        guard let id, let i = project.pages.firstIndex(where: { $0.id == id }), i != pageIndex else { return }
+        pageIndexFollowsPage = true
+        pageIndex = i
+        pageIndexFollowsPage = false
+    }
+
+    /// S2：几个跨页一起挪（语义同 SwiftUI 的 onMove：destination 是挪之前的下标，挪到它前面；= 页数是挪到最后），
+    /// 一步撤销；画面停在原来那一页上（pageIndex 跟着它走）。锁住的照样能挪（锁的是编排）。
+    func movePages(_ indices: IndexSet, to destination: Int) {
+        let reordered = CollageAlbum.moved(project.pages, from: indices, to: destination)
+        guard reordered.map(\.id) != project.pages.map(\.id) else { return }
+        let current = page?.id
         pushUndo()
-        let wasCurrent = index == pageIndex
-        project.pages.remove(at: index)
-        // 删的是前面的页：当前页往前挪一位，画面停在原来那一页上。
-        if index < pageIndex { pageIndex -= 1 }
-        pageIndex = max(0, min(pageIndex, project.pages.count - 1))
-        if wasCurrent {
+        project.pages = reordered
+        followCurrentPage(current)
+        commitEdit()
+    }
+
+    /// S2：几个跨页一起删，一步撤销。当前页还在就停在它上面；当前页删了停在删掉那一段后面的第一页（没有就最后一页）。
+    /// 锁住的照样能删。
+    func deletePages(_ indices: IndexSet) {
+        let gone = IndexSet(indices.filter { project.pages.indices.contains($0) })
+        guard !gone.isEmpty else { return }
+        let current = page?.id
+        let currentGone = gone.contains(pageIndex)
+        let before = gone.filter { $0 < pageIndex }.count
+        pushUndo()
+        project.pages = project.pages.enumerated().filter { !gone.contains($0.offset) }.map(\.element)
+        if currentGone {
+            pageIndex = max(0, min(pageIndex - before, project.pages.count - 1))
             finishCropEditForNavigation()
+            selection = nil
+            clearAlternatives()
+        } else {
+            followCurrentPage(current)
+        }
+        commitEdit()
+    }
+
+    /// S3：第 index 个跨页左右镜像（CollageAlbum.mirrored：只翻几何，照片不翻像素、取景不变、字的左右对齐不变）。
+    /// 一步撤销；再做一次翻回来。印样不翻（按拍摄先后排的片条）。
+    func mirrorPage(_ index: Int) {
+        guard project.pages.indices.contains(index) else { return }
+        guard project.pages[index].contactSheet == nil else {
+            setNotice("印样按拍摄先后排，不镜像")
+            return
+        }
+        if index == pageIndex { cancelSolveIfRunning() }
+        pushUndo()
+        project.pages[index] = CollageAlbum.mirrored(project.pages[index])
+        if index == pageIndex {
             selection = nil
             clearAlternatives()
         }
         commitEdit()
+        setNotice("第 \(index + 1) 个\(pageUnit)左右镜像了（照片本身没翻；再镜像一次翻回来）")
     }
 
-    func movePage(_ index: Int, by delta: Int) {
-        let target = index + delta
-        guard project.pages.indices.contains(index), project.pages.indices.contains(target) else { return }
-        pushUndo()
-        project.pages.swapAt(index, target)
-        pageIndex = target
-        commitEdit()
+    /// S4 的缓存：这一页、这一边算出来的几种切法（第 0 个是算的时候的样子），现在用的是第几个。换页、编辑过（工程版本号
+    /// 变了）就作废，下次重算。
+    private struct SideCycle {
+        var pageID: UUID
+        var side: CollageSpreadSide
+        var revision: Int
+        var roots: [CollageNode]
+        var index = 0
     }
+    private var sideCycle: SideCycle?
 
-    /// 选中的照片挪到相邻跨页：插到那一页最大的照片格旁边（宽格往右劈、高格往下劈），
-    /// 那一页的文字、完整显示、裁切都保留；想重排再点「换一批」。先算好目标页再从原页拿走，
-    /// 任何一步不成立就什么都不动 —— 以前先删后解，解不出来照片就两头都没了。
-    func moveSelectedPhoto(toPage target: Int) {
-        guard let selection, let root, project.pages.indices.contains(target), target != pageIndex,
-              var moved = root.node(at: selection)?.cell, moved.kind == .photo, moved.photoID != nil else { return }
-        moved.crop = nil
-        moved.locked = false
-        moved.contain = false
-        // 还在算的这一页「换一批」里带着这张照片：算完回来它就两个跨页上都有了。
-        cancelSolveIfRunning()
-        // 目标是散落版：放一张相纸（散落版不画切分树，插进树里就看不见了），放在相纸少的那半页正中
-        // （跨页正中是中缝）。
-        if project.pages[target].freeform, let id = moved.photoID, let photo = photoMap[id] {
-            let others = project.pages[target].items.filter { $0.kind == .photo }
-            let leftCount = others.filter { $0.cx < 0.5 }.count
-            let x: Double = project.canvas.seams == .fold ? (leftCount <= others.count - leftCount ? 0.25 : 0.75) : 0.5
-            let item = Self.photoItem(photo, frame: project.pages[target].scatter?.frame ?? .polaroid,
-                                      at: CGPoint(x: x, y: 0.5))
-            pushUndo()
-            project.pages[target].items.append(item)
-            project.pages[pageIndex].root = root.isLeaf ? CollageLayout.blankRoot(for: project.canvas)
-                                                        : CollageLayout.remove(at: selection, from: root, canvas: project.canvas)
-            self.selection = nil
-            commitEdit()
-            setNotice("已移到第 \(target + 1) 个跨页（放在照片少的那半页，拖到想要的位置）")
+    /// S4：只换左页或右页的版式（照片不变、不跨中缝）：这一边的几种结构不同的切法里往前 / 往后轮 step 个。
+    /// 第一次在后台算（CollageLayout.sideAlternatives），之后在缓存里轮。婚礼相册的跨页也能换（版式规则管哪几张同页，
+    /// 不管这一页怎么切）。这一边只有一张：说「这一页只有一张」。
+    func cycleSideLayout(_ side: CollageSpreadSide, step: Int) {
+        guard let page, let root, !page.freeform, page.contactSheet == nil, project.canvas.seams == .fold else {
+            setNotice("左页、右页分开换版式只对相册的网格跨页")
             return
         }
-        let targetRoot = project.pages[target].root
-        let frames = CollageLayout.pageGeometry(targetRoot, canvas: project.canvas, style: project.style).frames
-        let newTarget: CollageNode
-        var filledEmptySlot = false
-        // 那一页有待放照片的空格（新开的跨页、胶装的空半页）：放进最大的那个空格，不在空格旁边再劈一刀。
-        let emptySlot = frames.filter { $0.cell.kind == .photo && $0.cell.photoID == nil }
-            .max(by: { $0.rect.area < $1.rect.area })
-        if let slot = emptySlot {
-            var t = targetRoot
-            var path = slot.path
-            // 整页一个空格、又是胶装：先按中缝分成左右两页，照片放右页（不能横跨中缝）。
-            if t.isLeaf, !project.canvas.allowsCrossFold {
-                t = CollageLayout.blankRoot(for: project.canvas)
-                path = [1]
-            }
-            t.update(at: path) { $0.cell = moved }
-            newTarget = t
-            filledEmptySlot = true
-        } else {
-            let photoFrames = frames.filter { $0.cell.kind != .text }
-            guard let anchor = (photoFrames.isEmpty ? frames : photoFrames).max(by: { $0.rect.area < $1.rect.area }) else { return }
-            let edge: CollageLayout.Edge = anchor.rect.aspect >= 1 ? .right : .bottom
-            newTarget = CollageLayout.insert(moved, at: anchor.path, edge: edge, into: targetRoot)
+        if let c = sideCycle, c.pageID == page.id, c.side == side, c.revision == projectRevision, c.roots.count > 1 {
+            applySideCycle(c, step: step)
+            return
         }
+        cancelSolveIfRunning()
+        solveSeed &+= 1
+        let ctx = context
+        let seed = solveSeed
+        let ticket = beginSolve()
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                CollageLayout.sideAlternatives(root, side: side, context: ctx, seed: seed)
+            }.value
+            guard let self, ticket.generation == self.solveGeneration else { return }
+            self.isSolving = false
+            guard ticket.session == self.sessionToken, ticket.pageID == self.page?.id else { return }
+            switch result {
+            case .notSpread: self.setNotice("这一页找不到中缝那一刀（不是左右两页的跨页）：先点「换一批」")
+            case .single: self.setNotice("这一页只有一张")
+            case .locked: self.setNotice("\(side.label)有锁住的格子：先解锁再换这一页的版式")
+            case .options(let roots):
+                guard roots.count > 1 else {
+                    self.setNotice("\(side.label)没有别的切法了")
+                    return
+                }
+                self.applySideCycle(SideCycle(pageID: page.id, side: side, revision: self.projectRevision, roots: roots),
+                                    step: step)
+            }
+        }
+    }
+
+    private func applySideCycle(_ cycle: SideCycle, step: Int) {
+        var c = cycle
+        let n = c.roots.count
+        c.index = ((c.index + step) % n + n) % n
         pushUndo()
-        project.pages[target].root = newTarget
-        project.pages[pageIndex].root = root.isLeaf ? CollageLayout.blankRoot(for: project.canvas)
-                                                    : CollageLayout.remove(at: selection, from: root, canvas: project.canvas)
-        self.selection = nil
+        setRoot(c.roots[c.index])
+        selection = nil
+        clearAlternatives()
         commitEdit()
-        setNotice(filledEmptySlot ? "已移到第 \(target + 1) 个跨页（放进了那一页的空位）"
-                                  : "已移到第 \(target + 1) 个跨页（插在最大那张旁边，想重排点「换一批」）")
+        c.revision = projectRevision
+        sideCycle = c
+        setNotice("\(c.side.label)换了一种切法（\(c.index + 1)/\(n)；第 1 种是原来的）")
+    }
+
+    /// S5：锁住 / 解锁几个跨页（一步撤销）。锁住的「自动编排」、「整本婚礼相册」原样留着。
+    func setPagesLocked(_ indices: IndexSet, _ locked: Bool) {
+        let change = indices.filter { project.pages.indices.contains($0) && project.pages[$0].locked != locked }
+        guard !change.isEmpty else { return }
+        pushUndo()
+        for i in change { project.pages[i].locked = locked }
+        commitEdit()
+        setNotice((locked ? "锁住了" : "解锁了") + " \(change.count) 个\(pageUnit)"
+                  + (locked ? "：「自动编排」原样留着它们，上面的照片不参与编排" : ""))
+    }
+
+    /// S6 相似的线：托盘两两画面距离的中位数（同相册去重的估法，只用已经算好的特征），按托盘认缓存。
+    private var similarityMedianCache: (key: [String], value: Double?)?
+
+    private func similarityMedian() -> Double? {
+        let head = Array(project.photos.sorted { $0.score > $1.score }.prefix(CollageSelect.dedupeLimit))
+        let key = head.map(\.id)
+        if let c = similarityMedianCache, c.key == key { return c.value }
+        let value = CollageSelect.cachedDistanceMedian(head)
+        similarityMedianCache = (key, value)
+        return value
+    }
+
+    /// S6：换这张照片的候选（选中照片格时「格式 › 换一张」用）：同连拍组（burstGroup）、同一场（take）、画面相似
+    /// （Vision 特征距离 < 中位数的 76%，同相册去重的「同地同姿势」）。排序：没用过的在前，同连拍 > 同场 > 相似，同一类按
+    /// 分数；废片排最后；客户选中的标出来。只用已经算好的画面特征（路人信息的后台任务顺手算的），不在主线程上现跑 Vision。
+    func replacementCandidates(forPhoto id: String, limit: Int = 12) -> [CollageReplacement] {
+        guard let target = photoMap[id] else { return [] }
+        var pageOf: [String: Int] = [:]
+        for (i, p) in project.pages.enumerated() {
+            for pid in p.photoIDs where pageOf[pid] == nil { pageOf[pid] = i }
+        }
+        let median = similarityMedian()
+        return CollageAlbum.replacementCandidates(for: target, tray: project.photos, pageOf: pageOf, limit: limit) { p in
+            guard let m = median, let d = CollageVision.cachedDistance(target, p) else { return false }
+            return d < CollageSelect.samePoseFactor * m
+        }
+    }
+
+    /// S6：这一格换成 id 那张（一步撤销）：取景回到自动（按人脸）、裁切清掉，字、色调留在格子上。新照片在这一页别的格子里
+    /// = 两格对调；相册里在别的跨页的格子里 = 两格对调（那一格换成原来这张，说一句）；只在别的跨页的图层、印样里 = 不换。
+    func replacePhoto(at path: [Int], with id: String) {
+        guard let root, !isFreeform, !isContactSheet, photoMap[id] != nil,
+              let cell = root.node(at: path)?.cell, cell.kind == .photo, cell.photoID != id else { return }
+        if let other = root.leafPaths().first(where: { $0 != path && root.node(at: $0)?.cell?.photoID == id }) {
+            mutateRoot { r in
+                var out = CollageLayout.swapLeaves(r, path, other)
+                for p in [path, other] { out.update(at: p) { $0.cell?.framing = .auto; $0.cell?.crop = nil } }
+                return out
+            }
+            selection = path
+            return
+        }
+        let old = cell.photoID
+        var swapAt: (page: Int, path: [Int])?
+        if isAlbum, let elsewhere = usedOnOtherSpreads([id]).first {
+            for (i, p) in project.pages.enumerated() where i != pageIndex && !p.freeform && p.contactSheet == nil {
+                if let q = p.root.leafPaths().first(where: { p.root.node(at: $0)?.cell?.photoID == elsewhere }) {
+                    swapAt = (i, q)
+                    break
+                }
+            }
+            guard swapAt != nil else {
+                _ = refuseOtherSpreads([id])
+                return
+            }
+        }
+        cancelSolveIfRunning()
+        pushUndo()
+        project.pages[pageIndex].root.update(at: path) { node in
+            node.cell?.photoID = id
+            node.cell?.framing = .auto
+            node.cell?.crop = nil
+        }
+        if let s = swapAt {
+            project.pages[s.page].root.update(at: s.path) { node in
+                node.cell?.photoID = old
+                node.cell?.framing = .auto
+                node.cell?.crop = nil
+            }
+        }
+        selection = path
+        commitEdit()
+        if let s = swapAt {
+            setNotice("\(id) 原来在第 \(s.page + 1) 个跨页上：两格对调了（那一格换成了 \(old ?? "空格")）")
+        }
     }
 
     // MARK: - 色调样张

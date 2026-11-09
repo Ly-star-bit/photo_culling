@@ -13,6 +13,8 @@ struct CollageView: View {
     let watermarkStore: WatermarkStore
     @State private var autoCount = 6
     @State private var dedupeAlbum = true
+    /// 「自动编排」会替换已经排好的跨页时先问的那句话（F6，store.arrangeConfirmation）；nil = 没在问。
+    @State private var arrangeAsk: String?
     /// 快捷键一览（状态栏键盘按钮、? 键）。
     @State private var showShortcuts = false
 
@@ -232,8 +234,22 @@ struct CollageView: View {
             .help("「自动编排」按哪套规则编：默认 = 分数最高的做扉页、横图铺满跨页；婚礼相册 = 扉页取宽景、"
                   + "每章疏 → 密 → 精选收尾、竖图成对、每跨页最多 3 张、不跨中缝（换了点「自动编排」生效）。"
                   + "纸、卡纸、≥ 25mm 的边距是样式：在「样式 › 风格」里选「婚礼 · 雅致」，左栏「模板」的一键成套「整本婚礼相册」两样一起设")
-            Button("自动编排") { store.autoArrangeAlbum(dedupe: dedupeAlbum) }
+            Button("自动编排") {
+                // 已经排好的相册：整本重排会替换没锁的跨页，先问一句（F6；命令行、MCP 直接调 store，不问）。
+                if let ask = store.arrangeConfirmation {
+                    arrangeAsk = ask
+                } else {
+                    store.autoArrangeAlbum(dedupe: dedupeAlbum)
+                }
+            }
                 .disabled(store.project.photos.isEmpty)
+                .alert("重新编排整本？", isPresented: Binding(get: { arrangeAsk != nil },
+                                                        set: { if !$0 { arrangeAsk = nil } })) {
+                    Button("重排") { store.autoArrangeAlbum(dedupe: dedupeAlbum) }
+                    Button("取消", role: .cancel) {}
+                } message: {
+                    Text(arrangeAsk ?? "")
+                }
                 .help((fineArt ? "托盘里的照片按婚礼相册编成跨页：废片不要、同一场只留精选，扉页取宽景，每章疏 → 密 → 精选收尾"
                        : "托盘里的照片按时间和章节编成跨页：分数最高的做扉页，好片单独成页")
                       + "。客户选中的一张都不拿掉；右栏「文档 › 画布」里指定了跨页数就往那么多个跨页里塞（不删片）")

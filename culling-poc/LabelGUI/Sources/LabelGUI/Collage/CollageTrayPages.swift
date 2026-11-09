@@ -65,6 +65,8 @@ struct CollageLeftPane: View {
 struct CollageTemplatesPage: View {
     @ObservedObject var store: CollageStore
     @State private var templateToDelete: String?
+    /// 「整本婚礼相册」落下来会替换现有跨页时先问的那句话（F6，store.arrangeConfirmation）。
+    @State private var weddingAsk: String?
 
     var body: some View {
         let _ = CollagePerf.body("模板页")
@@ -88,6 +90,15 @@ struct CollageTemplatesPage: View {
         ), presenting: templateToDelete) { name in
             Button("删除「\(name)」", role: .destructive) { store.deleteTemplate(name) }
             Button("取消", role: .cancel) {}
+        }
+        .alert("按婚礼相册重排整本？", isPresented: Binding(
+            get: { weddingAsk != nil },
+            set: { if !$0 { weddingAsk = nil } }
+        )) {
+            Button("重排") { store.applyKit(.weddingAlbum) }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(weddingAsk ?? "")
         }
     }
 
@@ -113,7 +124,14 @@ struct CollageTemplatesPage: View {
         GroupBox("一键成套") {
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(CollageKitID.allCases) { kit in
-                    Button { store.applyKit(kit) } label: {
+                    Button {
+                        // 已经排好的相册：整本婚礼相册会把没锁的跨页全换掉，先问一句（F6；MCP、命令行不问）。
+                        if kit == .weddingAlbum, let ask = store.arrangeConfirmation {
+                            weddingAsk = ask
+                        } else {
+                            store.applyKit(kit)
+                        }
+                    } label: {
                         Text(kit.name).frame(maxWidth: .infinity)
                     }
                     .help(kit.summary)
