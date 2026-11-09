@@ -168,6 +168,14 @@ extension CollageAlbum {
         return (pages, Set(pages.flatMap { $0.page.photoIDs }))
     }
 
+    /// 锁住的第一个跨页就是扉页（一张照片 + 文字格，同 CollageBookCover.openerParts 的判法）：重排时 plan 不再出扉页
+    /// （opener: false）—— 不然两套编排都会无条件再出一个，mergeLocked 把锁住的放最前，一本书有两个扉页（R1#3）。
+    /// 也不能编完再删 fresh 的第一个：那一页上是分数最高 / 景别最宽的那张，删了它就出书了。
+    static func lockedOpener(_ project: CollageProject) -> Bool {
+        guard project.mode == .album, project.pages.first?.locked == true else { return false }
+        return CollageBookCover.openerParts(project) != nil
+    }
+
     /// 目标跨页数减掉锁住的个数（锁住的算在整本里）；没设 = nil。至少 1 个。
     static func budget(_ budget: CollageAlbumBudget?, excludingLocked locked: Int) -> CollageAlbumBudget? {
         guard var b = budget, locked > 0 else { return budget }
@@ -181,14 +189,15 @@ extension CollageAlbum {
     /// - 原来就是第一个的锁住页（锁住了扉页）还在最前面；
     /// - 上面没有照片（只有字、留白）的锁住页放回原来的下标；
     /// - 几个锁住页之间保持原来的先后。
+    /// freshOpener = false：fresh 里没有扉页（锁住的第一个跨页就是扉页，plan 没再出），第一个也按时间排。
     static func mergeLocked(_ fresh: [CollagePage], locked: [(index: Int, page: CollagePage)],
-                            photos: [String: CollagePhotoRef]) -> [CollagePage] {
+                            photos: [String: CollagePhotoRef], freshOpener: Bool = true) -> [CollagePage] {
         guard !locked.isEmpty else { return fresh }
         func start(_ page: CollagePage) -> CollagePhotoRef? {
             page.photoIDs.compactMap { photos[$0] }.min(by: shotEarlier)
         }
         var out = fresh
-        var opener: Int? = fresh.isEmpty ? nil : 0
+        var opener: Int? = fresh.isEmpty || !freshOpener ? nil : 0
         var floor = 0
         for (index, page) in locked.sorted(by: { $0.index < $1.index }) {
             var at: Int

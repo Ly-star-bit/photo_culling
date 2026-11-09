@@ -58,7 +58,11 @@ struct CollageDarkroomView: View {
         }
         .onKeyPress(.upArrow) { model.moveFocus(-model.tab.columns); return .handled }
         .onKeyPress(.downArrow) { model.moveFocus(model.tab.columns); return .handled }
-        .onKeyPress(.return) { model.apply(model.focus); return .handled }
+        // ⏎ 先对一下页：刚换了页（MCP、撤销……）还没跟上就只跟上，不把上一页的焦点套到这一页。
+        .onKeyPress(.return) {
+            if !model.syncToPage() { model.apply(model.focus) }
+            return .handled
+        }
         .onKeyPress(.space, phases: [.down, .up]) { press in
             model.showOriginal = press.phase == .down
             return .handled

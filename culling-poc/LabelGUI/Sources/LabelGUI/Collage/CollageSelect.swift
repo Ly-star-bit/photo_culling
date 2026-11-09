@@ -611,11 +611,13 @@ enum CollageAlbum {
     /// theme = .fineArt：婚礼 fine-art 的编排（CollageStyleFineArt.plan，chapterMono = 整章黑白，title = 工程标题：
     /// 扉页标题是西文就不加字距）；默认主题照旧。
     /// budget：目标跨页数（F06，CollageAlbumBudget）；默认主题走 planBudget，fine-art 编完往目标并。nil = 照旧。
+    /// opener = false：不出扉页（锁住的第一个跨页就是扉页，CollageAlbum.lockedOpener）—— 本来做扉页的那张照常按时间排进去。
     static func plan(_ photos: [CollagePhotoRef], dedupe: Bool = true, maxPerSpread: Int = 5,
                      theme: CollageAlbumTheme = .classic, chapterMono: Bool = true, title: String = "",
-                     budget: CollageAlbumBudget? = nil) -> Plan {
+                     budget: CollageAlbumBudget? = nil, opener withOpener: Bool = true) -> Plan {
         if theme == .fineArt {
-            return CollageStyleFineArt.plan(photos, dedupe: dedupe, chapterMono: chapterMono, title: title, budget: budget)
+            return CollageStyleFineArt.plan(photos, dedupe: dedupe, chapterMono: chapterMono, title: title, budget: budget,
+                                            opener: withOpener)
         }
         var kept = photos
         var dropped: [CollagePhotoRef] = []
@@ -627,10 +629,10 @@ enum CollageAlbum {
             dropped = r.dropped
             similar = r.similar
         }
-        if let budget { return planBudget(kept, dropped: dropped, similar: similar, budget: budget) }
+        if let budget { return planBudget(kept, dropped: dropped, similar: similar, budget: budget, opener: withOpener) }
         guard let opener = kept.max(by: { $0.score < $1.score }) else { return Plan(spreads: [], dropped: dropped) }
-        var spreads = [Spread(kind: .opener, photos: [opener])]
-        let rest = CollageSelect.chronological(kept.filter { $0.id != opener.id })
+        var spreads = withOpener ? [Spread(kind: .opener, photos: [opener])] : []
+        let rest = CollageSelect.chronological(withOpener ? kept.filter { $0.id != opener.id } : kept)
         let heroCount = rest.count >= 8 ? Int((Double(rest.count) * 0.12).rounded()) : 0
         let heroes = Set(rest.sorted { $0.score > $1.score }.prefix(heroCount).map(\.id))
 

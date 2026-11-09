@@ -131,15 +131,52 @@ struct CollageBookCover: Codable, Hashable {
         return out
     }
 
-    /// 导出前检查（CollagePreflight）里封面的几条，都只提醒、不拦、不指到哪个跨页：书脊宽还是估的、书脊太窄印不下字、
-    /// 脸贴着书脊 / 出了安全区。没有封面 = 空。
+    /// 导出前检查（CollagePreflight）里封面的几条（不指到哪个跨页：page = nil，格子路径是封面那一块的）：
+    /// - 拦：封面上的空照片格（导出来是一块底色，同跨页的空格）、放大超过 150%；
+    /// - 提醒：放大 120–150%、书脊宽还是估的、书脊太窄印不下字、脸贴着书脊 / 出了安全区。
+    /// 以前只有后面那几样提醒：封面上一格空着、或者放大到糊，导出时一声不吭（R2#3）。没有封面 = 空。
     static func preflightIssues(project: CollageProject, hints: [String: CollageCrop.Hints]) -> [CollagePreflightIssue] {
         guard project.mode == .album, let cover = project.bookCover else { return [] }
+        var out = cover.photoIssues(project: project, hints: hints)
         let notes = cover.notes(spreads: project.pages.count).map { (photo: String?.none, text: $0) }
         let faces = cover.faceWarningItems(project: project, hints: hints).map { (photo: Optional($0.photo), text: $0.text) }
-        return (notes + faces).map {
+        out += (notes + faces).map {
             CollagePreflightIssue(kind: .cover, severity: .warn, page: nil, photoID: $0.photo, message: "封面：" + $0.text)
         }
+        return out
+    }
+
+    /// 封面那一块的空照片格（照片格里没放照片、或者放的照片不在托盘里 —— 同 CollageStore.emptyPhotoSlots 的判断）和
+    /// 放大倍数（同跨页：印刷画布上 > 120% 提醒、> 150% 拦；取景和封面渲染同一个：画布换成 frontCanvas、pages 清空）。
+    func photoIssues(project: CollageProject, hints: [String: CollageCrop.Hints]) -> [CollagePreflightIssue] {
+        var frontProject = project
+        frontProject.canvas = Self.frontCanvas(project.canvas)
+        frontProject.pages = []
+        let canvas = frontProject.canvas
+        var photos: [String: CollagePhotoRef] = [:]
+        for p in project.photos where photos[p.id] == nil { photos[p.id] = p }
+        var out: [CollagePreflightIssue] = []
+        let frames = CollageLayout.pageGeometry(front, canvas: canvas, style: project.style).frames
+        for f in frames where f.cell.kind == .photo && !f.rect.isEmpty {
+            if let id = f.cell.photoID, photos[id] != nil { continue }
+            out.append(CollagePreflightIssue(kind: .cover, severity: .block, page: nil, path: f.path,
+                                             message: "封面：有一个空照片格，导出来是一块底色：从托盘拖照片进去，或者删掉那一格"))
+        }
+        guard project.canvas.isPrint else { return out }
+        let placed = CollagePreflight.placements(page: editPage, index: 0, project: frontProject, photos: photos, hints: hints)
+        for p in placed {
+            let k = CollageCrop.upscale(photo: p.photo, window: p.window, drawn: p.drawn)
+            guard k > CollageStore.upscaleLimit else { continue }
+            let pct = Int((k * 100).rounded())
+            let block = k > CollagePreflight.upscaleBlock
+            let file = URL(fileURLWithPath: p.photo.path).deletingPathExtension().lastPathComponent
+            let name = file.isEmpty ? p.photo.id : file
+            let tail = block ? "印出来会糊" : "印出来会软"
+            out.append(CollagePreflightIssue(kind: .cover, severity: block ? .block : .warn, page: nil, path: p.path,
+                                             photoID: p.photo.id,
+                                             message: "封面：\(name) 放大到 \(pct)%：\(tail)，少裁一点或缩小那一格"))
+        }
+        return out
     }
 
     // MARK: 照片
@@ -193,12 +230,14 @@ struct CollageBookCover: Codable, Hashable {
         var extent: Int { wrap + bleed }
         var width: Int { 2 * extent + 2 * pageW + spine }
         var height: Int { 2 * extent + pageH }
-        /// 封底 | 书脊 | 封面（翻开平放看得见的那块，PDF 的 TrimBox）。左上原点。
+        /// 封底 | 书脊 | 封面（翻开平放看得见的那块 = 板子；四条边是包边往里折的折线）。左上原点。
+        /// 封面 PDF 的 TrimBox 不是它，是 wrapRect（封面纸在包边外沿裁）。
         var trim: CGRect { CGRect(x: extent, y: extent, width: 2 * pageW + spine, height: pageH) }
         var back: CGRect { CGRect(x: extent, y: extent, width: pageW, height: pageH) }
         var spineRect: CGRect { CGRect(x: extent + pageW, y: extent, width: spine, height: pageH) }
         var front: CGRect { CGRect(x: extent + pageW + spine, y: extent, width: pageW, height: pageH) }
-        /// 包边折线（= trim 的四条边）以内、出血以内的那一圈（板子包住的部分）。
+        /// 包边外沿以内（出血以内）：板子 + 四周包边。封面纸在这里裁（封面 PDF 的 TrimBox、四角裁切线）；包边从 trim 的
+        /// 四条边往里折到板子背面。
         var wrapRect: CGRect { CGRect(x: bleed, y: bleed, width: width - 2 * bleed, height: height - 2 * bleed) }
     }
 

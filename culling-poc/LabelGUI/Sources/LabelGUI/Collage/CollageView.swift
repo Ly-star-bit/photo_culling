@@ -881,8 +881,9 @@ struct CollageAlternativeStrip: View {
     }
 
     /// 右键「连画布一起清」的说法：单张拼图只有一页 = 清空画布（照片还在托盘里）；几页的 / 相册 = 删掉这一页 / 跨页。
-    private var clearCanvasLabel: String {
-        if store.isAlbum { return "删除这个跨页" }
+    /// 编辑封面时 = nil（不出这一项）：备选是封面的，删的却是封面底下那个看不见的跨页（审查发现）。
+    private var clearCanvasLabel: String? {
+        if store.isAlbum { return store.editingCover ? nil : "删除这个跨页" }
         return store.project.pages.count > 1 ? "删除这一页" : "清空画布（照片还在托盘里）"
     }
 }
@@ -894,11 +895,11 @@ private struct CollageAlternativeThumbs: View, Equatable {
     let store: CollageStore
     let thumbs: [NSImage]
     let selected: Int
-    let clearCanvasLabel: String
+    let clearCanvasLabel: String?
     /// 每张缩略图是不是同一张（== 只比这个：NSImage 不是 Sendable，nonisolated 的 == 里不碰它）。
     private let thumbIDs: [ObjectIdentifier]
 
-    init(store: CollageStore, thumbs: [NSImage], selected: Int, clearCanvasLabel: String) {
+    init(store: CollageStore, thumbs: [NSImage], selected: Int, clearCanvasLabel: String?) {
         self.store = store
         self.thumbs = thumbs
         self.selected = selected
@@ -932,7 +933,9 @@ private struct CollageAlternativeThumbs: View, Equatable {
                         Button("从备选里去掉") { store.removeAlternative(item.offset) }
                         Divider()
                         Button("清空备选") { store.clearAlternativeStrip() }
-                        Button(clearCanvasLabel, role: .destructive) { store.deletePage(store.pageIndex) }
+                        if let clearCanvasLabel {
+                            Button(clearCanvasLabel, role: .destructive) { store.deletePage(store.pageIndex) }
+                        }
                     }
                     .help("第 \(item.offset + 1) 个备选（右键：从备选里去掉、清空备选）")
                 }

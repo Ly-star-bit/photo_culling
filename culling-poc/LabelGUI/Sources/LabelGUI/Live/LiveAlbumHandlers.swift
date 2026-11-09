@@ -244,7 +244,8 @@ extension LiveHandlers {
                             notExecuted("先 collage_run_kit kit=weddingAlbum 排一本，或者 collage_apply_template 排一版"))
         }
         if ["lock", "unlock", "mirror"].contains(action), !collage.isAlbum {
-            return .failure("invalid_state", "锁住、镜像只对相册的跨页（现在是单张拼图）。", notExecuted(""))
+            return .failure("invalid_state", "锁住、镜像只对相册的跨页（现在是单张拼图）。",
+                            notExecuted("单张拼图的页只能 go / add / delete / move；要相册先 collage_run_kit kit=weddingAlbum 排一本（会切到相册）"))
         }
         let before = collage.editDigest
         let page = LiveWire.int(req.params["page"])
@@ -337,7 +338,8 @@ extension LiveHandlers {
         func refusal() -> Reply? {
             let count = collage.project.pages.count
             guard collage.isAlbum, collage.project.canvas.seams == .fold else {
-                return .failure("invalid_state", "左页、右页分开换版式只对相册的跨页。", notExecuted(""))
+                return .failure("invalid_state", "左页、右页分开换版式只对相册的跨页。",
+                                notExecuted("单张拼图换版式用 collage_auto_layout；要相册先 collage_run_kit kit=weddingAlbum 排一本"))
             }
             let index = (asked ?? collage.pageIndex + 1) - 1
             guard collage.project.pages.indices.contains(index) else {
@@ -345,7 +347,9 @@ extension LiveHandlers {
             }
             let page = collage.project.pages[index]
             guard !page.freeform, page.contactSheet == nil else {
-                return .failure("invalid_state", "第 \(index + 1) 个跨页是\(page.freeform ? "散落版" : "印样")，没有左右两页的切法。", notExecuted(""))
+                return .failure("invalid_state", "第 \(index + 1) 个跨页是\(page.freeform ? "散落版" : "印样")，没有左右两页的切法。",
+                                notExecuted("换一个网格跨页（page 填别的跨页号），或者先 collage_auto_layout 把这一页排成网格版式"
+                                            + (page.freeform ? "" : "（印样页要给 photos）")))
             }
             guard let fold = CollageLayout.foldPath(page.root), let sub = page.root.node(at: fold + [side.rawValue]) else {
                 return .failure("invalid_state", "第 \(index + 1) 个跨页找不到中缝那一刀（不是左右两页分开排的）。",

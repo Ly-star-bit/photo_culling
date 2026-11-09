@@ -69,10 +69,39 @@ enum CollagePrintSelfTest {
         var four = CollagePrintRules()
         four.pageStep = 4
         let step = four.pageProblem(spreads: 11) ?? ""
-        check(step.contains("22P") && step.contains("每次加 4P") && step.contains("再加 2P") && step.contains("减 2P"),
-              "步长不对：再加 / 减几 P", step)
+        check(step.contains("22P") && step.contains("每次加 4P") && step.contains("再加 1 个跨页（到 24P）")
+              && step.contains("减 1 个跨页（到 20P）"),
+              "步长不对：按跨页说再加 / 减几个（跨页只能 2P 一加）", step)
         check(four.pageProblem(spreads: 12) == nil, "24P 合每次加 4P")
         check(std.pageProblem(spreads: 0) == nil, "没有跨页不报")
+        // 步长 3P、从 20P 起：合规的偶数是 20、26、32…（23、29 跨页凑不出）。以前 22P 提示「再加 1P 或减 2P」，做不到。
+        var three = CollagePrintRules()
+        three.pageStep = 3
+        let s3 = three.pageProblem(spreads: 11) ?? ""
+        check(s3.contains("再加 2 个跨页（到 26P）") && s3.contains("减 1 个跨页（到 20P）") && !s3.contains("1P或"),
+              "步长 3P：22P 往上到 26P（再加 2 个跨页）、往下到 20P（减 1 个），不说做不到的「再加 1P」", s3)
+        check(three.pageProblem(spreads: 13) == nil && three.pageProblem(spreads: 10) == nil, "26P、20P 合「从 20P 起每次加 3P」")
+        // 最少 21P、每次加 2P：21、23、25… 全是奇数，跨页永远凑不出。以前提示永远是「再加 1P 或减 1P」。
+        var odd = CollagePrintRules()
+        odd.minPages = 21
+        let never = odd.pageProblem(spreads: 11) ?? ""
+        check(never.contains("凑不出来") && (1...40).allSatisfy { odd.pageProblem(spreads: $0)?.contains("凑不出来") == true },
+              "最少 21P、每次加 2P：怎么都凑不出（全是奇数），提示里说清楚、不给做不到的办法", never)
+        var oddOne = CollagePrintRules()
+        oddOne.minPages = 21
+        oddOne.pageStep = 1
+        let under21 = oddOne.pageProblem(spreads: 10) ?? ""
+        check(oddOne.pageProblem(spreads: 11) == nil && under21.contains("少了 1P") && under21.contains("再加 1 个跨页（到 22P；")
+              && under21.contains("奇数"),
+              "最少 21P、每次加 1P：22P 合规；20P 时说再加 1 个跨页到 22P，写明 21P 凑不出", under21)
+        var capped = CollagePrintRules()
+        capped.pageStep = 4
+        capped.maxPages = 26
+        let top = capped.pageProblem(spreads: 13) ?? ""
+        check(top.contains("减 1 个跨页（到 24P）") && !top.contains("再加"), "往上没有合规的（最多 26P、24 之后是 28）：只说往下减", top)
+        check(CollagePrintRules.evenStep(3) == 4 && CollagePrintRules.evenStep(1) == 2 && CollagePrintRules.evenStep(6) == 6
+              && CollagePrintRules.evenStep(41) == 40 && CollagePrintRules.evenStepRange.lowerBound == 2,
+              "「每次加几 P」的步进器只给偶数（奇数往上取）")
 
         // 容错解码：坏值按范围收、不认识的色彩 = sRGB；旧画布没有这个键 = nil；nil 不写进 JSON。
         let bad = #"{"minPages": 1, "maxPages": 9000, "pageStep": 0, "colorSpace": "cmyk", "layflatFoldMM": -3, "jpegQuality": 3}"#
@@ -136,6 +165,34 @@ enum CollagePrintSelfTest {
         check(saved.width == mine.width && saved.height == mine.height && saved.bleed == mine.bleed
               && saved.safe == mine.safe && saved.binding == .glued && saved.printRules?.colorSpace == .adobeRGB,
               "存成规格再套回来：尺寸、出血、安全区、装订、规则都一样", "\(saved.width)x\(saved.height) vs \(mine.width)x\(mine.height)")
+        // 「存成规格」再套回来像素一字不差、菜单打勾（R2#7：cm 以前只存两位，5000px 宽的跨页 → 21.17cm → 套回来 5001px，
+        // 菜单显示「（改过）」）。几种 dpi × 单页宽（含奇数像素），连同存进 state.json 再读回来。
+        var exact = true
+        var missed = ""
+        for dpi in [150.0, 300, 350, 600, 1200] {
+            for cm in [15.0, 21.1667, 30, 40] {
+                for odd in [0, 1] {
+                    let w = Int((cm * 2 / 2.54 * dpi).rounded()) + odd
+                    let h = Int((cm / 2.54 * dpi).rounded()) + odd
+                    var c = CollageCanvas(name: "我的", width: w, height: h, dpi: dpi,
+                                          bleed: Int((dpi * 3 / 25.4).rounded()) + odd,
+                                          safe: Int((dpi * 5 / 25.4).rounded()) + odd, seams: .fold)
+                    c.printRules = .standard
+                    let spec = CollagePrintSpec(name: "我的", canvas: c)
+                    let stored = (try? JSONEncoder().encode(spec)).flatMap { try? JSONDecoder().decode(CollagePrintSpec.self, from: $0) }
+                    let back = spec.canvas
+                    let same = back.width == w && back.height == h && back.bleed == c.bleed && back.safe == c.safe
+                    if !same || !spec.matches(c) || stored?.matches(c) != true {
+                        exact = false
+                        missed = "\(Int(dpi))dpi \(w)×\(h) → \(back.width)×\(back.height)"
+                    }
+                }
+            }
+        }
+        var w5000 = CollageCanvas(name: "我的", width: 5000, height: 2500, dpi: 300, bleed: 35, safe: 59, seams: .fold)
+        w5000.printRules = .standard
+        check(exact && CollagePrintSpec(name: "我的", canvas: w5000).canvas.width == 5000,
+              "存成规格再套回来：各种 dpi、奇数像素都一字不差，菜单打勾（5000px 宽不再变成 5001）", missed)
         let specJSON = try? JSONEncoder().encode([CollagePrintSpec(name: "我的", canvas: mine)])
         let specBack = specJSON.flatMap { try? JSONDecoder().decode([CollageLossy<CollagePrintSpec>].self, from: $0) }
         check(specBack?.first?.value?.canvas.width == mine.width, "存的规格读回来")

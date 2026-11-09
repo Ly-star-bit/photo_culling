@@ -4,9 +4,10 @@ import CoreGraphics
 // MARK: - 导出前检查（相册 B · P3）
 //
 // 一本相册交出去之前要看的几样，一条一条列出来，点一下跳到那个跨页、选中那一格（CollageStore.reveal）。
-// 拦（导出按钮先确认）：空照片格、放大超过 150%、页数不合规、同一张用了两次、胶装时脸压中缝。
+// 拦（导出按钮先确认）：空照片格、放大超过 150%、页数不合规、同一张用了两次、胶装时脸压中缝；相册封面上的空照片格、
+// 放大超过 150%。
 // 提醒（只列在「导出 ▾」里）：放大 120–150%、平铺时脸压中缝、字出安全区 / 压进中缝带、贴边的照片没铺进出血、
-// 首尾单页那半边有东西、印刷画布上正文还是灰条。
+// 首尾单页那半边有东西、印刷画布上正文还是灰条；封面放大 120–150%、书脊是估的 / 太窄、脸贴书脊。
 // 同一份结果给导出按钮的确认框、「导出 ▾」的清单、命令行 ops 的 preflight；MCP collage_export 的 warnings 以后也接这一份
 // （CollagePreflight.run 吃 project + hints，不碰界面状态，后台线程也能跑）。
 
@@ -30,7 +31,8 @@ struct CollagePreflightIssue: Hashable, Identifiable {
         case singleEnd
         /// 印刷画布上正文还是灰条 / 占位字。
         case fillerBody
-        /// 相册封面（CollageBookCover）：书脊宽还是估的、书脊太窄印不下字、脸贴着书脊 / 出了安全区。只提醒。
+        /// 相册封面（CollageBookCover.preflightIssues）：空照片格、放大超过 150% 拦；放大 120–150%、书脊宽还是估的、
+        /// 书脊太窄印不下字、脸贴着书脊 / 出了安全区提醒。page = nil，path 是封面那一块的格子。
         case cover
 
         var label: String {
@@ -110,50 +112,59 @@ enum CollagePreflight {
 
     /// 全部页里画出来的照片（网格格子按阅读顺序、再是自由图层；印样页不算）。
     static func placements(project: CollageProject, hints: [String: CollageCrop.Hints]) -> [Placement] {
-        let canvas = project.canvas
-        let style = project.style
         var photos: [String: CollagePhotoRef] = [:]
         for p in project.photos where photos[p.id] == nil { photos[p.id] = p }
         var out: [Placement] = []
         for (i, page) in project.pages.enumerated() {
-            if !page.freeform {
-                let frames = CollageLayout.pageGeometry(page.root, canvas: canvas, style: style).frames
-                // 封面取景、人物挡字的格子按 CollageCover 的决定（封面会拉近，放大倍数要按它算）；
-                // 这一页没有这种格子就照旧（不算占位符、底色）。
-                let covered = frames.contains { CollageCover.applies(to: $0.cell) }
-                let paged = CollageLooks.project(project, page: page)
-                let ids = page.photoIDs
-                let pageVars = covered ? CollageTypeset.variables(project: paged, root: page.root, photos: photos,
-                                                                  pagePhotoIDs: ids, pageID: page.id) : [:]
-                let bg = covered ? CollageRender.backgroundColor(project: paged, pagePhotoIDs: ids, photos: photos)
-                    : style.background
-                for f in frames where f.cell.kind == .photo {
-                    guard let id = f.cell.photoID, let photo = photos[id] else { continue }
-                    let framing = CollageLayout.effectiveFraming(path: f.path, cell: f.cell, in: frames, photos: photos,
-                                                                 tight: style.tightSmallCells)
-                    let area = CollageCrop.photoArea(cell: f.cell, rect: f.rect.cgRect, style: style)
-                    let window = CollageCover.applies(to: f.cell)
-                        ? CollageRender.cellWindow(cell: f.cell, frameRect: f.rect.cgRect, project: paged, photo: photo,
-                                                   framing: framing, hints: hints[id],
-                                                   vars: CollageTypeset.cellVariables(pageVars, photo: photo),
-                                                   background: bg)
-                        : CollageCrop.window(for: photo, cell: f.cell, cellAspect: CollageCrop.aspect(of: area),
-                                             framing: framing, hints: hints[id])
-                    let drawn = CollageCrop.drawnRect(window: window, photo: photo, cell: f.cell, in: area)
-                    out.append(Placement(page: i, path: f.path, item: nil, cell: f.cell, photo: photo, window: window,
-                                         drawn: drawn, toCanvas: nil))
-                }
+            out += placements(page: page, index: i, project: project, photos: photos, hints: hints)
+        }
+        return out
+    }
+
+    /// 一页里画出来的照片（index = 记在 Placement.page 上的页号）。page 可以不在 project.pages 里：相册封面那一块
+    /// （CollageBookCover.editPage，画布换成 frontCanvas、pages 清空，同封面渲染）也按这个算放大倍数。
+    static func placements(page: CollagePage, index i: Int, project: CollageProject, photos: [String: CollagePhotoRef],
+                           hints: [String: CollageCrop.Hints]) -> [Placement] {
+        let canvas = project.canvas
+        let style = project.style
+        var out: [Placement] = []
+        if !page.freeform {
+            let frames = CollageLayout.pageGeometry(page.root, canvas: canvas, style: style).frames
+            // 封面取景、人物挡字的格子按 CollageCover 的决定（封面会拉近，放大倍数要按它算）；
+            // 这一页没有这种格子就照旧（不算占位符、底色）。
+            let covered = frames.contains { CollageCover.applies(to: $0.cell) }
+            let paged = CollageLooks.project(project, page: page)
+            let ids = page.photoIDs
+            let pageVars = covered ? CollageTypeset.variables(project: paged, root: page.root, photos: photos,
+                                                              pagePhotoIDs: ids, pageID: page.id) : [:]
+            let bg = covered ? CollageRender.backgroundColor(project: paged, pagePhotoIDs: ids, photos: photos)
+                : style.background
+            for f in frames where f.cell.kind == .photo {
+                guard let id = f.cell.photoID, let photo = photos[id] else { continue }
+                let framing = CollageLayout.effectiveFraming(path: f.path, cell: f.cell, in: frames, photos: photos,
+                                                             tight: style.tightSmallCells)
+                let area = CollageCrop.photoArea(cell: f.cell, rect: f.rect.cgRect, style: style)
+                let window = CollageCover.applies(to: f.cell)
+                    ? CollageRender.cellWindow(cell: f.cell, frameRect: f.rect.cgRect, project: paged, photo: photo,
+                                               framing: framing, hints: hints[id],
+                                               vars: CollageTypeset.cellVariables(pageVars, photo: photo),
+                                               background: bg)
+                    : CollageCrop.window(for: photo, cell: f.cell, cellAspect: CollageCrop.aspect(of: area),
+                                         framing: framing, hints: hints[id])
+                let drawn = CollageCrop.drawnRect(window: window, photo: photo, cell: f.cell, in: area)
+                out.append(Placement(page: i, path: f.path, item: nil, cell: f.cell, photo: photo, window: window,
+                                     drawn: drawn, toCanvas: nil))
             }
-            // 相纸（散落版整页、网格版上贴的）：和 CollageItems.drawPhotoItem 同一个取景。
-            for item in page.items where item.kind == .photo {
-                guard let id = item.photoID, let photo = photos[id] else { continue }
-                let inner = CollageItems.photoArea(item.frame, outer: CollageItems.localRect(item, canvas: canvas))
-                let framing: CollageFraming = item.framing == .auto ? .full : item.framing
-                let window = CollageCrop.window(for: photo, cellAspect: CollageCrop.aspect(of: inner), framing: framing,
-                                                override: nil, hints: hints[id])
-                out.append(Placement(page: i, path: nil, item: item.id, cell: nil, photo: photo, window: window,
-                                     drawn: inner, toCanvas: CollageItems.transform(item, canvas: canvas)))
-            }
+        }
+        // 相纸（散落版整页、网格版上贴的）：和 CollageItems.drawPhotoItem 同一个取景。
+        for item in page.items where item.kind == .photo {
+            guard let id = item.photoID, let photo = photos[id] else { continue }
+            let inner = CollageItems.photoArea(item.frame, outer: CollageItems.localRect(item, canvas: canvas))
+            let framing: CollageFraming = item.framing == .auto ? .full : item.framing
+            let window = CollageCrop.window(for: photo, cellAspect: CollageCrop.aspect(of: inner), framing: framing,
+                                            override: nil, hints: hints[id])
+            out.append(Placement(page: i, path: nil, item: item.id, cell: nil, photo: photo, window: window,
+                                 drawn: inner, toCanvas: CollageItems.transform(item, canvas: canvas)))
         }
         return out
     }
@@ -380,10 +391,18 @@ extension CollageStore {
     }
 
     /// 清单上点一条：换到那个跨页（走 pageIndex，同跨页条），选中那一格 / 那个图层，右栏切到「格式」。
-    /// 暗房开着先关（编辑区不在视图树里）。整本的事（页数）不跳。
+    /// 暗房开着先关（编辑区不在视图树里），整本概览开着先收起（画布被它盖着），编辑封面时先退出（不然 pageIndex 没变时
+    /// 还停在封面上、选中的路径也套到封面那块上）。整本的事（页数）不跳。
+    /// 封面的几条（page == nil）：空照片格进封面编辑、选中那一格；别的（书脊、脸贴书脊、放大）去「文档 › 封面」。
     func reveal(_ issue: CollagePreflightIssue) {
+        if issue.kind == .cover {
+            revealCover(issue)
+            return
+        }
         guard let target = issue.page, project.pages.indices.contains(target) else { return }
         if darkroom != nil { closeDarkroom() }
+        if albumUI.overviewShown { albumUI.overviewShown = false }
+        if editingCover { setEditingCover(false) }
         if target != pageIndex { pageIndex = target }
         if let item = issue.item, items.contains(where: { $0.id == item }) {
             selectItem(item)
@@ -391,6 +410,20 @@ extension CollageStore {
         } else if let path = issue.path, !isFreeform, !isContactSheet, root?.node(at: path)?.isLeaf == true {
             selection = path
             nav.showFormat()
+        }
+    }
+
+    /// 封面那几条：带格子路径的（空照片格、放大）进封面编辑、选中那一格；别的去「文档 › 封面」（书脊宽、包边在那里改）。
+    private func revealCover(_ issue: CollagePreflightIssue) {
+        guard isAlbum, let cover = project.bookCover else { return }
+        if darkroom != nil { closeDarkroom() }
+        if albumUI.overviewShown { albumUI.overviewShown = false }
+        if let path = issue.path, cover.front.node(at: path)?.isLeaf == true {
+            setEditingCover(true)
+            selection = path
+            nav.showFormat()
+        } else {
+            go(.cover)
         }
     }
 

@@ -85,12 +85,13 @@ extension CollageAlbum {
     ///    不会前面一两张、后面五六张）；章内按 4-3-5-2-4-3 的节奏（减了一半起伏）分大小，同姿势三张不进一个跨页；
     /// 4. 放不下就多出几个跨页，照片太少就少几个：一张都不拿掉（「相似只留一张」照旧是那个开关管）。
     static func planBudget(_ kept: [CollagePhotoRef], dropped: [CollagePhotoRef], similar: [String: Set<String>],
-                           budget raw: CollageAlbumBudget) -> Plan {
+                           budget raw: CollageAlbumBudget, opener withOpener: Bool = true) -> Plan {
         let budget = raw.normalized
         guard let opener = kept.max(by: { $0.score < $1.score }) else {
             return Plan(spreads: [], dropped: dropped, theme: .classic, budget: budget)
         }
-        let rest = CollageSelect.chronological(kept.filter { $0.id != opener.id })
+        // 不出扉页（锁住的第一个跨页就是扉页）：那张照常按时间排，正文多一个跨页的位置。
+        let rest = CollageSelect.chronological(withOpener ? kept.filter { $0.id != opener.id } : kept)
         var chapters: [[CollagePhotoRef]] = []
         for p in rest {
             if let last = chapters.last?.last, last.chapter == p.chapter {
@@ -101,7 +102,7 @@ extension CollageAlbum {
         }
         let lo = budget.minPerSpread
         let hi = budget.maxPerSpread
-        let body = budget.spreads - 1
+        let body = budget.spreads - (withOpener ? 1 : 0)
 
         // 好片单独成页：从默认的张数往下退，直到多图跨页（每跨页最多 hi 张）放得下。
         let heroCap = lo <= 1 && rest.count >= 8 ? Int((Double(rest.count) * 0.12).rounded()) : 0
@@ -124,7 +125,7 @@ extension CollageAlbum {
             if h == 0 || (fits && densest <= Double(hi) * 0.75) { break }
         }
 
-        var spreads = [Spread(kind: .opener, photos: [opener])]
+        var spreads = withOpener ? [Spread(kind: .opener, photos: [opener])] : []
         var beat = 0
         for (ci, seg) in segments.enumerated() {
             let sizes = bucketSizes(seg.grid.count, into: counts[ci], lo: lo, hi: hi, beat: beat)

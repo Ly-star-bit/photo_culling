@@ -424,8 +424,8 @@ enum CollageBookCoverRender {
 
     // MARK: 参考线（只在编辑预览、缩略图里，不进导出）
 
-    /// 折线（包边往里折的那一圈 = 看得见的那块的边）、书脊两条线、封面 / 封底的安全区、出血线。offset = 看得见的那块在图里的
-    /// 左上角（带包边时 = 包边 + 出血）。
+    /// 折线（包边往里折的那一圈 = 看得见的那块的边）、书脊两条线、封面 / 封底的安全区、裁切线（包边外沿）。offset = 看得见的
+    /// 那块在图里的左上角（带包边时 = 包边 + 出血）。
     private static func drawGuides(_ image: CGImage, layout: CollageBookCover.Layout, offset: CGFloat,
                                    canvas: CollageCanvas, scale: Double) -> CGImage? {
         guard let ctx = CollageRender.makeContext(width: image.width, height: image.height) else { return image }
@@ -446,7 +446,7 @@ enum CollageBookCoverRender {
             ctx.addLine(to: CGPoint(x: x, y: spine.maxY))
         }
         ctx.strokePath()
-        // 出血线（包边外面那一圈裁掉的）：品红虚线。
+        // 裁切线（包边外沿：封面纸在这里裁，外面那一圈是出血）：品红虚线。
         if offset > 0, layout.bleed > 0 {
             ctx.setStrokeColor(CGColor(srgbRed: 1, green: 0, blue: 1, alpha: 0.7))
             ctx.setLineDash(phase: 0, lengths: [lw * 5, lw * 4])
@@ -507,10 +507,10 @@ extension CollageBookCoverRender {
 // MARK: - 导出（C3）：「名_封面.<格式>」+「名_封面.pdf」
 
 extension CollageExport {
-    /// 封面 PDF：一页 = 整张封面（带包边、出血的 JPEG，原样嵌入）。BleedBox = 整张，TrimBox = 封底 | 书脊 | 封面
-    /// （翻开平放看得见的那块）；裁切线在四角、出血外面（同跨页 PDF），书脊两条折线画在上下两头的裁切线那一层（出血外面
-    /// 一小段，不进画面）。先写临时文件、读回来核对（verifyPDF）再改名，同 writePDF；overwrite = false 时正式名上已经有
-    /// 文件就报错不覆盖。
+    /// 封面 PDF：一页 = 整张封面（带包边、出血的 JPEG，原样嵌入）。BleedBox = 整张；TrimBox = 包边外沿（精装封面纸在
+    /// 这里裁，包边要折到板子背面，R2#8）—— 裁切线在它的四角、出血外面（同跨页 PDF）。板子的边（包边内沿：包边往里折的
+    /// 那一圈）和封底 / 书脊 / 封面的分界另画折线记号（虚线，出血外面一小段，不进画面），不和裁切线混。先写临时文件、
+    /// 读回来核对（verifyPDF）再改名，同 writePDF；overwrite = false 时正式名上已经有文件就报错不覆盖。
     static func writeCoverPDF(page: PDFPage, layout: CollageBookCover.Layout, dpi: Double, to url: URL, title: String,
                               cropMarks: Bool, overwrite: Bool = false) throws {
         let fm = FileManager.default
@@ -535,21 +535,25 @@ extension CollageExport {
         committed = true
     }
 
-    /// 封面 PDF 的几个框（点，左下原点）：media = 整张 + 四周裁切线留白，bleed = 整张，trim = 看得见的那块，
+    /// 封面 PDF 的几个框（点，左下原点）：media = 整张 + 四周裁切线留白，bleed = 整张，trim = 包边外沿（裁切的地方，
+    /// = 版面几何的 wrapRect），board = 板子（封底 | 书脊 | 封面，翻开平放看得见的那块；它的四条边是包边往里折的折线），
     /// spine = 书脊两条折线的 x。
     static func coverPDFBoxes(layout: CollageBookCover.Layout, dpi: Double, cropMarks: Bool)
-        -> (media: CGRect, bleed: CGRect, trim: CGRect, spine: [CGFloat]) {
+        -> (media: CGRect, bleed: CGRect, trim: CGRect, board: CGRect, spine: [CGFloat]) {
         let pt = 72.0 / max(1, dpi)
         let slug = cropMarks ? 10.0 / 25.4 * 72 : 0
         let w = Double(layout.width) * pt
         let h = Double(layout.height) * pt
         let media = CGRect(x: 0, y: 0, width: w + slug * 2, height: h + slug * 2)
         let bleed = CGRect(x: slug, y: slug, width: w, height: h)
+        let b = Double(layout.bleed) * pt
+        let trim = CGRect(x: slug + b, y: slug + b, width: Double(layout.width - 2 * layout.bleed) * pt,
+                          height: Double(layout.height - 2 * layout.bleed) * pt)
         let e = Double(layout.extent) * pt
-        let trim = CGRect(x: slug + e, y: slug + e, width: Double(2 * layout.pageW + layout.spine) * pt,
-                          height: Double(layout.pageH) * pt)
+        let board = CGRect(x: slug + e, y: slug + e, width: Double(2 * layout.pageW + layout.spine) * pt,
+                           height: Double(layout.pageH) * pt)
         let s0 = slug + e + Double(layout.pageW) * pt
-        return (media, bleed, trim, [CGFloat(s0), CGFloat(s0 + Double(layout.spine) * pt)])
+        return (media, bleed, trim, board, [CGFloat(s0), CGFloat(s0 + Double(layout.spine) * pt)])
     }
 
     private static func coverBox(_ rect: CGRect) -> CFData {
@@ -591,7 +595,7 @@ extension CollageExport {
             let slug = boxes.bleed.minX
             let length = max(4, slug - 3)
             let trim = boxes.trim
-            // 四角裁切线：沿看得见的那块的边，从出血外 2pt 起往外。
+            // 四角裁切线（实线）：沿包边外沿（TrimBox），从出血外 2pt 起往外。
             let gapX = trim.minX - boxes.bleed.minX + 2
             let gapY = trim.minY - boxes.bleed.minY + 2
             for x in [trim.minX, trim.maxX] {
@@ -604,12 +608,22 @@ extension CollageExport {
                     ctx.addLine(to: CGPoint(x: x, y: y + dy * (gapY + length)))
                 }
             }
-            // 书脊折线：上下两头、出血外面。
-            for x in boxes.spine {
+            ctx.strokePath()
+            // 折线记号（虚线，和裁切线分开）：板子的四条边（包边往里折）、封底 / 书脊 / 封面的分界。竖的画在上下两头、
+            // 横的画在左右两头，都在出血外面。
+            ctx.setLineDash(phase: 0, lengths: [1.5, 1.2])
+            let board = boxes.board
+            for x in [board.minX] + boxes.spine + [board.maxX] {
                 ctx.move(to: CGPoint(x: x, y: boxes.bleed.maxY + 2))
                 ctx.addLine(to: CGPoint(x: x, y: boxes.bleed.maxY + 2 + length))
                 ctx.move(to: CGPoint(x: x, y: boxes.bleed.minY - 2))
                 ctx.addLine(to: CGPoint(x: x, y: boxes.bleed.minY - 2 - length))
+            }
+            for y in [board.minY, board.maxY] {
+                ctx.move(to: CGPoint(x: boxes.bleed.minX - 2, y: y))
+                ctx.addLine(to: CGPoint(x: boxes.bleed.minX - 2 - length, y: y))
+                ctx.move(to: CGPoint(x: boxes.bleed.maxX + 2, y: y))
+                ctx.addLine(to: CGPoint(x: boxes.bleed.maxX + 2 + length, y: y))
             }
             ctx.strokePath()
             ctx.restoreGState()

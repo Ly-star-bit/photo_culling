@@ -91,30 +91,65 @@ struct CollagePrintRules: Codable, Hashable {
     /// P 数换成跨页数（往上取整：21P 也要 11 个跨页）。
     static func spreads(_ pages: Int) -> Int { (pages + 1) / 2 }
 
+    /// 「每次加几 P」步进器的范围：只给偶数（跨页只能 2P 一加）。
+    static let evenStepRange = 2...stepRange.upperBound
+
+    /// 步进器给的数取到偶数（奇数往上取）、夹进 evenStepRange。
+    static func evenStep(_ value: Int) -> Int {
+        let even = value + (value & 1)
+        return min(evenStepRange.upperBound, max(evenStepRange.lowerBound, even))
+    }
+
+    /// 合规的 P 数：从 minPages 起每次加 pageStep、不超过 maxPages，而且是偶数（跨页只能 2P 一加，n 个跨页 = 2n P）。
+    /// 这里给 ≥ p 的最小那个；没有 = nil。
+    func validPages(atLeast p: Int) -> Int? {
+        let step = max(1, pageStep)
+        var v = minPages
+        if p > v { v += (p - v + step - 1) / step * step }
+        while v <= maxPages {
+            if v % 2 == 0 { return v }
+            v += step
+        }
+        return nil
+    }
+
+    /// 同上，≤ p 的最大那个；没有 = nil。
+    func validPages(atMost p: Int) -> Int? {
+        let step = max(1, pageStep)
+        guard p >= minPages else { return nil }
+        var v = minPages + (min(p, maxPages) - minPages) / step * step
+        while v >= minPages {
+            if v % 2 == 0 { return v }
+            v -= step
+        }
+        return nil
+    }
+
     /// n 个跨页合不合这条规则：合 = nil；不合 = 跨页条悬停、导出前检查那一句（两种单位都写）。
-    /// 例：「印厂要 20–60P、每次加 2P；现在 34 个跨页 = 68P，多了 8P」。
+    /// 怎么改按跨页说（跨页只能 2P 一加）：往上、往下各找最近的合规 P 数（偶数、在步长上），说再加 / 减几个跨页到几 P。
+    /// 以前按 P 算「再加 1P」—— 步长 3P、从 20P 起时 22P 提示「再加 1P」做不到；最少 21P 时永远不合规、提示永远是
+    /// 「再加 1P 或减 1P」。最少是奇数、整条规则凑不出偶数的，提示里说清楚。
+    /// 例：「印厂要 20–60P、每次加 2P；现在 34 个跨页 = 68P，多了 8P：减 4 个跨页（到 60P）」。
     func pageProblem(spreads n: Int) -> String? {
         guard n > 0 else { return nil }
         let p = pages(spreads: n)
+        let up = validPages(atLeast: p)
+        if up == p { return nil }
+        let down = validPages(atMost: p)
         let head = "印厂要 \(minPages)–\(maxPages)P、每次加 \(pageStep)P；现在 \(n) 个跨页 = \(p)P，"
-        if p < minPages {
-            let short = minPages - p
-            return head + "少了 \(short)P（再加 \(Self.spreads(short)) 个跨页）"
+        guard up != nil || down != nil else {
+            return head + "这条规则凑不出来：跨页只能 2P 一加（P 数总是偶数），从 \(minPages)P 起每次加 \(pageStep)P、"
+                + "到 \(maxPages)P 为止没有一个偶数。照印厂给的核对一下最少几 P、每次加几 P"
         }
-        if p > maxPages {
-            let over = p - maxPages
-            return head + "多了 \(over)P（少 \(Self.spreads(over)) 个跨页）"
-        }
-        let off = (p - minPages) % max(1, pageStep)
-        if off != 0 {
-            let up = pageStep - off
-            let down = off
-            var ways: [String] = []
-            if p + up <= maxPages { ways.append("再加 \(up)P") }
-            if p - down >= minPages { ways.append("减 \(down)P") }
-            return head + "不是从 \(minPages)P 起每次加 \(pageStep)P 的数" + (ways.isEmpty ? "" : "：" + ways.joined(separator: "或"))
-        }
-        return nil
+        // 最少是奇数、现在比它少：跨页凑不出那个数，往上只能到下一个合规的偶数 —— 写在那个办法后面。
+        let odd = p < minPages && minPages % 2 == 1 ? "；最少 \(minPages)P 是奇数，跨页只能 2P 一加，凑不出 \(minPages)P" : ""
+        var ways: [String] = []
+        if let up { ways.append("再加 \((up - p) / 2) 个跨页（到 \(up)P\(odd)）") }
+        if let down { ways.append("减 \((p - down) / 2) 个跨页（到 \(down)P）") }
+        let fix = ways.joined(separator: "或")
+        if p < minPages { return head + "少了 \(minPages - p)P：" + fix }
+        if p > maxPages { return head + "多了 \(p - maxPages)P：" + fix }
+        return head + "不是从 \(minPages)P 起每次加 \(pageStep)P 的数：" + fix
     }
 }
 
@@ -149,17 +184,18 @@ struct CollagePrintSpec: Codable, Hashable, Identifiable {
         self.key = key
     }
 
-    /// 「存成规格…」：从现在的画布量回来（像素按 dpi 换回 cm / mm，留两位小数）。再套回来得到的像素和现在一样
-    /// （30×30cm 300dpi = 7087px，换回去还是 7087）。
+    /// 「存成规格…」：从现在的画布量回来（像素按 dpi 换回 cm / mm，留四位小数）。再套回来得到的像素和现在一样
+    /// （30×30cm 300dpi = 7087px，换回去还是 7087）。以前留两位：5000px 宽的跨页 → 单页 21.17cm → 套回来 5001px，
+    /// 菜单上那一条显示「（改过）」、不打勾（R2#7）。四位小数的误差到 1200dpi 也不到 0.05px。
     init(name: String, canvas: CollageCanvas) {
-        func round2(_ v: Double) -> Double { (v * 100).rounded() / 100 }
+        func round4(_ v: Double) -> Double { (v * 10_000).rounded() / 10_000 }
         let dpi = max(1, canvas.dpi)
         self.init(name: name,
-                  pageWidthCM: round2(Double(canvas.width) / 2 / dpi * 2.54),
-                  pageHeightCM: round2(Double(canvas.height) / dpi * 2.54),
+                  pageWidthCM: round4(Double(canvas.width) / 2 / dpi * 2.54),
+                  pageHeightCM: round4(Double(canvas.height) / dpi * 2.54),
                   dpi: canvas.dpi,
-                  bleedMM: round2(Double(canvas.bleed) / dpi * 25.4),
-                  safeMM: round2(Double(canvas.safe) / dpi * 25.4),
+                  bleedMM: round4(Double(canvas.bleed) / dpi * 25.4),
+                  safeMM: round4(Double(canvas.safe) / dpi * 25.4),
                   binding: canvas.binding,
                   rules: canvas.printRules ?? .standard)
     }

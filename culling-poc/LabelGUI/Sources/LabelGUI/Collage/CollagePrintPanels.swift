@@ -136,12 +136,13 @@ struct CollagePrintRulesBox: View {
                 }
                 .fixedSize()
                 Text("每次加")
-                Stepper(value: rule(\.pageStep), in: CollagePrintRules.stepRange) {
+                // 跨页只能 2P 一加：每次加几 P 只给偶数（2、4、6…；MCP、旧工程里的奇数一点就变成偶数）。
+                Stepper(value: evenStep, in: CollagePrintRules.evenStepRange, step: 2) {
                     Text("\(rules.pageStep)P").monospacedDigit()
                 }
                 .fixedSize()
             }
-            .help("印厂说的「P」是单页：1 个跨页 = 2P。最少、最多几 P，每次能加几 P（照印厂给的改）")
+            .help("印厂说的「P」是单页：1 个跨页 = 2P，所以跨页只能 2P 一加。最少、最多几 P，每次能加几 P（照印厂给的改）")
             pageLine(rules: rules, count: count, problem: problem)
             Toggle("首尾单页（第一页、最后一页贴在封板上）", isOn: rule(\.singleEnds))
                 .toggleStyle(.checkbox)
@@ -212,17 +213,27 @@ struct CollagePrintRulesBox: View {
 
     private func setFold(_ mm: Double?) {
         var rules = store.project.canvas.effectivePrintRules
-        if store.project.canvas.binding == .glued { rules.gluedFoldMM = mm } else { rules.layflatFoldMM = mm }
-        store.setPrintRules(rules, coalesce: true)
+        let glued = store.project.canvas.binding == .glued
+        if glued { rules.gluedFoldMM = mm } else { rules.layflatFoldMM = mm }
+        // 撤销按项合并：中缝带是自己的一项（平铺、胶装各一个），不和页数、色彩并成一步。
+        let item: WritableKeyPath<CollagePrintRules, Double?> = glued ? \.gluedFoldMM : \.layflatFoldMM
+        store.setPrintRules(rules, coalesce: true, key: item)
     }
 
+    /// 「每次加几 P」：只给偶数，奇数往上取到偶数（同一项撤销）。
+    private var evenStep: Binding<Int> {
+        Binding(get: { store.project.canvas.effectivePrintRules.pageStep },
+                set: { value in rule(\.pageStep).wrappedValue = CollagePrintRules.evenStep(value) })
+    }
+
+    /// 规则框的一项：连着点同一个步进器合成一步撤销，换一项（页数 → 色彩）新开一步（key = 这一项的 keyPath）。
     private func rule<T>(_ keyPath: WritableKeyPath<CollagePrintRules, T>) -> Binding<T> {
         Binding(get: { store.project.canvas.effectivePrintRules[keyPath: keyPath] },
                 set: { value in
                     var rules = store.project.canvas.effectivePrintRules
                     rules[keyPath: keyPath] = value
                     if rules.maxPages < rules.minPages { rules.maxPages = rules.minPages }
-                    store.setPrintRules(rules, coalesce: true)
+                    store.setPrintRules(rules, coalesce: true, key: keyPath)
                 })
     }
 }
@@ -240,11 +251,12 @@ struct CollageExportRangeBox: View {
         VStack(alignment: .leading, spacing: 6) {
             Picker("范围", selection: kind) {
                 Text("全部").tag(Kind.all)
-                Text("当前跨页").tag(Kind.current)
+                Text(Self.currentLabel(editingCover: store.editingCover, pageIndex: store.pageIndex)).tag(Kind.current)
                 Text("自定义").tag(Kind.custom)
             }
             .pickerStyle(.segmented)
-            .help("只导某几个跨页：改了一页不用整本重渲。文件名里的序号还是原来的跨页号")
+            .help("只导某几个跨页：改了一页不用整本重渲。文件名里的序号还是原来的跨页号"
+                  + (store.editingCover ? "。正在编辑封面：「当前跨页」是封面底下那个跨页，封面只在导「全部」时写" : ""))
             if case .custom = store.exportRange {
                 TextField("跨页号，比如 1-3, 7", text: Binding(get: { custom }, set: { text in
                     custom = text
@@ -258,6 +270,12 @@ struct CollageExportRangeBox: View {
         .onAppear {
             if case .custom(let text) = store.exportRange { custom = text }
         }
+    }
+
+    /// 「当前跨页」那一段的字：编辑封面时画布上是封面，「当前」导的却是封面底下那个跨页（封面不写）—— 写明是第几个
+    /// （R2#9）。分段控件没法单独灰掉一段。
+    static func currentLabel(editingCover: Bool, pageIndex: Int) -> String {
+        editingCover ? "当前跨页（第 \(pageIndex + 1) 个）" : "当前跨页"
     }
 
     private var kind: Binding<Kind> {
@@ -283,7 +301,8 @@ struct CollageExportRangeBox: View {
             EmptyView()
         case .success(let only?):
             let pdf = store.exportOptions.pdf ? "、不出 PDF（缺页的 PDF 不能拿去印，要 PDF 选「全部」）" : ""
-            Text("只导第 \(CollageExportRange.label(only)) 个跨页（\(only.count) 个）：只写这几张跨页图\(pdf)；文件名里的序号还是原来的跨页号")
+            let cover = store.project.bookCover != nil ? "、不写封面" : ""
+            Text("只导第 \(CollageExportRange.label(only)) 个跨页（\(only.count) 个）：只写这几张跨页图\(pdf)\(cover)；文件名里的序号还是原来的跨页号")
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         case .failure(let bad):
@@ -345,7 +364,16 @@ struct CollagePreflightBox: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(issue.page == nil ? "整本的事：在「文档 › 画布」里改规格，或者加减跨页" : "点一下跳到那个跨页、选中那一格")
+        .help(Self.rowHelp(issue))
+    }
+
+    /// 那一行的悬停说明：封面的几条指到封面（以前和页数一样写「在「文档 › 画布」里改规格」，对不上）。
+    static func rowHelp(_ issue: CollagePreflightIssue) -> String {
+        if issue.kind == .cover {
+            return issue.path != nil ? "封面上的事：点一下进封面编辑、选中那一格"
+                : "封面上的事：点一下去「文档 › 封面」（书脊宽、包边、封面的版式在那里改）"
+        }
+        return issue.page == nil ? "整本的事：在「文档 › 画布」里改规格，或者加减跨页" : "点一下跳到那个跨页、选中那一格"
     }
 }
 

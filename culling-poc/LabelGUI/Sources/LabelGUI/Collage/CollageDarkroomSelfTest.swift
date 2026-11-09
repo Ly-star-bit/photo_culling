@@ -423,6 +423,7 @@ enum CollageDarkroomSelfTest {
         check(nav.pageIndex == 1 && dn.canGoBack && !dn.canGoForward, "在最后一个跨页：下一跨页不动、灰掉", "")
         dn.goToPage(-1)
         check(nav.pageIndex == 0, "上一跨页回到第 1 个", "")
+        followsPage(two, check, spin: spin)
 
         // 真渲：合成照片的两个跨页，暗房开着换过去，每一类都换成新一页的。
         guard let photos else { return }
@@ -464,6 +465,44 @@ enum CollageDarkroomSelfTest {
               "Retina：1:1 细节渲 \(CollageDarkroom.loupeSide * 2)² 个导出像素、显示 \(CollageDarkroom.loupeSide) pt（一个导出像素 = 一个屏幕像素）",
               "\(px) 像素 · \(Int(dr.loupe?.size.width ?? 0)) pt")
         live.closeDarkroom()
+    }
+
+    /// 14b. 不走顶栏 ‹ › 的换页（MCP 翻页 / 加删跨页、撤销、ops 改 pageIndex）：样张的焦点、页签照样跟着新这一页的色调，
+    /// 悬停和放大镜位置清掉（R3#2：以前只有 goToPage 重设，焦点停在上一页那款，按 ⏎ 会把它套到这一页）。
+    /// 跟页在 store 变了的下一轮（objectWillChange 在改之前发）；⏎ 抢在前面时先跟上、不套用。
+    @MainActor
+    private static func followsPage(_ base: CollageProject, _ check: (Bool, String, String) -> Void,
+                                    spin: (Double, () -> Bool) -> Void) {
+        var two = base
+        two.pages[0].look = CollageLookSetting(look: .mono, strength: 1)
+        two.pages[1].look = CollageLookSetting(look: .filmRich, strength: 1)
+        let store = CollageStore(dataDir: appDataDir)
+        store.loadForTesting(two)
+        let dr = CollageDarkroom(store: store, rendering: false)
+        dr.scope = .page
+        dr.focus = .mono
+        dr.tab = CollageDarkroom.tab(of: .mono)
+        dr.hover = .sepia
+        dr.loupeAnchor = CGPoint(x: 5, y: 5)
+        store.pageIndex = 1
+        spin(2) { dr.focus == .filmRich }
+        check(dr.focus == .filmRich && dr.tab == CollageDarkroom.tab(of: .filmRich) && dr.hover == nil && dr.loupeAnchor == nil,
+              "store 直接换页（MCP 翻页、ops）：焦点、页签跟着第 2 个跨页的色调，悬停和放大镜位置清掉", "\(dr.focus)")
+        // 撤销：下标不变，页换了（加一个空跨页再撤掉）。
+        store.addPage()
+        spin(2) { dr.focus != .filmRich }
+        let blank = dr.focus
+        store.undo()
+        spin(2) { dr.focus == .filmRich }
+        check(blank == store.project.style.look && blank != .filmRich && dr.focus == .filmRich && store.pageIndex == 1,
+              "加跨页 → 焦点跟着空跨页（整组的色调）；撤销回去 → 跟回第 2 个跨页的那款", "\(blank) → \(dr.focus)")
+        // ⏎ 抢在下一轮前面：syncToPage 先跟上（返回 true，界面就不套用）；再问一次 = 没换页。
+        store.pageIndex = 0
+        let caught = dr.syncToPage()
+        let again = dr.syncToPage()
+        check(caught && !again && dr.focus == .mono && store.project.pages[0].look?.look == .mono,
+              "换页后马上按 ⏎：先跟上这一页（焦点 = 这一页的黑白），不把上一页那款套过来", "\(dr.focus)")
+        dr.stop()
     }
 
     /// 13. 1:1 细节（Options.region：离那一块远的格子不出图）和渲整页再裁逐字节相同。region 的安全边距是按效果估的

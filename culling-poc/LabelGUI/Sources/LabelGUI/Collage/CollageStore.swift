@@ -959,11 +959,14 @@ final class CollageStore: ObservableObject {
             .map(\.id)
     }
 
+    /// 清空托盘和版式：照片、跨页、相册封面一起拿掉（一步撤销）。封面也去掉：跨页都没了，留着一张照片全空的封面只会在
+    /// 导出前检查里报空格（以前封面的格子还指着托盘里已经没有的照片，渲染缺图、检查又查不出来，R1#8）。
     func clearTray() {
         cancelPendingSolve()
         pushUndo()
         project.photos.removeAll()
         project.pages.removeAll()
+        project.bookCover = nil
         pruneMarkSkips()
         pageIndex = 0
         clearAlternatives()
@@ -1182,7 +1185,8 @@ final class CollageStore: ObservableObject {
     /// 相册里已经排在别的跨页上的不放（F5），其余照排；剩下的和这一页现在的一样就不动。
     func relayout(photoIDs: [String]) {
         var ids = photoIDs
-        if isAlbum {
+        // 编辑封面时不管 F5：封面常用书里的一张（placeOnCover 同样允许跨页上已有的照片，两边一致）。
+        if isAlbum, !editingCover {
             let elsewhere = Set(usedOnOtherSpreads(ids))
             if !elsewhere.isEmpty {
                 _ = refuseOtherSpreads(ids)
@@ -1631,6 +1635,8 @@ final class CollageStore: ObservableObject {
             outcome?(.notGenerated)
             return
         }
+        // 整本婚礼相册排的是跨页：先退出封面编辑（同自动编排）。出一期、按卷出印样落下来是单张拼图，工程的 didSet 自己退出。
+        if kit == .weddingAlbum { setEditingCover(false) }
         cancelPendingSolve()
         solveSeed &+= 1
         var base = project
@@ -2583,12 +2589,12 @@ final class CollageStore: ObservableObject {
         commitEdit()
     }
 
-    /// `coalesce`：出血/安全区滑杆拖一下几十个值，只记一次撤销。
-    func setCanvas(_ canvas: CollageCanvas, coalesce: Bool = false) {
+    /// `coalesce`：出血/安全区滑杆拖一下几十个值，只记一次撤销。`key`：合的是哪一项（同 pushUndo）：先改页数再切色彩是两步。
+    func setCanvas(_ canvas: CollageCanvas, coalesce: Bool = false, key: AnyHashable? = nil) {
         guard canvas != project.canvas else { return }
         // 还在算的「换一批」是按旧画布算的：落到新画布上会出画、压切缝。
         cancelSolveIfRunning()
-        pushUndo(coalesce: coalesce)
+        pushUndo(coalesce: coalesce, key: key)
         let old = project.canvas
         project.canvas = canvas
         // 婚礼 fine-art：边距跟着册子尺寸重算，排好的页上的小字不小于 2.8mm（别的样式原样）。
@@ -2612,9 +2618,17 @@ final class CollageStore: ObservableObject {
     /// 挪出更宽的中缝带；别的跨页里还压着中缝的照片报出来，让人点「换一批」。
     func setBinding(_ binding: CollageBinding) {
         guard project.canvas.seams == .fold, binding != project.canvas.binding else { return }
+        // 换装订会改跨页（整版改单页大图、散落页让中缝）：先退出封面编辑，停在封面上看不到（审查发现）。
+        setEditingCover(false)
         cancelSolveIfRunning()
         pushUndo()
+        let oldBinding = project.canvas.binding
         project.canvas.binding = binding
+        // 封面估书脊用的每张纸厚跟着装订走：还是旧装订的默认值（没手改过）就换成新装订的默认值，手改过的不动。
+        // 同一步撤销（R2#5：以前做封面时按当时的装订定死，之后换装订、套规格都不跟）。
+        if let sheet = project.bookCover?.sheetMM, sheet == CollageBookCover.defaultSheetMM(oldBinding) {
+            project.bookCover?.sheetMM = CollageBookCover.defaultSheetMM(binding)
+        }
         var fixed = 0
         if binding == .glued {
             let ctx = spreadContext   // 已经是新的装订方式：CollageAlbum.layout 不会再给整版跨页
@@ -3184,6 +3198,9 @@ final class CollageStore: ObservableObject {
             setNotice("托盘是空的：先带精选进来")
             return
         }
+        // 整本级的操作先退出封面编辑（审查发现）：排的是跨页，停在封面上看不到结果；落地时 pageIndex = 0，本来就在
+        // 第一个跨页上时 didSet 不触发，不会自己退出。
+        setEditingCover(false)
         let locked = CollageAlbum.lockedSpreads(project)
         let photos = project.photos.filter { !locked.photoIDs.contains($0.id) }
         let map = photoMap
@@ -3194,17 +3211,19 @@ final class CollageStore: ObservableObject {
         let title = project.title
         let target = project.albumBudget
         let budget = CollageAlbum.budget(target, excludingLocked: locked.pages.count)
+        // 锁住的第一个跨页就是扉页：不再出一个（R1#3）。
+        let opener = !CollageAlbum.lockedOpener(project)
         busyText = "编排相册…"
         // 编排也在作废机制里：编排期间切回单张、撤销、套模板，结果回来不能盖掉。
         let ticket = beginSolve()
         Task { [weak self] in
             let result = await Task.detached(priority: .userInitiated) { () -> ([CollagePage], [CollagePhotoRef], String?, String?) in
                 let plan = CollageAlbum.plan(photos, dedupe: dedupe, theme: theme, chapterMono: chapterMono, title: title,
-                                             budget: budget)
+                                             budget: budget, opener: opener)
                 // fine-art：拿掉的分开说（同一场只留精选一直开着，「相似只留一张」只管画面相似的）。
                 let note = theme == .fineArt && !plan.dropped.isEmpty ? CollageStyleFineArt.droppedNote(photos, plan: plan) : nil
                 let pages = CollageAlbum.mergeLocked(CollageAlbum.build(plan, context: ctx, seed: 11), locked: locked.pages,
-                                                     photos: map)
+                                                     photos: map, freshOpener: opener)
                 var tail: [String] = []
                 // 和目标比的是整本（锁住的也算在里面）。
                 let placed = pages.reduce(0) { $0 + $1.photoIDs.count }
@@ -3654,9 +3673,22 @@ final class CollageStore: ObservableObject {
     /// 挪了页之后（还是同一页，下标变了）：pageIndex 跟着它，不清选中、备选（S2）。
     private func followCurrentPage(_ id: UUID?) {
         guard let id, let i = project.pages.firstIndex(where: { $0.id == id }), i != pageIndex else { return }
+        movePageIndexQuietly(to: i)
+    }
+
+    /// 只换 pageIndex、不走它的 didSet（不退出封面编辑、不清选中和备选）：还是同一页只是下标变了，或者编辑封面时换的是
+    /// 封面底下那一页（画布上是封面，选中、备选都是封面的）。
+    private func movePageIndexQuietly(to index: Int) {
+        guard index != pageIndex else { return }
         pageIndexFollowsPage = true
-        pageIndex = i
+        pageIndex = index
         pageIndexFollowsPage = false
+    }
+
+    /// pageIndex 指着的那个跨页的 id（编辑封面时也是封面底下那一页，不是封面）：挪、删、撤销之后按它跟回去。
+    /// 以前用 page?.id —— 编辑封面时那是封面的 id，在 pages 里找不到，跟不回去（R1#7、R3#4）。
+    private var currentSpreadID: UUID? {
+        project.pages.indices.contains(pageIndex) ? project.pages[pageIndex].id : nil
     }
 
     /// S2：几个跨页一起挪（语义同 SwiftUI 的 onMove：destination 是挪之前的下标，挪到它前面；= 页数是挪到最后），
@@ -3664,7 +3696,7 @@ final class CollageStore: ObservableObject {
     func movePages(_ indices: IndexSet, to destination: Int) {
         let reordered = CollageAlbum.moved(project.pages, from: indices, to: destination)
         guard reordered.map(\.id) != project.pages.map(\.id) else { return }
-        let current = page?.id
+        let current = currentSpreadID
         pushUndo()
         project.pages = reordered
         followCurrentPage(current)
@@ -3672,20 +3704,25 @@ final class CollageStore: ObservableObject {
     }
 
     /// S2：几个跨页一起删，一步撤销。当前页还在就停在它上面；当前页删了停在删掉那一段后面的第一页（没有就最后一页）。
-    /// 锁住的照样能删。
+    /// 锁住的照样能删。编辑封面时删的正好是封面底下那一页：接着编辑封面，底下换成同样那一页，封面的选中不清。
     func deletePages(_ indices: IndexSet) {
         let gone = IndexSet(indices.filter { project.pages.indices.contains($0) })
         guard !gone.isEmpty else { return }
-        let current = page?.id
+        let current = currentSpreadID
         let currentGone = gone.contains(pageIndex)
         let before = gone.filter { $0 < pageIndex }.count
         pushUndo()
         project.pages = project.pages.enumerated().filter { !gone.contains($0.offset) }.map(\.element)
         if currentGone {
-            pageIndex = max(0, min(pageIndex - before, project.pages.count - 1))
-            finishCropEditForNavigation()
-            selection = nil
-            clearAlternatives()
+            let next = max(0, min(pageIndex - before, project.pages.count - 1))
+            if editingCover {
+                movePageIndexQuietly(to: next)
+            } else {
+                pageIndex = next
+                finishCropEditForNavigation()
+                selection = nil
+                clearAlternatives()
+            }
         } else {
             followCurrentPage(current)
         }
@@ -3846,15 +3883,17 @@ final class CollageStore: ObservableObject {
                   + (locked ? "：「自动编排」原样留着它们，上面的照片不参与编排" : ""))
     }
 
-    /// S6 相似的线：托盘两两画面距离的中位数（同相册去重的估法，只用已经算好的特征），按托盘认缓存。
-    private var similarityMedianCache: (key: [String], value: Double?)?
+    /// S6 相似的线：托盘两两画面距离的中位数（同相册去重的估法，只用已经算好的特征），按托盘和路人信息的版本认缓存。
+    /// 键里带 hintsVersion（R1#5）：画面特征是路人信息的后台任务顺手算的，还在算时选中一格只拿到一部分特征的中位数，
+    /// 以前按照片 id 缓存住，之后特征算齐了也一直用那个偏的数；还一张都没算好（nil）不缓存。
+    private var similarityMedianCache: (key: [String], hints: Int, value: Double)?
 
     private func similarityMedian() -> Double? {
         let head = Array(project.photos.sorted { $0.score > $1.score }.prefix(CollageSelect.dedupeLimit))
         let key = head.map(\.id)
-        if let c = similarityMedianCache, c.key == key { return c.value }
-        let value = CollageSelect.cachedDistanceMedian(head)
-        similarityMedianCache = (key, value)
+        if let c = similarityMedianCache, c.key == key, c.hints == hintsVersion { return c.value }
+        guard let value = CollageSelect.cachedDistanceMedian(head) else { return nil }
+        similarityMedianCache = (key, hintsVersion, value)
         return value
     }
 
@@ -4214,6 +4253,9 @@ final class CollageStore: ObservableObject {
     private func restore(_ snapshot: CollageProject) {
         cancelPendingSolve()
         let keepItem = selectedItem
+        // 撤销前画面上是哪个跨页（编辑封面时不跟：画布上是封面，底下那页按数字夹）：快照里还有它就跟过去（同挪页以后，
+        // R1#6）。以前只按数字夹：[A,B,C,D] 停在 A、把 A 拖到最后（跟到第 4 个）、⌘Z 回到 [A,B,C,D] 却显示 D。
+        let current = editingCover ? nil : currentSpreadID
         // 方案栏不跟着撤销走（见方案那一段）：换的是这一版的样子，方案栏留现在的。
         var p = snapshot
         p.variants = project.variants
@@ -4221,7 +4263,14 @@ final class CollageStore: ObservableObject {
         project = p
         // 撤回去的那一版和哪个方案一样就标哪个（撤掉「切到方案」以后不再标那个方案「改过」）。
         activeVariantID = currentVariantID
-        pageIndex = min(pageIndex, max(0, project.pages.count - 1))
+        if let id = current, let i = project.pages.firstIndex(where: { $0.id == id }) {
+            pageIndex = i
+        } else if editingCover {
+            // 还在编辑封面（撤销没拿掉封面）：只夹底下那页的下标，不因为下标变了就退出封面编辑。
+            movePageIndexQuietly(to: min(pageIndex, max(0, project.pages.count - 1)))
+        } else {
+            pageIndex = min(pageIndex, max(0, project.pages.count - 1))
+        }
         selection = nil
         // 选中的图层撤销之后还在：接着选着（以前一律清掉，再按 → 就变成「下一版」，整页重排）。
         if let keepItem, page?.items.contains(where: { $0.id == keepItem }) == true {
@@ -5077,6 +5126,8 @@ final class CollageStore: ObservableObject {
     /// （换成胶装时整版铺满两页的单张改成「左页日期 + 右页大图」，和点装订的分段一样）。版式按比例缩放，同换画布。
     func applyPrintSpec(_ spec: CollagePrintSpec) {
         guard isAlbum else { return }
+        // 整本的事（换尺寸、换装订会重排跨页）：先退出封面编辑（界面、命令行、MCP collage_print_spec 都走这里）。
+        setEditingCover(false)
         var target = spec.canvas
         asOneUndoStep {
             target.binding = project.canvas.binding
@@ -5085,12 +5136,13 @@ final class CollageStore: ObservableObject {
         }
     }
 
-    /// 改这本的规则（页数、首尾单页、中缝带、色彩、JPEG 质量），尺寸、装订不动。coalesce：步进器连着点合成一步撤销。
-    func setPrintRules(_ rules: CollagePrintRules, coalesce: Bool = false) {
+    /// 改这本的规则（页数、首尾单页、中缝带、色彩、JPEG 质量），尺寸、装订不动。coalesce：步进器连着点合成一步撤销；
+    /// key：哪一项（规则框每一项各给一个）—— 不带 key 时 0.6 秒内先改页数再切色彩会并成一步（R2#10）。
+    func setPrintRules(_ rules: CollagePrintRules, coalesce: Bool = false, key: AnyHashable? = nil) {
         var c = project.canvas
         guard c.printRules != rules else { return }
         c.printRules = rules
-        setCanvas(c, coalesce: coalesce)
+        setCanvas(c, coalesce: coalesce, key: key)
     }
 
     /// 「文档 › 画布」的自定义尺寸（相册填单页的 cm）：跨页宽 = 2 × 单页宽；dpi、出血、安全区、装订、规则照旧，

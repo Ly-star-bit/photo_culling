@@ -209,6 +209,11 @@ final class CollageDarkroom: ObservableObject {
     }
 
     private var watch: AnyCancellable?
+    /// 焦点、页签、悬停、放大镜位置是按哪一页设的（syncToPage）：页换了（顶栏 ‹ ›、MCP 加 / 删跨页、撤销、ops 改 pageIndex）
+    /// 就按新这一页重设。
+    private var shownPageID: UUID?
+    /// storeWillChange 已经排了一次 syncToPage、还没跑（同一轮里 store 连着变只排一次）。
+    private var pageSyncPending = false
     /// store 变了、大预览还没跟上的那一次（storeWillChange）。
     private var previewPending = false
     /// 停手以后把每一类都看一遍（storeWillChange）。
@@ -222,9 +227,26 @@ final class CollageDarkroom: ObservableObject {
         self.store = store
         self.rendering = rendering
         watch = store.objectWillChange.sink { [weak self] _ in self?.storeWillChange() }
+        shownPageID = store.page?.id
         focus = current.look
         tab = Self.tab(of: current.look)
         refresh()
+    }
+
+    /// 画布上的页换了（按页 id 认，不按下标：删了当前页、撤销回去下标不变、页已经不是那一页）：悬停、放大镜位置清掉，
+    /// 样张的焦点和页签跟着新这一页现在用的色调（同打开暗房时）。不然焦点框还停在上一页套的那款，按 ⏎ 会把它套到这一页，
+    /// ← → 也从它往后数（R3#2：以前只有顶栏 ‹ › 换页时重设，MCP 加 / 删跨页、撤销、ops 改 pageIndex 都不管）。
+    /// 返回 true = 页换了、重设过（⏎ 先问它：刚换了页就不套用那个过期的焦点）。
+    @discardableResult
+    func syncToPage() -> Bool {
+        let id = store.page?.id
+        guard id != shownPageID else { return false }
+        shownPageID = id
+        hover = nil
+        loupeAnchor = nil
+        focus = current.look
+        tab = Self.tab(of: current.look)
+        return true
     }
 
     /// store 一变（objectWillChange 在改之前发，到点再读的是改完的）：
@@ -233,6 +255,17 @@ final class CollageDarkroom: ObservableObject {
     ///   后面的画布预览在一张张渲（CollageStore.setNeedsRender）。大预览照旧只渲最新的那一次。
     /// - 别的几类（样张、试条、底片条、原图、1:1 细节）照旧停手 settleDelay 再看：拖强度时 27 张样张不用每一档渲一遍。
     private func storeWillChange() {
+        // objectWillChange 在改之前发：到下一轮再看页换了没有。不放在去抖 settleDelay 的 refresh 里 —— ⏎ 可能抢在前面。
+        if !pageSyncPending {
+            pageSyncPending = true
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.pageSyncPending = false
+                    if self.watch != nil { self.syncToPage() }
+                }
+            }
+        }
         if !previewPending {
             previewPending = true
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.previewInterval) { [weak self] in
@@ -405,17 +438,13 @@ final class CollageDarkroom: ObservableObject {
     var canGoForward: Bool { store.pageIndex + 1 < pageCount }
 
     /// 换跨页（顶栏的 ‹ ›、⌘← ⌘→）：到头不动。悬停清掉、放大镜回到新一页主图那一格的中心（点过的位置是上一页的）；
-    /// store 换页时清掉选中，「这一格」退回这一页。各类渲染跟着 store 变（键里都有页码或这一页的照片），不用另外刷新。
+    /// store 换页时清掉选中，「这一格」退回这一页；样张的焦点跟着新这一页的色调（syncToPage，别处换页也走它）。
+    /// 各类渲染跟着 store 变（键里都有页码或这一页的照片），不用另外刷新。
     func goToPage(_ delta: Int) {
         let target = store.pageIndex + delta
         guard delta != 0, store.project.pages.indices.contains(target) else { return }
-        hover = nil
-        loupeAnchor = nil
         store.pageIndex = target
-        // 样张的焦点跟着新这一页现在用的色调走（同打开暗房时）：不然焦点框还停在上一页套的那款，按 ⏎ 会把它套到这一页，
-        // ← → 也从它往后数。
-        focus = current.look
-        tab = Self.tab(of: current.look)
+        syncToPage()
     }
 
     /// 底片条上点一格：选中它，「套用到」换成这一格，放大镜挪过去。
@@ -577,6 +606,7 @@ final class CollageDarkroom: ObservableObject {
 
     /// store 变了（套用、撤销、换页、选中、托盘……）：每一类按自己的 key 看要不要重渲。
     func refresh() {
+        syncToPage()
         probeData(current.look)
         guard rendering else { return }
         if store.selection == nil && scope == .cell { objectWillChange.send() }
