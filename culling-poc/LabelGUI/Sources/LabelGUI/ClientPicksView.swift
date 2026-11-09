@@ -110,13 +110,12 @@ extension ClientReply {
 // LABELGUI_DATA_DIR=<临时> LabelGUI --copy-originals <照片文件夹> --dest <目录> [--scope ...] [--ids a,b]
 // 都会读写这一场的会话目录（确认表记录、客户选中、复制目标），所以必须给临时数据目录。
 enum ClientPicksCLI {
-    /// 最后一个是场次持久化自检（PersistSelfTest.swift）：搭这里的分派，不另动 main.swift。
     /// 写成字面量：cli_guard_regression.py 按字面量核对「登记了的参数都有分派」。
-    static let flags = ["--proof-sheet", "--client-import", "--copy-list", "--copy-originals", "--persist-selftest"]
+    /// （场次持久化自检 --persist-selftest 以前也搭这里的分派，现在登在 SelfTestRegistry.all。）
+    static let flags = ["--proof-sheet", "--client-import", "--copy-list", "--copy-originals"]
 
     @MainActor
     static func run(flag: String, flagIndex: Int) -> Never {
-        if flag == PersistSelfTest.flag { PersistSelfTest.run(flagIndex: flagIndex) }
         let args = CommandLine.arguments
         CollageCLI.requireIsolatedDataDir(flag, "会改这一场的会话文件")
         let dir = URL(fileURLWithPath: args[flagIndex + 1])

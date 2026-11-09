@@ -273,6 +273,7 @@ swift build -c release
 #   MCP 冒烟和实时桥冒烟别同时跑同一个二进制：MCP 冒烟最后查进程表，会把实时桥冒烟起的进程算成多出来的
 # CI 也跑的（每条自己建临时数据目录，不要真照片；除了判决回归，都排在 MCP 冒烟后面）:
 #   不要照片的自检一次跑完(每条一个新的临时数据目录，最后核对「CI 登记」): Scripts/selftests.sh .build/release/LabelGUI [SELFTEST_SEEDS="1 2 3"]
+#   全部自检的清单(参数、CI 怎么跑、一句说明；selftests.sh 就照它跑): LabelGUI --list-selftests
 #   判决回归: Scripts/verdict_regression.sh .build/release/LabelGUI —— 好片夹具 Fixtures/photot-session + 合成坏片夹具 Fixtures/synthetic-rejects
 #     （Scripts/gen_synthetic_rejects.py 生成，cases.tsv 逐张写着测什么、期望什么；有意改判决：改生成脚本里的期望、重新生成，再 UPDATE_SYNTH=1 重跑）
 #   合成图跑原生分析: python3 -I Scripts/native_analysis_smoke.py .build/release/LabelGUI [--no-scale] [--keep]
@@ -282,8 +283,9 @@ swift build -c release
 #   交付对照回归(导出 → exports.json → 按交付文件名导入客户选择): python3 -I Scripts/delivery_ledger_regression.py .build/release/LabelGUI
 #   选片确认表回归(套餐张数、备注读回来、精修要求.csv、确认表水印): python3 -I Scripts/proof_sheet_regression.py .build/release/LabelGUI
 #   诊断回归(诊断包里没有照片和客户原话、没权限时的提示): python3 -I Scripts/diag_regression.py .build/release/LabelGUI [--keep]
-# 新加一个 --*-selftest 必须加进 Scripts/selftests.sh（或登在它的 ELSEWHERE / NOT_IN_CI 表里），新加的 Scripts/*_regression.py、
-#   *_smoke.py 必须在 .github/workflows/release.yml 里加一步（放在 MCP 冒烟后面）：不然 selftests.sh 最后的「CI 登记」会红
+# 新加一个 --*-selftest 只改自检登记表 Sources/LabelGUI/SelfTestRegistry.swift：在 all 里加一行（参数、一句说明、入口、CI 怎么跑），
+#   无头参数、main.swift 的分派、selftests.sh 跑不跑都从它来；新加的 Scripts/*_regression.py、*_smoke.py 必须在
+#   .github/workflows/release.yml 里加一步（放在 MCP 冒烟后面）：不然 selftests.sh 最后的「CI 登记」会红
 ```
 
 ## 使用流程

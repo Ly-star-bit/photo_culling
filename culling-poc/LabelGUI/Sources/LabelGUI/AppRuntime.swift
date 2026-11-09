@@ -2,29 +2,21 @@ import AppKit
 
 /// 进程怎么跑的：命令行无头模式（--analyze、--collage-ops……）下，任何会弹到屏幕上的动作都不做。
 enum AppRuntime {
-    /// 命令行无头参数；main.swift 分派之前按它们设 `headless`。
-    static let headlessFlags: Set<String> = [
+    /// 命令行无头参数；main.swift 分派之前按它们设 `headless`。= 下面的命令参数 + 自检登记表（SelfTestRegistry.swift）里的。
+    static let headlessFlags: Set<String> = commandFlags.union(SelfTestRegistry.flags)
+
+    /// 不是自检的无头命令参数（各自在 main.swift 里分派）。`--*-selftest` / `--*-probe` 不写在这里：只登在 SelfTestRegistry.all
+    /// （cli_guard_regression.py 的 G 段核对这里一个都没有、和 main.swift 的顶层分派两边对得上）。
+    static let commandFlags: Set<String> = [
         "--analyze", "--watermark", "--session-key", "--verdicts", "--sharp", "--focus", "--compare",
-        "--collage", "--collage-ui", "--collage-ops", "--mask-selftest", "--minimal-selftest", "--fashion-selftest", "--compare-crop", "--batch-ui", "--compare-ui", "--timeline-selftest", "--ux-selftest", "--export-xmp",
+        "--collage", "--collage-ui", "--collage-ops", "--compare-crop", "--batch-ui", "--compare-ui", "--export-xmp",
         "--watermark-ui", "--watermark-batch",
-        "--ingest", "--card-ui", "--card-queue-selftest",
-        "--proof-sheet", "--client-import", "--copy-list", "--copy-originals", "--persist-selftest", "--proof-selftest",
+        "--ingest", "--card-ui",
+        "--proof-sheet", "--client-import", "--copy-list", "--copy-originals",
         "--export-jpeg", "--body-offset",
-        "--film-selftest", "--film-looks-selftest", "--darkroom-selftest",
-        "--swiss-selftest",
-        "--album-selftest",
-        "--newspaper-selftest",
-        "--delivery-selftest",
-        "--files-selftest",
-        "--session-move-selftest",
-        "--followup-selftest",
-        "--collage-export-selftest",
         "--app-ui", "--live-host",
-        "--launch-gate-probe",
-        "--mcp", "--mcp-call", "--mcp-tools", "--mcp-selftest",
-        "--cull-mcp-selftest",
-        "--quit-selftest",
-        "--diag-export", "--diag-selftest",
+        "--mcp", "--mcp-call", "--mcp-tools",
+        "--diag-export",
     ]
 
     /// true = 无头跑（测试、自动化）。
