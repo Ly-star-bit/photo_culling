@@ -13,11 +13,40 @@ DMG="$ROOT/选片工具.dmg"
 POC="$ROOT/culling-poc"
 VOL="/Volumes/选片工具"
 
-echo "==> swift build"
+# 各阶段用时（优化分析 NE2 / NE3：CI 的构建两周翻了一倍，日志看不到，分不清是编译慢还是打 DMG 慢）。每个阶段开头
+# phase "<名字>"；退出时（成功、失败都算）打一行「各阶段用时：…」，没跑完的那个阶段标出来；CI 上另打一条 ::notice
+# （摘要页上不登录也看得到，CI 的「构建日志 → annotation」那一步再抄进摘要）。
+# 变量后面紧跟全角字符的地方一律写 ${…}：macOS 自带的 bash 3.2 会把全角字的第一个字节也当成变量名。
+PHASE=""
+PHASE_START=$SECONDS
+PHASE_TIMES=""
+phase() {
+    if [ -n "$PHASE" ]; then
+        PHASE_TIMES="${PHASE_TIMES}${PHASE_TIMES:+、}${PHASE} $((SECONDS - PHASE_START))s"
+    fi
+    PHASE="$1"
+    PHASE_START=$SECONDS
+    echo "==> $1"
+}
+phase_report() {
+    local rc=$?
+    if [ -n "$PHASE" ]; then
+        local mark=""
+        [ "$rc" -eq 0 ] || mark="（没跑完，退出码 ${rc}）"
+        PHASE_TIMES="${PHASE_TIMES}${PHASE_TIMES:+、}${PHASE} $((SECONDS - PHASE_START))s${mark}"
+    fi
+    echo "各阶段用时：${PHASE_TIMES}；合计 ${SECONDS}s"
+    if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+        echo "::notice title=构建各阶段用时::${PHASE_TIMES}；合计 ${SECONDS}s"
+    fi
+}
+trap phase_report EXIT
+
+phase "swift build"
 cd "$POC/LabelGUI"
 swift build -c release
 
-echo "==> 装配 app bundle"
+phase "装配 app bundle"
 # 从零装配:叠在旧 bundle 上会把已删掉的文件 (旧 Python 脚本、旧 plist 键) 一起带走。
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -130,10 +159,10 @@ cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE.txt"
 cp "$ROOT/THIRD_PARTY_NOTICES.md" "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
 cp "$POC/LabelGUI/Credits.rtf" "$APP/Contents/Resources/Credits.rtf"
 
-echo "==> 签名"
+phase "签名"
 codesign --force --sign - "$APP"
 
-echo "==> 渲染 DMG 背景图"
+phase "渲染 DMG 背景图"
 # --no-project: 这一步只要 Pillow — 别为了画一张背景图装整个项目环境。
 # --python python3: 用机器上现成的解释器 (本机 Homebrew、CI runner 自带),
 # 否则 uv 会为 culling-poc/.python-version 的 3.12 再下载一个 CPython。
@@ -183,7 +212,7 @@ center(700, "首次打开若被拦截：系统设置 → 隐私与安全性 → 
 img.save(out, dpi=(144, 144))
 EOF
 
-echo "==> 组装 DMG"
+phase "组装 DMG"
 # 上一次构建若在 detach 前失败（Finder 窗口没关 = Resource busy），卷会一直挂着：
 # 下次 attach 会挂成"选片工具 1"，osascript 和 detach 操作的是旧卷，convert 也会
 # 因为 RW 镜像仍被挂载而失败 —— 从此每次都失败，直到手动 detach。
@@ -210,6 +239,7 @@ if [ ! -d "$VOL" ]; then
     echo "!! $VOL 没有挂上"; exit 1
 fi
 
+phase "Finder 排版"
 # Finder 排版在无 GUI 的 CI runner 上可能失败 — 失败就跳过,DMG 照样能装,
 # 只是没有自定义布局/背景。
 # NO_FINDER=1:本机打包不碰 Finder(排版要让 Finder 打开卷窗口,会弹到正在用电脑的人屏幕上)。
@@ -251,6 +281,8 @@ if [ "${NO_FINDER:-}" != "1" ]; then
         sleep 0.5
     done
 fi
+
+phase "卸载、压缩 DMG"
 # Finder/Spotlight 可能还捏着卷:先礼貌重试几次,再 -force —— set -e 下一次
 # Resource busy 就会退出并把卷留在那里毒害下一次构建。
 detached=0

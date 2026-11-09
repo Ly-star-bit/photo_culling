@@ -44,8 +44,20 @@ jobs:
           restore-keys: |
             swiftpm-${{ runner.os }}-${{ steps.swift.outputs.version }}-
 
+      # tee 一份 build.log 给下一步出 annotation。pipefail 要自己开：GitHub 默认的 shell 是 bash -e、不带 pipefail，
+      # 管道的退出码是 tee 的 —— 不开的话 build_app.sh 失败这一步照样绿。
       - name: 构建 app + DMG
-        run: ./build_app.sh
+        id: build
+        run: |
+          set -o pipefail
+          ./build_app.sh 2>&1 | tee build.log
+
+      # 不登录也看得到（NE2：匿名拿不到 job 日志，以前编译警告、失败原因、各阶段用时在摘要页上都看不见）：编译警告去重转成
+      # ::warning（链到文件和行；一步最多 10 条，全部列在摘要里），构建红了另把前几个编译错误和 build.log 末尾 60 行写成
+      # ::error。各阶段用时 build_app.sh 退出时自己打 ::notice，这里抄进摘要。构建成功、失败都跑。
+      - name: 构建日志 → annotation
+        if: always() && steps.build.outcome != 'skipped'
+        run: python3 -I culling-poc/LabelGUI/Scripts/ci_build_annotations.py build.log ${{ steps.build.outcome == 'failure' && '--failed' || '' }}
 
       # 判决层回归：Fixtures/photot-session 的分析结果灌进临时目录跑 --verdicts，和期望
       # 逐字比对。改了分组/判决/提名逻辑而没更新期望值 → 这里红。
