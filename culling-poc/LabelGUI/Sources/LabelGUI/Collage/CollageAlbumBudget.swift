@@ -461,17 +461,19 @@ struct CollageAlbumSpreadCount: View {
 
     var body: some View {
         let count = store.project.pages.count
+        // 印厂规格的页数规则（CollagePrintRules.pageProblem）：不合规也标橙，悬停说清楚多了 / 少了几 P。
+        let pages = store.project.canvas.effectivePrintRules.pageProblem(spreads: count).map { "\n" + $0 }
         if let b = store.project.albumBudget {
             let over = count > b.spreads
             Text("\(count)/\(b.spreads)")
                 .font(.caption2).monospacedDigit()
-                .foregroundStyle(over ? Color.orange : Color.secondary)
-                .help(helpText(count: count, target: b.spreads))
+                .foregroundStyle(over || pages != nil ? Color.orange : Color.secondary)
+                .help(helpText(count: count, target: b.spreads) + (pages ?? ""))
         } else {
             Text("\(count)")
                 .font(.caption2).monospacedDigit()
-                .foregroundStyle(.secondary)
-                .help("\(count) 个跨页（\(count * 2)P）。要指定跨页数：右栏「文档 › 画布」里勾「指定跨页数」")
+                .foregroundStyle(pages != nil ? Color.orange : Color.secondary)
+                .help("\(count) 个跨页（\(count * 2)P）。要指定跨页数：右栏「文档 › 画布」里勾「指定跨页数」" + (pages ?? ""))
         }
     }
 

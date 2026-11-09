@@ -1477,7 +1477,8 @@ enum CollageRender {
 
     /// 能铺出血的：普通矩形照片格，没有相纸/胶片框、细线（细线会被裁掉），不是完整显示 ——
     /// 完整显示 + 本图模糊填可以：铺进出血的是模糊底，清楚的照片还在成品区里。
-    private static func canBleed(_ cell: CollageCell, style: CollageStyle) -> Bool {
+    /// 贴边时铺不铺进出血（导出前检查的「贴边没铺出血」按同一个判断）。
+    static func canBleed(_ cell: CollageCell, style: CollageStyle) -> Bool {
         (cell.shape ?? style.shape) == .rect && style.border == .none && (!cell.contain || cell.containBlur)
     }
 

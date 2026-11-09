@@ -130,31 +130,31 @@ struct CollageCanvasBox: View {
     var body: some View {
         GroupBox("画布") {
             VStack(alignment: .leading, spacing: 8) {
-                Menu {
-                    let presets = store.isAlbum ? CollageCanvas.albums : CollageCanvas.social
-                    ForEach(presets, id: \.name) { preset in
-                        Button(preset.name) {
-                            // 相册换尺寸不换装订方式。
-                            var c = preset
-                            if store.isAlbum { c.binding = store.project.canvas.binding }
-                            store.setCanvas(c)
+                if store.isAlbum {
+                    // 相册：印厂规格（尺寸、出血、装订、页数、色彩一起换），自定义尺寸填单页的 cm（CollagePrintPanels）。
+                    CollagePrintSpecMenu(store: store)
+                    CollagePageSizeFields(store: store)
+                } else {
+                    Menu {
+                        ForEach(CollageCanvas.social, id: \.name) { preset in
+                            Button(preset.name) { store.setCanvas(preset) }
                         }
+                    } label: {
+                        Text(store.project.canvas.name).lineLimit(1)
                     }
-                } label: {
-                    Text(store.project.canvas.name).lineLimit(1)
+                    .help("换画布：版式按比例缩放；想让照片重新贴合原比例，点画布空白处，在「格式 › 这一页」里点「贴合原比例」")
+                    HStack(spacing: 4) {
+                        TextField("宽", text: $customW).frame(width: 64)
+                        Text("×")
+                        TextField("高", text: $customH).frame(width: 64)
+                        Text("px").font(.caption).foregroundStyle(.secondary)
+                        Button("应用") { applyCustomSize() }
+                            .disabled(Int(customW) == nil || Int(customH) == nil)
+                    }
+                    .font(.caption)
+                    .onAppear { syncCustomFields() }
+                    .onChange(of: store.project.canvas) { _, _ in syncCustomFields() }
                 }
-                .help("换画布：版式按比例缩放；想让照片重新贴合原比例，点画布空白处，在「格式 › 这一页」里点「贴合原比例」")
-                HStack(spacing: 4) {
-                    TextField("宽", text: $customW).frame(width: 64)
-                    Text("×")
-                    TextField("高", text: $customH).frame(width: 64)
-                    Text("px").font(.caption).foregroundStyle(.secondary)
-                    Button("应用") { applyCustomSize() }
-                        .disabled(Int(customW) == nil || Int(customH) == nil)
-                }
-                .font(.caption)
-                .onAppear { syncCustomFields() }
-                .onChange(of: store.project.canvas) { _, _ in syncCustomFields() }
                 if store.project.canvas.seams == .grid9 {
                     Text("导出时另存 3×3 九张（每张 \(store.project.canvas.width / 3)×\(store.project.canvas.height / 3)），发朋友圈按顺序选图；脸不会压在切线上")
                         .font(.caption2).foregroundStyle(.secondary)
@@ -163,6 +163,9 @@ struct CollageCanvasBox: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 } else if store.project.canvas.seams == .fold {
                     foldControls
+                    // 印厂规格里像素装不下的那几样：页数、首尾单页、中缝带、色彩、JPEG（CollagePrintPanels）。
+                    Divider()
+                    CollagePrintRulesBox(store: store)
                     // 目标跨页数、每跨页张数（CollageAlbumBudget.swift）。
                     Divider()
                     CollageAlbumBudgetControls(store: store)
@@ -1004,6 +1007,8 @@ struct CollageExportPanel: View {
                 }
                 scalePicker
                 watermarkToggle
+                // 相册：全部 / 当前跨页 / 自定义（CollagePrintPanels）。
+                if store.isAlbum { CollageExportRangeBox(store: store) }
                 Text(summary).font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1012,6 +1017,10 @@ struct CollageExportPanel: View {
         }
         if store.isAlbum || store.project.canvas.bleed > 0 {
             printBox
+        }
+        // 相册、印刷画布：交出去之前那几样，一条一条列出来、点了跳过去（放大、空格、页数、脸压中缝、字出安全区……）。
+        if store.isAlbum || store.project.canvas.isPrint {
+            CollagePreflightBox(store: store)
         }
         GroupBox("输出目录") {
             VStack(alignment: .leading, spacing: 6) {
@@ -1096,8 +1105,13 @@ struct CollageExportPanel: View {
         let name = typed.isEmpty ? CollageStore.stampFormatter.string(from: Date()) : typed
         let example = typed.isEmpty ? "（例）" : ""
         if store.isAlbum {
-            let pdf = store.exportOptions.pdf ? " + \(name).pdf" : ""
-            return "\(name)_跨页_01.\(ext)…\(pdf)\(example)：每个跨页 \(c.width + c.bleed * 2)×\(c.height + c.bleed * 2)px（含出血）；sRGB"
+            // 部分导出不出 PDF（拆成单独的 let：整串插值太长 CI 的 Xcode 16 会类型检查超时）。
+            let partial: Bool = (try? store.exportPageSelection.get()).flatMap { $0 } != nil
+            let pdf: String = store.exportOptions.pdf && !partial ? " + \(name).pdf" : ""
+            let fullW: Int = c.width + c.bleed * 2
+            let fullH: Int = c.height + c.bleed * 2
+            let color: String = c.exportColorSpace.label
+            return "\(name)_跨页_01.\(ext)…\(pdf)\(example)：每个跨页 \(fullW)×\(fullH)px（含出血）；\(color)"
         }
         // 单张模式里有好几页（出一期、按卷出印样）：每页一个文件，名字后面加 _01…_NN（exportPlan）。
         let pages = store.project.pages.count
@@ -1130,27 +1144,11 @@ struct CollageExportPanel: View {
                      Double(store.project.canvas.width) / store.project.canvas.dpi * 2.54,
                      Double(store.project.canvas.height) / store.project.canvas.dpi * 2.54))
                     .font(.caption2).foregroundStyle(.secondary)
-                if store.project.canvas.isPrint { upscaleSummary }
+                // 放大超过 120% 的照片以前在这里汇总一句，现在一条条列在下面的「导出前检查」里（点了跳过去）。
+                if store.isAlbum { CollageProofButton(store: store) }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
-        }
-    }
-
-    /// 印刷前的分辨率检查：放大超过 120% 的照片有几张、在哪几页（画布上那几格也标了「放大」）。
-    @ViewBuilder
-    private var upscaleSummary: some View {
-        let issues = store.upscaleIssues()
-        if issues.isEmpty {
-            Text("照片都没有放大到 120% 以上，印出来不会软")
-                .font(.caption2).foregroundStyle(.secondary)
-        } else {
-            let pages = Set(issues.map(\.page)).sorted().map { "\($0 + 1)" }.joined(separator: "、")
-            let worst = Int(((issues.first?.factor ?? 1) * 100).rounded())
-            Label("\(issues.count) 张照片要放大到 120% 以上（最多 \(worst)%，在第 \(pages) 页）：印出来会软，少裁一点或缩小那一格",
-                  systemImage: "plus.magnifyingglass")
-                .font(.caption2).foregroundStyle(.orange)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
