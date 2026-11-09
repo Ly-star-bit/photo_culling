@@ -97,6 +97,14 @@ enum WhatsNew {
         return older(seen, than: notes)
     }
 
+    /// 要不要把这一版记成「见过」：只往前记。分支 / 本地打的包（版本号 0.1，CI 的 feature / main 包也是）、装回去的旧版
+    /// 不能把记过的版本号改小 —— 不然再开正式版又弹一次。比这张表还旧的（开发中的包）一律不记。
+    static func shouldRecord(current: String, lastSeen: String?, notesVersion: String) -> Bool {
+        guard let cur = parse(current), let notes = parse(notesVersion), !older(cur, than: notes) else { return false }
+        guard let seen = lastSeen.flatMap(parse) else { return true }
+        return older(seen, than: cur)
+    }
+
     // MARK: 记账
 
     /// 上次见过的版本号。读一律走 UserDefaults.standard；写：app 里写它自己的设置域（.standard），自检写参数域
@@ -139,15 +147,25 @@ enum WhatsNew {
         let show = shouldShow(current: current, lastSeen: ledger.lastSeen, notesVersion: notes.version,
                               hasHistory: !model.batch.recentSessions.isEmpty, headless: headless)
         guard show else {
-            ledger.record(current)
+            if shouldRecord(current: current, lastSeen: ledger.lastSeen, notesVersion: notes.version) { ledger.record(current) }
             return
         }
-        // 等窗口站稳了再弹（第一次出现的那一帧就弹 sheet 有时弹不出来）。
+        // 等窗口站稳了再弹（第一次出现的那一帧就弹 sheet 有时弹不出来）。版本号等弹框真出来了再记（WhatsNewSheet 的
+        // onAppear → recordShown）：插卡的导入框抢先弹了、或者导入框后到把它顶掉，这一版下次打开照样弹。
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             guard model.cardCenter.offer == nil else { return }
-            Ledger.standard.record(current)
             model.whatsNewShown = true
         }
+    }
+
+    /// 升级后弹的那一次真出来了：记下这一版（只往前记）。「帮助 › 这一版新增」手动打开的也走这里，一样只往前记。
+    @MainActor
+    static func recordShown() {
+        let current = appVersion
+        let ledger = Ledger.standard
+        guard !AppRuntime.headless, ProcessInfo.processInfo.environment["LABELGUI_NO_GUI"] != "1",
+              shouldRecord(current: current, lastSeen: ledger.lastSeen, notesVersion: notes.version) else { return }
+        ledger.record(current)
     }
 }
 
@@ -197,6 +215,14 @@ struct WhatsNewSheet: View {
         }
         .padding(22)
         .frame(width: 480)
+        // Esc 也关（只有一个「知道了」，挂的是 ⏎）。
+        .background {
+            Button("", action: onClose)
+                .keyboardShortcut(.cancelAction)
+                .opacity(0)
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
+        }
     }
 
     private func row(_ entry: WhatsNew.Entry) -> some View {
@@ -255,6 +281,21 @@ enum WhatsNewSelfTest {
             check(got == want, name + (want ? " → 弹" : " → 不弹"), "\(got)")
         }
         check(AppRuntime.headless, "--ux-selftest 跑在无头模式（checkOnLaunch 走不到弹）")
+
+        // 记不记：只往前记（分支 / 本地包 0.1、装回的旧版不把记过的版本号改小，不然再开正式版又弹一次）
+        let records: [(String, String, String?, Bool)] = [
+            ("新装 1.27.0（没记过）", "1.27.0", nil, true),
+            ("1.26.3 → 1.27.0", "1.27.0", "1.26.3", true),
+            ("同一版再开一次", "1.27.0", "1.27.0", false),
+            ("看过 1.27.0 以后开分支包 0.1", "0.1", "1.27.0", false),
+            ("没记过时开分支包 0.1（比表旧）", "0.1", nil, false),
+            ("看过 1.27.1 以后装回 1.27.0", "1.27.0", "1.27.1", false),
+            ("裸二进制（dev）", "dev", "1.26.3", false),
+        ]
+        for (name, current, seen, want) in records {
+            let got = WhatsNew.shouldRecord(current: current, lastSeen: seen, notesVersion: n)
+            check(got == want, "记账：" + name + (want ? " → 记" : " → 不记"), "\(got)")
+        }
 
         // 记账：写进参数域（内存里），读照样走 UserDefaults.standard；app 自己的设置域那个键跑前跑后一样、一次没写
         let prefsDomain: String = Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName

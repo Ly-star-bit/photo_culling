@@ -954,6 +954,10 @@ enum CollageUISnapshot {
         // 离屏截不到弹出框：「导出 ▾」摊开时一律画在顶栏下面（--tab 导出、--go export）。
         SnapshotPreview.inlineExport = true
         if snapTab?.export == true { store.nav.exportShown = true }
+        // 「导出」已经不是检视器的页签（顶栏「导出 ▾」，摊开画在顶栏下面）：只截检视器时截不到它，说一声，别默默截成「格式」页。
+        if snapTab?.export == true, option("--inspector-width") != nil {
+            print("--tab 导出 现在是顶栏「导出 ▾」，不在检视器里：--inspector-width 只截检视器，截出来是「格式」页；去掉 --inspector-width 看导出设置")
+        }
         let sizeParts = (option("--size") ?? "1440x900").split(separator: "x").compactMap { Double($0) }
         let size = NSSize(width: sizeParts.first ?? 1440, height: sizeParts.count > 1 ? sizeParts[1] : 900)
 

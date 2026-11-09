@@ -190,6 +190,12 @@ extension CollageStore {
     /// 去那一块（指路的字、「带我去」）：要「这一页」的先取消选中；暗房开着就先关（拼图页的编辑区不在视图树里）。
     func go(_ spot: CollageSpot, flash: Bool = true) {
         if darkroom != nil { closeDarkroom() }
+        var spot = spot
+        // 「格式」的锚点挂在「选中的格子」那块上：什么都没选时格式页显示的是「这一页」，去那块（不然页签不变、滚动和描边
+        // 都落空 ——「这一版新增」第一条「带我去」刚启动时就是这样）。选中贴纸、手写字时只切页签。
+        if spot == .format, selection == nil, selectedItem == nil { spot = .page }
+        // 「格式 › 印样」只有印样页才有：别的页去了只会清掉选中、退出裁切，什么也指不到 —— 改去「这一页」。
+        if spot == .contact, !isContactSheet { spot = .page }
         if spot.needsNothingSelected {
             if cropEditing { exitCropEdit() }
             selection = nil

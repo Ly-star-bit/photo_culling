@@ -158,7 +158,7 @@ enum ShortcutsTable {
         Row("⌘A  Esc", "全选（按现在的筛选）· 取消选择"),
         Row("⌫", "从托盘移除选中的（用到的格子留空，⌘Z 撤回）"),
         Row("拖进画布", "放进格子：中间替换、边上插入（散落版是放一张照片）"),
-        Row("右键", "用选中的几张重新排一版 · 加进当前版 · 移除"),
+        Row("右键", "用选中的几张重新排一版 · 加进现在的版式 · 移除"),
         Row("拖文件进左栏", "照片、文件夹加进托盘"),
     ])
     static let strips = ShortcutsSection("底下几条", [
@@ -200,9 +200,12 @@ enum ShortcutsTable {
 /// 快捷键一览：顶上按页切，底下两列。高度跟着这一页走（水印、暗房那页短：不按最高的批量处理页留一大块空白）。
 struct ShortcutsPanel: View {
     @State private var page: ShortcutsPage
+    /// 「帮助 › 快捷键一览」窗口用：每次出现时现问一次主窗口在哪一页（暗房开关不让 App.body 重算，构造时算的会过期）。
+    private let follow: (@MainActor () -> ShortcutsPage)?
 
-    init(page: ShortcutsPage = .batch) {
+    init(page: ShortcutsPage = .batch, follow: (@MainActor () -> ShortcutsPage)? = nil) {
         _page = State(initialValue: page)
+        self.follow = follow
     }
 
     var body: some View {
@@ -216,6 +219,7 @@ struct ShortcutsPanel: View {
             ShortcutsPageView(page: page)
         }
         .padding(16)
+        .onAppear { if let follow { page = follow() } }
     }
 }
 
@@ -330,10 +334,13 @@ private final class ShortcutsKeyMonitor {
     }
 
     private func handle(characters: String?, modifiers: NSEvent.ModifierFlags, windowNumber: Int) -> Bool {
-        guard let view, let window = view.window, window.windowNumber == windowNumber,
-              !view.isHiddenOrHasHiddenAncestor,
+        guard let view, let window = view.window, !view.isHiddenOrHasHiddenAncestor,
+              let target = NSApp.window(withWindowNumber: windowNumber) else { return false }
+        // 本页所在的窗口，或者挂在它上面的子窗口：快捷键一览是 popover，弹出来以后键盘落在 popover 自己的窗口上，
+        // 再按 ? 要能关掉（以前只认本窗口，? 只能开、关要按 Esc）。
+        guard target === window || target.parent === window,
               ShortcutsKey.opens(characters: characters, modifiers: modifiers,
-                                 typing: ShortcutsKey.isTyping(window.firstResponder)) else { return false }
+                                 typing: ShortcutsKey.isTyping(target.firstResponder)) else { return false }
         action?()
         return true
     }

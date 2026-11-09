@@ -1359,7 +1359,7 @@ extension LiveHandlers {
                             ["hint": "请用户在拼图页的方案栏里右键删掉几个不要的"])
         }
         guard !collage.isSolving else {
-            return .failure("invalid_state", "app 还在排这一版（排版没落地），现在存下来的会是落地之前的样子。",
+            return .failure("invalid_state", "app 还在排版（还没落地），现在存下来的会是落地之前的样子。",
                             ["hint": "过一两秒再调"])
         }
         let before = collage.editDigest
@@ -1464,7 +1464,7 @@ extension LiveHandlers {
                             ["hint": "先 collage_apply_template 或 collage_run_kit 排一版", "executed": false])
         }
         guard !collage.isSolving else {
-            return .failure("invalid_state", "app 还在排这一版（排版没落地），现在导出的会是落地之前的样子。",
+            return .failure("invalid_state", "app 还在排版（还没落地），现在导出的会是落地之前的样子。",
                             ["hint": "过一两秒再调", "executed": false])
         }
         // 批量页这一场开在存储卡上（审查 S07）：默认的「拼图导出/」在卡上不给，选的目录也不能在卡上 —— 不往卡上写。

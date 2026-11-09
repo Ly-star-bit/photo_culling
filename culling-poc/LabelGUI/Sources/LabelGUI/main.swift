@@ -670,13 +670,14 @@ struct LabelGUIApp: App {
             // 系统默认的「帮助」只有一项、点了说「帮助不可用」（没有帮助手册）。换成：快捷键一览、使用说明、导出 / 复制诊断信息、
             // 日志文件夹（审查 D03，见 Diagnostics/Diagnostics.swift）。
             CommandGroup(replacing: .help) {
-                HelpMenuItems { model.whatsNewShown = true }
+                // 插卡的导入框开着时不弹（同一个窗口同时只能出一个 sheet，弹不出来还会让 whatsNewShown 卡在 true）。
+                HelpMenuItems { if model.cardCenter.offer == nil { model.whatsNewShown = true } }
             }
         }
         // 「帮助 › 快捷键一览」：状态栏键盘按钮、? 键弹的同一张表，在哪个页面都能打开。只有一个，不进 ⌘N。
         Window("快捷键一览", id: ShortcutsWindow.id) {
             // 打开时翻到主窗口现在在的那一页（批量处理 / 水印 / 拼图 / 暗房），顶上可以换。
-            ShortcutsPanel(page: ShortcutsPage.current(model))
+            ShortcutsPanel(page: ShortcutsPage.current(model), follow: { ShortcutsPage.current(model) })
                 .preferredColorScheme(.dark)
         }
         .windowResizability(.contentSize)

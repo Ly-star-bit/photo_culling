@@ -1049,7 +1049,7 @@ struct CollageExportPanel: View {
     private var watermarkToggle: some View {
         if Self.showsWatermarkToggle(store.project.watermark) {
             Toggle("导出带水印", isOn: exportWatermarkBinding)
-                .help("只管这个拼图：关掉 = 导出不带水印的一版（预览里照样显示，「文档 › 水印」里的设置不动）")
+                .help("只管这个拼图：关掉 = 导出时不带水印（预览里照样显示，「文档 › 水印」里的设置不动）")
             if store.project.watermark?.exportEnabled == false {
                 Text("这个拼图导出时不带水印（预览照常显示）")
                     .font(.caption2).foregroundStyle(.orange)

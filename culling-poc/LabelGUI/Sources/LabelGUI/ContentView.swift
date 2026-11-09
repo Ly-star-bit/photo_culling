@@ -7,6 +7,8 @@ struct ContentView: View {
     @ObservedObject var store: LabelStore
     @ObservedObject var batchStore: BatchStore
     @ObservedObject var cardCenter: CardImportCenter
+    /// 插卡的导入框后到、把「这一版新增」收起来了：收起以后再给导入框一次（被顶掉的 sheet 不会自己补弹）。
+    @State private var requeueCardOffer = false
     @ObservedObject private var watermarkStore: WatermarkStore
     @ObservedObject private var collageStore: CollageStore
 
@@ -69,6 +71,23 @@ struct ContentView: View {
                 // 等弹框收起再切页签、描边（不然描边亮在弹框底下）。
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { model.go(destination) }
             }, onClose: { model.whatsNewShown = false })
+            .onAppear { WhatsNew.recordShown() }
+        }
+        // 插卡的导入框后到（第一次读可移除宗卷要等系统授权）：先收起「这一版新增」让导入框出来 —— 同一个视图上两个 sheet
+        // 只能出一个。版本号是弹框出现时记的，收起的这次已经算看过了；要再看在「帮助 › 这一版新增」。
+        .onChange(of: cardCenter.offer != nil) { _, hasOffer in
+            guard hasOffer, model.whatsNewShown else { return }
+            requeueCardOffer = true
+            model.whatsNewShown = false
+        }
+        .onChange(of: model.whatsNewShown) { _, shown in
+            guard !shown, requeueCardOffer else { return }
+            requeueCardOffer = false
+            guard let offer = cardCenter.offer else { return }
+            cardCenter.offer = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                if cardCenter.offer == nil { cardCenter.offer = offer }
+            }
         }
         // 标题栏副标题：AI 连着 / 正在操作 / 刚做了什么（§9.6a，四个 tab 都在）。不连 AI 时是空的，和以前一样。
         .modifier(LiveIndicatorSubtitle(indicator: model.indicator))
