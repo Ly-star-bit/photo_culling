@@ -111,6 +111,8 @@ struct CollageDocumentPanel: View {
             .collageSpot(.canvas, store.nav)
         CollageTitleBox(store: store)
             .collageSpot(.titles, store.nav)
+        // 相册封面（CollageBookCoverPanel.swift）：只在相册时出现。
+        CollageBookCoverBox(store: store)
         VStack(alignment: .leading, spacing: 12) {
             Text("水印").font(.subheadline.weight(.semibold))
                 .padding(.top, 4)
