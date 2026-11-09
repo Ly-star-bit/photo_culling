@@ -42,8 +42,9 @@ run() {
     # 每条自检单独限时（SELFTEST_TIMEOUT 秒，默认 300：CI 的虚拟机上 --quit-selftest 要 170 秒左右）：到点先用 sample 抓一份调用栈（卡在哪），再停掉、点名报出来，后面的照跑。
     # 以前整步 10 分钟一到被 CI 杀掉，看不出是哪一条。输出写文件（被停掉时 print 的缓冲本来就会丢，调用栈才是线索）。
     local log="$WORK/out.$$.txt" stack="$WORK/sample.$$.txt" timedout=0 pid
+    # 3<&-：下面读清单的 fd 3 不传给自检进程（和以前一样，自检只拿到 stdin / stdout / stderr）。
     LABELGUI_DATA_DIR="$data" LABELGUI_NO_GUI=1 LABELGUI_LIVE_SOCK_ROOT="$sock" LABELGUI_MCP_OUT="$WORK/mcp-out" \
-        "$BIN" "$@" </dev/null >"$log" 2>&1 &
+        "$BIN" "$@" </dev/null >"$log" 2>&1 3<&- &
     pid=$!
     while kill -0 "$pid" 2>/dev/null; do
         if [ $((SECONDS - start)) -ge "$LIMIT" ]; then
