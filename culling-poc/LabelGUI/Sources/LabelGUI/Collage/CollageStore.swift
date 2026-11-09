@@ -16,6 +16,8 @@ final class CollageStore: ObservableObject {
         didSet {
             projectRevision &+= 1
             derived = Derived()
+            // 封面没了（撤销到做封面之前、去掉封面）或者切回单张：退出封面编辑。
+            if editingCover, project.bookCover == nil || project.mode != .album { editingCover = false }
         }
     }
     /// 工程改了几次（只增）：派生缓存、画布角标按它认。
@@ -43,6 +45,8 @@ final class CollageStore: ObservableObject {
     @Published var pageIndex = 0 {
         didSet {
             guard pageIndex != oldValue else { return }
+            // 换到哪个跨页都不再编辑封面（跨页条上点卡片、⌘← ⌘→）。
+            if editingCover { editingCover = false }
             finishCropEditForNavigation()
             selection = nil
             selectedItem = nil
@@ -316,7 +320,11 @@ final class CollageStore: ObservableObject {
 
     // MARK: - 派生
 
-    var page: CollagePage? { project.pages.indices.contains(pageIndex) ? project.pages[pageIndex] : nil }
+    /// 当前页；编辑封面时是封面那块（CollageBookCover.editPage：不在 pages 里，id 是封面的）。
+    var page: CollagePage? {
+        if editingCover, let cover = project.bookCover { return cover.editPage }
+        return project.pages.indices.contains(pageIndex) ? project.pages[pageIndex] : nil
+    }
     var root: CollageNode? { page?.root }
 
     var photoMap: [String: CollagePhotoRef] {
@@ -328,19 +336,21 @@ final class CollageStore: ObservableObject {
     }
 
     var context: CollageLayout.Context {
-        CollageLayout.Context(canvas: project.canvas, style: project.style, photos: photoMap, hints: hints, heroID: nil)
+        CollageLayout.Context(canvas: editCanvas, style: project.style, photos: photoMap, hints: hints, heroID: nil)
     }
 
     /// 成品像素坐标里的几何（画布叠加层、拖缝、落点都用它）。散落版、印样没有格子。
     var geometry: CollageLayout.Geometry {
-        if let cached = derived.geometry, cached.page == pageIndex { return cached.value }
+        // 编辑封面：键 -1（不和任何跨页撞），几何按封面那一页的画布算（坐标是封面那一页自己的，左上原点）。
+        let key = editingCover ? -1 : pageIndex
+        if let cached = derived.geometry, cached.page == key { return cached.value }
         let value: CollageLayout.Geometry
         if let root, !isFreeform, !isContactSheet {
-            value = CollageLayout.pageGeometry(root, canvas: project.canvas, style: project.style)
+            value = CollageLayout.pageGeometry(root, canvas: editCanvas, style: project.style)
         } else {
             value = CollageLayout.Geometry()
         }
-        derived.geometry = (pageIndex, value)
+        derived.geometry = (key, value)
         return value
     }
 
@@ -410,7 +420,7 @@ final class CollageStore: ObservableObject {
         let ids = page.photoIDs
         let framing = CollageLayout.effectiveFraming(path: frame.path, cell: frame.cell, in: geometry.frames,
                                                      photos: map, tight: project.style.tightSmallCells)
-        let project = CollageLooks.project(self.project, page: page)
+        let project = CollageLooks.project(self.editProject, page: page)
         let vars = CollageTypeset.cellVariables(
             CollageTypeset.variables(project: project, root: page.root, photos: map, pagePhotoIDs: ids, pageID: page.id),
             photo: photo)
@@ -446,7 +456,7 @@ final class CollageStore: ObservableObject {
         let framing = CollageLayout.effectiveFraming(path: frame.path, cell: frame.cell, in: geometry.frames,
                                                      photos: map, tight: project.style.tightSmallCells)
         // 和渲染器一样：页级色调换进样式（底色取色、字的深浅按它），{frame} 按这一格的照片。
-        let project = CollageLooks.project(self.project, page: page)
+        let project = CollageLooks.project(self.editProject, page: page)
         let vars = CollageTypeset.cellVariables(
             CollageTypeset.variables(project: project, root: page.root, photos: map, pagePhotoIDs: ids, pageID: page.id),
             photo: photo)
@@ -463,7 +473,7 @@ final class CollageStore: ObservableObject {
         guard let page else { return [:] }
         let map = photoMap
         let photo = page.root.node(at: path)?.cell?.photoID.flatMap { map[$0] }
-        let project = CollageLooks.project(self.project, page: page)
+        let project = CollageLooks.project(self.editProject, page: page)
         return CollageTypeset.cellVariables(
             CollageTypeset.variables(project: project, root: page.root, photos: map, pagePhotoIDs: page.photoIDs,
                                      pageID: page.id),
@@ -875,6 +885,7 @@ final class CollageStore: ObservableObject {
             // 贴在那张相纸上的胶带一起拿掉（以前留在原地悬空）。
             project.pages[i].items = CollageItems.pinAll(project.pages[i].items, canvas: project.canvas)
         }
+        project.bookCover?.clearPhotos(gone)
         tray.prune(to: Set(project.photos.map(\.id)))
         commitEdit()
         if gone.count > 1 || placed > 0 {
@@ -886,13 +897,17 @@ final class CollageStore: ObservableObject {
     /// 托盘里没上任何一页的照片（「移除没用上的」）。
     var unusedTrayIDs: [String] {
         let usage = photoUsage
-        return project.photos.filter { usage[$0.id] == nil }.map(\.id)
+        // 只上了封面的也算用上了（不然「移除没用上的」会把封面那张拿掉）。
+        let cover = Set(project.bookCover?.photoIDs ?? [])
+        return project.photos.filter { usage[$0.id] == nil && !cover.contains($0.id) }.map(\.id)
     }
 
     /// 相册去重（fine-art：编排）拿掉、现在也还没上任何一页的照片（「移除相似拿掉的」）。
     var droppedTrayIDs: [String] {
         let usage = photoUsage
-        return project.photos.filter { albumDroppedIDs.contains($0.id) && usage[$0.id] == nil }.map(\.id)
+        let cover = Set(project.bookCover?.photoIDs ?? [])
+        return project.photos.filter { albumDroppedIDs.contains($0.id) && usage[$0.id] == nil && !cover.contains($0.id) }
+            .map(\.id)
     }
 
     func clearTray() {
@@ -1736,6 +1751,11 @@ final class CollageStore: ObservableObject {
     // MARK: - 编辑（全部可撤销）
 
     private func setRoot(_ root: CollageNode) {
+        // 编辑封面：写进封面那块的树（pages 不动）。
+        if editingCover, project.bookCover != nil {
+            project.bookCover?.front = root
+            return
+        }
         if project.pages.isEmpty {
             project.pages = [CollagePage(root: root)]
             pageIndex = 0
@@ -1746,6 +1766,11 @@ final class CollageStore: ObservableObject {
 
     /// 整页换掉（版式 + 图层 + 是不是散落版）；没有页就新建一页。
     private func setPage(_ newPage: CollagePage) {
+        // 编辑封面：只收切分树（封面没有散落版、印样、图层）。
+        if editingCover, project.bookCover != nil {
+            if !newPage.freeform, newPage.contactSheet == nil { project.bookCover?.front = newPage.root }
+            return
+        }
         if project.pages.isEmpty {
             project.pages = [newPage]
             pageIndex = 0
@@ -1777,13 +1802,15 @@ final class CollageStore: ObservableObject {
         // source 的路径不变；删 source 时它的兄弟子树（可能含刚插入的格子）整体上移。
         let inserted = CollageLayout.insert(cell, at: target, edge: edge, into: root)
         pushUndo()
-        setRoot(CollageLayout.remove(at: source, from: inserted, canvas: project.canvas))
+        setRoot(CollageLayout.remove(at: source, from: inserted, canvas: editCanvas))
         selection = nil
         commitEdit()
     }
 
     /// 托盘里的照片拖到格子上：中间 = 替换，边上 = 劈开插入。已经在版里的照片 = 挪过去。
     func place(photoID: String, at target: [Int], edge: CollageLayout.Edge?) {
+        // 编辑封面：放进封面那块（不管跨页的规矩，见 placeOnCover）。
+        if editingCover { return placeOnCover(photoID: photoID, at: target, edge: edge) }
         // 画布收的是纯文本拖放：别的 app 拖进来一段字不能当成照片 id。
         guard photoMap[photoID] != nil else { return }
         if isContactSheet {
@@ -1832,9 +1859,9 @@ final class CollageStore: ObservableObject {
     func removeCell(_ path: [Int]) {
         guard let root else { return }
         if root.isLeaf {
-            mutateRoot { _ in CollageLayout.blankRoot(for: project.canvas) }
+            mutateRoot { _ in CollageLayout.blankRoot(for: editCanvas) }
         } else {
-            mutateRoot { CollageLayout.remove(at: path, from: $0, canvas: project.canvas) }
+            mutateRoot { CollageLayout.remove(at: path, from: $0, canvas: editCanvas) }
         }
         selection = nil
         cropEditing = false
@@ -2415,7 +2442,7 @@ final class CollageStore: ObservableObject {
         let text = vertical ? CollageTemplates.verticalTitle(size: 0.06, seal: "光", date: true)
                             : CollageTemplates.centeredTitle()
         let target = selection ?? []
-        let canvas = project.canvas
+        let canvas = editCanvas
         mutateRoot { root in
             guard target.isEmpty else { return CollageLayout.insert(.text(text), at: target, edge: edge, into: root) }
             // 相册跨页：字只加在一页上（上、下横排加在右页，竖排加在那一边的那一页）—— 整个跨页加一条，
@@ -2880,6 +2907,44 @@ final class CollageStore: ObservableObject {
             commitEdit()
         }
     }
+
+    // MARK: - 相册封面（C1–C4；模型、渲染、ops、文档面板在 CollageBookCover*.swift）
+
+    /// 正在编辑封面：画布上是整张封面，选格子、换照片、改字落在封面那块的切分树上。不动 pageIndex，封面也不进 pages ——
+    /// page / root / context / geometry / setRoot / setPage 这几个咽喉按它改指封面，mutateRoot、updateSelectedCell、
+    /// updateText、swap、move、removeCell、place 就都落到封面上（place 转给 placeOnCover）。只在相册、有封面时为真：
+    /// 工程变了（撤销到没封面、去掉封面、切回单张）、换了跨页（pageIndex）都自动退出。界面用 setEditingCover。
+    @Published private(set) var editingCover = false {
+        didSet {
+            guard editingCover != oldValue else { return }
+            finishCropEditForNavigation()
+            selection = nil
+            selectedItem = nil
+            clearAlternatives()
+            // 几何、角标都是按「当前页」缓存的：换成封面 / 换回跨页都作废。
+            derived = Derived()
+            setNeedsRender()
+        }
+    }
+
+    /// 进 / 出封面编辑（跨页条最前面那张「封面」卡）。不是相册、没做封面进不去。
+    func setEditingCover(_ on: Bool) {
+        editingCover = on && isAlbum && project.bookCover != nil
+    }
+
+    /// 改封面（做、改书脊、换照片、去掉……）：一步撤销（coalesce / key 同 pushUndo：连着敲书脊宽合成一步）。什么都没变不记。
+    func updateBookCover(coalesce: Bool = false, key: AnyHashable? = nil, _ body: (inout CollageBookCover?) -> Void) {
+        var next = project.bookCover
+        body(&next)
+        guard next != project.bookCover else { return }
+        cancelSolveIfRunning()
+        pushUndo(coalesce: coalesce, key: key)
+        project.bookCover = next
+        commitEdit()
+    }
+
+    /// 画布视口（像素）：编辑封面时预览按整张封面放进视口算缩放（CollageBookCoverStore.coverPreviewJob）。
+    var previewViewport: CGSize { viewportPixels }
 
     // MARK: - 印样 / 底片条
 
@@ -3564,6 +3629,8 @@ final class CollageStore: ObservableObject {
         var rest = project
         rest.pages = []
         rest.variants = []
+        // 封面不画在跨页上：改封面（敲书脊宽、换封面照片）不让每个跨页的小图重渲。
+        rest.bookCover = nil
         var shared = Hasher()
         shared.combine(rest)
         shared.combine(project.pages.count)
@@ -3658,6 +3725,15 @@ final class CollageStore: ObservableObject {
                 if self.darkroom != nil && !self.renderRequested { break }
                 self.renderRequested = false
                 self.renderDirty = false
+                // 编辑封面：画布上是整张封面（封底 | 书脊 | 封面，带包边、出血、参考线），不是哪个跨页。
+                if self.editingCover, let job = self.coverPreviewJob() {
+                    let image = await Task.detached(priority: .userInitiated) { job.render() }.value
+                    if let image {
+                        self.previewState.image = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+                        self.previewState.scale = job.scale
+                    }
+                    continue
+                }
                 guard let page = self.page else {
                     self.previewState.image = nil
                     continue
@@ -3900,6 +3976,16 @@ final class CollageStore: ObservableObject {
                 self.progressFraction = Double(i + 1) / Double(snapshot.pages.count)
                 self.progressText = "导出 \(i + 1)/\(snapshot.pages.count)…"
             }
+            // 相册封面（C3）：单独出「名_封面」图和 PDF，不进跨页 PDF（CollageBookCoverRender.swift）。
+            if !Self.coverFileNames(base: base, project: snapshot, options: options).isEmpty, !(self?.exportCancelled ?? true) {
+                self?.progressText = "导出封面…"
+                let cover = await Self.exportCover(project: snapshot, options: options, base: base, folder: folder,
+                                                   scale: scale, hints: hints)
+                outcome.files += cover.files
+                lowRes += cover.lowRes
+                missing += cover.missing
+                if let e = cover.error, failure == nil { failure = "封面：\(e)" }
+            }
             // 缺页的 PDF 不能拿去印（页序整体前移、文件名照常，最容易直接发给印厂）：有跨页没写出来就不出 PDF。
             if wantPDF, plan.pdf != nil, !pdfMissing.isEmpty, !(self?.exportCancelled ?? true) {
                 let note = Self.pdfSkippedNote(pdfMissing, written: pdfWritten)
@@ -3935,6 +4021,7 @@ final class CollageStore: ObservableObject {
                 self.lastError = "导出失败: \(failure)"
             } else {
                 let files = plan.pages.flatMap { $0 } + (plan.pdf.map { [$0] } ?? [])
+                    + Self.coverFileNames(base: base, project: snapshot, options: options)
                 let main = plan.pdf ?? files.first ?? base
                 let clean = snapshot.watermark.map { !$0.exportEnabled && $0.anyLayerOn } == true ? "（不带水印）" : ""
                 self.progressText = "导出完成\(clean) → \(main)" + (files.count > 1 ? "（共 \(files.count) 个文件）" : "")
@@ -4069,6 +4156,7 @@ final class CollageStore: ObservableObject {
         while n < 1000 {
             let plan = Self.exportPlan(base: candidate, project: project, options: options)
             let names = plan.pages.flatMap { $0 } + (plan.pdf.map { [$0] } ?? [])
+                + Self.coverFileNames(base: candidate, project: project, options: options)
             let taken = names.contains { FileManager.default.fileExists(atPath: folder.appendingPathComponent($0).path) }
             if !taken { break }
             candidate = "\(root)-\(n)"

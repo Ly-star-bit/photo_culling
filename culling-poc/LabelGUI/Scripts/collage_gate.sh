@@ -234,6 +234,10 @@ EOF
     ops ops_wm wm "wm:photos:$INPUTS/sig.png,wm:page,wmtext:page:拾光 · 门禁,wmpos:page:bottom_center,renderclean:wm_p.png@0.5,renderexport:wm_e.png,wmtile:photos:on,renderexport:wm_tile.png,wmtile:photos:off,mode:album,arrange,page:1,renderclean:wm_album_p.png@0.3,renderexport:wm_album.png"
     echo "== ops：自由文字图层花字投影（S0 修过：预览里的投影按缩放算）"
     ops ops_fxitem fxitem "importtpl:$INPUTS/fx_template.json,applytpl:门禁花字图层,renderclean:fxitem_p.png@0.5,renderclean:fxitem_p25.png@0.25,renderexport:fxitem_e.png"
+    echo "== ops：相册封面（封底 | 书脊 | 封面一整张，带包边、出血）"
+    # 书脊填 12.5mm、中西混排的书脊标题（中文立着、拉丁字母转 90°）、封底一张小照片 + 一行字；renderclean 带折线、安全区参考线。
+    # 最后把书脊改成 4mm（不到 6mm 不印字）只看 cover:dump 的提示，不出图。
+    ops ops_album_cover album_cover "mode:album,arrange,cover:make,cover:spine=12.5,cover:title=林 & 苏 Wedding,cover:back=DSCF7216,cover:backtext=MMXXVI · 拾光,cover:edit,renderexport:cover.png,renderclean:cover_p.png@0.25,cover:spine=4,cover:dump"
 
     echo "== 水印页（逐字节）"
     local i
