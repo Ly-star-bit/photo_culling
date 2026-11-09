@@ -147,7 +147,7 @@ enum GridExifImportSelfTest {
             (.cardImport(queued: 1), nil, nil, "批量处理 · 导卡…"),
             (.task(.jpegExport), 1.0, nil, "批量处理 · 导出 JPG 100%"),
             (.task(.copyOriginals), .nan, nil, "批量处理 · 复制原片…"),
-            (.vlm, 1.7, nil, "批量处理 · VLM 判片 100%"),
+            (.vlm, 1.7, nil, "批量处理 · 精审 100%"),
             (.other, 0.5, .done, "批量处理 · 处理中 50%"),
             (nil, nil, .done, "批量处理 · 完成"),
             (nil, 0.9, .failed, "批量处理 · 出错"),

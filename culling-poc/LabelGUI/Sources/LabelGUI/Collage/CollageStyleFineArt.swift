@@ -73,7 +73,7 @@ enum CollageStyleFineArt {
     }
 
     static let presets: [CollageStyles.Preset] = [
-        CollageStyles.Preset(key: "weddingFineArt", name: "婚礼 fine-art", style: style),
+        CollageStyles.Preset(key: "weddingFineArt", name: "婚礼 · 雅致", style: style),
         CollageStyles.Preset(key: "weddingCanon", name: "婚礼 · 古典版心", style: canonStyle),
     ]
 

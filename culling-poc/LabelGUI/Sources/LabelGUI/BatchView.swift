@@ -1309,9 +1309,9 @@ struct BatchView: View {
             let vlmSuggested = store.items.filter(\.vlmReject)
             if !vlmSuggested.isEmpty {
                 Divider()
-                Text("VLM 判断校准").font(.caption).foregroundStyle(.secondary)
+                Text("本地模型判断校准").font(.caption).foregroundStyle(.secondary)
                 let released = vlmSuggested.filter { $0.verdict != .reject }.count
-                Text("VLM 建议淘汰 \(vlmSuggested.count) 张 · 你放行了其中 \(released) 张 (\(released * 100 / vlmSuggested.count)%)")
+                Text("本地模型建议淘汰 \(vlmSuggested.count) 张 · 你放行了其中 \(released) 张 (\(released * 100 / vlmSuggested.count)%)")
                     .font(.caption)
                     .foregroundStyle(released * 2 > vlmSuggested.count ? .orange : .primary)
             }
@@ -1339,7 +1339,7 @@ struct BatchView: View {
             }
             let rescued = store.items.filter { !$0.vlmRescued.isEmpty }.count
             if rescued > 0 {
-                Text("复审平反 \(rescued) 张 (算法误杀被 VLM 纠正)")
+                Text("复审平反 \(rescued) 张 (算法误杀被本地模型纠正)")
                     .font(.caption).foregroundStyle(.green)
             }
         }
@@ -1974,8 +1974,8 @@ struct BatchView: View {
     }
 
     static func infoHelp(_ item: BatchItem, closed: Int) -> String {
-        var parts: [String] = item.rejectReasons
-        if !item.vlmRescued.isEmpty { parts.append("VLM 平反: " + item.vlmRescued.joined(separator: "、")) }
+        var parts: [String] = item.rejectReasons.map(BatchStore.reasonLabel)
+        if !item.vlmRescued.isEmpty { parts.append("复审平反: " + item.vlmRescued.joined(separator: "、")) }
         if item.slowShutter { parts.append("快门低于安全快门 (1/焦距)，易糊") }
         if item.tilted { parts.append(String(format: "水平线倾斜 %.1f°", item.horizonDeg ?? 0)) }
         if closed > 0 { parts.append("\(item.faces.count) 张脸里 \(closed) 张闭眼") }
@@ -2062,14 +2062,14 @@ struct BatchView: View {
                 } label: {
                     HStack(spacing: 3) {
                         Image(systemName: Self.reasonIcon(reason)).font(.caption2)
-                        Text("\(reason) \(counts[reason]!)").font(.caption)
+                        Text("\(BatchStore.reasonLabel(reason)) \(counts[reason]!)").font(.caption)
                     }
                     .padding(.horizontal, 7).padding(.vertical, 2)
                     .background(active ? Color.red.opacity(0.35) : Color.white.opacity(0.08), in: Capsule())
                     .overlay(Capsule().stroke(active ? Color.red : .clear, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
-                .help(active ? "点击取消筛选" : "只看因「\(reason)」被标记的照片")
+                .help(active ? "点击取消筛选" : "只看因「\(BatchStore.reasonLabel(reason))」被标记的照片")
             }
         }
     }
@@ -2375,7 +2375,7 @@ private struct BatchControlPanel: View {
             Toggle("近似重复只留最佳 (\(store.reasonCounts["连拍重复"] ?? 0))",
                    isOn: $store.rejectBurstDuplicates)
                 .font(.caption)
-                .help("只作用在「几乎同一张」这一层 (2秒内 + phash 汉明距离≤10)，不是整场。" +
+                .help("只作用在「几乎同一张」这一层（2 秒内、画面几乎一模一样），不是整场。" +
                       "场里人在动、表情在变，哪张好是审美判断，交给你在堆栈里勾选。" +
                       "这是可随时关掉的规则，不会覆盖你手动改判过的照片。" +
                       "开关每场各记各的：只改这一场，别的场次不跟着变。" +
@@ -2467,13 +2467,13 @@ private struct BatchControlPanel: View {
                     .padding(6)
                 }
 
-                GroupBox("VLM 语义分析") {
+                GroupBox("本地模型（可选）") {
                     VStack(alignment: .leading, spacing: 10) {
                         LabeledContent("模型") {
                             Text("MiniCPM-V 4.6").font(.caption).foregroundStyle(.secondary)
                         }
                         Button("启动服务") { store.startVLMServer() }
-                            .help("通过 Ollama 启动 MiniCPM-V 4.6")
+                            .help("在本机启动看图模型 MiniCPM-V 4.6（经 Ollama；没装的先装 Ollama.app，再在终端里 ollama pull \(BatchStore.ollamaModel)）")
                         Button("复审废片 (\(store.autoRejectCount))") { store.runAppealOnRejects() }
                             .buttonStyle(.borderedProminent)
                             .disabled(store.autoRejectCount == 0 || store.isRunning)
@@ -3949,7 +3949,7 @@ struct PhotoInspector: View {
             if (store.groupSizes[item.burstGroup] ?? 1) > 1 {
                 Label("近似重复", systemImage: "square.stack.3d.down.right")
                     .font(.caption).foregroundStyle(.orange)
-                    .help("和同场的另一张几乎是同一张画面 (phash 汉明距离≤10)，" +
+                    .help("和同场的另一张几乎是同一张画面（2 秒内、画面几乎一模一样），" +
                           "自动「只留最佳」作用的就是这一层")
             }
             Label(item.verdict.rawValue, systemImage: item.verdict.symbol)
@@ -4151,10 +4151,10 @@ struct PhotoInspector: View {
                 signal("水平", String(format: "%+.1f°", deg))
             }
             if item.faceCount > 1 { signal("主体人数", "\(item.faceCount)") }
-            if let expr = item.expressionScore { signal("VLM表情", "\(expr)") }
-            if !item.vlmRescued.isEmpty { signal("VLM平反", item.vlmRescued.joined(separator: "、")) }
+            if let expr = item.expressionScore { signal("表情分", "\(expr)") }
+            if !item.vlmRescued.isEmpty { signal("平反", item.vlmRescued.joined(separator: "、")) }
             if !item.rejectReasons.isEmpty {
-                Text(item.rejectReasons.joined(separator: ", "))
+                Text(item.rejectReasons.map(BatchStore.reasonLabel).joined(separator: ", "))
                     .font(.caption).foregroundStyle(.red)
             }
             Spacer()
@@ -4223,7 +4223,7 @@ struct PhotoInspector: View {
                         .font(.caption).foregroundStyle(.orange)
                 }
                 if let reason = item.vlmReason {
-                    Text("VLM: \(reason)").font(.caption).foregroundStyle(.secondary)
+                    Text("本地模型：\(reason)").font(.caption).foregroundStyle(.secondary)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -4492,7 +4492,7 @@ struct ReviewView: View {
                         .background(color(item.verdict).opacity(0.25), in: Capsule())
                         .foregroundStyle(color(item.verdict))
                     if !item.rejectReasons.isEmpty {
-                        Text(item.rejectReasons.joined(separator: ", ")).font(.caption).foregroundStyle(.red)
+                        Text(item.rejectReasons.map(BatchStore.reasonLabel).joined(separator: ", ")).font(.caption).foregroundStyle(.red)
                     }
                     if let exif = item.exif {
                         Text(exif.summary).font(.caption).monospacedDigit().foregroundStyle(.secondary)

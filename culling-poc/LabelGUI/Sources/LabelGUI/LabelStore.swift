@@ -203,7 +203,7 @@ final class LabelStore: ObservableObject {
                     layer2ById[r.id] = r
                 }
             } catch {
-                warnings.append("layer2_results.json 无法解析（\(error.localizedDescription)），VLM 信号不显示")
+                warnings.append("本地模型的结果 layer2_results.json 无法解析（\(error.localizedDescription)），表情分、构图问题不显示")
             }
         }
         loadWarning = warnings.isEmpty ? nil : warnings.joined(separator: "\n")

@@ -708,7 +708,7 @@ enum CollageStyleFineArtSelfTest {
             let top = mm(ins?.top, canvas)
             check(fine != nil && abs(side - want) < 0.2 && abs(mm(ins?.outer, canvas) - want) < 0.2
                   && abs(top - max(pageH * 0.12, 25)) < 0.2,
-                  "预设「婚礼 fine-art」套到\(canvas.name)：上 / 内 / 外 = max(12% 页边, 25mm)",
+                  "预设「婚礼 · 雅致」套到\(canvas.name)：上 / 内 / 外 = max(12% 页边, 25mm)",
                   String(format: "上 %.1fmm 内 %.1fmm 外 %.1fmm 下 %.1fmm", top, side, mm(ins?.outer, canvas),
                          mm(ins?.bottom, canvas)))
             let canon = CollageStyleFineArt.adapted(CollageStyleFineArt.canonStyle, to: canvas)?.insets

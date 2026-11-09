@@ -224,23 +224,23 @@ struct CollageView: View {
             }
             .modifier(CollageHideLabels(on: compact))
             .fixedSize()
-            .help("「自动编排」按哪套规则编：默认 = 分数最高的做扉页、横图铺满跨页；婚礼 fine-art = 扉页取宽景、"
+            .help("「自动编排」按哪套规则编：默认 = 分数最高的做扉页、横图铺满跨页；婚礼相册 = 扉页取宽景、"
                   + "每章疏 → 密 → 精选收尾、竖图成对、每跨页最多 3 张、不跨中缝（换了点「自动编排」生效）。"
-                  + "纸、卡纸、≥ 25mm 的边距是样式：在「样式」里选「婚礼 fine-art」，左栏「模板」的一键成套「整本婚礼相册」两样一起设")
+                  + "纸、卡纸、≥ 25mm 的边距是样式：在「样式 › 风格」里选「婚礼 · 雅致」，左栏「模板」的一键成套「整本婚礼相册」两样一起设")
             Button("自动编排") { store.autoArrangeAlbum(dedupe: dedupeAlbum) }
                 .disabled(store.project.photos.isEmpty)
-                .help((fineArt ? "托盘里的照片按婚礼 fine-art 编成跨页：废片不要、同一场只留精选，扉页取宽景，每章疏 → 密 → 精选收尾"
+                .help((fineArt ? "托盘里的照片按婚礼相册编成跨页：废片不要、同一场只留精选，扉页取宽景，每章疏 → 密 → 精选收尾"
                        : "托盘里的照片按时间和章节编成跨页：分数最高的做扉页，好片单独成页")
                       + "。客户选中的一张都不拿掉；右栏「文档 › 画布」里指定了跨页数就往那么多个跨页里塞（不删片）")
             Toggle("相似只留一张", isOn: $dedupeAlbum)
                 .toggleStyle(.checkbox)
-                .help(fineArt ? "只管画面相似的（关掉也不会全上：fine-art 一直是同一场只留精选、连拍只留一张）；拿掉的仍在托盘里，可以拖回任何跨页"
+                .help(fineArt ? "只管画面相似的（关掉也不会全上：婚礼相册一直是同一场只留精选、连拍只留一张）；拿掉的仍在托盘里，可以拖回任何跨页"
                       : "连拍、同地同姿势的只留分数高的（拿掉的仍在托盘里，可以拖回任何跨页）")
             if fineArt {
                 Toggle("整章黑白", isOn: Binding(get: { store.project.albumChapterMono },
                                               set: { store.setAlbumTheme(.fineArt, chapterMono: $0) }))
                     .toggleStyle(.checkbox)
-                    .help("一章里黑白照片占三分之一以上，整章的跨页都转黑白（R7：黑白按整章用，不零星撒）；下次「自动编排」生效")
+                    .help("一章里黑白照片占三分之一以上，整章的跨页都转黑白（黑白一用就是一整章，不零星撒在几页里）；下次「自动编排」生效")
             }
             // 「换一批」在备选条最左边（婚礼 fine-art 的跨页按编排出版式，没有「换一批」，那里也不摆）。
             if store.isSolving { ProgressView().controlSize(.small) }
@@ -743,7 +743,7 @@ struct CollageTrayItem: View {
         if photo.isPick { parts.append("精选") }
         if photo.clientPick { parts.append("客户选中（编排不会拿掉）") }
         if uses > 1 { parts.append("用了 \(uses) 次") } else if uses == 1 { parts.append("已用") }
-        if dropped { parts.append(fineArt ? "fine-art 编排没上（同一场只留精选 / 相似）" : "相册去重拿掉的") }
+        if dropped { parts.append(fineArt ? "婚礼相册编排没上（同一场只留精选 / 相似）" : "相册去重拿掉的") }
         return parts.joined(separator: " · ")
     }
 }
@@ -813,7 +813,7 @@ struct CollageAlternativeStrip: View {
                 .font(.caption).foregroundStyle(.tertiary)
         } else if fineArtAlbum {
             // 婚礼 fine-art 编排的相册没有「换一批」：别叫人去点它。
-            Text("婚礼 fine-art 的跨页按编排出版式，没有备选：想重排点「自动编排」")
+            Text("婚礼相册的跨页按编排出版式，没有备选：想重排点「自动编排」")
                 .font(.caption).foregroundStyle(.tertiary)
         } else if store.isContactSheet {
             CollageJumpText(store: store, lead: "印样按拍摄先后排，没有备选：改规格、每条帧数在右栏", spot: .contact, tail: "里")

@@ -194,7 +194,7 @@ struct CollageCanvasBox: View {
         let band = String(format: "%.0fmm", canvas.foldBand / max(1, canvas.dpi) * 25.4)
         // 婚礼 fine-art 的编排从不跨缝（平铺也一样）。
         let rule = canvas.binding == .glued || store.project.albumTheme == .fineArt
-            ? "照片不跨中缝，中缝两侧各 \(band) 不放脸" + (canvas.binding == .glued ? "" : "（婚礼 fine-art 编排不跨缝）")
+            ? "照片不跨中缝，中缝两侧各 \(band) 不放脸" + (canvas.binding == .glued ? "" : "（婚礼相册编排不跨缝）")
             : "横图可以铺满两页，中缝两侧各 \(band) 不放脸"
         Text("\(rule)；出血 \(mm(canvas.bleed)) · 安全区 \(mm(canvas.safe))")
             .font(.caption2).foregroundStyle(.secondary)
@@ -450,7 +450,7 @@ struct CollageStylePanel: View {
                               display: String(format: "%.2f", store.project.style.grain))
                 CollageSlider(label: "压照片", value: styleBinding(\.paperOverPhotos), range: 0...1,
                               display: String(format: "%.2f", store.project.style.paperOverPhotos))
-                    .help("纸纹也压在照片上，照片的白往纸色靠一点：像印在这张纸上（报纸、fine-art 相册）")
+                    .help("纸纹也压在照片上，照片的白往纸色靠一点：像印在这张纸上（报纸风、婚礼相册）")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)

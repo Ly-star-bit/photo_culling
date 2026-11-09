@@ -191,7 +191,7 @@ final class QuitSelfTestHarness {
             let finished = run.done.wait(timeout: .now() + 5) == .success
             let terms = lines(run.marker).filter { $0 == "term" }.count
             check(terms == 1, "uv 转发：python 收到 SIGTERM 正好一次（落盘一次，没被第二个信号打断）→ \(terms) 次")
-            check(finished && isCancelled(run.result.value), "uv 转发：runProcess 当成取消收场（不报「VLM 分析失败」）")
+            check(finished && isCancelled(run.result.value), "uv 转发：runProcess 当成取消收场（不报「精审失败」）")
             check(ids.count == 2 && allGone(ids), "uv 转发：uv 和 python 都没了（\(ids)）")
             check(took < 1.4, String(format: "uv 转发：willTerminate 里没等满补刀的时限（%.2f s）", took))
         } else {
@@ -662,7 +662,8 @@ final class QuitSelfTestHarness {
               && (analysis?.message.contains("已经分析完的照片存好") ?? false),
               "分析在跑：「停下并退出」（回车）/「继续分析」（Esc），说清已分析的会存好")
         let vlm = QuitGuard.prompt(for: .askStop(.vlm))
-        check((vlm?.message.contains("Python 进程一起停掉") ?? false) && vlm?.secondary == "继续判片", "VLM 在跑：说清后台 Python 一起停")
+        check((vlm?.message.contains("Python 进程一起停掉") ?? false) && vlm?.secondary == "继续精审" && vlm?.title == "本地模型正在精审幸存照片，现在退出会中断",
+              "精审（本地模型）在跑：说清后台 Python 一起停")
         let card = QuitGuard.prompt(for: .askStop(.cardImport(queued: 2)))
         check((card?.message.contains("另外 2 张卡") ?? false) && (card?.message.contains("先别格式化") ?? false)
               && (card?.message.contains("不留半截") ?? false),

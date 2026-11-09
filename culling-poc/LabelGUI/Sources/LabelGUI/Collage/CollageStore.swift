@@ -1235,7 +1235,7 @@ final class CollageStore: ObservableObject {
         guard let root, let page else { return }
         if isAlbum, project.albumTheme == .fineArt {
             // fine-art 跨页是编排按版心算的（完整显示、卡纸留白、不跨缝），求解器的满铺网格会把它拆掉。
-            setNotice("婚礼 fine-art 的跨页按编排出版式，没有「换一批」：想重排点「自动编排」，或把编排换回「默认」")
+            setNotice("婚礼相册的跨页按编排出版式，没有「换一批」：想重排点「自动编排」，或把编排换回「默认」")
             return
         }
         if page.contactSheet != nil {

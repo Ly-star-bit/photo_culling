@@ -671,7 +671,7 @@ private struct DarkroomControls: View {
                         DarkroomSlider(label: "颗粒", value: store.project.style.filmGrain,
                                        ticks: [(0, nil), (0.5, "原样"), (1, "两倍")],
                                        set: { model.setStyleValue(\.filmGrain, $0) },
-                                       help: "胶片的细小纹理（spektrafilm 的颗粒模型）：50% 就是这款胶片在底片上的真实颗粒，100% 是两倍。"
+                                       help: "胶片的细小纹理（按这款胶片的真实颗粒算）：50% 就是它在底片上的颗粒，100% 是两倍。"
                                            + "缩小看的时候细颗粒会被平均掉，要在下面的 1:1 细节里看；先看整张，再看细节")
                         DarkroomSlider(label: "晕光", value: store.project.style.filmHalation,
                                        ticks: [(0, nil), (0.22, "真片"), (0.52, "弱"), (1, "去掉")],

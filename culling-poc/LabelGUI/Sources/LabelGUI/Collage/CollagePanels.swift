@@ -220,7 +220,7 @@ struct CollageLookBox: View {
                 CollageSlider(label: "颗粒", value: binding(\.filmGrain), range: 0...1,
                               display: percentText(store.project.style.filmGrain))
                     .disabled(!film.texture)
-                    .help("光谱胶片的颗粒（spektrafilm 的颗粒模型）：50% ≈ 这款胶片在 35mm 底片上的真实颗粒，100% 是两倍。"
+                    .help("胶片的颗粒（按这款胶片的真实颗粒算）：50% ≈ 它在 35mm 底片上的颗粒，100% 是两倍。"
                           + "按每张照片的像素算，导出和放大预览时才看得清；只在光谱胶片（负片、反转片、电影负片）上起作用，"
                           + "整组、哪一页、哪一格用着都算。从别的色调换进光谱胶片时自动设成这一款的起始值，拉回 0 以后不再自动加")
                 CollageSlider(label: "晕光", value: binding(\.filmHalation), range: 0...1,
