@@ -167,19 +167,36 @@ final class AppModel: ObservableObject {
 // MARK: - 「批量处理」页签上的进度（优化分析 NU11）
 
 extension AppModel {
-    /// 批量页的 isRunning 变了（已经回到主线程、那一拍写完了）。开跑：清掉上一次的「完成 / 出错」，记下现在的红字；
-    /// 跑完：用户这时不在批量页才记（在批量页的话底栏就看得见）。
+    /// 批量页的 isRunning 变了（已经回到主线程、那一拍写完了）。开跑：清掉上一次的「完成」，记下现在的红字和导卡提示；
+    /// 「出错」不清 —— 留到用户回批量页看过（排队的第二张卡一开跑，第一张的「先别格式化」不能被盖成「完成」）。
+    /// 跑完：用户这时不在批量页才记（在批量页的话底栏就看得见）。新的红字、新的导卡提示里有出了问题的（没导、先别格式化）
+    /// 算「出错」；只是告知的（同名改名导入、导到了还没打开）不算。
     fileprivate func batchRunningChanged(_ running: Bool) {
         if running {
-            batchTaskEnd = nil
+            if batchTaskEnd == .done { batchTaskEnd = nil }
             batchErrorAtStart = batch.lastError
             batchNoticeAtStart = batch.importNotice
             return
         }
         guard tab != .batch else { return }
-        let error = batch.lastError.flatMap { $0 == batchErrorAtStart ? nil : $0 }
-        let notice = batch.importNotice.flatMap { $0 == batchNoticeAtStart ? nil : $0 }
-        batchTaskEnd = error != nil || notice != nil ? .failed : .done
+        batchTaskEnd = Self.batchTaskEnd(previous: batchTaskEnd, errorAtStart: batchErrorAtStart, error: batch.lastError,
+                                         noticeAtStart: batchNoticeAtStart, notice: batch.importNotice)
+    }
+
+    /// 跑完以后页签上记什么（纯函数，`--ux-selftest` 测）。
+    nonisolated static func batchTaskEnd(previous: BatchTaskEnd?, errorAtStart: String?, error: String?,
+                                         noticeAtStart: String?, notice: String?) -> BatchTaskEnd {
+        if previous == .failed { return .failed }
+        if let error, error != errorAtStart { return .failed }
+        let before = Set((noticeAtStart ?? "").components(separatedBy: "\n"))
+        let fresh = (notice ?? "").components(separatedBy: "\n").filter { !$0.isEmpty && !before.contains($0) }
+        return fresh.contains(where: importNoticeIsProblem) ? .failed : .done
+    }
+
+    /// 导卡提示里哪一条是出了问题：没导（卡读不了、排队时被拔了、有文件没导进来）、要用户先别格式化卡的。
+    /// 别的（同名改名导入、导到了还没打开）只是告知。和 BatchStore.addImportNotice 挑留哪几行用的是同一个记号。
+    nonisolated static func importNoticeIsProblem(_ line: String) -> Bool {
+        line.contains("先别格式化") || line.contains("没导")
     }
 
     /// 「批量处理」页签上的字（纯函数，`--ux-selftest` 测）：长任务在跑时带上在做什么、几成（没有进度的写「…」）；
@@ -198,7 +215,8 @@ extension AppModel {
             case .pageExport, .other: what = "处理中"
             }
             guard let fraction, fraction.isFinite else { return name + " · " + what + "…" }
-            let pct = Int((min(1, max(0, fraction)) * 100).rounded(.down))
+            // 按 5% 一档跳：分析每张照片回调一次进度，页签按字的宽度排，每 1% 换一次字整排页签就左右挪一下。
+            let pct = Int((min(1, max(0, fraction)) * 100).rounded(.down)) / 5 * 5
             return name + " · " + what + " \(pct)%"
         }
         switch ended {

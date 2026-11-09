@@ -3026,6 +3026,9 @@ final class BatchStore: ObservableObject {
                 // 以前无条件 previewsChanged: true，网格收到就把四个图片缓存整份清掉、看得见的格子全部重解：
                 // 「重新分析」一张没重做、或者只新拷进 20 张也一样。现在只清真重写了预览的旧照片。
                 let stale = Self.stalePreviewPaths(before: cachedPaths, written: summary.previewsWritten)
+                // 在这里作废，不靠批量页的视图收通知：用户点了「重新分析」就去拼图页干别的时，批量页不在视图树里、收不到，
+                // 回来网格还是旧图（数值新、图旧）。键带代数，回到网格时那几格的 .task(id:) 换键、自己重解。
+                ThumbCache.invalidate(paths: stale)
                 self.postResultsChanged(previewsChanged: !stale.isEmpty, stalePaths: stale)
             }
         }

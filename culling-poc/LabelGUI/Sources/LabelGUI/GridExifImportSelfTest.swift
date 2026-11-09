@@ -143,7 +143,8 @@ enum GridExifImportSelfTest {
     private static func batchTabCases(_ t: Tally) {
         let rows: [(QuitGuard.Job?, Double?, AppModel.BatchTaskEnd?, String)] = [
             (nil, nil, nil, "批量处理"),
-            (.analysis, 0.374, nil, "批量处理 · 分析 37%"),
+            (.analysis, 0.374, nil, "批量处理 · 分析 35%"),
+            (.analysis, 0.399, nil, "批量处理 · 分析 35%"),
             (.cardImport(queued: 1), nil, nil, "批量处理 · 导卡…"),
             (.task(.jpegExport), 1.0, nil, "批量处理 · 导出 JPG 100%"),
             (.task(.copyOriginals), .nan, nil, "批量处理 · 复制原片…"),
@@ -155,6 +156,23 @@ enum GridExifImportSelfTest {
         for (job, fraction, ended, want) in rows {
             let got = AppModel.batchTabTitle(job: job, fraction: fraction, ended: ended)
             t.check(got == want, "批量处理页签「\(want)」", "得到「\(got)」")
+        }
+
+        // 跑完记「完成」还是「出错」：新红字、导卡提示里出了问题的（没导、先别格式化）才算出错；没看过的「出错」不被下一个任务盖掉
+        let warn = "存储卡「A」有 3 个文件没导进来 —— 先别格式化存储卡"
+        let info = "存储卡「B」：2 个同名文件改了名导入"
+        let ends: [(String, AppModel.BatchTaskEnd?, String?, String?, String?, String?, AppModel.BatchTaskEnd)] = [
+            ("什么都没多", nil, nil, nil, nil, nil, .done),
+            ("多了一条红字", nil, nil, "导出失败", nil, nil, .failed),
+            ("红字还是开跑时那条", nil, "导出失败", "导出失败", nil, nil, .done),
+            ("导卡多了「先别格式化」", nil, nil, nil, nil, warn, .failed),
+            ("导卡只多了改名的告知", nil, nil, nil, nil, info, .done),
+            ("排队的第二张卡导完：第一张的「先别格式化」开跑时已经在了", .failed, nil, nil, warn, warn, .failed),
+            ("开跑前已有告知、这次又多一条告知", nil, nil, nil, info, info + "\n" + "120 张导到了 ~/Pictures/x，还没打开、没分析", .done),
+        ]
+        for (name, previous, e0, e1, n0, n1, want) in ends {
+            let got = AppModel.batchTaskEnd(previous: previous, errorAtStart: e0, error: e1, noticeAtStart: n0, notice: n1)
+            t.check(got == want, "批量处理页签 跑完：" + name + (want == .failed ? " → 出错" : " → 完成"), "\(got)")
         }
     }
 

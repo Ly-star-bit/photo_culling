@@ -226,16 +226,8 @@ struct BatchView: View {
         }
         // 实时桥（§9.6b）：这几样开着时 AI 的改判 / 切场次 / 定位照片要等或者不做。只往 store 上记，界面不变
         .onChange(of: liveFlags, initial: true) { store.liveUI = liveFlags }
-        // 重新分析会原地覆盖预览图 —— 不清缓存的话数值更新了、图还是旧的。
-        // 只有分析真的重写了预览才清；切场次/VLM/废纸篓也发同一通知，
-        // 以前跟着一起清空，切回来整个网格重新解码一遍。
-        // 而且只清重写了预览的那几张（stalePaths：分析前就在网格里的照片的预览、原图路径）：全部复用时一张不清，
-        // 新拷进来的照片本来就是新键。
-        .onReceive(NotificationCenter.default.publisher(for: .analysisDidFinish)) { note in
-            if note.userInfo?["previewsChanged"] as? Bool == true {
-                ThumbCache.invalidate(paths: note.userInfo?["stalePaths"] as? [String] ?? [])
-            }
-        }
+        // 重新分析原地覆盖了预览图时，缩略图缓存在 BatchStore.runAnalysis 收尾就作废了（只作废重写了预览的那几张）：
+        // 以前在这里收通知再清，用户不在批量页时这个视图不在树里、收不到，回来是旧图。
         // 废片进废纸篓后这些 id 就没了，留着同样会写到不存在的照片上。
         .onChange(of: store.items.count) {
             let live = Set(store.items.map(\.id))
@@ -2858,7 +2850,8 @@ enum ThumbCache {
 
     /// 纯解码，不进缓存 —— 大图那条线用自己的 FitCache，别把网格缩略图挤出去。
     /// `embeddedMinEdge`：RAW 内嵌的 JPEG 至少要多大才用（长边，像素）；nil = min(2000, maxPixel / 2)，大图那条线一直用的门槛。
-    static func decode(path: String, maxPixel: Int, embeddedMinEdge: Int? = nil) -> NSImage? {
+    /// `embeddedAspect`：内嵌 JPEG 的宽高比要和它差 2% 以内才用（人脸小图按分析预览的画面裁，见 FaceStripCache.source）。
+    static func decode(path: String, maxPixel: Int, embeddedMinEdge: Int? = nil, embeddedAspect: CGFloat? = nil) -> NSImage? {
         guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil) else { return nil }
         // RAW-only 场次的适应视图：先试相机内嵌的 JPEG 预览（相机自己锐化过，
         // 解码只要几十毫秒），够大才用；不够大（很多 RAW 只嵌了 160px 缩略图）
@@ -2871,7 +2864,8 @@ enum ThumbCache {
                kCGImageSourceThumbnailMaxPixelSize: maxPixel,
                kCGImageSourceCreateThumbnailWithTransform: true,
            ] as CFDictionary),
-           max(embedded.width, embedded.height) >= (embeddedMinEdge ?? min(2000, maxPixel / 2)) {
+           max(embedded.width, embedded.height) >= (embeddedMinEdge ?? min(2000, maxPixel / 2)),
+           FaceStripCache.sameAspect(CGSize(width: embedded.width, height: embedded.height), embeddedAspect) {
             return NSImage(cgImage: embedded, size: NSSize(width: embedded.width, height: embedded.height))
         }
         guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
@@ -3625,7 +3619,7 @@ enum FaceStripCache {
 
     /// 原图解码（2048，进缓存）。纯 RAW 场次先取相机内嵌的 JPEG（和网格、大图同一条路：ThumbCache.decode），够大才用；
     /// 不够大、或者不是 RAW 的照旧整幅解（参数和以前一样）。调用的任务取消了、排到时还没开始解的就不解，返回 nil。
-    static func decode(path: String) async -> NSImage? {
+    static func decode(path: String, aspect: CGFloat? = nil) async -> NSImage? {
         if let hit = cache.object(forKey: path as NSString) { return hit }
         let request = Request()
         return await withTaskCancellationHandler {
@@ -3636,7 +3630,8 @@ enum FaceStripCache {
                         return
                     }
                     guard !request.isCancelled,
-                          let image = ThumbCache.decode(path: path, maxPixel: 2048, embeddedMinEdge: embeddedMinEdge)
+                          let image = ThumbCache.decode(path: path, maxPixel: 2048, embeddedMinEdge: embeddedMinEdge,
+                                                        embeddedAspect: aspect)
                     else {
                         continuation.resume(returning: nil)
                         return
@@ -3663,10 +3658,26 @@ enum FaceStripCache {
         }
         // 大图那边已经解过的（审片 / 挑选 / 检视器的大图、相邻预取都会解，JPEG 多半是原图的一半）：直接拿来裁，
         // 不再为一张脸单独排一张 2048 的原图解码 —— 那个队列是串行的、取消不了，翻得快会越排越长。
-        if let fit = FitCache.cachedDecode(path: decodePath) {
+        // 人脸框是按分析预览（整幅解码、转正）的画面归一化的，拿来裁的图画幅要和它一样：RAW 内嵌的 JPEG 在机内设了 16:9 / 1:1
+        // 画幅、做了畸变校正时取景和整幅解码不一样，按框裁出来的脸会偏（小脸偏几个百分点就把眼睛裁掉）—— 对不上就不用它。
+        let aspect = previewAspect(previewPath)
+        if let fit = FitCache.cachedDecode(path: decodePath), sameAspect(fit.size, aspect) {
             return fit
         }
-        return await decode(path: decodePath)
+        return await decode(path: decodePath, aspect: aspect)
+    }
+
+    /// 分析预览转正后的宽高比（只读文件头）；读不到 = nil（不比）。
+    private static func previewAspect(_ path: String) -> CGFloat? {
+        guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+              let size = WatermarkEngine.uprightSize(of: source), size.width > 0, size.height > 0 else { return nil }
+        return CGFloat(size.width) / CGFloat(size.height)
+    }
+
+    /// 宽高比差 2% 以内（aspect 是 nil = 不比，算对得上）。
+    static func sameAspect(_ size: CGSize, _ aspect: CGFloat?) -> Bool {
+        guard let aspect, size.width > 0, size.height > 0 else { return true }
+        return abs(size.width / size.height - aspect) <= aspect * 0.02
     }
 }
 

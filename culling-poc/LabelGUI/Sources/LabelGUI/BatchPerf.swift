@@ -67,8 +67,11 @@ enum BatchPerf {
                 }
             }
         }
-        measure("直接改判 带动画", (0..<12).map { setStep($0, animated: true) }, idle: idle, spin: spin)
-        measure("直接改判 不带动画", (12..<24).map { setStep($0, animated: false) }, idle: idle, spin: spin)
+        // 场次里一张照片都没有就不量这两组（targets 空着取下标会崩）。
+        if !targets.isEmpty {
+            measure("直接改判 带动画", (0..<12).map { setStep($0, animated: true) }, idle: idle, spin: spin)
+            measure("直接改判 不带动画", (12..<24).map { setStep($0, animated: false) }, idle: idle, spin: spin)
+        }
         print("perf grid：完了以后 \(store.manualOverrideCount) 张人工改判 · 挂着的格子 \(viewport.mountedCells) 个")
     }
 
