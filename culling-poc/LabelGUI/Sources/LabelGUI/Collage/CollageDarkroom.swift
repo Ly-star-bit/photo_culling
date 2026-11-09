@@ -412,6 +412,10 @@ final class CollageDarkroom: ObservableObject {
         hover = nil
         loupeAnchor = nil
         store.pageIndex = target
+        // 样张的焦点跟着新这一页现在用的色调走（同打开暗房时）：不然焦点框还停在上一页套的那款，按 ⏎ 会把它套到这一页，
+        // ← → 也从它往后数。
+        focus = current.look
+        tab = Self.tab(of: current.look)
     }
 
     /// 底片条上点一格：选中它，「套用到」换成这一格，放大镜挪过去。

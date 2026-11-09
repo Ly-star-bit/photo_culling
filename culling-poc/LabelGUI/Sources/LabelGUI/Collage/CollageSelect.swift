@@ -131,7 +131,7 @@ enum CollageVision {
     private static var hintCache: [String: CollageCrop.Hints] = [:]
     private static var printCache: [String: VNFeaturePrintObservation] = [:]
 
-    /// 门禁（LABELGUI_STABLE_SEEDS=1，Scripts/collage_gate.sh 设）里拼图用的 Vision 一律在 CPU 上算。神经网络引擎被别的
+    /// 门禁（LABELGUI_STABLE_SEEDS=1：Scripts/collage_gate.sh 设，live_smoke.py 的拼图那几段也设）里拼图用的 Vision 一律在 CPU 上算。神经网络引擎被别的
     /// 进程占着时，Vision 会换到 GPU / CPU 上算，特征、检测框差一点点，挑片顺序就变了：2026-11-08 机器忙时同一个程序和
     /// 空闲时出的基线差 142 张（自动挑片的 album、grid9、scatter、sheet、split）。钉在 CPU 上，忙不忙都算出同一个数。
     /// 平常不设：照旧让 Vision 自己挑（神经网络引擎快得多）。

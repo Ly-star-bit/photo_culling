@@ -215,6 +215,7 @@ enum CollageMasks {
             ctx.fill(CGRect(x: 0, y: 0, width: 64, height: 64))
             guard let image = ctx.makeImage() else { return }
             let request = VNGenerateForegroundInstanceMaskRequest()
+            CollageVision.pinForGate(request)  // 预热也走同一个计算单元（门禁模式下 CPU），别把模型先加载到神经网络引擎上
             try? VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
         }
     }
