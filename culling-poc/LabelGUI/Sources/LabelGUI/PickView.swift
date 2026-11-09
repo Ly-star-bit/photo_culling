@@ -509,16 +509,16 @@ struct PickView: View {
         }
     }
 
-    /// ⏎ 之后要去的那一组先解好。小组（≤4 张，格子大、要清晰版）解 4096；大组格子小，预览就够。
+    /// ⏎ 之后要去的那一组先解好。小组（≤4 张，格子大、要清晰版）解大图（和 SharpImageView 同一个尺寸、同一个键，
+    /// 见 FitCache.decodeSize）；大组格子小，预览就够。
     private func prefetchUpcoming() {
         guard let index = session.upcomingIndex else { return }
         let frames = session.frames(of: session.groups[index])
         if frames.count <= 4 {
+            let display = FitCache.expectedEdge
             for item in frames {
                 let path = item.decodePath
-                let px = SharpImageView.fitMaxPixel
-                guard FitCache.cache.object(forKey: ThumbCache.key(path, px)) == nil else { continue }
-                Task.detached(priority: .utility) { _ = FitCache.load(path: path, maxPixel: px) }
+                Task.detached(priority: .utility) { await FitCache.prefetch(path: path, display: display) }
             }
         } else {
             for item in frames.prefix(10) {
@@ -565,8 +565,8 @@ private struct PickTile: View {
 
     @State private var hovering = false
 
-    /// 格子够大（物理像素超过预览）才走 4096 + 锐化的清晰版；格子小的大组用 1024 预览就够，
-    /// 不然一组十几张就是十几张 4096 解码。
+    /// 格子够大（物理像素超过预览）才走大图解码 + 锐化的清晰版；格子小的大组用 1024 预览就够，
+    /// 不然一组十几张就是十几张大图解码。
     private var sharp: Bool {
         max(layout.image.width, layout.image.height) * (NSScreen.main?.backingScaleFactor ?? 2)
             > CGFloat(ImageLoader.previewMaxPixel) * 1.1

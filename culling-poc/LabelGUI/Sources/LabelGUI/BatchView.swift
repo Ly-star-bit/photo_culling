@@ -2840,8 +2840,8 @@ struct ThumbnailView: View {
 
 // MARK: - 大图专用缓存
 
-/// 检视器 / 审片 / 对比的 4096 解码（~45MB/张）和锐化成品（~17MB/张）。以前和网格
-/// 缩略图塞同一个 ThumbCache：检视器里翻 20 张就是 1.2GB，回到网格全灰重解。
+/// 检视器 / 审片 / 对比的大图解码（长边 3000–4096，~25–45MB/张，尺寸见 decodeSize）和锐化成品（~17MB/张）。
+/// 以前和网格缩略图塞同一个 ThumbCache：检视器里翻 20 张就是 1.2GB，回到网格全灰重解。
 /// 这里只留翻页前后够用的几张，网格那边不受影响。
 enum FitCache {
     static let cache: NSCache<NSString, NSImage> = {
@@ -2851,12 +2851,139 @@ enum FitCache {
         return c
     }()
 
-    static func load(path: String, maxPixel: Int) -> NSImage? {
+    // MARK: 解码尺寸
+
+    /// 原图的文件头：转正后的长边、是不是 JPEG（只有 JPEG 有 DCT 缩放「解一半」的快路）。
+    struct Header: Equatable {
+        let longEdge: Int
+        let jpeg: Bool
+    }
+
+    /// 大图解多大（纯函数，`--ux-selftest` 直接测）。`display` = 取景区要的设备像素长边（SharpRenderer.bucket
+    /// 分好的档）；目标 = min(4096, display)，原图长边的一半 ≥ 目标的 0.9 倍时直接要「一半」。
+    ///
+    /// ImageIO 解 JPEG 时，要的尺寸不超过原图长边的一半就按 DCT 只解一半，超过一半就只能整张解完再缩
+    /// （交付导出那边实测过同一件事，DeliveryExport.swift 的 deliveryDownscale）。以前固定要 4096：24–40 MP
+    /// 机身（长边 6000–7728，一半 3000–3864）都比 4096 小，每翻一页都整张解。7728×5152 的 JPEG（DSCF7207）
+    /// 实测：要 4096 是 241 ms、峰值 386 MB；要一半（3864）92 ms、158 MB。要得比一半还小反而更慢（2560 = 解一半
+    /// 再缩一遍，113 ms），所以够用就一律要一半、不跟着窗口再往下缩 —— 窗口拖大拖小也不用重新解。
+    /// - 一半不够（6000 长边的机身在 5K 全屏上要 3584，3000 < 0.9 × 3584）：要 4096，和以前一样。反正要整张解，
+    ///   要 4096 比要显示的档位稳：拖窗口每过一档不用再整张解一遍。
+    /// - 一半超过 4096（61 MP 的 9504）：要 4096，ImageIO 照样解一半再缩，不比以前多占内存。
+    /// - 读不到尺寸（original ≤ 0）：4096，老路。
+    /// 代价：5K / 6K 全屏看 40 MP 的 JPEG 时解 3864 不是 4096（长边少约 6%），Lanczos 缩到屏幕时看不出来。
+    static func decodeSize(original: Int, display: Int) -> Int {
+        let cap = SharpImageView.fitMaxPixel
+        guard original > 0 else { return cap }
+        let target = min(cap, max(1, display))
+        let half = original / 2
+        // half ≥ 0.9 × target，按整数比。
+        guard half * 10 >= target * 9 else { return cap }
+        return min(half, cap)
+    }
+
+    /// 按文件头定：不是 JPEG 的（RAW、HEIC、TIFF）、读不出头的一律 4096，走老路 —— RAW 在 ThumbCache.decode
+    /// 里按 maxPixel 决定用不用相机内嵌的 JPEG，尺寸一变可能掉进整幅 demosaic；HEIC 没有解一半的快路。
+    static func decodeSize(header: Header?, display: Int) -> Int {
+        guard let header, header.jpeg else { return SharpImageView.fitMaxPixel }
+        return decodeSize(original: header.longEdge, display: display)
+    }
+
+    /// 最近一次量到的大图长边档位（设备像素；SharpImageView 量到尺寸时写）。预取按它定解码尺寸，
+    /// 和翻到时那张大图要的是同一个缓存键。
+    @MainActor static var displayEdge = 0
+
+    /// 预取、还没量到尺寸的大图用的长边：量过就用量到的；一张都还没量过就按主屏幕整屏给 —— 宁大勿小，
+    /// 小了的话 6000 长边的机身先按一半解、量到尺寸以后又整张解一遍。
+    @MainActor static var expectedEdge: Int {
+        if displayEdge > 0 { return displayEdge }
+        let screen = NSScreen.main
+        let size = screen?.frame.size ?? CGSize(width: 1440, height: 900)
+        let scale = screen?.backingScaleFactor ?? 2
+        return SharpRenderer.bucket(max(size.width, size.height) * scale)
+    }
+
+    /// 文件头和在解的任务两张表，一把锁：预取、大图、人脸小图都在后台线程上查。
+    private final class Book: @unchecked Sendable {
+        private let lock = NSLock()
+        private var headers: [String: Header] = [:]
+        private var running: [String: Task<NSImage?, Never>] = [:]
+
+        func header(_ path: String) -> Header? {
+            lock.lock(); defer { lock.unlock() }
+            return headers[path]
+        }
+
+        func setHeader(_ header: Header, for path: String) {
+            lock.lock(); defer { lock.unlock() }
+            headers[path] = header
+        }
+
+        /// 这个键已经有人在解就交出那一份，没有才 `start` 一个（在锁里登记，start 出来的任务要等锁放了才能 finish）。
+        func task(for key: String, start: () -> Task<NSImage?, Never>) -> Task<NSImage?, Never> {
+            lock.lock(); defer { lock.unlock() }
+            if let inFlight = running[key] { return inFlight }
+            let made = start()
+            running[key] = made
+            return made
+        }
+
+        func finish(_ key: String) {
+            lock.lock(); defer { lock.unlock() }
+            running[key] = nil
+        }
+    }
+    private static let book = Book()
+
+    /// 读过的文件头（不读文件）。nil = 这张还没读过。
+    static func cachedHeader(path: String) -> Header? { book.header(path) }
+
+    /// 只读文件头（不解码），按路径记住，一张只读一次。读不出 = nil（按 4096 走老路，不记）。
+    static func header(path: String) -> Header? {
+        if let known = book.header(path) { return known }
+        guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+              let size = WatermarkEngine.uprightSize(of: source) else { return nil }
+        let type = CGImageSourceGetType(source) as String?
+        let header = Header(longEdge: max(size.width, size.height), jpeg: type == UTType.jpeg.identifier)
+        book.setHeader(header, for: path)
+        return header
+    }
+
+    /// 解码（进缓存）。同一个键已经有人在解（预取还没解完就翻到了、量到尺寸以后任务重进）就等那一份，
+    /// 不另起一张 —— 一张 40 MP 整张解要 160 MB 临时内存。
+    static func load(path: String, maxPixel: Int, priority: TaskPriority = .userInitiated) async -> NSImage? {
         let cacheKey = ThumbCache.key(path, maxPixel)
         if let hit = cache.object(forKey: cacheKey) { return hit }
-        guard let image = ThumbCache.decode(path: path, maxPixel: maxPixel) else { return nil }
-        cache.setObject(image, forKey: cacheKey, cost: Int(image.size.width * image.size.height * 4))
-        return image
+        let name = cacheKey as String
+        let task = book.task(for: name) {
+            Task.detached(priority: priority) { () -> NSImage? in
+                let image = ThumbCache.decode(path: path, maxPixel: maxPixel)
+                if let image {
+                    cache.setObject(image, forKey: name as NSString,
+                                    cost: Int(image.size.width * image.size.height * 4))
+                }
+                book.finish(name)
+                return image
+            }
+        }
+        return await task.value
+    }
+
+    /// 翻页前把邻居先解好：和翻到时那张大图同一个尺寸、同一个键。`display` 在主线程上取好（expectedEdge）再传进来。
+    static func prefetch(path: String, display: Int) async {
+        let size = decodeSize(header: header(path: path), display: display)
+        _ = await load(path: path, maxPixel: size, priority: .utility)
+    }
+
+    /// 这张已经解好的大图（不解码、不读文件）。JPEG 只可能解成两种尺寸（一半或 4096，见 decodeSize），
+    /// 两个键都看一眼，不用知道取景区多大。
+    static func cachedDecode(path: String) -> NSImage? {
+        let cap = SharpImageView.fitMaxPixel
+        if let header = book.header(path), header.jpeg, header.longEdge / 2 < cap,
+           let half = cache.object(forKey: ThumbCache.key(path, header.longEdge / 2)) {
+            return half
+        }
+        return cache.object(forKey: ThumbCache.key(path, cap))
     }
 }
 
@@ -2864,8 +2991,8 @@ enum FitCache {
 
 // SharpRenderer（Lanczos + 屏幕输出锐化）挪到了 DeliveryExport.swift：交付导出缩小时也走它。
 
-/// 适应窗口的大图，三段渐进：1024 预览秒出 → 4096 解码 → 按取景区设备像素
-/// Lanczos+锐化的成品换上。翻页时预取的是中间那张 4096，成品在 GPU 上几毫秒。
+/// 适应窗口的大图，三段渐进：1024 预览秒出 → 大图解码（≤ 4096，JPEG 多半是原图的一半，见
+/// FitCache.decodeSize）→ 按取景区设备像素 Lanczos+锐化的成品换上。翻页时预取的是中间那张解码，成品在 GPU 上几毫秒。
 ///
 /// 以前三处大图全是 `ThumbnailView(previewPath, maxPixel: 1600)` —— 但预览文件
 /// 本身只有 1024px（previewMaxPixel），Retina 27" 上的大图面板 ~2200 物理像素宽，
@@ -2881,24 +3008,34 @@ struct SharpImageView: View {
     /// 图实际显示出来的尺寸（点），量出来才知道要渲染多少设备像素。
     @State private var displayed: CGSize = .zero
 
-    /// 中间那张解码的上限。JPEG 走 ImageIO 的 DCT 缩放解码，4096 和 2048 耗时
-    /// 差不多；RAW 反正要完整 demosaic 再缩。6K 显示器上也够用。
+    /// 中间那张解码的上限（6K 显示器上也够用）。实际解多大看原图和取景区，见 FitCache.decodeSize：
+    /// 24–40 MP 的 JPEG 解原图的一半（DCT 缩放，不整张解）；RAW 反正要完整 demosaic 再缩，还是 4096。
     static let fitMaxPixel = 4096
 
-    private var longEdge: Int {
+    private var longEdge: Int { Self.edge(of: displayed) }
+
+    /// 取景区（点）要多少设备像素长边，按 256 分档。
+    @MainActor static func edge(of size: CGSize) -> Int {
         let scale = NSScreen.main?.backingScaleFactor ?? 2
-        return SharpRenderer.bucket(max(displayed.width, displayed.height) * scale)
+        return SharpRenderer.bucket(max(size.width, size.height) * scale)
     }
 
+    /// 定解码尺寸用的长边：还没量到尺寸时用预取用的那个（最近量到的，或者主屏幕整屏），好命中预取解好的那张，
+    /// 量到以后也多半还是同一个尺寸（见 decodeSize：够用就一律要一半），同一张不解两遍。
+    private var decodeEdge: Int { displayed == .zero ? FitCache.expectedEdge : longEdge }
+
     var body: some View {
-        let decodedKey = ThumbCache.key(decodePath, Self.fitMaxPixel)
+        // 文件头还没读过（第一次见这张）就还没有解码的键，任务里在后台读完再说。
+        let decodedKey = FitCache.cachedHeader(path: decodePath).map {
+            ThumbCache.key(decodePath, FitCache.decodeSize(header: $0, display: decodeEdge))
+        }
         let previewKey = ThumbCache.key(previewPath, 1024)
         // 成品按 (文件, 目标长边) 缓存，和解码缓存住同一个 NSCache。
         let renderedKey = ThumbCache.key(decodePath + "#sharp", longEdge)
-        let mine = loaded?.key == renderedKey || loaded?.key == decodedKey ? loaded?.image : nil
+        let mine = loaded?.key == renderedKey || (decodedKey != nil && loaded?.key == decodedKey) ? loaded?.image : nil
         let shown = mine
             ?? FitCache.cache.object(forKey: renderedKey)
-            ?? FitCache.cache.object(forKey: decodedKey)
+            ?? decodedKey.flatMap { FitCache.cache.object(forKey: $0) }
             ?? ThumbCache.cache.object(forKey: previewKey)
         return Group {
             if let shown {
@@ -2908,26 +3045,38 @@ struct SharpImageView: View {
             }
         }
         .background(GeometryReader { geo in
-            Color.clear.onChange(of: geo.size, initial: true) { displayed = geo.size }
+            Color.clear.onChange(of: geo.size, initial: true) {
+                displayed = geo.size
+                if geo.size != .zero { FitCache.displayEdge = Self.edge(of: geo.size) }
+            }
         })
         .task(id: renderedKey) {
             if let done = FitCache.cache.object(forKey: renderedKey) {
                 loaded = (renderedKey, done)
                 return
             }
+            let d = decodePath
+            let wanted = decodeEdge
+            let header: FitCache.Header?
+            if let known = FitCache.cachedHeader(path: d) {
+                header = known
+            } else {
+                header = await Task.detached(priority: .userInitiated) { FitCache.header(path: d) }.value
+                guard !Task.isCancelled else { return }
+            }
+            let px = FitCache.decodeSize(header: header, display: wanted)
+            let decodedKey = ThumbCache.key(d, px)
             // 1. 预览先上（多半已在缓存里，没有就解一张 1024 的，很快）。
             if loaded?.key != decodedKey, loaded?.key != renderedKey {
                 let p = previewPath
-                if let quick = await Task.detached(priority: .userInitiated) { ThumbCache.load(path: p, maxPixel: 1024) }.value {
+                let quick = await Task.detached(priority: .userInitiated) { ThumbCache.load(path: p, maxPixel: 1024) }.value
+                if let quick {
                     guard !Task.isCancelled else { return }
                     loaded = (decodedKey, quick)
                 }
             }
-            // 2. 4096 解码。
-            let d = decodePath
-            let px = Self.fitMaxPixel
-            guard let decoded = await Task.detached(priority: .userInitiated) { FitCache.load(path: d, maxPixel: px) }.value,
-                  !Task.isCancelled else { return }
+            // 2. 解码（尺寸见 FitCache.decodeSize；预取在解的同一张就等它，不另解）。
+            guard let decoded = await FitCache.load(path: d, maxPixel: px), !Task.isCancelled else { return }
             loaded = (decodedKey, decoded)
             // 3. 还没量到尺寸就先停在这，量到后 renderedKey 变化会再进来。
             guard displayed != .zero else { return }
@@ -3343,9 +3492,9 @@ enum FaceStripCache {
            let preview = ThumbCache.load(path: previewPath, maxPixel: ImageLoader.previewMaxPixel) {
             return preview
         }
-        // 大图那边已经解过 4096 的（审片 / 挑选 / 检视器的大图、相邻预取都会解）：直接拿来裁，
+        // 大图那边已经解过的（审片 / 挑选 / 检视器的大图、相邻预取都会解，JPEG 多半是原图的一半）：直接拿来裁，
         // 不再为一张脸单独排一张 2048 的原图解码 —— 那个队列是串行的、取消不了，翻得快会越排越长。
-        if let fit = FitCache.cache.object(forKey: ThumbCache.key(decodePath, 4096)) {
+        if let fit = FitCache.cachedDecode(path: decodePath) {
             return fit
         }
         return await decode(path: decodePath)
@@ -3636,16 +3785,15 @@ struct PhotoInspector: View {
     private func prefetchNeighbors() {
         let ids = visibleIDs
         guard let idx = ids.firstIndex(of: currentID) else { return }
+        let display = FitCache.expectedEdge
         for offset in [1, -1] {
             let n = idx + offset
             guard ids.indices.contains(n),
                   let neighbor = store.item(withID: ids[n]) else { continue }
-            // 预取的是 SharpImageView 要换上去的那张清晰版，翻到时直接命中缓存。
+            // 预取的是 SharpImageView 要换上去的那张清晰版（同一个解码尺寸），翻到时直接命中缓存。
             let path = neighbor.decodePath
-            let px = SharpImageView.fitMaxPixel
-            guard FitCache.cache.object(forKey: ThumbCache.key(path, px)) == nil else { continue }
             Task.detached(priority: .utility) {
-                _ = FitCache.load(path: path, maxPixel: px)
+                await FitCache.prefetch(path: path, display: display)
             }
         }
     }
@@ -4434,15 +4582,14 @@ struct ReviewView: View {
     private func prefetchNeighbors() {
         let order = self.order
         let idx = index(in: order)
+        let display = FitCache.expectedEdge
         for offset in [1, -1, 2] {
             let n = idx + offset
             guard order.indices.contains(n), let neighbor = store.item(withID: order[n]) else { continue }
-            // 预取的是 SharpImageView 要换上去的那张清晰版，翻到时直接命中缓存。
+            // 预取的是 SharpImageView 要换上去的那张清晰版（同一个解码尺寸），翻到时直接命中缓存。
             let path = neighbor.decodePath
-            let px = SharpImageView.fitMaxPixel
-            guard FitCache.cache.object(forKey: ThumbCache.key(path, px)) == nil else { continue }
             Task.detached(priority: .utility) {
-                _ = FitCache.load(path: path, maxPixel: px)
+                await FitCache.prefetch(path: path, display: display)
             }
         }
     }

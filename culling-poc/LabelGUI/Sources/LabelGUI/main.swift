@@ -313,14 +313,15 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
 
 // Headless sharpen smoke test (适应视图管线):
 // LabelGUI --sharp <photo> <out.jpg> [longEdge]
-// 走和检视器一模一样的 4096 解码 → Lanczos 缩到 longEdge → unsharp，落成 JPEG。
+// 走和检视器一模一样的解码（尺寸按 longEdge 定，FitCache.decodeSize）→ Lanczos 缩到 longEdge → unsharp，落成 JPEG。
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--sharp"),
    CommandLine.arguments.count > flagIndex + 2 {
     let photo = CommandLine.arguments[flagIndex + 1]
     let out = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 2])
     let edge = CommandLine.arguments.count > flagIndex + 3 ? Int(CommandLine.arguments[flagIndex + 3]) ?? 2560 : 2560
     let start = Date()
-    guard let decoded = ThumbCache.load(path: photo, maxPixel: SharpImageView.fitMaxPixel) else {
+    let decodeSize = FitCache.decodeSize(header: FitCache.header(path: photo), display: edge)
+    guard let decoded = ThumbCache.load(path: photo, maxPixel: decodeSize) else {
         FileHandle.standardError.write("decode failed\n".data(using: .utf8)!); exit(1)
     }
     let t1 = Date()

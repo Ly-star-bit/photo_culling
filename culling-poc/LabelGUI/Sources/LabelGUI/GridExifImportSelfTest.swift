@@ -2,7 +2,7 @@ import Foundation
 import Combine
 
 /// `--ux-selftest` 里的几组纯函数用例：EXIF 拍摄参数（快门 0 / 极小正数不崩）、网格多选（数字键、剪选中）、
-/// 水印页导入的 RAW+JPG 配对、拼图托盘每格的选中标记。
+/// 水印页导入的 RAW+JPG 配对、拼图托盘每格的选中标记、审片 / 检视器大图的解码尺寸。
 /// 每条打 PASS / FAIL 一行，返回失败条数（main.swift 加到总数上）。
 enum GridExifImportSelfTest {
     final class Tally {
@@ -22,7 +22,40 @@ enum GridExifImportSelfTest {
         gridSelectionCases(tally)
         watermarkCases(tally)
         trayMarkCases(tally)
+        fitDecodeCases(tally)
         return tally.failed
+    }
+
+    // MARK: - 大图解码尺寸
+
+    /// 审片 / 检视器 / 连拍挑选的大图解多大（FitCache.decodeSize）：几种机身长边 × 几档取景区。期望值手算：
+    /// 原图长边的一半 ≥ 0.9 × min(4096, 档位) 就要一半（一半超过 4096 的要 4096），不够就 4096。
+    private static func fitDecodeCases(_ t: Tally) {
+        let displays = [1536, 2560, 3072, 3328, 3584, 3840, 4096, 5120]
+        // (机身, 原图长边, 每档期望)
+        let rows: [(String, Int, [Int])] = [
+            ("24 MP 6000", 6000, [3000, 3000, 3000, 3000, 4096, 4096, 4096, 4096]),
+            ("24 MP 6048", 6048, [3024, 3024, 3024, 3024, 4096, 4096, 4096, 4096]),
+            ("33 MP 7008", 7008, [3504, 3504, 3504, 3504, 3504, 3504, 4096, 4096]),
+            ("40 MP 7728", 7728, [3864, 3864, 3864, 3864, 3864, 3864, 3864, 3864]),
+            ("45 MP 8192", 8192, [4096, 4096, 4096, 4096, 4096, 4096, 4096, 4096]),
+            ("61 MP 9504", 9504, [4096, 4096, 4096, 4096, 4096, 4096, 4096, 4096]),
+        ]
+        for (name, original, want) in rows {
+            let got = displays.map { FitCache.decodeSize(original: original, display: $0) }
+            t.check(got == want, "大图解码尺寸 " + name + " × 档位 \(displays)", "得到 \(got)，期望 \(want)")
+        }
+        let small = [1536, 2560].map { FitCache.decodeSize(original: 3000, display: $0) }
+        t.check(small == [1500, 4096], "大图解码尺寸 长边 3000 的小 JPEG：1536 档要一半，2560 档要 4096（ImageIO 给原尺寸）",
+                "得到 \(small)")
+        let unknown = FitCache.decodeSize(original: 0, display: 2560)
+        t.check(unknown == 4096, "大图解码尺寸 读不到原图尺寸 → 4096（老路）", "得到 \(unknown)")
+        let jpeg = FitCache.Header(longEdge: 7728, jpeg: true)
+        let raw = FitCache.Header(longEdge: 7728, jpeg: false)
+        let byHeader = [FitCache.decodeSize(header: jpeg, display: 2560), FitCache.decodeSize(header: raw, display: 2560),
+                        FitCache.decodeSize(header: nil, display: 2560)]
+        t.check(byHeader == [3864, 4096, 4096], "大图解码尺寸 JPEG 要一半；RAW / HEIC、读不出头的照旧 4096",
+                "得到 \(byHeader)")
     }
 
     // MARK: - 拼图托盘的选中标记
