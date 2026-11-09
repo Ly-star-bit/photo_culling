@@ -165,6 +165,14 @@ jobs:
         if: always() && env.DMG_MNT != ''
         run: hdiutil detach "$DMG_MNT" || hdiutil detach "$DMG_MNT" -force
 
+      # 推 tag 沿用这次的 DMG 时 restamp job 要走的路，这里拿一份副本、假版本号预演一遍（上传的 DMG 不动）：tag 那次才第一次
+      # 跑到的步骤（拷出来、改版本号、重签、重新建卷、只读挂上核对），feature 上就先验过。
+      - name: 预演 restamp（假版本号）
+        timeout-minutes: 10
+        run: |
+          culling-poc/LabelGUI/Scripts/restamp_dmg.sh 选片工具.dmg 0.0.0 "$RUNNER_TEMP/restamp-dryrun.dmg"
+          rm -f "$RUNNER_TEMP/restamp-dryrun.dmg"
+
       # 实时桥（v1）：起 --live-host（.prohibited，窗口从不显示；不行就 --no-view），经 --mcp 驱动；临时数据目录 + 测试 socket 根目录。
       # 带不带视图：第一次分支 CI（run 41158761483，2026-10-30）探针报「CI 用带视图的 --live-host」，所以钉 --view require ——
       # 以后哪次 runner 上建不了离屏窗口、拍不出快照或标题栏，这一步就红，不会悄悄退到 --no-view 少测 15 条。
@@ -261,41 +269,31 @@ jobs:
     runs-on: macos-15
     permissions:
       actions: read
+      contents: read
     steps:
+      # 只取那个脚本。要在下载产物之前：checkout 会清空工作目录，放后面会把 DMG 删掉。
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: culling-poc/LabelGUI/Scripts/restamp_dmg.sh
+          sparse-checkout-cone-mode: false
+
       - uses: actions/download-artifact@v4
         with:
           name: PhotoCulling-dmg
           run-id: ${{ needs.check.outputs.run_id }}
           github-token: ${{ github.token }}
 
+      # 拷出来改、重新建卷（原卷几乎没有空余，原地重签会 ENOSPC），最后只读挂上核对版本号和签名 —— 见脚本开头。
+      # build job 的「预演 restamp」每次都用同一个脚本跑过一遍。
       - name: 版本号换成 tag 的、重签
         env:
           FROM_RUN: ${{ needs.check.outputs.run_id }}
         run: |
           V="${GITHUB_REF_NAME#v}"
-          RW="$RUNNER_TEMP/restamp.dmg"
-          MNT="$RUNNER_TEMP/restamp"
-          hdiutil convert 选片工具.dmg -format UDRW -o "$RW" -quiet
-          mkdir -p "$MNT"
-          hdiutil attach "$RW" -nobrowse -noautoopen -mountpoint "$MNT" -quiet
-          APP="$MNT/选片工具.app"
-          PLIST="$APP/Contents/Info.plist"
-          OLD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")"
-          BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST")"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${V}" "$PLIST"
-          codesign --force --sign - "$APP"
-          codesign --verify --deep --strict --verbose=2 "$APP"
-          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")" = "$V" ]
-          detached=0
-          for _ in 1 2 3 4 5; do
-            if hdiutil detach "$MNT" -quiet; then detached=1; break; fi
-            sleep 1
-          done
-          [ "$detached" = 1 ] || hdiutil detach "$MNT" -force -quiet
-          rm -f 选片工具.dmg
-          hdiutil convert "$RW" -format ULMO -o 选片工具.dmg -quiet
+          MSG="$(culling-poc/LabelGUI/Scripts/restamp_dmg.sh 选片工具.dmg "$V" "$RUNNER_TEMP/restamped.dmg" | tail -1)"
+          mv -f "$RUNNER_TEMP/restamped.dmg" 选片工具.dmg
           ls -lh 选片工具.dmg
-          echo "::notice title=沿用 run ${FROM_RUN} 的安装包::版本号 ${OLD} → ${V}（CFBundleVersion ${BUILD} 不变）；只改了 Info.plist、重签，那次编译、测过的包原样发"
+          echo "::notice title=沿用 run ${FROM_RUN} 的安装包::${MSG%%；*}；那次编译、测过的包原样发"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
