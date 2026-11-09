@@ -107,6 +107,7 @@ struct BatchView: View {
     @State private var reviewSkippable = true
 
     var body: some View {
+        let _ = BatchPerf.body("批量页")
         Group {
             if reviewMode {
                 ReviewView(store: store, orderIDs: pagingOrder, rejectsSkippable: reviewSkippable,
@@ -156,7 +157,7 @@ struct BatchView: View {
                             .frame(minWidth: 500, maxWidth: .infinity)
                         if showControls {
                             Divider()
-                            controlPanel
+                            BatchControlPanel(store: store)
                                 .frame(width: 300)
                                 .transition(.move(edge: .trailing))
                         }
@@ -392,7 +393,8 @@ struct BatchView: View {
     // MARK: - Top bar (workflow-ordered: source → analyze → view → review → export)
 
     private var topBar: some View {
-        HStack(spacing: 10) {
+        BatchPerf.body("顶栏")
+        return HStack(spacing: 10) {
             Menu {
                 Button("选择文件夹...") { pickFolder() }
                 // 插卡时会自己问；这条给「卡早就插着、当时点了不导入」的时候用。
@@ -585,6 +587,7 @@ struct BatchView: View {
     // MARK: - Bottom status bar (the ONE home for stats + progress)
 
     private var statusBar: some View {
+        BatchPerf.body("状态栏")
         let counts = store.verdictCounts
         let total = store.items.count
         let rejectPct = total > 0 ? Int(Double(counts.reject) / Double(total) * 100) : 0
@@ -901,6 +904,7 @@ struct BatchView: View {
 
     private var gridArea: some View {
         ScrollViewReader { proxy in
+            let _ = BatchPerf.body("网格")
             VStack(spacing: 0) {
                 if !store.chapterSegments.isEmpty {
                     ChapterTimeline(segments: store.chapterSegments, viewport: viewport,
@@ -910,6 +914,7 @@ struct BatchView: View {
                                     onFilter: { chapter in setChapterFilter(chapter, proxy: proxy) }) { segment in
                         jumpToChapter(segment, proxy: proxy)
                     }
+                    .equatable()
                     .padding(.horizontal, 14)
                     .padding(.top, 8)
                     .padding(.bottom, 2)
@@ -985,31 +990,7 @@ struct BatchView: View {
             }
             // 只认按下：现在改判后焦点会挪到下一张，按住 3 的按键重复会一张接一张往下废。
             .onKeyPress(characters: .init(charactersIn: "1230"), phases: .down) { press in
-                // A digit hits the ⌘/⇧ selection when there is one —
-                // "select five, press 3" used to reject only the focused photo.
-                // 只改选中里还看得见的，改完清掉选中（和批量栏一样）：以前不清，接着用方向键走到别的照片
-                // 再按数字，改的还是早先那几张（GridSelectionRules.swift）。
-                let before = visibleItems.map(\.id)
-                let pick = GridSelectionRules.digitTargets(selected: selectedIDs, visible: before, focused: focusedID)
-                if pick.clearSelection { selectedIDs.removeAll() }
-                guard !pick.ids.isEmpty else { return .ignored }
-                let verdict: Verdict?
-                switch press.characters {
-                case "1": verdict = .pick
-                case "2": verdict = .usable
-                case "3": verdict = .reject
-                default: verdict = nil
-                }
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    store.setOverrideBatch(pick.ids, verdict)
-                }
-                // 改的是选中的几张也要管焦点：焦点那张也在选中里（⇧点、⌘A、点场标题）、被筛掉或整场叠掉时
-                // 以前焦点不动，留在看不见的照片上。
-                keepPlace(changed: pick.ids, before: before, proxy: proxy)
-                if pick.fromSelection, let text = GridSelectionRules.changedNotice(count: pick.ids.count, verdict: verdict) {
-                    showGridToast(text, verdict: verdict)
-                }
-                return .handled
+                applyDigit(press.characters, proxy: proxy) ? .handled : .ignored
             }
             // - / =：缩略图小一号 / 大一号（Lightroom 网格的习惯）。
             .onKeyPress(characters: .init(charactersIn: "-=+")) { press in
@@ -1020,7 +1001,44 @@ struct BatchView: View {
                 return .handled
             }
             .overlay(alignment: .bottom) { gridToastView }
+            // 只给 --batch-ui --perf grid：量刷新时的按键从这里进来，走和上面真按键同一段代码。界面运行时从不发。
+            .onReceive(BatchPerf.keys) { key in
+                switch key {
+                case "→": moveFocus(1, proxy: proxy)
+                case "←": moveFocus(-1, proxy: proxy)
+                default: _ = applyDigit(key, proxy: proxy)
+                }
+            }
         }
+    }
+
+    /// 数字键 1 / 2 / 3 / 0：精选 / 可用 / 废片 / 恢复自动。返回 false = 没有可改的（没焦点也没选中），按键放过去。
+    private func applyDigit(_ characters: String, proxy: ScrollViewProxy) -> Bool {
+        // A digit hits the ⌘/⇧ selection when there is one —
+        // "select five, press 3" used to reject only the focused photo.
+        // 只改选中里还看得见的，改完清掉选中（和批量栏一样）：以前不清，接着用方向键走到别的照片
+        // 再按数字，改的还是早先那几张（GridSelectionRules.swift）。
+        let before = visibleItems.map(\.id)
+        let pick = GridSelectionRules.digitTargets(selected: selectedIDs, visible: before, focused: focusedID)
+        if pick.clearSelection { selectedIDs.removeAll() }
+        guard !pick.ids.isEmpty else { return false }
+        let verdict: Verdict?
+        switch characters {
+        case "1": verdict = .pick
+        case "2": verdict = .usable
+        case "3": verdict = .reject
+        default: verdict = nil
+        }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            store.setOverrideBatch(pick.ids, verdict)
+        }
+        // 改的是选中的几张也要管焦点：焦点那张也在选中里（⇧点、⌘A、点场标题）、被筛掉或整场叠掉时
+        // 以前焦点不动，留在看不见的照片上。
+        keepPlace(changed: pick.ids, before: before, proxy: proxy)
+        if pick.fromSelection, let text = GridSelectionRules.changedNotice(count: pick.ids.count, verdict: verdict) {
+            showGridToast(text, verdict: verdict)
+        }
+        return true
     }
 
     // MARK: 网格多选：数字键改了多张的提示、筛选变了剪选中（规则见 GridSelectionRules.swift）
@@ -1826,16 +1844,9 @@ struct BatchView: View {
                 ForEach(members) { member in
                     // groupSize 1：行头已经写了张数，缩略图上再贴 ×N 就重复了。
                     let soleKeeper = member.verdict != .reject && alive.count == 1
-                    CellHoverBar(id: member.id, verdict: member.verdict,
-                                 keepOnly: soleKeeper ? nil : {
-                                     withAnimation { keepOnly(member.id, inTake: all) }
-                                     focusedID = member.id
-                                 },
-                                 compact: thumbSize < 150,
-                                 onSet: { v in setFromHover(member.id, v) }) {
-                        thumbnailCell(member, color: member.verdict.color, groupSize: 1)
-                    }
-                    .id(member.id)
+                    gridCell(member, color: member.verdict.color, groupSize: 1, keepOnly: !soleKeeper,
+                             compact: thumbSize < 150)
+                        .id(member.id)
                 }
             }
         }
@@ -1903,10 +1914,8 @@ struct BatchView: View {
             if showSingles {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: thumbSize), spacing: 8)], alignment: .leading, spacing: 8) {
                     ForEach(singles) { item in
-                        CellHoverBar(id: item.id, verdict: item.verdict, keepOnly: nil, onSet: { v in setFromHover(item.id, v) }) {
-                            thumbnailCell(item, color: item.verdict.color, groupSize: 1)
-                        }
-                        .id(item.id)
+                        gridCell(item, color: item.verdict.color, groupSize: 1)
+                            .id(item.id)
                     }
                 }
             }
@@ -1990,10 +1999,8 @@ struct BatchView: View {
             Section {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: thumbSize), spacing: 8)], spacing: 8) {
                     ForEach(matching) { item in
-                        CellHoverBar(id: item.id, verdict: item.verdict, keepOnly: nil, onSet: { v in setFromHover(item.id, v) }) {
-                            thumbnailCell(item, color: color, groupSize: takeSizes[item.take] ?? 1)
-                        }
-                        .id(item.id)
+                        gridCell(item, color: color, groupSize: takeSizes[item.take] ?? 1)
+                            .id(item.id)
                     }
                 }
             } header: {
@@ -2037,128 +2044,32 @@ struct BatchView: View {
         }
     }
 
-    @ViewBuilder
-    private func thumbnailCell(_ item: BatchItem, color: Color, groupSize: Int) -> some View {
-        let isSelected = selectedIDs.contains(item.id)
-        let isFocused = focusedID == item.id
-        VStack(spacing: 3) {
-            // 方格 + 整图 fit（Lightroom / Aftershoot 的做法）。以前是 .fill 塞进
-            // 140×100 的横框：一张竖拍只剩中间一条，52% 的画面被裁掉，看不到脚也
-            // 看不到构图 —— 而这类场次全是竖拍。
-            ThumbnailView(path: item.previewPath, fit: true)
-                .frame(maxWidth: .infinity, minHeight: thumbSize, maxHeight: thumbSize)
-                .background(Color(white: 0.10))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                // 焦点和选中分开：以前都是 3px accent，⌘多选之后分不清焦点在哪，
-                // 而数字键在没有选中时判的正是焦点那张。选中 = accent 粗框 + 左上 ✓，
-                // 焦点 = 白色细框，两者可以同时出现。
-                .overlay {
-                    if isSelected {
-                        RoundedRectangle(cornerRadius: 6).stroke(Color.accentColor, lineWidth: 3)
-                    }
-                    if isFocused {
-                        RoundedRectangle(cornerRadius: 5).inset(by: isSelected ? 3 : 0)
-                            .stroke(Color.white.opacity(0.9), lineWidth: 1.5)
-                    }
-                }
-                // 右上一条：状态（排名 · 手判 · ★精选 · ×N）。精选统一用绿星（和判决
-                // 小点、审片头部同一个符号同一个色），排名只用灰度 —— 以前四个角各挂
-                // 一坨、精选绿圆和 #1 黄字打架，代码里自己写着"别弄成圣诞树"。
-                .overlay(alignment: .topTrailing) {
-                    let rank = store.takeRank[item.id]
-                    let manual = store.isManual(item.id)
-                    let client = store.clientPicks.contains(item.id)
-                    let hasStatus: Bool = rank != nil || manual || client || item.verdict == .pick || groupSize > 1
-                    if hasStatus {
-                        HStack(spacing: 4) {
-                            if let rank {
-                                Text("#\(rank)").font(.caption2).bold().monospacedDigit()
-                                    .foregroundStyle(rank == 1 ? Color.white : Color.white.opacity(0.6))
-                            }
-                            if manual { Image(systemName: "hand.raised.fill").font(.caption2) }
-                            // 客户选中：紫心（和确认表上客户点的那颗、XMP 的紫色标同一个颜色）。
-                            if client { Image(systemName: "heart.fill").font(.caption2).foregroundStyle(.purple) }
-                            if item.verdict == .pick {
-                                Image(systemName: "star.fill").font(.caption2).foregroundStyle(Verdict.pick.color)
-                            }
-                            if groupSize > 1 { Text("×\(groupSize)").font(.caption2).bold() }
-                        }
-                        .padding(.horizontal, 5).padding(.vertical, 3)
-                        .background(.black.opacity(0.55), in: Capsule())
-                        .padding(4)
-                        .help(Self.statusHelp(rank: rank, manual: manual, client: client,
-                                              pick: item.verdict == .pick, groupSize: groupSize,
-                                              note: client ? store.clientNotes[item.id] : nil))
-                    }
-                }
-                // 左下一条：信息（淘汰理由 · VLM 平反 · 慢门 · 水平 · 合影睁眼）。
-                .overlay(alignment: .bottomLeading) {
-                    let closed = item.faces.count >= 2 ? item.faces.filter { $0.eyeClosed == true }.count : -1
-                    let hasInfo = !item.rejectReasons.isEmpty || !item.vlmRescued.isEmpty
-                        || item.slowShutter || item.tilted || closed >= 0
-                    if hasInfo {
-                        HStack(spacing: 4) {
-                            ForEach(item.rejectReasons, id: \.self) { reason in
-                                Image(systemName: Self.reasonIcon(reason)).font(.caption2).foregroundStyle(.red)
-                            }
-                            if !item.vlmRescued.isEmpty {
-                                Image(systemName: "checkmark.seal.fill").font(.caption2).foregroundStyle(.green)
-                            }
-                            if item.slowShutter { Image(systemName: "tortoise.fill").font(.caption2).foregroundStyle(.yellow) }
-                            if item.tilted { Image(systemName: "level").font(.caption2).foregroundStyle(.yellow) }
-                            if closed >= 0 {
-                                HStack(spacing: 1) {
-                                    Image(systemName: closed > 0 ? "eye.slash" : "eye").font(.caption2)
-                                    Text("\(item.faces.count - closed)/\(item.faces.count)").font(.caption2).monospacedDigit()
-                                }
-                                .foregroundStyle(closed > 0 ? .red : .green)
-                            }
-                        }
-                        .padding(.horizontal, 5).padding(.vertical, 3)
-                        .background(.black.opacity(0.55), in: Capsule())
-                        .padding(4)
-                        .help(Self.infoHelp(item, closed: closed))
-                    }
-                }
-                .overlay(alignment: .topLeading) {
-                    if isSelected {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(Color.accentColor)
-                            .background(Circle().fill(.white))
-                            .padding(4)
-                    }
-                }
-            HStack(spacing: 4) {
-                Image(systemName: item.verdict.symbol)
-                    .font(.system(size: 7, weight: .bold))
-                    .foregroundStyle(color)
-                    .frame(width: 8)
-                Text(item.id).font(.caption2).lineLimit(1)
-                    .foregroundStyle(.secondary)
-                if let iso = item.exif?.iso {
-                    // Orange from ISO 3200 up — the range worth batch-denoising.
-                    Text("ISO \(iso)").font(.caption2).monospacedDigit().lineLimit(1)
-                        .foregroundStyle(iso >= 3200 ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
-                }
-            }
-        }
-        .contentShape(Rectangle())
-        // 时间轴的「你在这」：只记出现/消失，不在这里读任何会触发重绘的状态。
-        .onAppear { viewport.appeared(item.id, chapter: BatchStore.timelineChapter(of: item)) }
-        .onDisappear { viewport.disappeared(item.id) }
-        .onChange(of: BatchStore.timelineChapter(of: item)) { _, chapter in viewport.update(item.id, chapter: chapter) }
-        // gesture + simultaneousGesture instead of two onTapGestures: the latter
-        // makes SwiftUI hold every single click ~300ms to rule out a double —
-        // that was the visible lag on selection. Simultaneous recognition fires
-        // the single click instantly; during a double-click the first click just
-        // sets focus (harmless) and the second opens the inspector.
-        // 双击的第二下不再算一次单击：⌘ 双击不会选上又取消；点完悬停按钮照片挪了位，手快补的
-        // 第二下落在新补上来的照片上，也不会把焦点和多选带走。
-        .gesture(TapGesture(count: 2).onEnded { openInspector(item.id) })
-        .simultaneousGesture(TapGesture().onEnded {
-            guard !ClickGuard.isRepeatClick else { return }
-            handleClick(ids: [item.id], anchorID: item.id)
-        })
+    /// 一格（GridCell）：画出来要用的值在这里取好传进去，GridCell 按值比、没变的格子不重算 body（优化分析 NP4）。
+    private func gridCell(_ item: BatchItem, color: Color, groupSize: Int, keepOnly: Bool = false,
+                          compact: Bool = false) -> some View {
+        let client = store.clientPicks.contains(item.id)
+        return GridCell(item: item, thumbGeneration: ThumbCache.generation(of: item.previewPath),
+                        color: color, groupSize: groupSize, thumbSize: thumbSize,
+                        isSelected: selectedIDs.contains(item.id), isFocused: focusedID == item.id,
+                        rank: store.takeRank[item.id], manual: store.isManual(item.id), client: client,
+                        note: client ? store.clientNotes[item.id] : nil, keepOnly: keepOnly, compact: compact,
+                        viewport: viewport, actions: cellActions)
+            .equatable()
+    }
+
+    /// 格子上的双击、单击、悬停判决、「只留这张」：按下去那一刻才读 store 和焦点 —— GridCell 没重算时手里拿的是
+    /// 早先那一份闭包，读到的照样是现在的状态（@State、store 都是同一份）。「只留这张」的整场成员也是那一刻现取。
+    private var cellActions: GridCell.Actions {
+        GridCell.Actions(
+            open: { id in openInspector(id) },
+            click: { id in handleClick(ids: [id], anchorID: id) },
+            set: { id, verdict in setFromHover(id, verdict) },
+            keepOnly: { id in
+                guard let take = store.item(withID: id)?.take else { return }
+                let all = store.members(ofTake: take)
+                withAnimation { keepOnly(id, inTake: all) }
+                focusedID = id
+            })
     }
 
     // MARK: - Right: controls
@@ -2166,184 +2077,7 @@ struct BatchView: View {
     // MARK: - Right panel: thresholds + VLM only. Everything else lives in the
     // top bar / export menu; explanations live in .help tooltips, not captions.
 
-    /// 「同一场最大间隔」滑杆 + 按快门节奏直方图。
-    ///
-    /// 这是整个分组的主刻度：之前分组靠 phash 汉明距离≤10 把"同一场"切碎成
-    /// 一对一对（photot 实测最大组只有 2 张），堆栈界面因此根本没东西可堆。
-    /// 现在按拍摄时间切场，间隔交给用户拧 —— 宴会抓拍和影棚摆拍的节奏差一个
-    /// 数量级，没有哪个固定值是对的。
-    @ViewBuilder
-    private var takeGapRow: some View {
-        let stats = store.takeStats
-        VStack(alignment: .leading, spacing: 3) {
-            HStack {
-                Text("同一场最大间隔").font(.callout)
-                Spacer()
-                Text("\(stats.takes) 场多张").font(.caption).monospacedDigit()
-                    .foregroundStyle(.secondary)
-                Text("\(Int(store.takeGapSec)) 秒").font(.callout).monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            MetricHistogram(
-                bins: store.captureGapBins,
-                range: BatchStore.captureGapHistRange,
-                threshold: store.takeGapSec,
-                killBelow: true,
-                sqrtScale: true,
-                markColor: .green
-            )
-            Slider(value: $store.takeGapSec, in: 1...60, step: 1)
-            Text("绿色 = 会并进同一场的间隔。只改怎么分堆，不改任何判决。")
-                .font(.caption2).foregroundStyle(.tertiary)
-        }
-        .help("相邻两张间隔超过这个秒数就算换了一场。直方图是本场拍摄的按快门节奏分布," +
-              "白线就是当前这条线。双机位按机身各切各的 —— 两台机器同一秒各拍一张是" +
-              "两个角度,不是重复。")
-    }
-
-    /// 连拍去重开关。分组本来只用来"提名"最佳的那张，组内其余照片原封不动留在
-    /// 可用里 —— 一组 8 张全清晰全睁眼时等于没去重。这是规则，不写 overrides：
-    /// 关掉开关整组立刻全部回来。
-    @ViewBuilder
-    private var burstDedupeRow: some View {
-        let stats = store.burstGroupStats
-        VStack(alignment: .leading, spacing: 2) {
-            Toggle("近似重复只留最佳 (\(store.reasonCounts["连拍重复"] ?? 0))",
-                   isOn: $store.rejectBurstDuplicates)
-                .font(.caption)
-                .help("只作用在「几乎同一张」这一层 (2秒内 + phash 汉明距离≤10)，不是整场。" +
-                      "场里人在动、表情在变，哪张好是审美判断，交给你在堆栈里勾选。" +
-                      "这是可随时关掉的规则，不会覆盖你手动改判过的照片。" +
-                      "开关每场各记各的：只改这一场，别的场次不跟着变。" +
-                      "本场共 \(stats.groups) 组近似重复、\(stats.photos) 张候选")
-                .disabled(stats.groups == 0)
-            Text(stats.groups > 0
-                 ? "\(stats.groups) 组近似重复 · \(stats.photos) 张（和上面的「场」是两层）· 开关只改这一场"
-                 : "本场没有近似重复的照片")
-                .font(.caption2).foregroundStyle(.tertiary)
-        }
-    }
-
-    private var controlPanel: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                GroupBox("筛选严格度") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Picker("预设", selection: Binding(
-                            get: { store.currentPreset },
-                            set: { if let p = $0 { store.applyPreset(p) } }
-                        )) {
-                            ForEach(BatchStore.CullPreset.allCases, id: \.self) { p in
-                                Text(p.rawValue).tag(BatchStore.CullPreset?.some(p))
-                            }
-                            Text("自定义").tag(BatchStore.CullPreset?.none)
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-
-                        let reasonCounts = store.reasonCounts
-                        thresholdSlider(
-                            label: "锐度下限",
-                            value: "\(Int(store.sharpnessThreshold))",
-                            killCount: reasonCounts["虚焦"] ?? 0,
-                            slider: Slider(value: $store.sharpnessThreshold, in: 0...150, step: 5),
-                            help: "五官区域梯度锐度，低于此值判为虚焦 → 废片。清晰照片约 65-95。直方图 = 本场分布，红色 = 会被此线淘汰",
-                            histogram: MetricHistogram(
-                                bins: store.sharpnessBins,
-                                range: BatchStore.sharpnessHistRange,
-                                threshold: store.sharpnessThreshold,
-                                killBelow: true
-                            )
-                        )
-                        thresholdSlider(
-                            label: "曝光裁切上限",
-                            value: String(format: "%.1f%%", store.exposureThreshold * 100),
-                            killCount: reasonCounts["曝光裁切"] ?? 0,
-                            slider: Slider(value: $store.exposureThreshold, in: 0.005...0.5),
-                            help: "死白/死黑像素占比超过此值 → 废片。直方图为开方刻度 (大多数照片裁切接近 0)",
-                            histogram: MetricHistogram(
-                                bins: store.exposureBins,
-                                range: BatchStore.exposureHistRange,
-                                threshold: store.exposureThreshold,
-                                killBelow: false,
-                                sqrtScale: true
-                            )
-                        )
-                        thresholdSlider(
-                            label: "人脸质量下限",
-                            value: store.faceQualityThreshold > 0
-                                ? String(format: "%.2f", store.faceQualityThreshold) : "关闭",
-                            killCount: reasonCounts["人脸质量低"] ?? 0,
-                            slider: Slider(value: $store.faceQualityThreshold, in: 0...1),
-                            help: "特写脸的质量下限;小脸按景别自动放宽，连拍组内改为组内相对比较 (不看此线)。直方图只画单张照片的分布。拉到 0 关闭",
-                            histogram: MetricHistogram(
-                                // Only photos the absolute line actually
-                                // applies to; burst frames are judged
-                                // group-relative and were misleading here.
-                                bins: store.faceQualityBins,
-                                range: BatchStore.faceQualityHistRange,
-                                threshold: store.faceQualityThreshold,
-                                killBelow: true
-                            )
-                        )
-                        takeGapRow
-                        burstDedupeRow
-                        Toggle("只看临界照片 (\(store.borderlineCount))", isOn: $store.borderlineFilter)
-                            .font(.caption)
-                            .help("任一阈值 ±15% 区间内的照片 — 调完滑杆先过一眼刀口上的这些，误杀都藏在这里")
-                        Stepper("每章节最少保留 \(store.minKeepersPerChapter == 0 ? "—" : "\(store.minKeepersPerChapter) 张") · 所有场次",
-                                value: $store.minKeepersPerChapter, in: 0...50)
-                            .font(.caption)
-                            .help("某个章节（仪式/晚宴…）留下的张数低于这个数就在状态栏和时间轴上提醒。0 = 只在整章全灭时提醒。" +
-                                  "所有场次通用（只管提醒，不改任何判决）")
-                        Text("拖动实时生效 · 红字 = 该项当前淘汰数")
-                            .font(.caption2).foregroundStyle(.tertiary)
-                    }
-                    .padding(6)
-                }
-
-                GroupBox("VLM 语义分析") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        LabeledContent("模型") {
-                            Text("MiniCPM-V 4.6").font(.caption).foregroundStyle(.secondary)
-                        }
-                        Button("启动服务") { store.startVLMServer() }
-                            .help("通过 Ollama 启动 MiniCPM-V 4.6")
-                        Button("复审废片 (\(store.autoRejectCount))") { store.runAppealOnRejects() }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(store.autoRejectCount == 0 || store.isRunning)
-                            .help("给自动淘汰的照片一个平反机会：按各自的淘汰原因定向复查 (虚焦→主体清晰吗;闭眼→是否眯眼笑;曝光→是否刻意剪影/逆光)。洗清罪名的照片自动回到可用并带“平反”徽章;人工改判过的不复审")
-                        Button("精审幸存照片") { store.runVLMOnSurvivors() }
-                            .disabled(store.items.isEmpty || store.isRunning)
-                            .help("可选:给未淘汰照片打表情分(连拍组挑精选用)并检查构图(抢镜/切肢仅作提示徽章)")
-                    }
-                    .padding(6)
-                }
-            }
-            .padding(12)
-        }
-    }
-
-    /// One threshold row: name + live value + kill count on top, the shoot's
-    /// metric distribution behind the slider, docs in tooltip.
-    private func thresholdSlider(label: String, value: String, killCount: Int,
-                                 slider: Slider<EmptyView, EmptyView>, help: String,
-                                 histogram: MetricHistogram) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack {
-                Text(label).font(.callout)
-                Spacer()
-                if killCount > 0 {
-                    Text("淘汰 \(killCount)").font(.caption).monospacedDigit()
-                        .foregroundStyle(.red)
-                }
-                Text(value).font(.callout).monospacedDigit().foregroundStyle(.secondary)
-            }
-            histogram
-            slider
-        }
-        .help(help)
-    }
+    // 右栏（筛选严格度 + VLM）在下面的 BatchControlPanel 里。
 
     /// 拖进来的东西：文件夹就打开它，照片文件就打开它所在的文件夹。新文件夹直接开始分析；
     /// 分析过的就打开缓存的结果（要重新分析点顶栏「重新分析」）。
@@ -2559,6 +2293,194 @@ struct BatchView: View {
     }
 }
 
+// MARK: - 右栏：筛选严格度 + VLM
+
+/// 右栏单独一个视图，只看 store（优化分析 NP4）：以前是批量页的一个属性，网格里每挪一下焦点、点选一张照片，三张直方图、
+/// 三根滑杆跟着整页一起重算。Everything else lives in the top bar / export menu; explanations live in .help tooltips.
+private struct BatchControlPanel: View {
+    @ObservedObject var store: BatchStore
+
+    /// 「同一场最大间隔」滑杆 + 按快门节奏直方图。
+    ///
+    /// 这是整个分组的主刻度：之前分组靠 phash 汉明距离≤10 把"同一场"切碎成
+    /// 一对一对（photot 实测最大组只有 2 张），堆栈界面因此根本没东西可堆。
+    /// 现在按拍摄时间切场，间隔交给用户拧 —— 宴会抓拍和影棚摆拍的节奏差一个
+    /// 数量级，没有哪个固定值是对的。
+    @ViewBuilder
+    private var takeGapRow: some View {
+        let stats = store.takeStats
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text("同一场最大间隔").font(.callout)
+                Spacer()
+                Text("\(stats.takes) 场多张").font(.caption).monospacedDigit()
+                    .foregroundStyle(.secondary)
+                Text("\(Int(store.takeGapSec)) 秒").font(.callout).monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            MetricHistogram(
+                bins: store.captureGapBins,
+                range: BatchStore.captureGapHistRange,
+                threshold: store.takeGapSec,
+                killBelow: true,
+                sqrtScale: true,
+                markColor: .green
+            )
+            Slider(value: $store.takeGapSec, in: 1...60, step: 1)
+            Text("绿色 = 会并进同一场的间隔。只改怎么分堆，不改任何判决。")
+                .font(.caption2).foregroundStyle(.tertiary)
+        }
+        .help("相邻两张间隔超过这个秒数就算换了一场。直方图是本场拍摄的按快门节奏分布," +
+              "白线就是当前这条线。双机位按机身各切各的 —— 两台机器同一秒各拍一张是" +
+              "两个角度,不是重复。")
+    }
+
+    /// 连拍去重开关。分组本来只用来"提名"最佳的那张，组内其余照片原封不动留在
+    /// 可用里 —— 一组 8 张全清晰全睁眼时等于没去重。这是规则，不写 overrides：
+    /// 关掉开关整组立刻全部回来。
+    @ViewBuilder
+    private var burstDedupeRow: some View {
+        let stats = store.burstGroupStats
+        VStack(alignment: .leading, spacing: 2) {
+            Toggle("近似重复只留最佳 (\(store.reasonCounts["连拍重复"] ?? 0))",
+                   isOn: $store.rejectBurstDuplicates)
+                .font(.caption)
+                .help("只作用在「几乎同一张」这一层 (2秒内 + phash 汉明距离≤10)，不是整场。" +
+                      "场里人在动、表情在变，哪张好是审美判断，交给你在堆栈里勾选。" +
+                      "这是可随时关掉的规则，不会覆盖你手动改判过的照片。" +
+                      "开关每场各记各的：只改这一场，别的场次不跟着变。" +
+                      "本场共 \(stats.groups) 组近似重复、\(stats.photos) 张候选")
+                .disabled(stats.groups == 0)
+            Text(stats.groups > 0
+                 ? "\(stats.groups) 组近似重复 · \(stats.photos) 张（和上面的「场」是两层）· 开关只改这一场"
+                 : "本场没有近似重复的照片")
+                .font(.caption2).foregroundStyle(.tertiary)
+        }
+    }
+
+    var body: some View {
+        BatchPerf.body("右栏")
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                GroupBox("筛选严格度") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Picker("预设", selection: Binding(
+                            get: { store.currentPreset },
+                            set: { if let p = $0 { store.applyPreset(p) } }
+                        )) {
+                            ForEach(BatchStore.CullPreset.allCases, id: \.self) { p in
+                                Text(p.rawValue).tag(BatchStore.CullPreset?.some(p))
+                            }
+                            Text("自定义").tag(BatchStore.CullPreset?.none)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+
+                        let reasonCounts = store.reasonCounts
+                        thresholdSlider(
+                            label: "锐度下限",
+                            value: "\(Int(store.sharpnessThreshold))",
+                            killCount: reasonCounts["虚焦"] ?? 0,
+                            slider: Slider(value: $store.sharpnessThreshold, in: 0...150, step: 5),
+                            help: "五官区域梯度锐度，低于此值判为虚焦 → 废片。清晰照片约 65-95。直方图 = 本场分布，红色 = 会被此线淘汰",
+                            histogram: MetricHistogram(
+                                bins: store.sharpnessBins,
+                                range: BatchStore.sharpnessHistRange,
+                                threshold: store.sharpnessThreshold,
+                                killBelow: true
+                            )
+                        )
+                        thresholdSlider(
+                            label: "曝光裁切上限",
+                            value: String(format: "%.1f%%", store.exposureThreshold * 100),
+                            killCount: reasonCounts["曝光裁切"] ?? 0,
+                            slider: Slider(value: $store.exposureThreshold, in: 0.005...0.5),
+                            help: "死白/死黑像素占比超过此值 → 废片。直方图为开方刻度 (大多数照片裁切接近 0)",
+                            histogram: MetricHistogram(
+                                bins: store.exposureBins,
+                                range: BatchStore.exposureHistRange,
+                                threshold: store.exposureThreshold,
+                                killBelow: false,
+                                sqrtScale: true
+                            )
+                        )
+                        thresholdSlider(
+                            label: "人脸质量下限",
+                            value: store.faceQualityThreshold > 0
+                                ? String(format: "%.2f", store.faceQualityThreshold) : "关闭",
+                            killCount: reasonCounts["人脸质量低"] ?? 0,
+                            slider: Slider(value: $store.faceQualityThreshold, in: 0...1),
+                            help: "特写脸的质量下限;小脸按景别自动放宽，连拍组内改为组内相对比较 (不看此线)。直方图只画单张照片的分布。拉到 0 关闭",
+                            histogram: MetricHistogram(
+                                // Only photos the absolute line actually
+                                // applies to; burst frames are judged
+                                // group-relative and were misleading here.
+                                bins: store.faceQualityBins,
+                                range: BatchStore.faceQualityHistRange,
+                                threshold: store.faceQualityThreshold,
+                                killBelow: true
+                            )
+                        )
+                        takeGapRow
+                        burstDedupeRow
+                        Toggle("只看临界照片 (\(store.borderlineCount))", isOn: $store.borderlineFilter)
+                            .font(.caption)
+                            .help("任一阈值 ±15% 区间内的照片 — 调完滑杆先过一眼刀口上的这些，误杀都藏在这里")
+                        Stepper("每章节最少保留 \(store.minKeepersPerChapter == 0 ? "—" : "\(store.minKeepersPerChapter) 张") · 所有场次",
+                                value: $store.minKeepersPerChapter, in: 0...50)
+                            .font(.caption)
+                            .help("某个章节（仪式/晚宴…）留下的张数低于这个数就在状态栏和时间轴上提醒。0 = 只在整章全灭时提醒。" +
+                                  "所有场次通用（只管提醒，不改任何判决）")
+                        Text("拖动实时生效 · 红字 = 该项当前淘汰数")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                    }
+                    .padding(6)
+                }
+
+                GroupBox("VLM 语义分析") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        LabeledContent("模型") {
+                            Text("MiniCPM-V 4.6").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Button("启动服务") { store.startVLMServer() }
+                            .help("通过 Ollama 启动 MiniCPM-V 4.6")
+                        Button("复审废片 (\(store.autoRejectCount))") { store.runAppealOnRejects() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(store.autoRejectCount == 0 || store.isRunning)
+                            .help("给自动淘汰的照片一个平反机会：按各自的淘汰原因定向复查 (虚焦→主体清晰吗;闭眼→是否眯眼笑;曝光→是否刻意剪影/逆光)。洗清罪名的照片自动回到可用并带“平反”徽章;人工改判过的不复审")
+                        Button("精审幸存照片") { store.runVLMOnSurvivors() }
+                            .disabled(store.items.isEmpty || store.isRunning)
+                            .help("可选:给未淘汰照片打表情分(连拍组挑精选用)并检查构图(抢镜/切肢仅作提示徽章)")
+                    }
+                    .padding(6)
+                }
+            }
+            .padding(12)
+        }
+    }
+
+    /// One threshold row: name + live value + kill count on top, the shoot's
+    /// metric distribution behind the slider, docs in tooltip.
+    private func thresholdSlider(label: String, value: String, killCount: Int,
+                                 slider: Slider<EmptyView, EmptyView>, help: String,
+                                 histogram: MetricHistogram) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text(label).font(.callout)
+                Spacer()
+                if killCount > 0 {
+                    Text("淘汰 \(killCount)").font(.caption).monospacedDigit()
+                        .foregroundStyle(.red)
+                }
+                Text(value).font(.callout).monospacedDigit().foregroundStyle(.secondary)
+            }
+            histogram
+            slider
+        }
+        .help(help)
+    }
+}
+
 // MARK: - 快捷键一览
 
 /// 快捷键按场景分组列出来（Aftershoot、Narrative 都有这么一张表）。以前只散在各处的提示行里。
@@ -2644,6 +2566,180 @@ struct ShortcutsPanel: View {
     }
 }
 
+// MARK: - 网格的一格
+
+/// 网格里的一格：缩略图 + 角标 + 文件名，外面包着悬停判决条（CellHoverBar）。按值比（Equatable；闭包、viewport 不比值）：
+/// 按一下 ← → 只有焦点换了的两格重算 body，按数字键只有改了的那几格。以前格子是批量页的一个函数、外面包着带闭包的
+/// CellHoverBar，批量页 body 一跑（焦点一换就是一次），看得见的格子全部重算：1440×900 一屏 35 格，5K 全屏最小缩略图
+/// 229 格（优化分析 NP4，--batch-ui --perf grid 量的）。格子上画的东西都得从这里的字段来：漏了一样，那样东西变了格子
+/// 不会跟着变。
+private struct GridCell: View, Equatable {
+    /// 格子上的操作（批量页给）：按下去那一刻才读 store 和焦点，所以不参与比较。
+    struct Actions {
+        let open: (String) -> Void
+        let click: (String) -> Void
+        let set: (String, Verdict) -> Void
+        let keepOnly: (String) -> Void
+    }
+
+    let item: BatchItem
+    /// 预览图的代数（ThumbCache.generation）：重新分析重写了这张的预览，代数加一、格子跟着重算，缩略图按新键重解
+    /// —— 照片的数值碰巧一样也得换图（分析收尾只清重写了的那几张，NP3）。
+    let thumbGeneration: Int
+    let color: Color
+    let groupSize: Int
+    let thumbSize: Double
+    let isSelected: Bool
+    let isFocused: Bool
+    /// 本场评分第几（store.takeRank），人工改判，客户选中和客户备注。
+    let rank: Int?
+    let manual: Bool
+    let client: Bool
+    let note: String?
+    /// 悬停条上给不给「只留这张」：分组视图里多张连拍的那一行、它又不是唯一留下的那张。
+    let keepOnly: Bool
+    /// 缩略图窄：悬停条上「只留这张」单独一行（CellHoverBar.compact）。
+    let compact: Bool
+    let viewport: GridViewport
+    let actions: Actions
+
+    /// 分三段比：一长串 && 在 CI 的 Xcode 16 上类型检查会慢。
+    static func == (a: GridCell, b: GridCell) -> Bool {
+        let photo: Bool = a.item == b.item && a.thumbGeneration == b.thumbGeneration && a.color == b.color
+            && a.groupSize == b.groupSize && a.thumbSize == b.thumbSize
+        let state: Bool = a.isSelected == b.isSelected && a.isFocused == b.isFocused && a.rank == b.rank && a.manual == b.manual
+        let rest: Bool = a.client == b.client && a.note == b.note && a.keepOnly == b.keepOnly && a.compact == b.compact
+        return photo && state && rest && a.viewport === b.viewport
+    }
+
+    var body: some View {
+        let _ = BatchPerf.body("格子")
+        CellHoverBar(id: item.id, verdict: item.verdict,
+                     keepOnly: keepOnly ? { [actions, id = item.id] in actions.keepOnly(id) } : nil,
+                     compact: compact,
+                     onSet: { [actions, id = item.id] v in actions.set(id, v) }) {
+            cell
+        }
+    }
+
+    private var cell: some View {
+        VStack(spacing: 3) {
+            // 方格 + 整图 fit（Lightroom / Aftershoot 的做法）。以前是 .fill 塞进
+            // 140×100 的横框：一张竖拍只剩中间一条，52% 的画面被裁掉，看不到脚也
+            // 看不到构图 —— 而这类场次全是竖拍。
+            ThumbnailView(path: item.previewPath, fit: true)
+                .frame(maxWidth: .infinity, minHeight: thumbSize, maxHeight: thumbSize)
+                .background(Color(white: 0.10))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                // 焦点和选中分开：以前都是 3px accent，⌘多选之后分不清焦点在哪，
+                // 而数字键在没有选中时判的正是焦点那张。选中 = accent 粗框 + 左上 ✓，
+                // 焦点 = 白色细框，两者可以同时出现。
+                .overlay {
+                    if isSelected {
+                        RoundedRectangle(cornerRadius: 6).stroke(Color.accentColor, lineWidth: 3)
+                    }
+                    if isFocused {
+                        RoundedRectangle(cornerRadius: 5).inset(by: isSelected ? 3 : 0)
+                            .stroke(Color.white.opacity(0.9), lineWidth: 1.5)
+                    }
+                }
+                // 右上一条：状态（排名 · 手判 · ★精选 · ×N）。精选统一用绿星（和判决
+                // 小点、审片头部同一个符号同一个色），排名只用灰度 —— 以前四个角各挂
+                // 一坨、精选绿圆和 #1 黄字打架，代码里自己写着"别弄成圣诞树"。
+                .overlay(alignment: .topTrailing) {
+                    let hasStatus: Bool = rank != nil || manual || client || item.verdict == .pick || groupSize > 1
+                    if hasStatus {
+                        HStack(spacing: 4) {
+                            if let rank {
+                                Text("#\(rank)").font(.caption2).bold().monospacedDigit()
+                                    .foregroundStyle(rank == 1 ? Color.white : Color.white.opacity(0.6))
+                            }
+                            if manual { Image(systemName: "hand.raised.fill").font(.caption2) }
+                            // 客户选中：紫心（和确认表上客户点的那颗、XMP 的紫色标同一个颜色）。
+                            if client { Image(systemName: "heart.fill").font(.caption2).foregroundStyle(.purple) }
+                            if item.verdict == .pick {
+                                Image(systemName: "star.fill").font(.caption2).foregroundStyle(Verdict.pick.color)
+                            }
+                            if groupSize > 1 { Text("×\(groupSize)").font(.caption2).bold() }
+                        }
+                        .padding(.horizontal, 5).padding(.vertical, 3)
+                        .background(.black.opacity(0.55), in: Capsule())
+                        .padding(4)
+                        .help(BatchView.statusHelp(rank: rank, manual: manual, client: client,
+                                                   pick: item.verdict == .pick, groupSize: groupSize, note: note))
+                    }
+                }
+                // 左下一条：信息（淘汰理由 · VLM 平反 · 慢门 · 水平 · 合影睁眼）。
+                .overlay(alignment: .bottomLeading) {
+                    let closed = item.faces.count >= 2 ? item.faces.filter { $0.eyeClosed == true }.count : -1
+                    let hasInfo = !item.rejectReasons.isEmpty || !item.vlmRescued.isEmpty
+                        || item.slowShutter || item.tilted || closed >= 0
+                    if hasInfo {
+                        HStack(spacing: 4) {
+                            ForEach(item.rejectReasons, id: \.self) { reason in
+                                Image(systemName: BatchView.reasonIcon(reason)).font(.caption2).foregroundStyle(.red)
+                            }
+                            if !item.vlmRescued.isEmpty {
+                                Image(systemName: "checkmark.seal.fill").font(.caption2).foregroundStyle(.green)
+                            }
+                            if item.slowShutter { Image(systemName: "tortoise.fill").font(.caption2).foregroundStyle(.yellow) }
+                            if item.tilted { Image(systemName: "level").font(.caption2).foregroundStyle(.yellow) }
+                            if closed >= 0 {
+                                HStack(spacing: 1) {
+                                    Image(systemName: closed > 0 ? "eye.slash" : "eye").font(.caption2)
+                                    Text("\(item.faces.count - closed)/\(item.faces.count)").font(.caption2).monospacedDigit()
+                                }
+                                .foregroundStyle(closed > 0 ? .red : .green)
+                            }
+                        }
+                        .padding(.horizontal, 5).padding(.vertical, 3)
+                        .background(.black.opacity(0.55), in: Capsule())
+                        .padding(4)
+                        .help(BatchView.infoHelp(item, closed: closed))
+                    }
+                }
+                .overlay(alignment: .topLeading) {
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(Color.accentColor)
+                            .background(Circle().fill(.white))
+                            .padding(4)
+                    }
+                }
+            HStack(spacing: 4) {
+                Image(systemName: item.verdict.symbol)
+                    .font(.system(size: 7, weight: .bold))
+                    .foregroundStyle(color)
+                    .frame(width: 8)
+                Text(item.id).font(.caption2).lineLimit(1)
+                    .foregroundStyle(.secondary)
+                if let iso = item.exif?.iso {
+                    // Orange from ISO 3200 up — the range worth batch-denoising.
+                    Text("ISO \(iso)").font(.caption2).monospacedDigit().lineLimit(1)
+                        .foregroundStyle(iso >= 3200 ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
+                }
+            }
+        }
+        .contentShape(Rectangle())
+        // 时间轴的「你在这」：只记出现/消失，不在这里读任何会触发重绘的状态。
+        .onAppear { viewport.appeared(item.id, chapter: BatchStore.timelineChapter(of: item)) }
+        .onDisappear { viewport.disappeared(item.id) }
+        .onChange(of: BatchStore.timelineChapter(of: item)) { _, chapter in viewport.update(item.id, chapter: chapter) }
+        // gesture + simultaneousGesture instead of two onTapGestures: the latter
+        // makes SwiftUI hold every single click ~300ms to rule out a double —
+        // that was the visible lag on selection. Simultaneous recognition fires
+        // the single click instantly; during a double-click the first click just
+        // sets focus (harmless) and the second opens the inspector.
+        // 双击的第二下不再算一次单击：⌘ 双击不会选上又取消；点完悬停按钮照片挪了位，手快补的
+        // 第二下落在新补上来的照片上，也不会把焦点和多选带走。
+        .gesture(TapGesture(count: 2).onEnded { actions.open(item.id) })
+        .simultaneousGesture(TapGesture().onEnded {
+            guard !ClickGuard.isRepeatClick else { return }
+            actions.click(item.id)
+        })
+    }
+}
+
 // MARK: - 缩略图悬停：快捷判决（Lightroom 网格格子上可点的旗标那种）
 
 /// 鼠标停在缩略图上，图下沿露出一小条：★ 精选 / ● 可用 / ✕ 废片（现在是哪个亮哪个），多张连拍的行里
@@ -2667,6 +2763,7 @@ private struct CellHoverBar<Content: View>: View {
     static var isSingleClick: Bool { !ClickGuard.isRepeatClick }
 
     var body: some View {
+        let _ = BatchPerf.body("悬停条")
         content()
             .overlay(alignment: .bottom) {
                 if hovering || id == SnapshotPreview.hoverID {
@@ -2833,6 +2930,7 @@ struct ThumbnailView: View {
     @State private var image: NSImage?
 
     var body: some View {
+        BatchPerf.body("缩略图")
         // Read the cache synchronously in body: a cell scrolled back into view
         // is a fresh struct with nil @State, and waiting for `.task` to copy
         // the cached image over showed a gray flash on every scroll-back.
@@ -4185,6 +4283,7 @@ struct MetricHistogram: View {
     }
 
     var body: some View {
+        let _ = BatchPerf.body("直方图")
         Canvas { context, size in
             let binCount = bins.count
             guard let maxBin = bins.max(), maxBin > 0 else { return }

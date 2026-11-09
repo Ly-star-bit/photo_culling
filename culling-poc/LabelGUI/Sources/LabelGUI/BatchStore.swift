@@ -39,7 +39,8 @@ extension Notification.Name {
     static let analysisDidFinish = Notification.Name("cullingAnalysisDidFinish")
 }
 
-struct BatchItem: Identifiable {
+/// Equatable：网格的一格（BatchView 的 GridCell）按值比，照片的哪样东西变了都要跟着重画。
+struct BatchItem: Identifiable, Equatable {
     let id: String
     let previewPath: String
     let rawPath: String
