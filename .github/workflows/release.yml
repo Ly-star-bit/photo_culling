@@ -183,7 +183,8 @@ jobs:
       # 不要照片的进程内自检：网格改判后的焦点、时间轴不出界、五种杂志风和人物挡字的版式规则、场次持久化、选片 MCP、
       # 文件安全、拼图导出、确认表……每条都在新的临时 LABELGUI_DATA_DIR 里跑（要 fixture 的传 Fixtures/photot-session）；
       # 时间轴自检的随机数按 seed 播种，固定跑 3 个 seed（三批互不相同的 3000 组；FAIL 行带 seed 和 trial，原样能复现）。最后核对「CI 登记」：
-      # AppRuntime.headlessFlags 里每个 --*-selftest 都有人跑、Scripts/ 下每个 *_regression.py / *_smoke.py 在这个文件里都有一步。
+      # 自检登记表（SelfTestRegistry.swift，selftests.sh 用 --list-selftests 拿）里每一条都有人跑、Sources 里没有绕过登记表的
+      # --*-selftest、Scripts/ 下每个 *_regression.py / *_smoke.py 在这个文件里都有一步。跑哪些、带什么参数也从登记表来。
       # 和下面几步一样放在 MCP 冒烟后面（见 MCP 冒烟那段注释）。
       - name: 自检 (--*-selftest)
         # 每条自检在 selftests.sh 里单独限时 300 秒（卡住的点名报错、后面照跑）；runner 是虚拟机，Vision 比本机慢得多，整步给足
@@ -207,7 +208,8 @@ jobs:
 
       # 无头护栏（审查 S13、S36）：会写数据目录的命令不设 LABELGUI_DATA_DIR、或者指到真实数据目录（原样 / 符号链接 / 大小写 /
       # 结尾斜杠）都退出码 2、什么都不写；batch.* 钉在内存里，跑完 LabelGUI 设置域逐字节不变；GUI 启动门控对一个真的
-      # --live-host --no-view 探锁认人（--launch-gate-probe，只打印不弹框）；main.swift 顶层分派和 AppRuntime.headlessFlags 两边对得上。
+      # --live-host --no-view 探锁认人（--launch-gate-probe，只打印不弹框）；main.swift 顶层分派和 AppRuntime.commandFlags 两边对得上、
+      # 自检只登在登记表里（--list-selftests）、两处按表分派都在建数据目录 / 开界面之前。
       # 「真实数据目录」用 CFFIXED_USER_HOME 换成假的家目录下那个，但 A 段 --session-key 不设 LABELGUI_DATA_DIR、E 段用真的
       # 家目录比 defaults export：必须放在 MCP 冒烟后面（见那段注释），万一假家目录失灵也不会抢先建出默认数据目录。
       - name: 无头护栏回归 (数据目录闸 / 启动门控)

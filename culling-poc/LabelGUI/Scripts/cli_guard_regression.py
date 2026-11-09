@@ -4,7 +4,8 @@
   E   batch.*（去重、每章最少保留、排序）钉在内存里：--verdicts --dedupe 照样生效，跑完 LabelGUI 设置域逐字节不变。
   F   GUI 启动门控的探锁、认人（--launch-gate-probe，只打印、不弹框）：真的 --live-host 拿着锁 → 认出来；
       旧的一行、pid 不是 LabelGUI、空的一行 → 等满以后 unknown；只拿 LOCK_SH 的不挡。
-  G   main.swift 顶层分派的参数和 AppRuntime.headlessFlags 两边对得上。
+  G   main.swift 顶层分派的参数和 AppRuntime.commandFlags 两边对得上；自检只登在登记表（--list-selftests）里，
+      main.swift 在建数据目录之前、开界面之前两处按表分派。
 
 用法: python3 -I cli_guard_regression.py <LabelGUI 裸二进制> [工作目录]
 「真实数据目录」一律用 CFFIXED_USER_HOME 换成假的家目录下那个（card_import_regression G 段、live_smoke 同一招）：
@@ -286,13 +287,31 @@ got = gate(d)
 os.close(fd)
 check(got == "launch-gate proceed", f"别人只拿着 LOCK_SH（--mcp 探锁那种）不挡 → {got}")
 
-print("G. 分派的每个参数都登记在 AppRuntime.headlessFlags 里（漏登记：脚本里跑会被 NoGUIGate 拦下，终端里跑 headless=false）")
+print("G. 分派的每个参数都登记了、登记了的都有分派（漏登记：脚本里跑会被 NoGUIGate 拦下，终端里跑 headless=false）")
+# AppRuntime.headlessFlags = commandFlags（不是自检的命令，各自在 main.swift 里分派）+ 自检登记表（SelfTestRegistry.all，
+# main.swift 里两处 SelfTestRegistry.dispatch 按表分派）。登记表从程序拿（--list-selftests，和 selftests.sh 同一份）。
 main_src = open(os.path.join(SRC, "main.swift"), encoding="utf-8").read()
 runtime_src = open(os.path.join(SRC, "AppRuntime.swift"), encoding="utf-8").read()
 picks_src = open(os.path.join(SRC, "ClientPicksView.swift"), encoding="utf-8").read()
 mcp_src = open(os.path.join(SRC, "MCP", "MCPServerMain.swift"), encoding="utf-8").read()
-m = re.search(r"headlessFlags: Set<String> = \[(.*?)\]", runtime_src, re.S)
-registered = set(re.findall(r'"(--[\w-]+)"', m.group(1))) if m else set()
+m = re.search(r"commandFlags: Set<String> = \[(.*?)\]", runtime_src, re.S)
+commands = set(re.findall(r'"(--[\w-]+)"', m.group(1))) if m else set()
+list_data = os.path.join(WORK, "list-data")
+r = run(["--list-selftests"], env_for(list_data))
+rows = [line.split("\t") for line in (r.stdout if r else "").splitlines() if line.startswith("--")]
+selftests = {row[0] for row in rows}
+check(r is not None and r.returncode == 0 and len(selftests) > 15 and len(selftests) == len(rows),
+      f"--list-selftests 读到了自检登记表（{len(selftests)} 条，参数不重复）")
+check(not os.path.exists(list_data), "--list-selftests 不建数据目录")
+check(not [f for f in commands if re.search(r"-(selftest|probe)$", f)],
+      "AppRuntime.commandFlags 里没有 --*-selftest / --*-probe（自检只登在 SelfTestRegistry.all）")
+check(not (commands & selftests), f"没有既登在 commandFlags、又登在自检登记表里的：{sorted(commands & selftests)}")
+gui = main_src.find("\nLabelGUIApp.main()")
+data_dir = main_src.find("\nensureAppDataDir()\n")
+before = main_src.find("SelfTestRegistry.dispatch(.beforeDataDir)")
+after = main_src.find("SelfTestRegistry.dispatch(.afterSetup)")
+check(0 <= before < data_dir < after < gui,
+      "main.swift 分派登记表两处：.beforeDataDir 在建数据目录之前、.afterSetup 在 LabelGUIApp.main() 之前")
 dispatched = set()
 for line in main_src.splitlines():
     if not line.startswith(("if ", "for flag in ")):   # 只看顶层分派（缩进的是各自的子选项）
@@ -303,8 +322,8 @@ for line in main_src.splitlines():
 pm = re.search(r"static let flags = \[(.*?)\]", picks_src)
 dispatched |= set(re.findall(r'"(--[\w-]+)"', pm.group(1))) if pm else set()
 dispatched |= {f for f in re.findall(r'"(--mcp[\w-]*)"', mcp_src)}
-check(bool(registered) and len(dispatched) > 30, f"读到了 headlessFlags（{len(registered)} 个）和顶层分派（{len(dispatched)} 个）")
-check(dispatched <= registered, f"分派了却没登记：{sorted(dispatched - registered)}")
-check(registered <= dispatched, f"登记了却没有分派：{sorted(registered - dispatched)}")
+check(bool(commands) and len(dispatched) > 20, f"读到了 commandFlags（{len(commands)} 个）和顶层分派（{len(dispatched)} 个）")
+check(dispatched <= commands, f"分派了却没登记：{sorted(dispatched - commands)}")
+check(commands <= dispatched, f"登记了却没有分派：{sorted(commands - dispatched)}")
 
 finish()

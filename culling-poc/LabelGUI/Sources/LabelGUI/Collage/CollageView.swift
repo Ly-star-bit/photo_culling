@@ -13,6 +13,8 @@ struct CollageView: View {
     let watermarkStore: WatermarkStore
     @State private var autoCount = 6
     @State private var dedupeAlbum = true
+    /// 快捷键一览（状态栏键盘按钮、? 键）。
+    @State private var showShortcuts = false
 
     init(store: CollageStore, batchStore: BatchStore, watermarkStore: WatermarkStore) {
         self.store = store
@@ -72,6 +74,9 @@ struct CollageView: View {
         .overlay(alignment: .topTrailing) {
             if SnapshotPreview.inlineExport { CollageInlineExport(store: store) }
         }
+        // ? 开关快捷键一览（焦点不在画布、托盘上也接；正在输入框里打字时不接，见 ShortcutsKey）。暗房开着时编辑器不在视图树里，
+        // 暗房自己接 ?。
+        .shortcutsHotkey(isPresented: $showShortcuts)
     }
 
     private var exportConfirmShown: Binding<Bool> {
@@ -290,6 +295,11 @@ struct CollageView: View {
                 ProgressView(value: fraction).frame(width: 140)
             }
             Text(canvasSummary).font(.caption).foregroundStyle(.tertiary)
+            Button { showShortcuts.toggle() } label: { Image(systemName: "keyboard") }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("快捷键一览 (?)")
+                .popover(isPresented: $showShortcuts, arrowEdge: .top) { ShortcutsPanel(page: .collage) }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)

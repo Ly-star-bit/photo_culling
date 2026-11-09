@@ -61,10 +61,6 @@ NoGUIGate.early()
 if let mcpMode = MCPServerMain.mode(CommandLine.arguments), let mcpFDs {
     MCPServerMain.run(mcpMode, fds: mcpFDs)
 }
-// MCP 这一层纯函数的自检（含不开界面那道闸的判断表）：LabelGUI --mcp-selftest [--json]，不读写任何文件。
-if CommandLine.arguments.contains("--mcp-selftest") {
-    MCPSelfTest.run()
-}
 // 无头入口一律钉住 batch.*（去重关 / 每章最少保留 0 / 按拍摄时间，只在内存里）：输出不跟着本机设置域漂，
 // 也不会有谁赋值以后经 didSet 写回去。BatchStore 的初值在构造时读，这里在任何分派之前，一处管全部入口；
 // --verdicts 带 --dedupe 时另外钉 AppRuntime.pinnedRejectBurstDuplicates（去重按场次存，argument domain 里的只是老场次回落的全局值），
@@ -73,16 +69,9 @@ if CommandLine.arguments.contains("--mcp-selftest") {
 if AppRuntime.headless && !CommandLine.arguments.contains("--live-host") {
     AppRuntime.pinBatchSettings()
 }
-// GUI 启动门控的探锁、认人走一遍，只打印结论、不弹框（测试用，见 LaunchGate.swift）：
-// LABELGUI_DATA_DIR=<临时> LabelGUI --launch-gate-probe [--budget-ms N]。只读，不建目录。
-if CommandLine.arguments.contains("--launch-gate-probe") {
-    LaunchGate.runProbe()
-}
-// 选片确认表自检（页面脚本用 JavaScriptCore 跑：套餐张数、每张备注、复制的文字；客户回复里的备注；确认表水印）：
-// LabelGUI --proof-selftest。不读写数据目录（放在建目录之前）。
-if CommandLine.arguments.contains("--proof-selftest") {
-    ProofSheetSelfTest.run()
-}
+// 自检（登记表 SelfTestRegistry.swift）里不写数据目录的那几条：MCP 纯函数（--mcp-selftest）、启动门控探锁（--launch-gate-probe）、
+// 确认表页面脚本（--proof-selftest），还有打印登记表的 --list-selftests。在建数据目录之前，跑完自己退出。
+MainActor.assumeIsolated { SelfTestRegistry.dispatch(.beforeDataDir) }
 
 // --app-ui、--live-host 是测试宿主：整套 store 都会写数据目录，所以 LABELGUI_DATA_DIR 没设、或者指到真实数据目录的，
 // 在建目录、注册字体之前就退出（它们自己的分派里还会再查一遍，那时已经晚了）。不跑 Python，不同步运行时（§9.7、§10.5）；
@@ -109,6 +98,10 @@ if testHostFlag == nil {
 CollageEmbeddedFonts.registerForProcess(in: appDataDir)
 
 let appConfig = AppConfig.load(from: appDataDir)
+
+// 其余的自检一律在这里分派（登记表 SelfTestRegistry.swift：参数、说明、入口、CI 怎么跑；加一条自检只改那张表）。
+// 在任何别的无头命令之前，入口都是 -> Never：跑完自己退出，走不到下面开界面那一句。
+MainActor.assumeIsolated { SelfTestRegistry.dispatch(.afterSetup) }
 
 // Headless mode for testing/automation: LabelGUI --analyze <photo_dir>
 // runs the native engine and exits without launching the window.
@@ -198,15 +191,6 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--card-ui"),
    CommandLine.arguments.count > flagIndex + 2 {
     MainActor.assumeIsolated {
         CardImportSnapshot.run(flagIndex: flagIndex)
-    }
-}
-
-// 存储卡排队自检：两张假卡走 CardImportCenter 的确认 / 排队 / 停下分析，看都导全了、分析在最后跑一次。
-// LABELGUI_DATA_DIR=<临时> LabelGUI --card-queue-selftest <cardA> <cardB> --dest <dir>
-if let flagIndex = CommandLine.arguments.firstIndex(of: "--card-queue-selftest"),
-   CommandLine.arguments.count > flagIndex + 2 {
-    MainActor.assumeIsolated {
-        CardImportQueueSelftest.run(flagIndex: flagIndex)
     }
 }
 
@@ -474,38 +458,6 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--watermark-batch"),
     }
 }
 
-// 网格「改判后保持位置」自检（另外几组纯函数的也挂在这里）：LabelGUI --ux-selftest。
-if CommandLine.arguments.contains("--ux-selftest") {
-    MainActor.assumeIsolated {
-        // (说明, 改判前顺序, 改判后顺序, 焦点那张, 期望新焦点 / nil = 不动)
-        let cases: [(String, [String], [String], String, String?)] = [
-            ("精选区里按 3：跳到废片区 → 焦点落到原来的下一张", ["p1", "p2", "p3", "u1", "r1"], ["p1", "p3", "u1", "r1", "p2"], "p2", "p3"),
-            ("分组行里按 2：位置没变 → 不动", ["a1", "a2", "a3", "b1"], ["a1", "a2", "a3", "b1"], "a2", nil),
-            ("定完一场被叠起来：这张藏了 → 下一场第一张", ["a1", "a2", "b1", "b2"], ["a1", "b1", "b2"], "a2", "b1"),
-            ("只看精选时废掉最后一张 → 往前找", ["p1", "p2", "p3"], ["p1", "p2"], "p3", "p2"),
-            ("唯一一张被筛掉 → 没得落", ["p1"], [], "p1", nil),
-            ("这张前后的邻居变了（排序挪动）→ 落到原来的下一张", ["p1", "u1", "u2", "u3"], ["p1", "u2", "u1", "u3"], "u1", "u2"),
-            ("同一场里别的照片被叠掉、它自己没动 → 不动", ["a", "r", "b", "c1"], ["a", "b", "c1"], "b", nil),
-            ("按 0 让定完的场重新展开、废片冒出来围着它 → 不动", ["k", "n1"], ["r1", "k", "r2", "n1"], "k", nil),
-        ]
-        var failed = 0
-        for (name, before, after, id, expected) in cases {
-            let got = BatchView.placeAfterChange(of: id, before: before, after: after)
-            let ok = got == expected
-            if !ok { failed += 1 }
-            // 拆开拼：一长串 + 和三元在 CI 的 Xcode 16 上类型检查会慢。
-            let head: String = ok ? "PASS " : "FAIL "
-            let result: String = got ?? "不动"
-            let want: String = ok ? "" : "（期望 \(expected ?? "不动")）"
-            print(head + name + " → " + result + want)
-        }
-        failed += GridExifImportSelfTest.run()  // EXIF 快门 0 不崩、网格多选规则、水印页 RAW+JPG 配对
-        failed += CollageNavSelfTest.run()      // 拼图检视器重排：去那儿（页签、滚动请求）、--tab 新老名字、色调两节
-        failed += WhatsNewSelfTest.run()        // 这一版新增：版本号、弹不弹、记账只写独立的 suite、数据表
-        exit(failed == 0 ? 0 : 1)
-    }
-}
-
 // XMP 写入 + 「XMP 过期」提醒的端到端检查：LABELGUI_DATA_DIR=<临时> LabelGUI --export-xmp <photo_dir> [--then id=精选|可用|废片 [--incremental]]
 // --incremental：改判之后点「XMP 待更新」（只写改了的），断言只动了 1 个 sidecar（见 FileSafetySelfTest.swift）。
 // 会在 photo_dir 里原图旁边写 .xmp —— 只对拷出来的临时文件夹跑。
@@ -550,24 +502,6 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--export-xmp"),
     exit(0)
 }
 
-// 文件安全自检（XMP 只写改了的 / 同名共用 .xmp / 废片避开拼图 / 高 ISO 复制）：LABELGUI_DATA_DIR=<临时> LabelGUI --files-selftest
-if CommandLine.arguments.contains("--files-selftest") {
-    MainActor.assumeIsolated { FileSafetySelfTest.run() }
-}
-
-// 挪了的文件夹认得回来（改名 / 拷贝 / 重新定位 / 实时桥不跟书签）：LABELGUI_DATA_DIR=<临时> LabelGUI --session-move-selftest
-if CommandLine.arguments.contains("--session-move-selftest") {
-    MainActor.assumeIsolated { SessionMoveSelfTest.run() }
-}
-
-// 长任务和退出自检（退出时 VLM 子进程整组停掉、阈值防抖写掉、防闲置睡眠、⌘Q 确认）：LABELGUI_DATA_DIR=<临时> LabelGUI --quit-selftest（见 QuitSelfTest.swift）
-if CommandLine.arguments.contains("--quit-selftest") {
-    MainActor.assumeIsolated { QuitSelfTest.run() }
-}
-// 跟进小修自检（写盘失败报给 MCP、水印页按客户选中导入、复制原片连续失败就停……，见 FollowupSelfTest.swift）：
-// LABELGUI_DATA_DIR=<临时> LabelGUI --followup-selftest
-if CommandLine.arguments.contains("--followup-selftest") { MainActor.assumeIsolated { FollowupSelfTest.run() } }
-
 // 按机身对时（会写这一场的 body_offsets.json，只在临时数据目录下跑）：
 // LABELGUI_DATA_DIR=<临时> LabelGUI --body-offset <photo_dir> [--body '<机身 key>' --seconds +180 | --align id,id] [--undo]
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--body-offset"),
@@ -575,41 +509,6 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--body-offset"),
     MainActor.assumeIsolated {
         BodyClockCLI.run(flagIndex: flagIndex)
     }
-}
-
-// 选片 MCP 的出口（概览的 XMP 过期、AI 改判的出处、一次定一场、导入客户选择）在真的 store 上跑一遍（只写临时数据目录）：
-// LABELGUI_DATA_DIR=<临时> LabelGUI --cull-mcp-selftest <Fixtures/photot-session>（见 CullMCPSelfTest.swift）。
-if let i = CommandLine.arguments.firstIndex(of: "--cull-mcp-selftest") { MainActor.assumeIsolated { CullMCPSelfTest.run(flagIndex: i) } }
-
-// 时间轴布局自检：LabelGUI --timeline-selftest [--seed N] [--trial K]（随机章节数/张数/宽度，验证不出界、不重叠）。
-// 随机数按 seed 播种（--seed，或环境变量 LABELGUI_SELFTEST_SEED；都没给 = 1），同一个 seed 每次跑的都是同样的 3000 组；
-// FAIL 行带 seed 和 trial，--trial 只重跑那一组。CI（Scripts/selftests.sh）固定跑几个 seed。
-if CommandLine.arguments.contains("--timeline-selftest") {
-    let args = CommandLine.arguments
-    func number<T: FixedWidthInteger>(_ flag: String, _ env: String?) -> T? {
-        let raw: String?
-        if let i = args.firstIndex(of: flag) {
-            raw = args.count > i + 1 ? args[i + 1] : ""
-        } else {
-            raw = env.flatMap { ProcessInfo.processInfo.environment[$0] }
-        }
-        guard let raw else { return nil }
-        // 写错了直接退出：悄悄退回默认 seed，以为在复现的其实是另一组。
-        guard let value = T(raw) else {
-            print("--timeline-selftest：\(flag) 要一个非负整数，拿到的是「\(raw)」")
-            exit(2)
-        }
-        return value
-    }
-    let seed: UInt64 = number("--seed", "LABELGUI_SELFTEST_SEED") ?? 1
-    let trial: UInt32? = number("--trial", nil)
-    MainActor.assumeIsolated { ChapterTimelineSelfTest.run(seed: seed, onlyTrial: trial.map { Int($0) }) }
-}
-
-// 交付环节数据安全自检（XMP 归属 / 合并、同名另存、截断 JPEG、同一个文件、两条去 GPS）：
-// LABELGUI_DATA_DIR=<临时> LabelGUI --delivery-selftest（见 DeliverySelfTest.swift；端到端在 Scripts/delivery_regression.py）。
-if CommandLine.arguments.contains("--delivery-selftest") {
-    MainActor.assumeIsolated { DeliverySelfTest.run() }
 }
 
 // 批量页 / 连拍挑选离屏快照：LabelGUI --batch-ui|--compare-ui <photo_dir> <out.png> [...]（见 UISnapshot.swift）。
@@ -640,31 +539,6 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--live-host") {
         LiveHost.run(flagIndex: flagIndex)
     }
 }
-
-// 主体蒙版 / 人物挡字自检：LabelGUI --mask-selftest <photo_dir>（见 CollageMaskSelfTest.swift）。
-if let flagIndex = CommandLine.arguments.firstIndex(of: "--mask-selftest") {
-    MainActor.assumeIsolated {
-        CollageMaskSelfTest.run(flagIndex: flagIndex)
-    }
-}
-
-// 光谱胶片色调的表（spektrafilm 烘的 LUT）自检：LABELGUI_DATA_DIR=<临时> LabelGUI --film-looks-selftest（CollageFilmLooksSelfTest.swift）。
-if CommandLine.arguments.contains("--film-looks-selftest") { CollageFilmLooksSelfTest.run() }
-// 暗房的规则（悬停不改工程、三级套用、强度、撤销）：LABELGUI_DATA_DIR=<临时> LabelGUI --darkroom-selftest（CollageDarkroomSelfTest.swift）。
-if CommandLine.arguments.contains("--darkroom-selftest") { MainActor.assumeIsolated { CollageDarkroomSelfTest.run() } }
-if let i = CommandLine.arguments.firstIndex(of: "--film-selftest") { MainActor.assumeIsolated { CollageStyleFilmSelfTest.run(flagIndex: i) } }  // 底片印样自检：LabelGUI --film-selftest <photo_dir> [--out 目录]
-// 留白杂志模板自检：LabelGUI --minimal-selftest [photo_dir]（见 CollageStyleMinimalSelfTest.swift）。
-if let i = CommandLine.arguments.firstIndex(of: "--minimal-selftest") { MainActor.assumeIsolated { CollageStyleMinimalSelfTest.run(flagIndex: i) } }
-if CommandLine.arguments.contains("--swiss-selftest") { MainActor.assumeIsolated { CollageSwissSelfTest.run() } }
-// 婚礼相册 fine-art 编排自检：LabelGUI --album-selftest [<photo_dir> --out <dir>]（见 CollageStyleFineArtSelfTest.swift）。
-if let flagIndex = CommandLine.arguments.firstIndex(of: "--album-selftest") {
-    MainActor.assumeIsolated { CollageStyleFineArtSelfTest.run(flagIndex: flagIndex) }
-}
-// 时尚刊自检（挑主图、出一期、换封面、文案商标、字块不重叠）：LabelGUI --fashion-selftest <photo_dir>（CollageStyleFashionSelfTest.swift）。
-if let i = CommandLine.arguments.firstIndex(of: "--fashion-selftest") { MainActor.assumeIsolated { CollageStyleFashionSelfTest.run(flagIndex: i) } }
-if let i = CommandLine.arguments.firstIndex(of: "--newspaper-selftest") { MainActor.assumeIsolated { CollageStyleNewspaperSelfTest.run(flagIndex: i) } }  // 报纸风自检（CollageStyleNewspaperSelfTest.swift）
-// 拼图导出自检（合成数据，见 CollageExportSelfTest.swift）：LABELGUI_DATA_DIR=<临时> LabelGUI --collage-export-selftest
-if CommandLine.arguments.contains("--collage-export-selftest") { MainActor.assumeIsolated { CollageExportSelfTest.run() } }
 
 // 拼图编辑操作脚本：LabelGUI --collage-ops <photo_dir> --ops "..."（见 CollageCLI.swift）。
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--collage-ops"),
@@ -741,11 +615,6 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--export-jpeg"),
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--diag-export"), CommandLine.arguments.count > flagIndex + 1 {
     MainActor.assumeIsolated { DiagnosticsCLI.run(flagIndex: flagIndex) }
 }
-// 诊断这一组的自检（状态栏提示历史、持久日志轮转、诊断包里没有照片和客户原话、失败原因、文件夹权限）：
-// LABELGUI_DATA_DIR=<临时> LabelGUI --diag-selftest [<photo_dir>]（见 Diagnostics/DiagnosticsSelfTest.swift）。
-if CommandLine.arguments.contains("--diag-selftest") {
-    MainActor.assumeIsolated { DiagnosticsSelfTest.run() }
-}
 
 // 走到这里就要开界面了。命令行里带着不认识的 `--参数`（拼错了、或者拿新的测试脚本跑旧版程序）时
 // 不开：测试 / 自动化以为自己在无头跑，结果弹出一个窗口。系统自己传的参数是单横线（-NSDocument…、-psn_…）。
@@ -806,7 +675,8 @@ struct LabelGUIApp: App {
         }
         // 「帮助 › 快捷键一览」：状态栏键盘按钮、? 键弹的同一张表，在哪个页面都能打开。只有一个，不进 ⌘N。
         Window("快捷键一览", id: ShortcutsWindow.id) {
-            ShortcutsPanel()
+            // 打开时翻到主窗口现在在的那一页（批量处理 / 水印 / 拼图 / 暗房），顶上可以换。
+            ShortcutsPanel(page: ShortcutsPage.current(model))
                 .preferredColorScheme(.dark)
         }
         .windowResizability(.contentSize)

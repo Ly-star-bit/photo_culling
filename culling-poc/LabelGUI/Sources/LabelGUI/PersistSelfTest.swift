@@ -7,7 +7,7 @@ import Foundation
 /// 设只读目录，核对原件保住了、提示有了、切场次拦住了。会改写数据目录：只在临时目录里跑。每条打一行 PASS / FAIL，
 /// 有 FAIL 退出码 1。不碰 UserDefaults（minKeepersPerChapter 这类设置写的是全局的，数据目录隔离不了）。
 enum PersistSelfTest {
-    static let flag = "--persist-selftest"  // 和 ClientPicksCLI.flags 里的字面量一致
+    static let flag = "--persist-selftest"  // 和 SelfTestRegistry.all 里登记的一致
 
     @MainActor
     static func run(flagIndex: Int) -> Never {

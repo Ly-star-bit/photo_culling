@@ -1,31 +1,12 @@
 #!/bin/bash
 # 不要照片的进程内自检（CI 的「自检」步骤）：每条都在一个新的临时 LABELGUI_DATA_DIR 里跑，任何一条退出码不是 0 就红。
-#   --ux-selftest        网格改判后焦点落在哪（BatchView.placeAfterChange）
-#   --timeline-selftest  时间轴 3000 组随机章节不出界、不重叠；随机数按 seed 播种，这里固定跑 3 个 seed（seed 先混开再和
-#                        trial 组合，三个 seed 是三批互不相同的 3000 组，自检开头核对）
-#   --swiss-selftest     瑞士风版式规则（完全不收照片参数）
-#   --minimal / --mask / --album / --fashion / --newspaper-selftest   不给照片文件夹时只验合成数据
-#   --delivery-selftest  交付环节的数据安全：XMP 归属 / 合并、同名另存 -2、截断 JPEG、同一个文件、两条去 GPS
-#                        （端到端的命令行出口在 Scripts/delivery_regression.py）
-#   --session-move-selftest  挪了的文件夹认得回来（同卷改名 / 拷贝不认 / 重新定位 / 实时桥不跟书签），造假的拍摄、真改名
-#   --quit-selftest      长任务和退出：退出 / 取消时 VLM 的 uv、python 子进程整组停掉（假的 uv），阈值防抖退出时写掉，
-#                        分析 / VLM / 导卡 / 导出 JPG / 复制原片期间防闲置睡眠（pmset 里核对电源断言）、所有出口都放掉；⌘Q 确认的判断表和
-#                        「停下并退出」流程（注入的弹框，从不真弹；合成 JPEG 真跑分析；水印页、拼图页在导出也问）
-#   --diag-selftest      诊断：状态栏提示历史、日志轮转、诊断包里没有照片和客户原话、逐张失败的原因、文件夹没权限
-#                        （端到端的命令行出口在 Scripts/diag_regression.py）
-#   --followup-selftest  跟进小修：写盘失败报给 MCP（persisted / save_failed）、水印页按客户选中导入、复制原片连续失败就停……
-#   --persist-selftest   场次持久化：删场次留判决、坏文件挪开不盖、读不了的拒绝切场次、写盘失败看得见（Fixtures/photot-session）
-#   --cull-mcp-selftest  选片 MCP 在真的 BatchStore 上：概览的 XMP 待更新 / 上次写的时间、导入客户选择（带备注、托盘跟着刷、
-#                        纯数字交付名）、AI 改判的出处（阈值建议不拿 AI 的当样本、亲手改过就拿掉）、一次定一场；
-#                        用 Fixtures/photot-session 的 JSON（不要照片），要一个空的数据目录（run 每条都给新的）
-#   --files-selftest     文件安全：XMP 只写改了的、同名共用 .xmp、废片避开拼图、高 ISO RAW 复制不互相顶掉
-#   --collage-export-selftest  拼图 / 相册导出：PDF 先写临时文件再改名、缺跨页不出 PDF、空照片格先确认
-#   --proof-selftest     选片确认表页面脚本（JavaScriptCore）：套餐张数、每张备注、复制的文字、确认表水印
-#   --film-looks-selftest  光谱胶片色调：表读得到（裸二进制往上找 third_party/film-luts；.app 里只读包里那份，CI 另拿 DMG 里的 app 跑）、名字不带品牌、GPU 和 CPU 同色
-#   --darkroom-selftest  暗房：悬停只预览、整组 / 这一页 / 这一格各改各的、强度、颗粒晕光对整组、←→、原图、撤销；
-#                        1:1 细节只渲那一块和渲整页再裁逐字节相同（合成照片，投影、抠图格、卡纸、网点、水印、散落相纸、刊头）
-# 别处跑的（最后那段「CI 登记」核对的就是这张表）：--mcp-selftest 在 mcp_smoke.py、--card-queue-selftest 在
-# card_import_regression.py、--launch-gate-probe 在 cli_guard_regression.py；--film-selftest 要先分析过的真照片，CI 不跑。
+# 跑哪些、按什么先后、带什么参数、各测什么，都在自检登记表 Sources/LabelGUI/SelfTestRegistry.swift 里（优化分析 NE8）：
+# 这里先跑一次 `LabelGUI --list-selftests` 拿清单（一条一行：参数、CI 怎么跑、selftests.sh 给的参数、说明），ci 一列是 selftests.sh 的照着跑：
+#   参数里的 {fixture} 换成 Fixtures/photot-session；带 {seed} 的（时间轴）按 SELFTEST_SEEDS 每个跑一遍，标签带 seed=N。
+#   标签是参数去掉 -- 和 -selftest（--session-move-selftest → session-move）。
+# 加一条自检只改那张表（SelfTestRegistry.all 加一行），这个脚本不用动。
+# 别处跑的（ci 一列是回归脚本名，比如 --mcp-selftest 在 mcp_smoke.py）、CI 不跑的（none，带为什么）也在那张表里，
+# 最后那段「CI 登记」核对。
 #
 # 为什么每条都要临时数据目录：main.swift 在分派之前就建数据目录、往里写内置字体；ux / timeline / swiss 不查
 # LABELGUI_DATA_DIR，不设就会在 runner 上建出 ~/Library/Application Support/选片工具，MCP 冒烟里「不建目录」那一条就测不了
@@ -49,7 +30,7 @@ failed=()
 passed=0
 LIMIT="${SELFTEST_TIMEOUT:-300}"
 timings=""
-ran=" "   # 跑过的自检参数（最后「CI 登记」那段对 AppRuntime.headlessFlags 用）
+ran=" "   # 跑过的自检参数（最后「CI 登记」那段对登记表用）
 run() {
     local label="$1"; shift
     ran="$ran$1 "
@@ -61,8 +42,9 @@ run() {
     # 每条自检单独限时（SELFTEST_TIMEOUT 秒，默认 300：CI 的虚拟机上 --quit-selftest 要 170 秒左右）：到点先用 sample 抓一份调用栈（卡在哪），再停掉、点名报出来，后面的照跑。
     # 以前整步 10 分钟一到被 CI 杀掉，看不出是哪一条。输出写文件（被停掉时 print 的缓冲本来就会丢，调用栈才是线索）。
     local log="$WORK/out.$$.txt" stack="$WORK/sample.$$.txt" timedout=0 pid
+    # 3<&-：下面读清单的 fd 3 不传给自检进程（和以前一样，自检只拿到 stdin / stdout / stderr）。
     LABELGUI_DATA_DIR="$data" LABELGUI_NO_GUI=1 LABELGUI_LIVE_SOCK_ROOT="$sock" LABELGUI_MCP_OUT="$WORK/mcp-out" \
-        "$BIN" "$@" </dev/null >"$log" 2>&1 &
+        "$BIN" "$@" </dev/null >"$log" 2>&1 3<&- &
     pid=$!
     while kill -0 "$pid" 2>/dev/null; do
         if [ $((SECONDS - start)) -ge "$LIMIT" ]; then
@@ -108,65 +90,92 @@ run() {
     rm -rf "$data" "$sock"
 }
 
-run ux --ux-selftest
-for seed in $SEEDS; do
-    run "timeline seed=$seed" --timeline-selftest --seed "$seed"
-done
-run swiss --swiss-selftest
-run minimal --minimal-selftest
-run mask --mask-selftest
-run album --album-selftest
-run fashion --fashion-selftest
-run newspaper --newspaper-selftest
-run delivery --delivery-selftest
-run session-move --session-move-selftest
-run quit --quit-selftest
-run diag --diag-selftest
-run followup --followup-selftest
-run persist --persist-selftest "$FIX"
-run cull-mcp --cull-mcp-selftest "$FIX"
-run files --files-selftest
-run collage-export --collage-export-selftest
-run proof --proof-selftest
-run film-looks --film-looks-selftest
-run darkroom --darkroom-selftest
+# 清单从程序里拿（自检登记表），和每条自检一样走临时数据目录：拿清单本身不建数据目录、不读写任何文件。
+LIST="$WORK/selftests.tsv"
+mkdir -p "$WORK/list-data" "$WORK/list-sock"
+LABELGUI_DATA_DIR="$WORK/list-data" LABELGUI_NO_GUI=1 LABELGUI_LIVE_SOCK_ROOT="$WORK/list-sock" LABELGUI_MCP_OUT="$WORK/mcp-out" \
+    "$BIN" --list-selftests </dev/null >"$LIST" 2>"$WORK/list.err"
+list_rc=$?
+if [ $list_rc -ne 0 ] || ! grep -q -- '^--' "$LIST"; then
+    echo "FAIL 自检清单：$BIN --list-selftests 退出码 ${list_rc}，读不到登记表（旧版程序没有这个参数？）"
+    sed 's/^/    /' "$WORK/list.err" "$LIST"
+    if [ "${GITHUB_ACTIONS:-}" = "true" ]; then echo "::error title=自检清单::--list-selftests 退出码 ${list_rc}"; fi
+    exit 1
+fi
+
+# 一行四列（tab 分开，空的写 -）：参数、CI 怎么跑、selftests.sh 给的参数、说明（none 的再带一列为什么不跑）。
+# fd 3 读：run 里起的进程不会吃掉清单的 stdin。
+while IFS=$'\t' read -r -u 3 flag ci args _summary; do
+    case "$flag" in --*) ;; *) continue ;; esac
+    [ "$ci" = "selftests.sh" ] || continue
+    label="${flag#--}"
+    label="${label%-selftest}"
+    argv=()
+    [ "$args" = "-" ] || read -r -a argv <<<"$args"
+    has_seed=0
+    for a in ${argv[@]+"${argv[@]}"}; do [ "$a" = "{seed}" ] && has_seed=1; done
+    if [ $has_seed -eq 1 ]; then
+        for seed in $SEEDS; do
+            cmd=()
+            for a in "${argv[@]}"; do
+                case "$a" in "{seed}") cmd+=("$seed") ;; "{fixture}") cmd+=("$FIX") ;; *) cmd+=("$a") ;; esac
+            done
+            run "$label seed=$seed" "$flag" "${cmd[@]}"
+        done
+    else
+        cmd=()
+        for a in ${argv[@]+"${argv[@]}"}; do
+            case "$a" in "{fixture}") cmd+=("$FIX") ;; *) cmd+=("$a") ;; esac
+        done
+        run "$label" "$flag" ${cmd[@]+"${cmd[@]}"}
+    fi
+done 3<"$LIST"
 
 # ---------------------------------------------------------------- CI 登记
-# 这一轮各车道加的自检、回归脚本有一半没进 CI（只在自己的分支上手跑过），合进来以后改坏了 CI 照样绿。这里核对两件事：
-#   1. AppRuntime.headlessFlags 里每个 --*-selftest / --*-probe 要么上面 run 过，要么在 ELSEWHERE 里写清在哪个脚本跑
-#      （那个脚本里真有这个参数的字面量、release.yml 里真有那一步），要么在 NOT_IN_CI 里写清为什么不跑；
-#   2. Scripts/ 下每个 *_regression.py、*_smoke.py、verdict_regression.sh、selftests.sh 在 release.yml 里都有一步（注释不算）。
-# 新加一个自检或回归脚本忘了接进 CI，这里就红。只读源码和 release.yml，不跑二进制。
-ELSEWHERE="
---mcp-selftest mcp_smoke.py
---card-queue-selftest card_import_regression.py
---launch-gate-probe cli_guard_regression.py
-"
-NOT_IN_CI="
---film-selftest 要先分析过的真照片（按卷出印样、合成帧都从真的像素来），Fixtures 里只有 JSON
-"
-RUNTIME_SRC="$ROOT/Sources/LabelGUI/AppRuntime.swift"
+# 这一轮各车道加的自检、回归脚本有一半没进 CI（只在自己的分支上手跑过），合进来以后改坏了 CI 照样绿。这里核对三件事：
+#   1. 登记表（上面 --list-selftests 拿到的清单）里每一条都有人跑：ci 是 selftests.sh 的上面真跑过；是回归脚本名的，
+#      Scripts/ 下那个脚本里真有这个参数的字面量、release.yml 里真有那一步；none 的写了为什么不跑。参数不重复。
+#   2. 没有绕过登记表的自检：Sources/ 下每个 "--…-selftest" / "--…-probe" 字面量都在登记表里（往 main.swift 里直接写一个
+#      分派、不登记的，这里红）。
+#   3. Scripts/ 下每个 *_regression.py、*_smoke.py、verdict_regression.sh、selftests.sh 在 release.yml 里都有一步（注释不算）。
+# 新加一个自检或回归脚本忘了接进 CI，这里就红。读上面拿到的清单、源码和 release.yml，不另跑二进制。
+SRC_DIR="$ROOT/Sources/LabelGUI"
 WORKFLOW="$ROOT/../../.github/workflows/release.yml"
 ci_bad=()
-if [ ! -f "$RUNTIME_SRC" ] || [ ! -f "$WORKFLOW" ]; then
-    ci_bad+=("找不到 $RUNTIME_SRC 或 $WORKFLOW")
+if [ ! -d "$SRC_DIR" ] || [ ! -f "$WORKFLOW" ]; then
+    ci_bad+=("找不到 $SRC_DIR 或 $WORKFLOW")
 else
     workflow_steps="$(grep -vE '^[[:space:]]*#' "$WORKFLOW")"
-    flags="$(sed -n '/headlessFlags: Set<String> = \[/,/^    \]/p' "$RUNTIME_SRC" \
-        | grep -oE -- '"--[a-z0-9-]+-(selftest|probe)"' | tr -d '"' | sort -u)"
-    [ -n "$flags" ] || ci_bad+=("AppRuntime.headlessFlags 里一个 --*-selftest 都没读到：解析坏了")
-    for flag in $flags; do
-        case "$ran" in *" $flag "*) continue ;; esac
-        where="$(printf '%s\n' "$ELSEWHERE" | awk -v f="$flag" '$1 == f { print $2 }')"
-        if [ -n "$where" ]; then
-            grep -qF -- "\"$flag\"" "$ROOT/Scripts/$where" 2>/dev/null \
-                || ci_bad+=("$flag 登记在 $where 里跑，可是 Scripts/$where 里没有 \"$flag\"")
-            printf '%s\n' "$workflow_steps" | grep -qF -- "Scripts/$where" \
-                || ci_bad+=("$flag 登记在 $where 里跑，可是 release.yml 不跑 Scripts/$where")
-            continue
-        fi
-        printf '%s\n' "$NOT_IN_CI" | awk -v f="$flag" '$1 == f { hit = 1 } END { exit !hit }' && continue
-        ci_bad+=("$flag 没进 CI：加进 Scripts/selftests.sh（run <名字> $flag …），或在 ELSEWHERE / NOT_IN_CI 里写清楚")
+    flags="$(grep -E -- '^--' "$LIST" | cut -f1 | sort)"
+    [ -n "$flags" ] || ci_bad+=("登记表里一条都没读到：--list-selftests 的输出解析坏了")
+    dups="$(printf '%s\n' "$flags" | uniq -d)"
+    [ -z "$dups" ] || ci_bad+=("登记表里有重复的参数：$(echo $dups)")
+    while IFS=$'\t' read -r -u 3 flag ci _args _summary why; do
+        case "$flag" in --*) ;; *) continue ;; esac
+        case "$ci" in
+            selftests.sh)
+                case "$ran" in *" $flag "*) ;; *) ci_bad+=("$flag 登记成 selftests.sh 跑，可是上面没跑到") ;; esac
+                ;;
+            none)
+                [ -n "$why" ] && [ "$why" != "-" ] || ci_bad+=("$flag 登记成 CI 不跑（none），可是没写为什么")
+                ;;
+            *)
+                if [ ! -f "$ROOT/Scripts/$ci" ]; then
+                    ci_bad+=("$flag 登记在 $ci 里跑，可是 Scripts/ 下没有 $ci")
+                else
+                    grep -qF -- "\"$flag\"" "$ROOT/Scripts/$ci" \
+                        || ci_bad+=("$flag 登记在 $ci 里跑，可是 Scripts/$ci 里没有 \"$flag\"")
+                    printf '%s\n' "$workflow_steps" | grep -qF -- "Scripts/$ci" \
+                        || ci_bad+=("$flag 登记在 $ci 里跑，可是 release.yml 不跑 Scripts/$ci")
+                fi
+                ;;
+        esac
+    done 3<"$LIST"
+    literals="$(grep -rhoE --include='*.swift' -- '"--[a-z0-9-]+-(selftest|probe)"' "$SRC_DIR" | tr -d '"' | sort -u)"
+    [ -n "$literals" ] || ci_bad+=("Sources 里一个 \"--…-selftest\" 字面量都没读到：扫描坏了")
+    for lit in $literals; do
+        printf '%s\n' "$flags" | grep -qxF -- "$lit" \
+            || ci_bad+=("Sources 里有 \"$lit\"，登记表里却没有：自检只登在 SelfTestRegistry.all（入口、CI 怎么跑），别直接写进 main.swift 的分派")
     done
     for script in "$ROOT"/Scripts/*_regression.py "$ROOT"/Scripts/*_smoke.py "$ROOT"/Scripts/verdict_regression.sh \
                   "$ROOT"/Scripts/selftests.sh; do

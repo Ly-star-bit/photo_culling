@@ -10,6 +10,8 @@ import AppKit
 /// LabelGUI --batch-ui <photo_dir> <out.png> --delivery-ui jpeg|highlights|watermark [--delivery-json '{"size":"long:3000"}']
 ///     （导出 JPG / 精华 Top N / 水印页的导出设置那一段）
 /// LabelGUI --batch-ui <photo_dir> <out.png> --body-clock-ui   （状态栏「N 台机身」点开的按机身对时面板）
+/// LabelGUI --batch-ui <photo_dir> <out.png> --shortcuts-ui [--shortcuts-page 批量处理|水印|拼图|暗房]
+///     （快捷键一览：键盘按钮、? 键、「帮助 › 快捷键一览」弹的那张表，翻到这一页；不给 = 批量处理）
 /// 都可以加 --ax-dump：截图前打印辅助功能树（输入框、滑杆这类 AppKit 控件带着值），按文字断言。
 /// LabelGUI --batch-ui <photo_dir> <out.png> --perf grid [--copies 15] [--size 2560x1440 -batch.thumbSize 90]
 ///     （截完图接着在网格里按 → ← 和数字键，打印每一下哪些视图 body 重算了几次、主线程 CPU、进程指令数：BatchPerf；
@@ -117,7 +119,12 @@ enum BatchUISnapshot {
         for v in sections { order += store.items.filter { $0.verdict == v }.map(\.id) }
         let startID = option("--id") ?? order.first ?? ""
         if args.contains("--shortcuts-ui") {
-            root = AnyView(ShortcutsPanel().background(Color(white: 0.16)))
+            let name = option("--shortcuts-page") ?? ShortcutsPage.batch.rawValue
+            guard let page = ShortcutsPage(rawValue: name) else {
+                print("--shortcuts-page 只认 \(ShortcutsPage.allCases.map(\.rawValue).joined(separator: "|"))：\(name)")
+                exit(2)
+            }
+            root = AnyView(ShortcutsPanel(page: page).background(Color(white: 0.16)))
         } else if let kind = option("--delivery-ui") {
             root = AnyView(deliveryPreview(kind, store: store, json: option("--delivery-json") ?? "")
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
