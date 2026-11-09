@@ -309,7 +309,8 @@ struct CollagePreflightBox: View {
                     Label(head, systemImage: issues.isEmpty ? "checkmark.circle" : "list.bullet")
                         .font(.caption)
                         .foregroundStyle(issues.isEmpty ? .secondary : .primary)
-                    ForEach(issues.prefix(Self.shownLimit)) { row($0) }
+                    // 按序号认（同一格两块字压出安全区、首行又一样时 id 会重）。
+                    ForEach(Array(issues.prefix(Self.shownLimit).enumerated()), id: \.offset) { row($0.element) }
                     if issues.count > Self.shownLimit {
                         Text("还有 \(issues.count - Self.shownLimit) 条（拦的在前；改好前面的再看）")
                             .font(.caption2).foregroundStyle(.secondary)

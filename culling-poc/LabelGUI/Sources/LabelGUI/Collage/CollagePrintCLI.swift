@@ -253,8 +253,11 @@ enum CollagePrintCLI {
             print("  导出超时")
             return true
         }
-        print("  导出 → " + (outcome.files.isEmpty ? "（没写出文件）" : outcome.files.joined(separator: " "))
-              + (outcome.failure.map { " · 失败: \($0)" } ?? "") + (outcome.warning.map { " · 提示: \($0)" } ?? ""))
+        // 拆成几个 let：整串 + 拼 CI 的 6.1.2 编译器类型检查超时。
+        let files: String = outcome.files.isEmpty ? "（没写出文件）" : outcome.files.joined(separator: " ")
+        let failed: String = outcome.failure.map { " · 失败: \($0)" } ?? ""
+        let warned: String = outcome.warning.map { " · 提示: \($0)" } ?? ""
+        print("  导出 → \(files)\(failed)\(warned)")
         print("  " + store.progressText)
         // 第一张图的色彩、JPEG 是不是基线（核对规格的 sRGB / Adobe RGB 有没有生效）。
         if let first = outcome.files.first(where: { !$0.hasSuffix(".pdf") }) {
