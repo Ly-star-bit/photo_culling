@@ -22,7 +22,9 @@ struct ContentView: View {
     var body: some View {
         TabView(selection: $model.tab) {
             BatchView(store: batchStore, proofWatermark: { [watermarkStore] in watermarkStore.proofWatermark() })
-                .tabItem { Label("批量处理", systemImage: "square.grid.3x3") }
+                // 长任务的进度、跑完 / 出错写在页签上（优化分析 NU11）：在拼图页、水印页也看得见导卡、分析、导出到哪了。
+                // ContentView 本来就观察 batchStore，进度一变这里跟着重算，不多一份订阅。
+                .tabItem { Label(model.batchTabTitle, systemImage: "square.grid.3x3") }
                 .tag(AppTab.batch)
 
             WatermarkView(store: watermarkStore, batchStore: batchStore)

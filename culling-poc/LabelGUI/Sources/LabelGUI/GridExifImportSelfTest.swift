@@ -30,6 +30,7 @@ enum GridExifImportSelfTest {
         cacheInvalidationCases(tally)
         previewCacheCases(tally)
         faceStripCancelCases(tally)
+        batchTabCases(tally)
         return tally.failed
     }
 
@@ -134,6 +135,27 @@ enum GridExifImportSelfTest {
         t.check(finished && outcomes.get("B") == true && bCached, "人脸小图 没取消的照常解、进缓存",
                 "\(String(describing: outcomes.get("B"))) \(bCached)")
         FaceStripCache.cache.removeObject(forKey: b as NSString)
+    }
+
+    // MARK: - 「批量处理」页签上的字（优化分析 NU11）
+
+    /// 长任务在跑：做什么、几成（没有进度写「…」，进度夹在 0–100%）；没在跑：用户不在批量页时跑完 / 出错的那一句，都没有就是原名。
+    private static func batchTabCases(_ t: Tally) {
+        let rows: [(QuitGuard.Job?, Double?, AppModel.BatchTaskEnd?, String)] = [
+            (nil, nil, nil, "批量处理"),
+            (.analysis, 0.374, nil, "批量处理 · 分析 37%"),
+            (.cardImport(queued: 1), nil, nil, "批量处理 · 导卡…"),
+            (.task(.jpegExport), 1.0, nil, "批量处理 · 导出 JPG 100%"),
+            (.task(.copyOriginals), .nan, nil, "批量处理 · 复制原片…"),
+            (.vlm, 1.7, nil, "批量处理 · VLM 判片 100%"),
+            (.other, 0.5, .done, "批量处理 · 处理中 50%"),
+            (nil, nil, .done, "批量处理 · 完成"),
+            (nil, 0.9, .failed, "批量处理 · 出错"),
+        ]
+        for (job, fraction, ended, want) in rows {
+            let got = AppModel.batchTabTitle(job: job, fraction: fraction, ended: ended)
+            t.check(got == want, "批量处理页签「\(want)」", "得到「\(got)」")
+        }
     }
 
     // MARK: - 分析收尾只清重写了预览的照片
