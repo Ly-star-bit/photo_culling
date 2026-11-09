@@ -769,6 +769,13 @@ final class CollageDarkroom: ObservableObject {
         if !wholePage { opts.region = rect }
         guard let cg = CollageRender.render(page: page, project: project, hints: hints, options: opts),
               cg.width == w, cg.height == h, let crop = cg.cropping(to: rect) else { return nil }
-        return NSImage(cgImage: crop, size: NSSize(width: side, height: side))
+        // 裁出来的 CGImage 和整页共用一块内存（dataProvider 是整页的）：直接交出去，1:1 细节开着就一直钉着一整张
+        // 导出尺寸的页面位图（印刷跨页约 100 MB）。画进自己的 side × side 位图（和渲染同一种格式：sRGB、8 位、
+        // 不带 alpha，1:1 不缩放，逐字节就是裁出来的那块），整页随这次渲染一起放掉。
+        guard let ctx = CollageRender.makeContext(width: side, height: side) else { return nil }
+        ctx.interpolationQuality = .none
+        ctx.draw(crop, in: CGRect(x: 0, y: 0, width: side, height: side))
+        guard let own = ctx.makeImage() else { return nil }
+        return NSImage(cgImage: own, size: NSSize(width: side, height: side))
     }
 }
