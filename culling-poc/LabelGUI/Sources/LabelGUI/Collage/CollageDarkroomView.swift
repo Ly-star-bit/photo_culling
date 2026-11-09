@@ -241,57 +241,64 @@ private struct DarkroomTopBar: View {
     var body: some View {
         let _ = CollagePerf.body("暗房顶栏")
         let scopes: [CollageDarkroom.Scope] = model.pageAvailable ? [.project, .page, .cell] : [.project, .cell]
-        HStack(spacing: 12) {
+        // 三栏：左右两栏一样宽（都撑满剩下的地方），「套用到」那组就在正中。以前左边一组、右边一组各自按内容宽，中间两个
+        // Spacer 分剩下的：右边加了撤销 / 重做以后比左边宽，「套用到」被挤到正中偏左。
+        HStack(spacing: 0) {
             HStack(spacing: 6) {
                 Text("暗房").font(.system(size: 13, weight: .semibold)).foregroundStyle(DarkroomPalette.text)
                 Text("·").foregroundStyle(DarkroomPalette.tertiary)
                 Text(model.effectiveScope.label + (store.isAlbum ? " · 跨页 \(store.pageIndex + 1)" : ""))
                     .font(.system(size: 13)).foregroundStyle(DarkroomPalette.secondary)
             }
-            .frame(minWidth: 150, alignment: .leading)
-            Spacer(minLength: 12)
-            Text("套用到").font(.system(size: 12)).foregroundStyle(DarkroomPalette.tertiary)
-            DarkroomSegmented(items: scopes.map { s in
-                let enabled = s != .cell || model.cellAvailable
-                return .init(id: s.rawValue, label: s.label, selected: model.effectiveScope == s, enabled: enabled,
-                             help: s == .cell && !enabled ? "先在底下这一页的小样里点一格" : "色调和强度改「\(s.label)」")
-            }) { id in
-                if let s = CollageDarkroom.Scope(rawValue: id) { model.scope = s }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 12) {
+                Text("套用到").font(.system(size: 12)).foregroundStyle(DarkroomPalette.tertiary)
+                DarkroomSegmented(items: scopes.map { s in
+                    let enabled = s != .cell || model.cellAvailable
+                    return .init(id: s.rawValue, label: s.label, selected: model.effectiveScope == s, enabled: enabled,
+                                 help: s == .cell && !enabled ? "先在底下这一页的小样里点一格" : "色调和强度改「\(s.label)」")
+                }) { id in
+                    if let s = CollageDarkroom.Scope(rawValue: id) { model.scope = s }
+                }
+                .frame(width: CGFloat(scopes.count) * 76)
             }
-            .frame(width: CGFloat(scopes.count) * 76)
-            Spacer(minLength: 12)
-            // 撤销 / 重做：暗房开着时拼图的顶栏（⌘Z 绑在它上面）不在视图树里，以前暗房里按 ⌘Z 没人接，界面却写着
-            // 「⌘Z 一步步撤」。条件、提示和拼图顶栏的一样。
-            HStack(spacing: 2) {
-                undoButton("arrow.uturn.backward", "撤销", enabled: store.canUndo) { store.undo() }
-                    .keyboardShortcut("z", modifiers: .command)
-                    .help("撤销 (⌘Z)")
-                undoButton("arrow.uturn.forward", "重做", enabled: store.canRedo) { store.redo() }
-                    .keyboardShortcut("z", modifiers: [.command, .shift])
-                    .help("重做 (⇧⌘Z)")
+            .fixedSize()
+            .padding(.horizontal, 12)
+            HStack(spacing: 12) {
+                // 撤销 / 重做：暗房开着时拼图的顶栏（⌘Z 绑在它上面）不在视图树里，以前暗房里按 ⌘Z 没人接，界面却写着
+                // 「⌘Z 一步步撤」。条件、提示和拼图顶栏的一样。
+                HStack(spacing: 2) {
+                    undoButton("arrow.uturn.backward", "撤销", enabled: store.canUndo) { store.undo() }
+                        .keyboardShortcut("z", modifiers: .command)
+                        .help("撤销 (⌘Z)")
+                    undoButton("arrow.uturn.forward", "重做", enabled: store.canRedo) { store.redo() }
+                        .keyboardShortcut("z", modifiers: [.command, .shift])
+                        .help("重做 (⇧⌘Z)")
+                }
+                Text("原图")
+                    .font(.system(size: 12, weight: model.showOriginal ? .semibold : .regular))
+                    .foregroundStyle(model.showOriginal ? DarkroomPalette.text : DarkroomPalette.secondary)
+                    .padding(.horizontal, 12).padding(.vertical, 5)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(model.showOriginal ? DarkroomPalette.raised : .clear))
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(DarkroomPalette.hairline, lineWidth: 1))
+                    .contentShape(Rectangle())
+                    .onLongPressGesture(minimumDuration: 0, maximumDistance: 40, perform: {}, onPressingChanged: { pressing in
+                        model.showOriginal = pressing
+                    })
+                    .help("按住看原图（空格）")
+                    .accessibilityAddTraits(.isButton)
+                Button {
+                    store.closeDarkroom()
+                } label: {
+                    Text("完成").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.black)
+                        .padding(.horizontal, 16).padding(.vertical, 5)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(DarkroomPalette.accent))
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.escape, modifiers: [])
+                .help("回到拼图（Esc）。暗房里的改动都已经套上了，⌘Z 一步步撤")
             }
-            Text("原图")
-                .font(.system(size: 12, weight: model.showOriginal ? .semibold : .regular))
-                .foregroundStyle(model.showOriginal ? DarkroomPalette.text : DarkroomPalette.secondary)
-                .padding(.horizontal, 12).padding(.vertical, 5)
-                .background(RoundedRectangle(cornerRadius: 6).fill(model.showOriginal ? DarkroomPalette.raised : .clear))
-                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(DarkroomPalette.hairline, lineWidth: 1))
-                .contentShape(Rectangle())
-                .onLongPressGesture(minimumDuration: 0, maximumDistance: 40, perform: {}, onPressingChanged: { pressing in
-                    model.showOriginal = pressing
-                })
-                .help("按住看原图（空格）")
-                .accessibilityAddTraits(.isButton)
-            Button {
-                store.closeDarkroom()
-            } label: {
-                Text("完成").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.black)
-                    .padding(.horizontal, 16).padding(.vertical, 5)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(DarkroomPalette.accent))
-            }
-            .buttonStyle(.plain)
-            .keyboardShortcut(.escape, modifiers: [])
-            .help("回到拼图（Esc）。暗房里的改动都已经套上了，⌘Z 一步步撤")
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(.horizontal, 14)
         .frame(height: 44)
