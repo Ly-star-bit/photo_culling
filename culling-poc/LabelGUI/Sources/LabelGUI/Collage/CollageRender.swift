@@ -43,8 +43,63 @@ enum CollageImages {
 
     /// 导出用：原图按需解，不缓存。
     static func full(_ photo: CollagePhotoRef, need: Int) -> CGImage? {
-        let fullLong = max(photo.width, photo.height)
-        return decode(path: photo.path, maxPixel: min(max(256, need), max(256, fullLong)))
+        decode(path: photo.path, maxPixel: fullPixels(photo, need: need))
+    }
+
+    /// full 解出来的长边：要多少解多少，不超过原图。
+    static func fullPixels(_ photo: CollagePhotoRef, need: Int) -> Int {
+        min(max(256, need), max(256, max(photo.width, photo.height)))
+    }
+
+    /// 最近用过的几张原图解码（CollageRender.Options.originals；暗房的 1:1 细节）：停手一次渲一次，够得着的那一两格
+    /// 每次都从原图整张重解 —— 纯 RAW 场次一次一整幅 RAW。键是原图路径 + 解出来的长边（和 full 同一个算法，拿到的就是
+    /// full 会解的那一张，逐字节一样）；只留最近用的 capacity 张、合计不超过 byteLimit（导出尺寸的解码一张几十上百 MB；
+    /// 最新的那张总留着），超了扔最久没用的。导出不用它（照旧现解、不缓存）。几个线程一起用：拿锁查、放；解码不拿锁
+    /// （两个线程同时解同一张就各解一遍）。
+    final class Recent: @unchecked Sendable {
+        let capacity: Int
+        let byteLimit: Int
+        private let lock = NSLock()
+        private var entries: [(key: String, image: CGImage)] = []
+        /// 命中 / 现解的次数（自检、--perf darkroom 看缓存起没起作用）。
+        private(set) var hits = 0
+        private(set) var misses = 0
+
+        init(capacity: Int, byteLimit: Int = ThumbCache.budget(fraction: 0.03, cap: 400_000_000)) {
+            self.capacity = max(1, capacity)
+            self.byteLimit = byteLimit
+        }
+
+        func full(_ photo: CollagePhotoRef, need: Int) -> CGImage? {
+            let maxPixel = CollageImages.fullPixels(photo, need: need)
+            let key = "\(photo.path)#\(maxPixel)"
+            lock.lock()
+            if let i = entries.firstIndex(where: { $0.key == key }) {
+                let hit = entries.remove(at: i)
+                entries.append(hit)
+                hits += 1
+                lock.unlock()
+                return hit.image
+            }
+            misses += 1
+            lock.unlock()
+            guard let image = CollageImages.decode(path: photo.path, maxPixel: maxPixel) else { return nil }
+            lock.lock()
+            entries.removeAll { $0.key == key }
+            entries.append((key, image))
+            while entries.count > 1,
+                  entries.count > capacity || entries.reduce(0, { $0 + $1.image.bytesPerRow * $1.image.height }) > byteLimit {
+                entries.removeFirst()
+            }
+            lock.unlock()
+            return image
+        }
+
+        func removeAll() {
+            lock.lock()
+            entries.removeAll()
+            lock.unlock()
+        }
     }
 }
 
@@ -69,8 +124,11 @@ enum CollageRender {
         /// 导出时收集读不了原图的照片（用了预览图 / 整格空着），导出结束要报出来。
         var report: RenderReport?
         /// 只要这一块（这次渲染的像素坐标，左上原点；暗房的 1:1 细节）：离它远的照片格不出图（不解码、不调色、
-        /// 不画框和投影），别的照常画 —— 这块里的像素和渲整页逐字节一样，块外面的不能用。nil = 整页。
+        /// 不画框和投影），只够得着框、投影的格子不出照片（drawPhoto），别的照常画 —— 这块里的像素和渲整页逐字节一样，
+        /// 块外面的不能用。nil = 整页。
         var region: CGRect?
+        /// export 时原图解码先查这里（暗房 1:1 细节的最近几张，CollageImages.Recent）；nil = 照旧现解、不缓存（导出）。
+        var originals: CollageImages.Recent?
 
         init(scale: Double = 1) { self.scale = scale }
     }
@@ -369,13 +427,16 @@ enum CollageRender {
                     let cutoutMask = frame.cell.cutout != nil && decided?.cutoutDropped != true ? decided?.mask : nil
                     if let decided { windows[frame.path] = decided.window }
                     // 只要一块、这格够不着它：不出照片（压字、水印下面照常画 —— 它们摆在哪、什么深浅不看照片画没画）。
+                    // 够得着的只是框、投影（照片落不进那一块）：照片也不出（drawPhoto 的 region）。人物挡字、抠图格要
+                    // 主体切图，照旧出。
+                    let wholeTile = (decided?.hasBehind ?? false) || cutoutMask != nil
                     let shown = outsideRegion(rect) ? nil
                         : drawPhoto(ctx, cell: frame.cell, rect: rect, photo: photo, framing: framing, style: style,
                                     short: short, hints: hints[id], background: bg, sharpenRadius: sharpenRadius,
                                     options: options, extend: extend,
                                     color: CollageLooks.ops(colorOps[id], cell: frame.cell),
                                     window: decided?.window, subjectOnly: cutoutMask != nil,
-                                    screen: screen, keyline: keyline)
+                                    screen: screen, keyline: keyline, region: wholeTile ? nil : options.region)
                     if let shown, style.paperOverPhotos > 0, cutoutMask == nil { paperClips.append(shown.clip) }
                     if let report = options.report, let screen, shown != nil {
                         report.halftone.append(halftoneRecord(screen, owner: ownerName(frame.path), photoID: photo.id))
@@ -918,13 +979,17 @@ enum CollageRender {
 
     /// 没画出来 = nil。window = 已经定好的取景（CollageCover 的决定；nil = 照常算）。subjectOnly = 抠图格：
     /// 照片、框、投影、细线都不画（只准备好 tile，主体切图之后再画），背景透出页面。
+    /// region（这次渲染的坐标，同 Options.region）：照片一点都落不进这一块（够得着的只是框、投影）就不解码、不出图，
+    /// 框、投影、细线照画，返回 nil。落得进去的照旧整张出（见 cellImage：只出一截和整张再裁不逐字节一样）。
+    /// 要切主体的格子不给 region。
     @discardableResult
     private static func drawPhoto(_ ctx: CGContext, cell: CollageCell, rect: CGRect, photo: CollagePhotoRef,
                                   framing: CollageFraming, style: CollageStyle, short: Double,
                                   hints: CollageCrop.Hints?, background: CollageColor, sharpenRadius: Double,
                                   options: Options, extend: Edges?, color: CollageLooks.Ops?,
                                   window base: CollageCrop.Window? = nil, subjectOnly: Bool = false,
-                                  screen: CollageScreening.Spec? = nil, keyline: Keyline? = nil) -> Shown? {
+                                  screen: CollageScreening.Spec? = nil, keyline: Keyline? = nil,
+                                  region: CGRect? = nil) -> Shown? {
         let shape = cell.shape ?? style.shape
         let outer = CollageCrop.outerArea(cell: cell, rect: rect, style: style)
         let framed = CollageCrop.isFramed(cell: cell, style: style)
@@ -988,7 +1053,7 @@ enum CollageRender {
             let ph = max(1, Int(drawn.height.rounded()))
             guard let tile = cellImage(photo: photo, window: window, width: pw, height: ph, sharpen: style.sharpen,
                                        radius: sharpenRadius, export: options.export, report: options.report,
-                                       color: color, screen: screen) else { return nil }
+                                       color: color, screen: screen, originals: options.originals) else { return nil }
             return Shown(tile: tile, drawn: drawn, window: window, clip: clip, guide: guide)
         }
 
@@ -1031,14 +1096,23 @@ enum CollageRender {
 
         let pw = max(1, Int(drawn.width.rounded()))
         let ph = max(1, Int(drawn.height.rounded()))
-        guard let tile = cellImage(photo: photo, window: window, width: pw, height: ph, sharpen: style.sharpen,
-                                   radius: sharpenRadius, export: options.export, report: options.report,
-                                   color: color, screen: screen) else { return nil }
-        ctx.saveGState()
-        ctx.addPath(clip)
-        ctx.clip()
-        drawImageTopLeft(ctx, tile, drawn)
-        ctx.restoreGState()
+        // 只要 region 那一块（1:1 细节）、照片一点都落不进去（drawn 和 region 都是取过整的像素）：照片不解码、不出图。
+        let offRegion = region.map { r in
+            let visible = drawn.intersection(r)
+            return visible.isNull || visible.width < 1 || visible.height < 1
+        } ?? false
+        var shownTile: CGImage?
+        if !offRegion {
+            guard let tile = cellImage(photo: photo, window: window, width: pw, height: ph, sharpen: style.sharpen,
+                                       radius: sharpenRadius, export: options.export, report: options.report,
+                                       color: color, screen: screen, originals: options.originals) else { return nil }
+            ctx.saveGState()
+            ctx.addPath(clip)
+            ctx.clip()
+            drawImageTopLeft(ctx, tile, drawn)
+            ctx.restoreGState()
+            shownTile = tile
+        }
 
         if style.border == .mat, framed, let keyline {
             drawKeyline(ctx, photo: blurFill ? inner : drawn, outer: outer, inner: inner, short: short, keyline: keyline,
@@ -1054,7 +1128,9 @@ enum CollageRender {
             ctx.strokePath()
             ctx.restoreGState()
         }
-        return Shown(tile: tile, drawn: drawn, window: window, clip: clip, guide: guide)
+        // 照片一点都没出（region 只够得着框、投影）：返回 nil，同够不着的格子（纸纹不压这一格 —— 它在这块外面）。
+        guard let shownTile else { return nil }
+        return Shown(tile: shownTile, drawn: drawn, window: window, clip: clip, guide: guide)
     }
 
     /// Shown.guide：同一张照片、同一套调色和锐化、同是预览或原图 = 同一张 tile（取景、尺寸另在缓存键里）。
@@ -1562,12 +1638,23 @@ enum CollageRender {
     }
 
     /// screen = 照片加网（CollageScreening）：色调之后加网、不再锐化；nil = 照旧锐化（和以前逐像素一样）。
+    /// originals = 原图解码先查这几张（export 时；暗房 1:1 细节），nil = 照旧现解。
+    /// 不支持只出 tile 里的一块：Core Image 按要的那块往回推每一步算多大，颗粒、晕光（高斯模糊）在不同的输出范围上
+    /// 算出来差 1（8 位，几百个像素），和整张出再裁不再逐字节一样 —— 1:1 细节要的就是导出那一张。
     static func cellImage(photo: CollagePhotoRef, window: CollageCrop.Window, width: Int, height: Int,
                           sharpen: Double, radius: Double, export: Bool, report: RenderReport? = nil,
-                          color: CollageLooks.Ops? = nil, screen: CollageScreening.Spec? = nil) -> CGImage? {
+                          color: CollageLooks.Ops? = nil, screen: CollageScreening.Spec? = nil,
+                          originals: CollageImages.Recent? = nil) -> CGImage? {
         guard width > 0, height > 0 else { return nil }
         let need = neededLongEdge(photo: photo, window: window, width: width, height: height)
-        var decoded = export ? CollageImages.full(photo, need: need) : CollageImages.preview(photo, need: need)
+        var decoded: CGImage?
+        if !export {
+            decoded = CollageImages.preview(photo, need: need)
+        } else if let originals {
+            decoded = originals.full(photo, need: need)
+        } else {
+            decoded = CollageImages.full(photo, need: need)
+        }
         if decoded == nil, export {
             // 原图读不了（卷没挂、机型 RAW 不支持）：退回预览，别在成品里留个窟窿；导出后报出来。
             decoded = CollageImages.preview(photo, need: min(need, ImageLoader.previewMaxPixel))

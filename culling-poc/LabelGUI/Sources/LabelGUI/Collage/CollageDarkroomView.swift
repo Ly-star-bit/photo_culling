@@ -43,8 +43,17 @@ struct CollageDarkroomView: View {
         .focused($focused)
         .focusEffectDisabled()
         .onAppear { focused = true }
-        .onKeyPress(.leftArrow) { model.moveFocus(-1); return .handled }
-        .onKeyPress(.rightArrow) { model.moveFocus(1); return .handled }
+        // ⌘← / ⌘→ 是换跨页（顶栏的 ‹ ›）：onKeyPress 不看修饰键，带 ⌘ 的放过去。
+        .onKeyPress(.leftArrow, phases: [.down, .repeat]) { press in
+            guard !press.modifiers.contains(.command) else { return .ignored }
+            model.moveFocus(-1)
+            return .handled
+        }
+        .onKeyPress(.rightArrow, phases: [.down, .repeat]) { press in
+            guard !press.modifiers.contains(.command) else { return .ignored }
+            model.moveFocus(1)
+            return .handled
+        }
         .onKeyPress(.upArrow) { model.moveFocus(-model.tab.columns); return .handled }
         .onKeyPress(.downArrow) { model.moveFocus(model.tab.columns); return .handled }
         .onKeyPress(.return) { model.apply(model.focus); return .handled }
@@ -241,61 +250,103 @@ private struct DarkroomTopBar: View {
     var body: some View {
         let _ = CollagePerf.body("暗房顶栏")
         let scopes: [CollageDarkroom.Scope] = model.pageAvailable ? [.project, .page, .cell] : [.project, .cell]
-        HStack(spacing: 12) {
+        // 三栏：左右两栏一样宽（都撑满剩下的地方），「套用到」那组就在正中。以前左边一组、右边一组各自按内容宽，中间两个
+        // Spacer 分剩下的：右边加了撤销 / 重做以后比左边宽，「套用到」被挤到正中偏左。
+        HStack(spacing: 0) {
             HStack(spacing: 6) {
                 Text("暗房").font(.system(size: 13, weight: .semibold)).foregroundStyle(DarkroomPalette.text)
                 Text("·").foregroundStyle(DarkroomPalette.tertiary)
-                Text(model.effectiveScope.label + (store.isAlbum ? " · 跨页 \(store.pageIndex + 1)" : ""))
+                Text(model.effectiveScope.label)
                     .font(.system(size: 13)).foregroundStyle(DarkroomPalette.secondary)
+                if model.pageCount > 1 { pageNavigator }
             }
-            .frame(minWidth: 150, alignment: .leading)
-            Spacer(minLength: 12)
-            Text("套用到").font(.system(size: 12)).foregroundStyle(DarkroomPalette.tertiary)
-            DarkroomSegmented(items: scopes.map { s in
-                let enabled = s != .cell || model.cellAvailable
-                return .init(id: s.rawValue, label: s.label, selected: model.effectiveScope == s, enabled: enabled,
-                             help: s == .cell && !enabled ? "先在底下这一页的小样里点一格" : "色调和强度改「\(s.label)」")
-            }) { id in
-                if let s = CollageDarkroom.Scope(rawValue: id) { model.scope = s }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 12) {
+                Text("套用到").font(.system(size: 12)).foregroundStyle(DarkroomPalette.tertiary)
+                DarkroomSegmented(items: scopes.map { s in
+                    let enabled = s != .cell || model.cellAvailable
+                    return .init(id: s.rawValue, label: s.label, selected: model.effectiveScope == s, enabled: enabled,
+                                 help: s == .cell && !enabled ? "先在底下这一页的小样里点一格" : "色调和强度改「\(s.label)」")
+                }) { id in
+                    if let s = CollageDarkroom.Scope(rawValue: id) { model.scope = s }
+                }
+                .frame(width: CGFloat(scopes.count) * 76)
             }
-            .frame(width: CGFloat(scopes.count) * 76)
-            Spacer(minLength: 12)
-            // 撤销 / 重做：暗房开着时拼图的顶栏（⌘Z 绑在它上面）不在视图树里，以前暗房里按 ⌘Z 没人接，界面却写着
-            // 「⌘Z 一步步撤」。条件、提示和拼图顶栏的一样。
-            HStack(spacing: 2) {
-                undoButton("arrow.uturn.backward", "撤销", enabled: store.canUndo) { store.undo() }
-                    .keyboardShortcut("z", modifiers: .command)
-                    .help("撤销 (⌘Z)")
-                undoButton("arrow.uturn.forward", "重做", enabled: store.canRedo) { store.redo() }
-                    .keyboardShortcut("z", modifiers: [.command, .shift])
-                    .help("重做 (⇧⌘Z)")
+            .fixedSize()
+            .padding(.horizontal, 12)
+            HStack(spacing: 12) {
+                // 撤销 / 重做：暗房开着时拼图的顶栏（⌘Z 绑在它上面）不在视图树里，以前暗房里按 ⌘Z 没人接，界面却写着
+                // 「⌘Z 一步步撤」。条件、提示和拼图顶栏的一样。
+                HStack(spacing: 2) {
+                    undoButton("arrow.uturn.backward", "撤销", enabled: store.canUndo) { store.undo() }
+                        .keyboardShortcut("z", modifiers: .command)
+                        .help("撤销 (⌘Z)")
+                    undoButton("arrow.uturn.forward", "重做", enabled: store.canRedo) { store.redo() }
+                        .keyboardShortcut("z", modifiers: [.command, .shift])
+                        .help("重做 (⇧⌘Z)")
+                }
+                Text("原图")
+                    .font(.system(size: 12, weight: model.showOriginal ? .semibold : .regular))
+                    .foregroundStyle(model.showOriginal ? DarkroomPalette.text : DarkroomPalette.secondary)
+                    .padding(.horizontal, 12).padding(.vertical, 5)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(model.showOriginal ? DarkroomPalette.raised : .clear))
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(DarkroomPalette.hairline, lineWidth: 1))
+                    .contentShape(Rectangle())
+                    .onLongPressGesture(minimumDuration: 0, maximumDistance: 40, perform: {}, onPressingChanged: { pressing in
+                        model.showOriginal = pressing
+                    })
+                    .help("按住看原图（空格）")
+                    .accessibilityAddTraits(.isButton)
+                Button {
+                    store.closeDarkroom()
+                } label: {
+                    Text("完成").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.black)
+                        .padding(.horizontal, 16).padding(.vertical, 5)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(DarkroomPalette.accent))
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.escape, modifiers: [])
+                .help("回到拼图（Esc）。暗房里的改动都已经套上了，⌘Z 一步步撤")
             }
-            Text("原图")
-                .font(.system(size: 12, weight: model.showOriginal ? .semibold : .regular))
-                .foregroundStyle(model.showOriginal ? DarkroomPalette.text : DarkroomPalette.secondary)
-                .padding(.horizontal, 12).padding(.vertical, 5)
-                .background(RoundedRectangle(cornerRadius: 6).fill(model.showOriginal ? DarkroomPalette.raised : .clear))
-                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(DarkroomPalette.hairline, lineWidth: 1))
-                .contentShape(Rectangle())
-                .onLongPressGesture(minimumDuration: 0, maximumDistance: 40, perform: {}, onPressingChanged: { pressing in
-                    model.showOriginal = pressing
-                })
-                .help("按住看原图（空格）")
-                .accessibilityAddTraits(.isButton)
-            Button {
-                store.closeDarkroom()
-            } label: {
-                Text("完成").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.black)
-                    .padding(.horizontal, 16).padding(.vertical, 5)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(DarkroomPalette.accent))
-            }
-            .buttonStyle(.plain)
-            .keyboardShortcut(.escape, modifiers: [])
-            .help("回到拼图（Esc）。暗房里的改动都已经套上了，⌘Z 一步步撤")
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(.horizontal, 14)
         .frame(height: 44)
         .background(DarkroomPalette.sidebar)
+    }
+
+    /// 换跨页：‹ 跨页 3 / 30 ›（单张拼图有好几页时是「页」）。⌘← / ⌘→；← → 本身是换色调（CollageDarkroomView 里
+    /// 带 ⌘ 的不接）。以前暗房里换不了页：30 个跨页逐页定色调，每页都要退出暗房、翻页、再进。
+    private var pageNavigator: some View {
+        let unit = store.isAlbum ? "跨页" : "页"
+        return HStack(spacing: 2) {
+            Text("·").foregroundStyle(DarkroomPalette.tertiary).padding(.trailing, 4)
+            pageButton("chevron.left", "上一\(unit)", enabled: model.canGoBack) { model.goToPage(-1) }
+                .keyboardShortcut(.leftArrow, modifiers: .command)
+                .help("上一\(unit) (⌘←)")
+            Text("\(unit) \(store.pageIndex + 1) / \(model.pageCount)")
+                .font(.system(size: 13)).monospacedDigit().foregroundStyle(DarkroomPalette.secondary)
+                .fixedSize()
+            pageButton("chevron.right", "下一\(unit)", enabled: model.canGoForward) { model.goToPage(1) }
+                .keyboardShortcut(.rightArrow, modifiers: .command)
+                .help("下一\(unit) (⌘→)")
+        }
+    }
+
+    /// 换页的小箭头：没有边框（贴着页码），灰掉时压暗。
+    private func pageButton(_ symbol: String, _ label: String, enabled: Bool,
+                            _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(DarkroomPalette.secondary)
+                .frame(width: 22, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.35)
+        .accessibilityLabel(label)
     }
 
     /// 顶栏的小图标按钮（撤销、重做）：和「原图」同样的发丝边，灰掉时压暗。
@@ -449,7 +500,8 @@ private struct DarkroomPreview: View {
                     .animation(.easeOut(duration: 0.2), value: output.busyLine)
             }
             .overlay(alignment: .bottom) {
-                Text("←→ 换一款 · ⏎ 套用 · 按住空格看原图 · 点图换 1:1 细节的位置 · Esc 完成")
+                Text("←→ 换一款 · ⏎ 套用 · 按住空格看原图 · 点图换 1:1 细节的位置"
+                     + (model.pageCount > 1 ? " · ⌘←→ 换\(model.store.isAlbum ? "跨页" : "页")" : "") + " · Esc 完成")
                     .font(.system(size: 11)).foregroundStyle(DarkroomPalette.tertiary)
                     .padding(.bottom, 12)
             }
@@ -581,9 +633,9 @@ private struct DarkroomControls: View {
                         Text(note).font(.system(size: 11)).foregroundStyle(DarkroomPalette.accent)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    // 这一款的表、颗粒数据读不到（漏打包）：以前静默变原样，没人发现（v1.24–v1.26.1）。读过的有缓存，
-                    // 这里问的是现在套着的那一款，进暗房之前画布已经用它渲过。
-                    if spectral, CollageFilmLUTs.table(setting.look) == nil || CollageFilmEffects.extras(setting.look) == nil {
+                    // 这一款的表、颗粒数据读不到（漏打包）：以前静默变原样，没人发现（v1.24–v1.26.1）。只看暗房问好的
+                    // 结果（CollageDarkroom.dataMissing：只问缓存，没读过的在后台读），body 里不读文件。
+                    if spectral, model.dataMissing.contains(setting.look) {
                         Text("这款的数据没读到，颜色 / 颗粒不起作用（缺哪个文件记在日志里）")
                             .font(.system(size: 11)).foregroundStyle(DarkroomPalette.accent)
                             .fixedSize(horizontal: false, vertical: true)
@@ -655,7 +707,7 @@ private struct DarkroomControls: View {
 
                 VStack(alignment: .leading, spacing: 10) {
                     DarkroomSectionTitle(title: "1:1 细节", trailing: "导出尺寸")
-                    DarkroomLoupe(output: model.output)
+                    DarkroomLoupe(model: model, output: model.output)
                     Text("颗粒、晕光在这里看得清。点大预览换位置。")
                         .font(.system(size: 11)).foregroundStyle(DarkroomPalette.tertiary)
                 }
@@ -766,9 +818,13 @@ private struct DarkroomTestStrip: View {
     }
 }
 
-/// 1:1 细节：导出尺寸渲整页、裁一块（1 个导出像素 = 1 pt），圆角方块、1px 发丝边；重渲时旧图压暗。
+/// 1:1 细节：导出尺寸渲整页、裁一块（1 个导出像素 = 1 个屏幕像素：Retina 上渲两倍的像素放进同样大的方块），圆角方块、
+/// 1px 发丝边；重渲时旧图压暗。
 private struct DarkroomLoupe: View {
+    /// 只用来报屏幕倍率（不订阅）。
+    let model: CollageDarkroom
     @ObservedObject var output: CollageDarkroom.Output
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
         let _ = CollagePerf.body("暗房细节")
@@ -798,6 +854,9 @@ private struct DarkroomLoupe: View {
         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(DarkroomPalette.hairline, lineWidth: 1))
         .frame(maxWidth: .infinity)
         .accessibilityLabel("1:1 细节")
+        // 按这块屏幕的倍率渲（窗口拖到另一块屏上会变）。
+        .onAppear { model.loupeDensity = displayScale }
+        .onChange(of: displayScale) { model.loupeDensity = displayScale }
     }
 }
 

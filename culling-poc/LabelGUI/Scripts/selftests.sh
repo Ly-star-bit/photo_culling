@@ -22,7 +22,8 @@
 #   --collage-export-selftest  拼图 / 相册导出：PDF 先写临时文件再改名、缺跨页不出 PDF、空照片格先确认
 #   --proof-selftest     选片确认表页面脚本（JavaScriptCore）：套餐张数、每张备注、复制的文字、确认表水印
 #   --film-looks-selftest  光谱胶片色调：表读得到（裸二进制往上找 third_party/film-luts；.app 里只读包里那份，CI 另拿 DMG 里的 app 跑）、名字不带品牌、GPU 和 CPU 同色
-#   --darkroom-selftest  暗房：悬停只预览、整组 / 这一页 / 这一格各改各的、强度、颗粒晕光对整组、←→、原图、撤销
+#   --darkroom-selftest  暗房：悬停只预览、整组 / 这一页 / 这一格各改各的、强度、颗粒晕光对整组、←→、原图、撤销；
+#                        1:1 细节只渲那一块和渲整页再裁逐字节相同（合成照片，投影、抠图格、卡纸、网点、水印、散落相纸、刊头）
 # 别处跑的（最后那段「CI 登记」核对的就是这张表）：--mcp-selftest 在 mcp_smoke.py、--card-queue-selftest 在
 # card_import_regression.py、--launch-gate-probe 在 cli_guard_regression.py；--film-selftest 要先分析过的真照片，CI 不跑。
 #

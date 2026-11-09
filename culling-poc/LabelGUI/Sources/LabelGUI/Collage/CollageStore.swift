@@ -144,6 +144,8 @@ final class CollageStore: ObservableObject {
     private var viewportPixels = CGSize(width: 1200, height: 900)
     private var renderTask: Task<Void, Never>?
     private var renderDirty = false
+    /// 暗房开着时实时桥要了一张预览（previewSettled）、还没渲：渲染循环在暗房开着时只为它渲一张，渲完就停。
+    private var renderRequested = false
 
     // MARK: - 视觉信息 / 模板 / 撤销
 
@@ -3640,11 +3642,19 @@ final class CollageStore: ObservableObject {
     /// 暗房开着、画布预览攒着没渲：实时桥读预览之前先 previewSettled（它会现渲）。
     var previewDeferred: Bool { darkroom != nil && renderDirty && renderTask == nil }
 
+    /// 自检用：画布预览这一张正在后台渲（循环已经取走了工程、还没回来；之后再标的脏不在这一张里）。
+    var previewRendering: Bool { renderTask != nil && !renderDirty }
+
     private func startRenderLoop() {
         guard renderTask == nil else { return }
         renderTask = Task { [weak self] in
             while true {
                 guard let self, self.renderDirty else { break }
+                // 暗房开着：只渲实时桥要的那一张（renderRequested），渲完就停、接着记着脏（关暗房补渲）。以前循环一被
+                // previewSettled 带起来就只看 dirty：AI 写的时候用户在暗房里拖滑杆，每一下都标脏，循环就一直渲下去，
+                // 藏在暗房后面一帧一张整页（setNeedsRender 攒着那套白攒了）。
+                if self.darkroom != nil && !self.renderRequested { break }
+                self.renderRequested = false
                 self.renderDirty = false
                 guard let page = self.page else {
                     self.previewState.image = nil
@@ -4691,10 +4701,14 @@ extension CollageStore {
 
     /// 预览重渲完没有（结果里要带「用户此刻屏幕上的拼图」，§9.4.3 第 12 步）：等后台渲染任务跑完、没有新的脏标记。
     func previewSettled(timeout: Double) async -> Bool {
-        // 暗房开着时画布预览是攒着的（setNeedsRender）：实时桥要看预览，现在就渲。
-        if renderDirty { startRenderLoop() }
+        // 暗房开着时画布预览是攒着的（setNeedsRender）：实时桥要看预览，现在就渲一张（这一刻的工程，AI 刚写的已经在里面）。
+        // 渲着的时候暗房里又拖出来的脏不等：循环渲完这一张就停（startRenderLoop），那些照旧攒着、关暗房补渲。
+        if renderDirty {
+            if darkroom != nil { renderRequested = true }
+            startRenderLoop()
+        }
         let deadline = Date().addingTimeInterval(timeout)
-        while renderTask != nil || renderDirty {
+        while renderTask != nil || renderRequested || (renderDirty && darkroom == nil) {
             if Date() >= deadline { return false }
             try? await Task.sleep(nanoseconds: 20_000_000)
         }

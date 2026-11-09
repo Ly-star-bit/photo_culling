@@ -1177,7 +1177,8 @@ enum CollageContact {
         let tile = CollageRender.cellImage(photo: plan.photo, window: plan.window, width: plan.tw, height: plan.th,
                                            sharpen: env.style.sharpen, radius: env.sharpenRadius,
                                            export: env.options.export, report: local,
-                                           color: env.colorOps[plan.photo.id], screen: plan.screen)
+                                           color: env.colorOps[plan.photo.id], screen: plan.screen,
+                                           originals: env.options.originals)
         return DecodedFrame(tile: tile, lowRes: local?.lowRes ?? [], missing: local?.missing ?? [])
     }
 

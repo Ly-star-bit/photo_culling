@@ -125,9 +125,22 @@ extension CollagePerf {
             }
         }
         let center = dr.loupeCenter
+        // 暗房里的样子：原图解码在缓存里（停手一次渲一次，同几格照片）；另量一次原图现解（刚换位置、刚换页）。
+        let originals = CollageImages.Recent(capacity: 2)
         let loupe = median {
             _ = CollageDarkroom.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints,
+                                            scale: exportScale, center: center, originals: originals)
+        }
+        let loupeCold = median {
+            _ = CollageDarkroom.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints,
                                             scale: exportScale, center: center)
+        }
+        // Retina 上的真 1:1：边长两倍的像素（loupeSide × 2）。
+        let retina = CollageDarkroom.loupeSide * 2
+        let loupeRetina = median {
+            _ = CollageDarkroom.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints,
+                                            scale: exportScale, center: center, side: retina, density: 2,
+                                            originals: originals)
         }
         let loupeWhole = median {
             _ = CollageDarkroom.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints,
@@ -155,43 +168,29 @@ extension CollagePerf {
             _ = CollageLooks.cube(project.style.look, strength: 0.8, printing: p)
         }
         print(String(format: "perf darkroom 单次：大预览（%.2f 倍）%.1f ms · 原图 %.1f · 样张 %d 张 %.1f · 底片条 %d 格 %.1f · "
-                     + "1:1 细节（%d 倍）%.1f（渲整页再裁 %.1f）· 冲印区色调表一张 %.1f · 编辑指纹 %.2f ms"
+                     + "1:1 细节（%d 倍）%.1f（原图现解 %.1f · 渲整页再裁 %.1f · Retina %d² %.1f）· 冲印区色调表一张 %.1f · 编辑指纹 %.2f ms"
                      + "（%d 张 / %d 页 %.2f ms）",
                      scale, preview, plain, CollageDarkroom.order.count, frames, cells.count, reel, Int(exportScale),
-                     loupe, loupeWhole, cube, digest, big.photos.count, big.pages.count, bigDigest))
-        loupeIdentity(project, page: page, pageIndex: pageIndex, hints: hints, scale: exportScale,
-                      centers: store.geometry.frames.map { f in
-                          CGPoint(x: Double(f.rect.x0 + f.rect.x1) / 2, y: Double(f.rect.y0 + f.rect.y1) / 2)
-                      } + [CGPoint(x: 0, y: 0), CGPoint(x: Double(c.width), y: Double(c.height)),
-                           CGPoint(x: Double(c.width) / 2, y: Double(c.height) / 2)])
+                     loupe, loupeCold, loupeWhole, retina, loupeRetina, cube, digest, big.photos.count, big.pages.count,
+                     bigDigest))
+        let centers = store.geometry.frames.map { f in
+            CGPoint(x: Double(f.rect.x0 + f.rect.x1) / 2, y: Double(f.rect.y0 + f.rect.y1) / 2)
+        } + [CGPoint(x: 0, y: 0), CGPoint(x: Double(c.width), y: Double(c.height)),
+             CGPoint(x: Double(c.width) / 2, y: Double(c.height) / 2)]
+        for side in [CollageDarkroom.loupeSide, retina] {
+            loupeIdentity(project, page: page, pageIndex: pageIndex, hints: hints, scale: exportScale, centers: centers,
+                          side: side)
+        }
     }
 
     /// 1:1 细节只渲够得着的那几格（Options.region）和渲整页再裁，逐字节核对：每格中心、四角里的两个、画布中心。
+    /// 核对本身在 CollageDarkroom.loupeIdentity（--darkroom-selftest 用合成图核对同一个函数，不同就失败）。
     static func loupeIdentity(_ project: CollageProject, page: CollagePage, pageIndex: Int,
-                              hints: [String: CollageCrop.Hints], scale: Double, centers: [CGPoint]) {
-        // 裁出来的 CGImage 和整页共用一块内存（dataProvider 是整页的）：画进一张新的位图再比。
-        func bytes(_ image: NSImage?) -> [UInt8]? {
-            guard let cg = image?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
-            var out = [UInt8](repeating: 0, count: cg.width * cg.height * 4)
-            let ok = out.withUnsafeMutableBytes { buf -> Bool in
-                guard let ctx = CGContext(data: buf.baseAddress, width: cg.width, height: cg.height, bitsPerComponent: 8,
-                                          bytesPerRow: cg.width * 4, space: CollageRender.srgb,
-                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
-                ctx.draw(cg, in: CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
-                return true
-            }
-            return ok ? out : nil
-        }
-        var same = 0
-        for center in centers {
-            let culled = CollageDarkroom.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints,
-                                                     scale: scale, center: center)
-            let whole = CollageDarkroom.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints,
-                                                    scale: scale, center: center, wholePage: true)
-            if let a = bytes(culled), a == bytes(whole) { same += 1 }
-        }
+                              hints: [String: CollageCrop.Hints], scale: Double, centers: [CGPoint], side: Int) {
+        let same = CollageDarkroom.loupeIdentity(project, pageIndex: pageIndex, fallback: page, hints: hints, scale: scale,
+                                                 centers: centers, side: side).filter { $0 }.count
         print((same == centers.count ? "PASS" : "FAIL")
-              + " 1:1 细节只渲够得着的格子：\(same) / \(centers.count) 处和渲整页再裁逐字节相同")
+              + " 1:1 细节只渲够得着的格子（\(side)²）：\(same) / \(centers.count) 处和渲整页再裁逐字节相同")
     }
 
     /// 暗房每一类、画布预览都落下来（最多等 90 秒）。返回等了多少毫秒。先等过暗房的 120 ms 去抖和 1:1 细节的

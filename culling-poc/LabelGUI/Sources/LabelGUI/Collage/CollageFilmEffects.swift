@@ -189,6 +189,14 @@ enum CollageFilmEffects {
         return loaded
     }
 
+    /// 只问读过没有、不读文件（同 CollageFilmLUTs.cachedState）：true = 读到了，false = 读不到，nil = 还没读过。
+    static func cachedState(_ look: CollageLook) -> Bool? {
+        lock.lock()
+        defer { lock.unlock() }
+        if cache[look] != nil { return true }
+        return missing.contains(look) ? false : nil
+    }
+
     static func load(_ look: CollageLook, from dir: URL) -> Extras? {
         func table(_ suffix: String) -> CollageFilmLUTs.Table? {
             guard let text = try? String(contentsOf: dir.appendingPathComponent(look.rawValue + suffix), encoding: .utf8)
