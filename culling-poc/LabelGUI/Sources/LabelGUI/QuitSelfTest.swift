@@ -1,11 +1,13 @@
 import AppKit
+import Combine
 import Foundation
 
 /// 长任务和退出的自检（全项目审查 S05b / S05c / S05d / S05e）：
 ///     LABELGUI_DATA_DIR=<空的临时目录> LABELGUI_NO_GUI=1 LabelGUI --quit-selftest
 /// 不要照片：假的 uv（/bin/sh 脚本，转发 / 不转发 SIGTERM / 子进程不理 SIGTERM 三种）走 BatchStore 同一个 runProcess、同一个
 /// processBox，核对 willTerminate 以后子进程整组都没了、python 那一层只收到一次 SIGTERM；阈值防抖里排着的那次退出时写掉、
-/// 没排着的不写；防睡眠的 activity 在 pmset 里真的有、放掉就没，分析（合成的色块 JPEG）跑完 / 取消、VLM 提前返回都放掉；
+/// 没排着的不写；防睡眠的 activity 在 pmset 里真的有（每一种长任务都核对）、放掉就没，分析（合成的色块 JPEG）跑完 / 取消、
+/// VLM 提前返回、导卡（导完 / 取消 / 卡被拔 / 排队的下一张）、导出 JPG / 精华、复制原片、复制高 ISO RAW（含提前返回）都放掉；
 /// ⌘Q 确认的判断表（QuitGuard）和流程（QuitCoordinator，弹框、回 AppKit 都换成假的，在 modal panel 模式里等停下）；
 /// ⌘Q 也看拼图工程、标注存上没有（真的 AppModel、场次目录 / collage.json chmod 成写不进、读不出）；
 /// 「上次分析没跑完」的标记（开跑写、跑完 / 取消 / 出错删，留下的下次打开这一场提示）。
@@ -22,6 +24,7 @@ enum QuitSelfTest {
         t.cancelSignalsOnlyUV()
         t.thresholdFlushOnQuit()
         t.sleepGuardDuringLongTasks()
+        t.sleepGuardDuringImportAndExports()
         t.quitDecisionTable()
         t.quitCoordinatorFlows()
         t.quitChecksCollageAndLabels()
@@ -320,13 +323,16 @@ final class QuitSelfTestHarness {
         return String(data: data, encoding: .utf8)
     }
 
-    /// 本进程有没有一条名字里带 tag 的 PreventUserIdleSystemSleep 断言（nil = pmset 用不了）。
-    func preventsIdleSleep(_ tag: String) -> Bool? {
+    /// 本进程的 PreventUserIdleSystemSleep 断言那几行（nil = pmset 用不了）。
+    func idleSleepAssertions() -> [Substring]? {
         guard let text = pmsetAssertions(), text.contains("Listed by owning process") else { return nil }
         let me = "pid \(getpid())("
-        return text.split(separator: "\n").contains {
-            $0.contains(me) && $0.contains("PreventUserIdleSystemSleep") && $0.contains(tag)
-        }
+        return text.split(separator: "\n").filter { $0.contains(me) && $0.contains("PreventUserIdleSystemSleep") }
+    }
+
+    /// 本进程有没有一条名字里带 tag 的 PreventUserIdleSystemSleep 断言（nil = pmset 用不了）。
+    func preventsIdleSleep(_ tag: String) -> Bool? {
+        idleSleepAssertions().map { lines in lines.contains { $0.contains(tag) } }
     }
 
     func waitFor(_ seconds: Double, _ cond: () -> Bool) -> Bool {
@@ -370,17 +376,33 @@ final class QuitSelfTestHarness {
         v.end()
         check(reg.active.isEmpty, "都放掉了")
 
+        let nonASCII = LongTaskKind.allCases.filter { !$0.reason.allSatisfy(\.isASCII) }.map(\.rawValue)
+        check(nonASCII.isEmpty, "每一种长任务的断言名字都只有 ASCII（带中文的整个名字会变成空串，pmset 里认不出）：\(nonASCII)")
+
         let forced = LongTaskRegistry()
         forced.forceSystemActivity = true
-        let tag = LongTaskKind.vlm.reason
-        if preventsIdleSleep(tag) == nil {
+        let kinds = LongTaskKind.allCases
+        if idleSleepAssertions() == nil {
             print("SKIP pmset -g assertions 用不了：不核对系统里的电源断言")
         } else {
-            let token = forced.begin(.vlm)
-            let held = waitFor(3) { preventsIdleSleep(tag) == true }
-            check(held && token.holdsSystemActivity, "拿着时 pmset 里有本进程的 PreventUserIdleSystemSleep「\(LongTaskKind.vlm.reason)」")
-            token.end()
-            check(waitFor(3) { preventsIdleSleep(tag) == false }, "放掉以后 pmset 里没有了")
+            // 每一种都进断言（导卡、导出 JPG / 精华、复制原片、复制高 ISO RAW 是 NR1 加的）：一起拿、一起等，不逐个等（省时间）。
+            let tokens = kinds.map { forced.begin($0) }
+            var missing = kinds.map(\.rawValue)
+            let held = waitFor(3) {
+                guard let lines = idleSleepAssertions() else { return false }
+                missing = kinds.filter { kind in !lines.contains { $0.contains(kind.reason) } }.map(\.rawValue)
+                return missing.isEmpty
+            }
+            check(held && tokens.allSatisfy(\.holdsSystemActivity),
+                  "\(kinds.count) 种长任务拿着时 pmset 里各有一条本进程的 PreventUserIdleSystemSleep（缺：\(missing)）")
+            tokens.forEach { $0.end() }
+            var left: [String] = []
+            let released = waitFor(3) {
+                guard let lines = idleSleepAssertions() else { return false }
+                left = kinds.filter { kind in lines.contains { $0.contains(kind.reason) } }.map(\.rawValue)
+                return left.isEmpty
+            }
+            check(released && forced.active.isEmpty, "都放掉以后 pmset 里一条都没有了（还在：\(left)）")
             let control = "LabelGUI quit-selftest control"
             let bridgeStyle = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: control)
             usleep(500_000)
@@ -423,6 +445,146 @@ final class QuitSelfTestHarness {
         }
     }
 
+    // MARK: - NR1 导卡、导出 JPG / 精华、复制原片、复制高 ISO RAW 期间防闲置睡眠
+
+    func sleepGuardDuringImportAndExports() {
+        print("— NR1 导卡（含排着队的下一张）、导出 JPG / 精华、复制原片、复制高 ISO RAW 期间也拿着防睡眠（无头只记账），所有出口都放掉")
+        let store = newStore()
+
+        // 导卡：假卡 = DCIM/100TEST 里几张色块 JPEG，导进 work 里的文件夹（不碰「图片」）。
+        let card = work.appendingPathComponent("card-nr1", isDirectory: true)
+        try? fm.removeItem(at: card)
+        try? fm.createDirectory(at: card.appendingPathComponent("DCIM"), withIntermediateDirectories: true)
+        try? fm.moveItem(at: makePhotoFolder("card-nr1-src", count: 4),
+                         to: card.appendingPathComponent("DCIM/100TEST", isDirectory: true))
+        let ledgerURL = dataDir.appendingPathComponent(CardImporter.ledgerFileName)
+        func plan(_ source: URL, into name: String) -> CardImporter.Plan? {
+            let dest = work.appendingPathComponent(name, isDirectory: true)
+            try? fm.removeItem(at: dest)
+            return try? CardImporter.plan(source: source, destination: dest, ledger: .load(from: ledgerURL), includeImported: true)
+        }
+        func settled() -> Bool { !store.isRunning && store.longTasks.active.isEmpty }
+        if let p = plan(card, into: "card-nr1-done") {
+            store.importFromCard(p, analyzeAfter: false)
+            check(store.longTasks.active == [.cardImport], "导卡一开始就拿着（\(store.longTasks.active.map(\.rawValue))）")
+            spin(60, until: settled)
+            check(settled() && store.progressText.hasPrefix("导入完成"), "导完放掉（\(store.progressText)）")
+        } else {
+            check(false, "假卡做得出导入计划")
+        }
+        if let p = plan(card, into: "card-nr1-cancel") {
+            store.importFromCard(p, analyzeAfter: false)
+            store.cancel()
+            spin(60, until: settled)
+            check(settled() && store.progressText.contains("取消"), "导卡中途取消也放掉（\(store.progressText)）")
+        } else {
+            check(false, "假卡做得出导入计划（取消那条）")
+        }
+        // 读卡失败（确认以后卡被拔了 = 重做计划时整张读不了）：走 catch 那个出口。
+        let pulled = work.appendingPathComponent("card-nr1-pulled", isDirectory: true)
+        try? fm.removeItem(at: pulled)
+        try? fm.copyItem(at: card, to: pulled)
+        if let p = plan(pulled, into: "card-nr1-pulled-dest") {
+            try? fm.removeItem(at: pulled)
+            store.importFromCard(p, analyzeAfter: false)
+            spin(60, until: settled)
+            check(settled() && (store.importNotice ?? "").contains("读不了"),
+                  "卡被拔了、重做计划读不了也放掉（\(store.importNotice ?? "nil")）")
+        } else {
+            check(false, "假卡做得出导入计划（拔卡那条）")
+        }
+        // 排着队的下一张卡：CardImportCenter 在前一张导完、isRunning 落下以后再调一次 importFromCard，自己拿自己的。
+        let center = CardImportCenter(store: store)
+        final class Seen: @unchecked Sendable {
+            var starts = 0
+            var duringSecond: [LongTaskKind]?
+        }
+        let seen = Seen()
+        let watch = store.$isRunning.filter { $0 }.sink { _ in
+            seen.starts += 1
+            // $isRunning 在赋值之前发：排到主线程下一拍再看（那时 importFromCard 已经拿了）。
+            if seen.starts == 2 {
+                DispatchQueue.main.async { MainActor.assumeIsolated { seen.duringSecond = store.longTasks.active } }
+            }
+        }
+        if let a = plan(card, into: "card-nr1-queue"), let b = plan(card, into: "card-nr1-queue-b") {
+            let volume = CardImporter.Volume(root: card, name: card.lastPathComponent, uuid: nil)
+            center.offer = CardImportCenter.Offer(volume: volume, plan: a)
+            center.confirm(analyzeAfter: false)
+            center.offer = CardImportCenter.Offer(volume: volume, plan: b)
+            center.confirm(analyzeAfter: false)
+            check(store.importing && center.pending.count == 1 && store.longTasks.active == [.cardImport],
+                  "两张卡：第一张在导、拿着，第二张排着队（\(center.pending.count) 张）")
+            spin(60) { center.pending.isEmpty && settled() }
+            let during = seen.duringSecond?.map(\.rawValue) ?? []
+            check(seen.starts == 2 && seen.duringSecond?.contains(.cardImport) == true,
+                  "排着队的那张开始导时也拿着（开始了 \(seen.starts) 张，那时 \(during)）")
+            check(center.pending.isEmpty && settled(), "两张都导完：都放掉（\(store.longTasks.active.map(\.rawValue))）")
+        } else {
+            check(false, "假卡做得出导入计划（排队那条）")
+        }
+        withExtendedLifetime(watch) {}
+
+        // 导出 / 复制：一场手写的假拍摄（3 张小 JPEG + 2 张 ISO 6400 的假 RAW），不跑分析。
+        typealias Fake = FileSafetySelfTest.Fake
+        let shoot = work.appendingPathComponent("photos-nr1-export", isDirectory: true)
+        try? fm.removeItem(at: shoot)
+        let shotStore = FileSafetySelfTest.makeShoot(shoot, [
+            Fake(id: "N1", raw: "N1.JPG", jpeg: true), Fake(id: "N2", raw: "N2.JPG", jpeg: true),
+            Fake(id: "N3", raw: "N3.JPG", jpeg: true),
+            Fake(id: "R1", raw: "R1.ARW", iso: 6400), Fake(id: "R2", raw: "R2.ARW", iso: 6400),
+        ])
+        func done() -> Bool { !shotStore.isRunning && shotStore.longTasks.active.isEmpty }
+        func run(_ kind: LongTaskKind, _ what: String, _ start: () -> Void) {
+            start()
+            let held = shotStore.longTasks.active
+            spin(60, until: done)
+            check(held == [kind] && done(), "\(what)：一开始就拿着「\(kind.rawValue)」、结束放掉（拿着的是 \(held.map(\.rawValue))；\(shotStore.lastError ?? shotStore.progressText)）")
+        }
+        let jpegs = ["N1", "N2", "N3"]
+        let out = work.appendingPathComponent("nr1-out", isDirectory: true)
+        try? fm.removeItem(at: out)
+        run(.jpegExport, "导出 JPG") {
+            shotStore.exportJPEGs(to: out.appendingPathComponent("jpg"), includeUsable: true, options: DeliveryOptions(), ids: jpegs)
+        }
+        run(.jpegExport, "导出 JPG 中途取消") {
+            shotStore.exportJPEGs(to: out.appendingPathComponent("jpg-cancel"), includeUsable: true, options: DeliveryOptions(),
+                                  ids: jpegs)
+            shotStore.cancel()
+        }
+        // 建不了导出文件夹（那一级是个文件）：Task 里提前返回的那个出口。
+        let blocker = out.appendingPathComponent("是个文件")
+        try? fm.createDirectory(at: out, withIntermediateDirectories: true)
+        try? Data("x".utf8).write(to: blocker)
+        run(.jpegExport, "建不了导出文件夹、提前返回") {
+            shotStore.exportJPEGs(to: blocker.appendingPathComponent("jpg"), includeUsable: true, options: DeliveryOptions(),
+                                  ids: jpegs)
+        }
+        check((shotStore.lastError ?? "").contains("无法创建导出文件夹"), "（对照）确实走的是建不了文件夹那条：\(shotStore.lastError ?? "nil")")
+        for id in jpegs { shotStore.setOverride(id, .pick) }
+        run(.highlights, "导出精华") {
+            shotStore.exportHighlights(count: 2, into: out.appendingPathComponent("精华"), options: DeliveryOptions())
+        }
+        run(.copyOriginals, "复制原片") {
+            shotStore.copyOriginals(jpegs, to: out.appendingPathComponent("精修"))
+        }
+        run(.copyOriginals, "复制原片中途取消") {
+            shotStore.copyOriginals(jpegs, to: out.appendingPathComponent("精修-取消"))
+            shotStore.cancel()
+        }
+        defer { HighISOCopier.testHooks = HighISOCopier.TestHooks() }
+        HighISOCopier.testHooks = HighISOCopier.TestHooks(noClone: true, freeBytes: 1 << 20)
+        run(.highISO, "复制高 ISO RAW：空间不够、提前返回") {
+            shotStore.exportHighISORaws(minISO: 3200, keepersOnly: false)
+        }
+        check((shotStore.lastError ?? "").contains("只剩"), "（对照）确实走的是空间不够那条：\(shotStore.lastError ?? "nil")")
+        HighISOCopier.testHooks = HighISOCopier.TestHooks()
+        run(.highISO, "复制高 ISO RAW") {
+            shotStore.exportHighISORaws(minISO: 3200, keepersOnly: false)
+        }
+        check(shotStore.progressText.contains("已复制 2 个"), "（对照）2 个 RAW 复制了：\(shotStore.progressText)")
+    }
+
     // MARK: - S05d 退出确认（纯函数 + 注入的弹框，从不真弹）
 
     func fourCC(_ s: String) -> OSType {
@@ -431,7 +593,9 @@ final class QuitSelfTestHarness {
 
     func quitDecisionTable() {
         print("— S05d 退出确认的判断：在跑就问「停下并退出 / 继续」，系统注销重启不问直接停下保存，没存上的问一句，无头一律直接退")
+        // 导出 JPG / 精华、复制原片、复制高 ISO RAW 各是一种（NR1）。
         let jobs: [QuitGuard.Job] = [.analysis, .vlm, .appeal, .cardImport(queued: 1), .other]
+            + QuitGuard.exportKinds.map { QuitGuard.Job.task($0) }
         var wrong: [String] = []
         for headless in [false, true] {
             for reason in [QuitGuard.Reason.user, .system] {
@@ -454,17 +618,23 @@ final class QuitSelfTestHarness {
                 }
             }
         }
-        check(wrong.isEmpty, "判断表 \(2 * 2 * 6 * 2) 种组合都对" + (wrong.isEmpty ? "" : "：\(wrong.prefix(3))"))
+        let combos = 2 * 2 * (jobs.count + 1) * 2
+        check(wrong.isEmpty, "判断表 \(combos) 种组合都对" + (wrong.isEmpty ? "" : "：\(wrong.prefix(3))"))
 
-        let mapping: [(Bool, Bool, Bool, Int, [LongTaskKind], QuitGuard.Job?, String)] = [
+        var mapping: [(Bool, Bool, Bool, Int, [LongTaskKind], QuitGuard.Job?, String)] = [
             (false, false, false, 0, [], nil, "没在跑"),
             (true, true, false, 0, [.analysis], .analysis, "分析"),
             (true, false, false, 0, [.vlm], .vlm, "VLM"),
             (true, false, false, 0, [.appeal], .appeal, "复审"),
             (true, false, true, 2, [], .cardImport(queued: 2), "导卡（后面排着 2 张）"),
-            (true, false, false, 0, [], .other, "导出 / 复制 / 写 XMP"),
+            (true, false, false, 1, [.cardImport], .cardImport(queued: 1), "导卡（只看防睡眠的记账也认得出）"),
+            (true, false, false, 0, [], .other, "选片确认表 / 写 XMP / 移废片（不拿防睡眠的）"),
             (false, false, false, 0, [.vlm], nil, "isRunning 已经落下、防睡眠还没放（defer 晚一拍）= 不在跑"),
+            (false, false, false, 0, [.copyOriginals], nil, "复制原片收尾时 isRunning 已经落下 = 不在跑"),
         ]
+        for kind in QuitGuard.exportKinds {
+            mapping.append((true, false, false, 0, [kind], .task(kind), kind.label))
+        }
         for (running, analyzing, importing, queued, long, expect, what) in mapping {
             let got = QuitGuard.runningJob(isRunning: running, analyzing: analyzing, importing: importing,
                                            queuedCards: queued, longTasks: long)
@@ -487,6 +657,14 @@ final class QuitSelfTestHarness {
         check((card?.message.contains("另外 2 张卡") ?? false) && (card?.message.contains("先别格式化") ?? false)
               && (card?.message.contains("不留半截") ?? false),
               "导卡在跑：已校验的留着、不留半截、排着的卡不导、先别格式化")
+        for kind in QuitGuard.exportKinds {
+            let p = QuitGuard.prompt(for: .askStop(.task(kind)))
+            let ok = p?.title == "正在\(kind.label)，现在退出会中断" && p?.primary == "停下并退出"
+                && p?.secondary == "继续\(kind.label)" && p?.primaryQuits == true && (p?.message.contains("留着") ?? false)
+            check(ok, "\(kind.label)在跑：确认框按这一种说话（\(p?.title ?? "nil") / \(p?.secondary ?? "nil")）")
+        }
+        let copying = QuitGuard.prompt(for: .askStop(.task(.copyOriginals)))?.message ?? ""
+        check(copying.contains("不留半截") && copying.contains("一模一样的会跳过"), "复制原片：说清正在复制的不留半截、下次一样的跳过")
         let unsaved = QuitGuard.prompt(for: .askUnsaved("「婚礼」的判决没存上（盘满了）"))
         check(unsaved?.primaryQuits == false && unsaved?.quitIsDestructive == true && unsaved?.primary == "不退出"
               && (unsaved?.message.contains("「婚礼」的判决没存上（盘满了）") ?? false),

@@ -4672,8 +4672,11 @@ final class BatchStore: ObservableObject {
         cancelFlag = AnalysisEngine.CancelFlag()
         let flag = cancelFlag
         let total = jobs.count
+        // 几百张整幅解码再编码，外接盘上要好几分钟：期间不让 Mac 闲置睡眠（优化分析 NR1）。
+        let sleepGuard = longTasks.begin(isHighlights ? .highlights : .jpegExport)
 
         Task.detached { [weak self] in
+            defer { sleepGuard.end() }  // 所有出口（建不了文件夹、取消、导完）都放掉
             do {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             } catch {
@@ -4889,8 +4892,11 @@ final class BatchStore: ObservableObject {
         let total = sources.count
         cancelFlag = AnalysisEngine.CancelFlag()
         let flag = cancelFlag
+        // 跨盘实打实复制几百个 RAW：期间不让 Mac 闲置睡眠（优化分析 NR1）。
+        let sleepGuard = longTasks.begin(.highISO)
 
         Task.detached { [weak self] in
+            defer { sleepGuard.end() }  // 所有出口（空间不够、建不了文件夹、盘满、取消、复制完）都放掉
             let fm = FileManager.default
             var copied = 0, existed = 0
             var renamed: [String] = []

@@ -1133,8 +1133,11 @@ extension BatchStore {
         let flag = freshCancelFlag()
         let total = shots.count
         progressText = "复制原片 0/\(total)..."
+        // 几百个 RAW 逐个复制、回读校验 SHA：期间不让 Mac 闲置睡眠（优化分析 NR1）。
+        let sleepGuard = longTasks.begin(.copyOriginals)
 
         Task.detached { [weak self] in
+            defer { sleepGuard.end() }  // 所有出口（取消、连续失败停下、复制完）都放掉
             var copied = 0, skipped = 0, renamed = 0, keptSidecars = 0, done = 0
             var failed: [String] = []
             var streak = OriginalsCopier.FailureStreak()

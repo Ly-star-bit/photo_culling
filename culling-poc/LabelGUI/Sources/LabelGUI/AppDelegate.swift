@@ -1,7 +1,8 @@
 import AppKit
 import Foundation
 
-// 退出确认（全项目审查 S05d，和 S01a 的「判决没存上」共用；拼图工程、标注没存上也问，见 QuitSaveCheck）：分析、VLM、导卡在跑时按 ⌘Q / 程序坞退出先问一句；
+// 退出确认（全项目审查 S05d，和 S01a 的「判决没存上」共用；拼图工程、标注没存上也问，见 QuitSaveCheck）：分析、VLM、导卡、
+// 导出 JPG / 精华、复制原片、复制高 ISO RAW 在跑时按 ⌘Q / 程序坞退出先问一句；
 // 选「停下并退出」走现有的 cancel()，等它把已完成的写完再真的退（.terminateLater）—— willTerminate 是同步的，
 // 等不到后台引擎写盘，只确认一句「确定退出」照样丢掉这一轮。注销、重启、关机不弹框，直接停下保存再放行。
 // 判断全在纯函数（QuitGuard）和可注入的流程（QuitCoordinator）里，--quit-selftest 断言；弹框只在 AppDelegate 这一条路上，
@@ -17,9 +18,14 @@ enum QuitGuard {
         case analysis, vlm, appeal
         /// 存储卡导入；queued = 后面还有几张卡排着队。
         case cardImport(queued: Int)
-        /// 导出、复制原片、写 XMP、移废片……
+        /// 拿着防睡眠的那几种导出 / 复制（导出 JPG、精华、复制原片、复制高 ISO RAW）：确认框按它的 label 说话（优化分析 NR1）。
+        case task(LongTaskKind)
+        /// 选片确认表、写 XMP、移废片……（几秒就完的，不拿防睡眠）
         case other
     }
+
+    /// 导出 / 复制这几种长任务（runningJob 按这个先后认；分析、VLM、复审、导卡另有自己的那一支）。
+    static let exportKinds: [LongTaskKind] = [.jpegExport, .highlights, .copyOriginals, .highISO]
 
     struct State: Equatable {
         var running: Job?
@@ -48,11 +54,27 @@ enum QuitGuard {
     static func runningJob(isRunning: Bool, analyzing: Bool, importing: Bool, queuedCards: Int,
                             longTasks: [LongTaskKind]) -> Job? {
         guard isRunning else { return nil }
-        if importing { return .cardImport(queued: queuedCards) }
+        if importing || longTasks.contains(.cardImport) { return .cardImport(queued: queuedCards) }
         if analyzing || longTasks.contains(.analysis) { return .analysis }
         if longTasks.contains(.vlm) { return .vlm }
         if longTasks.contains(.appeal) { return .appeal }
+        if let kind = exportKinds.first(where: longTasks.contains) { return .task(kind) }
         return .other
+    }
+
+    /// 导出 / 复制叫停以后留下什么（「停下并退出」后面那半句）。JPG 每张编码完整份原子写，复制走 .part 再改名（CardImporter.copyOne），
+    /// 叫停时正在写的那一个都不留半截。
+    static func taskStopNote(_ kind: LongTaskKind) -> String {
+        switch kind {
+        case .jpegExport, .highlights:
+            return "先停下（已经导出的 JPG 留着，每张写完才落盘，不留半截），再退出。"
+        case .copyOriginals:
+            return "先停下（已经复制、校验过的原片留着，正在复制的那一个不留半截），再退出；下次再复制，目标里一模一样的会跳过。"
+        case .highISO:
+            return "先停下（已经复制好的 RAW 留着，正在复制的那一个不留半截），再退出；下次再点，复制好的会跳过。"
+        case .analysis, .vlm, .appeal, .cardImport:
+            return "先停下（已经写好的文件留着），再退出。"
+        }
     }
 
     /// 退出 Apple 事件里的 kAEQuitReason：注销、重启、关机（含系统先弹确认框的那两种）算系统要退；没有这个属性
@@ -114,6 +136,10 @@ enum QuitGuard {
                               message: stop + "已经拷完、校验过的照片留着，正在拷的那一张不留半截；下次插卡再导入，"
                                   + "导过的不会重复拷。" + rest + "导完之前先别格式化存储卡。",
                               primary: "停下并退出", secondary: "继续导入", primaryQuits: true, quitIsDestructive: false)
+            case .task(let kind):
+                return Prompt(title: "正在\(kind.label)，现在退出会中断",
+                              message: stop + taskStopNote(kind),
+                              primary: "停下并退出", secondary: "继续\(kind.label)", primaryQuits: true, quitIsDestructive: false)
             case .other:
                 return Prompt(title: "还有任务在跑，现在退出会中断",
                               message: stop + "先停下（已经写好的文件留着），再退出。",
