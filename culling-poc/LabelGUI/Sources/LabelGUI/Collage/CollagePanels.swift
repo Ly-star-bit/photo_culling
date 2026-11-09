@@ -206,8 +206,7 @@ struct CollageLookBox: View {
             VStack(alignment: .leading, spacing: 8) {
                 // 暗房放在色调格上面（以前在这一块最底下，滑杆、加网都过完才看得到，NU2）；顶栏也有「暗房」。
                 CollageDarkroomButton(store: store, scope: .project, title: "进暗房…", prominent: true)
-                    .help("整页的看片台：大样张分胶片 / 滤镜两页（胶片按负片、反转片、电影负片分节），悬停就在大预览里看，"
-                          + "拖竖线比原图，强度试条、颗粒、晕光、1:1 细节都在一处；整组、这一页、这一格都能改")
+                    .help(CollageDarkroomButton.projectHelp)
                 // 和暗房一样分「胶片 / 滤镜」两节（NU9）：以前 27 个混在一格里。
                 swatchSection("胶片", looks: CollageDarkroom.looks(in: .film))
                 swatchSection("滤镜", looks: CollageDarkroom.looks(in: .filter))
@@ -220,7 +219,7 @@ struct CollageLookBox: View {
                 CollageSlider(label: "颗粒", value: binding(\.filmGrain), range: 0...1,
                               display: percentText(store.project.style.filmGrain))
                     .disabled(!film.texture)
-                    .help("光谱胶片的颗粒（spektrafilm 的颗粒模型）：50% ≈ 这款胶片在 35mm 底片上的真实颗粒，100% 是两倍。"
+                    .help("胶片的颗粒（按这款胶片的真实颗粒算）：50% ≈ 它在 35mm 底片上的颗粒，100% 是两倍。"
                           + "按每张照片的像素算，导出和放大预览时才看得清；只在光谱胶片（负片、反转片、电影负片）上起作用，"
                           + "整组、哪一页、哪一格用着都算。从别的色调换进光谱胶片时自动设成这一款的起始值，拉回 0 以后不再自动加")
                 CollageSlider(label: "晕光", value: binding(\.filmHalation), range: 0...1,
@@ -299,7 +298,7 @@ struct CollageLookBox: View {
     @ViewBuilder
     private var halftoneControls: some View {
         let ht = store.project.style.halftone
-        Toggle("照片加网（报纸）", isOn: Binding(get: { ht != nil }, set: { on in
+        Toggle("照片加网（报纸风）", isOn: Binding(get: { ht != nil }, set: { on in
             var s = store.project.style
             s.halftone = on ? (s.halftone ?? CollageHalftone()) : nil
             store.setStyle(s, coalesce: false)
@@ -409,9 +408,9 @@ struct CollageLookBox: View {
         }
         .buttonStyle(.plain)
         .help(look == .none ? "不调色"
-              : look.isSpectral ? "整组套「\(look.label)」：光谱胶片，按真实胶片和相纸的数据算的（spektrafilm）"
+              : look.isSpectral ? "整组套「\(look.label)」：光谱胶片，按真实胶片的数据算的，有颗粒、晕光"
                   + (look.referenceStock.map { "；参考：\($0)" } ?? "")
-              : "整组套「\(look.label)」")
+              : "整组套「\(look.label)」（滤镜，没有颗粒、晕光）：\(CollageDarkroom.blurb(look))")
     }
 }
 
@@ -721,7 +720,7 @@ struct CollageDecorBox: View {
                     Spacer()
                 }
                 Text(store.isFreeform
-                     ? "散落版：托盘里的照片拖进画布 = 放一张相纸。选中后拖动挪位置，拖上方圆点旋转、右下圆点缩放；[ ] 微调角度。先选中一张相纸再加胶带、回形针，会贴在它上沿并跟着它走。"
+                     ? "散落版：托盘里的照片拖进画布 = 放一张照片。选中后拖动挪位置，拖上方圆点旋转、右下圆点缩放；[ ] 微调角度。先选中一张照片再加胶带、回形针，会贴在它上沿并跟着它走。"
                      : "贴纸浮在版面上。先选中一个照片格再加胶带，会贴在那一格的上沿。")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -801,16 +800,16 @@ struct CollageContactBox: View {
                 ForEach(CollageContactLayout.allCases, id: \.self) { Text($0.label).tag($0) }
             }
             .pickerStyle(.segmented)
-            .help("印样 = 白相纸上一块黑场、白边手写卷号；底片条 = 一条条放在深色底上（社交图）。换排法时纸跟着换，下面可以再挑")
+            .help("印样 = 白纸上一块黑场、白边手写卷号；底片条 = 一条条放在深色底上（社交图）。换排法时纸跟着换，下面可以再挑")
             paperControls
             if sheet.layout == .sheet, darkPaper {
                 // 自己挑了深色的纸（或者跟着偏深的工程底色）：黑场压在深色上分不出来。
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text("印样印在白相纸上：现在的纸偏深，黑场和纸分不出来")
+                    Text("印样印在白纸上：现在的纸偏深，黑场和纸分不出来")
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
-                    Button("换白相纸") { store.useWhitePaper() }
+                    Button("换白纸") { store.useWhitePaper() }
                         .font(.caption)
                         .help("只换这一页印样的纸（工程的底色、别的页不动）；撤销可以换回来")
                 }

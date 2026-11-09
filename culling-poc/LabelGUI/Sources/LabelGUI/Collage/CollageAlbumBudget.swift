@@ -48,7 +48,7 @@ struct CollageAlbumBudget: Codable, Hashable {
         if count > b.spreads {
             // fine-art 不看目标里的每跨页张数（固定 1–3 张）：照实际的上限说，不说用户填的那个。
             // 并页还要守版式规则（CollageStyleFineArt.compress）：并了会破坏的不并，所以会多。
-            let cap = fineArt ? "婚礼 fine-art 每跨页最多 \(CollageStyleFineArt.maxPerSpread) 张、并页不破坏版式（不连着 4 个多图跨页、"
+            let cap = fineArt ? "婚礼相册编排每跨页最多 \(CollageStyleFineArt.maxPerSpread) 张、并页不破坏版式（不连着 4 个多图跨页、"
                 + "同姿势 / 黑白彩色不进同一跨页、左右页亮度差不大），"
                 : "每跨页最多 \(b.maxPerSpread) 张"
             let fix = fineArt ? "编排换「默认」、或从托盘拿掉一些" : "调高每跨页张数、或从托盘拿掉一些"
@@ -404,7 +404,7 @@ struct CollageAlbumBudgetControls: View {
                 store.setAlbumBudget(on ? CollageAlbumBudget(spreads: start) : nil)
             }))
             .toggleStyle(.checkbox)
-            .help("「自动编排」把托盘里的照片塞进指定的跨页数（照 SmartAlbums）：不替你删片，放不下就多出几个、在跨页条上标橙")
+            .help("「自动编排」把托盘里的照片塞进指定的跨页数：不替你删片，放不下就多出几个、在跨页条上标橙")
             if let b = budget {
                 Stepper(value: Binding(get: { b.spreads }, set: { v in
                     var next = b
@@ -440,7 +440,7 @@ struct CollageAlbumBudgetControls: View {
                     }
                     .help("每个跨页最少、最多放几张（扉页固定一张）")
                 }
-                let rule = fineArt ? "婚礼 fine-art 每跨页固定 1–3 张（每跨页张数只对默认编排）：把落单的单图、呼吸页、章末收尾并起来往目标凑，"
+                let rule = fineArt ? "婚礼相册编排每跨页固定 1–3 张（每跨页张数只对默认编排）：把落单的单图、呼吸页、章末收尾并起来往目标凑，"
                     + "并了会破坏版式（连着 4 个多图跨页、同姿势 / 黑白彩色同页、左右亮度差太大）的不并，凑不够就多出几个（不删片）"
                     : "照片全部排进去、不替你删：每跨页最多 \(b.maxPerSpread) 张放不下时，多出来的跨页在跨页条上标橙"
                 Text(rule + "。改完点工具条的「自动编排」生效")

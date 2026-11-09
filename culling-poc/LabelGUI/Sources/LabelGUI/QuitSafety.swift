@@ -67,8 +67,8 @@ enum LongTaskKind: String, Sendable, CaseIterable {
     var label: String {
         switch self {
         case .analysis: return "分析照片"
-        case .vlm: return "VLM 判片"
-        case .appeal: return "VLM 复审废片"
+        case .vlm: return "精审幸存照片"
+        case .appeal: return "复审废片"
         case .cardImport: return "从存储卡导入"
         case .jpegExport: return "导出 JPG"
         case .highlights: return "导出精华"

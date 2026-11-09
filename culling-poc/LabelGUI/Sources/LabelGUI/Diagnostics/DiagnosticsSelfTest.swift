@@ -349,7 +349,7 @@ enum DiagnosticsSelfTest {
             "照片文件夹\"吴十订婚\"不存在",
             "{\"a\":\"\",\"name\":\"张三婚礼\"}",
             "The file “/Volumes/T7/张三婚礼” couldn’t be opened; “/Users/someone/Desktop/客户钱七” too",
-            "先点“取消”再移除历史记录；先点“启动 VLM 服务”",
+            "先点“取消”再移除历史记录；先点“启动服务”",
             "The file “DSCF0001.RAF” couldn’t be opened; 写入「封面.jpg」失败",
             "又看了一遍：「李四订婚」、“王五订婚”、\"赵六写真\"",
         ]

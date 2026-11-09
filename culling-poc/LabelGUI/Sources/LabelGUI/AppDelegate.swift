@@ -159,12 +159,12 @@ enum QuitGuard {
                           message: stop + "先停下，已经分析完的照片存好（下次分析直接复用，不用从头来），再退出。",
                           primary: "停下并退出", secondary: "继续分析", primaryQuits: true, quitIsDestructive: false)
         case .vlm, .appeal:
-            let what = job == .vlm ? "判片" : "复审废片"
-            let again = job == .vlm ? "「VLM 分析」" : "「复审废片」"
-            return Prompt(title: "VLM 正在\(what)，现在退出会中断",
-                          message: stop + "先停下，已经判完的存好（下次再点\(again)从没判的接着跑），"
+            let what = job == .vlm ? "精审幸存照片" : "复审废片"
+            let short = job == .vlm ? "精审" : "复审"
+            return Prompt(title: "本地模型正在\(what)，现在退出会中断",
+                          message: stop + "先停下，已经判完的存好（下次再点「\(what)」从没判的接着跑），"
                               + "后台的 Python 进程一起停掉，再退出。",
-                          primary: "停下并退出", secondary: "继续\(what)", primaryQuits: true, quitIsDestructive: false)
+                          primary: "停下并退出", secondary: "继续\(short)", primaryQuits: true, quitIsDestructive: false)
         case .cardImport(let queued):
             let rest = queued > 0 ? "排着队的另外 \(queued) 张卡也先不导了。" : ""
             return Prompt(title: "正在从存储卡导入，现在退出会中断",

@@ -2077,7 +2077,7 @@ final class BatchStore: ObservableObject {
                 for _ in 0..<10 {
                     try? await Task.sleep(for: .seconds(1))
                     if await self?.checkVLMServer() == true {
-                        self?.progressText = "VLM 服务已就绪 (MiniCPM-V 4.6)"
+                        self?.progressText = "本地模型已就绪 (MiniCPM-V 4.6)"
                         return
                     }
                 }
@@ -2821,6 +2821,12 @@ final class BatchStore: ObservableObject {
     /// Canonical display order for reject-reason chips and slider kill-counts.
     static let reasonOrder = ["文件损坏", "连拍重复", "闭眼", "虚焦", "曝光裁切", "欠曝", "过曝", "人脸质量低", "VLM建议淘汰"]
 
+    /// 淘汰理由在界面上怎么写（优化分析 NU10）：理由本身照旧是 "VLM建议淘汰"（rejectReasons、理由筛选、--verdicts、
+    /// 判决回归的期望文件、MCP 的 reasons 都按这串字认），只是界面上不露「VLM」，写成「本地模型建议淘汰」。
+    nonisolated static func reasonLabel(_ reason: String) -> String {
+        reason == "VLM建议淘汰" ? "本地模型建议淘汰" : reason
+    }
+
     /// Within ±15% of any ACTIVE threshold — the photos a small slider nudge
     /// would flip either way.
     func isBorderline(_ item: BatchItem) -> Bool {
@@ -3051,12 +3057,12 @@ final class BatchStore: ObservableObject {
             // the Python subprocess time out against a server that isn't there.
             guard await self.checkVLMServer() else {
                 await MainActor.run { [weak self] in
-                    self?.lastError = "Ollama 服务未运行 — 先点“启动 VLM 服务” (模型: ollama pull \(Self.ollamaModel))"
+                    self?.lastError = "Ollama 服务未运行 — 先点“启动服务” (模型: ollama pull \(Self.ollamaModel))"
                     self?.isRunning = false
                 }
                 return
             }
-            await MainActor.run { [weak self] in self?.progressText = "VLM 分析 \(count) 张幸存照片 (每张约6秒)..." }
+            await MainActor.run { [weak self] in self?.progressText = "本地模型精审 \(count) 张幸存照片 (每张约6秒)..." }
             let idsFile = data.appendingPathComponent("vlm_ids.txt")
             do {
                 try survivors.joined(separator: "\n").write(to: idsFile, atomically: true, encoding: .utf8)
@@ -3086,7 +3092,7 @@ final class BatchStore: ObservableObject {
                     let parts = line.dropFirst("PROGRESS ".count).split(separator: "/")
                     guard parts.count == 2, let done = Int(parts[0]), let total = Int(parts[1]), total > 0 else { return }
                     Task { @MainActor [weak self] in
-                        self?.progressText = "VLM 分析中 \(done)/\(total)..."
+                        self?.progressText = "精审中 \(done)/\(total)..."
                         self?.progressFraction = Double(done) / Double(total)
                     }
                 }
@@ -3099,15 +3105,15 @@ final class BatchStore: ObservableObject {
                 case .success:
                     self.loadResults()
                     self.applyThresholds()
-                    self.progressText = "VLM 完成"
-                    self.warnOnPartialVLMFailure(summary, label: "VLM")
+                    self.progressText = "精审完成"
+                    self.warnOnPartialVLMFailure(summary, label: "精审")
                     self.postResultsChanged(previewsChanged: false)
                 case .failure(let message):
-                    self.lastError = "VLM 分析失败 (服务在跑吗? 先点“启动 VLM 服务”): \(message)"
+                    self.lastError = "精审失败 (服务在跑吗? 先点“启动服务”): \(message)"
                 case .cancelled:
                     self.loadResults()   // 已判完的那部分留下来
                     self.applyThresholds()
-                    self.progressText = "VLM 已取消 (已完成的判决已保留)"
+                    self.progressText = "精审已取消 (已完成的判决已保留)"
                 }
                 self.isRunning = false
             }
@@ -3170,7 +3176,7 @@ final class BatchStore: ObservableObject {
             guard let self else { return }
             guard await self.checkVLMServer() else {
                 await MainActor.run { [weak self] in
-                    self?.lastError = "Ollama 服务未运行 — 先点“启动 VLM 服务” (模型: ollama pull \(Self.ollamaModel))"
+                    self?.lastError = "Ollama 服务未运行 — 先点“启动服务” (模型: ollama pull \(Self.ollamaModel))"
                     self?.isRunning = false
                 }
                 return

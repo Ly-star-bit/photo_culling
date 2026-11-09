@@ -145,7 +145,7 @@ struct CollageMyTemplatesBox: View {
         GroupBox("我的模板") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    TextField("把当前版存成模板…", text: $templateName)
+                    TextField("把这一页的版式存成模板…", text: $templateName)
                         .onSubmit { saveTemplate() }
                     Button("存") { saveTemplate() }
                         .disabled(templateName.trimmingCharacters(in: .whitespaces).isEmpty || store.root == nil)

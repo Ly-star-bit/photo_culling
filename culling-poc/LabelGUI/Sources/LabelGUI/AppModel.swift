@@ -191,7 +191,7 @@ extension AppModel {
             let what: String
             switch job {
             case .analysis: what = "分析"
-            case .vlm: what = "VLM 判片"
+            case .vlm: what = "精审"
             case .appeal: what = "复审"
             case .cardImport: what = "导卡"
             case .task(let kind): what = kind.label

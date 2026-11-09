@@ -33,7 +33,7 @@ enum WhatsNew {
     /// 这一版新增的条目。占位：发版前换成 v1.27.0 的（两三条就好，一条一句话，能「带我去」的都带上）。
     static let notes = Notes(version: "1.27.0", entries: [
         Entry(id: "inspector",
-              title: "检视器跟着选中走",
+              title: "右栏跟着选中走",
               detail: "点画布上的照片、文字、贴纸，右栏自动切到「格式」；点空白处是这一页的设置。",
               destination: .collage(.format)),
         Entry(id: "left-pane",

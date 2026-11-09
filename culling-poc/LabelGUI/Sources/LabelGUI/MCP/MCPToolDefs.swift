@@ -255,7 +255,7 @@ enum MCPToolDefs {
      "annotations":"$WRITE_IDEMPOTENT"},
 
     {"name":"collage_run_kit","title":"在 app 里一键成套",
-     "description":"在 app 里一键成套（= 拼图页「一键成套 ▾」）：{{kits}}。替换当前拼图工程，落地时是一步撤销。要等 app 算完（最长约 50 秒）；被用户的新操作作废或用户切了场次回 superseded，托盘里没有能用的照片回 nothing_to_render。结果里有页数、封面和 app 当前画面的预览图。",
+     "description":"在 app 里一键成套（= 拼图页左栏「模板 › 一键成套」）：{{kits}}。替换当前拼图工程，落地时是一步撤销。要等 app 算完（最长约 50 秒）；被用户的新操作作废或用户切了场次回 superseded，托盘里没有能用的照片回 nothing_to_render。结果里有页数、封面和 app 当前画面的预览图。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "kit":{"type":"string","enum":"$KITS"},

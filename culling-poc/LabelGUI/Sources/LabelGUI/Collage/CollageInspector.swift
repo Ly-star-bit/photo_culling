@@ -194,7 +194,7 @@ struct CollageCanvasBox: View {
         let band = String(format: "%.0fmm", canvas.foldBand / max(1, canvas.dpi) * 25.4)
         // 婚礼 fine-art 的编排从不跨缝（平铺也一样）。
         let rule = canvas.binding == .glued || store.project.albumTheme == .fineArt
-            ? "照片不跨中缝，中缝两侧各 \(band) 不放脸" + (canvas.binding == .glued ? "" : "（婚礼 fine-art 编排不跨缝）")
+            ? "照片不跨中缝，中缝两侧各 \(band) 不放脸" + (canvas.binding == .glued ? "" : "（婚礼相册编排不跨缝）")
             : "横图可以铺满两页，中缝两侧各 \(band) 不放脸"
         Text("\(rule)；出血 \(mm(canvas.bleed)) · 安全区 \(mm(canvas.safe))")
             .font(.caption2).foregroundStyle(.secondary)
@@ -363,11 +363,11 @@ struct CollageStylePanel: View {
                               display: String(format: "%.2f", store.project.style.sharpen))
                     // 加了网的照片不锐化（锐化会在网点边上起白边）。
                     .disabled(store.project.style.halftone != nil)
-                    .help(store.project.style.halftone != nil ? "照片加了网（报纸）不锐化：锐化会在网点边上起白边"
+                    .help(store.project.style.halftone != nil ? "照片加了网（报纸风）不锐化：锐化会在网点边上起白边"
                           : "照片缩到格子大小之后补的锐化（预览和导出一样）")
                 // 灰掉的滑杆说一句为什么（禁用控件上的悬停提示不一定出得来）。
                 if store.project.style.halftone != nil {
-                    gridOnlyHint("照片加了网（报纸）：输出锐化不起作用，锐化会在网点边上起白边。")
+                    gridOnlyHint("照片加了网（报纸风）：输出锐化不起作用，锐化会在网点边上起白边。")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -450,7 +450,7 @@ struct CollageStylePanel: View {
                               display: String(format: "%.2f", store.project.style.grain))
                 CollageSlider(label: "压照片", value: styleBinding(\.paperOverPhotos), range: 0...1,
                               display: String(format: "%.2f", store.project.style.paperOverPhotos))
-                    .help("纸纹也压在照片上，照片的白往纸色靠一点：像印在这张纸上（报纸、fine-art 相册）")
+                    .help("纸纹也压在照片上，照片的白往纸色靠一点：像印在这张纸上（报纸风、婚礼相册）")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
@@ -488,7 +488,7 @@ struct CollageStylePanel: View {
     private var frameBox: some View {
         GroupBox("边框与投影") {
             VStack(alignment: .leading, spacing: 8) {
-                if store.isFreeform { gridOnlyHint("散落版的相框、投影按张调：点画布上的一张相纸，在「格式」里。") }
+                if store.isFreeform { gridOnlyHint("散落版的相框、投影按张调：点画布上的一张照片，在「格式」里。") }
                 if store.isContactSheet { gridOnlyHint("印样的片条自己有片边，不加边框、投影。") }
                 frameControls.disabled(store.isFreeform || store.isContactSheet)
             }
@@ -903,7 +903,7 @@ struct CollageTextEditor: View {
                 e.gradient = on ? (color.luminance > 0.5 ? CollageColor(hex: 0xE2B657) : CollageColor(hex: 0x3B5B8C)) : nil
             }
             Spacer(minLength: 0)
-            Menu("样式") {
+            Menu("搭配") {
                 ForEach(CollageTextEffects.presets) { preset in
                     Button(preset.name) { store.applyTextEffect(preset, line: index, target: target) }
                 }
@@ -994,7 +994,7 @@ struct CollageExportPanel: View {
                 TextField("文件名（留空 = 导出时间，精确到秒）", text: $store.exportName)
                     .textFieldStyle(.roundedBorder)
                     .help("直接写进输出目录，不另建文件夹；目录里有同名的自动加 -2、-3，不会覆盖")
-                Picker("格式", selection: $store.exportOptions.format) {
+                Picker("文件格式", selection: $store.exportOptions.format) {
                     ForEach(CollageExport.Format.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented)

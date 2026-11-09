@@ -734,7 +734,7 @@ private struct PickTile: View {
     @ViewBuilder
     private var reasonsBadge: some View {
         if !item.rejectReasons.isEmpty {
-            Text(item.rejectReasons.joined(separator: " · "))
+            Text(item.rejectReasons.map(BatchStore.reasonLabel).joined(separator: " · "))
                 .font(.caption2.bold())
                 .padding(.horizontal, 6).padding(.vertical, 2)
                 .background(.black.opacity(0.6), in: Capsule())

@@ -33,7 +33,7 @@ final class CollageDarkroom: ObservableObject {
         }
     }
 
-    /// 样张的一组：负片、反转片、电影负片（光谱胶片，有颗粒晕光）和滤镜（相纸滤镜，没有）。
+    /// 样张的一组：负片、反转片、电影负片（光谱胶片，有颗粒晕光）和滤镜（程序调色，没有）。
     enum Kind { case negative, slide, cine, filter }
 
     struct Group: Identifiable {
@@ -55,7 +55,7 @@ final class CollageDarkroom: ObservableObject {
     /// 全部色调的先后。
     static let order: [CollageLook] = groups.flatMap(\.looks)
 
-    /// 样张的两个页签：胶片（光谱色调）/ 滤镜（相纸滤镜）。先少给选择（R8 §3.2），←→ 只在这一页签里走。
+    /// 样张的两个页签：胶片（光谱色调）/ 滤镜（程序调色）。先少给选择（R8 §3.2），←→ 只在这一页签里走。
     enum Tab: String, CaseIterable, Identifiable {
         case film, filter
         var id: String { rawValue }
@@ -90,14 +90,14 @@ final class CollageDarkroom: ObservableObject {
         case .slideCool: return "浓烈清透，偏冷"
         case .cineTungsten: return "整体偏蓝的冷调电影感"
         case .none: return "不调色"
-        case .film: return "暖、柔，黑位抬一点"
+        case .film: return "暖、柔，黑位抬一点（原来叫「胶片」）"
         case .airy: return "提亮、偏青、反差低"
         case .faded: return "褪色，偏黄带棕"
-        case .cinema: return "青橙对比，反差大"
+        case .cinema: return "青橙对比，反差大（原来叫「电影」）"
         case .cool: return "冷灰、低饱和"
         case .mono: return "中性黑白"
         case .sepia: return "暖棕单色"
-        case .newsprint: return "墨不纯黑、纸不纯白"
+        case .newsprint: return "墨不纯黑、纸不纯白（原来叫「报纸」）"
         case .contrastMono: return "黑到底、白到顶"
         case .muted: return "哑光，反差和饱和都压低"
         case .fineArt: return "抬黑、柔和，高光微暖"

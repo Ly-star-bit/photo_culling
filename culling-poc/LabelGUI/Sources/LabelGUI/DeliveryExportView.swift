@@ -126,7 +126,7 @@ private struct DeliverySharpenRow: View {
         .disabled(original)
         .help(original
               ? "原尺寸不锐化：输出锐化只补缩小损失的那点清晰度"
-              : "缩小后补一刀输出锐化（和检视器同一套 Lanczos + USM）；原图本来就比目标小的不锐化")
+              : "缩小后补一刀输出锐化，补回缩小损失的那点清晰度；原图本来就比目标小的不锐化")
     }
 }
 

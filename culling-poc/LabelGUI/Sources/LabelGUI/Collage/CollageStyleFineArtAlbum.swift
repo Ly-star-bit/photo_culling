@@ -9,7 +9,7 @@ enum CollageAlbumTheme: String, Codable, CaseIterable, Hashable {
     var label: String {
         switch self {
         case .classic: return "默认"
-        case .fineArt: return "婚礼 fine-art"
+        case .fineArt: return "婚礼相册"
         }
     }
 }

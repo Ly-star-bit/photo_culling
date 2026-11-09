@@ -120,9 +120,9 @@ struct DetailView: View {
                 LabeledContent("暗部裁切", value: l1?.shadowClipPct.map { String(format: "%.2f%%", $0 * 100) } ?? "-")
                 LabeledContent("连拍分组(算法)", value: l1?.burstGroup.map(String.init) ?? "-")
                 if let l2 {
-                    LabeledContent("VLM表情分", value: l2.expressionScore.map(String.init) ?? "-")
-                    LabeledContent("VLM构图问题", value: (l2.compositionIssues?.joined(separator: ", ")).flatMap { $0.isEmpty ? nil : $0 } ?? "无")
-                    LabeledContent("VLM淘汰建议", value: l2.rejectRecommended.map { $0 ? "是" : "否" } ?? "-")
+                    LabeledContent("表情分（本地模型）", value: l2.expressionScore.map(String.init) ?? "-")
+                    LabeledContent("构图问题（本地模型）", value: (l2.compositionIssues?.joined(separator: ", ")).flatMap { $0.isEmpty ? nil : $0 } ?? "无")
+                    LabeledContent("淘汰建议（本地模型）", value: l2.rejectRecommended.map { $0 ? "是" : "否" } ?? "-")
                 }
             } header: {
                 Text("参考信号 (只读)")

@@ -21,7 +21,7 @@ enum CollageKitID: String, CaseIterable, Identifiable {
         switch self {
         case .fashionIssue: return "时尚刊：封面（人物挡字）+ 3 张内页，3:4 多页（小红书轮播），共用刊头、期号、色调"
         case .contactRoll: return "底片印样：按选片结果一个章节一卷（同一章节两台机身各一卷），一卷一页、超过 35 帧接着排下一页（含废片），每场最好那张红笔圈，废片打叉"
-        case .weddingAlbum: return "婚礼相册：切到相册、fine-art 样式，按章节开篇、疏密节奏、竖图成对自动编排"
+        case .weddingAlbum: return "婚礼相册：切到相册、「婚礼 · 雅致」样式，按章节开篇、疏密节奏、竖图成对自动编排"
         }
     }
 

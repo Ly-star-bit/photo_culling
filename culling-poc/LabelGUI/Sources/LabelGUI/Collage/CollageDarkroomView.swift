@@ -379,7 +379,7 @@ private struct DarkroomSwatches: View {
         VStack(spacing: 0) {
             DarkroomSegmented(items: CollageDarkroom.Tab.allCases.map { t in
                 .init(id: t.rawValue, label: t.label, selected: model.tab == t,
-                      help: t == .film ? "光谱胶片：有颗粒、晕光" : "相纸滤镜：没有颗粒、晕光")
+                      help: t == .film ? "胶片：按真实胶片的数据算的，有颗粒、晕光、冲印" : "滤镜：程序调色，没有颗粒、晕光、冲印")
             }) { id in
                 if let t = CollageDarkroom.Tab(rawValue: id) { model.tab = t }
             }
@@ -671,7 +671,7 @@ private struct DarkroomControls: View {
                         DarkroomSlider(label: "颗粒", value: store.project.style.filmGrain,
                                        ticks: [(0, nil), (0.5, "原样"), (1, "两倍")],
                                        set: { model.setStyleValue(\.filmGrain, $0) },
-                                       help: "胶片的细小纹理（spektrafilm 的颗粒模型）：50% 就是这款胶片在底片上的真实颗粒，100% 是两倍。"
+                                       help: "胶片的细小纹理（按这款胶片的真实颗粒算）：50% 就是它在底片上的颗粒，100% 是两倍。"
                                            + "缩小看的时候细颗粒会被平均掉，要在下面的 1:1 细节里看；先看整张，再看细节")
                         DarkroomSlider(label: "晕光", value: store.project.style.filmHalation,
                                        ticks: [(0, nil), (0.22, "真片"), (0.52, "弱"), (1, "去掉")],
@@ -698,8 +698,8 @@ private struct DarkroomControls: View {
                                    help: "一页里几张照片的冷暖、明暗往主图对齐（对整组），混拍的一页用")
                     if !spectral {
                         Text(film.texture
-                             ? "「\(setting.look.label)」是相纸滤镜，这一级没有颗粒、晕光和冲印；上面几项对整组，管的是别的页、格用着的光谱胶片。"
-                             : "「\(setting.look.label)」是相纸滤镜，没有颗粒、晕光和冲印：在「胶片」页签里换一款才有。")
+                             ? "「\(setting.look.label)」是滤镜，这一级没有颗粒、晕光和冲印；上面几项对整组，管的是别的页、格用着的胶片。"
+                             : "「\(setting.look.label)」是滤镜，没有颗粒、晕光和冲印：在「胶片」页签里换一款才有。")
                             .font(.system(size: 11)).foregroundStyle(DarkroomPalette.tertiary)
                             .fixedSize(horizontal: false, vertical: true)
                     }

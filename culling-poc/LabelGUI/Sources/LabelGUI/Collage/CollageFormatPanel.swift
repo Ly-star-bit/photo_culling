@@ -384,6 +384,10 @@ struct CollageDarkroomButton: View {
 
     /// 暗房的琥珀色（安全灯）：顶栏按钮、样式页的大按钮同一个颜色。
     static let amber = Color(red: 1, green: 0.702, blue: 0.251)
+
+    /// 整组进暗房的悬停（顶栏「暗房」、样式页「进暗房…」同一句；以前两处各说各的）。
+    static let projectHelp = "整页的看片台：大样张分胶片 / 滤镜两页，悬停就在大预览里看，拖竖线比原图；强度试条、颗粒、晕光、1:1 细节都在一处。"
+        + "从这里进改整组，进去以后顶上「套用到」能换成这一页（相册）、这一格；只想调一格，也可以选中它在「格式 › 色调」里进"
 }
 
 // MARK: - 这一页（什么都没选）
@@ -434,7 +438,7 @@ struct CollagePageBox: View {
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         } else if store.isFreeform {
-            Text("散落版：托盘里的照片拖进画布 = 放一张相纸。选中后拖动挪位置，拖上方圆点旋转、右下圆点缩放；[ ] 微调角度。")
+            Text("散落版：托盘里的照片拖进画布 = 放一张照片。选中后拖动挪位置，拖上方圆点旋转、右下圆点缩放；[ ] 微调角度。")
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
@@ -443,8 +447,8 @@ struct CollagePageBox: View {
                     .disabled(store.root == nil)
                     .help("结构不变，按照片原比例重算每条缝的位置（手动拖过的缝会被重算）")
                 if !store.alternatives.isEmpty {
-                    Text(store.alternativeIndex < 0 ? "备选 \(store.alternatives.count) 版"
-                         : "第 \(store.alternativeIndex + 1)/\(store.alternatives.count) 版")
+                    Text(store.alternativeIndex < 0 ? "备选 \(store.alternatives.count) 个"
+                         : "第 \(store.alternativeIndex + 1)/\(store.alternatives.count) 个备选")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
