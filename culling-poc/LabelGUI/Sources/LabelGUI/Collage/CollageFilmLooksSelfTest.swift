@@ -12,6 +12,8 @@ import CoreImage
 /// 3. 取样：格点上 map() 就是表里的值；灰阶从黑到白亮度不往回走（反转片印到相纸上会整条反过来，这条能抓到）；
 ///    强度 1 的 cube 确实不是原样，强度 0 的 grade() 是原样。
 /// 4. 读坏的表：格点数不对、有非数字、空文件都是 nil；空目录里读不到；读不到时 map() 原样返回。
+///    放表的目录指到空目录（漏打包）：色调表、颗粒数据各记一行日志（缺哪个文件、在哪找的），读几次都只记一次，不崩；
+///    指回来照常读得到。
 /// 5. 渲染：一块纯色走 CollageLooks.apply（CIColorCubeWithColorSpace，sRGB）出来的颜色和 CPU 上 grade() 算的差 ≤ 3/255
 ///    —— 预览、导出（GPU）和主图取色、压字判深浅（CPU）用的是同一个颜色。
 /// 6. 存档：新色调存进 CollageLookSetting 再读回来不变。
@@ -141,6 +143,7 @@ enum CollageFilmLooksSelfTest {
         let empty = fm.temporaryDirectory.appendingPathComponent("film-looks-selftest-\(UUID().uuidString)")
         try? fm.createDirectory(at: empty, withIntermediateDirectories: true)
         check(CollageFilmLUTs.load(.filmWarmSkin, from: empty) == nil, "空目录里读不到")
+        missingTables(empty, check)
         try? fm.removeItem(at: empty)
 
         // ---------------------------------------------------------------- 5. 渲染
@@ -185,6 +188,51 @@ enum CollageFilmLooksSelfTest {
 
         print(failures.isEmpty ? "全部通过" : "失败 \(failures.count) 项：" + failures.joined(separator: "；"))
         exit(failures.isEmpty ? 0 : 1)
+    }
+
+    /// 漏打包（v1.24.0–v1.26.1 那样）：放表的目录指到一个空目录 —— 色调表、颗粒数据都读不到，每款记一行日志
+    /// （色调、缺哪个文件、在哪个目录找的），读几次都只记一次；map 原样返回、不崩。指回来以后照常读得到。
+    private static func missingTables(_ empty: URL, _ check: (Bool, String, String) -> Void) {
+        let fm = FileManager.default
+        let logData = fm.temporaryDirectory.appendingPathComponent("film-looks-selftest-log-\(UUID().uuidString)")
+        let mine = AppLog.logsDir == nil
+        let logs = mine ? AppLog.installFileLog(dataDir: logData, role: "自检") : AppLog.logsDir
+        CollageFilmLUTs.directoryOverride = empty
+        CollageFilmLUTs.resetForTesting()
+        CollageFilmEffects.resetForTesting()
+        var identity = true
+        for _ in 0..<3 {
+            let v = CollageFilmLUTs.map(.filmWarmSkin, 0.3, 0.5, 0.7)
+            identity = identity && v.0 == 0.3 && v.1 == 0.5 && v.2 == 0.7
+            _ = CollageFilmEffects.extras(.filmWarmSkin)
+        }
+        check(identity && CollageFilmLUTs.table(.filmWarmSkin) == nil && CollageFilmEffects.extras(.filmWarmSkin) == nil
+              && !CollageFilmEffects.supportsExposure(.filmWarmSkin),
+              "空目录：色调表、颗粒数据都是 nil，map 原样返回（不崩）", "")
+        AppLog.flush()
+        let text = logs.flatMap { try? String(contentsOf: $0.appendingPathComponent(AppLog.fileName), encoding: .utf8) } ?? ""
+        let lines = text.split(separator: "\n").filter { $0.contains("filmWarmSkin") }
+        let table = lines.filter { $0.contains("色调表没读到") }
+        let extras = lines.filter { $0.contains("冲印区数据没读到") }
+        check(table.count == 1 && table[0].contains("缺 filmWarmSkin.cube") && table[0].contains(empty.path),
+              "日志：色调表读不到记一行（色调、缺哪个文件、在哪个目录找的），读几次都只记一次", "\(table.count) 行")
+        check(extras.count == 1 && extras[0].contains("filmWarmSkin.film.cube、filmWarmSkin.print.cube、filmWarmSkin.json"),
+              "日志：颗粒、晕光、冲印区的数据读不到记一行，缺的三个文件都列出来", "\(extras.count) 行")
+        check(CollageFilmLUTs.missingReason(["a.cube"], in: nil).contains("没找到放表的目录"), "找不到目录时说找过哪两处", "")
+        var negative = CollageProject()
+        negative.style.look = .filmWarmSkin
+        let fc = CollageFilmEffects.filmControls(negative)
+        check(fc.texture && !fc.exposure && !fc.reversalOnly,
+              "数据没读到的负片：胶片曝光灰掉，但不说成「用着的都是反转片」（暗房右栏另有「这款的数据没读到」）", "")
+        CollageFilmLUTs.directoryOverride = nil
+        CollageFilmLUTs.resetForTesting()
+        CollageFilmEffects.resetForTesting()
+        check(CollageFilmLUTs.table(.filmWarmSkin) != nil && CollageFilmEffects.extras(.filmWarmSkin) != nil,
+              "目录指回来：照常读得到", "")
+        if mine {
+            AppLog.uninstallFileLog()
+            try? fm.removeItem(at: logData)
+        }
     }
 
     private static let linear = CGColorSpace(name: CGColorSpace.linearSRGB)!
@@ -360,12 +408,13 @@ enum CollageFilmLooksSelfTest {
         // 检视器、暗房的颗粒 / 晕光 / 冷暖 / 画幅 / 胶片曝光灰不灰掉（filmControls）：按整个工程，不只看整组的色调。
         let none = CollageFilmEffects.filmControls(plain)
         let page = CollageFilmEffects.filmControls(pageLevel)
-        check(!none.texture && !none.exposure, "整组滤镜、哪一级都没光谱色调：颗粒、冲印都灰掉", "\(none)")
-        check(page.texture && page.exposure, "整组滤镜、只有一页是电影负片：颗粒、晕光、冷暖、画幅、胶片曝光都能调", "\(page)")
+        check(!none.texture && !none.exposure && !none.reversalOnly, "整组滤镜、哪一级都没光谱色调：颗粒、冲印都灰掉", "\(none)")
+        check(page.texture && page.exposure && !page.reversalOnly,
+              "整组滤镜、只有一页是电影负片：颗粒、晕光、冷暖、画幅、胶片曝光都能调", "\(page)")
         var slideCell = plain
         slideCell.pages[0].root.update(at: []) { $0.cell?.look = CollageLookSetting(look: .slideVivid, strength: 1) }
         let slide = CollageFilmEffects.filmControls(slideCell)
-        check(CollageFilmEffects.spectralLooks(slideCell) == [.slideVivid] && slide.texture && !slide.exposure,
+        check(CollageFilmEffects.spectralLooks(slideCell) == [.slideVivid] && slide.texture && !slide.exposure && slide.reversalOnly,
               "只有一格是反转片：颗粒能调、胶片曝光灰掉（反转片没有冲扫补偿）", "\(slide)")
         var mixed = slideCell
         mixed.style.look = .filmWarmSkin

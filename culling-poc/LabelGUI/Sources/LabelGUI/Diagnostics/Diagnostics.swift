@@ -363,6 +363,7 @@ enum DiagnosticsBundle {
         parts.append(("recent-messages.txt", history + "\n"))
         parts.append(("sessions.txt", sessionsSummary(sessions, redact: redact)))
         parts.append(("data-dir.txt", tree(dataDir, redact: redact)))
+        parts.append(("film-luts.txt", filmLuts()))
 
         AppLog.flush()
         let logsDir = dataDir.appendingPathComponent(AppLog.logsFolderName, isDirectory: true)
@@ -445,6 +446,7 @@ enum DiagnosticsBundle {
         - recent-messages.txt：这次打开以后状态栏出过的提示（最近 20 条）
         - logs/：app 的日志（最近约 5 MB）
         - sessions.txt、data-dir.txt：有几场、每场几张，数据目录里有哪些文件（只列名字和大小）
+        - film-luts.txt：光谱胶片的表在哪个目录、每款要的文件缺没缺、目录里的文件（名字和大小）
         - crash-reports/：最近 30 天里选片工具的崩溃报告（有的话）
         不含：照片、预览图（连文件名都不列）、客户回复和备注原文、场次记录（判决、sessions.json）。
         所有路径都打了码：家目录换成 ~，外置盘的名字换成 <盘 N>，场次文件夹（最近场次、当前打开的、数据目录里还留着
@@ -497,6 +499,37 @@ enum DiagnosticsBundle {
         for (index, session) in sessions.enumerated() {
             let label = redact.label(forSession: index)
             lines.append("\(label)  key \(session.key) · \(session.photoCount) 张 · 上次分析 \(session.lastAnalyzed)")
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// 光谱胶片的表（film-luts）在哪、缺没缺：v1.24.0–v1.26.1 漏打包了 .json，颗粒、晕光、冲印区三个版本都静默不起作用，
+    /// 别人机器上出这种事，诊断包里要看得出来。每款光谱色调要的文件（色调表 .cube；颗粒、晕光、冲印区的 .film.cube /
+    /// .print.cube / .json；负片、电影负片的胶片曝光另有 .film_e.cube / .print_e.cube）缺哪几个，目录里每个文件的名字和
+    /// 大小（都是 app 自己起的英文名）。
+    static func filmLuts() -> String {
+        guard let dir = CollageFilmLUTs.directory else {
+            return "光谱胶片的表：" + CollageFilmLUTs.missingReason([], in: nil) + "\n"
+        }
+        let fm = FileManager.default
+        let names = ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? []).sorted()
+        let present = Set(names)
+        let spectral = CollageLook.allCases.filter(\.isSpectral)
+        var absent: [String] = []
+        for look in spectral {
+            var need = [".cube", ".film.cube", ".print.cube", ".json"]
+            if !look.isReversal { need += [".film_e.cube", ".print_e.cube"] }
+            absent += need.map { look.rawValue + $0 }.filter { !present.contains($0) }
+        }
+        // 路径打包时会逐段打码，先说清楚是 app 包里的还是往上找到的开发树。
+        let place = dir.path.contains(".app/Contents/Resources/") ? "app 包里" : "开发树（可执行文件往上找到的）"
+        var lines = ["光谱胶片的表（\(place)）：\(dir.path)",
+                     absent.isEmpty ? "\(spectral.count) 款光谱色调要的文件都在"
+                         : "缺 \(absent.count) 个文件：" + absent.joined(separator: "、"),
+                     "目录里的文件："]
+        for name in names {
+            let size = (try? fm.attributesOfItem(atPath: dir.appendingPathComponent(name).path))?[.size] as? NSNumber
+            lines.append("  \(name)  \(byteText(size?.int64Value ?? 0))")
         }
         return lines.joined(separator: "\n") + "\n"
     }

@@ -229,7 +229,7 @@ struct CollageLookBox: View {
                     .disabled(!film.exposure)
                     .help("冲印：给底片多（少）几档曝光，冲扫店把亮度拉回一半（+1 档更亮更通透、+2 档高光被肩部压软）。"
                           + "只在负片、电影负片上有；反转片没有冲扫补偿这一层")
-                if film.texture && !film.exposure {
+                if film.reversalOnly {
                     hint("用着的光谱胶片都是反转片：没有冲扫补偿这一层，胶片曝光只在负片、电影负片上有。")
                 }
                 CollageSlider(label: "冷暖", value: binding(\.filmWarmth), range: -1...1,

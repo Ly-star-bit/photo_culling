@@ -224,10 +224,10 @@ enum DiagnosticsSelfTest {
         check(names == report.entries, "报告列的文件就是 zip 里的", "\(names) vs \(report.entries)")
         let folder = names.first.map { String($0.split(separator: "/").first ?? "") } ?? ""
         check(folder.hasPrefix("xuanpian-diagnostics-"), "最外层一个「xuanpian-diagnostics-时间」文件夹", folder)
-        let want = ["README.txt", "info.txt", "recent-messages.txt", "sessions.txt", "data-dir.txt", "logs/app.log", "logs/app.1.log",
-                    "crash-reports/LabelGUI-2026-11-03-101010.ips"]
+        let want = ["README.txt", "info.txt", "recent-messages.txt", "sessions.txt", "data-dir.txt", "film-luts.txt",
+                    "logs/app.log", "logs/app.1.log", "crash-reports/LabelGUI-2026-11-03-101010.ips"]
         let missing = want.filter { files[folder + "/" + $0] == nil }
-        check(missing.isEmpty, "说明、诊断信息、提示、场次概况、目录结构、日志、最近的崩溃报告都在", "缺 \(missing)")
+        check(missing.isEmpty, "说明、诊断信息、提示、场次概况、目录结构、光谱胶片的表、日志、最近的崩溃报告都在", "缺 \(missing)")
         check(names.count == want.count, "别的程序的、30 天以前的崩溃报告不要，场次 JSON、sessions.json 不放", "\(names)")
         let images = names.filter { DiagnosticsBundle.imageExtensions.contains(URL(fileURLWithPath: $0).pathExtension.lowercased()) }
         check(images.isEmpty, "没有照片、预览图", "\(images)")
@@ -243,6 +243,10 @@ enum DiagnosticsSelfTest {
         let tree = files[folder + "/data-dir.txt"] ?? ""
         check(tree.contains("sessions/\(key1)/manifest.json") && tree.contains("sessions/\(key1)/previews/  （1 个文件")
               && tree.contains("另有 1 张图片"), "目录结构：JSON 列名字和大小，预览目录只说个数，图片不列名字", tree)
+        let luts = files[folder + "/film-luts.txt"] ?? ""
+        check(luts.hasPrefix("光谱胶片的表")
+              && (CollageFilmLUTs.directory == nil || (luts.contains("款光谱色调要的文件都在") && luts.contains("filmWarmSkin.json"))),
+              "光谱胶片的表：在哪个目录、缺没缺、目录里的文件", String(luts.prefix(300)))
         let summary = files[folder + "/sessions.txt"] ?? ""
         check(summary.contains("<场次 1>  key \(key1) · 3 张") && summary.contains("<场次 2>  key \(key2) · 5 张"),
               "场次概况：代号、key、张数", summary)

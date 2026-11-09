@@ -581,6 +581,13 @@ private struct DarkroomControls: View {
                         Text(note).font(.system(size: 11)).foregroundStyle(DarkroomPalette.accent)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    // 这一款的表、颗粒数据读不到（漏打包）：以前静默变原样，没人发现（v1.24–v1.26.1）。读过的有缓存，
+                    // 这里问的是现在套着的那一款，进暗房之前画布已经用它渲过。
+                    if spectral, CollageFilmLUTs.table(setting.look) == nil || CollageFilmEffects.extras(setting.look) == nil {
+                        Text("这款的数据没读到，颜色 / 颗粒不起作用（缺哪个文件记在日志里）")
+                            .font(.system(size: 11)).foregroundStyle(DarkroomPalette.accent)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
@@ -675,7 +682,7 @@ private struct DarkroomControls: View {
 private struct DarkroomPrinting: View {
     @ObservedObject var model: CollageDarkroom
     @ObservedObject var store: CollageStore
-    let film: (texture: Bool, exposure: Bool)
+    let film: CollageFilmEffects.FilmControls
 
     var body: some View {
         let _ = CollagePerf.body("暗房冲印")
@@ -701,7 +708,7 @@ private struct DarkroomPrinting: View {
                                : "放大机的黄、品滤色：暖往橙走（不往黄绿），冷往蓝。在印放那一步改，比套完再调白平衡更像胶片；在统一色温之前")
                 .disabled(!film.texture)
                 .opacity(film.texture ? 1 : 0.4)
-            if film.texture && !exposable {
+            if film.reversalOnly {
                 Text("反转片没有冲扫补偿这一层，过曝就是发白：胶片曝光只在负片、电影负片上有。")
                     .font(.system(size: 11)).foregroundStyle(DarkroomPalette.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
