@@ -654,6 +654,8 @@ enum MCPArgs {
         /// cull_set_verdicts 的 changes：[{id, verdict}]，每张各自的判决（一次调用一步撤销）。写成对象数组而不是 {id: verdict}：
         /// 键不固定的 object 在 schema 里只能写 additionalProperties:{…}，有的客户端（Gemini / Antigravity）不认。
         case verdictChanges(count: ClosedRange<Int>)
+        /// 格子路径：0–8 位数字（空 = 整页一格的根），同 cell_text 的 path。
+        case cellPath
     }
 
     struct ToolSpec {
@@ -695,6 +697,14 @@ enum MCPArgs {
     static let collageStateSpec: ToolSpec = {
         var p: [String: Spec] = ["session": session, "include_preview": .bool, "inline": .bool]
         p["max_edge"] = .int(256...1024)
+        // 换照片的候选（相册 A + B · M）：要换掉的那张、最多几张
+        p["candidates_for"] = .string(maxLength: 256)
+        p["candidates_limit"] = .int(1...30)
+        return ToolSpec(props: p, required: [])
+    }()
+    /// 导出前检查（只读，相册 A + B · M）：texts = 查不查字；pages = 要导的跨页（导出按钮会不会问只看这几页）。
+    static let preflightSpec: ToolSpec = {
+        let p: [String: Spec] = ["session": session, "texts": .bool, "pages": .string(maxLength: 200)]
         return ToolSpec(props: p, required: [])
     }()
 
@@ -794,6 +804,67 @@ enum MCPArgs {
         p["name"] = .text(maxLength: 100)
         p["variant"] = .string(maxLength: 16)
         p["deadline_seconds"] = .deadline
+        // 只导几个跨页、看版 PDF（相册 A + B · M）
+        p["pages"] = .string(maxLength: 200)
+        p["proof"] = .bool
+        return ToolSpec(props: p, required: [])
+    }()
+    // 相册整本的 5 个写工具（相册 A + B · M）：一个工具一个 let（6.1.2 的类型检查）
+    static let pageActions = ["go", "add", "delete", "move", "lock", "unlock", "mirror", "side_layout"]
+    static let pagesSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "if_digest": digest, "reveal": .bool, "op_id": .opID, "inline": .bool]
+        p["action"] = .oneOf(pageActions)
+        p["page"] = .int(1...999)
+        p["pages"] = .string(maxLength: 200)
+        p["to"] = .int(1...999)
+        p["side"] = .oneOf(["left", "right"])
+        p["step"] = .int(-20...20)
+        p["deadline_seconds"] = .deadline
+        return ToolSpec(props: p, required: ["action"])
+    }()
+    static let movePhotosSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "if_digest": digest, "reveal": .bool, "op_id": .opID, "inline": .bool]
+        p["photos"] = .strings(count: 1...CollageLayoutSpec.maxLeaves, maxLength: 256, oneOf: nil)
+        p["to"] = .int(1...999)
+        p["deadline_seconds"] = .deadline
+        return ToolSpec(props: p, required: ["photos", "to"])
+    }()
+    static let replacePhotoSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "if_digest": digest, "reveal": .bool, "op_id": .opID, "inline": .bool]
+        p["path"] = .cellPath
+        p["with"] = .string(maxLength: 256)
+        return ToolSpec(props: p, required: ["path", "with"])
+    }()
+    static let printSpecSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "if_digest": digest, "reveal": .bool, "op_id": .opID, "inline": .bool]
+        p["spec"] = .string(maxLength: 80)
+        p["min_pages"] = .int(CollagePrintRules.pageLimit)
+        p["max_pages"] = .int(CollagePrintRules.pageLimit)
+        p["page_step"] = .int(CollagePrintRules.stepRange)
+        p["single_ends"] = .bool
+        p["color"] = .oneOf(printColors)
+        p["jpeg_quality"] = .number(CollagePrintRules.qualityRange)
+        p["fold_mm"] = .number(CollagePrintRules.foldRangeMM)
+        p["auto"] = .strings(count: 1...2, maxLength: 16, oneOf: ["jpeg_quality", "fold_mm"])
+        return ToolSpec(props: p, required: [])
+    }()
+    static let printColors = ["srgb", "adobe_rgb"]
+    static let coverActions = ["make", "remake", "remove", "edit", "done"]
+    /// 封面的字段（改的；action 不算）。
+    static let coverFields = ["spine_mm", "spine_auto", "wrap_mm", "board_mm", "sheet_mm", "spine_title", "spine_date",
+                              "back_photo", "back_text"]
+    static let bookCoverSpec: ToolSpec = {
+        var p: [String: Spec] = ["session": session, "if_digest": digest, "reveal": .bool, "op_id": .opID, "inline": .bool]
+        p["action"] = .oneOf(coverActions)
+        p["spine_mm"] = .number(CollageBookCover.spineRange)
+        p["spine_auto"] = .bool
+        p["wrap_mm"] = .number(CollageBookCover.wrapRange)
+        p["board_mm"] = .number(CollageBookCover.boardRange)
+        p["sheet_mm"] = .number(CollageBookCover.sheetRange)
+        p["spine_title"] = .text(maxLength: 60)
+        p["spine_date"] = .text(maxLength: 40)
+        p["back_photo"] = .text(maxLength: 256)
+        p["back_text"] = .text(maxLength: 120)
         return ToolSpec(props: p, required: [])
     }()
     static let undoSpec: ToolSpec = {
@@ -831,6 +902,12 @@ enum MCPArgs {
         s["collage_set_layout"] = setLayoutSpec
         s["collage_auto_layout"] = autoLayoutSpec
         s["cull_import_client_picks"] = clientPicksSpec
+        s["collage_pages"] = pagesSpec
+        s["collage_move_photos"] = movePhotosSpec
+        s["collage_replace_photo"] = replacePhotoSpec
+        s["collage_preflight"] = preflightSpec
+        s["collage_print_spec"] = printSpecSpec
+        s["collage_cover"] = bookCoverSpec
         return s
     }()
 
@@ -870,6 +947,73 @@ enum MCPArgs {
             if given("text") == given("ids") {
                 return Problem(message: "text 和 ids 要给一个、只能给一个：text 是客户回复的原文（app 来认），ids 是你已经认出的照片 id。",
                                hint: "客户在微信里回的那段话原样放进 text")
+            }
+        case "collage_get_state":
+            if given("candidates_limit") && !given("candidates_for") {
+                return Problem(message: "candidates_limit 要和 candidates_for 一起给。", hint: "candidates_for 填要换掉的那张照片的 id")
+            }
+        case "collage_export":
+            if args["proof"] as? Bool == true, let other = ["pages", "scale", "format"].first(where: given) {
+                return Problem(message: "proof（看版 PDF）是整本低清的一份，不和 \(other) 一起用。",
+                               hint: "只导几个跨页用 pages（不带 proof）；看版 PDF 去掉 \(other) 再调")
+            }
+        case "collage_pages", "collage_print_spec", "collage_cover":
+            return albumRules(tool, args)
+        default:
+            break
+        }
+        return nil
+    }
+
+    /// 相册整本那几个工具里 schema 写不出来的（相册 A + B · M）：每个 action 认哪几个参数、至少给一个字段、互相冲突的。
+    static func albumRules(_ tool: String, _ args: [String: Any]) -> Problem? {
+        func given(_ k: String) -> Bool { args[k] != nil && !(args[k] is NSNull) }
+        switch tool {
+        case "collage_pages":
+            let action = args["action"] as? String ?? ""
+            // 每个 action 认的参数（别的给了就是写错了：比如 go 带了 pages，多半是想 move）
+            let allowed: [String: Set<String>] = [
+                "go": ["page"], "add": ["page"], "delete": ["pages"], "move": ["pages", "to"], "lock": ["pages"],
+                "unlock": ["pages"], "mirror": ["pages"], "side_layout": ["page", "side", "step"],
+            ]
+            let mine = allowed[action] ?? []
+            if let extra = ["page", "pages", "to", "side", "step"].first(where: { given($0) && !mine.contains($0) }) {
+                let list = mine.sorted().joined(separator: "、")
+                return Problem(message: "action=\(action) 不用 \(extra)（它认的是：\(list.isEmpty ? "没有别的参数" : list)）。",
+                               hint: "page 是一个跨页号（go / add / side_layout），pages 是几个跨页（delete / move / lock / unlock / mirror），to 只给 move")
+            }
+            if action == "go" && !given("page") {
+                return Problem(message: "action=go 要给 page：翻到第几个跨页（从 1 起）。", hint: "跨页号看 collage_get_state 的 album.spreads")
+            }
+            if action == "move" && !given("to") {
+                return Problem(message: "action=move 要给 to：挪完以后从第几个跨页开始。", hint: "pages 不给 = 挪当前跨页")
+            }
+            if action == "side_layout" && !given("side") {
+                return Problem(message: "action=side_layout 要给 side：left 或 right。", hint: "")
+            }
+            if given("step"), args["step"].flatMap(integer) == 0 {
+                return Problem(message: "step 不能是 0：1 往后轮一种，-1 往前轮一种。", hint: "")
+            }
+        case "collage_print_spec":
+            if let both = ["jpeg_quality", "fold_mm"].first(where: { given($0) && uniqueStrings(args["auto"]).contains($0) }) {
+                return Problem(message: "\(both) 又给了数、又写在 auto 里：只能选一个。", hint: "auto 是改回自动")
+            }
+            if let lo = args["min_pages"].flatMap(integer), let hi = args["max_pages"].flatMap(integer), lo > hi {
+                return Problem(message: "min_pages（\(lo)）比 max_pages（\(hi)）大。", hint: "P 是单页，1 个跨页 = 2P")
+            }
+        case "collage_cover":
+            let action = args["action"] as? String
+            let fields = coverFields.filter(given)
+            if let a = action, ["remove", "edit", "done"].contains(a), let f = fields.first {
+                let why = a == "remove" ? "去掉封面" : "进 / 出封面编辑"
+                return Problem(message: "action=\(a)（\(why)）不和字段一起用（给了 \(f)）。",
+                               hint: "先改字段（可以带 action=make / remake），再单独调一次 action=\(a)")
+            }
+            if given("spine_mm") && given("spine_auto") {
+                return Problem(message: "spine_mm 和 spine_auto 只能给一个：spine_mm 是印厂给的书脊宽，spine_auto 是改回按页数估。", hint: "")
+            }
+            if given("spine_auto") && args["spine_auto"] as? Bool != true {
+                return Problem(message: "spine_auto 只认 true（改回按页数估）；要填书脊宽用 spine_mm。", hint: "")
             }
         default:
             break
@@ -970,6 +1114,10 @@ enum MCPArgs {
             }
         case .verdictChanges(let count):
             if case .failure(let p) = verdictChanges(value, name: name, count: count) { return p }
+        case .cellPath:
+            guard let s = value as? String, s.utf8.count <= 8, s.utf8.allSatisfy({ (48...57).contains($0) }) else {
+                return Problem(message: "\(name) 要是 0–8 位数字的格子路径（整页一格是空字符串）。", hint: "取 collage_get_state 的 cells[].path")
+            }
         }
         return nil
     }

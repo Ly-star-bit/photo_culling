@@ -302,11 +302,11 @@ swift build -c release
 
 ## 给 AI 用（MCP）
 
-app 里的程序本身就是一个 MCP 服务器（`LabelGUI --mcp`，stdio），Claude Code、Antigravity 这类 AI agent 接上以后能看你的选片结果、替你改判、排拼图。**这一版只做实时**：你开着 app 时，AI 读的是 app 当前打开的那一场（app 内存里的状态，含还没存盘的改动），改判、导入客户选择、套模板、自己设计版式、一键成套、换封面、改字、换样式、存成方案和切方案、导出图片、撤销都交给 app 自己执行，你在窗口里当场看到，改判和改拼图 ⌘Z 照样能撤（存方案、导出不改拼图，不进撤销）；app 没开时只能看状态、列场次、列模板，其余工具一律回 `app_not_running`，请你自己打开 app —— **MCP 绝不会替你启动 app**。app 没开时读场次、出拼图成品图，以及让 AI 分析新文件夹，这一版都没有（app 开着时可以让 app 导出：`collage_export`）。
+app 里的程序本身就是一个 MCP 服务器（`LabelGUI --mcp`，stdio），Claude Code、Antigravity 这类 AI agent 接上以后能看你的选片结果、替你改判、排拼图。**这一版只做实时**：你开着 app 时，AI 读的是 app 当前打开的那一场（app 内存里的状态，含还没存盘的改动），改判、导入客户选择、套模板、自己设计版式、一键成套、换封面、改字、换样式、存成方案和切方案、相册整本的翻页 / 加删挪锁跨页 / 挪照片 / 换照片 / 印厂规格 / 封面、导出图片和看版 PDF、撤销都交给 app 自己执行，你在窗口里当场看到，改判和改拼图 ⌘Z 照样能撤（存方案、导出不改拼图，不进撤销）；app 没开时只能看状态、列场次、列模板，其余工具一律回 `app_not_running`，请你自己打开 app —— **MCP 绝不会替你启动 app**。app 没开时读场次、出拼图成品图，以及让 AI 分析新文件夹，这一版都没有（app 开着时可以让 app 导出：`collage_export`）。
 
-### 24 个工具
+### 30 个工具
 
-app 没开时也能用的只有前 3 个；其余 21 个要 app 开着、而且 `session` 是 app 当前打开的那一场（不是就回 `session_not_open`，要换场次用 `app_open_session`）。
+app 没开时也能用的只有前 3 个；其余 27 个要 app 开着、而且 `session` 是 app 当前打开的那一场（不是就回 `session_not_open`，要换场次用 `app_open_session`）。
 
 | # | 工具 | 做什么 | app 没开时 |
 |---|---|---|---|
@@ -318,7 +318,7 @@ app 没开时也能用的只有前 3 个；其余 21 个要 app 开着、而且 
 | 6 | `cull_get_photos` 照片详情 | 1–20 张的完整分析：EXIF、每张脸的位置和睁闭眼、复审结果、人工改判（AI 改的带 `ai_override`：哪一次、什么时候、改之前是什么）和客户选中 | `app_not_running` |
 | 7 | `cull_list_groups` 分组 | 章节、场（一串连拍，带名次和推荐的那张）、近似重复组的成员 | `app_not_running` |
 | 8 | `cull_preview_photos` 看照片 | 1–4 张缩小预览（内联图片）；`crop=face` 从原图按主脸裁一块放大，看眼睛和对焦，和连拍挑选里的放大同一个算法 | `app_not_running` |
-| 9 | `collage_get_state` 看 app 里的拼图 | 拼图工程的状态（模式、页、画布尺寸、模板、样式、文字、托盘里每张照片的比例（客户选中的带 `client_pick`）、相册设了目标跨页数时的 `album_target`、每个格子和它的位置、这一页版式的语法 `layout`、存过的方案、撤销深度、`digest`）和 app 当前画面的预览 | `app_not_running` |
+| 9 | `collage_get_state` 看 app 里的拼图 | 拼图工程的状态（模式、页、画布尺寸、模板、样式、文字、托盘里每张照片的比例（客户选中的带 `client_pick`）、相册设了目标跨页数时的 `album_target`、每个格子和它的位置、这一页版式的语法 `layout`、存过的方案、撤销深度、`digest`）和 app 当前画面的预览。相册另有 `album`：每个跨页（号从 1 起）放了哪几张、锁没锁，印厂规格的页数合不合规，有没有封面；`editing_cover` 为 true 时正在编辑封面，`page_kind` 是 `cover`、格子和版式是封面那一块。`candidates_for` 填一张照片的 id，另给换它的候选（同连拍 / 同场 / 画面相似，带分数、用在第几个跨页、是不是废片、客户选中） | `app_not_running` |
 | 10 | `app_open_session` 在 app 里打开场次 | = 侧栏「最近场次」里点它。只能开列表里的；会清掉 app 里这一场的撤销记录，撤销栈不空时先回 `confirm_required` 让 AI 问你；这一场有原件读不出来、只在内存里的改动（`data.unsaved_in_memory`）时也先回 `confirm_required`，你同意丢掉这些改动 AI 才带 confirm 切；这一场的判决、客户选中、客户备注、对时或拼图工程因为盘满没存上时不切（`save_failed`；腾出空间后再调一次，app 切之前会先再存一次） | `app_not_running` |
 | 11 | `cull_set_verdicts` 改判 | = 网格里按 1/2/3/0（精选 / 可用 / 废片 / 恢复自动）。`ids` + `verdict` 都改成同一个，或者 `changes:[{id, verdict}]` 每张各自的（定一场连拍：一张精选、其余废片，一次写完）；不管几张几种判决，一次调用一步撤销。AI 改的照样算人工改判（✋），另外记下出处（重开也在），状态栏显示「人工改判 N（其中 AI M）」，阈值建议不拿它们当样本；你之后亲手再改就算你的 | `app_not_running` |
 | 12 | `cull_show_photos` 在 app 里定位照片 | 在网格里选中这些照片、把焦点移过去给你看，默认把 app 切到批量页（不拉到前台）；不改判决、不进撤销、不改你的筛选 | `app_not_running` |
@@ -330,10 +330,18 @@ app 没开时也能用的只有前 3 个；其余 21 个要 app 开着、而且 
 | 18 | `app_undo` 撤销 AI 刚做的一步 | 只撤 AI 自己的那一步（`target` 分 `verdicts` / `collage`）；你之后又改过就不撤（`undo_not_ours`），请你自己 ⌘Z | `app_not_running` |
 | 19 | `collage_save_variant` 存成方案 | 把现在这一版（画布、样式、文字、所有页、水印）存进拼图页底下的「方案」栏；让 AI 出几版设计时，每版排好就存一个，下一版不会盖掉它。一模一样的不再存，一场最多 30 个；不进撤销 | `app_not_running` |
 | 20 | `collage_open_variant` 切到方案 | = 方案栏里点它：整版换成那个方案，托盘照旧（它用到、托盘里没有的照片补回去）；一步撤销 | `app_not_running` |
-| 21 | `collage_export` 导出拼图 | = 拼图页的「导出」按钮：写进「导出 ▾」里设的输出目录（没设过 = 照片文件夹里的「拼图导出」），同名加 -2 不覆盖；清晰度 1–3 倍（九宫格、轮播最多 2 倍，印刷画布不放大）、格式、文件名可以只为这一次指定，不改「导出 ▾」里的设置；能直接导存着的方案。有空照片格照样导出，`warnings` 里报 `empty_slots`（带页号）；相册有跨页没写出来时不出 PDF（`export_partial` 写明缺第几个跨页）；输出目录在拍摄文件夹里面（会被下次分析扫到）时不导、回 `invalid_state`，请你在「导出 ▾」里点「用默认」或选拍摄文件夹外面的目录；这一场开在存储卡上时不往卡上导（默认的「拼图导出」在卡上，也回 `invalid_state`），请你先导入这张卡或在「导出 ▾」里选卡外的目录。不改拼图、不进撤销、不弹访达，返回每个文件的路径和像素尺寸 | `app_not_running` |
+| 21 | `collage_export` 导出拼图 | = 拼图页的「导出」按钮：写进「导出 ▾」里设的输出目录（没设过 = 照片文件夹里的「拼图导出」），同名加 -2 不覆盖；清晰度 1–3 倍（九宫格、轮播最多 2 倍，印刷画布不放大）、格式、文件名可以只为这一次指定，不改「导出 ▾」里的设置；能直接导存着的方案。`pages` 只导某几个跨页（「1-3, 7」，文件名里的序号还是原来的跨页号；部分导出不出印刷 PDF、不出封面）；`proof:true` 改出给客户看的看版 PDF（每个跨页一页低清，页脚印跨页号和照片文件名，有封面放第一页，「名_看版.pdf」）。导出前跑一遍导出前检查（同第 28 个），结果放在 `preflight`，除空照片格以外还有「拦」时另给一条 `preflight_blocks`（照样导出）。有空照片格照样导出，`warnings` 里报 `empty_slots`（带页号）；相册有跨页没写出来时不出 PDF（`export_partial` 写明缺第几个跨页）；输出目录在拍摄文件夹里面（会被下次分析扫到）时不导、回 `invalid_state`，请你在「导出 ▾」里点「用默认」或选拍摄文件夹外面的目录；这一场开在存储卡上时不往卡上导（默认的「拼图导出」在卡上，也回 `invalid_state`），请你先导入这张卡或在「导出 ▾」里选卡外的目录。不改拼图、不进撤销、不弹访达，返回每个文件的路径和像素尺寸 | `app_not_running` |
 | 22 | `collage_set_layout` 设计版式 | AI 自己定这一页的版式，不用模板：怎么切分、哪张照片放哪一格、取景、形状、完整显示、裁切、压字、文字格、留白（语法见第 3 个工具的 `layout_grammar`）。不在托盘的照片自动进托盘，可以顺便换画布（只有一页时）；写错了指出错在哪、什么都不改；读到的 `layout` 原样发回来不改任何东西；一步撤销 | `app_not_running` |
 | 23 | `collage_auto_layout` 引擎排一版 | 和「换一批」同一个引擎：按照片比例切格子，每调一次换一种，锁定的格子不动；可以指定用哪几张或从托盘挑几张。结果里的 `layout` 可以改几处再用第 22 个发回来；一步撤销 | `app_not_running` |
 | 24 | `cull_import_client_picks` 导入客户选择 | = 「客户 › 导入客户选择…」：客户微信里回的原话放进 `text`（文件名、文件号、确认表编号、确认表「复制我的选择」那一段、CSV 都认，规则和导入框一样），或者 AI 认出的 `ids`（都要是这一场的）。文件名后面的修图要求（「DSCF7207 去路人」「7207：瘦脸」）一起认成客户备注（`notes` / `new_notes`），复制原片时写成「精修要求.csv」。`dry_run` 默认 true，只回认出了哪些、没认出的、按哪张确认表对的；`dry_run:false` 才标成客户选中（加到原来的上面、不改判决，客户选中和备注一起一步撤销）；标完拼图托盘的紫心跟着刷 | `app_not_running` |
+| 25 | `collage_pages` 翻页 / 改跨页 | 相册的跨页（单张拼图有好几页时同样）：`action` 是 `go` 翻到第 `page` 个（不进撤销）、`add` 在第 `page` 个后面加一个空跨页、`delete` / `lock` / `unlock` / `mirror` 对 `pages` 里的几个（「1-3, 7」，不给 = 当前跨页；不能全删；镜像只翻版式、照片不翻）、`move` 把 `pages` 挪到从第 `to` 个开始、`side_layout` 只给左页或右页换一种切法（`side`、`step`）。每个都先退出封面编辑；改的一次一步撤销 | `app_not_running` |
+| 26 | `collage_move_photos` 照片挪到别的跨页 | = 右键那一格「移到第…个跨页」/ 把托盘里的照片拖到跨页上：`photos` 放进第 `to` 个跨页，那一页按「加进现在的版式（重排）」重排（锁住的格子不动）。都在同一个跨页上的是挪（原来那一页也重排），都是托盘里没上版的是放；同一张照片不会上两个跨页。后台排完才回，一步撤销 | `app_not_running` |
+| 27 | `collage_replace_photo` 换一格照片 | = 「格式 › 换一张」：当前页 `path` 那一格换成 `with`（托盘里的），取景回到自动；在别的跨页格子里的两格对调（结果 `swapped` 写明在哪）。候选用第 9 个的 `candidates_for` 拿。编辑封面时换的是封面那块。一步撤销 | `app_not_running` |
+| 28 | `collage_preflight` 导出前检查 | = 「导出 ▾」里的「导出前检查」：整本过一遍，`blocks`（拦：空照片格、放大超过 150%、页数不合印厂规格、同一张用了两次、胶装脸压中缝带）和 `warnings`（提醒：放大 120–150%、平铺脸压中缝、字出安全区、没铺进出血、首尾单页、占位正文、封面书脊）分开，每条带跨页号、格子和照片；`pages` 给了看只导那几个跨页时导出按钮会不会问。只读 | `app_not_running` |
+| 29 | `collage_print_spec` 印厂规格 | = 「文档 › 画布」相册那一节：不给参数读现在的规格和能套的规格表；`spec` 套一套（尺寸、出血、装订、页数规则一起换），`min_pages` / `max_pages` / `page_step` / `single_ends` / `color` / `jpeg_quality` / `fold_mm` 单独改规则，`auto` 改回自动。内置的都是保守默认，照印厂给的改；不新建规格。一步撤销 | `app_not_running` |
+| 30 | `collage_cover` 相册封面 | = 「文档 › 封面」：不给参数读封面；`action` 是 `make`（主图用扉页那张）/ `remake` / `remove` / `edit` / `done`（进 / 出封面编辑，不进撤销）；书脊宽（印厂给的数，或 `spine_auto` 按页数估）、包边、板厚、纸厚、书脊上的字、封底照片和一行字。有封面时预览图是整张封面（封底 \| 书脊 \| 封面）。一步撤销 | `app_not_running` |
+
+**编辑封面时的「当前页」**：编辑封面（跨页条最前面那张「封面」卡，或 `collage_cover action=edit`）时 app 的「当前页」是封面那一块：`collage_get_state` 照实报（`editing_cover: true`、`page_kind: cover`），`collage_replace_photo` 换的是封面的格子；`collage_set_layout`、`collage_auto_layout`、`collage_apply_template` 和 `collage_set_text` 的 `cell_text` 回 `invalid_state`（它们按跨页的画布算格子，套到封面上会算错）；`collage_pages`、`collage_move_photos` 先退出封面编辑再按跨页号做。
 
 改判和拼图写的结果里有 `live.notice`（和窗口里那一页状态栏上同一句话）、这一步怎么撤，拼图写还带 app 当前画面的预览图。改判、撤销、导入客户选择和拼图的写工具结果里有 `persisted`：盘满、场次目录写不进去时是 false，另带一条 `save_failed` 警告，原话就是批量页顶上红条那一句（拼图是拼图页上那句）；导入客户选择和撤销它时，客户选中和客户备注两份都存上才算 true；这时改动在 app 里已经生效，但只在内存里，AI 会请你腾出空间、点红条上的「重试」；拼图工程原件读不出来、这一场先不存拼图时，AI 会请你修好或移走那个文件，再切到别的场次、切回来重新打开（腾空间没用，在那之前拼图上的改动都不会存盘）。设了 `LABELGUI_MCP_LIVE=0` 时只注册前 3 个。
 
@@ -403,7 +411,7 @@ exec "/Applications/选片工具.app/Contents/MacOS/LabelGUI" --mcp "$@"
 
 ### 审批
 
-Claude Code 交互模式下，每个工具第一次调用都会问你。建议 9 个读工具（第 1–9 个）和 14 个写工具（第 11–24 个）选「以后不再问」：写的改动当场出现在你眼前，改判、导入客户选择和改拼图一步 ⌘Z 能撤（存方案、导出不改拼图，不进撤销；存错的方案在方案栏里右键删掉；导入客户选择默认只预览、不标）。**`app_open_session` 保持每次问**：切场次会清掉 app 里这一场的判决和拼图撤销记录；原件读不出来、只在内存里的改动也会丢。想一次配好，在 Claude Code 的设置（`~/.claude/settings.json`，或者项目里的 `.claude/settings.json`）里放行这 23 个（合并进文件里已有的 `permissions.allow`，别整个文件覆盖）：
+Claude Code 交互模式下，每个工具第一次调用都会问你。建议 10 个读工具（第 1–9 个和第 28 个）和 19 个写工具（第 11–27、29、30 个）选「以后不再问」：写的改动当场出现在你眼前，改判、导入客户选择和改拼图（含跨页、封面、印厂规格）一步 ⌘Z 能撤（存方案、导出、翻页不改拼图，不进撤销；存错的方案在方案栏里右键删掉；导入客户选择默认只预览、不标）。**`app_open_session` 保持每次问**：切场次会清掉 app 里这一场的判决和拼图撤销记录；原件读不出来、只在内存里的改动也会丢。想一次配好，在 Claude Code 的设置（`~/.claude/settings.json`，或者项目里的 `.claude/settings.json`）里放行这 29 个（合并进文件里已有的 `permissions.allow`，别整个文件覆盖）：
 
 ```json
 {"permissions":{"allow":[
@@ -414,7 +422,9 @@ Claude Code 交互模式下，每个工具第一次调用都会问你。建议 9
   "mcp__xuanpian__collage_run_kit", "mcp__xuanpian__collage_next_cover", "mcp__xuanpian__collage_set_text",
   "mcp__xuanpian__collage_set_style", "mcp__xuanpian__app_undo", "mcp__xuanpian__collage_save_variant",
   "mcp__xuanpian__collage_open_variant", "mcp__xuanpian__collage_export", "mcp__xuanpian__collage_set_layout",
-  "mcp__xuanpian__collage_auto_layout", "mcp__xuanpian__cull_import_client_picks"
+  "mcp__xuanpian__collage_auto_layout", "mcp__xuanpian__cull_import_client_picks", "mcp__xuanpian__collage_pages",
+  "mcp__xuanpian__collage_move_photos", "mcp__xuanpian__collage_replace_photo", "mcp__xuanpian__collage_preflight",
+  "mcp__xuanpian__collage_print_spec", "mcp__xuanpian__collage_cover"
 ]}}
 ```
 

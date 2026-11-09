@@ -48,19 +48,29 @@ enum MCPLiveTools {
         "collage_set_layout": Route(method: "collage.set_layout", write: true, session: .required, deadlineMs: 50_000),
         "collage_auto_layout": Route(method: "collage.auto_layout", write: true, session: .required, deadlineMs: 50_000),
         "cull_import_client_picks": Route(method: "cull.import_client_picks", write: true, session: .required, deadlineMs: 10_000),
+        // 相册整本（相册 A + B · M）：翻页 / 改跨页、挪照片要在后台排（50 s，带 deadline_seconds）；导出前检查要低清排一遍每页的字
+        "collage_pages": Route(method: "collage.pages", write: true, session: .required, deadlineMs: 50_000),
+        "collage_move_photos": Route(method: "collage.move_photos", write: true, session: .required, deadlineMs: 50_000),
+        "collage_replace_photo": Route(method: "collage.replace_photo", write: true, session: .required, deadlineMs: 10_000),
+        "collage_preflight": Route(method: "collage.preflight", write: false, session: .required, deadlineMs: 30_000),
+        "collage_print_spec": Route(method: "collage.print_spec", write: true, session: .required, deadlineMs: 10_000),
+        "collage_cover": Route(method: "collage.cover", write: true, session: .required, deadlineMs: 10_000),
     ]
 
-    /// 会转发的桥方法（§10.4 的 12 个 + 方案栏的 2 个 + 导出 + 设计版式的 2 个 + 导入客户选择；app 的 capabilities 里没有的回
-    /// app_version_mismatch / app_too_old：旧版 app 没有这些）。
+    /// 会转发的桥方法（§10.4 的 12 个 + 方案栏的 2 个 + 导出 + 设计版式的 2 个 + 导入客户选择 + 相册整本的 6 个；app 的
+    /// capabilities 里没有的回 app_version_mismatch / app_too_old：旧版 app 没有这些）。
     static let wired: Set<String> = ["cull.read", "cull.preview", "collage.state", "session.open", "cull.set_verdicts", "cull.show",
                                      "collage.apply_template", "collage.run_kit", "collage.next_cover", "collage.set_text",
                                      "collage.set_style", "undo", "collage.save_variant", "collage.open_variant",
-                                     "collage.export", "collage.set_layout", "collage.auto_layout", "cull.import_client_picks"]
+                                     "collage.export", "collage.set_layout", "collage.auto_layout", "cull.import_client_picks",
+                                     "collage.pages", "collage.move_photos", "collage.replace_photo", "collage.preflight",
+                                     "collage.print_spec", "collage.cover"]
 
     /// 结果里带拼图预览的写（和 collage_get_state 一样处理：存一份、内联）。
     static let collageWrites: Set<String> = ["collage.apply_template", "collage.run_kit", "collage.next_cover", "collage.set_text",
                                              "collage.set_style", "undo", "collage.save_variant", "collage.open_variant",
-                                             "collage.set_layout", "collage.auto_layout"]
+                                             "collage.set_layout", "collage.auto_layout", "collage.pages", "collage.move_photos",
+                                             "collage.replace_photo", "collage.print_spec", "collage.cover"]
 
     /// cull.read 的四个工具 → kind（§10.4）。
     static let readKinds: [String: String] = [
@@ -137,7 +147,12 @@ enum MCPLiveTools {
             let inline = call.arguments["inline"] as? Bool ?? true
             params["budget_kb"] = inline ? MCPConfig.inlineKB : 4 * MCPConfig.perImageKB
         case "collage.state":
-            for k in ["include_preview", "max_edge"] { if let v = call.arguments[k] { params[k] = v } }
+            for k in ["include_preview", "max_edge", "candidates_for", "candidates_limit"] {
+                if let v = call.arguments[k] { params[k] = v }
+            }
+        case "collage.preflight":
+            for k in ["texts", "pages"] { if let v = call.arguments[k] { params[k] = v } }
+            params["text_max"] = MCPJSON.textMax
         default:
             break
         }

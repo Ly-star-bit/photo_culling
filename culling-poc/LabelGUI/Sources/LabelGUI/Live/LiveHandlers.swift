@@ -29,6 +29,11 @@ enum LiveHandlers {
             guard let live, let model else { return quitting }
             return await collageState(req, live: live, model: model)
         }
+        // 导出前检查（相册 A + B · M，LiveAlbumHandlers.swift）：只读，离开主线程跑
+        live.register("collage.preflight", kind: .read) { [weak live, weak model] req in
+            guard let live, let model else { return quitting }
+            return await preflightRead(req, live: live, model: model)
+        }
         registerWrites(live, model: model)
     }
 
@@ -153,7 +158,7 @@ enum LiveHandlers {
     /// params {"session"?,"include_preview","max_edge"}。不带 session = app 当前那一场（没打开任何场次时 session:null）。
     static func collageState(_ req: LiveServer.Request, live: LiveServer, model: AppModel) async -> LiveServer.Reply {
         var args: [String: Any] = [:]
-        for name in ["include_preview", "max_edge"] { if let v = req.params[name] { args[name] = v } }
+        for name in ["include_preview", "max_edge", "candidates_for", "candidates_limit"] { if let v = req.params[name] { args[name] = v } }
         if let p = MCPArgs.check("collage_get_state", args) { return invalid(p.message, hint: p.hint) }
         if let raw = req.params["session"], !(raw is NSNull), !(raw is String) { return invalid("session 要是字符串") }
         // §9.4.3 第 5 步在第 7 步之前：场次不对就不去碰拼图工程（挂的时候会按批量页刷托盘，可能写 collage.json）
@@ -167,8 +172,6 @@ enum LiveHandlers {
         var out: [String: Any] = ["source": "app"]
         out["session"] = current ?? NSNull()
         out["mode"] = project.mode.rawValue
-        out["page"] = project.pages.isEmpty ? 0 : collage.pageIndex + 1
-        out["pages"] = project.pages.count
         let key = styleKey(project.style)
         out["style"] = key ?? NSNull()
         out["style_name"] = key.flatMap { k in CollageStyles.all.first { $0.key == k }?.name } ?? NSNull()
@@ -191,16 +194,17 @@ enum LiveHandlers {
         let (rows, cut) = trayRows(collage)
         out["tray_photos"] = rows
         if cut { out["tray_photos_truncated"] = true }
-        if let page = collage.page {
-            out["cells"] = cells(page, project: project)
-            out["page_kind"] = page.contactSheet != nil ? "contact_sheet" : (page.freeform ? "freeform" : "grid")
-            out["items"] = page.items.count
-            // 这一页的版式（collage_set_layout 的语法）；散落版、印样没有切分树可写
-            out["layout"] = page.freeform || page.contactSheet != nil ? NSNull()
-                : CollageLayoutSpec.describe(page.root, canvas: project.canvas, style: project.style)
-        } else {
-            out["cells"] = [[String: Any]]()
-            out["layout"] = NSNull()
+        // 页码、格子、版式（编辑封面时是封面那一块，editing_cover: true，见 LiveAlbumHandlers 的文件头）
+        out.merge(pageFields(collage)) { _, new in new }
+        // 相册整本的摘要（相册 A + B · M）：每个跨页的照片、锁、印厂规格的页数、封面
+        if collage.isAlbum { out["album"] = albumInfo(collage) }
+        // 换照片的候选（S6，同「格式 › 换一张」）
+        if let target = req.params["candidates_for"] as? String {
+            guard collage.photoMap[target] != nil else {
+                return invalid("托盘里没有「\(target)」，拿不了换它的候选。", hint: "照片 id 见 tray_photos 或 cells[].photo_id")
+            }
+            let limit = LiveWire.int(req.params["candidates_limit"]) ?? 12
+            out["candidates"] = candidateRows(collage, for: target, limit: limit)
         }
         out["variants"] = variantsList(collage)
         out["selection"] = collage.selection.map { path in path.map(String.init).joined() } ?? NSNull()
@@ -249,9 +253,10 @@ enum LiveHandlers {
     }
 
     /// 当前页的格子（切分树的叶子，按阅读顺序）：path 是孩子下标连起来（"01"），overlays 是压在照片上的字块数，
-    /// rect 是这一格在画布上的位置（[x, y, 宽, 高]，相对画布宽高；散落版、印样没有）。
-    static func cells(_ page: CollagePage, project: CollageProject) -> [[String: Any]] {
-        let canvas = project.canvas
+    /// rect 是这一格在画布上的位置（[x, y, 宽, 高]，相对画布宽高；散落版、印样没有）。canvas：这一页的画布（编辑封面时是
+    /// 封面那一页，CollageStore.editCanvas；不给 = 工程的画布）。
+    static func cells(_ page: CollagePage, project: CollageProject, canvas pageCanvas: CollageCanvas? = nil) -> [[String: Any]] {
+        let canvas = pageCanvas ?? project.canvas
         var rects: [[Int]: [Double]] = [:]
         if !page.freeform, page.contactSheet == nil {
             let w = Double(max(1, canvas.width))
@@ -306,6 +311,33 @@ enum LiveHandlers {
             return row
         }
         return (Array(rows), collage.project.photos.count > trayRowLimit)
+    }
+
+    /// 换这张照片的候选（S6 CollageStore.replacementCandidates，同「格式 › 换一张」）：理由（同连拍 / 同场 / 相似）、分数、
+    /// 用在第几个跨页（从 1 起；null = 没上版）、废片、客户选中。排序是 store 的：没用过的在前，同连拍 > 同场 > 相似，再按分数。
+    static func candidateRows(_ collage: CollageStore, for id: String, limit: Int) -> [String: Any] {
+        let list = collage.replacementCandidates(forPhoto: id, limit: limit)
+        let rows = list.map { c -> [String: Any] in
+            var row: [String: Any] = ["id": c.photoID, "reason": candidateReason(c.reason), "reason_label": c.reason.label]
+            row["score"] = MCPReadModel.r3(c.score)
+            row["page"] = c.page.map { $0 + 1 } ?? NSNull()
+            row["reject"] = c.reject
+            row["client_pick"] = c.clientPick
+            return row
+        }
+        var out: [String: Any] = ["photo": id, "rows": rows]
+        // 这张自己在第几个跨页（换的时候 path 指它所在的那一格）
+        let pages = collage.project.pages
+        out["page"] = pages.indices.first { pages[$0].photoIDs.contains(id) }.map { $0 + 1 } ?? NSNull()
+        return out
+    }
+
+    nonisolated static func candidateReason(_ r: CollageReplacement.Reason) -> String {
+        switch r {
+        case .burst: return "burst"
+        case .take: return "take"
+        case .similar: return "similar"
+        }
     }
 
     /// 工程的样式是哪个预设（色调、强度另算，§9.3 的 style / look 分开报）；改过任何一项就不是任何预设 = nil。
@@ -489,6 +521,9 @@ extension LiveHandlers {
             ("collage.save_variant", saveVariant), ("collage.open_variant", openVariant),
             ("collage.export", exportCollage), ("collage.set_layout", setLayout), ("collage.auto_layout", autoLayout),
             ("cull.import_client_picks", importClientPicks),
+            // 相册整本（相册 A + B · M，LiveAlbumHandlers.swift）
+            ("collage.pages", pagesOp), ("collage.move_photos", movePhotos), ("collage.replace_photo", replacePhotoOp),
+            ("collage.print_spec", printSpecOp), ("collage.cover", coverOp),
         ]
         for (name, run) in methods {
             live.register(name, kind: .write) { [weak live, weak model] req in
@@ -623,6 +658,8 @@ extension LiveHandlers {
             "collage.save_variant": "存方案", "collage.open_variant": "切方案", "collage.export": "导出",
             "collage.set_layout": "设计版式", "collage.auto_layout": "排版",
             "cull.import_client_picks": "导入客户选择",
+            "collage.pages": "改跨页", "collage.move_photos": "挪照片", "collage.replace_photo": "换照片",
+            "collage.print_spec": "改印厂规格", "collage.cover": "改封面",
         ]
         return labels[method] ?? method
     }
@@ -690,9 +727,11 @@ extension LiveHandlers {
         return (done.value, settled)
     }
 
-    /// 拼图写的回复：工程摘要、两个指纹、undo、live、预览。
+    /// 拼图写的回复：工程摘要、两个指纹、undo、live、预览。coverPreview：相册有封面、又没在编辑封面时，预览换成整张封面
+    /// （collage_cover 用；编辑封面时画布上本来就是封面）。
     static func collageReply(_ req: Request, live: LiveServer, model: AppModel, body: [String: Any], digestBefore: String,
-                             undo: [String: Any], notice: String?, warnings: [[String: Any]]) async -> Reply {
+                             undo: [String: Any], notice: String?, warnings: [[String: Any]],
+                             coverPreview: Bool = false) async -> Reply {
         let collage = model.collage
         var out = body
         out["session"] = currentKey(model.batch) ?? NSNull()
@@ -707,7 +746,14 @@ extension LiveHandlers {
         let (info, notVisible) = liveInfo(req, live: live, model: model, notice: notice, persisted: saved.persisted)
         out["live"] = info
         var all = warnings + saved.warnings + notVisible
-        let (preview, settled) = await collagePreview(collage)
+        let wholeCover = coverPreview && !collage.editingCover && collage.coverLayout != nil
+        var preview: [String: Any]
+        var settled = true
+        if wholeCover {
+            preview = await coverPreviewFields(collage)
+        } else {
+            (preview, settled) = await collagePreview(collage)
+        }
         out.merge(preview) { _, new in new }
         if preview.isEmpty {
             let message = collage.project.pages.isEmpty ? "拼图里还没有任何一页，没有预览。" : "app 的预览 1.5 秒内没渲出来。"
@@ -730,7 +776,8 @@ extension LiveHandlers {
     /// 拼图写落地以后（第 10、11 步），再交给 collageReply。
     static func collageDone(_ req: Request, live: LiveServer, model: AppModel, tool: String, changed: Bool, pushesBefore: Int,
                             digestBefore: String, summary: String, body: [String: Any],
-                            warnings: [[String: Any]] = [], landed: LandedCounts? = nil) async -> Reply {
+                            warnings: [[String: Any]] = [], landed: LandedCounts? = nil,
+                            coverPreview: Bool = false) async -> Reply {
         let collage = model.collage
         let after = landed?.pushes ?? collage.undoPushes
         var notice: String?
@@ -750,7 +797,7 @@ extension LiveHandlers {
         b["changed"] = changed
         let undo = undoInfo(.collage, added: changed ? 1 : 0, model: model)
         return await collageReply(req, live: live, model: model, body: b, digestBefore: digestBefore, undo: undo,
-                                  notice: notice, warnings: warnings)
+                                  notice: notice, warnings: warnings, coverPreview: coverPreview)
     }
 
     // MARK: session.open（app_open_session，§10.4）
@@ -1177,6 +1224,7 @@ extension LiveHandlers {
         if let stop = await begin(req, Gate(scope: .collage, digest: true), live: live, model: model) { return stop }
         model.ensureCollageAttached()
         let collage = model.collage
+        if let stop = coverEditingRefusal(collage, "套模板") { return stop }
         guard let template = collage.template(named: name) else { return unknown() }
         let before = collage.editDigest
         let pushes = collage.undoPushes
@@ -1298,6 +1346,7 @@ extension LiveHandlers {
         var cell: (path: [Int], index: Int, text: String)?
         if let obj = req.params["cell_text"] as? [String: Any], let p = obj["path"] as? String,
            let index = LiveWire.int(obj["index"]), let text = obj["text"] as? String {
+            if let stop = coverEditingRefusal(collage, "改格子里的字（cell_text）") { return stop }
             let path = p.compactMap(\.wholeNumberValue)
             guard collage.root?.node(at: path)?.cell?.overlays.indices.contains(index) == true else {
                 return invalid("格子「\(p)」上没有第 \(index) 个字块（下标从 0 开始）。",
@@ -1480,16 +1529,44 @@ extension LiveHandlers {
         }
         if let refused = exportFolderRefused(collage) { return refused }
         let folderReminder = collage.outputFolder.flatMap(collage.exportFolderReminder)
+        let name = req.params["name"] as? String ?? ""
+        // 看版 PDF（相册 A + B · M，= 「导出 ▾ › 印刷 › 出看版 PDF」）：给客户看的低清合订本，不导跨页图
+        if req.params["proof"] as? Bool == true {
+            guard project.mode == .album else {
+                return .failure("invalid_state", "看版 PDF 只对相册（现在是单张拼图）。", ["hint": "去掉 proof 照常导出图片", "executed": false])
+            }
+            return await exportProof(req, live: live, model: model, project: project, name: name, body: body,
+                                     settled: settled, folderReminder: folderReminder)
+        }
+        // 只导几个跨页（同「导出 ▾」的范围；文件名里的序号还是原来的跨页号，部分导出不出印刷 PDF、不出封面）
+        var only: [Int]?
+        if let text = req.params["pages"] as? String {
+            switch CollageExportRange.parse(text, count: project.pages.count) {
+            case .success(let list): only = list
+            case .failure(let bad):
+                return invalid("pages 写错了：\(bad.message)。", hint: "跨页号从 1 起，写成「3」「1-3, 7」；一共 \(project.pages.count) 个")
+            }
+            body["pages"] = (only ?? []).map { $0 + 1 }
+        }
         var options = collage.exportOptions
         let askedScale = LiveWire.int(req.params["scale"])
         if let k = askedScale { options.scale = k }
         if let f = (req.params["format"] as? String).flatMap(CollageExport.Format.init(rawValue:)) { options.format = f }
-        let name = req.params["name"] as? String ?? ""
         // 空照片格（和导出按钮的确认框同一个判断）：照样导出，warnings 里报
-        let emptySlots = CollageStore.emptyPhotoSlots(project: project)
+        let emptySlots = CollageStore.emptyPhotoSlots(project: project).filter { only?.contains($0.page) ?? true }
         let started = Date()
+        // 导出前检查（同 collage_preflight、「导出 ▾」的清单）：离开主线程过一遍，照样导出，结果放进 preflight
+        let box = LiveBox((project, collage.hints))
+        let issues = await Task.detached(priority: .userInitiated) { () -> LiveBox<[CollagePreflightIssue]> in
+            let (p, h) = box.value
+            return LiveBox(CollagePreflight.run(project: p, hints: h, texts: true))
+        }.value.value
+        let checked = only.map { picked in issues.filter { $0.page.map(picked.contains) ?? false } } ?? issues
+        body["preflight"] = preflightBody(checked, project: project, pages: only, limit: 10)
         let outcome = await withCheckedContinuation { (cont: CheckedContinuation<CollageStore.ExportOutcome, Never>) in
-            collage.startExport(project: project, options: options, name: name, reveal: false) { cont.resume(returning: $0) }
+            collage.startExport(project: project, options: options, name: name, reveal: false, pages: only) {
+                cont.resume(returning: $0)
+            }
         }
         if outcome.files.isEmpty {
             let why = outcome.cancelled ? "用户取消了导出" : (outcome.failure ?? "一个文件都没写出来")
@@ -1531,6 +1608,16 @@ extension LiveHandlers {
                                             hint: "collage_get_state 的 cells 里 kind 是 photo、photo_id 是 null 的就是：用 collage_set_layout 放上照片或者去掉这一格；确实要一块底色就不用管")
             item["pages"] = Set(emptySlots.map { $0.page + 1 }).sorted()
             item["count"] = emptySlots.count
+            warnings.append(item)
+        }
+        // 空照片格以外的「拦」（放大超过 150%、页数不合规、同一张用了两次、胶装脸压中缝）：导出按钮会先问，AI 这边照样导出、说一声
+        let blocks = checked.filter { $0.severity == .block && $0.kind != .emptySlot }
+        if let first = blocks.first {
+            var item = MCPReadModel.warning("preflight_blocks",
+                                            "导出前检查还有 \(blocks.count) 条「拦」（第一条：\(first.message)）：导出按钮会先问，这次照样导出了。",
+                                            hint: "看结果里的 preflight.blocks（collage_preflight 能单独查全部），改完再导")
+            item["count"] = blocks.count
+            item["kinds"] = Array(Set(blocks.map { snakeCase($0.kind.rawValue) })).sorted()
             warnings.append(item)
         }
         if let w = outcome.warning {
@@ -1693,6 +1780,7 @@ extension LiveHandlers {
             invalid("版式写错了：\(p.text)", hint: "语法见 collage_list_templates（include 里写 layout_grammar）；照片 id 见 collage_get_state 的 tray_photos 或 cull_list_photos")
         }
         if let stop = canvasShared() { return stop }
+        if let stop = coverEditingRefusal(collage, "设计版式") { return stop }
         let first = CollageLayoutSpec.parse(req.params["layout"], maxCells: cellLimit(collage)) { photoKnown($0, model: model) }
         guard case .success(let draft) = first else {
             if case .failure(let p) = first { return problem(p) }
@@ -1715,6 +1803,7 @@ extension LiveHandlers {
         // 等的时候用户可能动过（拿掉照片、翻页、加页）：落地前再核对一遍
         guard collage.page?.id == pageID else { return pageMoved() }
         if let stop = canvasShared() { return stop }
+        if let stop = coverEditingRefusal(collage, "设计版式") { return stop }
         let readable = Set(refs.map(\.id))
         let onPage = Set(collage.page?.photoIDs ?? [])
         let again = CollageLayoutSpec.parse(req.params["layout"], maxCells: cellLimit(collage)) {
@@ -1752,6 +1841,7 @@ extension LiveHandlers {
         let count = LiveWire.int(req.params["count"])
         // = 「换一批」不做的两种：fine-art 跨页按编排出版式；印样按拍摄先后排（给了照片才是把这一页换成普通版式）
         func engineRefuses() -> Reply? {
+            if let stop = coverEditingRefusal(collage, "引擎排版") { return stop }
             if collage.isAlbum, collage.project.albumTheme == .fineArt {
                 return .failure("invalid_state", "婚礼 fine-art 的跨页按编排出版式，引擎排不了，这一次什么都没改。",
                                 ["hint": "自己设计就用 collage_set_layout", "executed": false])
