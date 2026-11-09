@@ -732,6 +732,38 @@ enum CollageAlbumEditSelfTest {
         store.redo()
         check(store.project.pages[3].root == refined, "重做：回来的是精排的版", sig(3))
 
+        // 审查：精排回来之前就撤销了 → 精排不落到操作之前的版上；再重做回来的是精排的版（重做栈里的快照补上），不停在快版。
+        store.loadForTesting(project)
+        store.addPhotos(["EX"], toPage: 4)
+        let quick = store.project.pages[4].root
+        store.undo()
+        idle()
+        check(store.project.pages == project.pages, "精排回来之前撤销：精排不落到操作之前的版上")
+        store.redo()
+        check(Set(store.project.pages[4].photoIDs) == ["E8", "E9", "EX"] && store.project.pages[4].root != quick,
+              "再重做：回来的是精排的版（不是同步那一版）", sig(4))
+
+        // 审查：精排回来之前把那一页删了 → 撤销删页，回来的是精排的版。
+        store.loadForTesting(project)
+        store.addPhotos(["EX"], toPage: 4)
+        let quick4 = store.project.pages[4].root
+        store.deletePages(IndexSet(integer: 4))
+        idle()
+        store.undo()
+        check(store.project.pages.count == 5 && Set(store.project.pages[4].photoIDs) == ["E8", "E9", "EX"]
+              && store.project.pages[4].root != quick4,
+              "精排回来之前删了那一页：撤销删页，回来的是精排的版", sig(4))
+
+        // 审查：精排回来之前换了装订（画布变了）→ 按旧画布算的不落，留同步那一版；撤销换装订也不是旧画布的精排。
+        store.loadForTesting(project)
+        store.addPhotos(["EX"], toPage: 4)
+        let quickFlat = store.project.pages[4].root
+        store.setBinding(project.canvas.binding == .glued ? .layflat : .glued)
+        let afterBinding = store.project.pages[4].root
+        idle()
+        check(store.project.pages[4].root == afterBinding && afterBinding == quickFlat,
+              "精排回来之前换了装订：按旧画布算的精排不落", sig(4))
+
         // F3：「拼图 (7)」以后马上往第一个新跨页拖一张：两个新跨页都有照片，「放了 7 张」说的时候照片已经在上面。
         store.loadForTesting(project)
         store.pageIndex = 4

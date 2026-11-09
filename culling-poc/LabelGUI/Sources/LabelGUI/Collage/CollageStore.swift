@@ -3404,6 +3404,7 @@ final class CollageStore: ObservableObject {
         let pushes = undoPushes
         var locked: [UUID: Bool] = [:]
         for page in project.pages where work.contains(where: { $0.pageID == page.id }) { locked[page.id] = page.locked }
+        let basis = RefineBasis(project)
         Task { [weak self] in
             let roots = await Task.detached(priority: .userInitiated) {
                 work.map { $0.job.run(ctx, seed: $0.seed) }
@@ -3411,32 +3412,55 @@ final class CollageStore: ObservableObject {
             guard let self, self.refineEpoch == epoch else { return }
             self.pendingRefines.remove(ticket)
             guard self.sessionToken == session else { return }
-            self.landRefined(Array(zip(work, roots)), locked: locked, since: pushes)
+            self.landRefined(Array(zip(work, roots)), locked: locked, since: pushes, basis: basis)
         }
         return ticket
     }
 
+    /// 精排是按哪张画布、哪套样式、哪种模式算的。回来时工程（或撤销 / 重做的快照）不是这一套就不落（审查：精排期间
+    /// 换装订、套规格、改画布、切单张，按旧参数算的树原样落到新画布上 —— 平铺算的跨页落到胶装上照片压中缝、
+    /// 换装订那一下的「压中缝」提示也漏掉它；跨页的树落到单张上）。只看这几样：页还是那一页、树还是同步那一版，
+    /// 别的（标题、托盘）不影响版式。
+    private struct RefineBasis: Equatable {
+        let canvas: CollageCanvas
+        let style: CollageStyle
+        let mode: CollageMode
+        init(_ p: CollageProject) { canvas = p.canvas; style = p.style; mode = p.mode }
+    }
+
     /// 精排回来：逐页核对（见 refinePages），对得上的换成精排的。
-    private func landRefined(_ done: [(RefineJob, CollageNode)], locked: [UUID: Bool], since pushes: Int) {
+    private func landRefined(_ done: [(RefineJob, CollageNode)], locked: [UUID: Bool], since pushes: Int,
+                             basis: RefineBasis) {
         let onCanvas = page?.id
         let keep = selectedCell?.photoID
+        let refined = done.filter { $0.1 != $0.0.landed }.map { RefinedPage(id: $0.0.pageID, from: $0.0.landed, to: $0.1) }
+        guard !refined.isEmpty else { return }
         var landed: [RefinedPage] = []
-        for (r, root) in done where root != r.landed {
-            guard let i = project.pages.firstIndex(where: { $0.id == r.pageID }) else { continue }   // 删掉了
+        // 工程里不在了的页（删掉了、撤销到操作之前、清空了托盘）：快照里的照样补（之后撤销 / 重做回来就是精排的）。
+        var absent: [RefinedPage] = []
+        let sameBasis = RefineBasis(project) == basis
+        for r in refined {
+            guard let i = project.pages.firstIndex(where: { $0.id == r.id }) else {
+                absent.append(r)
+                continue
+            }
+            guard sameBasis else { continue }
             let now = project.pages[i]
             // 用户动过这一页（打字、拖缝、换一批、镜像、撤销、改成散落版、锁住……）：留用户的。
-            guard now.root == r.landed, now.locked == locked[r.pageID], !now.freeform, now.contactSheet == nil else { continue }
-            // 画布上这一页正在裁切（双击进去、还没挪）：不在手底下换树。
-            if now.id == onCanvas, cropEditing { continue }
-            project.pages[i].root = root
-            landed.append(RefinedPage(id: r.pageID, from: r.landed, to: root))
+            guard now.root == r.from, now.locked == locked[r.id], !now.freeform, now.contactSheet == nil else { continue }
+            // 画布上这一页正在裁切（双击进去、还没挪）、正在拖缝（连续编辑按路径改树）：不在手底下换树。
+            if now.id == onCanvas, cropEditing || continuousEditDepth > 0 { continue }
+            project.pages[i].root = r.to
+            landed.append(r)
         }
-        guard !landed.isEmpty else { return }
-        // 落地之后又压的几步（改别的跨页、改标题……）、撤销以后的重做：快照里这一页还是同步那一版的也换上精排的 ——
-        // 撤销那一步只退那一步，不连精排一起退。操作之前那一步的快照里是操作之前的版，对不上，不碰。
+        // 落地之后又压的几步（改别的跨页、改标题……）：快照里这一页还是同步那一版的也换上精排的 —— 撤销那一步只退那一步，
+        // 不连精排一起退。只补落下了的页和工程里不在了的页：用户动过的页（镜像了、拖了缝），撤销回去应该是他看到过的那一版。
+        // 操作之前那一步的快照里是操作之前的版，对不上，不碰。
         let later = min(max(0, undoPushes - pushes), undoStack.count)
-        for s in undoStack.indices.suffix(later) { undoStack[s] = Self.patched(undoStack[s], landed) }
-        for s in redoStack.indices { redoStack[s] = Self.patched(redoStack[s], landed) }
+        for s in undoStack.indices.suffix(later) { undoStack[s] = Self.patched(undoStack[s], landed + absent, basis: basis) }
+        // 重做栈（精排回来之前撤销了：工程里是操作之前的版，这一页对不上）：重做回来的那一版里还是同步那一版的，换上精排的。
+        for s in redoStack.indices { redoStack[s] = Self.patched(redoStack[s], refined, basis: basis) }
+        guard !landed.isEmpty else { return }
         if let onCanvas, landed.contains(where: { $0.id == onCanvas }) {
             // 画布上这一页换了树：选中跟着那张照片走（找不到就清掉）；备选作废（画布上已经不是其中的任何一版）。
             let root = page?.root
@@ -3452,8 +3476,9 @@ final class CollageStore: ObservableObject {
         let to: CollageNode
     }
 
-    /// 快照里这几页（按 id）还是同步落下的那一版的，换成精排的。
-    private nonisolated static func patched(_ snapshot: CollageProject, _ landed: [RefinedPage]) -> CollageProject {
+    /// 快照里这几页（按 id）还是同步落下的那一版的，换成精排的（快照的画布、样式、模式不是精排算的那一套就不动）。
+    private static func patched(_ snapshot: CollageProject, _ landed: [RefinedPage], basis: RefineBasis) -> CollageProject {
+        guard !landed.isEmpty, RefineBasis(snapshot) == basis else { return snapshot }
         var out = snapshot
         for l in landed {
             guard let j = out.pages.firstIndex(where: { $0.id == l.id }), out.pages[j].root == l.from else { continue }
