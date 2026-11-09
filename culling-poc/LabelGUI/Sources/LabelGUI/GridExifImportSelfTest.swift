@@ -50,8 +50,8 @@ enum GridExifImportSelfTest {
                 "得到 \(small)")
         let unknown = FitCache.decodeSize(original: 0, display: 2560)
         t.check(unknown == 4096, "大图解码尺寸 读不到原图尺寸 → 4096（老路）", "得到 \(unknown)")
-        let jpeg = FitCache.Header(longEdge: 7728, jpeg: true)
-        let raw = FitCache.Header(longEdge: 7728, jpeg: false)
+        let jpeg = FitCache.Header(width: 7728, height: 5152, jpeg: true)
+        let raw = FitCache.Header(width: 7728, height: 5152, jpeg: false)
         let byHeader = [FitCache.decodeSize(header: jpeg, display: 2560), FitCache.decodeSize(header: raw, display: 2560),
                         FitCache.decodeSize(header: nil, display: 2560)]
         t.check(byHeader == [3864, 4096, 4096], "大图解码尺寸 JPEG 要一半；RAW / HEIC、读不出头的照旧 4096",
