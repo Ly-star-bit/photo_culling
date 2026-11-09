@@ -366,6 +366,8 @@ struct CollageTray: View {
             } else {
                 Text("已选 \(n) 张").font(.caption).foregroundStyle(.secondary).monospacedDigit()
                 Spacer()
+                // 多选以后最常见的意图：用这几张排一版（NU8：以前只在右键菜单里）。
+                if n > 1 { relayoutButton(order.filter(selected.contains)) }
                 Button("移除", role: .destructive) { store.removeFromTray(order.filter(selected.contains)) }
                     .controlSize(.small)
                     .help("从托盘移除选中的 \(n) 张（⌫）：版式里用到的格子留空，⌘Z 一次撤回")
@@ -382,6 +384,21 @@ struct CollageTray: View {
         .frame(height: 20)
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
+    }
+
+    /// 「排一版」：和右键「用这 N 张重新排一版」同一个方法；排完取消托盘的选中（键盘焦点还在托盘上，紧接着按 ⌫ 不会把
+    /// 刚排上的照片移出托盘，同 CollageTrayGrid.toCanvas）。超过 16 张灰着，悬停说为什么。
+    private func relayoutButton(_ ids: [String]) -> some View {
+        let tooMany = ids.count > Self.relayoutLimit
+        return Button("排一版") {
+            store.relayout(photoIDs: ids)
+            tray.clear()
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.small)
+        .disabled(tooMany || store.isSolving)
+        .help(tooMany ? "一版最多 \(Self.relayoutLimit) 张：少选几张（现在 \(ids.count) 张）"
+              : "用选中的 \(ids.count) 张重新排一版（右键里也有；⌘Z 撤回）")
     }
 
     private var emptyTray: some View {
