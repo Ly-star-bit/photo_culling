@@ -160,7 +160,8 @@ struct WatermarkView: View {
                 VStack(spacing: 10) {
                     Image(systemName: "square.and.arrow.down.on.square")
                         .font(.system(size: 34)).foregroundStyle(.tertiary)
-                    Text("拖拽照片/文件夹到这里\n或点「导入照片」")
+                    // 批量页选好的片子从顶栏「导入选片结果」拿（NU7：以前空状态只提「导入照片」）。
+                    Text("拖拽照片/文件夹到这里\n或点「导入照片」\n选好的片子：点「导入选片结果」拿批量页的精选")
                         .font(.caption).foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                 }

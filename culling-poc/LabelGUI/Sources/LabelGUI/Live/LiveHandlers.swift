@@ -1180,7 +1180,7 @@ extension LiveHandlers {
         guard let template = collage.template(named: name) else { return unknown() }
         let before = collage.editDigest
         let pushes = collage.undoPushes
-        // = 检视器里点模板（applyTemplate 自己会 setNotice，桥的提示接在它后面）
+        // = 左栏「模板」里点模板（applyTemplate 自己会 setNotice，桥的提示接在它后面）
         let changed = collage.externalEdit { collage.applyTemplate(template) }
         let summary = collage.notice ?? "套了模板「\(template.name)」"
         var body: [String: Any] = ["template": template.name]
@@ -1419,7 +1419,7 @@ extension LiveHandlers {
     /// startExport 里也拦），这里先回一个说得清的 invalid_state —— 不然只剩 export_failed「一个文件都没写出来」。
     static func exportFolderRefused(_ collage: CollageStore) -> Reply? {
         guard let folder = collage.outputFolder, let why = collage.exportFolderRefusal(folder) else { return nil }
-        let hint = "请用户在拼图页「导出」里点「用默认」（拍摄文件夹里的「\(ImageLoader.collageExportSubfolder)/」，分析时跳过），"
+        let hint = "请用户在拼图页顶栏「导出 ▾」里点「用默认」（拍摄文件夹里的「\(ImageLoader.collageExportSubfolder)/」，分析时跳过），"
             + "或选拍摄文件夹外面的目录"
         return .failure("invalid_state", why, ["hint": hint, "executed": false, "folder": folder.path])
     }
@@ -1469,14 +1469,14 @@ extension LiveHandlers {
         }
         // 批量页这一场开在存储卡上（审查 S07）：默认的「拼图导出/」在卡上不给，选的目录也不能在卡上 —— 不往卡上写。
         if model.batch.isCardSession, collage.outputFolder == nil || collage.cardOutputRefusal != nil {
-            let why = collage.cardOutputRefusal ?? "照片在存储卡上：默认的输出目录（卡上的「拼图导出」）不能用，导出页上也没选别的目录"
+            let why = collage.cardOutputRefusal ?? "照片在存储卡上：默认的输出目录（卡上的「拼图导出」）不能用，「导出 ▾」里也没选别的目录"
             return .failure("invalid_state", why + "。",
-                            ["hint": "请用户先导入这张卡（文件夹菜单「从存储卡导入…」），或者在拼图页「导出」里选一个不在卡上的目录",
+                            ["hint": "请用户先导入这张卡（文件夹菜单「从存储卡导入…」），或者在拼图页顶栏「导出 ▾」里选一个不在卡上的目录",
                              "executed": false])
         }
         guard collage.outputFolder != nil else {
-            return .failure("invalid_state", "没有输出目录：app 还没打开照片文件夹，导出页上也没选目录。",
-                            ["hint": "请用户在拼图页「导出」里选一个输出目录", "executed": false])
+            return .failure("invalid_state", "没有输出目录：app 还没打开照片文件夹，「导出 ▾」里也没选目录。",
+                            ["hint": "请用户在拼图页顶栏「导出 ▾」里选一个输出目录", "executed": false])
         }
         if let refused = exportFolderRefused(collage) { return refused }
         let folderReminder = collage.outputFolder.flatMap(collage.exportFolderReminder)
@@ -1538,7 +1538,7 @@ extension LiveHandlers {
         }
         if let note = folderReminder {
             warnings.append(MCPReadModel.warning("export_folder_in_session", note,
-                                                 hint: "请用户确认是不是真要导到那一场的拍摄文件夹里；不是的话在拼图页「导出」里换个目录"))
+                                                 hint: "请用户确认是不是真要导到那一场的拍摄文件夹里；不是的话在拼图页顶栏「导出 ▾」里换个目录"))
         }
         if outcome.cancelled {
             warnings.append(MCPReadModel.warning("export_cancelled", "用户中途取消了导出：只写出了前面几个文件。", hint: ""))
@@ -1592,7 +1592,7 @@ extension LiveHandlers {
         if fields.filmFormat != nil { parts.append("画幅") }
         let before = collage.editDigest
         let pushes = collage.undoPushes
-        // = 样式页点预设（不合并），色调、强度在同一步里再改（和界面一样，也会改「下次新建拼图沿用的默认样式」）
+        // = 检视器「样式」点预设（不合并），色调、强度在同一步里再改（和界面一样，也会改「下次新建拼图沿用的默认样式」）
         let changed = collage.externalEdit { collage.setStyleParts(preset: preset, look: look, strength: strength, fields: fields) }
         let summary = "换了" + parts.joined(separator: "、")
         var body: [String: Any] = ["look": collage.project.style.look.rawValue]

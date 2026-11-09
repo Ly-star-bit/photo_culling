@@ -26,6 +26,8 @@ final class AppModel: ObservableObject {
     let watermark: WatermarkStore
     let collage: CollageStore
     @Published var tab: AppTab = .batch
+    /// 「这一版新增」弹框开着（升级后第一次打开、「帮助 › 这一版新增」，见 WhatsNew.swift）。
+    @Published var whatsNewShown = false
     /// 实时桥（bridge: .none 时是 nil）。
     private(set) var live: LiveServer?
     /// 用户此刻是不是正在 app 里操作（§9.6b）：桥在执行写之前问它。GUI 开桥时才去看 AppKit，别的时候只看 store。

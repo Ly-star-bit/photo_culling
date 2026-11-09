@@ -2,24 +2,22 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
-/// 拼图 tab：左托盘 · 中画布 · 右检视器，底部备选版式（相册模式多一条跨页条）。
+/// 拼图 tab：左栏（照片 / 模板 / 素材）· 中画布 · 右检视器（格式 / 样式 / 文档），底部方案栏、跨页条、备选版式。
+/// 两边的页签在 store.nav（CollageNav.swift）：选中画布上的东西右栏切到「格式」，指路的字、「带我去」都走它。
 struct CollageView: View {
     @ObservedObject var store: CollageStore
     /// 不整份订阅批量页（分析进度、判决计数一变，整个拼图页都跟着重算）：换场次由 CollageSessionWatch 盯，
     /// 托盘「带照片」菜单的计数由 CollageTrayHeader 自己订阅。
     let batchStore: BatchStore
-    /// 检视器「水印」页读水印页的签名、设置和预设；只在那一页里观察它（水印页预览一动，拼图页不跟着重算）。
+    /// 检视器「文档 › 水印」读水印页的签名、设置和预设；只在那一块里观察它（水印页预览一动，拼图页不跟着重算）。
     let watermarkStore: WatermarkStore
-    @State private var inspectorTab: CollageInspector.Tab
     @State private var autoCount = 6
     @State private var dedupeAlbum = true
 
-    init(store: CollageStore, batchStore: BatchStore, watermarkStore: WatermarkStore,
-         initialTab: CollageInspector.Tab = .layout) {
+    init(store: CollageStore, batchStore: BatchStore, watermarkStore: WatermarkStore) {
         self.store = store
         self.batchStore = batchStore
         self.watermarkStore = watermarkStore
-        _inspectorTab = State(initialValue: initialTab)
     }
 
     var body: some View {
@@ -53,17 +51,26 @@ struct CollageView: View {
             topBar
             Divider()
             HSplitView {
-                CollageTray(store: store, batchStore: batchStore)
-                    .frame(minWidth: 190, idealWidth: 230, maxWidth: 320)
-                CollageCanvasView(store: store) { inspectorTab = .text }
+                // 模板格最小 86pt：两列要 230 左右（以前 190，模板挪进左栏以后一列太浪费）。
+                // 230 + 画布 420 + 检视器 300 = 950，最窄的窗口（960）里照样放得下。
+                CollageLeftPane(store: store, batchStore: batchStore)
+                    .frame(minWidth: 230, idealWidth: 250, maxWidth: 340)
+                // 选中画布上的照片、文字、贴纸：右栏切到「格式」（NU3）；双击文字 / 照片上的字：切过去并滚到编辑器。
+                CollageCanvasView(store: store,
+                                  onEditText: { spot in store.go(spot) },
+                                  onSelect: { store.nav.showFormat() })
                     .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
-                CollageInspector(store: store, watermarkStore: watermarkStore, tab: $inspectorTab)
+                CollageInspector(store: store, watermarkStore: watermarkStore)
                     .frame(minWidth: 300, idealWidth: 330, maxWidth: 380)
             }
             Divider()
             bottomStrips
             Divider()
             statusBar
+        }
+        // 离屏快照截不到弹出框（单独一个窗口）：--collage-ui 把「导出 ▾」的内容画在顶栏下面。
+        .overlay(alignment: .topTrailing) {
+            if SnapshotPreview.inlineExport { CollageInlineExport(store: store) }
         }
     }
 
@@ -78,8 +85,48 @@ struct CollageView: View {
 
     // MARK: - 顶栏
 
+    /// 单张 / 相册 … 撤销 重做 参考线 方案 | 暗房 导出 ▾。窗口窄、放不下整排时（960 宽的相册，婚礼 fine-art 最挤）
+    /// 换紧凑的一排：间距收一点、暗房只留图标、「导出相册」写成「导出」、「编排」两个字不写（ViewThatFits 按整排的
+    /// 理想宽度挑，放得下就是完整的那排）。
     private var topBar: some View {
-        HStack(spacing: 10) {
+        ViewThatFits(in: .horizontal) {
+            topBarRow(compact: false)
+            topBarRow(compact: true)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.bar)
+        .background(topBarShortcuts)
+    }
+
+    /// 顶栏的快捷键只挂一份：两排（完整 / 紧凑）里的按钮都不挂，这里一组看不见的按钮挂（ViewThatFits 没挑中的那一排
+    /// 不能也接一次 ⌘Z）。能不能按和看得见的那个按钮同一个条件（灰着的时候快捷键也不动）。
+    private var topBarShortcuts: some View {
+        ZStack {
+            Button("撤销") { store.undo() }
+                .keyboardShortcut("z", modifiers: .command)
+                .disabled(!store.canUndo)
+            Button("重做") { store.redo() }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+                .disabled(!store.canRedo)
+            Button("存成方案") { store.saveVariant() }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(store.project.pages.isEmpty || store.isSolving)
+            Button("导出") { store.export() }
+                .keyboardShortcut("e", modifiers: .command)
+                .disabled(store.exportBlockedReason != nil)
+            if store.isExporting {
+                Button("取消导出") { store.cancelExport() }
+                    .keyboardShortcut(.escape, modifiers: [])
+            }
+        }
+        .opacity(0)
+        .frame(width: 0, height: 0)
+        .accessibilityHidden(true)
+    }
+
+    private func topBarRow(compact: Bool) -> some View {
+        HStack(spacing: compact ? 8 : 10) {
             Picker("", selection: Binding(get: { store.project.mode }, set: { store.setMode($0) })) {
                 Text("单张拼图").tag(CollageMode.single)
                 Text("相册").tag(CollageMode.album)
@@ -90,49 +137,60 @@ struct CollageView: View {
             .help("单张：一张拼图（朋友圈/小红书/九宫格/轮播）；相册：多个跨页，印刷用")
 
             if store.isAlbum {
-                albumControls
+                albumControls(compact: compact)
             } else {
                 singleControls
             }
 
             Divider().frame(height: 18)
-            Button { store.undo() } label: { Image(systemName: "arrow.uturn.backward") }
-                .keyboardShortcut("z", modifiers: .command)
-                .disabled(!store.canUndo)
-                .help("撤销 (⌘Z)")
-            Button { store.redo() } label: { Image(systemName: "arrow.uturn.forward") }
-                .keyboardShortcut("z", modifiers: [.command, .shift])
-                .disabled(!store.canRedo)
-                .help("重做 (⇧⌘Z)")
-            Toggle(isOn: Binding(get: { store.showGuides }, set: { store.showGuides = $0; store.setNeedsRender() })) {
-                Image(systemName: "rectangle.dashed")
-            }
-            .toggleStyle(.button)
-            .help("参考线：安全区、中缝、九宫格/轮播切线（不会导出）")
-            // 只放图标：顶栏在最窄的窗口（960）里已经挤满了。
-            Button { store.saveVariant() } label: { Image(systemName: "plus.square.on.square") }
-                .keyboardShortcut("s", modifiers: [.command, .shift])
-                .disabled(store.project.pages.isEmpty || store.isSolving)
-                .help("把现在这一版存成方案（⇧⌘S）：底下的方案栏里点缩略图随时切回来，可以存好几版比着挑")
-
-            Spacer()
-            if store.isExporting {
-                Button("取消") { store.cancelExport() }
-                    .keyboardShortcut(.escape, modifiers: [])
-            }
-            Button {
-                store.export()
-            } label: {
-                Label(store.isAlbum ? "导出相册" : "导出", systemImage: "square.and.arrow.up")
-            }
-            .buttonStyle(.borderedProminent)
-            .keyboardShortcut("e", modifiers: .command)
-            .disabled(store.exportBlockedReason != nil)
-            .help(store.exportBlockedReason ?? "按导出设置写到输出目录 (⌘E)")
+            editButtons
+            Spacer(minLength: 8)
+            trailingButtons(compact: compact)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.bar)
+    }
+
+    /// 撤销、重做、参考线、存成方案：只放图标（顶栏在最窄的窗口里已经挤满了）。快捷键在 topBarShortcuts。
+    @ViewBuilder
+    private var editButtons: some View {
+        Button { store.undo() } label: { Image(systemName: "arrow.uturn.backward") }
+            .disabled(!store.canUndo)
+            .help("撤销 (⌘Z)")
+        Button { store.redo() } label: { Image(systemName: "arrow.uturn.forward") }
+            .disabled(!store.canRedo)
+            .help("重做 (⇧⌘Z)")
+        Toggle(isOn: Binding(get: { store.showGuides }, set: { store.showGuides = $0; store.setNeedsRender() })) {
+            Image(systemName: "rectangle.dashed")
+        }
+        .toggleStyle(.button)
+        .help("参考线：安全区、中缝、九宫格/轮播切线（不会导出）")
+        Button { store.saveVariant() } label: { Image(systemName: "plus.square.on.square") }
+            .disabled(store.project.pages.isEmpty || store.isSolving)
+            .help("把现在这一版存成方案（⇧⌘S）：底下的方案栏里点缩略图随时切回来，可以存好几版比着挑")
+    }
+
+    @ViewBuilder
+    private func trailingButtons(compact: Bool) -> some View {
+        if store.isExporting {
+            Button("取消") { store.cancelExport() }
+                .help("停止导出 (Esc)")
+        }
+        // 暗房进顶栏（NU2）：以前唯一的入口在样式页色调块最底下。整组进；只改这一页 / 这一格从「格式」里进。
+        Button {
+            store.openDarkroom()
+        } label: {
+            if compact {
+                Image(systemName: "film")
+            } else {
+                Label("暗房", systemImage: "film")
+            }
+        }
+        .buttonStyle(.bordered)
+        .tint(CollageDarkroomButton.amber)
+        .disabled(store.page == nil)
+        .help("整页的看片台：胶片 / 滤镜大样张，悬停就在大预览里看，拖竖线比原图（整组；只改这一页、这一格在「格式」里进）")
+        .collageSpot(.darkroom, store.nav)
+        CollageExportButtons(store: store, compact: compact)
+            .collageSpot(.export, store.nav)
     }
 
     private var singleControls: some View {
@@ -152,37 +210,28 @@ struct CollageView: View {
             Button("自动排版") { store.autoLayout(count: autoCount) }
                 .disabled(store.project.photos.isEmpty || store.isSolving)
                 .help("从托盘按分数和多样性挑 \(autoCount) 张，排出一批备选版式")
-            Button { store.previousAlternative() } label: { Image(systemName: "chevron.left") }
-                .disabled(store.alternatives.isEmpty)
-                .help("上一版 (←)")
-            // 印样按拍摄先后排，没有备选版式（regenerate 只会提示一句）：→ 和「换一批」灰掉，备选条说去哪改。
-            Button { store.nextAlternative() } label: { Image(systemName: "chevron.right") }
-                .disabled(store.root == nil || store.isContactSheet)
-                .help("下一版 (→)")
-            Button("换一批") { store.regenerate() }
-                .disabled(store.root == nil || store.isSolving || store.isContactSheet)
-                .help(store.isContactSheet ? "印样按拍摄先后排，没有别的版：改规格、每条帧数在「版式 › 印样」里"
-                      : "同样的照片重新求解一批备选；锁定的格子不动")
+            // ←、→、「换一批」在备选条最左边（本来就是管备选的）。
             if store.isSolving { ProgressView().controlSize(.small) }
         }
     }
 
-    private var albumControls: some View {
+    private func albumControls(compact: Bool) -> some View {
         // 编排主题：默认 / 婚礼 fine-art（一键成套「整本婚礼相册」设成 fine-art；之后的「自动编排」按它编）。
         let fineArt = store.project.albumTheme == .fineArt
         return HStack(spacing: 8) {
             Picker("编排", selection: Binding(get: { store.project.albumTheme }, set: { store.setAlbumTheme($0) })) {
                 ForEach(CollageAlbumTheme.allCases, id: \.self) { Text($0.label).tag($0) }
             }
+            .modifier(CollageHideLabels(on: compact))
             .fixedSize()
             .help("「自动编排」按哪套规则编：默认 = 分数最高的做扉页、横图铺满跨页；婚礼 fine-art = 扉页取宽景、"
                   + "每章疏 → 密 → 精选收尾、竖图成对、每跨页最多 3 张、不跨中缝（换了点「自动编排」生效）。"
-                  + "纸、卡纸、≥ 25mm 的边距是样式：在「样式」里选「婚礼 fine-art」，一键成套「整本婚礼相册」两样一起设")
+                  + "纸、卡纸、≥ 25mm 的边距是样式：在「样式」里选「婚礼 fine-art」，左栏「模板」的一键成套「整本婚礼相册」两样一起设")
             Button("自动编排") { store.autoArrangeAlbum(dedupe: dedupeAlbum) }
                 .disabled(store.project.photos.isEmpty)
                 .help((fineArt ? "托盘里的照片按婚礼 fine-art 编成跨页：废片不要、同一场只留精选，扉页取宽景，每章疏 → 密 → 精选收尾"
                        : "托盘里的照片按时间和章节编成跨页：分数最高的做扉页，好片单独成页")
-                      + "。客户选中的一张都不拿掉；检视器「画布」里指定了跨页数就往那么多个跨页里塞（不删片）")
+                      + "。客户选中的一张都不拿掉；右栏「文档 › 画布」里指定了跨页数就往那么多个跨页里塞（不删片）")
             Toggle("相似只留一张", isOn: $dedupeAlbum)
                 .toggleStyle(.checkbox)
                 .help(fineArt ? "只管画面相似的（关掉也不会全上：fine-art 一直是同一场只留精选、连拍只留一张）；拿掉的仍在托盘里，可以拖回任何跨页"
@@ -193,13 +242,7 @@ struct CollageView: View {
                     .toggleStyle(.checkbox)
                     .help("一章里黑白照片占三分之一以上，整章的跨页都转黑白（R7：黑白按整章用，不零星撒）；下次「自动编排」生效")
             }
-            // 婚礼 fine-art 的跨页按编排出版式（完整显示、卡纸留白），没有「换一批」（编排换回「默认」才有）：
-            // 不摆一个永远灰着的按钮 —— 窗口最窄（960）时它占的地方正好让「整章黑白」放得下。
-            if !fineArt {
-                Button("换一批") { store.regenerate() }
-                    .disabled(store.root == nil || store.isSolving)
-                    .help("当前跨页重新求解；锁定的格子不动")
-            }
+            // 「换一批」在备选条最左边（婚礼 fine-art 的跨页按编排出版式，没有「换一批」，那里也不摆）。
             if store.isSolving { ProgressView().controlSize(.small) }
         }
         // 整组按自己要的宽度排（不折行、不截字）：顶栏的 HStack 按份给宽度，不先让右边的空当（Spacer）让出来 ——
@@ -211,11 +254,10 @@ struct CollageView: View {
 
     private var bottomStrips: some View {
         VStack(spacing: 0) {
-            // 存过方案才显示（入口是顶栏的「存成方案」）。
-            if !store.variants.isEmpty {
-                CollageVariantStrip(store: store, thumbs: store.thumbs)
-                Divider()
-            }
+            // 方案栏常驻（NU6）：以前存过才出现，没存过的人不知道有；空的时候是矮矮一条「+ 存成方案（⇧⌘S）」。
+            CollageVariantStrip(store: store, thumbs: store.thumbs)
+                .collageSpot(.variants, store.nav)
+            Divider()
             // 相册的跨页条；单张拼图有好几页（一键成套的一期杂志、小红书轮播组图）时也显示（页条）。
             if store.isAlbum || store.project.pages.count > 1 {
                 CollagePageStrip(store: store, thumbs: store.thumbs)
@@ -283,7 +325,6 @@ struct CollageTray: View {
     /// 选中和筛选（store.tray）：只有托盘订阅。
     @ObservedObject var tray: CollageTrayState
     let batchStore: BatchStore
-    @State private var dropTargeted = false
 
     /// 「用这几张重新排一版」最多几张（和顶栏自动排版的张数上限一样）。
     static let relayoutLimit = 16
@@ -326,23 +367,7 @@ struct CollageTray: View {
                     .equatable()
             }
         }
-        .overlay {
-            RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(Color.accentColor, lineWidth: 2)
-                .padding(3)
-                .opacity(dropTargeted ? 1 : 0)
-                .allowsHitTesting(false)
-        }
-        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
-            Task { @MainActor in
-                var urls: [URL] = []
-                for p in providers {
-                    if let url = await CollageCanvasDropDelegate.loadURL(p) { urls.append(url) }
-                }
-                store.addFiles(urls)
-            }
-            return true
-        }
+        // 文件拖进来：整个左栏都收（CollageLeftPane），哪个页签都行。
         // 显示的变了（换了筛选、上了版、移除、撤销）：看不见的从选中里去掉。
         .onChange(of: visibleIDs) { _, ids in tray.prune(to: Set(ids)) }
     }
@@ -365,6 +390,8 @@ struct CollageTray: View {
             } else {
                 Text("已选 \(n) 张").font(.caption).foregroundStyle(.secondary).monospacedDigit()
                 Spacer()
+                // 多选以后最常见的意图：用这几张排一版（NU8：以前只在右键菜单里）。
+                if n > 1 { relayoutButton(order.filter(selected.contains)) }
                 Button("移除", role: .destructive) { store.removeFromTray(order.filter(selected.contains)) }
                     .controlSize(.small)
                     .help("从托盘移除选中的 \(n) 张（⌫）：版式里用到的格子留空，⌘Z 一次撤回")
@@ -381,6 +408,21 @@ struct CollageTray: View {
         .frame(height: 20)
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
+    }
+
+    /// 「排一版」：和右键「用这 N 张重新排一版」同一个方法；排完取消托盘的选中（键盘焦点还在托盘上，紧接着按 ⌫ 不会把
+    /// 刚排上的照片移出托盘，同 CollageTrayGrid.toCanvas）。超过 16 张灰着，悬停说为什么。
+    private func relayoutButton(_ ids: [String]) -> some View {
+        let tooMany = ids.count > Self.relayoutLimit
+        return Button("排一版") {
+            store.relayout(photoIDs: ids)
+            tray.clear()
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.small)
+        .disabled(tooMany || store.isSolving)
+        .help(tooMany ? "一版最多 \(Self.relayoutLimit) 张：少选几张（现在 \(ids.count) 张）"
+              : "用选中的 \(ids.count) 张重新排一版（右键里也有；⌘Z 撤回）")
     }
 
     private var emptyTray: some View {
@@ -711,21 +753,15 @@ struct CollageTrayItem: View {
 struct CollageAlternativeStrip: View {
     @ObservedObject var store: CollageStore
 
+    /// 婚礼 fine-art 的相册跨页按编排出版式：没有 ← → 和「换一批」（不摆永远灰着的按钮）。
+    private var fineArtAlbum: Bool { store.isAlbum && store.project.albumTheme == .fineArt }
+
     var body: some View {
         let _ = CollagePerf.body("备选条")
         HStack(spacing: 8) {
-            Text("备选").font(.caption).foregroundStyle(.secondary)
-                .frame(width: 32)
+            controls
             if store.alternativeThumbs.isEmpty {
-                // 婚礼 fine-art 编排的相册没有「换一批」（按钮灰着）：别叫人去点它。
-                Text(store.root == nil ? "自动排版后这里是几十个备选版式，← → 切换"
-                     : store.isAlbum && store.project.albumTheme == .fineArt
-                     ? "婚礼 fine-art 的跨页按编排出版式，没有备选：想重排点「自动编排」"
-                     : store.isContactSheet
-                     ? "印样按拍摄先后排，没有备选：改规格、每条帧数在「版式 › 印样」里"
-                     : "点「换一批」或 → 出一批备选版式")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                emptyHint
                 Spacer()
             } else {
                 CollageAlternativeThumbs(store: store, thumbs: store.alternativeThumbs, selected: store.alternativeIndex,
@@ -742,6 +778,49 @@ struct CollageAlternativeStrip: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 78)
+    }
+
+    /// 「备选」+ ← → +「换一批」：以前在顶栏，挪到管备选的这一条最左边。印样按拍摄先后排，没有备选版式
+    /// （regenerate 只会提示一句）：→ 和「换一批」灰掉，旁边说去哪改。
+    private var controls: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("备选").font(.caption).foregroundStyle(.secondary)
+            if !fineArtAlbum {
+                HStack(spacing: 4) {
+                    Button { store.previousAlternative() } label: { Image(systemName: "chevron.left") }
+                        .disabled(store.alternatives.isEmpty)
+                        .help("上一版 (←)")
+                    Button { store.nextAlternative() } label: { Image(systemName: "chevron.right") }
+                        .disabled(store.root == nil || store.isContactSheet)
+                        .help("下一版 (→)")
+                }
+                .controlSize(.small)
+                Button("换一批") { store.regenerate() }
+                    .controlSize(.small)
+                    .disabled(store.root == nil || store.isSolving || store.isContactSheet)
+                    .help(store.isContactSheet ? "印样按拍摄先后排，没有别的版：改规格、每条帧数在右栏「格式 › 印样」里"
+                          : store.isAlbum ? "当前跨页重新求解；锁定的格子不动" : "同样的照片重新求解一批备选；锁定的格子不动")
+            }
+        }
+        .frame(width: 72, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var emptyHint: some View {
+        if store.root == nil {
+            Text(store.isAlbum ? "点「自动编排」把托盘编成跨页；每个跨页「换一批」出备选版式，← → 切换"
+                 : "自动排版后这里是几十个备选版式，← → 切换")
+                .font(.caption).foregroundStyle(.tertiary)
+        } else if fineArtAlbum {
+            // 婚礼 fine-art 编排的相册没有「换一批」：别叫人去点它。
+            Text("婚礼 fine-art 的跨页按编排出版式，没有备选：想重排点「自动编排」")
+                .font(.caption).foregroundStyle(.tertiary)
+        } else if store.isContactSheet {
+            CollageJumpText(store: store, lead: "印样按拍摄先后排，没有备选：改规格、每条帧数在右栏", spot: .contact, tail: "里")
+        } else {
+            Text("点左边的「换一批」或 → 出一批备选版式")
+                .font(.caption).foregroundStyle(.tertiary)
+        }
     }
 
     /// 右键「连画布一起清」的说法：单张拼图只有一页 = 清空画布（照片还在托盘里）；几页的 / 相册 = 删掉这一页 / 跨页。
@@ -810,7 +889,7 @@ private struct CollageAlternativeThumbs: View, Equatable {
 
 /// 方案栏：存下来的几版（CollageVariant）。点缩略图切过去（一步撤销），右键覆盖 / 改名 / 删除（这三样不进撤销：
 /// 覆盖、删除先问一句），最后一格「+」存现在这一版。和现在一模一样的描蓝边；最近存的 / 切到的那个之后又改过，
-/// 名字后面标「改过」（右键「用现在的样子覆盖它」）。
+/// 名字后面标「改过」（右键「用现在的样子覆盖它」）。一直显示：没存过时是一条「+ 存成方案（⇧⌘S）」。
 struct CollageVariantStrip: View {
     @ObservedObject var store: CollageStore
     /// 方案缩略图在 store.thumbs 里。
@@ -827,9 +906,39 @@ struct CollageVariantStrip: View {
 
     var body: some View {
         let _ = CollagePerf.body("方案条")
+        if store.variants.isEmpty {
+            emptyStrip
+        } else {
+            strip
+        }
+    }
+
+    /// 还没存过方案：一个按钮 + 一句话（不占缩略图那么高，画布少让一点）。
+    private var emptyStrip: some View {
+        HStack(spacing: 8) {
+            Text("方案").font(.caption).foregroundStyle(.secondary)
+                .frame(width: 32)
+            Button {
+                store.saveVariant()
+            } label: {
+                Label("存成方案（⇧⌘S）", systemImage: "plus")
+            }
+            .controlSize(.small)
+            .disabled(store.project.pages.isEmpty || store.isSolving)
+            .help("把现在这一版存成方案：画布、样式、文字、所有页、水印一起存，点缩略图随时切回来")
+            Text("存好几版并排比着挑，点一下切回来（⌘Z 回到切之前）")
+                .font(.caption).foregroundStyle(.tertiary)
+                .lineLimit(1).truncationMode(.tail)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 32)
+    }
+
+    private var strip: some View {
         let current = store.currentVariantIDs
         let modifiedID = store.activeVariantModified ? store.activeVariantID : nil
-        HStack(spacing: 8) {
+        return HStack(spacing: 8) {
             Text("方案").font(.caption).foregroundStyle(.secondary)
                 .frame(width: 32)
             ScrollView(.horizontal, showsIndicators: false) {
@@ -1005,5 +1114,99 @@ struct CollagePageStrip: View {
             Button("删除这个\(unit)", role: .destructive) { store.deletePage(index) }
         }
         .help("\(unit) \(index + 1) · \(page.photoIDs.count) 张（右键挪动/删除）")
+    }
+}
+
+// MARK: - 顶栏「导出 ▾」
+
+/// 紧凑的顶栏：Picker 不写标签（「编排」两个字）。
+private struct CollageHideLabels: ViewModifier {
+    let on: Bool
+
+    func body(content: Content) -> some View {
+        if on {
+            content.labelsHidden()
+        } else {
+            content
+        }
+    }
+}
+
+/// 「导出」一键按导出设置写出（⌘E，和以前一样）；旁边的 ▾ 弹出导出设置（文件、印刷、输出目录：以前是检视器的「导出」页，
+/// 照 Canva 的「分享 › 下载」）。▾ 不跟着导出按钮灰：没有输出目录导不了的时候，正要从这里选一个。
+struct CollageExportButtons: View {
+    @ObservedObject var store: CollageStore
+    @ObservedObject var nav: CollageNav
+    /// 顶栏放不下整排时：相册也只写「导出」。
+    let compact: Bool
+
+    init(store: CollageStore, compact: Bool = false) {
+        self.store = store
+        self.nav = store.nav
+        self.compact = compact
+    }
+
+    var body: some View {
+        HStack(spacing: 1) {
+            Button {
+                store.export()
+            } label: {
+                Label(store.isAlbum && !compact ? "导出相册" : "导出", systemImage: "square.and.arrow.up")
+            }
+            // ⌘E 挂在顶栏那组看不见的快捷键上（CollageView.topBarShortcuts）：顶栏两排里各有一个这个按钮。
+            .disabled(store.exportBlockedReason != nil)
+            .help(store.exportBlockedReason ?? "按导出设置写到输出目录 (⌘E)；旁边的 ▾ 改文件名、格式、清晰度、输出目录")
+            Button {
+                nav.exportShown.toggle()
+            } label: {
+                Image(systemName: "chevron.down")
+            }
+            .help("导出设置：文件名、格式、清晰度、带不带水印、印刷（出血、PDF）、输出目录")
+            // 离屏快照里不弹真的弹出框（截不到，还要一个窗口）：CollageView 把内容画在顶栏下面。
+            .popover(isPresented: SnapshotPreview.inlineExport ? .constant(false) : $nav.exportShown,
+                     arrowEdge: .bottom) {
+                CollageExportPopover(store: store)
+            }
+        }
+        .buttonStyle(.borderedProminent)
+    }
+}
+
+/// 离屏快照里「导出 ▾」摊开的样子（SnapshotPreview.inlineExport）：画在顶栏下面、右边对齐。只订阅 nav。
+private struct CollageInlineExport: View {
+    let store: CollageStore
+    @ObservedObject var nav: CollageNav
+
+    init(store: CollageStore) {
+        self.store = store
+        self.nav = store.nav
+    }
+
+    var body: some View {
+        if nav.exportShown {
+            CollageExportPopover(store: store)
+                .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.gray.opacity(0.4)))
+                .shadow(radius: 12)
+                .padding(.top, 46)
+                .padding(.trailing, 10)
+        }
+    }
+}
+
+/// 弹出框里的导出设置：就是以前「导出」页那一块（CollageExportPanel），按内容高度排。
+struct CollageExportPopover: View {
+    let store: CollageStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("导出设置").font(.headline)
+            CollageExportPanel(store: store)
+        }
+        .padding(14)
+        .frame(width: 340)
+        .fixedSize(horizontal: false, vertical: true)
+        // 滑杆松手 = 一次拖动结束（质量、出血、安全区）。
+        .environment(\.collageUndo, store)
     }
 }

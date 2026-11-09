@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
-// MARK: - 检视器「水印」页
+// MARK: - 检视器「文档 › 水印」
 //
 // 拼图里的水印是工程自带的一份快照：改这里不动水印页，改水印页（包括它的预设）也不会悄悄改掉这里；
 // 要同步就点「用水印页的设置」。水印在拼图里实时画（每张照片画在裁切后看得见的那块里），预览 = 导出。
@@ -16,9 +16,8 @@ struct CollageWatermarkPanel: View {
         CollageMarkLayerBox(store: store, kind: .photos)
         CollageMarkLayerBox(store: store, kind: .page)
         CollageWatermarkAdoptBox(store: store, watermarkStore: watermarkStore)
-        Text("相框和画布比例只在水印页单张导出时生效；拼图里要白边请用 样式 › 边框。水印不压中缝、切线和安全区，不躲进贴纸、相纸底下，每张照片的水印让着整页的：格子太小、签名或字放不下、怎么翻都躲不开时，那一处就不画。")
-            .font(.caption2).foregroundStyle(.tertiary)
-            .fixedSize(horizontal: false, vertical: true)
+        CollageJumpText(store: store, lead: "相框和画布比例只在水印页单张导出时生效；拼图里要白边请用", spot: .frame,
+                        tail: "。水印不压中缝、切线和安全区，不躲进贴纸、相纸底下，每张照片的水印让着整页的：格子太小、签名或字放不下、怎么翻都躲不开时，那一处就不画。")
     }
 }
 

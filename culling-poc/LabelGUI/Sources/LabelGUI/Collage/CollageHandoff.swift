@@ -56,7 +56,7 @@ enum CollageHandoff {
         guard collage.watermarkRevision == revision else {
             // 后面又来了一次交接：那一次自己会套，不吭声。是等照片时手动改过水印：说一声，不盖掉。
             if collage.latestHandoffRevision == revision {
-                collage.setNotice(joined([placed, "等照片的时候水印改过了，这次没套水印页的设置（要的话在右边「水印」里点「用水印页的设置」）"]))
+                collage.setNotice(joined([placed, "等照片的时候水印改过了，这次没套水印页的设置（要的话在右栏「文档 › 水印」里点「用水印页的设置」）"]))
             }
             return
         }
@@ -64,7 +64,7 @@ enum CollageHandoff {
         var parts = [placed]
         if collage.notice != placed { parts.append(collage.notice) }
         if adopted, collage.isAlbum {
-            parts.append("「每张照片」水印对整本相册的照片都生效（单张选中后在右边「水印」里关掉）")
+            parts.append("「每张照片」水印对整本相册的照片都生效（单张选中后在右栏「格式」里勾「这张不加水印」）")
         }
         let text = joined(parts)
         if !text.isEmpty { collage.setNotice(text) }

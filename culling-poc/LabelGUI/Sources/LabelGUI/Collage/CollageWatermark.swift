@@ -253,7 +253,7 @@ enum CollageWatermarks {
 
     /// 签名图读不了时导出完的提示（状态栏、命令行导出提示）。说清楚去哪儿改：拼图右边检视器的「水印」，
     /// 不是左边那个「水印」tab —— 那边选的签名不会改到已经存进拼图的这一份。
-    static let signatureLostWarning = "签名图找不到了，导出里没有签名 —— 在右边「水印」里点「选择签名…」重新选一张"
+    static let signatureLostWarning = "签名图找不到了，导出里没有签名 —— 在右栏「文档 › 水印」里点「选择签名…」重新选一张"
     /// 同一件事，检视器签名框里的说法（按钮就在下面）。
     static let signatureLostPanelWarning = "签名图找不到了，预览和导出里都没有签名 —— 点下面「选择签名…」重新选一张"
 

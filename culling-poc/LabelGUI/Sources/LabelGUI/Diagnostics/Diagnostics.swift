@@ -12,7 +12,7 @@ import UniformTypeIdentifiers
 //      有哪些文件（只列名字和大小，照片、预览图连名字都不列）、场次概况（几个、几张，不带路径和 bookmark）。场次 JSON、
 //      sessions.json、客户备注一律不放；所有文字里的路径都打码（家目录 ~、盘名 <盘 N>、场次文件夹 <场次 N>、别的文件夹
 //      <文件夹 N>，不只认 sessions.json 里登记的，见 Redactor），「」“”"" 里的文件夹名、盘名同样换掉。
-//   4. 「帮助」菜单（快捷键一览、使用说明、导出 / 复制诊断信息、日志文件夹）。
+//   4. 「帮助」菜单（这一版新增、快捷键一览、使用说明、导出 / 复制诊断信息、日志文件夹）。
 
 enum Diagnostics {
     static let privacySettingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders")!
@@ -183,10 +183,13 @@ enum ShortcutsWindow {
 
 /// 替换系统默认的「帮助」菜单（没有帮助手册，默认那一项点了只会说「帮助不可用」）。
 struct HelpMenuItems: View {
+    /// 「这一版新增」：弹主窗口上那个弹框（AppModel.whatsNewShown，见 WhatsNew.swift）。
+    var onWhatsNew: () -> Void = {}
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openURL) private var openURL
 
     var body: some View {
+        Button("这一版新增") { onWhatsNew() }
         Button("快捷键一览") { openWindow(id: ShortcutsWindow.id) }
         Button("使用说明（网页）") {
             guard !AppRuntime.headless else { return }

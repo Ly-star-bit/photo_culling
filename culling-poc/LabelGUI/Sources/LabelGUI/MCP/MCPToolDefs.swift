@@ -34,7 +34,7 @@ enum MCPToolDefs {
 
     static let liveInstructions = """
     xuanpian 是本机「选片工具」（photo culling + collage）的接口，这一版只做实时：用户开着 app 时，读 app 当前打开的那一场（判决 pick/usable/reject、废片理由、章节、场、近似重复、人脸/闭眼/锐度/EXIF、预览图），以及改判、在 app 里定位照片、切场次、套拼图模板、一键成套、换封面、改标题/刊头/期号、换样式色调、存成方案、切方案、导出图片、撤销，都由 app 自己执行，窗口里当场看得到，用户按 ⌘Z 能撤。app 没开时只能看状态、列场次、列模板，其余工具返回 app_not_running：MCP 绝不会启动 app，请用户自己打开。先调 app_status。
-    流程：app_status（live.state 是 live 才能用其余工具；live.open_session 是 app 当前打开的那一场，所有 session 参数都填它）→ cull_session_overview → cull_list_groups / cull_list_photos → cull_get_photos / cull_preview_photos（看眼睛、对焦用 crop=face）。要别的场次：cull_list_sessions 找到它，再 app_open_session（只能打开 app「最近场次」里的；会清掉 app 里这一场的撤销记录，先问用户）。改判用 cull_set_verdicts，给用户看用 cull_show_photos，客户发回来的选择用 cull_import_client_picks（先 dry_run 给用户看认出了哪些）；拼图先 collage_get_state，再 collage_apply_template / collage_run_kit / collage_next_cover / collage_set_text / collage_set_style，结果里有 app 当前画面的预览；模板不合适就自己设计：collage_list_templates（include=["layout_grammar"]）看语法，collage_set_layout 把版式放进当前页（collage_auto_layout 让 app 的引擎先排一版，读回 layout 再改）；要给用户出几版设计挑，每排好一版就 collage_save_variant 存成方案（不会被下一版盖掉），collage_open_variant 切回某一版；导出成图片用 collage_export（清晰度 1–3 倍，写到导出页设的目录）；撤销 AI 自己刚做的一步用 app_undo。
+    流程：app_status（live.state 是 live 才能用其余工具；live.open_session 是 app 当前打开的那一场，所有 session 参数都填它）→ cull_session_overview → cull_list_groups / cull_list_photos → cull_get_photos / cull_preview_photos（看眼睛、对焦用 crop=face）。要别的场次：cull_list_sessions 找到它，再 app_open_session（只能打开 app「最近场次」里的；会清掉 app 里这一场的撤销记录，先问用户）。改判用 cull_set_verdicts，给用户看用 cull_show_photos，客户发回来的选择用 cull_import_client_picks（先 dry_run 给用户看认出了哪些）；拼图先 collage_get_state，再 collage_apply_template / collage_run_kit / collage_next_cover / collage_set_text / collage_set_style，结果里有 app 当前画面的预览；模板不合适就自己设计：collage_list_templates（include=["layout_grammar"]）看语法，collage_set_layout 把版式放进当前页（collage_auto_layout 让 app 的引擎先排一版，读回 layout 再改）；要给用户出几版设计挑，每排好一版就 collage_save_variant 存成方案（不会被下一版盖掉），collage_open_variant 切回某一版；导出成图片用 collage_export（清晰度 1–3 倍，写到拼图页「导出 ▾」里设的目录）；撤销 AI 自己刚做的一步用 app_undo。
     出错时：user_busy 的 data.transient 为 true 是用户正在拖动或打字，等几秒再调；为 false 是开着对话框、连拍挑选或裁切，请用户先关掉，不要重试。app_outcome_unknown：用结果里的 op_id 原样再调同一个工具，不要换工具。session_not_open：先 app_status 看 open_session。其他错误按 hint 改。读到的是 app 内存里的状态（含还没存盘的改动）。图片是缩小预览，文字结果里有预览文件的路径；不要直接读原图（几十 MB）。session 可以填照片文件夹的绝对路径，也可以填 16 位 session key。
     """
 
@@ -243,7 +243,7 @@ enum MCPToolDefs {
      "annotations":"$WRITE_IDEMPOTENT"},
 
     {"name":"collage_apply_template","title":"套模板",
-     "description":"给 app 里当前的拼图套一个模板（= 检视器里点模板），画布当场换版式。template 可以写模板全名、分类名（套这个分类的第一个）或名字里的几个字，取值见 collage_list_templates。一次调用是一步撤销（拼图页 ⌘Z，或 app_undo target=collage）。结果里有 app 当前画面的预览图。",
+     "description":"给 app 里当前的拼图套一个模板（= 拼图页左栏「模板」里点模板），画布当场换版式。template 可以写模板全名、分类名（套这个分类的第一个）或名字里的几个字，取值见 collage_list_templates。一次调用是一步撤销（拼图页 ⌘Z，或 app_undo target=collage）。结果里有 app 当前画面的预览图。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "template":{"type":"string","minLength":1,"maxLength":80,"description":"模板全名、分类名或名字里的几个字"},
@@ -284,7 +284,7 @@ enum MCPToolDefs {
      "annotations":"$WRITE"},
 
     {"name":"collage_set_text","title":"改标题/刊头/期号/文字",
-     "description":"改 app 里当前拼图的文字（= 检视器「文字」页）：title 标题、subtitle 副标题、masthead 刊头、issue 期号；cell_text 改某个格子里第 index 个字块的第一行，必须同时带 if_digest（用户改过版式以后格子下标会指错地方）。至少给一个字段，文字里可以有逗号；不管改几个字段都是一步撤销。用户正在输入框里打字时回 user_busy。结果里有 app 当前画面的预览图。",
+     "description":"改 app 里当前拼图的文字（= 检视器「文档 › 标题和刊头」，cell_text = 选中文字以后的「格式」）：title 标题、subtitle 副标题、masthead 刊头、issue 期号；cell_text 改某个格子里第 index 个字块的第一行，必须同时带 if_digest（用户改过版式以后格子下标会指错地方）。至少给一个字段，文字里可以有逗号；不管改几个字段都是一步撤销。用户正在输入框里打字时回 user_busy。结果里有 app 当前画面的预览图。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "title":{"type":"string","maxLength":60},
@@ -304,7 +304,7 @@ enum MCPToolDefs {
      "annotations":"$WRITE_IDEMPOTENT"},
 
     {"name":"collage_set_style","title":"换样式/色调",
-     "description":"换 app 里当前拼图的样式和色调（= 检视器样式页）：style 是整套「纸、缝、边、框」的预设，look 是整组照片统一的色调，look_strength 是色调强度 0–1；film_grain、film_halation 是光谱胶片色调（filmSoftSkin…cineTungsten，片名见 collage_list_templates 的 looks[].reference）的颗粒、晕光 0–1（别的色调上不起作用；从别的色调换进光谱胶片、两项都是 0 又没给时，会带上这一款的起始值）；margin 外边距（四边一样，会盖掉四边不一样的边距）、gutter 缝宽、corner 圆角、background 底色（设了就是纯色底）、shape 默认的格子形状单独调（给了 style 就在预设上面改）。至少给一个；一次调用是一步撤销。和界面一样，换样式也会改「下次新建拼图沿用的默认样式」。取值见 collage_list_templates。结果里有 app 当前画面的预览图。",
+     "description":"换 app 里当前拼图的样式和色调（= 检视器「样式」）：style 是整套「纸、缝、边、框」的预设，look 是整组照片统一的色调，look_strength 是色调强度 0–1；film_grain、film_halation 是光谱胶片色调（filmSoftSkin…cineTungsten，片名见 collage_list_templates 的 looks[].reference）的颗粒、晕光 0–1（别的色调上不起作用；从别的色调换进光谱胶片、两项都是 0 又没给时，会带上这一款的起始值）；margin 外边距（四边一样，会盖掉四边不一样的边距）、gutter 缝宽、corner 圆角、background 底色（设了就是纯色底）、shape 默认的格子形状单独调（给了 style 就在预设上面改）。至少给一个；一次调用是一步撤销。和界面一样，换样式也会改「下次新建拼图沿用的默认样式」。取值见 collage_list_templates。结果里有 app 当前画面的预览图。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "style":{"type":"string","enum":"$STYLES"},
@@ -361,11 +361,11 @@ enum MCPToolDefs {
      "annotations":"$WRITE_IDEMPOTENT"},
 
     {"name":"collage_export","title":"导出拼图",
-     "description":"让 app 把拼图导出成图片（= 拼图页的「导出」按钮）：写进导出页设的输出目录，没设过就是照片文件夹里的「拼图导出」，同名的自动加 -2，不覆盖。单张模式每页一个文件（九宫格、轮播另外切好），相册每个跨页一个文件、导出页开着印刷 PDF 的话另出一份（有跨页没写出来就不出 PDF，缺页的不能拿去印：warnings 的 export_partial 写明缺第几个跨页）。有空照片格（照片格里没放照片；留白格不算）照样导出成一块底色，warnings 里报 empty_slots（带页号）。scale 是清晰度：1 = 画布的平台尺寸，2、3 = 版式不变、像素按倍数放大（九宫格、轮播最多 2 倍，A4、相册这些印刷画布永远 1 倍）。scale、format 不填就按导出页上的设置，name 不填是导出那一刻的时间；variant 填方案 id 就导那个存着的方案，不用先切过去。这些参数只管这一次，不改导出页上的设置。不改拼图、不进撤销、不弹访达窗口；要等 app 写完（大相册可能几十秒；超时的话 app 会接着导完，用同一个 op_id 再调拿结果，换新的 op_id 会再导一份）。用户正在导出时回 user_busy；app 还在排版、或者输出目录在拍摄文件夹里面（下次分析会把成品当成新照片；请用户在导出页点「用默认」或选拍摄文件夹外面的目录）时回 invalid_state。结果里有目录、实际用的倍数和每个文件的路径、像素尺寸、大小。",
+     "description":"让 app 把拼图导出成图片（= 拼图页的「导出」按钮）：写进「导出 ▾」里设的输出目录，没设过就是照片文件夹里的「拼图导出」，同名的自动加 -2，不覆盖。单张模式每页一个文件（九宫格、轮播另外切好），相册每个跨页一个文件、「导出 ▾」里开着印刷 PDF 的话另出一份（有跨页没写出来就不出 PDF，缺页的不能拿去印：warnings 的 export_partial 写明缺第几个跨页）。有空照片格（照片格里没放照片；留白格不算）照样导出成一块底色，warnings 里报 empty_slots（带页号）。scale 是清晰度：1 = 画布的平台尺寸，2、3 = 版式不变、像素按倍数放大（九宫格、轮播最多 2 倍，A4、相册这些印刷画布永远 1 倍）。scale、format 不填就按「导出 ▾」里的设置，name 不填是导出那一刻的时间；variant 填方案 id 就导那个存着的方案，不用先切过去。这些参数只管这一次，不改「导出 ▾」里的设置。不改拼图、不进撤销、不弹访达窗口；要等 app 写完（大相册可能几十秒；超时的话 app 会接着导完，用同一个 op_id 再调拿结果，换新的 op_id 会再导一份）。用户正在导出时回 user_busy；app 还在排版、或者输出目录在拍摄文件夹里面（下次分析会把成品当成新照片；请用户在「导出 ▾」里点「用默认」或选拍摄文件夹外面的目录）时回 invalid_state。结果里有目录、实际用的倍数和每个文件的路径、像素尺寸、大小。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
-       "scale":{"type":"integer","minimum":1,"maximum":3,"description":"清晰度倍数；不填 = 导出页上选的"},
-       "format":{"type":"string","enum":["jpeg","png","tiff"],"description":"不填 = 导出页上选的"},
+       "scale":{"type":"integer","minimum":1,"maximum":3,"description":"清晰度倍数；不填 = 「导出 ▾」里选的"},
+       "format":{"type":"string","enum":["jpeg","png","tiff"],"description":"不填 = 「导出 ▾」里选的"},
        "name":{"type":"string","maxLength":100,"description":"文件名（不带扩展名）；不填 = 导出那一刻的时间"},
        "variant":{"type":"string","minLength":1,"maxLength":16,"description":"方案 id（collage_get_state 的 variants[].id）；不填 = 现在这一版"},
        "if_digest":"$IF_DIGEST",
