@@ -390,6 +390,22 @@ final class CollageDarkroom: ObservableObject {
         hover = next
     }
 
+    // MARK: - 换页
+
+    var pageCount: Int { store.project.pages.count }
+    var canGoBack: Bool { store.pageIndex > 0 }
+    var canGoForward: Bool { store.pageIndex + 1 < pageCount }
+
+    /// 换跨页（顶栏的 ‹ ›、⌘← ⌘→）：到头不动。悬停清掉、放大镜回到新一页主图那一格的中心（点过的位置是上一页的）；
+    /// store 换页时清掉选中，「这一格」退回这一页。各类渲染跟着 store 变（键里都有页码或这一页的照片），不用另外刷新。
+    func goToPage(_ delta: Int) {
+        let target = store.pageIndex + delta
+        guard delta != 0, store.project.pages.indices.contains(target) else { return }
+        hover = nil
+        loupeAnchor = nil
+        store.pageIndex = target
+    }
+
     /// 底片条上点一格：选中它，「套用到」换成这一格，放大镜挪过去。
     func selectCell(_ path: [Int]) {
         store.selection = path

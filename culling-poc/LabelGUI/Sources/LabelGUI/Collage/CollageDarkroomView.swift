@@ -43,8 +43,17 @@ struct CollageDarkroomView: View {
         .focused($focused)
         .focusEffectDisabled()
         .onAppear { focused = true }
-        .onKeyPress(.leftArrow) { model.moveFocus(-1); return .handled }
-        .onKeyPress(.rightArrow) { model.moveFocus(1); return .handled }
+        // ⌘← / ⌘→ 是换跨页（顶栏的 ‹ ›）：onKeyPress 不看修饰键，带 ⌘ 的放过去。
+        .onKeyPress(.leftArrow, phases: [.down, .repeat]) { press in
+            guard !press.modifiers.contains(.command) else { return .ignored }
+            model.moveFocus(-1)
+            return .handled
+        }
+        .onKeyPress(.rightArrow, phases: [.down, .repeat]) { press in
+            guard !press.modifiers.contains(.command) else { return .ignored }
+            model.moveFocus(1)
+            return .handled
+        }
         .onKeyPress(.upArrow) { model.moveFocus(-model.tab.columns); return .handled }
         .onKeyPress(.downArrow) { model.moveFocus(model.tab.columns); return .handled }
         .onKeyPress(.return) { model.apply(model.focus); return .handled }
@@ -247,8 +256,9 @@ private struct DarkroomTopBar: View {
             HStack(spacing: 6) {
                 Text("暗房").font(.system(size: 13, weight: .semibold)).foregroundStyle(DarkroomPalette.text)
                 Text("·").foregroundStyle(DarkroomPalette.tertiary)
-                Text(model.effectiveScope.label + (store.isAlbum ? " · 跨页 \(store.pageIndex + 1)" : ""))
+                Text(model.effectiveScope.label)
                     .font(.system(size: 13)).foregroundStyle(DarkroomPalette.secondary)
+                if model.pageCount > 1 { pageNavigator }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 12) {
@@ -303,6 +313,40 @@ private struct DarkroomTopBar: View {
         .padding(.horizontal, 14)
         .frame(height: 44)
         .background(DarkroomPalette.sidebar)
+    }
+
+    /// 换跨页：‹ 跨页 3 / 30 ›（单张拼图有好几页时是「页」）。⌘← / ⌘→；← → 本身是换色调（CollageDarkroomView 里
+    /// 带 ⌘ 的不接）。以前暗房里换不了页：30 个跨页逐页定色调，每页都要退出暗房、翻页、再进。
+    private var pageNavigator: some View {
+        let unit = store.isAlbum ? "跨页" : "页"
+        return HStack(spacing: 2) {
+            Text("·").foregroundStyle(DarkroomPalette.tertiary).padding(.trailing, 4)
+            pageButton("chevron.left", "上一\(unit)", enabled: model.canGoBack) { model.goToPage(-1) }
+                .keyboardShortcut(.leftArrow, modifiers: .command)
+                .help("上一\(unit) (⌘←)")
+            Text("\(unit) \(store.pageIndex + 1) / \(model.pageCount)")
+                .font(.system(size: 13)).monospacedDigit().foregroundStyle(DarkroomPalette.secondary)
+                .fixedSize()
+            pageButton("chevron.right", "下一\(unit)", enabled: model.canGoForward) { model.goToPage(1) }
+                .keyboardShortcut(.rightArrow, modifiers: .command)
+                .help("下一\(unit) (⌘→)")
+        }
+    }
+
+    /// 换页的小箭头：没有边框（贴着页码），灰掉时压暗。
+    private func pageButton(_ symbol: String, _ label: String, enabled: Bool,
+                            _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(DarkroomPalette.secondary)
+                .frame(width: 22, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.35)
+        .accessibilityLabel(label)
     }
 
     /// 顶栏的小图标按钮（撤销、重做）：和「原图」同样的发丝边，灰掉时压暗。
@@ -456,7 +500,8 @@ private struct DarkroomPreview: View {
                     .animation(.easeOut(duration: 0.2), value: output.busyLine)
             }
             .overlay(alignment: .bottom) {
-                Text("←→ 换一款 · ⏎ 套用 · 按住空格看原图 · 点图换 1:1 细节的位置 · Esc 完成")
+                Text("←→ 换一款 · ⏎ 套用 · 按住空格看原图 · 点图换 1:1 细节的位置"
+                     + (model.pageCount > 1 ? " · ⌘←→ 换\(model.store.isAlbum ? "跨页" : "页")" : "") + " · Esc 完成")
                     .font(.system(size: 11)).foregroundStyle(DarkroomPalette.tertiary)
                     .padding(.bottom, 12)
             }

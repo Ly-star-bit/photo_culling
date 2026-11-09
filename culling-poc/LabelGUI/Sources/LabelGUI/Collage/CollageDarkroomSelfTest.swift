@@ -25,6 +25,7 @@ import ImageIO
 /// 12. 「这款的数据没读到」：只问缓存，没读过的在后台读、读完再提示（不在主线程上解析表）。
 /// 13. 1:1 细节只渲够得着的那一块，和渲整页再裁逐字节相同：合成照片，投影 + 圆角 + 模糊填（1 倍、0.75 倍）、抠图格、
 ///     卡纸 + 细线 + 纸纹、报纸网点、每张照片 + 整页水印、模板库的散落相纸和封面刊头，都套光谱色调 + 颗粒 + 晕光。
+/// 14. 换跨页：到头不动、不进撤销，选中 / 悬停 / 放大镜位置清掉，暗房渲的每一类都换成新一页的。
 /// 全过退出 0，否则 1。
 enum CollageDarkroomSelfTest {
 
@@ -376,9 +377,76 @@ enum CollageDarkroomSelfTest {
 
         // ---------------------------------------------------------------- 13. 1:1 细节只渲那一块
         print("== 1:1 细节只渲够得着的那一块：和渲整页再裁逐字节比")
-        loupeIdentity(check)
+        let photos = syntheticPhotos(check)
+        if let photos { loupeIdentity(photos, check) }
+
+        // ---------------------------------------------------------------- 14. 换跨页
+        print("== 换跨页")
+        pageTurn(photos, check, spin: spin)
 
         finish(failures)
+    }
+
+    /// 14. 暗房里换跨页（顶栏的 ‹ ›、⌘← ⌘→）：到头不动、不进撤销；换过去选中清掉（「这一格」退回这一页）、悬停和放大镜
+    /// 位置清掉，样张、试条的照片换成新一页的主图；暗房开着渲的那几类（大预览、原图、1:1 细节、底片条、样张）都换成新一页的。
+    @MainActor
+    private static func pageTurn(_ photos: [CollagePhotoRef]?, _ check: (Bool, String, String) -> Void,
+                                 spin: (Double, () -> Bool) -> Void) {
+        var two = project(album: true)
+        two.photos[0].score = 2
+        two.photos[1].score = 1
+        two.pages[1] = CollagePage(root: .leaf(.photo("b")))
+        let nav = CollageStore(dataDir: appDataDir)
+        nav.loadForTesting(two)
+        let dn = CollageDarkroom(store: nav, rendering: false)
+        check(dn.pageCount == 2 && !dn.canGoBack && dn.canGoForward, "两个跨页、在第 1 个：上一跨页灰掉、下一跨页能点", "")
+        nav.selection = [0]
+        dn.scope = .cell
+        dn.loupeAnchor = CGPoint(x: 5, y: 5)
+        dn.hover = .mono
+        let subject = dn.subjectPhotoID
+        let pushes = nav.undoPushes
+        dn.goToPage(1)
+        check(nav.pageIndex == 1 && nav.selection == nil && dn.effectiveScope == .page && dn.loupeAnchor == nil
+              && dn.hover == nil && nav.undoPushes == pushes,
+              "下一跨页：换到第 2 个，选中清掉、「这一格」退回这一页，悬停和放大镜位置清掉，不进撤销", "\(dn.effectiveScope)")
+        check(subject == "a" && dn.subjectPhotoID == "b", "样张、试条的照片换成新一页的主图",
+              "\(subject ?? "无") → \(dn.subjectPhotoID ?? "无")")
+        dn.goToPage(1)
+        check(nav.pageIndex == 1 && dn.canGoBack && !dn.canGoForward, "在最后一个跨页：下一跨页不动、灰掉", "")
+        dn.goToPage(-1)
+        check(nav.pageIndex == 0, "上一跨页回到第 1 个", "")
+
+        // 真渲：合成照片的两个跨页，暗房开着换过去，每一类都换成新一页的。
+        guard let photos else { return }
+        var album = CollageProject()
+        album.mode = .album
+        album.photos = photos
+        album.canvas = CollageCanvas(name: "自检 3:2", width: 1500, height: 1000)
+        album.style.look = .filmWarmSkin
+        album.style.filmGrain = 0.6
+        album.pages = [CollagePage(root: .split(.row, 0.5, .leaf(.photo("p1")), .leaf(.photo("p2")))),
+                       CollagePage(root: .leaf(.photo("p3")))]
+        let live = CollageStore(dataDir: appDataDir)
+        live.loadForTesting(album)
+        live.openDarkroom()
+        guard let dr = live.darkroom else {
+            check(false, "真渲：暗房打开", "")
+            return
+        }
+        func settled() -> Bool { !dr.busy && dr.processed != nil && dr.loupe != nil && !dr.reel.isEmpty && !dr.frames.isEmpty }
+        spin(0.6) { false }
+        spin(60) { settled() }
+        let before = (dr.processed, dr.original, dr.loupe, dr.frames[.filmWarmSkin], dr.reel.map(\.photoID))
+        dr.goToPage(1)
+        spin(0.6) { false }
+        spin(60) { settled() }
+        check(before.4 == ["p1", "p2"] && dr.reel.map(\.photoID) == ["p3"] && dr.processed !== before.0
+              && dr.original !== before.1 && dr.loupe !== before.2 && dr.frames[.filmWarmSkin] !== before.3
+              && dr.subjectPhotoID == "p3",
+              "真渲：换到第 2 个跨页，大预览、原图、1:1 细节、样张、底片条都换成新一页的",
+              "底片条 \(before.4) → \(dr.reel.map(\.photoID))")
+        live.closeDarkroom()
     }
 
     /// 13. 1:1 细节（Options.region：离那一块远的格子不出图）和渲整页再裁逐字节相同。region 的安全边距是按效果估的
@@ -387,24 +455,12 @@ enum CollageDarkroomSelfTest {
     /// Lanczos 都有东西可算）写进隔离的数据目录；每种模板都套光谱色调 + 颗粒 + 晕光，量每格中心、每格左上角（缝、投影
     /// 落的地方）、九宫点、画布四角、散落版每张相纸的中心。
     @MainActor
-    private static func loupeIdentity(_ check: (Bool, String, String) -> Void) {
+    private static func loupeIdentity(_ synthetic: [CollagePhotoRef], _ check: (Bool, String, String) -> Void) {
         guard CollageFilmEffects.extras(.filmWarmSkin) != nil else {
             check(false, "准备：光谱色调的颗粒、晕光数据读得到（third_party/film-luts）", "")
             return
         }
-        let dir = appDataDir.appendingPathComponent("darkroom-selftest-photos")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        var photos: [CollagePhotoRef] = []
-        for (i, size) in [(1500, 1000), (1000, 1500), (1500, 1000), (1200, 1200)].enumerated() {
-            let url = dir.appendingPathComponent("p\(i + 1).jpg")
-            guard writePhoto(url, width: size.0, height: size.1, variant: i) else {
-                check(false, "准备：合成照片写得出来", url.lastPathComponent)
-                return
-            }
-            var p = CollagePhotoRef(id: "p\(i + 1)", path: url.path, width: size.0, height: size.1)
-            p.score = Double(4 - i)
-            photos.append(p)
-        }
+        var photos = synthetic
         // 抠图格那张：一张脸 + 一直到底边的身子（合成蒙版，不跑 Vision）。
         let face: [Double] = [0.42, 0.2, 0.58, 0.36]
         photos[3].faces = [face]
@@ -559,6 +615,24 @@ enum CollageDarkroomSelfTest {
             check(bad.isEmpty, "\(c.name)：\(results.count - bad.count) / \(results.count) 处和渲整页再裁逐字节相同",
                   bad.isEmpty ? "" : "不同：" + bad.joined(separator: " "))
         }
+    }
+
+    /// 四张合成照片（p1–p4：横、竖、横、方）写进隔离的数据目录，主图分数 p1 最高。写不出来 = nil。
+    private static func syntheticPhotos(_ check: (Bool, String, String) -> Void) -> [CollagePhotoRef]? {
+        let dir = appDataDir.appendingPathComponent("darkroom-selftest-photos")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var photos: [CollagePhotoRef] = []
+        for (i, size) in [(1500, 1000), (1000, 1500), (1500, 1000), (1200, 1200)].enumerated() {
+            let url = dir.appendingPathComponent("p\(i + 1).jpg")
+            guard writePhoto(url, width: size.0, height: size.1, variant: i) else {
+                check(false, "准备：合成照片写得出来", url.lastPathComponent)
+                return nil
+            }
+            var p = CollagePhotoRef(id: "p\(i + 1)", path: url.path, width: size.0, height: size.1)
+            p.score = Double(4 - i)
+            photos.append(p)
+        }
+        return photos
     }
 
     /// 合成照片：竖向渐变的天、暖色地面、一个过曝的太阳（晕光）、几根深色柱子（硬边：锐化、Lanczos）、一块红、一个
