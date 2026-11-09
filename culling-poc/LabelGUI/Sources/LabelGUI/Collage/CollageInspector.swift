@@ -903,7 +903,7 @@ struct CollageTextEditor: View {
                 e.gradient = on ? (color.luminance > 0.5 ? CollageColor(hex: 0xE2B657) : CollageColor(hex: 0x3B5B8C)) : nil
             }
             Spacer(minLength: 0)
-            Menu("样式") {
+            Menu("搭配") {
                 ForEach(CollageTextEffects.presets) { preset in
                     Button(preset.name) { store.applyTextEffect(preset, line: index, target: target) }
                 }
@@ -994,7 +994,7 @@ struct CollageExportPanel: View {
                 TextField("文件名（留空 = 导出时间，精确到秒）", text: $store.exportName)
                     .textFieldStyle(.roundedBorder)
                     .help("直接写进输出目录，不另建文件夹；目录里有同名的自动加 -2、-3，不会覆盖")
-                Picker("格式", selection: $store.exportOptions.format) {
+                Picker("文件格式", selection: $store.exportOptions.format) {
                     ForEach(CollageExport.Format.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented)

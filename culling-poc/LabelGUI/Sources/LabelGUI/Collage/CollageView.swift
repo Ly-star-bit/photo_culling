@@ -187,7 +187,7 @@ struct CollageView: View {
         .buttonStyle(.bordered)
         .tint(CollageDarkroomButton.amber)
         .disabled(store.page == nil)
-        .help("整页的看片台：胶片 / 滤镜大样张，悬停就在大预览里看，拖竖线比原图（整组；只改这一页、这一格在「格式」里进）")
+        .help(CollageDarkroomButton.projectHelp)
         .collageSpot(.darkroom, store.nav)
         CollageExportButtons(store: store, compact: compact)
             .collageSpot(.export, store.nav)
@@ -1155,13 +1155,13 @@ struct CollageExportButtons: View {
             }
             // ⌘E 挂在顶栏那组看不见的快捷键上（CollageView.topBarShortcuts）：顶栏两排里各有一个这个按钮。
             .disabled(store.exportBlockedReason != nil)
-            .help(store.exportBlockedReason ?? "按导出设置写到输出目录 (⌘E)；旁边的 ▾ 改文件名、格式、清晰度、输出目录")
+            .help(store.exportBlockedReason ?? "按导出设置写到输出目录 (⌘E)；旁边的 ▾ 改文件名、文件格式、清晰度、输出目录")
             Button {
                 nav.exportShown.toggle()
             } label: {
                 Image(systemName: "chevron.down")
             }
-            .help("导出设置：文件名、格式、清晰度、带不带水印、印刷（出血、PDF）、输出目录")
+            .help("导出设置：文件名、文件格式、清晰度、带不带水印、印刷（出血、PDF）、输出目录")
             // 离屏快照里不弹真的弹出框（截不到，还要一个窗口）：CollageView 把内容画在顶栏下面。
             .popover(isPresented: SnapshotPreview.inlineExport ? .constant(false) : $nav.exportShown,
                      arrowEdge: .bottom) {

@@ -206,8 +206,7 @@ struct CollageLookBox: View {
             VStack(alignment: .leading, spacing: 8) {
                 // 暗房放在色调格上面（以前在这一块最底下，滑杆、加网都过完才看得到，NU2）；顶栏也有「暗房」。
                 CollageDarkroomButton(store: store, scope: .project, title: "进暗房…", prominent: true)
-                    .help("整页的看片台：大样张分胶片 / 滤镜两页（胶片按负片、反转片、电影负片分节），悬停就在大预览里看，"
-                          + "拖竖线比原图，强度试条、颗粒、晕光、1:1 细节都在一处；整组、这一页、这一格都能改")
+                    .help(CollageDarkroomButton.projectHelp)
                 // 和暗房一样分「胶片 / 滤镜」两节（NU9）：以前 27 个混在一格里。
                 swatchSection("胶片", looks: CollageDarkroom.looks(in: .film))
                 swatchSection("滤镜", looks: CollageDarkroom.looks(in: .filter))
