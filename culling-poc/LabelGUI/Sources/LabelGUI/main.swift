@@ -474,7 +474,7 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--watermark-batch"),
     }
 }
 
-// 网格「改判后保持位置」自检：LabelGUI --ux-selftest。
+// 网格「改判后保持位置」自检（另外几组纯函数的也挂在这里）：LabelGUI --ux-selftest。
 if CommandLine.arguments.contains("--ux-selftest") {
     MainActor.assumeIsolated {
         // (说明, 改判前顺序, 改判后顺序, 焦点那张, 期望新焦点 / nil = 不动)
@@ -500,6 +500,7 @@ if CommandLine.arguments.contains("--ux-selftest") {
             print(head + name + " → " + result + want)
         }
         failed += GridExifImportSelfTest.run()  // EXIF 快门 0 不崩、网格多选规则、水印页 RAW+JPG 配对
+        failed += CollageNavSelfTest.run()      // 拼图检视器重排：去那儿（页签、滚动请求）、--tab 新老名字、色调两节
         exit(failed == 0 ? 0 : 1)
     }
 }

@@ -121,6 +121,8 @@ final class CollageStore: ObservableObject {
     let thumbs = CollageThumbs()
     /// 托盘的选中和筛选（CollageTrayState.swift）：只有托盘订阅。
     let tray = CollageTrayState()
+    /// 左栏 / 右栏的页签、「去那儿」（CollageNav.swift）：只有检视器、左栏、顶栏的「导出 ▾」订阅。
+    let nav = CollageNav()
     var preview: NSImage? { previewState.image }
     /// 相册跨页条的缩略图（按页 id）。
     var pageThumbs: [UUID: NSImage] { thumbs.pages }
@@ -1236,7 +1238,7 @@ final class CollageStore: ObservableObject {
         }
         if page.contactSheet != nil {
             // 印样的版式由帧和规格定（一卷就是一卷），没有「换一版」。
-            setNotice("印样按拍摄先后排，没有别的版：改规格、每条帧数在「版式 › 印样」里")
+            setNotice("印样按拍摄先后排，没有别的版：改规格、每条帧数在右栏「格式 › 印样」里（点画布空白处）")
             return
         }
         if page.freeform {
@@ -3973,7 +3975,7 @@ final class CollageStore: ObservableObject {
         return parts.isEmpty ? nil : parts.joined(separator: "；")
     }
 
-    static let fillerBodyWarning = "正文还是灰条或占位字：印出来是要被人读的，在「文字」里换成自己的字"
+    static let fillerBodyWarning = "正文还是灰条或占位字：印出来是要被人读的，选中那一块字，在右栏「格式 › 正文」里换成自己的字"
 
     /// 一个空照片格：kind 是 .photo，却没有照片（没放，或者那张已经不在托盘里）。导出时这一格什么都不画，印出来是一块底色。
     struct EmptySlot: Hashable {

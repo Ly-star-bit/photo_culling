@@ -21,6 +21,9 @@ enum SnapshotPreview {
     @MainActor static var hoverID: String?
     /// 拼图检视器「印样 › 逐帧」一开始就展开（--collage-ui --contact-frames）。界面运行时永远是 false。
     @MainActor static var contactFramesOpen = false
+    /// 拼图顶栏「导出 ▾」的内容画在顶栏下面、不弹真的弹出框（--collage-ui：离屏截不到弹出框的窗口）。
+    /// 界面运行时永远是 false。
+    @MainActor static var inlineExport = false
 }
 
 /// 离屏快照的辅助功能树（--ax-dump）：AppKit 那几样控件（滑杆、分段、输入框、菜单按钮）带着值和能不能点，

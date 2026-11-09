@@ -134,8 +134,11 @@ enum CollageHit {
 
 struct CollageCanvasView: View {
     @ObservedObject var store: CollageStore
-    /// 双击文字格：让检视器切到「文字」。
-    var onEditText: () -> Void = {}
+    /// 双击文字格、手写字、照片上的字：检视器切到「格式」、滚到那个编辑器（textEditor / overlays）。
+    var onEditText: (CollageSpot) -> Void = { _ in }
+    /// 用户在画布上选中了一样东西（格子、字块、图层）：检视器切到「格式」（NU3）。点空白处不调。
+    /// 只接手势：撤销恢复的选中、实时桥、命令行设的选中不切页签（正在样式页拖滑杆时按 ⌘Z 不该被拽走）。
+    var onSelect: () -> Void = {}
 
     private enum DragMode {
         case gutter(CollageLayout.Gutter)
@@ -237,7 +240,7 @@ struct CollageCanvasView: View {
 
     /// 单击立刻选中：以前「双击优先、单击排在后面」，每一下单击都要等双击超时（0.3–0.5 秒）才选上。
     /// 双击的第二下（clickCount = 2）在这里就按双击处理，另外还挂了一个同时识别的双击手势兜底 ——
-    /// 两边都可能走到 doubleTap，它是幂等的（进裁切、切到文字页，做两次和一次一样）。
+    /// 两边都可能走到 doubleTap，它是幂等的（进裁切、切到「格式」的文字编辑器，做两次和一次一样）。
     private func singleTapGesture(layout: CollageCanvasLayout, geometry: CollageLayout.Geometry) -> some Gesture {
         SpatialTapGesture(count: 1).onEnded { value in
             if Self.currentClickCount() >= 2 {
@@ -263,14 +266,17 @@ struct CollageCanvasView: View {
         switch CollageHit.at(p, store: store, geometry: geometry, layout: layout) {
         case .item(let item), .rotateHandle(let item), .resizeHandle(let item):
             store.selectItem(item.id)
+            onSelect()
         case .overlay(let f, let i, _):
             store.selection = f.path
             store.overlayIndex = i
+            onSelect()
         case .gutter(let g):
             if NSEvent.modifierFlags.contains(.option) { store.flipGutter(g.path) }
         case .cell(let f):
             if store.cropEditing, store.selection != f.path { store.exitCropEdit() }
             store.selection = f.path
+            onSelect()
         case .none:
             store.exitCropEdit()
             store.selection = nil
@@ -283,13 +289,14 @@ struct CollageCanvasView: View {
         let hit = CollageHit.at(p, store: store, geometry: geometry, layout: layout)
         if case .item(let item) = hit {
             store.selectItem(item.id)
-            if item.kind == .text { onEditText() }
+            onSelect()
+            if item.kind == .text { onEditText(.textEditor) }
             return
         }
         if case .overlay(let f, let i, _) = hit {
             store.selection = f.path
             store.overlayIndex = i
-            onEditText()
+            onEditText(.overlays)
             return
         }
         guard case .cell(let f) = hit else { return }
@@ -298,10 +305,11 @@ struct CollageCanvasView: View {
             if f.cell.photoID != nil { store.enterCropEdit(f.path) }
         case .text:
             store.selection = f.path
-            onEditText()
+            onEditText(.textEditor)
         case .empty:
             store.selection = f.path
         }
+        onSelect()
     }
 
     // MARK: - 拖动：拖缝 / 挪格子 / 裁切平移
@@ -328,6 +336,7 @@ struct CollageCanvasView: View {
         switch hit {
         case .item(let item):
             store.selectItem(item.id)
+            onSelect()
             store.beginContinuousEdit()
             return .item(item)
         case .rotateHandle(let item):
@@ -340,6 +349,7 @@ struct CollageCanvasView: View {
         case .overlay(let f, let i, let rect):
             store.selection = f.path
             store.overlayIndex = i
+            onSelect()
             store.beginContinuousEdit()
             return .overlay(f.path, i, store.overlayArea(for: f), CGPoint(x: rect.midX, y: rect.midY))
         case .gutter(let g):
@@ -349,6 +359,7 @@ struct CollageCanvasView: View {
             guard f.cell.kind != .empty || f.cell.photoID != nil else { return nil }
             if store.cropEditing { store.exitCropEdit() }
             store.selection = f.path
+            onSelect()
             return .move(f.path)
         case .none:
             return nil

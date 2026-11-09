@@ -204,14 +204,19 @@ struct CollageLookBox: View {
         let film = CollageFilmEffects.filmControls(store.project)
         GroupBox("色调") {
             VStack(alignment: .leading, spacing: 8) {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 60), spacing: 6)], spacing: 8) {
-                    ForEach(CollageLook.allCases, id: \.self) { look in
-                        swatch(look)
-                    }
-                }
+                // 暗房放在色调格上面（以前在这一块最底下，滑杆、加网都过完才看得到，NU2）；顶栏也有「暗房」。
+                CollageDarkroomButton(store: store, scope: .project, title: "进暗房…", prominent: true)
+                    .help("整页的看片台：大样张分胶片 / 滤镜两页（胶片按负片、反转片、电影负片分节），悬停就在大预览里看，"
+                          + "拖竖线比原图，强度试条、颗粒、晕光、1:1 细节都在一处；整组、这一页、这一格都能改")
+                // 和暗房一样分「胶片 / 滤镜」两节（NU9）：以前 27 个混在一格里。
+                swatchSection("胶片", looks: CollageDarkroom.looks(in: .film))
+                swatchSection("滤镜", looks: CollageDarkroom.looks(in: .filter))
                 CollageSlider(label: "强度", value: binding(\.lookStrength), range: 0...1,
                               display: percentText(store.project.style.lookStrength))
                     .disabled(store.project.style.look == .none)
+                if store.project.style.look == .none {
+                    hint("整组没套色调（不调色）：强度不起作用。")
+                }
                 CollageSlider(label: "颗粒", value: binding(\.filmGrain), range: 0...1,
                               display: percentText(store.project.style.filmGrain))
                     .disabled(!film.texture)
@@ -253,37 +258,13 @@ struct CollageLookBox: View {
                 CollageSlider(label: "统一色温", value: binding(\.harmonize), range: 0...1,
                               display: percentText(store.project.style.harmonize))
                     .help("其余照片的色温、明暗往主图靠：不同时间、不同光线拍的放在一起才像一组")
-                HStack(spacing: 6) {
-                    Text("这一页").font(.caption).frame(width: 56, alignment: .leading)
-                    Menu(store.page?.look.map { $0.look.label } ?? "跟着整体") {
-                        Button("跟着整体") { store.setPageLook(nil) }
-                        Divider()
-                        ForEach(CollageLook.allCases, id: \.self) { look in
-                            Button(look.label) {
-                                store.setPageLook(CollageLookSetting(look: look, strength: store.project.style.lookStrength))
-                            }
-                        }
-                    }
-                    .fixedSize()
-                    .disabled(store.page == nil)
-                    .help("只给这一页换色调（整章黑白、一期杂志里的一页黑白）；格子还能在「版式」里单独设")
-                }
                 halftoneControls
-                Button {
-                    store.openDarkroom()
-                } label: {
-                    Label("进暗房…", systemImage: "film")
-                        .frame(maxWidth: .infinity)
-                }
-                .controlSize(.large)
-                .buttonStyle(.bordered)
-                .tint(Color(red: 1, green: 0.702, blue: 0.251))
-                .disabled(store.page == nil)
-                .help("整页的看片台：大样张分胶片 / 滤镜两页（胶片按负片、反转片、电影负片分节），悬停就在大预览里看，"
-                      + "拖竖线比原图，强度试条、颗粒、晕光、1:1 细节都在一处；整组、这一页、这一格都能改")
                 Text("整组照片套同一个色调；导出和预览一样。黑白、旧照的强度只管影调。")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
+                // 这一页的色调在「格式 › 这一页」，这一格的在选中照片的「格式 › 色调」（三级各在各的位置）。
+                CollageJumpText(store: store, lead: "只给这一页换：", spot: .pageLook,
+                                tail: "；只给一格换：选中那张照片，在「格式」里。")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
@@ -300,6 +281,18 @@ struct CollageLookBox: View {
         Text(text)
             .font(.caption2).foregroundStyle(.tertiary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// 一节色调样张（胶片 / 滤镜）：小标题 + 一格样张。
+    private func swatchSection(_ title: String, looks: [CollageLook]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 60), spacing: 6)], spacing: 8) {
+                ForEach(looks, id: \.self) { look in
+                    swatch(look)
+                }
+            }
+        }
     }
 
     /// 照片加网（报纸风）：开关、网型、点距、网点增大、墨色、纸色。纸色默认跟页面底色（深色页上换成纸白）。
@@ -871,7 +864,7 @@ struct CollageContactBox: View {
             Button("跟着底色") { store.updateContactSheet { $0.paper = nil } }
                 .font(.caption)
                 .disabled(sheet.paper == nil)
-                .help("用工程的底色（样式页里的底色、取色底）")
+                .help("用工程的底色（「样式 › 底色」里的底色、取色底）")
         }
     }
 
@@ -1175,8 +1168,7 @@ struct CollageItemBox: View {
                     }
                 }
             }
-        } else {
-            Text("内容和字体在「文字」里改").font(.caption).foregroundStyle(.secondary)
         }
+        // 手写字：字的内容、字体在下面的「排版」「第 N 行」里（同在「格式」这一页）。
     }
 }

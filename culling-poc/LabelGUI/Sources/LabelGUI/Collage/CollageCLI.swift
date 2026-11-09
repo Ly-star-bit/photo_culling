@@ -767,7 +767,7 @@ enum CollageCLI {
 
 // MARK: - 界面离屏快照（不开 GUI：禁止激活、窗口从不显示）
 
-/// LabelGUI --collage-ui <photo_dir> <out.png> [--album [--target-spreads 20@1-6]] [--tab 版式|样式|文字|水印|导出] [--select 路径如 10]
+/// LabelGUI --collage-ui <photo_dir> <out.png> [--album [--target-spreads 20@1-6] [--album-theme fineArt]] [--tab 格式|样式|文档|照片|模板|素材] [--select 路径如 10]
 /// [--crop] [--overlay-index N] [--size 1440x900] [--adopt photos|page[:水印页预设名]] [--inspector-width 300] [--notice 提示文字]
 /// [--contact-frames]（印样的「逐帧」一开始就展开）[--light]（浅色外观）[--ax-dump]
 /// [--tray-filter all|unused|used] [--tray-select ID,ID]（托盘的筛选、多选）
@@ -778,11 +778,16 @@ enum CollageCLI {
 /// 截图前先改工程（都可选）：--relayout [--count 6]（托盘重新自动排版，几张；工程里还没有版式时也排）、
 /// --layout grid|scatter、--template <模板名>、--title 标题、--subtitle 副标题、--style <样式预设 key>、--wm photos:/sig.png[,page:…]（签名水印）、--look <色调>、
 /// --film-exposure / --film-warmth / --film-format（冲印区）、--overlay <压字预设>（放在主图那一格并选中它）、--page N（相册第 N 个跨页，从 0 起；先换页再选格子）、
-/// --select-item N（选中第 N 个自由图层）、--darkroom（开着暗房截，CollageDarkroom：可再给
+/// --select-item N（选中第 N 个自由图层）、--add-item text|<贴纸 rawValue>（加一个手写字 / 贴纸并选中）、--darkroom（开着暗房截，CollageDarkroom：可再给
 /// --darkroom-scope page|cell、--darkroom-hover <色调>、--darkroom-split 0.3、--darkroom-original（按住空格））。
 /// --inspector-width N：只截检视器、宽 N pt（高取 --size 的高）—— 窗口里检视器能拖到 300…380，
 /// 分栏视图给多宽外面定不准，单独截才能逐个宽度看有没有挤出去。
-/// --tab 水印 时另外打印面板上每层显示什么（「水印面板」行）；--ax-dump 打印辅助功能树（滑杆、分段、输入框）。
+/// --tab：格式 / 样式 / 文档 是右栏检视器的页签，照片 / 模板 / 素材 是左栏的页签（另一边照默认：右栏「格式」、左栏「照片」）；
+/// 老名字照样认（CollageNav.snapshotTab）：版式 → 格式；文字 → 选中了东西是格式、没选中是文档的标题和刊头；
+/// 水印 → 文档、滚到水印那一段；导出 → 顶栏「导出 ▾」摊开（弹出框截不到，画在顶栏下面）。--tray 照片|模板|素材 单独给左栏，
+/// --go <CollageSpot 的 rawValue>（looks、kits、watermark…）= 截图前点一下指路的字：切页签、滚过去、那一块描边。
+/// --tab 水印 / 文档 时另外打印面板上每层显示什么（「水印面板」行），--tab 导出 打印「导出面板」行；
+/// --ax-dump 打印辅助功能树（滑杆、分段、输入框）。
 /// 用和 app 一模一样的 CollageView 在离屏窗口里布局、渲染成 PNG —— 我不能打开界面，
 /// 用它看排布、控件有没有挤、画布叠加层对不对。
 enum CollageUISnapshot {
@@ -822,6 +827,8 @@ enum CollageUISnapshot {
             store.setMode(.album)
             // --target-spreads 20 / 20@1-6：目标跨页数（看检视器里那一块、跨页条的「现在/目标」和标橙）。
             if let t = option("--target-spreads"), let b = CollageCLI.parseBudget(t) { store.setAlbumBudget(b) }
+            // --album-theme classic|fineArt：编排主题（看婚礼 fine-art 时最挤的那排顶栏）。
+            if let t = option("--album-theme").flatMap(CollageAlbumTheme.init(rawValue:)) { store.setAlbumTheme(t) }
             store.autoArrangeAlbum(dedupe: true)
             spin(60) { !store.project.pages.isEmpty && store.busyText == nil }
         } else if store.root == nil || args.contains("--relayout") {
@@ -885,6 +892,16 @@ enum CollageUISnapshot {
         if let i = option("--select-item").flatMap(Int.init), store.items.indices.contains(i) {
             store.selectItem(store.items[i].id)
         }
+        // --add-item text|<贴纸 rawValue>：加一个手写字 / 贴纸（和左栏「素材」同一个方法，加完就选中它），看选中图层时的「格式」。
+        if let kind = option("--add-item") {
+            if kind == "text" {
+                store.addItemText()
+            } else if let sticker = CollageSticker(rawValue: kind) {
+                store.addSticker(sticker)
+            } else {
+                print("--add-item 不认识：\(kind)")
+            }
+        }
         // --tray-filter all|unused|used、--tray-select ID,ID：截托盘的筛选和多选（离屏点不了）。
         if let f = option("--tray-filter").flatMap(CollageTrayState.Filter.init(rawValue:)) { store.tray.filter = f }
         if let ids = option("--tray-select") { store.tray.selection = Set(ids.split(separator: ",").map(String.init)) }
@@ -922,14 +939,26 @@ enum CollageUISnapshot {
         }
         // --contact-frames：印样的「逐帧」一开始就展开（离屏点不了展开箭头）。
         SnapshotPreview.contactFramesOpen = args.contains("--contact-frames")
-        let tab: CollageInspector.Tab = CollageInspector.Tab.allCases.first { $0.rawValue == option("--tab") } ?? .layout
+        // --tab：新名字、老名字都认（CollageNav.snapshotTab）；不认识的照旧当没给（以前也是落回默认页签）。
+        let tabName = option("--tab")
+        let hasSelection = store.selection != nil || store.selectedItem != nil
+        let snapTab = tabName.flatMap { CollageNav.snapshotTab($0, hasSelection: hasSelection) }
+        if let name = tabName, snapTab == nil { print("--tab 只认 \(CollageNav.snapshotTabNames)，没有「\(name)」") }
+        if let t = snapTab?.inspector { store.nav.inspectorTab = t }
+        if let t = snapTab?.tray { store.nav.trayTab = t }
+        if let t = option("--tray").flatMap({ name in CollageTrayTab.allCases.first { $0.label == name || $0.rawValue == name } }) {
+            store.nav.trayTab = t
+        }
+        // 离屏截不到弹出框：「导出 ▾」摊开时一律画在顶栏下面（--tab 导出、--go export）。
+        SnapshotPreview.inlineExport = true
+        if snapTab?.export == true { store.nav.exportShown = true }
         let sizeParts = (option("--size") ?? "1440x900").split(separator: "x").compactMap { Double($0) }
         let size = NSSize(width: sizeParts.first ?? 1440, height: sizeParts.count > 1 ? sizeParts[1] : 900)
 
         // 离屏截图里 AppKit 面板底色会画成白的，深色模式的白字就看不见了：--light 用浅色看控件。
         let light = args.contains("--light")
         let inspectorWidth = option("--inspector-width").flatMap(Double.init).map { CGFloat($0) }
-        let view = CollageSnapshotHost(store: store, batchStore: batch, watermarkStore: watermarkStore, tab: tab,
+        let view = CollageSnapshotHost(store: store, batchStore: batch, watermarkStore: watermarkStore,
                                        inspectorWidth: inspectorWidth)
             .frame(width: inspectorWidth ?? size.width, height: size.height)
             .environment(\.colorScheme, light ? .light : .dark)
@@ -941,6 +970,11 @@ enum CollageUISnapshot {
         host.layoutSubtreeIfNeeded()
         // 等备选缩略图、预览渲染、跨页缩略图都出来。
         spin(4)
+        // 老名字「水印」「文字」要滚到那一段（不描边：截图要稳定）。
+        if let spot = snapTab?.spot {
+            store.nav.go(spot, flash: false)
+            spin(1)
+        }
         // 暗房：等样张、大预览、试条、底片条、放大镜都渲完（放大镜是导出尺寸，最多等 60 秒）。
         if let dr = store.darkroom {
             spin(60) { !dr.busy && dr.processed != nil && dr.loupe != nil }
@@ -962,6 +996,13 @@ enum CollageUISnapshot {
         if let text = option("--notice") { store.setNotice(text) }
         host.layoutSubtreeIfNeeded()
         spin(1.5)
+        // --go：真的点一下指路的字（切页签、滚过去、描边），截在描边还亮着的时候（描边 0.12 秒后亮、亮 1.6 秒）。
+        if let spot = option("--go").flatMap(CollageSpot.init(rawValue:)) {
+            store.go(spot)
+            spin(0.7)
+            print("去 \(spot.label)：左栏 \(store.nav.trayTab.label) · 右栏 \(store.nav.inspectorTab.rawValue)"
+                  + (store.nav.exportShown ? " · 导出设置摊开" : "") + " · 描边 \(store.nav.flash.spot?.rawValue ?? "无")")
+        }
         guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
             print("快照失败")
             exit(1)
@@ -974,10 +1015,10 @@ enum CollageUISnapshot {
             print("写不出 \(out.path)")
             exit(1)
         }
-        if tab == .watermark {
+        if tabName == "水印" || tabName == "文档" {
             for line in CollageWatermarkPanel.describe(store) { print(line) }
         }
-        if tab == .export {
+        if snapTab?.export == true {
             let wm = store.project.watermark
             let shown = CollageExportPanel.showsWatermarkToggle(wm)
             print("导出面板 「导出带水印」" + (shown ? "显示" : "不显示")
@@ -990,12 +1031,11 @@ enum CollageUISnapshot {
     }
 }
 
-/// 快照用：CollageView 的检视器 tab 是 @State，外面设不进去 —— 这里包一层直接给初值。
+/// 快照用：整个拼图页，或者只截检视器（页签在 store.nav 里，建视图之前设好）。
 private struct CollageSnapshotHost: View {
     let store: CollageStore
     let batchStore: BatchStore
     let watermarkStore: WatermarkStore
-    let tab: CollageInspector.Tab
     /// 只截检视器（--inspector-width）。
     let inspectorWidth: CGFloat?
 
@@ -1003,9 +1043,9 @@ private struct CollageSnapshotHost: View {
         // 离屏没有窗口底色：不垫一层，透明处存成 PNG 是黑的，黑字就看不见了。
         Group {
             if inspectorWidth != nil {
-                CollageInspector(store: store, watermarkStore: watermarkStore, tab: .constant(tab))
+                CollageInspector(store: store, watermarkStore: watermarkStore)
             } else {
-                CollageView(store: store, batchStore: batchStore, watermarkStore: watermarkStore, initialTab: tab)
+                CollageView(store: store, batchStore: batchStore, watermarkStore: watermarkStore)
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))

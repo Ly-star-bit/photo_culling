@@ -2,41 +2,52 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
-/// 右侧检视器：版式 / 样式 / 文字 / 水印 / 导出。所有改动都走 store 的方法（进撤销栈）。
+/// 右侧检视器：格式 / 样式 / 文档（照 Keynote：选中什么「格式」就显示什么，样式管整组，文档管整个工程）。
+/// 模板、素材在左栏，导出设置在顶栏「导出 ▾」。所有改动都走 store 的方法（进撤销栈）。
 struct CollageInspector: View {
     enum Tab: String, CaseIterable {
-        case layout = "版式"
+        /// 选中的照片格 / 文字 / 图层；什么都没选 = 这一页（CollageFormatPanel.swift）。
+        case format = "格式"
+        /// 整组：风格、色调、留白、底色、边框。
         case style = "样式"
-        case text = "文字"
-        case watermark = "水印"
-        case export = "导出"
+        /// 整个工程：画布、标题和刊头、水印。
+        case document = "文档"
     }
 
-    @ObservedObject var store: CollageStore
+    let store: CollageStore
+    /// 页签、「去那儿」的滚动（store.nav）：换页签只重算检视器。
+    @ObservedObject var nav: CollageNav
     let watermarkStore: WatermarkStore
-    @Binding var tab: Tab
+
+    init(store: CollageStore, watermarkStore: WatermarkStore) {
+        self.store = store
+        self.nav = store.nav
+        self.watermarkStore = watermarkStore
+    }
 
     var body: some View {
         let _ = CollagePerf.body("检视器")
         VStack(spacing: 0) {
-            Picker("", selection: $tab) {
+            Picker("", selection: $nav.inspectorTab) {
                 ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .padding(8)
+            .help("格式：选中的照片、文字、贴纸（没选中 = 这一页）；样式：整组的风格、色调、留白；文档：画布、标题、水印")
             Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    switch tab {
-                    case .layout: CollageLayoutPanel(store: store)
-                    case .style: CollageStylePanel(store: store)
-                    case .text: CollageTextPanel(store: store)
-                    case .watermark: CollageWatermarkPanel(store: store, watermarkStore: watermarkStore)
-                    case .export: CollageExportPanel(store: store)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        switch nav.inspectorTab {
+                        case .format: CollageFormatPanel(store: store)
+                        case .style: CollageStylePanel(store: store)
+                        case .document: CollageDocumentPanel(store: store, watermarkStore: watermarkStore)
+                        }
                     }
+                    .padding(10)
                 }
-                .padding(10)
+                .collageScrollTarget(.inspector, nav: nav, proxy: proxy)
             }
         }
         // 滑杆松手 = 这一次拖动结束（CollageSlider 读它，CollageStore.endCoalescing）。
@@ -88,40 +99,35 @@ extension CollageColor {
 
 private func percent(_ v: Double) -> String { String(format: "%.1f%%", v * 100) }
 
-// MARK: - 版式
+// MARK: - 文档：画布 → 标题和刊头 → 水印
 
-struct CollageLayoutPanel: View {
-    @ObservedObject var store: CollageStore
-    @State private var templateName = ""
-    /// nil = 跟着这一页（套固定比例的模板来的默认关）。
-    @State private var templateFits: Bool?
-    @State private var customW = ""
-    @State private var customH = ""
-    @State private var templateToDelete: String?
+struct CollageDocumentPanel: View {
+    let store: CollageStore
+    let watermarkStore: WatermarkStore
 
     var body: some View {
-        let _ = CollagePerf.body("版式面板")
-        canvasBox
-        if let item = store.selectedItemValue {
-            // 换了图层就换一个面板实例：输入框迟到的提交只会写回它自己那张（按 id 认）。
-            CollageItemBox(store: store, item: item)
-                .id(item.id)
-        } else if store.selectedCell != nil {
-            cellBox
+        let _ = CollagePerf.body("文档面板")
+        CollageCanvasBox(store: store)
+            .collageSpot(.canvas, store.nav)
+        CollageTitleBox(store: store)
+            .collageSpot(.titles, store.nav)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("水印").font(.subheadline.weight(.semibold))
+                .padding(.top, 4)
+            CollageWatermarkPanel(store: store, watermarkStore: watermarkStore)
         }
-        if let sheet = store.page?.contactSheet {
-            // 印样：没有格子、没有缝，版式由规格和帧定。
-            CollageContactBox(store: store, sheet: sheet)
-        } else if !store.isFreeform {
-            layoutBox
-        }
-        CollageDecorBox(store: store)
-        templateBox
+        .collageSpot(.watermark, store.nav)
     }
+}
 
-    // 画布
+// 画布
 
-    private var canvasBox: some View {
+struct CollageCanvasBox: View {
+    @ObservedObject var store: CollageStore
+    @State private var customW = ""
+    @State private var customH = ""
+
+    var body: some View {
         GroupBox("画布") {
             VStack(alignment: .leading, spacing: 8) {
                 Menu {
@@ -137,7 +143,7 @@ struct CollageLayoutPanel: View {
                 } label: {
                     Text(store.project.canvas.name).lineLimit(1)
                 }
-                .help("换画布：版式按比例缩放；想让照片重新贴合原比例，点下面的「贴合原比例」")
+                .help("换画布：版式按比例缩放；想让照片重新贴合原比例，点画布空白处，在「格式 › 这一页」里点「贴合原比例」")
                 HStack(spacing: 4) {
                     TextField("宽", text: $customW).frame(width: 64)
                     Text("×")
@@ -160,6 +166,10 @@ struct CollageLayoutPanel: View {
                     // 目标跨页数、每跨页张数（CollageAlbumBudget.swift）。
                     Divider()
                     CollageAlbumBudgetControls(store: store)
+                }
+                if store.isAlbum || store.project.canvas.bleed > 0 {
+                    CollageJumpText(store: store, lead: "出血、安全区、印刷 PDF 在顶栏", spot: .export, tail: "里",
+                                    title: "导出 ▾")
                 }
             }
             // 每一块都撑满检视器的宽（以前「画布」「输出目录」两块按内容收窄，和别的块对不齐）。
@@ -192,7 +202,7 @@ struct CollageLayoutPanel: View {
         if canvas.binding == .glued {
             let crossing = store.crossFoldPages()
             if !crossing.isEmpty {
-                Label("第 " + crossing.map { "\($0 + 1)" }.joined(separator: "、") + " 页有照片压在中缝上：到那一页点「换一批」",
+                Label("第 " + crossing.map { "\($0 + 1)" }.joined(separator: "、") + " 页有照片压在中缝上：到那一页点备选条的「换一批」",
                       systemImage: "exclamationmark.triangle.fill")
                     .font(.caption2).foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
@@ -212,306 +222,6 @@ struct CollageLayoutPanel: View {
         c.height = h
         c.name = "自定义 \(w)×\(h)"
         store.setCanvas(c)
-    }
-
-    // 选中的格子
-
-    private var cellBox: some View {
-        GroupBox("选中的格子") {
-            VStack(alignment: .leading, spacing: 8) {
-                if let cell = store.selectedCell {
-                    Text(cellTitle(cell)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    if cell.kind == .photo, cell.photoID != nil {
-                        photoCellControls(cell)
-                        if selectedWindow?.hitsBystander == true {
-                            Label("取景里有路人：双击格子拖一拖，或者换「半身」「特写」", systemImage: "person.2.fill")
-                                .font(.caption2).foregroundStyle(.orange)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        if store.project.canvas.isPrint, let up = selectedUpscale, up > CollageStore.upscaleLimit {
-                            Label("这张要放大到 \(Int((up * 100).rounded()))% 才铺得满，超过 120% 印出来会软：少裁一点、换「完整显示」，或者给它小一点的格子",
-                                  systemImage: "plus.magnifyingglass")
-                                .font(.caption2).foregroundStyle(.orange)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        Text(cell.overlay == nil ? "要在这张照片上压字：到「文字」里选一个样式" : "照片上压了字：在「文字」里改内容、位置、深浅")
-                            .font(.caption2).foregroundStyle(.tertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } else if cell.kind == .text {
-                        Text("在「文字」里编辑内容和字体").font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        Text("空格子：从托盘拖一张照片进来").font(.caption).foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Button(cell.locked ? "解锁" : "锁定") { store.toggleLock() }
-                            .help("锁定的格子在「换一批」时位置和大小都不动")
-                        Spacer()
-                        Button("删除格子", role: .destructive) {
-                            if let path = store.selection { store.removeCell(path) }
-                        }
-                        .help("删掉这一格，其余自动补位 (Delete)")
-                    }
-                    if store.isAlbum, store.selectedCell?.photoID != nil {
-                        HStack {
-                            Button("移到上一跨页") { store.moveSelectedPhoto(toPage: store.pageIndex - 1) }
-                                .disabled(store.pageIndex == 0)
-                            Button("移到下一跨页") { store.moveSelectedPhoto(toPage: store.pageIndex + 1) }
-                                .disabled(store.pageIndex >= store.project.pages.count - 1)
-                        }
-                        .font(.caption)
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(4)
-        }
-    }
-
-    /// 选中那一格印出来要放大多少。
-    private var selectedUpscale: Double? {
-        guard let path = store.selection, let frame = store.geometry.frames.first(where: { $0.path == path }) else {
-            return nil
-        }
-        return store.upscale(for: frame)
-    }
-
-    /// 选中那一格现在的取景（看有没有路人）。
-    private var selectedWindow: CollageCrop.Window? {
-        guard let path = store.selection, let frame = store.geometry.frames.first(where: { $0.path == path }) else {
-            return nil
-        }
-        return store.window(for: frame)
-    }
-
-    private func cellTitle(_ cell: CollageCell) -> String {
-        switch cell.kind {
-        case .photo: return cell.photoID.map { "照片 \($0)" } ?? "空照片格"
-        case .text: return "文字格"
-        case .empty: return "留白格"
-        }
-    }
-
-    @ViewBuilder
-    private func photoCellControls(_ cell: CollageCell) -> some View {
-        // 标签自己占一行宽（fixedSize）：五段（多了「封面」）在 300pt 宽的检视器里会把「景别」挤成竖着两行。
-        HStack(spacing: 8) {
-            Text("景别").fixedSize()
-            Picker("景别", selection: Binding(get: { cell.framing }, set: { store.setFraming($0) })) {
-                ForEach(CollageFraming.allCases, id: \.self) { Text($0.label).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-        }
-        .help("按人脸一键取景：全身 = 尽量大；半身 = 腰以上；特写 = 头肩；封面 = 头顶压进刊头底部（刊头设成人物挡字）。"
-              + "自动 = 小格收近景")
-        Picker("形状", selection: Binding(get: { cell.shape }, set: { store.setShape($0) })) {
-            Text("跟随样式").tag(CollageShape?.none)
-            ForEach(CollageShape.allCases, id: \.self) { Text($0.label).tag(CollageShape?.some($0)) }
-        }
-        Toggle("完整显示，不裁", isOn: Binding(get: { cell.contain }, set: { store.setContain($0) }))
-            .help("照片按原比例整张放进格子，四周留底色")
-        cutoutControls(cell)
-        if cell.contain {
-            Toggle("四周用本图模糊填", isOn: Binding(get: { cell.containBlur }, set: { store.setContainBlur($0) }))
-                .help("不留底色：这张照片自己大幅模糊铺满整格，清楚的那张浮在正中（横格放竖图常用）")
-        }
-        // 和上面「景别」「形状」同一种行：标签字号、对齐都跟着它们。
-        Picker("色调", selection: Binding(get: { cell.look?.look }, set: { look in
-            store.setCellLook(look.map { CollageLookSetting(look: $0, strength: store.project.style.lookStrength) })
-        })) {
-            Text("跟着页面").tag(CollageLook?.none)
-            Divider()
-            ForEach(CollageLook.allCases, id: \.self) { Text($0.label).tag(CollageLook?.some($0)) }
-        }
-        .help("只给这一格换色调（彩色里放一张黑白）；字的深浅、水印的自动深浅跟着它")
-        HStack {
-            if store.cropEditing {
-                Button("完成裁切") { store.exitCropEdit() }
-                    .keyboardShortcut(.return, modifiers: [])
-            } else {
-                Button("调整裁切…") { if let p = store.selection { store.enterCropEdit(p) } }
-                    .help("也可以双击格子：拖动平移、捏合缩放")
-            }
-            Button("还原自动") { store.resetCrop() }
-                .disabled(cell.crop == nil)
-        }
-        if store.cropEditing, let path = store.selection {
-            zoomSlider(path: path)
-        }
-    }
-
-    /// 抠图：只画主体（主体蒙版切出来），背景透出页面；可选白色贴纸边、投影。认不出主体时照常画整张。
-    @ViewBuilder
-    private func cutoutControls(_ cell: CollageCell) -> some View {
-        let path = store.selection ?? []
-        Toggle("抠图（只留人，背景透出页面）", isOn: Binding(get: { cell.cutout != nil }, set: { on in
-            store.setCutout(on ? CollageCutout() : nil, at: path)
-        }))
-        .help("用主体蒙版只画人（或主体），格子的其余地方露出页面底色；可以压在大字上（字设成「人物挡字」）。"
-              + CollageMasks.cutoutCaveat)
-        if let cutout = cell.cutout {
-            // 这一张不抠（认不出主体、贴不到成品底边）：白边、投影没有东西可画，灰掉（和压字深度一样）。
-            let frame = store.geometry.frames.first(where: { $0.path == path })
-            let decided = frame.flatMap { store.coverResolution(for: $0) }
-            let refused = decided.map { $0.mask == nil || $0.cutoutReason != nil } ?? false
-            Text(CollageMasks.cutoutCaveat)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Toggle("人要贴着成品底边", isOn: Binding(get: { cutout.toEdge }, set: { v in
-                var c = cutout
-                c.toEdge = v
-                store.setCutout(c, at: path)
-            }))
-            .font(.caption)
-            .help("开着：取景底边那一条要是人（身子、腿），贴不上就不抠、整张照片照放（巨型数字的做法）；关掉 = 照样抠")
-            CollageSlider(label: "白边",
-                          value: Binding(get: { cutout.stroke }, set: { v in
-                              var c = cutout
-                              c.stroke = v
-                              store.setCutout(c, at: path, coalesce: true)
-                          }),
-                          range: 0...0.02, display: String(format: "%.1f%%", cutout.stroke * 100))
-                .help("贴纸那样的一圈白边（相对画布短边）")
-                .disabled(refused)
-                .opacity(refused ? 0.45 : 1)
-            CollageSlider(label: "投影",
-                          value: Binding(get: { cutout.shadow }, set: { v in
-                              var c = cutout
-                              c.shadow = v
-                              store.setCutout(c, at: path, coalesce: true)
-                          }),
-                          range: 0...1, display: String(format: "%.2f", cutout.shadow))
-                .disabled(refused)
-                .opacity(refused ? 0.45 : 1)
-            if let decided {
-                if decided.mask == nil {
-                    Text("这张照片认不出主体，照常画整张").font(.caption2).foregroundStyle(.orange)
-                } else if let why = decided.cutoutReason {
-                    Text(why).font(.caption2).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        }
-    }
-
-    private func zoomSlider(path: [Int]) -> some View {
-        let frame = store.geometry.frames.first { $0.path == path }
-        let base = frame.flatMap { store.cropBaseline(for: $0) }
-        let binding = Binding<Double>(
-            get: { base?.zoom ?? 1 },
-            set: { z in
-                guard let base else { return }
-                store.setCrop(CollageCropOverride(cx: base.cx, cy: base.cy, zoom: z), at: path)
-            })
-        return CollageSlider(label: "缩放", value: binding, range: 1...6,
-                             display: String(format: "%.1f×", base?.zoom ?? 1))
-    }
-
-    // 版式操作
-
-    private var layoutBox: some View {
-        GroupBox("版式") {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Button("贴合原比例") { store.refit() }
-                        .disabled(store.root == nil)
-                        .help("结构不变，按照片原比例重算每条缝的位置（手动拖过的缝会被重算）")
-                    if !store.alternatives.isEmpty {
-                        Text(store.alternativeIndex < 0 ? "备选 \(store.alternatives.count) 版"
-                             : "第 \(store.alternativeIndex + 1)/\(store.alternatives.count) 版")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                Text("加文字格").font(.caption).foregroundStyle(.secondary)
-                HStack(spacing: 6) {
-                    Button("上") { store.addTextCell(edge: .top, vertical: false) }
-                    Button("下") { store.addTextCell(edge: .bottom, vertical: false) }
-                    Button("左 · 竖排") { store.addTextCell(edge: .left, vertical: true) }
-                    Button("右 · 竖排") { store.addTextCell(edge: .right, vertical: true) }
-                }
-                .font(.caption)
-                .disabled(store.root == nil)
-                .help("选中格子时加在那一格旁边，否则加在整版的这一边")
-                Button("改成印样") { store.makeContactSheet() }
-                    .font(.caption)
-                    .disabled(store.project.photos.isEmpty)
-                    .help("托盘的照片按拍摄先后排成一卷：连续的片条、齿孔、帧号，精选红圈、废片打叉（可以撤销）"
-                          + (store.isAlbum ? "。相册跨页里印样放在右页，不跨中缝；别的跨页用了的照片不拿" : ""))
-                Text("画布上：拖缝调大小 · ⌥点缝横竖翻转 · 拖格子到另一格中间互换、到边上劈开插入 · 双击调裁切")
-                    .font(.caption2).foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(4)
-        }
-    }
-
-    // 模板
-
-    private var templateBox: some View {
-        GroupBox("模板") {
-            VStack(alignment: .leading, spacing: 8) {
-                Menu("一键成套") {
-                    ForEach(CollageKitID.allCases) { kit in
-                        Button(kit.name) { store.applyKit(kit) }
-                            .help(kit.summary)
-                    }
-                    Button("换封面（出一期）") { store.applyKit(.fashionIssue, coverStep: 1) }
-                        .disabled(CollageStyleFashion.coverPhotoID(store.project) == nil)
-                        .help("在前 \(CollageStyleFashion.coverChoices) 个主图候选里换下一张当封面，内页留着")
-                }
-                .fixedSize()
-                .disabled(store.isSolving || (store.project.photos.isEmpty && store.batch == nil))
-                .help("一次出一整套：一期杂志、一卷印样、一本婚礼相册（替换当前拼图，可以撤销）")
-                CollageTemplateGallery(store: store) { templateToDelete = $0 }
-                Divider()
-                HStack {
-                    TextField("把当前版存成模板…", text: $templateName)
-                        .onSubmit { saveTemplate() }
-                    Button("存") { saveTemplate() }
-                        .disabled(templateName.trimmingCharacters(in: .whitespaces).isEmpty || store.root == nil)
-                }
-                Toggle("套用时按照片比例自适应", isOn: Binding(get: { fitsOnSave }, set: { templateFits = $0 }))
-                    .font(.caption)
-                    .help("关掉 = 固定比例，照片按格子裁（严格网格、月洞门这种）；散落版总是原样摆放")
-                HStack {
-                    Button("导入模板…") { importTemplates() }
-                    Button("导出我的模板…") { exportTemplates() }
-                        .disabled(store.userTemplates.isEmpty)
-                }
-                .font(.caption)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(4)
-        }
-        .confirmationDialog("删除模板？", isPresented: Binding(
-            get: { templateToDelete != nil },
-            set: { if !$0 { templateToDelete = nil } }
-        ), presenting: templateToDelete) { name in
-            Button("删除「\(name)」", role: .destructive) { store.deleteTemplate(name) }
-            Button("取消", role: .cancel) {}
-        }
-    }
-
-    private var fitsOnSave: Bool { templateFits ?? !(store.page?.fixedAspects ?? false) }
-
-    private func saveTemplate() {
-        store.saveTemplate(named: templateName, fitAspects: fitsOnSave)
-        templateName = ""
-        templateFits = nil
-    }
-
-    private func importTemplates() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.json]
-        if panel.runModal() == .OK, let url = panel.url { store.importTemplates(from: url) }
-    }
-
-    private func exportTemplates() {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.json]
-        panel.nameFieldStringValue = "拼图模板.json"
-        if panel.runModal() == .OK, let url = panel.url { store.exportTemplates(to: url) }
     }
 }
 
@@ -533,11 +243,17 @@ struct CollageStylePanel: View {
     ]
 
     var body: some View {
+        let _ = CollagePerf.body("样式面板")
         presetBox
+            .collageSpot(.presets, store.nav)
         CollageLookBox(store: store)
+            .collageSpot(.looks, store.nav)
         spacingBox
+            .collageSpot(.spacing, store.nav)
         backgroundBox
+            .collageSpot(.background, store.nav)
         frameBox
+            .collageSpot(.frame, store.nav)
     }
 
     private func styleBinding(_ keyPath: WritableKeyPath<CollageStyle, Double>) -> Binding<Double> {
@@ -640,7 +356,9 @@ struct CollageStylePanel: View {
                 }
                 .disabled(store.isFreeform || store.isContactSheet)
                 if store.isFreeform { gridOnlyHint("散落版没有格子：上面几项只管网格版。") }
-                if store.isContactSheet { gridOnlyHint("印样没有格子：留白、倾斜在「版式 › 印样」里调。") }
+                if store.isContactSheet {
+                    CollageJumpText(store: store, lead: "印样没有格子：留白、倾斜在", spot: .contact, tail: "里调。")
+                }
                 CollageSlider(label: "输出锐化", value: styleBinding(\.sharpen), range: 0...1,
                               display: String(format: "%.2f", store.project.style.sharpen))
                     // 加了网的照片不锐化（锐化会在网点边上起白边）。
@@ -770,7 +488,7 @@ struct CollageStylePanel: View {
     private var frameBox: some View {
         GroupBox("边框与投影") {
             VStack(alignment: .leading, spacing: 8) {
-                if store.isFreeform { gridOnlyHint("散落版的相框、投影在「版式 › 选中的图层」里按张调。") }
+                if store.isFreeform { gridOnlyHint("散落版的相框、投影按张调：点画布上的一张相纸，在「格式」里。") }
                 if store.isContactSheet { gridOnlyHint("印样的片条自己有片边，不加边框、投影。") }
                 frameControls.disabled(store.isFreeform || store.isContactSheet)
             }
@@ -810,17 +528,20 @@ struct CollageStylePanel: View {
     }
 }
 
-// MARK: - 文字
+// MARK: - 标题和刊头（文档）
 
-struct CollageTextPanel: View {
+/// 标题 / 副标题 / 刊头 / 期号：模板里的 {title} {subtitle} {masthead} {issue}。占位符说明收进 ⓘ 弹出框
+/// （以前 567 个字常驻在这一块里，选中的文字编辑器被挤到下面）。选中的文字格、照片上的字在「格式」里改。
+struct CollageTitleBox: View {
     @ObservedObject var store: CollageStore
     @State private var title = ""
     @State private var subtitle = ""
     @State private var masthead = ""
     @State private var issue = ""
+    @State private var helpShown = false
 
     var body: some View {
-        GroupBox("标题") {
+        GroupBox {
             VStack(alignment: .leading, spacing: 6) {
                 TextField("拾光", text: $title)
                     .onSubmit { store.setTitle(title) }
@@ -829,7 +550,7 @@ struct CollageTextPanel: View {
                     .onChange(of: subtitle) { _, v in store.setSubtitle(v) }
                 HStack(spacing: 6) {
                     // 刊头不预置任何刊名：空着就用标题（拉丁字母转大写，中文转拼音大写）。
-                    // 占位字要在 300pt 宽里放得下（旁边还有 96pt 的期号）：{masthead} 这个键下面的占位符说明里有，
+                    // 占位字要在 300pt 宽里放得下（旁边还有 96pt 的期号）：{masthead} 这个键在 ⓘ 的占位符说明里有，
                     // 这里留「空着会怎样」。
                     TextField("刊头（空 = 标题拼音）", text: $masthead)
                         .onChange(of: masthead) { _, v in store.setMasthead(v) }
@@ -844,12 +565,32 @@ struct CollageTextPanel: View {
                         .font(.caption2).foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Text("模板里的 {title} {subtitle} {masthead} {issue} 就是这几行。其他占位符：{initial} 刊头首字母 {masthead_short} 截短的刊头（时尚刊）{masthead_alt} 和标题不是同一串字时的刊头（同一串时为空）{no} 页码 {date} {date_cn} {date_cn_full} {year} {weekday_cn} {weekday_en} {lunar} 农历 {ganzhi} 干支 {year_roman} {month_en} {month_en_title} {day_n} 不补零的日 {issue_n} 不补零的期号 {issue_cn} 中文期号 {count_cn} 中文张数 {frame} 帧号 {model} {lens} {focal} 35mm 等效焦距（相机没写等效时是实际焦距） {focal_mm} 实际焦距 {fnumber} {fstop} f/光圈 {shutter} {iso}。写法：{model|未记录} 没有值时印竖线后面的字；{model|} 可省略：「 · 」隔开的一段里这种占位符全空，连同分隔点不印；[[…]] 里面有占位符是空的，整段不印（没有拍摄时间的照片不剩半句）；[[甲||乙]] 甲印不出来就印乙")
+                Text("模板里的 {title} {subtitle} {masthead} {issue} 就是这几行；选中画布上的字，在「格式」里改字体、字号、花字。")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
+        } label: {
+            HStack(spacing: 4) {
+                Text("标题和刊头")
+                Button {
+                    helpShown.toggle()
+                } label: {
+                    Image(systemName: "info.circle")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("其他占位符和写法")
+                .popover(isPresented: $helpShown, arrowEdge: .leading) {
+                    Text(Self.placeholderHelp)
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .frame(width: 340)
+                        .padding(12)
+                }
+            }
         }
         .onAppear {
             title = store.project.title
@@ -861,67 +602,10 @@ struct CollageTextPanel: View {
         .onChange(of: store.project.subtitle) { _, v in if v != subtitle { subtitle = v } }
         .onChange(of: store.project.masthead) { _, v in if v != masthead { masthead = v } }
         .onChange(of: store.project.issue) { _, v in if v != issue { issue = v } }
-
-        if let item = store.selectedItemValue {
-            if item.kind == .text, let text = item.text {
-                CollageTextEditor(store: store, text: text, target: .item(item.id))
-                    .id(CollageTextTarget.item(item.id))
-            } else {
-                hint("选中的是贴纸 / 相纸：在「版式」里调")
-            }
-        } else if let path = store.selection, let cell = store.selectedCell {
-            if cell.kind == .text, let text = cell.text {
-                // 编辑器绑定到这一格的路径；换了格子就换一个编辑器实例（旧的文字框迟到的提交
-                // 只会写回它自己那一格）。
-                CollageTextEditor(store: store, text: text, target: .cell(path, store.page?.id))
-                    .id(CollageTextTarget.cell(path, store.page?.id))
-            } else if cell.kind == .photo {
-                CollageOverlayBox(store: store, path: path, overlays: cell.overlays)
-                let list = cell.overlays
-                if !list.isEmpty {
-                    // 编辑器绑定到「这一格的第几块」：切了字块就换一个编辑器实例（迟到的提交只写回它自己那一块）。
-                    let i = max(0, min(store.overlayIndex, list.count - 1))
-                    let overlay = list[i]
-                    CollageTextEditor(store: store, text: overlay.text,
-                                      target: .overlay(path, cell.photoID, store.page?.id, i),
-                                      alignFollowsAnchor: overlay.anchor != .custom && overlay.anchor != .bottomBand
-                                        && !overlay.text.isTall,
-                                      isOverlay: true)
-                        .id(CollageTextTarget.overlay(path, cell.photoID, store.page?.id, i))
-                }
-            } else {
-                addBox
-            }
-        } else {
-            addBox
-        }
     }
 
-    private func hint(_ text: String) -> some View {
-        Text(text).font(.caption).foregroundStyle(.secondary)
-    }
-
-    private var addBox: some View {
-        GroupBox("文字格") {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("选中一张照片可以在照片上压字；选中文字格编辑内容；或者加一个：")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 6) {
-                    Group {
-                        Button("上方横排") { store.addTextCell(edge: .top, vertical: false) }
-                        Button("右侧竖排") { store.addTextCell(edge: .right, vertical: true) }
-                    }
-                    .disabled(store.root == nil || store.isFreeform)
-                    .help(store.isFreeform ? "散落版没有格子：用「手写字」" : "")
-                    Button("手写字") { store.addItemText() }
-                }
-                .font(.caption)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(4)
-        }
-    }
+    /// 占位符说明（ⓘ 弹出框）：一字不改搬过来的。
+    static let placeholderHelp = "模板里的 {title} {subtitle} {masthead} {issue} 就是这几行。其他占位符：{initial} 刊头首字母 {masthead_short} 截短的刊头（时尚刊）{masthead_alt} 和标题不是同一串字时的刊头（同一串时为空）{no} 页码 {date} {date_cn} {date_cn_full} {year} {weekday_cn} {weekday_en} {lunar} 农历 {ganzhi} 干支 {year_roman} {month_en} {month_en_title} {day_n} 不补零的日 {issue_n} 不补零的期号 {issue_cn} 中文期号 {count_cn} 中文张数 {frame} 帧号 {model} {lens} {focal} 35mm 等效焦距（相机没写等效时是实际焦距） {focal_mm} 实际焦距 {fnumber} {fstop} f/光圈 {shutter} {iso}。写法：{model|未记录} 没有值时印竖线后面的字；{model|} 可省略：「 · 」隔开的一段里这种占位符全空，连同分隔点不印；[[…]] 里面有占位符是空的，整段不印（没有拍摄时间的照片不剩半句）；[[甲||乙]] 甲印不出来就印乙"
 }
 
 /// 一个文字格的全部参数：逐行字体/字号/字距/颜色，竖排、对齐、细线、印章。
@@ -1299,7 +983,7 @@ struct CollageTextEditor: View {
     }
 }
 
-// MARK: - 导出
+// MARK: - 导出（顶栏「导出 ▾」弹出来的那一块）
 
 struct CollageExportPanel: View {
     @ObservedObject var store: CollageStore
@@ -1348,6 +1032,7 @@ struct CollageExportPanel: View {
             .padding(4)
         }
         Button {
+            store.nav.exportShown = false
             store.export()
         } label: {
             Label(store.isAlbum ? "导出相册" : "导出", systemImage: "square.and.arrow.up")
@@ -1364,7 +1049,7 @@ struct CollageExportPanel: View {
     private var watermarkToggle: some View {
         if Self.showsWatermarkToggle(store.project.watermark) {
             Toggle("导出带水印", isOn: exportWatermarkBinding)
-                .help("只管这个拼图：关掉 = 导出不带水印的一版（预览里照样显示，右边「水印」里的设置不动）")
+                .help("只管这个拼图：关掉 = 导出不带水印的一版（预览里照样显示，「文档 › 水印」里的设置不动）")
             if store.project.watermark?.exportEnabled == false {
                 Text("这个拼图导出时不带水印（预览照常显示）")
                     .font(.caption2).foregroundStyle(.orange)
@@ -1396,7 +1081,7 @@ struct CollageExportPanel: View {
                 set: { store.exportOptions.scale = $0 })
     }
 
-    /// 导出页显示「导出带水印」开关：至少开着一层水印（--collage-ui --tab 导出 按同一个判断打印「导出面板」行）。
+    /// 导出设置里显示「导出带水印」开关：至少开着一层水印（--collage-ui --tab 导出 按同一个判断打印「导出面板」行）。
     static func showsWatermarkToggle(_ wm: CollageWatermark?) -> Bool { wm?.anyLayerOn == true }
 
     private var exportWatermarkBinding: Binding<Bool> {

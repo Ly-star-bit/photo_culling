@@ -388,9 +388,9 @@ extension CollageStyleFineArt {
     }
 }
 
-// MARK: - 界面：检视器「画布」里相册的目标跨页数
+// MARK: - 界面：检视器「文档 › 画布」里相册的目标跨页数
 
-/// 检视器「画布」（相册）里：目标跨页数开关 + 跨页数、每跨页张数。改了不马上重排（和「编排」主题一样），
+/// 检视器「文档 › 画布」（相册）里：目标跨页数开关 + 跨页数、每跨页张数。改了不马上重排（和「编排」主题一样），
 /// 点「按这个编排」或工具条的「自动编排」生效。
 struct CollageAlbumBudgetControls: View {
     @ObservedObject var store: CollageStore
@@ -471,12 +471,12 @@ struct CollageAlbumSpreadCount: View {
             Text("\(count)")
                 .font(.caption2).monospacedDigit()
                 .foregroundStyle(.secondary)
-                .help("\(count) 个跨页（\(count * 2)P）。要指定跨页数：检视器「画布」里勾「指定跨页数」")
+                .help("\(count) 个跨页（\(count * 2)P）。要指定跨页数：右栏「文档 › 画布」里勾「指定跨页数」")
         }
     }
 
     private func helpText(count: Int, target: Int) -> String {
-        let change = "在检视器「画布」里改目标"
+        let change = "在右栏「文档 › 画布」里改目标"
         if count > target {
             return "比目标 \(target) 个跨页多 \(count - target) 个（页码标橙的那几个）：调高每跨页张数，或从托盘拿掉一些；" + change
         }
