@@ -31,27 +31,27 @@ enum WhatsNew {
     }
 
     /// 这一版新增的条目（两三条到五条，一条一句话，能「带我去」的都带上）。发下一版时整张换掉、version 跟着改。
-    static let notes = Notes(version: "1.27.0", entries: [
-        Entry(id: "inspector",
-              title: "右栏跟着选中走",
-              detail: "点画布上的照片、文字、贴纸，右栏自动切到「格式」、只显示它的设置；点空白处是这一页的设置。",
-              destination: .collage(.format)),
-        Entry(id: "left-pane",
-              title: "模板、素材搬到左栏",
-              detail: "一键成套和 65 个模板在左栏「模板」，文字格、手写字、贴纸在「素材」。",
-              destination: .collage(.kits)),
-        Entry(id: "darkroom",
-              title: "暗房进了顶栏",
-              detail: "顶栏「暗房」一点就进；暗房里 ⌘Z 能撤销，⌘← / ⌘→ 换跨页。只调一格：选中它，在「格式 › 色调」里点「在暗房里挑…」。",
-              destination: .collage(.darkroom)),
-        Entry(id: "client-menu",
-              title: "批量页的「客户 ▾」",
-              detail: "确认表、导入客户选择、复制原片都在这里；「废片移到废纸篓」挪到了文件夹菜单。",
-              destination: .batch),
-        Entry(id: "renames",
-              title: "几样东西改了名",
-              detail: "「胶片」只指暗房里的 15 款光谱胶片：原来的色调「胶片」叫「奶油」，「电影」叫「青橙」，「报纸」叫「新闻纸」。",
-              destination: .collage(.looks)),
+    static let notes = Notes(version: "1.28.0", entries: [
+        Entry(id: "album-overview",
+              title: "相册整本概览",
+              detail: "跨页条左边「整本」（G）摊开整本：拖动排序，多选锁住 / 镜像 / 删除；托盘的照片、画布的格子能直接拖到跨页卡片上。⌘← / ⌘→ 换跨页。",
+              destination: nil),
+        Entry(id: "this-spread",
+              title: "「这个跨页」和「换一张」",
+              detail: "不选格子时右栏能左页 / 右页分开换切法、镜像、锁住这个跨页；选中一张照片，「换一张」列出同连拍、同场的候选。",
+              destination: .collage(.page)),
+        Entry(id: "print-spec",
+              title: "印厂规格",
+              detail: "「文档 › 画布」的相册尺寸换成印厂规格：页数规则、中缝、色彩（sRGB / Adobe RGB）、JPEG 质量照印厂给的改，还能存成规格。",
+              destination: .collage(.canvas)),
+        Entry(id: "preflight",
+              title: "导出前检查、看版 PDF",
+              detail: "「导出 ▾」先查空照片格、放大过头、脸压中缝；能只导某几个跨页，也能出给客户看的看版 PDF。",
+              destination: .collage(.export)),
+        Entry(id: "book-cover",
+              title: "封面",
+              detail: "跨页条最前面的「封面」卡：封底 | 书脊 | 封面排在一整张上，书脊宽按页数估；导出时单独出封面的 JPG 和 PDF。",
+              destination: .collage(.cover)),
     ])
 
     /// 记「上次见过哪一版」的键（app 自己的 UserDefaults 域；自检写进参数域，不碰这里）。

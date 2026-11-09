@@ -197,6 +197,8 @@ extension CollageStore {
         if spot == .format, selection == nil, selectedItem == nil { spot = .page }
         // 「格式 › 印样」只有印样页才有：别的页去了只会清掉选中、退出裁切，什么也指不到 —— 改去「这一页」。
         if spot == .contact, !isContactSheet { spot = .page }
+        // 「文档 › 封面」只有相册才有（「这一版新增」的「封面」那条）：不是相册时去「文档 › 画布」，相册尺寸在那里选。
+        if spot == .cover, !isAlbum { spot = .canvas }
         if spot.needsNothingSelected {
             if cropEditing { exitCropEdit() }
             selection = nil
