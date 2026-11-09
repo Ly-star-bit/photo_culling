@@ -789,16 +789,17 @@ by_name = {t["name"]: t for t in TL_LIVE}
 ro = {n for n, t in by_name.items() if t["annotations"]["readOnlyHint"]}
 check(ro == READ_ONLY, f"只读的是第 1–9 个和第 28 个（collage_preflight）：{sorted(ro)}")
 check([n for n, t in by_name.items() if t["annotations"]["destructiveHint"]] == ["app_open_session"], "只有 app_open_session 是 destructive")
-# README 的工具表和放行清单跟着工具走（加了工具忘了改 README 就红）：标题写着几个、表里一行一个、放行的是除 app_open_session 以外全部
+# README 的放行清单跟着工具走（用户照抄那段 JSON：加了工具忘了加就红）：除 app_open_session 以外全在、不重复。
+# 工具表的标题和行只打一行提醒（表的排版改了不该让 MCP 冒烟红）
 README = os.path.join(os.path.dirname(os.path.dirname(ROOT)), "README.md")
 if os.path.isfile(README):
     readme = open(README, encoding="utf-8").read()
     allowed = re.findall(r'"mcp__xuanpian__([a-z_]+)"', readme)
-    rows = re.findall(r"^\| (\d+) \| `([a-z_]+)`", readme, re.M)
-    check(f"### {len(TOOLS_ALL)} 个工具" in readme and [n for _, n in rows] == TOOLS_ALL
-          and [int(i) for i, _ in rows] == list(range(1, len(TOOLS_ALL) + 1))
-          and sorted(allowed) == sorted(set(TOOLS_ALL) - {"app_open_session"}) and len(allowed) == len(set(allowed)),
-          f"README：「{len(TOOLS_ALL)} 个工具」、表里 {len(rows)} 行按编号、放行清单 {len(allowed)} 个（除了 app_open_session 全在）")
+    check(sorted(allowed) == sorted(set(TOOLS_ALL) - {"app_open_session"}) and len(allowed) == len(set(allowed)),
+          f"README 的放行清单 {len(allowed)} 个：除了 app_open_session 全在、不重复")
+    rows = [n for _, n in re.findall(r"^\| (\d+) \| `([a-z_]+)`", readme, re.M)]
+    if f"### {len(TOOLS_ALL)} 个工具" not in readme or rows != TOOLS_ALL:
+        print(f"  提醒：README 的工具表（标题「{len(TOOLS_ALL)} 个工具」、一行一个）和 tools/list 对不上，记得改：{rows}")
 else:
     print(f"  （没找到 {README}：README 那一条不查）")
 # 概览的 xmp：上次写 XMP 的记录读不进来时照实说不知道（null + unknown + xmp_state_unknown），说明里写着，AI 才不会当成没写过

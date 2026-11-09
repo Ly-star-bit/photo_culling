@@ -993,6 +993,14 @@ def album_section():
                   f"镜像第 {target} 个跨页：每格中心 x → 1 − x、照片不变，一步撤销；app_undo 回到原样")
         else:
             skip("没有放了两张以上的跨页：镜像那一条跳过")
+        # 几个跨页一起镜像：mirrorPage 每页各 commitEdit 一次，整次调用照样一步撤销，一次 app_undo 几页都回去
+        s0 = st()
+        _, mr2 = w("collage_pages", {"action": "mirror", "pages": "1-3"})
+        s1 = st()
+        u = undo()
+        check(mr2.get("changed") is True and steps(s0, s1) == 1 and mr2.get("targets") == [1, 2, 3] and "error" not in u
+              and st()["edit_digest"] == s0["edit_digest"],
+              f"镜像第 1–3 个跨页：一步撤销（{steps(s0, s1)} 步），一次 app_undo 三页都回去")
 
         # ---------- 单边换版式：找一边有两张以上的跨页；照片不变、一步撤销；只有一张的那一边 invalid_state。
         # 婚礼编排的跨页常常一边只有一张：都换不了时，把托盘里没上版的和一个两张的跨页上的挪到最后新加的空跨页，凑一页多张的再试
