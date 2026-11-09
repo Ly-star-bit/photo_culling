@@ -16,11 +16,12 @@ extension CollageStore {
         editingCover ? CollageBookCover.frontCanvas(project.canvas) : project.canvas
     }
 
-    /// 取景、压字摆位用的工程：编辑封面时画布换成封面那一页（和渲染封面时同一份）。
+    /// 取景、压字摆位用的工程：编辑封面时画布换成封面那一页、pages 清空（{no} = 01），和渲染封面时同一份。
     var editProject: CollageProject {
         guard editingCover else { return project }
         var p = project
         p.canvas = editCanvas
+        p.pages = []
         return p
     }
 

@@ -470,6 +470,7 @@ enum CollageBookCoverSelfTest {
         single.mode = .single
         check(CollageBookCoverRender.render(project: single, hints: [:], options: opts) == nil, "不是相册：不出封面", "")
         checkMirror(check: check)
+        checkEdgeSpans(check: check)
         if let px = pixels(image) {
             // 合成的这本：边距 4.5% 短边（13.5mm）比包边 + 出血（18mm）窄，四边贴边的都是底色 —— 包边一整圈铺底色，不把
             // 照片、字的一条边翻出去。
@@ -557,8 +558,11 @@ enum CollageBookCoverSelfTest {
                 ctx.fill(CGRect(x: x, y: h - 1 - y, width: 1, height: 1))
             }
         }
-        guard let trim = ctx.makeImage(), let sheet = CollageBookCoverRender.mirrorEdges(trim, extent: e, background: bg),
-              let t = pixels(trim), let s = pixels(sheet) else {
+        let spans = CollageBookCoverRender.EdgeSpans(top: [20..<w], right: [0..<12], topRight: true)
+        guard let trim = ctx.makeImage(),
+              let sheet = CollageBookCoverRender.mirrorEdges(trim, extent: e, background: bg, spans: spans),
+              let full = CollageBookCoverRender.mirrorEdges(trim, extent: e, background: bg),
+              let t = pixels(trim), let s = pixels(sheet), let f = pixels(full) else {
             check(false, "包边：合成图拼得出来", "")
             return
         }
@@ -573,8 +577,50 @@ enum CollageBookCoverSelfTest {
         for x in 0..<(e + 20) { for k in 0..<e where s(x, k) != b { solid = false } }
         for y in 0..<(h + 2 * e) { for k in 0..<e where s(k, y) != b { solid = false } }
         for x in 0..<(w + 2 * e) { for k in 0..<e where s(x, e + h + k) != b { solid = false } }
-        check(sheet.width == w + 2 * e && sheet.height == h + 2 * e && center && mirrorTop && mirrorRight && solid,
-              "包边、出血：照片贴边的那一段往外镜像（翻过板边接得上），底色那几段铺底色", "")
+        var corner = true
+        for k in 0..<e { for j in 0..<e where s(e + w + k, e - 1 - j) != t(w - 1 - k, j) { corner = false } }
+        check(sheet.width == w + 2 * e && sheet.height == h + 2 * e && center && mirrorTop && mirrorRight && corner && solid,
+              "包边、出血：照片贴边的那一段（和挨着的角）往外镜像（翻过板边接得上），别处铺底色", "")
+        var whole = true
+        for y in 0..<h { for k in 0..<e where f(e - 1 - k, e + y) != t(k, y) { whole = false } }
+        check(whole, "不给哪几段：整圈镜像", "")
+    }
+
+    /// 哪几段镜像：照片格贴着成品边（零边距铺满）才镜像；默认边距一段都不镜像；模糊底整页镜像。
+    static func checkEdgeSpans(check: (Bool, String, String) -> Void) {
+        var p = album()
+        let cover = CollageBookCover(front: .split(.row, 0.6, .leaf(.photo("A")), .leaf(.text(CollageTemplates.centeredTitle()))))
+        let l = cover.layout(canvas: p.canvas, spreads: p.pages.count)
+        let none = CollageBookCoverRender.frontEdgeSpans(cover: cover, project: p, layout: l, scale: 1)
+        p.style.margin = 0
+        let bleed = CollageBookCoverRender.frontEdgeSpans(cover: cover, project: p, layout: l, scale: 1)
+        let x0 = l.pageW + l.spine
+        let photoW = bleed.top.first.map { $0.count } ?? 0
+        let gutter = CollageLayout.gutterPixels(canvas: CollageBookCover.frontCanvas(p.canvas), style: p.style)
+        check(none == CollageBookCoverRender.EdgeSpans(), "默认边距：包边一整圈铺底色（纸纹也不影响）", "")
+        check(bleed.top.count == 1 && bleed.top[0].lowerBound == x0 && bleed.bottom == bleed.top && bleed.right.isEmpty
+              && !bleed.topRight && abs(photoW - Int(Double(l.pageW - gutter) * 0.6)) <= 2,
+              "零边距：只有贴边的照片格那一段镜像（右边是文字格，不镜像）", "上边 \(bleed.top.map { "\($0)" })")
+        p.style.backgroundMode = .blurPhoto
+        let blur = CollageBookCoverRender.frontEdgeSpans(cover: cover, project: p, layout: l, scale: 1)
+        check(blur.top == [x0..<(x0 + l.pageW)] && blur.right == [0..<l.pageH] && blur.topRight && blur.bottomRight
+              && blur.left.isEmpty && !blur.topLeft,
+              "模糊底：封面那一页上、下、右整段镜像，封底、书脊不镜像", "")
+        // {no}：封面那块和第 2 个跨页的树一模一样，也印 01（封面不是哪个跨页）。
+        var same = album()
+        var noText = CollageTemplates.centeredTitle()
+        noText.lines[0].text = "{no}"
+        let tree = CollageNode.split(.column, 0.8, .leaf(.photo("A")), .leaf(.text(noText)))
+        same.pages[1] = CollagePage(root: tree)
+        same.bookCover = CollageBookCover(front: tree)
+        var opts = CollageRender.Options(scale: 0.1)
+        let report = CollageRender.RenderReport()
+        opts.report = report
+        _ = CollageBookCoverRender.render(project: same, hints: [:], options: opts)
+        let printed = report.texts.flatMap(\.lines)
+        let vars = CollageBookCoverRender.spineVariables(cover: same.bookCover!, project: same, photos: [:])
+        check(printed.contains("01") && !printed.contains("02") && vars["no"] == "01",
+              "封面的 {no} = 01（树和某个跨页一样也不印那个跨页的页码）", printed.joined(separator: " "))
     }
 
     // MARK: - 小工具

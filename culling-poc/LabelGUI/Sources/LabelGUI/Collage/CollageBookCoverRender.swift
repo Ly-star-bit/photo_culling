@@ -10,8 +10,7 @@ import ImageIO
 //   取景按格子算 —— 和编辑时画布上看到的是同一张；
 // - 封底：留白，或者一张小照片（完整显示）+ 一行字，同样走 CollageRender（版心收窄、底色跟封面）；
 // - 书脊：封面的底色 + 书脊字（中文一个个立着从上往下排，拉丁字母、数字整段转 90° 从上往下读）；
-// - 包边、出血：把看得见的那块四条边往外补（mirrorEdges）：边上是底色的那一段铺底色，边上是照片（零边距铺满）的那一段
-//   镜像出去。不让照片自己往外铺：包边 15mm 加出血 3mm 一边 18mm，照片往外延不够时渲染器会按放大后的格子重新取景
+// - 包边、出血：把看得见的那块四条边往外补（mirrorEdges）：照片格贴着成品边（零边距铺满）的那几段镜像出去，别处铺底色。不让照片自己往外铺：包边 15mm 加出血 3mm 一边 18mm，照片往外延不够时渲染器会按放大后的格子重新取景
 //   （CollageRender.drawPhoto 的铺出血），脸可能被挪进包边、看得见的那块也和预览不一样了。镜像不动看得见的那块（预览
 //   什么样、印出来什么样），翻过板边接得上。底色那一段不镜像：边距比包边窄时（默认 30cm 册子边距 13.5mm < 18mm）
 //   镜像会把照片的一条边翻到包边最外面，看着像出了错。
@@ -40,9 +39,11 @@ enum CollageBookCoverRender {
         var photos: [String: CollagePhotoRef] = [:]
         for p in project.photos where photos[p.id] == nil { photos[p.id] = p }
 
-        // 1. 封面那一页（画布换成单页）。
+        // 1. 封面那一页（画布换成单页）。pages 清空：占位符 {no} 按页 id、再按树找第几页 —— 封面不是哪个跨页，
+        // 「按扉页重做」出来的树又常和扉页那一页一模一样，不清空 {no} 会印成那个跨页的页码。
         var frontProject = project
         frontProject.canvas = CollageBookCover.frontCanvas(canvas)
+        frontProject.pages = []
         var pageOptions = options
         pageOptions.includeBleed = false
         pageOptions.guides = false
@@ -74,7 +75,7 @@ enum CollageBookCoverRender {
                                                                    width: layout.pageW, height: layout.pageH))
         }
         let spineLocal = CGRect(x: layout.pageW, y: 0, width: layout.spine, height: layout.pageH)
-        let vars = spineVariables(cover: cover, project: project, photos: photos)
+        let vars = spineVariables(cover: cover, project: frontProject, photos: photos)
         if let spine = spineLayout(cover: cover, vars: vars, rect: spineLocal, spineMM: cover.spineWidthMM(spreads: spreads),
                                    canvas: canvas, scale: scale) {
             drawSpine(spine, ctx: ctx, color: spineInk(bg))
@@ -85,7 +86,8 @@ enum CollageBookCoverRender {
         let full: CGImage
         let offset: CGFloat
         if options.includeBleed, layout.extent > 0 {
-            guard let sheet = mirrorEdges(trim, extent: layout.extent, background: bg) else { return nil }
+            let spans = frontEdgeSpans(cover: cover, project: project, layout: layout, scale: scale)
+            guard let sheet = mirrorEdges(trim, extent: layout.extent, background: bg, spans: spans) else { return nil }
             full = sheet
             offset = CGFloat(layout.extent)
         } else {
@@ -140,11 +142,14 @@ enum CollageBookCoverRender {
         background.luminance < 0.45 ? CollageColor.paper : CollageColor.ink
     }
 
-    /// 书脊字展开占位符用的值：和封面那一页同一份（{title}、{date} 按封面的照片，没有照片按托盘）。
+    /// 书脊字展开占位符用的值：和封面那一页同一份（{title}、{date} 按封面的照片，没有照片按托盘；{no} = 01，见 render
+    /// 里清空 pages 那一句）。
     static func spineVariables(cover: CollageBookCover, project: CollageProject,
                                photos: [String: CollagePhotoRef]) -> [String: String] {
-        CollageTypeset.variables(project: project, root: cover.front, photos: photos,
-                                 pagePhotoIDs: cover.front.photoIDs, pageID: cover.id)
+        var p = project
+        p.pages = []
+        return CollageTypeset.variables(project: p, root: cover.front, photos: photos,
+                                        pagePhotoIDs: cover.front.photoIDs, pageID: cover.id)
     }
 
     /// 一段字：立着排（中日韩文字，一个字一格）还是整段转 90°（拉丁字母、数字、标点、空格）。
@@ -308,19 +313,74 @@ enum CollageBookCoverRender {
 
     // MARK: 包边、出血
 
-    /// 看得见的那块四条边各往外补 extent 像素（包边 + 出血）：先整圈镜像（四个角两个方向都镜像），再把边上那一像素是
-    /// 底色的那几段（background，nil = 不管）改铺底色 —— 只有照片贴到边上的那几段留着镜像。
-    static func mirrorEdges(_ trim: CGImage, extent e: Int, background: CollageColor? = nil) -> CGImage? {
+    /// 看得见的那块四条边上，哪几段要镜像出去（其余铺底色）：下标是看得见的那块的像素（上、下边按 x，左、右边按 y），
+    /// 四个角各自镜不镜。
+    struct EdgeSpans: Equatable {
+        var top: [Range<Int>] = []
+        var bottom: [Range<Int>] = []
+        var left: [Range<Int>] = []
+        var right: [Range<Int>] = []
+        var topLeft = false
+        var topRight = false
+        var bottomLeft = false
+        var bottomRight = false
+
+        /// 四条边、四个角全镜像（看得见的那块整张都是照片 / 照片做的底）。
+        static func all(width: Int, height: Int) -> EdgeSpans {
+            EdgeSpans(top: [0..<width], bottom: [0..<width], left: [0..<height], right: [0..<height],
+                      topLeft: true, topRight: true, bottomLeft: true, bottomRight: true)
+        }
+    }
+
+    /// 封面那一页上贴着成品边的照片格（零边距铺满）在看得见的那块的上、下、右边占的那几段 —— 只有这几段镜像出去，别处
+    /// （边距里的底色、纸纹、格子之间的缝）铺底色。按格子算，不按像素认底色：纸纹（婚礼样式 grain 0.16）让底色那一圈每个
+    /// 像素都不一样，按像素认就整圈镜像，把照片离边不到 18mm 的那一条翻到包边最外面。
+    /// 模糊底、渐变底（照片做的底铺满封面那一页）：封面那一页的上、下、右边整段镜像。封底（版心收得很小）、书脊从不镜像。
+    static func frontEdgeSpans(cover: CollageBookCover, project: CollageProject, layout: CollageBookCover.Layout,
+                               scale: Double) -> EdgeSpans {
+        let x0 = layout.pageW + layout.spine
+        var spans = EdgeSpans()
+        if project.style.backgroundMode.usesPaperTint {
+            spans.top = [x0..<(x0 + layout.pageW)]
+            spans.bottom = spans.top
+            spans.right = [0..<layout.pageH]
+            spans.topRight = true
+            spans.bottomRight = true
+            return spans
+        }
+        let canvas = CollageBookCover.frontCanvas(project.canvas)
+        let frames = CollageLayout.pageGeometry(cover.front, canvas: canvas, style: project.style, scale: scale).frames
+        for f in frames where f.cell.kind == .photo && !f.rect.isEmpty {
+            let r = f.rect
+            let top = r.y0 <= 1
+            let bottom = r.y1 >= layout.pageH - 1
+            let right = r.x1 >= layout.pageW - 1
+            if top { spans.top.append((x0 + r.x0)..<(x0 + min(r.x1, layout.pageW))) }
+            if bottom { spans.bottom.append((x0 + r.x0)..<(x0 + min(r.x1, layout.pageW))) }
+            if right { spans.right.append(r.y0..<min(r.y1, layout.pageH)) }
+            if top && right { spans.topRight = true }
+            if bottom && right { spans.bottomRight = true }
+        }
+        return spans
+    }
+
+    /// 看得见的那块四条边各往外补 extent 像素（包边 + 出血）：spans 里的那几段（和挨着的角）镜像出去，翻过板边接得上；
+    /// 别处铺 background。spans = nil：整圈镜像。
+    static func mirrorEdges(_ trim: CGImage, extent e: Int, background: CollageColor, spans: EdgeSpans? = nil) -> CGImage? {
         let w = trim.width
         let h = trim.height
         guard e > 0, e <= w, e <= h, let ctx = CollageRender.makeContext(width: w + 2 * e, height: h + 2 * e) else {
             return e > 0 ? nil : trim
         }
+        let s = spans ?? .all(width: w, height: h)
+        let fullW = w + 2 * e
         let fullH = h + 2 * e
         ctx.interpolationQuality = .none
+        ctx.setFillColor(background.cgColor)
+        ctx.fill(CGRect(x: 0, y: 0, width: fullW, height: fullH))
         // 源、目标都按左上原点的像素坐标给；CGContext 本身是左下原点（y 朝上）。
         func put(_ src: CGRect, _ dst: CGRect, flipX: Bool, flipY: Bool) {
-            guard let piece = trim.cropping(to: src) else { return }
+            guard src.width > 0, src.height > 0, let piece = trim.cropping(to: src) else { return }
             let y = CGFloat(fullH) - dst.maxY
             ctx.saveGState()
             ctx.translateBy(x: flipX ? dst.maxX : dst.minX, y: flipY ? y + dst.height : y)
@@ -330,84 +390,36 @@ enum CollageBookCoverRender {
         }
         let W = CGFloat(w), H = CGFloat(h), E = CGFloat(e)
         put(CGRect(x: 0, y: 0, width: W, height: H), CGRect(x: E, y: E, width: W, height: H), flipX: false, flipY: false)
-        put(CGRect(x: 0, y: 0, width: E, height: H), CGRect(x: 0, y: E, width: E, height: H), flipX: true, flipY: false)
-        put(CGRect(x: W - E, y: 0, width: E, height: H), CGRect(x: E + W, y: E, width: E, height: H), flipX: true, flipY: false)
-        put(CGRect(x: 0, y: 0, width: W, height: E), CGRect(x: E, y: 0, width: W, height: E), flipX: false, flipY: true)
-        put(CGRect(x: 0, y: H - E, width: W, height: E), CGRect(x: E, y: E + H, width: W, height: E), flipX: false, flipY: true)
-        put(CGRect(x: 0, y: 0, width: E, height: E), CGRect(x: 0, y: 0, width: E, height: E), flipX: true, flipY: true)
-        put(CGRect(x: W - E, y: 0, width: E, height: E), CGRect(x: E + W, y: 0, width: E, height: E), flipX: true, flipY: true)
-        put(CGRect(x: 0, y: H - E, width: E, height: E), CGRect(x: 0, y: E + H, width: E, height: E), flipX: true, flipY: true)
-        put(CGRect(x: W - E, y: H - E, width: E, height: E), CGRect(x: E + W, y: E + H, width: E, height: E),
-            flipX: true, flipY: true)
-        if let background {
-            // 边上一像素是底色的那几段：整条（连同角）铺底色。
-            let target = rgb8(background)
-            ctx.setFillColor(background.cgColor)
-            func fill(_ r: CGRect) { ctx.fill(CGRect(x: r.minX, y: CGFloat(fullH) - r.maxY, width: r.width, height: r.height)) }
-            let top = edgePixels(trim, CGRect(x: 0, y: 0, width: w, height: 1)).map { near($0, target) }
-            let bottom = edgePixels(trim, CGRect(x: 0, y: h - 1, width: w, height: 1)).map { near($0, target) }
-            let left = edgePixels(trim, CGRect(x: 0, y: 0, width: 1, height: h)).map { near($0, target) }
-            let right = edgePixels(trim, CGRect(x: w - 1, y: 0, width: 1, height: h)).map { near($0, target) }
-            for r in runs(top) { fill(CGRect(x: E + CGFloat(r.lowerBound), y: 0, width: CGFloat(r.count), height: E)) }
-            for r in runs(bottom) { fill(CGRect(x: E + CGFloat(r.lowerBound), y: E + H, width: CGFloat(r.count), height: E)) }
-            for r in runs(left) { fill(CGRect(x: 0, y: E + CGFloat(r.lowerBound), width: E, height: CGFloat(r.count))) }
-            for r in runs(right) { fill(CGRect(x: E + W, y: E + CGFloat(r.lowerBound), width: E, height: CGFloat(r.count))) }
-            // 角：挨着的那个角像素是底色就铺底色。
-            if top.first == true && left.first == true { fill(CGRect(x: 0, y: 0, width: E, height: E)) }
-            if top.last == true && right.first == true { fill(CGRect(x: E + W, y: 0, width: E, height: E)) }
-            if bottom.first == true && left.last == true { fill(CGRect(x: 0, y: E + H, width: E, height: E)) }
-            if bottom.last == true && right.last == true { fill(CGRect(x: E + W, y: E + H, width: E, height: E)) }
+        for r in s.top {
+            let a = CGFloat(max(0, r.lowerBound)), n = CGFloat(min(w, r.upperBound)) - a
+            put(CGRect(x: a, y: 0, width: n, height: E), CGRect(x: E + a, y: 0, width: n, height: E), flipX: false, flipY: true)
+        }
+        for r in s.bottom {
+            let a = CGFloat(max(0, r.lowerBound)), n = CGFloat(min(w, r.upperBound)) - a
+            put(CGRect(x: a, y: H - E, width: n, height: E), CGRect(x: E + a, y: E + H, width: n, height: E),
+                flipX: false, flipY: true)
+        }
+        for r in s.left {
+            let a = CGFloat(max(0, r.lowerBound)), n = CGFloat(min(h, r.upperBound)) - a
+            put(CGRect(x: 0, y: a, width: E, height: n), CGRect(x: 0, y: E + a, width: E, height: n), flipX: true, flipY: false)
+        }
+        for r in s.right {
+            let a = CGFloat(max(0, r.lowerBound)), n = CGFloat(min(h, r.upperBound)) - a
+            put(CGRect(x: W - E, y: a, width: E, height: n), CGRect(x: E + W, y: E + a, width: E, height: n),
+                flipX: true, flipY: false)
+        }
+        if s.topLeft { put(CGRect(x: 0, y: 0, width: E, height: E), CGRect(x: 0, y: 0, width: E, height: E), flipX: true, flipY: true) }
+        if s.topRight {
+            put(CGRect(x: W - E, y: 0, width: E, height: E), CGRect(x: E + W, y: 0, width: E, height: E), flipX: true, flipY: true)
+        }
+        if s.bottomLeft {
+            put(CGRect(x: 0, y: H - E, width: E, height: E), CGRect(x: 0, y: E + H, width: E, height: E), flipX: true, flipY: true)
+        }
+        if s.bottomRight {
+            put(CGRect(x: W - E, y: H - E, width: E, height: E), CGRect(x: E + W, y: E + H, width: E, height: E),
+                flipX: true, flipY: true)
         }
         return ctx.makeImage()
-    }
-
-    private static func rgb8(_ c: CollageColor) -> (Int, Int, Int) {
-        (Int((c.r * 255).rounded()), Int((c.g * 255).rounded()), Int((c.b * 255).rounded()))
-    }
-
-    /// 和底色差不过 2（8 位）：同一个底色填出来的就是同一个数，留一点给取色底的舍入。
-    private static func near(_ p: (Int, Int, Int), _ t: (Int, Int, Int)) -> Bool {
-        abs(p.0 - t.0) <= 2 && abs(p.1 - t.1) <= 2 && abs(p.2 - t.2) <= 2
-    }
-
-    /// 图上一条一像素宽 / 高的边（左上原点）的每个像素（sRGB 8 位）。
-    private static func edgePixels(_ image: CGImage, _ rect: CGRect) -> [(Int, Int, Int)] {
-        let w = Int(rect.width)
-        let h = Int(rect.height)
-        guard w > 0, h > 0, let piece = image.cropping(to: rect) else { return [] }
-        var buf = [UInt8](repeating: 0, count: w * h * 4)
-        let ok = buf.withUnsafeMutableBytes { raw -> Bool in
-            guard let ctx = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
-                                      space: CollageRender.srgb, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else {
-                return false
-            }
-            ctx.interpolationQuality = .none
-            ctx.draw(piece, in: CGRect(x: 0, y: 0, width: w, height: h))
-            return true
-        }
-        guard ok else { return [] }
-        var out: [(Int, Int, Int)] = []
-        out.reserveCapacity(w * h)
-        for i in 0..<(w * h) {
-            let o: Int = i * 4
-            out.append((Int(buf[o]), Int(buf[o + 1]), Int(buf[o + 2])))
-        }
-        return out
-    }
-
-    /// 连着为 true 的那几段（下标范围）。
-    private static func runs(_ flags: [Bool]) -> [Range<Int>] {
-        var out: [Range<Int>] = []
-        var start: Int?
-        for (i, f) in flags.enumerated() {
-            if f, start == nil { start = i }
-            if !f, let s = start {
-                out.append(s..<i)
-                start = nil
-            }
-        }
-        if let s = start { out.append(s..<flags.count) }
-        return out
     }
 
     // MARK: 参考线（只在编辑预览、缩略图里，不进导出）
