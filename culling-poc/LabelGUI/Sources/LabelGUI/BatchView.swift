@@ -2827,12 +2827,10 @@ private struct CellHoverBar<Content: View>: View {
 /// every appearance — scrolling a few hundred photos stuttered. Decode a small
 /// thumbnail off the main thread once and cache it.
 enum ThumbCache {
-    /// Shared by the grid's 512px thumbs AND the review/inspector 1600px fit
-    /// decodes (~7MB each) — a count limit alone let the 1600px entries grow to
-    /// multiple GB on a 500-photo shoot, so the limit is bytes, not entries.
-    /// ~1/10 of physical RAM (8GB Air → 800MB, 16GB → 1.6GB, 32GB+ capped at
-    /// 2GB): the fixed 800MB plus the other two caches was 1.6GB on an 8GB
-    /// machine, which swapped.
+    /// 网格那几档（512 的格子、256 的胶片条和拼图托盘、128 的水印页列表）。按字节限，不按张数：一个 count limit
+    /// 挡不住大图把它撑到好几 GB。约物理内存的 8%（8GB Air → 640MB，16GB → 1.28GB，封顶 1.6GB）。
+    /// 以前审片 / 检视器 / 连拍挑选的 1024 预览也塞在这里（10%，封顶 2GB）：审几百张以后网格那几百张 512 被挤掉，回网格时
+    /// 灰一下、整屏重解（优化分析 NP7）。现在 1024 那一档进 `previews`，两个加起来还是 10.5% / 封顶 2GB，内存上限基本不涨。
     static let physicalMemory = Int(ProcessInfo.processInfo.physicalMemory)
     static func budget(fraction: Double, cap: Int) -> Int {
         min(cap, Int(Double(physicalMemory) * fraction))
@@ -2840,9 +2838,27 @@ enum ThumbCache {
 
     static let cache: NSCache<NSString, NSImage> = {
         let c = NSCache<NSString, NSImage>()
-        c.totalCostLimit = budget(fraction: 0.10, cap: 2_000_000_000)
+        c.totalCostLimit = budget(fraction: 0.08, cap: 1_600_000_000)
         return c
     }()
+
+    /// 预览原尺寸（1024）及以上那一档：审片 / 检视器大图先上的那张、连拍挑选大组的格子和预取、人脸小图的来源、标注页的大图。
+    /// 一张约 3 MB，物理内存的 2.5%（8GB → 200MB ≈ 70 张，封顶 400MB）：够翻页前后、一组连拍用。
+    static let previews: NSCache<NSString, NSImage> = {
+        let c = NSCache<NSString, NSImage>()
+        c.totalCostLimit = budget(fraction: 0.025, cap: 400_000_000)
+        return c
+    }()
+
+    /// 这一档放哪个缓存：≥ 预览原尺寸（1024）的进 previews，网格那几档进 cache。读写都按它分，键还是同一个 key()。
+    static func storage(for maxPixel: Int) -> NSCache<NSString, NSImage> {
+        maxPixel >= ImageLoader.previewMaxPixel ? previews : cache
+    }
+
+    /// 缓存里现成的（不解码、不读文件）。
+    static func cached(_ path: String, _ maxPixel: Int) -> NSImage? {
+        storage(for: maxPixel).object(forKey: key(path, maxPixel))
+    }
 
     /// Re-analysis overwrites previews/<id>.jpg in place, so a purely
     /// path-keyed cache kept serving the old picture (new numbers, stale
@@ -2888,9 +2904,10 @@ enum ThumbCache {
 
     static func load(path: String, maxPixel: Int = 512) -> NSImage? {
         let cacheKey = key(path, maxPixel)
-        if let hit = cache.object(forKey: cacheKey) { return hit }
+        let store = storage(for: maxPixel)
+        if let hit = store.object(forKey: cacheKey) { return hit }
         guard let image = decode(path: path, maxPixel: maxPixel) else { return nil }
-        cache.setObject(image, forKey: cacheKey, cost: Int(image.size.width * image.size.height * 4))
+        store.setObject(image, forKey: cacheKey, cost: Int(image.size.width * image.size.height * 4))
         return image
     }
 
@@ -2934,7 +2951,7 @@ struct ThumbnailView: View {
         // Read the cache synchronously in body: a cell scrolled back into view
         // is a fresh struct with nil @State, and waiting for `.task` to copy
         // the cached image over showed a gray flash on every scroll-back.
-        let shown = image ?? ThumbCache.cache.object(forKey: ThumbCache.key(path, maxPixel))
+        let shown = image ?? ThumbCache.cached(path, maxPixel)
         return Group {
             if let shown {
                 Image(nsImage: shown).resizable().aspectRatio(contentMode: fit ? .fit : .fill)
@@ -2943,7 +2960,7 @@ struct ThumbnailView: View {
             }
         }
         .task(id: ThumbCache.key(path, maxPixel)) {
-            if let cached = ThumbCache.cache.object(forKey: ThumbCache.key(path, maxPixel)) {
+            if let cached = ThumbCache.cached(path, maxPixel) {
                 image = cached
                 return
             }
@@ -3193,14 +3210,13 @@ struct SharpImageView: View {
         let decodedKey = FitCache.cachedHeader(path: decodePath).map {
             ThumbCache.key(decodePath, FitCache.decodeSize(header: $0, display: decodeEdge))
         }
-        let previewKey = ThumbCache.key(previewPath, 1024)
         // 成品按 (文件, 目标长边) 缓存，和解码缓存住同一个 NSCache（相邻预取也按这个键先渲好）。
         let renderedKey = FitCache.renderedKey(path: decodePath, edge: longEdge)
         let mine = loaded?.key == renderedKey || (decodedKey != nil && loaded?.key == decodedKey) ? loaded?.image : nil
         let shown = mine
             ?? FitCache.cache.object(forKey: renderedKey)
             ?? decodedKey.flatMap { FitCache.cache.object(forKey: $0) }
-            ?? ThumbCache.cache.object(forKey: previewKey)
+            ?? ThumbCache.cached(previewPath, 1024)
         return Group {
             if let shown {
                 Image(nsImage: shown).interpolation(.high).resizable().aspectRatio(contentMode: .fit)

@@ -1,9 +1,11 @@
 import Foundation
 import Combine
 import AppKit
+import ImageIO
+import UniformTypeIdentifiers
 
 /// `--ux-selftest` 里的几组纯函数用例：EXIF 拍摄参数（快门 0 / 极小正数不崩）、网格多选（数字键、剪选中）、
-/// 水印页导入的 RAW+JPG 配对、拼图托盘每格的选中标记、审片 / 检视器大图的解码尺寸。
+/// 水印页导入的 RAW+JPG 配对、拼图托盘每格的选中标记、审片 / 检视器大图的解码尺寸、1024 预览和网格缩略图分开存。
 /// 每条打 PASS / FAIL 一行，返回失败条数（main.swift 加到总数上）。
 enum GridExifImportSelfTest {
     final class Tally {
@@ -25,7 +27,58 @@ enum GridExifImportSelfTest {
         trayMarkCases(tally)
         fitDecodeCases(tally)
         cacheInvalidationCases(tally)
+        previewCacheCases(tally)
         return tally.failed
+    }
+
+    // MARK: - 1024 预览单独一个缓存（优化分析 NP7）
+
+    /// 自检用：在 `url` 写一张纯色 JPEG。
+    static func writeJPEG(_ url: URL, width: Int, height: Int) -> Bool {
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return false }
+        ctx.setFillColor(CGColor(red: 0.8, green: 0.5, blue: 0.2, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        guard let image = ctx.makeImage(),
+              let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil)
+        else { return false }
+        CGImageDestinationAddImage(dest, image, nil)
+        return CGImageDestinationFinalize(dest)
+    }
+
+    /// 审片 / 检视器 / 连拍挑选的 1024 预览进 ThumbCache.previews，网格那几档（512、256、128）进 ThumbCache.cache：
+    /// 真解一张图两档各进各的；预览缓存塞到远超上限（审了几百张），网格那张 512 还在。
+    @MainActor
+    private static func previewCacheCases(_ t: Tally) {
+        let routed: Bool = ThumbCache.storage(for: 1024) === ThumbCache.previews
+            && ThumbCache.storage(for: 1600) === ThumbCache.previews
+            && ThumbCache.storage(for: 512) === ThumbCache.cache && ThumbCache.storage(for: 256) === ThumbCache.cache
+            && ThumbCache.storage(for: 128) === ThumbCache.cache
+        t.check(routed, "1024 预览和网格缩略图分开存：≥ 1024 进 previews，512 / 256 / 128 进 cache")
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("thumbcache-selftest-" + UUID().uuidString)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("P.jpg").path
+        guard writeJPEG(URL(fileURLWithPath: path), width: 1536, height: 1024) else {
+            t.check(false, "1024 预览缓存 写不出测试 JPEG")
+            return
+        }
+        let big = ThumbCache.load(path: path, maxPixel: 1024)
+        let small = ThumbCache.load(path: path, maxPixel: 512)
+        let bigKey = ThumbCache.key(path, 1024), smallKey = ThumbCache.key(path, 512)
+        let bigHome: Bool = ThumbCache.previews.object(forKey: bigKey) != nil && ThumbCache.cache.object(forKey: bigKey) == nil
+        let smallHome: Bool = ThumbCache.cache.object(forKey: smallKey) != nil && ThumbCache.previews.object(forKey: smallKey) == nil
+        t.check(big?.size.width == 1024 && small?.size.width == 512 && bigHome && smallHome,
+                "1024 解出来进 previews、512 进 cache，各读各的（cached 读回同一张）",
+                "\(big?.size ?? .zero) \(small?.size ?? .zero) \(bigHome) \(smallHome)")
+        let filler = NSImage(size: NSSize(width: 4, height: 4))
+        let fillers = (0..<200).map { "selftest-filler-\($0)" as NSString }
+        for key in fillers { ThumbCache.previews.setObject(filler, forKey: key, cost: 3_000_000) }
+        t.check(ThumbCache.cached(path, 512) != nil, "审片翻过 200 张 1024（远超预览缓存的上限）：网格那张 512 还在")
+        for key in fillers { ThumbCache.previews.removeObject(forKey: key) }
+        ThumbCache.previews.removeObject(forKey: bigKey)
+        ThumbCache.cache.removeObject(forKey: smallKey)
     }
 
     // MARK: - 分析收尾只清重写了预览的照片
