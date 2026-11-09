@@ -1051,7 +1051,7 @@ private struct CollageSnapshotHost: View {
 /// matchTone=on（同一格里这几块统一深浅）、fade=0.55（底部平滑压暗，最深多黑）、inkTop=0.025（字墨的顶离上边）。
 /// 渲染件：halftone:dot|line[;点距;网角;锐度;网点增大;墨色;纸色|page]|none（照片加网，点距相对短边；实际不到 3 像素只调影调；
 /// page = 纸色跟页面底色（模糊底、渐变底时跟底色块），深色页配深墨时换成纸白；.marks.json 的 halftone 记每张的实际点距、出没出点、墨色纸色）、border:none|hairline|polaroid|film|mat[=卡纸色]、mat:0.07（卡纸宽，
-/// 顺手换成卡纸边）、paperover:0.5（纸纹压在照片上）、grain:0.4（底下的纸纹）；贴纸 sticker:barcode / sticker:greasePencil
+/// 顺手换成卡纸边）、paperover:0.5（纸纹压在照片上）、papergrain:0.4（底下的纸纹；grain: 是光谱胶片的颗粒）；贴纸 sticker:barcode / sticker:greasePencil
 /// （先 sel:路径 选中照片格 = 圈住那一格）、itemmark:N=circle|cross|dot|cropLine（换记号，外框按记号换算）、
 /// itemcolor:N=hex、itemlabel:N=字（标签、邮戳、条码上的字）。
 /// 印样 / 底片条：contact:135|645|66|67|auto[;每条帧数;条数;sheet|strip]（这一页改成印样，托盘按拍摄先后排成一卷；
@@ -1865,11 +1865,12 @@ enum CollageOpsScript {
                     st.matWidth = min(0.3, max(0.01, v))
                     store.setStyle(st, coalesce: false)
                 } else { ok = false }
-            case "paperover", "grain":
-                // paperover:0.5（纸纹压在照片上 0…1）；grain:0.4（底下的纸纹）
+            case "paperover", "papergrain":
+                // paperover:0.5（纸纹压在照片上 0…1）；papergrain:0.4（底下的纸纹）。以前也叫 grain:，和上面光谱胶片的
+                // grain: 撞名，这条一直走不到（编译警告就是它）：改名 papergrain。
                 if let v = Double(arg), v.isFinite {
                     var st = store.project.style
-                    if name == "grain" { st.grain = min(1, max(0, v)) } else { st.paperOverPhotos = min(1, max(0, v)) }
+                    if name == "papergrain" { st.grain = min(1, max(0, v)) } else { st.paperOverPhotos = min(1, max(0, v)) }
                     store.setStyle(st, coalesce: false)
                 } else { ok = false }
             case "contact":
