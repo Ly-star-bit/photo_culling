@@ -63,9 +63,11 @@ struct ClientImportSheet: View {
     private func preview(_ lines: [String], hasUnknown: Bool) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+                // 只凭表上编号认的备注（「12 去路人」）那一行也标橙：编号认错了，备注就记到别的照片上（优化分析 NR2）。
+                let warn = (index == 0 && hasUnknown) || line.hasPrefix(ClientReply.numberedNotePrefix)
                 Text(line)
                     .font(index == 0 ? .callout.bold() : .caption)
-                    .foregroundStyle(index == 0 && hasUnknown ? Color.orange : Color.primary)
+                    .foregroundStyle(warn ? Color.orange : Color.primary)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }

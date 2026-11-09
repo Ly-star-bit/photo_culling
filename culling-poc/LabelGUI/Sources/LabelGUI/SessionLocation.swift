@@ -170,7 +170,8 @@ enum SessionLocation {
     struct RelocationCheck: Equatable {
         /// 抽查了几张（全场均匀抽，不只是前面几张）。
         var sampled = 0
-        /// 按原来的子文件夹和文件名找到了，而且是同一个文件（大小一样；老场次没记大小的看修改时间、EXIF 拍摄时间）。
+        /// 按原来的子文件夹和文件名找到了，而且是同一个文件（大小一样、记了拍摄时间的拍摄时间也一样；老场次没记大小的看修改时间、
+        /// EXIF 拍摄时间）。
         var matched = 0
         /// 找到了同名文件，却不是同一个（大小 / 时间不一样）：多半是另一场拍摄里的同名照片。
         var different = 0
@@ -228,14 +229,20 @@ enum SessionLocation {
         return result
     }
 
-    /// 新位置上同名的这个文件是不是分析过的那一个：记了大小的先看大小（拷贝不改大小，两张不同的照片几乎不会一字节不差）；
-    /// 大小变了的再看 EXIF 拍摄时间 —— 别的软件可能往 JPEG 里写过元数据（Lightroom 把星级直接写进 JPEG），拍摄时间
+    /// 新位置上同名的这个文件是不是分析过的那一个：记了大小的先看大小（拷贝不改大小）；大小一样、manifest 又记了拍摄时间的，
+    /// 再比一次 EXIF 拍摄时间（优化分析 NR3）—— 未压缩的 RAF / ARW 基本定长，同一台机身另一场的同名 RAW 一字节不差也是常事，
+    /// 以前大小一样就算，纯 RAW 场次选错文件夹会把 manifest 改指到另一批原片上（之后移废片、写 XMP 都作用到那一批）。
+    /// 文件头里读不到拍摄时间的（没有 EXIF、ImageIO 不认的格式）照旧按大小算。
+    /// 大小变了的也看 EXIF 拍摄时间 —— 别的软件可能往 JPEG 里写过元数据（Lightroom 把星级直接写进 JPEG），拍摄时间
     /// 一样的还算同一张，同一台相机另一场的同名照片拍摄时间对不上。没记大小的，修改时间（差 2 秒以内，exFAT 只记到 2 秒）
-    /// 或者 EXIF 拍摄时间有一样对得上就算。nil = 什么都没记，分不出。
+    /// 或者 EXIF 拍摄时间有一样对得上就算。nil = 什么都没记，分不出。都只读文件头、不解码。
     static func sameFile(_ stamp: ImageLoader.FileStamp, at url: URL, layer1: [String: Any]?, captureTime: String?) -> Bool? {
         let shot: String? = captureTime.flatMap { $0.count >= 19 ? String($0.prefix(19)) : nil }
         if let size = (layer1?["src_size"] as? NSNumber)?.intValue {
-            if size == stamp.size { return true }
+            if size == stamp.size {
+                guard let shot, let exif = exifCaptureTime(url) else { return true }
+                return exif == shot
+            }
             guard let shot, let exif = exifCaptureTime(url) else { return false }
             return exif == shot
         }

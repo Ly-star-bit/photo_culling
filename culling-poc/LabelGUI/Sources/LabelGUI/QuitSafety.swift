@@ -55,17 +55,25 @@ enum SubprocessGroup {
     }
 }
 
-// MARK: - 分析、VLM、复审期间防闲置睡眠（S05c）
+// MARK: - 分析、VLM、复审、导卡、导出 / 复制期间防闲置睡眠（S05c）
 
-/// 哪一种长任务（退出确认框按它说话）。
+/// 哪一种长任务（退出确认框按它说话）。导卡、导出 JPG / 精华、复制原片、复制高 ISO RAW 以前没拿（优化分析 NR1）：
+/// 导一整张婚礼卡、往外接盘复制几百个 RAW 都要十几分钟，人一走开 Mac 闲置睡眠，复制就停在半路。
+/// 选片确认表、写 XMP、移废片几秒就完，不拿（退出确认框照旧按「还有任务在跑」说）。
 enum LongTaskKind: String, Sendable, CaseIterable {
     case analysis, vlm, appeal
+    case cardImport, jpegExport, highlights, copyOriginals, highISO
 
     var label: String {
         switch self {
         case .analysis: return "分析照片"
         case .vlm: return "VLM 判片"
         case .appeal: return "VLM 复审废片"
+        case .cardImport: return "从存储卡导入"
+        case .jpegExport: return "导出 JPG"
+        case .highlights: return "导出精华"
+        case .copyOriginals: return "复制原片"
+        case .highISO: return "复制高 ISO RAW"
         }
     }
 
@@ -73,8 +81,8 @@ enum LongTaskKind: String, Sendable, CaseIterable {
     var reason: String { "LabelGUI \(rawValue): long task running, idle system sleep disabled" }
 }
 
-/// 分析、VLM、复审期间拿着 ProcessInfo 的 activity：夜里挂着跑几小时的 VLM，人一走开 Mac 闲置睡眠，Python 和 Ollama
-/// 一起停住，早上一看没跑完（审查 S05c）。以前全仓只有实时桥拿了一个 .userInitiatedAllowingIdleSystemSleep，等于没防。
+/// 分析、VLM、复审、导卡、导出 / 复制期间拿着 ProcessInfo 的 activity：夜里挂着跑几小时的 VLM，人一走开 Mac 闲置睡眠，
+/// Python 和 Ollama 一起停住，早上一看没跑完（审查 S05c）。以前全仓只有实时桥拿了一个 .userInitiatedAllowingIdleSystemSleep，等于没防。
 /// 合盖照样睡（那是用户自己的选择）；显示器照样可以灭。无头（命令行、测试宿主）不拿，只记账（退出确认框和自检看）。
 /// 每次 begin 拿到一个 token，任务的 Task.detached 第一行 defer { token.end() } —— 所有出口（探 Ollama 失败、写清单失败、
 /// 成功、失败、取消）都放掉，不然 app 开着期间 Mac 一直不睡。

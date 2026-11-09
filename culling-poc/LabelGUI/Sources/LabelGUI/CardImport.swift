@@ -1456,8 +1456,12 @@ extension BatchStore {
         let card = plan.sourceName
         // 进度回调是 Task 排进主线程的，可能比收尾那一下晚到 —— 收尾之后的一律不算。
         let live = ImportLiveBox()
+        // 导卡期间不让 Mac 闲置睡眠（优化分析 NR1）：一张婚礼卡连第二份备份要导十几分钟，人一走开就停在半路。
+        // 一张卡一个：排着队的下一张卡导的时候是 CardImportCenter 再调一次这里，自己拿自己的。
+        let sleepGuard = longTasks.begin(.cardImport)
 
         Task.detached { [weak self] in
+            defer { sleepGuard.end() }  // 所有出口（读卡失败、取消、导完、出错）都放掉
             let fresh: CardImporter.Plan
             do {
                 var made = try CardImporter.plan(source: plan.source, destination: plan.destination,

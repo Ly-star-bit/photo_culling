@@ -788,13 +788,55 @@ final class BatchStore: ObservableObject {
     }
     private var xmpState: XMPState?
     private var xmpStatePath: URL { sessionDir.appendingPathComponent("xmp_state.json") }
+    /// xmp_state.json 在、却读不进来（解不开 / 读不出来）的原因（优化分析 NR4）：说不清上次写进 XMP 的是什么。以前 try? 读、
+    /// 失败就当这一场没写过 —— 「待更新」恒为 0，「只写改了的」退化成整场写，把我们的星级写进 LR 改过的 sidecar（S17 那种）。
+    /// 现在照 overrides 那几份的口径：解不开的挪成 .corrupt-<时间>.json、提示；读不出来、挪不开的提示，这一场不改写它
+    /// （xmpStateWriteRefused）。两种都按「不知道」处理：「XMP 待更新」不提醒、「只写改了的」不写（说清楚为什么）；
+    /// 菜单「全部重写 XMP」是用户明说要整场重写，照常能用。写成功一次（挪开那种）就又知道了。nil = 读进来了或者没写过。
+    private(set) var xmpStateUnknown: String?
+    /// xmp_state.json 原件读不出来、挪不开：这一场不改写它（拿内存里的去盖，原件就没了）。
+    private var xmpStateWriteRefused = false
 
     private func loadXMPState() {
-        guard let data = try? Data(contentsOf: xmpStatePath) else {
-            xmpState = nil
+        xmpState = nil
+        xmpStateUnknown = nil
+        xmpStateWriteRefused = false
+        let name = "XMP 记录 xmp_state.json"
+        let unknownTail = "：说不清哪些照片在 LR / C1 里改过，「XMP 待更新」先不提醒、「只更新改了的」先不能用"
+        switch SessionFiles.read(XMPState.self, at: xmpStatePath) {
+        case .missing:
+            break
+        case .ok(let state):
+            xmpState = state
+        case .corrupt(let moved?):
+            let why = "\(name) 解不开（被手改过或写坏了），原件已挪成 \(moved.lastPathComponent)"
+            xmpStateUnknown = why
+            addDataNotice(sessionLabel + "的 " + why + unknownTail + "；菜单「全部重写 XMP」会整场重写，LR 里改过的星级会被盖回去" +
+                          "（文件在 \(sessionDir.path)）")
+        case .corrupt(nil):
+            let why = "\(name) 解不开、也挪不开"
+            xmpStateUnknown = why
+            xmpStateWriteRefused = true
+            addDataNotice(sessionLabel + "的 " + why + unknownTail + "，为免覆盖这一场也不改写它（修好或移走这个文件后重新打开这一场；" +
+                          "文件在 \(sessionDir.path)）")
+        case .unreadable(let reason):
+            let why = "\(name) 读不出来（\(reason)）"
+            xmpStateUnknown = why
+            xmpStateWriteRefused = true
+            addDataNotice(sessionLabel + "的 " + why + unknownTail + "，为免覆盖这一场也不改写它（重新打开这一场再读一次；" +
+                          "文件在 \(sessionDir.path)）")
+        }
+    }
+
+    /// 写 xmp_state.json：原件读不出来、挪不开的这一场不写；写失败只记日志（丢了的是「待更新」的提醒，菜单「全部重写 XMP」
+    /// 补得回来，不值得一条红条 —— 和阈值、确认表记录一样，以前 try? 吞掉，日志里都没有）。写成功了就又「知道」了。
+    private func writeXMPState(_ state: XMPState) {
+        guard !xmpStateWriteRefused else {
+            SessionFiles.log.notice("xmp_state.json 原件读不出来，这一场不改写它")
             return
         }
-        xmpState = try? JSONDecoder().decode(XMPState.self, from: data)
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        if SessionFiles.writeLogged(data, to: xmpStatePath) { xmpStateUnknown = nil }
     }
 
     /// 旧版本把本工具更早写的 sidecar（rate.py 的 culling-poc 标记）也记成了「别人的」，「XMP 过期」
@@ -818,15 +860,14 @@ final class BatchStore: ObservableObject {
         // 这里写下的 foreign 都是按现在的规则判的（导出时逐张判过，或者刚复查过）。
         state.foreignRechecked = true
         xmpState = state
-        if let data = try? JSONEncoder().encode(state) {
-            try? data.write(to: xmpStatePath, options: .atomic)
-        }
+        writeXMPState(state)
     }
 
     /// 和 XMP 对不上的张数：写过的按「判决 + 星级」比；从没写进去的（新照片、上次写失败的）也算；
     /// 别的软件的 XMP 我们不碰，不算。
+    /// 上次写 XMP 的记录读不进来（xmpStateUnknown，NR4）：不知道，不提醒（点下去「只更新改了的」也不写）。
     private func xmpStale(in items: [BatchItem]) -> Int {
-        guard let state = xmpState else { return 0 }
+        guard xmpStateUnknown == nil, let state = xmpState else { return 0 }
         var n = 0
         for item in items where Self.xmpNeedsWrite(item, state: state, clientPick: clientPicks.contains(item.id)) {
             n += 1
@@ -842,8 +883,9 @@ final class BatchStore: ObservableObject {
         !state.foreign.contains(item.id) && state.marks[item.id] != xmpMark(item, clientPick: clientPick)
     }
 
-    /// 这一场写过 XMP 没有（菜单上叫「写入 XMP」还是「全部重写 XMP」）。
-    var hasWrittenXMP: Bool { xmpState != nil }
+    /// 这一场写过 XMP 没有（菜单上叫「写入 XMP」还是「全部重写 XMP」）。xmp_state.json 在、却读不进来的也算写过（NR4）：
+    /// 点下去是整场重写，菜单得照实叫「全部重写」。
+    var hasWrittenXMP: Bool { xmpState != nil || xmpStateUnknown != nil }
 
     /// 「XMP 待更新」里因为同名共用一个 .xmp 写不了的张数（上次写 XMP 时认出来的、还在这一场、还算待更新的）。
     var xmpSharedSidecarCount: Int {
@@ -1523,7 +1565,7 @@ final class BatchStore: ObservableObject {
             // 不走 saveXMPState：它会把 foreignRechecked 记成已复查，switchSession 接着的 recheckForeignSidecars 就不查了。
             xmpState = state
             backupOnce(xmpStatePath)
-            if let encoded = try? JSONEncoder().encode(state) { try? encoded.write(to: xmpStatePath, options: .atomic) }
+            writeXMPState(state)
         }
     }
 
@@ -1837,7 +1879,8 @@ final class BatchStore: ObservableObject {
         }
         let dir = dataDir.appendingPathComponent("sessions/\(entry.key)")
         // 防选错（审查）：不只看「有一张同名的」—— 同一台机身的另一场、两台同型号机身都有一堆同名文件。全场抽查、按大小
-        // （老场次按修改时间、拍摄时间）比，大多数对得上才换；对不上就不换，说清楚对上了几张。
+        // 和拍摄时间（大小一样的也比，定长的 RAW 大小骗得过，NR3；老场次按修改时间、拍摄时间）比，大多数对得上才换；
+        // 对不上就不换，说清楚对上了几张。
         if let check = SessionLocation.relocationCheck(sessionDir: dir, under: folder), !check.accepted {
             if check.found == 0 {
                 lastError = "「\(folder.lastPathComponent)」里找不到「\(entry.name)」的照片（按原来的子文件夹和文件名一张都没对上），" +
@@ -4687,8 +4730,11 @@ final class BatchStore: ObservableObject {
         cancelFlag = AnalysisEngine.CancelFlag()
         let flag = cancelFlag
         let total = jobs.count
+        // 几百张整幅解码再编码，外接盘上要好几分钟：期间不让 Mac 闲置睡眠（优化分析 NR1）。
+        let sleepGuard = longTasks.begin(isHighlights ? .highlights : .jpegExport)
 
         Task.detached { [weak self] in
+            defer { sleepGuard.end() }  // 所有出口（建不了文件夹、取消、导完）都放掉
             do {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             } catch {
@@ -4904,8 +4950,11 @@ final class BatchStore: ObservableObject {
         let total = sources.count
         cancelFlag = AnalysisEngine.CancelFlag()
         let flag = cancelFlag
+        // 跨盘实打实复制几百个 RAW：期间不让 Mac 闲置睡眠（优化分析 NR1）。
+        let sleepGuard = longTasks.begin(.highISO)
 
         Task.detached { [weak self] in
+            defer { sleepGuard.end() }  // 所有出口（空间不够、建不了文件夹、盘满、取消、复制完）都放掉
             let fm = FileManager.default
             var copied = 0, existed = 0
             var renamed: [String] = []
@@ -5008,9 +5057,17 @@ final class BatchStore: ObservableObject {
             lastError = why
             return
         }
+        // 上次写 XMP 的记录在、却读不进来（NR4）：「只写改了的」没法挑，往下走就成了整场写、把 LR 里改过的星级盖回去 ——
+        // 不写，说清楚。要整场重写的用菜单那一项（用户明说的）。
+        if scope == .changed, let unknown = xmpStateUnknown {
+            lastError = "没写 XMP：\(unknown)，说不清哪些照片改过、只更新哪几张。要整场重写用菜单「全部重写 XMP」" +
+                "（在 LR / C1 里改过的星级会被盖回去）"
+            return
+        }
         isRunning = true
         lastError = nil
-        // 只写改了的：和「XMP 待更新」同一个判断。从没写过（xmpState == nil）时状态栏不提醒，走到这里就按整场写。
+        // 只写改了的：和「XMP 待更新」同一个判断。从没写过（xmpState == nil、xmp_state.json 不在）时状态栏不提醒，
+        // 走到这里就按整场写；在、却读不进来的上面已经挡了。
         let chosen: [BatchItem]
         if scope == .changed, let state = xmpState {
             chosen = items.filter { Self.xmpNeedsWrite($0, state: state, clientPick: clientPicks.contains($0.id)) }
