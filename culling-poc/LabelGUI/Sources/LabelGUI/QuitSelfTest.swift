@@ -9,6 +9,7 @@ import Foundation
 /// 没排着的不写；防睡眠的 activity 在 pmset 里真的有（每一种长任务都核对）、放掉就没，分析（合成的色块 JPEG）跑完 / 取消、
 /// VLM 提前返回、导卡（导完 / 取消 / 卡被拔 / 排队的下一张）、导出 JPG / 精华、复制原片、复制高 ISO RAW（含提前返回）都放掉；
 /// ⌘Q 确认的判断表（QuitGuard）和流程（QuitCoordinator，弹框、回 AppKit 都换成假的，在 modal panel 模式里等停下）；
+/// ⌘Q 也看水印页、拼图页是不是正在导出（假的导出页：叫停、等停下、停不下来等满时限，AppDelegate 接的是 AppModel 里那两个）；
 /// ⌘Q 也看拼图工程、标注存上没有（真的 AppModel、场次目录 / collage.json chmod 成写不进、读不出）；
 /// 「上次分析没跑完」的标记（开跑写、跑完 / 取消 / 出错删，留下的下次打开这一场提示）。
 /// 会写数据目录：只在临时目录里跑。每条打一行 PASS / FAIL，有 FAIL 退出码 1。不弹任何框。
@@ -27,6 +28,7 @@ enum QuitSelfTest {
         t.sleepGuardDuringImportAndExports()
         t.quitDecisionTable()
         t.quitCoordinatorFlows()
+        t.quitWaitsForPageExports()
         t.quitChecksCollageAndLabels()
         t.unfinishedAnalysisMarker()
         print("quit-selftest: \(t.passed) 通过 \(t.failed) 失败")
@@ -596,29 +598,37 @@ final class QuitSelfTestHarness {
         // 导出 JPG / 精华、复制原片、复制高 ISO RAW 各是一种（NR1）。
         let jobs: [QuitGuard.Job] = [.analysis, .vlm, .appeal, .cardImport(queued: 1), .other]
             + QuitGuard.exportKinds.map { QuitGuard.Job.task($0) }
+        // 水印页 / 拼图页在不在导出（NR5）：批量页闲着就按它们问，批量页也在跑就按批量页的问、确认框里补一句一起停下。
+        let pageSets: [[QuitGuard.ExportPage]] = [[], [.watermark], [.collage], [.watermark, .collage]]
         var wrong: [String] = []
         for headless in [false, true] {
             for reason in [QuitGuard.Reason.user, .system] {
                 for running in [nil] + jobs.map(Optional.some) {
                     for unsaved in [nil, "判决没存上"] as [String?] {
-                        let got = QuitGuard.decide(headless: headless,
-                                                   state: QuitGuard.State(running: running, unsaved: unsaved), reason: reason)
-                        let expect: QuitGuard.Decision
-                        if headless {
-                            expect = .quit
-                        } else if let running {
-                            expect = reason == .system ? .stopThenQuit(running) : .askStop(running)
-                        } else if let unsaved, reason == .user {
-                            expect = .askUnsaved(unsaved)
-                        } else {
-                            expect = .quit
+                        for pages in pageSets {
+                            let state = QuitGuard.State(running: running, unsaved: unsaved, pageExports: pages)
+                            let got = QuitGuard.decide(headless: headless, state: state, reason: reason)
+                            let job: QuitGuard.Job? = running ?? (pages.isEmpty ? nil : .pageExport(pages))
+                            let also: [QuitGuard.ExportPage] = running == nil ? [] : pages
+                            let expect: QuitGuard.Decision
+                            if headless {
+                                expect = .quit
+                            } else if let job {
+                                expect = reason == .system ? .stopThenQuit(job, also: also) : .askStop(job, also: also)
+                            } else if let unsaved, reason == .user {
+                                expect = .askUnsaved(unsaved)
+                            } else {
+                                expect = .quit
+                            }
+                            if got != expect {
+                                wrong.append("headless=\(headless) \(reason) \(String(describing: running)) \(unsaved ?? "-") \(pages) → \(got)")
+                            }
                         }
-                        if got != expect { wrong.append("headless=\(headless) \(reason) \(String(describing: running)) \(unsaved ?? "-") → \(got)") }
                     }
                 }
             }
         }
-        let combos = 2 * 2 * (jobs.count + 1) * 2
+        let combos = 2 * 2 * (jobs.count + 1) * 2 * pageSets.count
         check(wrong.isEmpty, "判断表 \(combos) 种组合都对" + (wrong.isEmpty ? "" : "：\(wrong.prefix(3))"))
 
         var mapping: [(Bool, Bool, Bool, Int, [LongTaskKind], QuitGuard.Job?, String)] = [
@@ -665,6 +675,15 @@ final class QuitSelfTestHarness {
         }
         let copying = QuitGuard.prompt(for: .askStop(.task(.copyOriginals)))?.message ?? ""
         check(copying.contains("不留半截") && copying.contains("一模一样的会跳过"), "复制原片：说清正在复制的不留半截、下次一样的跳过")
+        let wm = QuitGuard.prompt(for: .askStop(.pageExport([.watermark])))
+        check(wm?.title == "水印页正在导出，现在退出会中断" && wm?.secondary == "继续导出" && wm?.primaryQuits == true
+              && (wm?.message.contains("已经写出的文件留着") ?? false), "只有水印页在导出：「水印页正在导出」/「继续导出」（NR5）")
+        let both = QuitGuard.prompt(for: .askStop(.pageExport([.watermark, .collage])))
+        check(both?.title == "水印页、拼图页正在导出，现在退出会中断", "水印页、拼图页都在导出：一句说全（\(both?.title ?? "nil")）")
+        let mixed = QuitGuard.prompt(for: .askStop(.analysis, also: [.collage]))
+        check(mixed?.title == analysis?.title && mixed?.secondary == "继续分析"
+              && (mixed?.message.contains("拼图页正在导出，也一起停下") ?? false),
+              "分析在跑、拼图页也在导出：照分析问，补一句拼图页也一起停下")
         let unsaved = QuitGuard.prompt(for: .askUnsaved("「婚礼」的判决没存上（盘满了）"))
         check(unsaved?.primaryQuits == false && unsaved?.quitIsDestructive == true && unsaved?.primary == "不退出"
               && (unsaved?.message.contains("「婚礼」的判决没存上（盘满了）") ?? false),
@@ -695,10 +714,30 @@ final class QuitSelfTestHarness {
     }
 
     func coordinator(_ target: QuitTarget, _ rec: Recorder, headless: Bool = false,
-                     saveChecks: @escaping () -> [QuitSaveCheck] = { [] }) -> QuitCoordinator {
-        QuitCoordinator(target: target, headless: headless, saveChecks: saveChecks,
+                     saveChecks: @escaping () -> [QuitSaveCheck] = { [] },
+                     exporters: @escaping () -> [QuitExportTarget] = { [] }) -> QuitCoordinator {
+        QuitCoordinator(target: target, headless: headless, saveChecks: saveChecks, exporters: exporters,
                         ask: { rec.asked.append($0); return rec.answer($0) },
                         reply: { rec.replies.append($0) })
+    }
+
+    /// 自检里假的水印页 / 拼图页：叫停以后 stopAfter 秒 isExporting 落下（nil = 一直停不下来）。
+    final class FakeExporter: QuitExportTarget {
+        let quitExportPage: QuitGuard.ExportPage
+        var isExporting = false
+        var cancels = 0
+        var stopAfter: Double? = 0.2
+        /// isExporting 落下的那一刻（核对放行在它之后）。
+        var stoppedAt: Date?
+        init(_ page: QuitGuard.ExportPage) { quitExportPage = page }
+        func cancelExport() {
+            cancels += 1
+            guard cancels == 1, let delay = stopAfter else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [self] in
+                isExporting = false
+                stoppedAt = Date()
+            }
+        }
     }
 
     /// 自检里假的拼图 / 标注存盘。
@@ -883,6 +922,89 @@ final class QuitSelfTestHarness {
         }
     }
 
+    // MARK: - NR5 ⌘Q 也看水印页、拼图页是不是正在导出
+
+    func quitWaitsForPageExports() {
+        print("— NR5 ⌘Q 也看水印页、拼图页是不是正在导出：问「停下并退出 / 继续导出」，停下时叫它们自己的取消，等停下再放行")
+        // 只有水印页在导出、批量页闲着。
+        let idle = FakeTarget()
+        let wm = FakeExporter(.watermark), col = FakeExporter(.collage)
+        wm.isExporting = true
+        let r1 = Recorder()
+        final class AtReply { var exporting: Bool? }
+        let atReply = AtReply()
+        // 回 AppKit 的那一下记下水印页还在不在导（核对是停下以后才放行）。
+        let c1 = QuitCoordinator(target: idle, headless: false, exporters: { [wm, col] },
+                                 ask: { r1.asked.append($0); return r1.answer($0) },
+                                 reply: { r1.replies.append($0); atReply.exporting = wm.isExporting })
+        let reply1 = c1.shouldTerminate(reason: .user)
+        check(reply1 == .terminateLater && r1.asked == [.askStop(.pageExport([.watermark]))] && wm.cancels == 1
+              && col.cancels == 0 && idle.cancels == 0,
+              "水印页在导出时 ⌘Q：问「水印页正在导出」，选「停下并退出」只叫停水印页（批量页闲着不叫它的取消）：\(r1.asked)")
+        withExtendedLifetime(c1) { spinModal(5) { !r1.replies.isEmpty } }
+        let seen = atReply.exporting.map { "\($0)" } ?? "nil"
+        check(r1.replies == [true] && atReply.exporting == false && wm.stoppedAt != nil,
+              "等水印页手上那一张写完、isExporting 落下才放行（放行那一下还在导：\(seen)）")
+
+        // 选「继续导出」：不退、不叫停。
+        let wm2 = FakeExporter(.watermark)
+        wm2.isExporting = true
+        let r2 = Recorder()
+        r2.answer = { _ in false }
+        check(coordinator(idle, r2, exporters: { [wm2] }).shouldTerminate(reason: .user) == .terminateCancel
+              && wm2.cancels == 0 && wm2.isExporting, "选「继续导出」：不退、不叫停")
+
+        // 批量页在跑、拼图页也在导出：照批量页问，补一句；两边都叫停，都停下才放行。
+        let busy = FakeTarget()
+        busy.isRunning = true
+        busy.onCancel = { t in t.isRunning = false }
+        let col3 = FakeExporter(.collage)
+        col3.isExporting = true
+        col3.stopAfter = 0.3
+        let r3 = Recorder()
+        let c3 = coordinator(busy, r3, exporters: { [FakeExporter(.watermark), col3] })
+        _ = c3.shouldTerminate(reason: .user)
+        withExtendedLifetime(c3) { spinModal(5) { !r3.replies.isEmpty } }
+        check(r3.asked == [.askStop(.other, also: [.collage])] && busy.cancels == 1 && col3.cancels >= 1
+              && r3.replies == [true] && !col3.isExporting,
+              "批量页在跑、拼图页也在导出：问一次（拼图页一起停下），两边都叫停，拼图页也停下了才放行：\(r3.asked)")
+
+        // 系统要退（注销、关机）：不问，直接叫停、等停下。
+        let col4 = FakeExporter(.collage)
+        col4.isExporting = true
+        let r4 = Recorder()
+        let c4 = coordinator(idle, r4, exporters: { [col4] })
+        let reply4 = c4.shouldTerminate(reason: .system)
+        withExtendedLifetime(c4) { spinModal(5) { !r4.replies.isEmpty } }
+        check(reply4 == .terminateLater && r4.asked.isEmpty && col4.cancels >= 1 && r4.replies == [true],
+              "注销 / 关机时拼图页在导出：不弹框，叫停、停下再放行")
+
+        // 停不下来：等满时限照样放行（和批量页一样）。
+        let stuck = FakeExporter(.watermark)
+        stuck.isExporting = true
+        stuck.stopAfter = nil
+        let r5 = Recorder()
+        let c5 = coordinator(idle, r5, exporters: { [stuck] })
+        c5.userStopTimeout = 0.4
+        let start5 = Date()
+        _ = c5.shouldTerminate(reason: .user)
+        withExtendedLifetime(c5) { spinModal(3) { !r5.replies.isEmpty } }
+        let waited = Date().timeIntervalSince(start5)
+        check(r5.replies == [true] && waited >= 0.35 && waited < 2.5, String(format: "水印页停不下来：等满时限照样放行（%.2f s）", waited))
+
+        // 无头：直接退，不问、不叫停。
+        let wm6 = FakeExporter(.watermark)
+        wm6.isExporting = true
+        let r6 = Recorder()
+        check(coordinator(idle, r6, headless: true, exporters: { [wm6] }).shouldTerminate(reason: .user) == .terminateNow
+              && r6.asked.isEmpty && wm6.cancels == 0, "无头：直接退，不问、不叫停")
+
+        // 都没在导出：照旧直接退。
+        let r7 = Recorder()
+        check(coordinator(idle, r7, exporters: { [FakeExporter(.watermark), FakeExporter(.collage)] }).shouldTerminate(reason: .user)
+              == .terminateNow && r7.asked.isEmpty, "水印页、拼图页都没在导出：直接退，不问")
+    }
+
     // MARK: - ⌘Q 也看拼图工程、标注存上没有
 
     /// collage.json 盘上那一份的缝宽（读不出来 = nil）。
@@ -961,10 +1083,19 @@ final class QuitSelfTestHarness {
         let wired = AppDelegate.saveChecks()
         check(unwired.isEmpty && wired.count == 2 && wired.first === collage && wired.last === model.labels,
               "AppDelegate 退出前看 AppModel 里的拼图工程和标注（LabelGUIApp.init 设 AppDelegate.model；没设时不看）")
+        // 水印页、拼图页的导出（NR5）：同一个 AppModel 里的那两个 store。
+        AppDelegate.model = nil
+        let noPages = AppDelegate.exporters()
+        AppDelegate.model = model
+        let pages = AppDelegate.exporters()
+        check(noPages.isEmpty && pages.count == 2 && pages.first === model.watermark && pages.last === collage
+              && pages.map(\.quitExportPage) == [.watermark, .collage] && !pages.contains(where: \.isExporting),
+              "AppDelegate 退出前看 AppModel 里的水印页、拼图页在不在导出（没设 model 时不看；这时都没在导）")
         func quit(_ reason: QuitGuard.Reason = .user, answer: Bool = false) -> (reply: NSApplication.TerminateReply, asked: [QuitGuard.Decision]) {
             let rec = Recorder()
             rec.answer = { _ in answer }
-            let reply = coordinator(model.batch, rec, saveChecks: { AppDelegate.saveChecks() }).shouldTerminate(reason: reason)
+            let reply = coordinator(model.batch, rec, saveChecks: { AppDelegate.saveChecks() },
+                                    exporters: { AppDelegate.exporters() }).shouldTerminate(reason: reason)
             return (reply, rec.asked)
         }
 
