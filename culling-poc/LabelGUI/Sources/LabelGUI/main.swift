@@ -73,6 +73,13 @@ if AppRuntime.headless && !CommandLine.arguments.contains("--live-host") {
 // 确认表页面脚本（--proof-selftest），还有打印登记表的 --list-selftests。在建数据目录之前，跑完自己退出。
 MainActor.assumeIsolated { SelfTestRegistry.dispatch(.beforeDataDir) }
 
+// LabelGUI --accuracy <照片文件夹> [--json]：这一场的人工标注（「标注校准」页写的 labels.csv）和自动判决对比 ——
+// 虚焦 / 闭眼 / 曝光各抓到、漏掉、误杀几张，是哪几张（AccuracyReport.swift）。只读：在建数据目录之前分派，
+// 判决在系统临时目录里的一份影子数据目录上算，真实数据目录一个字节都不写。
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--accuracy") {
+    MainActor.assumeIsolated { AccuracyCLI.run(flagIndex: flagIndex) }
+}
+
 // --app-ui、--live-host 是测试宿主：整套 store 都会写数据目录，所以 LABELGUI_DATA_DIR 没设、或者指到真实数据目录的，
 // 在建目录、注册字体之前就退出（它们自己的分派里还会再查一遍，那时已经晚了）。不跑 Python，不同步运行时（§9.7、§10.5）；
 // 字体照常注册（要渲染）。

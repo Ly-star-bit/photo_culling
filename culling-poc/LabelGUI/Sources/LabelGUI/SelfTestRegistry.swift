@@ -100,6 +100,8 @@ enum SelfTestRegistry {
               ci: .selftests()) { _ in CollageFilmLooksSelfTest.run() },
         .init("--darkroom-selftest", "暗房：悬停只预览、整组 / 这一页 / 这一格各改各的、强度、颗粒晕光、←→、原图、撤销；1:1 细节只渲那一块和渲整页再裁逐字节相同",
               ci: .selftests()) { _ in CollageDarkroomSelfTest.run() },
+        .init("--accuracy-selftest", "标注校准页「和自动判决对比」：虚焦 / 闭眼 / 曝光各抓到、漏掉、误杀几张，高分被判废 / 低分进精选，样本太少不给百分比，labels.csv 解析；纯函数，不读写任何文件",
+              stage: .beforeDataDir, ci: .selftests()) { _ in AccuracySelfTest.run() },
         .init("--mcp-selftest", "MCP 这一层的纯函数（含不开界面那道闸的判断表）：不起服务器、不读写任何文件（[--json]）",
               stage: .beforeDataDir, ci: .elsewhere("mcp_smoke.py")) { _ in MCPSelfTest.run() },
         .init("--card-queue-selftest", "存储卡排队：两张假卡走确认 / 排队 / 停下分析，看都导全了、分析在最后跑一次（<cardA> <cardB> --dest <dir>）",
