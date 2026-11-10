@@ -90,6 +90,8 @@ enum SelfTestRegistry {
               minArgs: 1, ci: .selftests(["{fixture}"])) { i in PersistSelfTest.run(flagIndex: i) },
         .init("--cull-mcp-selftest", "选片 MCP 在真的 BatchStore 上：XMP 待更新、导入客户选择、AI 改判的出处、一次定一场（<Fixtures/photot-session>，要空的数据目录）",
               ci: .selftests(["{fixture}"])) { i in CullMCPSelfTest.run(flagIndex: i) },
+        .init("--events-selftest", "离屏假事件（--events）实测送不送得到：最小 SwiftUI 视图上的点击 / 双击 / 悬停 / 滚轮 / 右键菜单；给了 fixture 再验批量页网格点一下格子焦点变到那张、悬停一格悬停条出现（[<Fixtures/photot-session>]，窗口从不上屏）",
+              ci: .selftests(["{fixture}"])) { i in SnapshotEventsSelfTest.run(flagIndex: i) },
         .init("--files-selftest", "文件安全：XMP 只写改了的、同名共用 .xmp、废片避开拼图、高 ISO RAW 复制不互相顶掉",
               ci: .selftests()) { _ in FileSafetySelfTest.run() },
         .init("--collage-export-selftest", "拼图 / 相册导出：PDF 先写临时文件再改名、缺跨页不出 PDF、空照片格先确认",
