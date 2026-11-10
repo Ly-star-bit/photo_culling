@@ -255,13 +255,13 @@ struct CollagePhotoCellBoxes: View {
     private var warnings: some View {
         if selectedWindow?.hitsBystander == true {
             Label("取景里有路人：双击格子拖一拖，或者换「半身」「特写」", systemImage: "person.2.fill")
-                .font(.caption2).foregroundStyle(.orange)
+                .font(.caption2).foregroundStyle(AppPalette.warning)
                 .fixedSize(horizontal: false, vertical: true)
         }
         if store.project.canvas.isPrint, let up = selectedUpscale, up > CollageStore.upscaleLimit {
             Label("这张要放大到 \(Int((up * 100).rounded()))% 才铺得满，超过 120% 印出来会软：少裁一点、换「完整显示」，或者给它小一点的格子",
                   systemImage: "plus.magnifyingglass")
-                .font(.caption2).foregroundStyle(.orange)
+                .font(.caption2).foregroundStyle(AppPalette.warning)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -349,9 +349,9 @@ struct CollagePhotoCellBoxes: View {
                 .opacity(refused ? 0.45 : 1)
             if let decided {
                 if decided.mask == nil {
-                    Text("这张照片认不出主体，照常画整张").font(.caption2).foregroundStyle(.orange)
+                    Text("这张照片认不出主体，照常画整张").font(.caption2).foregroundStyle(AppPalette.warning)
                 } else if let why = decided.cutoutReason {
-                    Text(why).font(.caption2).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                    Text(why).font(.caption2).foregroundStyle(AppPalette.warning).fixedSize(horizontal: false, vertical: true)
                 }
             }
         }

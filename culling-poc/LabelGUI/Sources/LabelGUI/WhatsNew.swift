@@ -31,27 +31,27 @@ enum WhatsNew {
     }
 
     /// 这一版新增的条目（两三条到五条，一条一句话，能「带我去」的都带上）。发下一版时整张换掉、version 跟着改。
-    static let notes = Notes(version: "1.30.0", entries: [
-        Entry(id: "justified-grid",
-              title: "网格里的照片大了",
-              detail: "批量页每张照片按自己的比例排满一行，不再是方格里两边留灰底；↑ ↓ 落到上下行位置最近的那张。",
+    static let notes = Notes(version: "1.31.0", entries: [
+        Entry(id: "inspector-side",
+              title: "看单张时照片大了",
+              detail: "空格打开的检视器改成左边整高的照片、右边一栏放淘汰理由、指标和 EXIF（以前照片只占一半高）。",
               destination: .batch),
-        Entry(id: "one-accent",
-              title: "全 app 一套颜色",
-              detail: "暗房的石墨灰和琥珀色铺到批量、水印、拼图三页：琥珀色只表示选中和下一步，判决还是绿 / 蓝 / 红。",
+        Entry(id: "takes-side-by-side",
+              title: "按分组一屏看到更多场",
+              detail: "一行放得下的几场挨着排；筛选没结果时写明是哪几个筛选、给「显示全部」；窗口窄了顶栏会收起字。",
+              destination: .batch),
+        Entry(id: "arrow-fast",
+              title: "大场次方向键跟手了",
+              detail: "几千张的场次里按方向键和几百张一样快。预览被清掉的旧场次不再让网格空转，给一个「重新分析」。",
+              destination: .batch),
+        Entry(id: "album-preflight",
+              title: "相册导出前查得更严",
+              detail: "原图读不了、胶装照片跨中缝、书脊按旧页数填的，现在都会拦下；用了预览图就不出印刷 PDF。",
+              destination: .collage(.export)),
+        Entry(id: "accuracy",
+              title: "标注校准能看准确率了",
+              detail: "在「标注校准」里标过的照片会和自动判决对比：虚焦、闭眼、曝光各抓到几张、漏了几张、误杀几张。",
               destination: nil),
-        Entry(id: "pick-button",
-              title: "「挑连拍」在顶栏",
-              detail: "还有连拍没挑时，批量页顶栏右边有一个琥珀色的「挑连拍 N 场」（以前是状态栏里一行小橙字）。全选只留 ⌘A。",
-              destination: .batch),
-        Entry(id: "quiet-badges",
-              title: "角标少了",
-              detail: "名次和同场张数并成「1/10」；文件名后面只有 ISO 3200 以上才写 ISO。面板里的说明字大了一号。",
-              destination: .batch),
-        Entry(id: "watermark-polish",
-              title: "水印页整齐了",
-              detail: "右栏的卡片一样宽；九宫格放大了、旁边写着位置；自定义颜色前面有字了。",
-              destination: .watermark),
     ])
 
     /// 记「上次见过哪一版」的键（app 自己的 UserDefaults 域；自检写进参数域，不碰这里）。

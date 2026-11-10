@@ -177,7 +177,7 @@ struct CollagePrintRulesBox: View {
         let now = count > 0 ? "；现在 \(count) 个跨页 = \(rules.pages(spreads: count))P" : ""
         if let problem {
             Label(problem, systemImage: "exclamationmark.triangle.fill")
-                .font(.caption2).foregroundStyle(.orange)
+                .font(.caption2).foregroundStyle(AppPalette.warning)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
             Text(range + now)
@@ -307,7 +307,7 @@ struct CollageExportRangeBox: View {
                 .fixedSize(horizontal: false, vertical: true)
         case .failure(let bad):
             Label(bad.message, systemImage: "exclamationmark.triangle.fill")
-                .font(.caption2).foregroundStyle(.orange)
+                .font(.caption2).foregroundStyle(AppPalette.warning)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -355,7 +355,7 @@ struct CollagePreflightBox: View {
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: 5) {
                 Image(systemName: block ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
-                    .foregroundStyle(block ? Color.red : Color.orange)
+                    .foregroundStyle(block ? Color.red : AppPalette.warning)
                 Text(issue.message)
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)

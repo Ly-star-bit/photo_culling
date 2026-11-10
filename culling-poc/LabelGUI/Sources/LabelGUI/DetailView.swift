@@ -129,7 +129,7 @@ struct DetailView: View {
             } footer: {
                 // "-" above means one of two very different things; say which.
                 if let warning = store.loadWarning {
-                    Text(warning).font(.caption).foregroundStyle(.orange)
+                    Text(warning).font(.caption).foregroundStyle(AppPalette.warning)
                 } else if l1 == nil {
                     Text("这张照片没有算法分析结果（分析失败或未分析）").font(.caption).foregroundStyle(.secondary)
                 }

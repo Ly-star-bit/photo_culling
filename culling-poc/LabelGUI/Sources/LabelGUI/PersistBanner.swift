@@ -28,7 +28,7 @@ extension BatchView {
             }
             if let notice = store.dataNotice {
                 HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(AppPalette.warning)
                     Text(notice).font(.callout)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
@@ -38,7 +38,7 @@ extension BatchView {
                         .help("知道了（关掉这条提醒）")
                 }
                 .padding(.horizontal, 12).padding(.vertical, 6)
-                .background(Color.orange.opacity(0.14))
+                .background(AppPalette.warning.opacity(0.14))
             }
         }
     }

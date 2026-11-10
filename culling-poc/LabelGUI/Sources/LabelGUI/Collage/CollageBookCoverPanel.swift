@@ -59,7 +59,7 @@ struct CollageBookCoverBox: View {
         // 书脊宽是按别的页数填的（优化分析 A4）：填完以后加减过跨页。导出前检查里是「拦」。
         if let stale = cover.spineStaleNote(spreads: spreads) {
             Label(stale, systemImage: "exclamationmark.triangle.fill")
-                .font(.caption2).foregroundStyle(.orange)
+                .font(.caption2).foregroundStyle(AppPalette.warning)
                 .fixedSize(horizontal: false, vertical: true)
             Button("印厂给的数没变，按现在的 \(CollageBookCover.pageCount(spreads: spreads))P 记") {
                 store.setCoverSpine(cover.spineMM)
@@ -71,12 +71,12 @@ struct CollageBookCoverBox: View {
             Label(String(format: "书脊只有 %.1f mm，放不下字（至少 %.0f mm）：书脊上不印字",
                          cover.spineWidthMM(spreads: spreads), CollageBookCover.minSpineTextMM),
                   systemImage: "exclamationmark.triangle.fill")
-                .font(.caption2).foregroundStyle(.orange)
+                .font(.caption2).foregroundStyle(AppPalette.warning)
                 .fixedSize(horizontal: false, vertical: true)
         }
         ForEach(store.coverFaceWarnings, id: \.self) { warning in
             Label(warning, systemImage: "exclamationmark.triangle.fill")
-                .font(.caption2).foregroundStyle(.orange)
+                .font(.caption2).foregroundStyle(AppPalette.warning)
                 .fixedSize(horizontal: false, vertical: true)
         }
         HStack(spacing: 4) {

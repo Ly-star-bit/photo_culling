@@ -67,7 +67,7 @@ struct ClientImportSheet: View {
                 let warn = (index == 0 && hasUnknown) || line.hasPrefix(ClientReply.numberedNotePrefix)
                 Text(line)
                     .font(index == 0 ? .callout.bold() : .caption)
-                    .foregroundStyle(warn ? Color.orange : Color.primary)
+                    .foregroundStyle(warn ? AppPalette.warning : Color.primary)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }

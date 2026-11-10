@@ -1255,7 +1255,7 @@ struct CollageVariantStrip: View {
                 .frame(height: 52)
                 .overlay(RoundedRectangle(cornerRadius: 2)
                     .strokeBorder(current ? AppPalette.accent : Color.clear, lineWidth: 2.5))
-                (Text(v.name) + Text(modified ? " · 改过" : "").foregroundColor(.orange))
+                (Text(v.name) + Text(modified ? " · 改过" : "").foregroundColor(AppPalette.warning))
                     .font(.caption2).foregroundStyle(current ? .primary : .secondary)
                     .lineLimit(1)
                     .frame(maxWidth: 96)
@@ -1584,7 +1584,7 @@ private struct CollageStripCard: View {
     }
 
     private var tint: AnyShapeStyle {
-        if over { return AnyShapeStyle(Color.orange) }
+        if over { return AnyShapeStyle(AppPalette.warning) }
         return selected ? AnyShapeStyle(HierarchicalShapeStyle.primary) : AnyShapeStyle(HierarchicalShapeStyle.secondary)
     }
 }

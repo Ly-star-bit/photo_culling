@@ -435,7 +435,7 @@ struct CardImportSheet: View {
         HStack(alignment: .center, spacing: 14) {
             Image(systemName: "sdcard.fill")
                 .font(.system(size: 30))
-                .foregroundStyle(.orange)
+                .foregroundStyle(AppPalette.warning)
                 .frame(width: 40)
             VStack(alignment: .leading, spacing: 3) {
                 Text("发现存储卡「\(offer.volume.name)」").font(.title3.bold())
@@ -459,7 +459,7 @@ struct CardImportSheet: View {
     private func details(_ offer: CardImportCenter.Offer) -> some View {
         if let error = offer.error {
             Label(error, systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
+                .foregroundStyle(AppPalette.warning)
                 .fixedSize(horizontal: false, vertical: true)
         } else if let issue = offer.targetIssue {
             targetIssueView(issue)
@@ -571,7 +571,7 @@ struct CardImportSheet: View {
     private func backupIssueView(_ issue: String) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Label(issue, systemImage: "externaldrive.badge.xmark")
-                .foregroundStyle(.orange)
+                .foregroundStyle(AppPalette.warning)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
                 Button("换个备份位置…") { center.chooseBackupRoot() }
@@ -602,7 +602,7 @@ struct CardImportSheet: View {
     private func targetIssueView(_ issue: String) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Label(issue, systemImage: "externaldrive.badge.xmark")
-                .foregroundStyle(.orange)
+                .foregroundStyle(AppPalette.warning)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
                 Button("换个位置…") { center.chooseRoot() }
@@ -653,7 +653,7 @@ struct CardImportSheet: View {
             Label {
                 Text(problems + "，那里的照片导不进来。先别格式化这张卡").fixedSize(horizontal: false, vertical: true)
             } icon: {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(AppPalette.warning)
             }
             .font(.callout)
         }
@@ -758,7 +758,7 @@ struct CardImportSheet: View {
         // 前面有卡在导 / 排着队：排在后面。在分析：「停下分析并导入」。别的任务（导出、VLM）：等它，或自己停。
         if canImport && (store.isRunning || !center.pending.isEmpty) {
             HStack(spacing: 8) {
-                Image(systemName: "hourglass").foregroundStyle(.orange)
+                Image(systemName: "hourglass").foregroundStyle(AppPalette.warning)
                 Text(busyText)
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

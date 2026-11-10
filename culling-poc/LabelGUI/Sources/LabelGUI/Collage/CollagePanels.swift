@@ -638,11 +638,11 @@ struct CollageOverlayBox: View {
         return VStack(alignment: .leading, spacing: 2) {
             Text(state)
                 .font(.caption)
-                .foregroundStyle(block.layer == .behindSubject ? Color.secondary : Color.orange)
+                .foregroundStyle(block.layer == .behindSubject ? Color.secondary : AppPalette.warning)
             if let reason = block.reason {
                 Text(reason)
                     .font(.caption2)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(AppPalette.warning)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -756,7 +756,7 @@ struct CollageDecorBox: View {
                 }
                 if store.editingCover {
                     Text("编辑封面时没有贴纸和手写字：封面那块只有格子（照片、文字、留白）。")
-                        .font(.caption2).foregroundStyle(.orange)
+                        .font(.caption2).foregroundStyle(AppPalette.warning)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Text(store.isFreeform

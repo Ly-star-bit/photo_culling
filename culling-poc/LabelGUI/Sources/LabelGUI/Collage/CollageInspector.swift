@@ -218,7 +218,7 @@ struct CollageCanvasBox: View {
             if !crossing.isEmpty {
                 Label("第 " + crossing.map { "\($0 + 1)" }.joined(separator: "、") + " 页有照片压在中缝上：到那一页点备选条的「换一批」",
                       systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption2).foregroundStyle(.orange)
+                    .font(.caption2).foregroundStyle(AppPalette.warning)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -611,7 +611,7 @@ struct CollageTitleBox: View {
                 if CollageTypeset.mastheadLooksReal(masthead: store.project.masthead, title: store.project.title) {
                     // 不拦：只提醒一句（自己的作品集、内部用都可以）。
                     Text("这个刊头像是真实杂志的名字：发出去前确认能用")
-                        .font(.caption2).foregroundStyle(.orange)
+                        .font(.caption2).foregroundStyle(AppPalette.warning)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Text("模板里的 {title} {subtitle} {masthead} {issue} 就是这几行；选中画布上的字，在「格式」里改字体、字号、花字。")
@@ -1117,7 +1117,7 @@ struct CollageExportPanel: View {
                 .help("只管这个拼图：关掉 = 导出时不带水印（预览里照样显示，「文档 › 水印」里的设置不动）")
             if store.project.watermark?.exportEnabled == false {
                 Text("这个拼图导出时不带水印（预览照常显示）")
-                    .font(.caption2).foregroundStyle(.orange)
+                    .font(.caption2).foregroundStyle(AppPalette.warning)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }

@@ -471,12 +471,12 @@ struct CollageAlbumSpreadCount: View {
             let over = count > b.spreads
             Text("\(count)/\(b.spreads)")
                 .font(.caption2).monospacedDigit()
-                .foregroundStyle(over || offSpec ? Color.orange : Color.secondary)
+                .foregroundStyle(over || offSpec ? AppPalette.warning : Color.secondary)
                 .help(helpText(count: count, target: b.spreads) + (pages ?? ""))
         } else {
             Text("\(count)")
                 .font(.caption2).monospacedDigit()
-                .foregroundStyle(offSpec ? Color.orange : Color.secondary)
+                .foregroundStyle(offSpec ? AppPalette.warning : Color.secondary)
                 .help("\(count) 个跨页（\(count * 2)P）。要指定跨页数：右栏「文档 › 画布」里勾「指定跨页数」" + (pages ?? ""))
         }
     }

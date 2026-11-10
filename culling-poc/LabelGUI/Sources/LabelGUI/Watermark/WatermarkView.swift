@@ -449,7 +449,7 @@ struct WatermarkView: View {
                                   display: String(format: "%.1f", store.config.tile.gapRatio))
                     if !store.config.signatureEnabled || store.signatureURL == nil {
                         Text("平铺用的是签名图：请先开启签名图水印并选择 PNG")
-                            .font(.caption2).foregroundStyle(.orange)
+                            .font(.caption2).foregroundStyle(AppPalette.warning)
                     }
                 }
             }

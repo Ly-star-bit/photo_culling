@@ -377,9 +377,9 @@ struct ChapterTimeline: View, Equatable {
                     tri.addLine(to: CGPoint(x: cx + 3.5, y: 6.5))
                     tri.addLine(to: CGPoint(x: cx - 3.5, y: 6.5))
                     tri.closeSubpath()
-                    ctx.fill(tri, with: .color(seg.allRejected ? .red : .orange))
+                    ctx.fill(tri, with: .color(seg.allRejected ? .red : AppPalette.warning))
                 } else if showPending && seg.pendingTakes > 0 {
-                    ctx.fill(Path(ellipseIn: CGRect(x: cx - 2, y: 2, width: 4, height: 4)), with: .color(.orange))
+                    ctx.fill(Path(ellipseIn: CGRect(x: cx - 2, y: 2, width: 4, height: 4)), with: .color(AppPalette.warning))
                 }
             }
             for x in layout.dayMarks {
@@ -458,7 +458,7 @@ private struct TimelineCard: View {
             }
             if segment.pendingTakes > 0 {
                 Label("还有 \(segment.pendingTakes) 场连拍没定", systemImage: "rectangle.stack")
-                    .font(.caption).foregroundStyle(.orange)
+                    .font(.caption).foregroundStyle(AppPalette.warning)
             }
             if segment.allRejected {
                 Label("这一章全部被淘汰（漏交风险）", systemImage: "exclamationmark.triangle.fill")
@@ -466,12 +466,12 @@ private struct TimelineCard: View {
             } else if segment.underMin {
                 Label("只留了 \(segment.pick + segment.usable) 张（每章至少 \(minKeepers)）",
                       systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(.orange)
+                    .font(.caption).foregroundStyle(AppPalette.warning)
             }
             Text(missed ? "当前视图里没有这一章的照片（被筛选掉了，或单张已收起）"
                         : "点击跳到这一章 · 右键只看这一章 · 网格里 [ ] 上一章 / 下一章")
                 .font(.caption2)
-                .foregroundStyle(missed ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
+                .foregroundStyle(missed ? AnyShapeStyle(AppPalette.warning) : AnyShapeStyle(.tertiary))
         }
         .padding(10)
         .frame(width: ChapterTimeline.cardWidth, alignment: .leading)

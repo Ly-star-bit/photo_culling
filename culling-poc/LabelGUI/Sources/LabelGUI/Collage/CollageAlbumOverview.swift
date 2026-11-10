@@ -403,7 +403,7 @@ private struct CollageOverviewCard: View {
 
     private var caption: some View {
         HStack(spacing: 4) {
-            Text("\(number)").fontWeight(.semibold).foregroundStyle(over ? Color.orange : Color.primary)
+            Text("\(number)").fontWeight(.semibold).foregroundStyle(over ? AppPalette.warning : Color.primary)
             Text("· " + CollageAlbumRules.photoCountLabel(photos)).foregroundStyle(.secondary)
             if locked { Image(systemName: "lock.fill").foregroundStyle(.secondary) }
             if current { Text("· 在编辑").foregroundStyle(.tertiary) }

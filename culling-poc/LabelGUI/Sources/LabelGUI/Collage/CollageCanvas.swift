@@ -994,8 +994,8 @@ struct CollageCanvasOverlay: View {
         return HStack(spacing: 4) {
             if b.locked { badge("lock.fill", nil, .white) }
             if b.cutsFace { badge("exclamationmark.triangle.fill", "切脸", .red) }
-            if b.bystander { badge("person.2.fill", "路人", .orange) }
-            if let up = b.upscale { badge("plus.magnifyingglass", "放大\(Int((up * 100).rounded()))%", .orange) }
+            if b.bystander { badge("person.2.fill", "路人", AppPalette.warning) }
+            if let up = b.upscale { badge("plus.magnifyingglass", "放大\(Int((up * 100).rounded()))%", AppPalette.warning) }
         }
         .offset(x: r.minX + 6, y: r.minY + 6)
     }

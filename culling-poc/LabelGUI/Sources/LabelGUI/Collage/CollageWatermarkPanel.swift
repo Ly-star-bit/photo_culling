@@ -46,7 +46,7 @@ struct CollageSignatureBox: View {
                 }
                 if lost {
                     Text(CollageWatermarks.signatureLostPanelWarning)
-                        .font(.caption2).foregroundStyle(.orange)
+                        .font(.caption2).foregroundStyle(AppPalette.warning)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 buttons
@@ -72,7 +72,7 @@ struct CollageSignatureBox: View {
                 ThumbnailView(path: file, maxPixel: 256, fit: true)
                     .padding(4)
             } else if signature != nil {
-                Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+                Image(systemName: "exclamationmark.triangle").foregroundStyle(AppPalette.warning)
             } else {
                 Image(systemName: "signature").foregroundStyle(.secondary)
             }
@@ -194,7 +194,7 @@ struct CollageMarkLayerBox: View {
             .help(hasSignature ? "关掉只画文字（签名的位置、大小还记着）" : "先在上面选一张签名图")
         if !layer.hasContent(signature: hasSignature) {
             Text(Self.emptyWarning(hasSignature: hasSignature))
-                .font(.caption2).foregroundStyle(.orange)
+                .font(.caption2).foregroundStyle(AppPalette.warning)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
