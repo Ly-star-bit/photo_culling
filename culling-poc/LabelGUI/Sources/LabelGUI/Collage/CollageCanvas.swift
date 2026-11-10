@@ -399,7 +399,7 @@ struct CollageCanvasView: View {
                 Button(action: onAutoLayout) {
                     Label(store.isAlbum ? "自动编排" : "自动排版", systemImage: "wand.and.stars").frame(minWidth: 140)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accentProminent)
                 .controlSize(.large)
                 .disabled(store.isSolving)
                 Text("或者把托盘里的照片拖进来 · 左栏「模板」里套一个")
@@ -921,7 +921,7 @@ struct CollageCanvasOverlay: View {
                 path.move(to: h.topCenter)
                 path.addLine(to: h.rotate)
             }
-            .stroke(Color.accentColor, lineWidth: 2)
+            .stroke(AppPalette.accent, lineWidth: 2)
             handle(at: h.rotate)
             handle(at: h.resize)
         }
@@ -930,7 +930,7 @@ struct CollageCanvasOverlay: View {
     private func handle(at p: CGPoint) -> some View {
         Circle()
             .fill(Color.white)
-            .overlay(Circle().stroke(Color.accentColor, lineWidth: 2))
+            .overlay(Circle().stroke(AppPalette.accent, lineWidth: 2))
             .frame(width: 12, height: 12)
             .offset(x: p.x - 6, y: p.y - 6)
     }
@@ -942,7 +942,7 @@ struct CollageCanvasOverlay: View {
     private func selectionOutline(_ frame: CollageLayout.Frame) -> some View {
         let r = viewRect(frame)
         return Rectangle()
-            .strokeBorder(Color.accentColor, lineWidth: 2.5)
+            .strokeBorder(AppPalette.accent, lineWidth: 2.5)
             .frame(width: r.width + 4, height: r.height + 4)
             .offset(x: r.minX - 2, y: r.minY - 2)
     }
@@ -953,7 +953,7 @@ struct CollageCanvasOverlay: View {
         let w = isRow ? max(3, r.width) : r.width
         let h = isRow ? r.height : max(3, r.height)
         return Rectangle()
-            .fill(Color.accentColor.opacity(0.55))
+            .fill(AppPalette.accent.opacity(0.55))
             .frame(width: w, height: h)
             .offset(x: r.midX - w / 2, y: r.midY - h / 2)
     }
@@ -964,13 +964,13 @@ struct CollageCanvasOverlay: View {
         if let edge {
             let bar = edgeBar(r, edge: edge)
             RoundedRectangle(cornerRadius: 2)
-                .fill(Color.accentColor)
+                .fill(AppPalette.accent)
                 .frame(width: bar.width, height: bar.height)
                 .offset(x: bar.minX, y: bar.minY)
         } else {
             Rectangle()
-                .fill(Color.accentColor.opacity(0.22))
-                .overlay(Rectangle().strokeBorder(Color.accentColor, lineWidth: 3))
+                .fill(AppPalette.accent.opacity(0.22))
+                .overlay(Rectangle().strokeBorder(AppPalette.accent, lineWidth: 3))
                 .frame(width: r.width, height: r.height)
                 .offset(x: r.minX, y: r.minY)
         }

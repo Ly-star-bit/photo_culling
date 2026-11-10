@@ -284,7 +284,7 @@ struct CollageSplit<Left: View, Center: View, Right: View>: View {
                                             inspector: workspace.inspectorHidden ? nil : workspace.inspectorWidth)
             HStack(spacing: 0) {
                 if !workspace.trayHidden {
-                    left.frame(width: w.tray)
+                    left.frame(width: w.tray).background(AppPalette.panel)
                     CollageSplitHandle(width: w.tray, direction: 1, range: CollageWorkspace.trayRange,
                                        set: { workspace.trayWidth = $0 },
                                        reset: { workspace.trayWidth = CollageWorkspace.trayDefault })
@@ -307,7 +307,7 @@ struct CollageSplit<Left: View, Center: View, Right: View>: View {
                     CollageSplitHandle(width: w.inspector, direction: -1, range: CollageWorkspace.inspectorRange,
                                        set: { workspace.inspectorWidth = $0 },
                                        reset: { workspace.inspectorWidth = CollageWorkspace.inspectorDefault })
-                    right.frame(width: w.inspector)
+                    right.frame(width: w.inspector).background(AppPalette.panel)
                 }
             }
         }
@@ -328,7 +328,7 @@ private struct CollageSplitHandle: View {
         ZStack {
             Color.clear
             Rectangle()
-                .fill(start != nil || hovering ? Color.accentColor.opacity(0.7) : Color(nsColor: .separatorColor))
+                .fill(start != nil || hovering ? AppPalette.accent.opacity(0.7) : Color(nsColor: .separatorColor))
                 .frame(width: start != nil || hovering ? 2 : 1)
         }
         .frame(width: CollageWorkspace.handleWidth)

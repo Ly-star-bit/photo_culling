@@ -24,6 +24,7 @@ enum GridExifImportSelfTest {
         let tally = Tally()
         exifCases(tally)
         gridSelectionCases(tally)
+        justifiedRowCases(tally)
         watermarkCases(tally)
         trayMarkCases(tally)
         fitDecodeCases(tally)
@@ -340,6 +341,85 @@ enum GridExifImportSelfTest {
         }
         let intOK: Bool = ImageLoader.positiveInt(0) == nil && ImageLoader.positiveInt(50) == 50
         t.check(intOK, "EXIF 35mm 等效焦距 0 = 未知，当没有（回退到实际焦距）")
+    }
+
+    // MARK: - 网格按比例排满一行（JustifiedRows）
+
+    @MainActor
+    private static func justifiedRowCases(_ t: Tally) {
+        let sp = JustifiedRows.spacing
+        // 12 张竖片（2:3）+ 4 张横片（3:2），1100 宽、目标行高 168。
+        let aspects: [CGFloat] = Array(repeating: 2.0 / 3.0, count: 6) + [1.5, 1.5] + Array(repeating: 2.0 / 3.0, count: 6) + [1.5, 1.5]
+        let rows = JustifiedRows.pack(aspects: aspects, width: 1100, target: 168)
+        let covered = rows.flatMap { Array($0.range) }
+        t.check(covered == Array(0..<aspects.count), "分行：每张照片正好在一行里，顺序不变", "\(covered)")
+        let full = rows.dropLast().allSatisfy { row in
+            abs(row.widths.reduce(0, +) + sp * CGFloat(row.widths.count - 1) - 1100) < 0.5
+        }
+        t.check(full, "分行：除了最后一行，每一行正好排满 1100", "\(rows.map { $0.widths.reduce(0, +) })")
+        let near = rows.dropLast().allSatisfy { $0.height > 168 * 0.7 && $0.height <= 168 * JustifiedRows.maxStretch + 0.01 }
+        t.check(near, "分行：行高在目标的 0.7–\(JustifiedRows.maxStretch) 倍之间", "\(rows.map(\.height))")
+        // 最后一行：凑不满一行时不拉伸（行高 = 目标、靠左）。上面那 16 张正好排满，再加一张竖片就多出一行。
+        let tail = JustifiedRows.pack(aspects: aspects + [2.0 / 3.0], width: 1100, target: 168).last
+        t.check(tail?.height == 168 && tail?.widths == [112], "分行：最后一行凑不满时不拉伸（行高 = 目标）",
+                "\(String(describing: tail))")
+        let ratio = zip(rows.first?.widths ?? [], aspects).allSatisfy { abs($0 / (rows.first?.height ?? 1) - $1) < 0.001 }
+        t.check(ratio, "分行：格子的宽高比就是照片的宽高比（不裁、不留边）")
+
+        // 全景（6:1）夹到 2.4，极窄的夹到 0.5；读不出比例（0、NaN）当 1.5。
+        let odd = JustifiedRows.pack(aspects: [6, 0.1, 0, .nan], width: 2000, target: 100)
+        let oddWidths = odd.first?.widths ?? []
+        t.check(odd.count == 1 && oddWidths == [240, 50, 150, 150], "分行：全景、长条的比例夹住，读不出的当 3:2", "\(oddWidths)")
+        // 窗口比一张横片还窄：一张一行、缩到正好一行宽，不撑出去。
+        let narrow = JustifiedRows.pack(aspects: [1.5, 1.5, 2.0 / 3.0], width: 150, target: 168)
+        let fits = narrow.allSatisfy { $0.widths.reduce(0, +) + sp * CGFloat($0.widths.count - 1) <= 150.5 }
+        t.check(fits && narrow.flatMap { Array($0.range) } == [0, 1, 2], "分行：很窄的窗口里一行不会比窗口宽",
+                "\(narrow.map(\.widths))")
+        t.check(JustifiedRows.pack(aspects: [], width: 1000, target: 100).isEmpty, "分行：没有照片 = 没有行")
+
+        // ↑ ↓：按中点找上下行最近的那张。
+        let ids = (0..<aspects.count).map { "p\($0)" }
+        let cells = rows.map { JustifiedRows.cells(ids: ids, row: $0) }
+        let firstRow = cells.first ?? []
+        let secondRow = cells.count > 1 ? cells[1] : []
+        if let from = firstRow.last, let want = secondRow.min(by: { abs($0.mid - from.mid) < abs($1.mid - from.mid) }) {
+            let down = JustifiedRows.vertical(rows: cells, from: from.id, direction: 1)
+            t.check(down == want.id, "↓：落到下一行里中点最近的那张", "\(String(describing: down)) ≠ \(want.id)")
+            let back = JustifiedRows.vertical(rows: cells, from: want.id, direction: -1)
+            let backWant = firstRow.min(by: { abs($0.mid - want.mid) < abs($1.mid - want.mid) })?.id
+            t.check(back == backWant, "↑：回到上一行里中点最近的那张", "\(String(describing: back))")
+        } else {
+            t.check(false, "↓：用例至少要有两行", "\(cells.count) 行")
+        }
+        t.check(JustifiedRows.vertical(rows: cells, from: firstRow.first?.id, direction: -1) == nil, "↑：已经在第一行 = 不动")
+        t.check(JustifiedRows.vertical(rows: cells, from: cells.last?.last?.id, direction: 1) == nil, "↓：已经在最后一行 = 不动")
+        t.check(JustifiedRows.vertical(rows: cells, from: nil, direction: 1) == "p0", "↑ ↓：没有焦点 = 第一张")
+        t.check(JustifiedRows.vertical(rows: cells, from: "不在网格里", direction: 1) == "p0", "↑ ↓：焦点那张被筛掉了 = 第一张")
+
+        // 宽高比从文件头读：横的、竖的各一张；读不出来用 2:3，不记（文件补上以后读得到）。
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("aspect-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let wide = dir.appendingPathComponent("wide.jpg"), tall = dir.appendingPathComponent("tall.jpg")
+        let late = dir.appendingPathComponent("late.jpg")
+        let wrote = writeJPEG(wide, width: 300, height: 200) && writeJPEG(tall, width: 200, height: 300)
+        let read: Bool = wrote && abs(PhotoAspect.of(path: wide.path) - 1.5) < 0.001 && abs(PhotoAspect.of(path: tall.path) - 2.0 / 3.0) < 0.001
+        t.check(read, "宽高比：从预览图的文件头读（横 1.5、竖 0.667）")
+        let missing = PhotoAspect.of(path: late.path)
+        let unknown: Bool = PhotoAspect.known(path: late.path) == nil
+        t.check(unknown, "宽高比：读不出来的不记")
+        let later: Bool = writeJPEG(late, width: 400, height: 200) && abs(PhotoAspect.of(path: late.path) - 2) < 0.001
+        t.check(missing == PhotoAspect.fallback && later, "宽高比：文件没了先按 2:3 排，不记住；文件补上以后读得到")
+        // 一整场第一次打开要把每张的文件头读一遍：量一下一张多久（只打印，不判）。
+        let clock = ContinuousClock()
+        var copies: [String] = []
+        for i in 0..<200 {
+            let url = dir.appendingPathComponent("c\(i).jpg")
+            if (try? FileManager.default.copyItem(at: wide, to: url)) != nil { copies.append(url.path) }
+        }
+        let took = clock.measure { for path in copies { _ = PhotoAspect.of(path: path) } }
+        let micros = Double(took.components.attoseconds) / 1e12 / Double(max(1, copies.count))
+        print(String(format: "     （读文件头：%.0f 微秒 / 张，%d 张）", micros, copies.count))
     }
 
     // MARK: - 网格多选（S21）

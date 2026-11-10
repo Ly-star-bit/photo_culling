@@ -48,7 +48,7 @@ struct CollageLeftPane: View {
         }
         .overlay {
             RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(Color.accentColor, lineWidth: 2)
+                .strokeBorder(AppPalette.accent, lineWidth: 2)
                 .padding(3)
                 .opacity(dropTargeted ? 1 : 0)
                 .allowsHitTesting(false)
@@ -124,7 +124,7 @@ struct CollageTemplatesPage: View {
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+        .background(AppPalette.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
     }
 
     /// 一键成套：放最上面，一套一个按钮（以前是「版式」页最底下一个小菜单）。

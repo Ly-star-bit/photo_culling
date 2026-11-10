@@ -222,7 +222,7 @@ private struct CollageSpotMark: ViewModifier {
         content
             .overlay {
                 RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.accentColor, lineWidth: 2.5)
+                    .stroke(AppPalette.accent, lineWidth: 2.5)
                     .padding(-3)
                     .opacity(on ? 1 : 0)
                     .allowsHitTesting(false)
@@ -297,7 +297,7 @@ struct CollageJumpText: View {
         var out = AttributedString(lead)
         var part = AttributedString("「\(link)」")
         part.link = URL(string: "\(scheme):\(spot.rawValue)")
-        part.foregroundColor = .accentColor
+        part.foregroundColor = AppPalette.accent
         out += part
         out += AttributedString(tail)
         return out

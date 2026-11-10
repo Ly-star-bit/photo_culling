@@ -785,7 +785,7 @@ enum DiagnosticsSelfTest {
             Spacer()
             Text("完成: 120 张").font(.caption).foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 12).padding(.vertical, 6).frame(width: 700).background(.bar)
+        .padding(.horizontal, 12).padding(.vertical, 6).frame(width: 700).background(AppPalette.bar)
         for (name, view) in [("error-panel.png", AnyView(panel)), ("error-statusbar.png", AnyView(bar))] {
             let url = dir.appendingPathComponent(name)
             check(snapshot(view, to: url), "拍 → \(url.path)")

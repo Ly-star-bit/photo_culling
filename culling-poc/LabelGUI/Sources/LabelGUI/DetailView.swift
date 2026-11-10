@@ -26,7 +26,7 @@ struct DetailView: View {
         .overlay {
             if focus == .pane {
                 Rectangle()
-                    .strokeBorder(Color.accentColor.opacity(0.7), lineWidth: 2)
+                    .strokeBorder(AppPalette.accent.opacity(0.7), lineWidth: 2)
                     .allowsHitTesting(false)
             }
         }
@@ -159,7 +159,7 @@ struct DetailView: View {
                 Text(typing ? "正在输入文字，快捷键已暂停；点击图片恢复"
                             : (focus == .pane ? "键盘快捷键已激活" : "点击图片启用键盘快捷键"))
                     .font(.caption)
-                    .foregroundStyle(focus == .pane ? Color.accentColor : .secondary)
+                    .foregroundStyle(focus == .pane ? AppPalette.accent : .secondary)
                 Text("快捷键: ←/→ 换图, 1-5 评分, b 虚焦, c 闭眼, x 曝光问题, ⌘] 下一张未标注")
                     .font(.caption).foregroundStyle(.secondary)
             }

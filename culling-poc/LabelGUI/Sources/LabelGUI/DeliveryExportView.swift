@@ -105,7 +105,7 @@ private struct DeliverySizeRow: View {
             }
             .help("放进这个尺寸：不裁切、不放大（原图比它小就按原图）")
             if let hint {
-                Text(hint).font(.caption2).foregroundStyle(.tertiary)
+                Text(hint).hintText()
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -187,7 +187,7 @@ private struct DeliveryNameRow: View {
                 .font(.caption).foregroundStyle(.secondary)
                 .lineLimit(1).truncationMode(.middle)
             Text(hint + "；「:3」补零到 3 位，重名另存 -2")
-                .font(.caption2).foregroundStyle(.tertiary)
+                .hintText()
                 .fixedSize(horizontal: false, vertical: true)
         }
     }

@@ -678,6 +678,7 @@ struct LabelGUIApp: App {
         Window("快捷键一览", id: ShortcutsWindow.id) {
             // 打开时翻到主窗口现在在的那一页（批量处理 / 水印 / 拼图 / 暗房），顶上可以换。
             ShortcutsPanel(page: ShortcutsPage.current(model), follow: { ShortcutsPage.current(model) })
+                .appTheme()
                 .preferredColorScheme(.dark)
         }
         .windowResizability(.contentSize)

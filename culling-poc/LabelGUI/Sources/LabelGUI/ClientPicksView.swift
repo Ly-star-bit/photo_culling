@@ -52,7 +52,7 @@ struct ClientImportSheet: View {
                     store.importClientPicks(resolution.ids, notes: resolution.notes)
                     isPresented = false
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accentProminent)
                 .disabled(resolution.ids.isEmpty)
             }
         }

@@ -24,6 +24,8 @@ import AppKit
 /// 离屏快照里假装鼠标停在这张上（离屏窗口收不到鼠标，悬停才出现的按钮只能这样看）。界面运行时永远是 nil。
 enum SnapshotPreview {
     @MainActor static var hoverID: String?
+    /// --batch-ui --press：每按一下键以后网格的焦点在哪张（界面运行时没人读）。
+    @MainActor static var gridFocus: String?
     /// 拼图检视器「印样 › 逐帧」一开始就展开（--collage-ui --contact-frames）。界面运行时永远是 false。
     @MainActor static var contactFramesOpen = false
     /// 拼图顶栏「导出 ▾」的内容画在顶栏下面、不弹真的弹出框（--collage-ui：离屏截不到弹出框的窗口）。
@@ -191,7 +193,7 @@ enum BatchUISnapshot {
             .frame(width: size.width, height: size.height)
             .background(Color(nsColor: .windowBackgroundColor))
             .environment(\.colorScheme, light ? .light : .dark)
-        let host = NSHostingView(rootView: view)
+        let host = NSHostingView(rootView: view.appTheme())
         host.frame = NSRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
@@ -201,6 +203,22 @@ enum BatchUISnapshot {
         spin(Double(option("--wait") ?? "3") ?? 3)
         host.layoutSubtreeIfNeeded()
         spin(1)
+        // --show <id>：和 AI 的「给我看这张」同一条路（store.viewRequest）—— 焦点落到这张、网格滚过去。验证滚动定位找得到
+        // 还没铺出来的行。--press "↓,↓,→"：接着在网格里按这几个键（和 --perf grid 同一个入口），打印每按一下焦点在哪。
+        if let show = option("--show") {
+            store.viewRequest = BatchStore.ViewRequest(token: UUID(), session: store.sessionDir.lastPathComponent,
+                                                       ids: [show], select: false)
+            for _ in 0..<4 { host.layoutSubtreeIfNeeded(); spin(0.4) }
+            print("--show \(show)：焦点 \(store.viewApplied?.focus ?? "无")")
+        }
+        if let press = option("--press") {
+            for key in press.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }) where !key.isEmpty {
+                BatchPerf.keys.send(key)
+                for _ in 0..<2 { host.layoutSubtreeIfNeeded(); spin(0.25) }
+                print("--press \(key)：焦点 \(SnapshotPreview.gridFocus ?? "无")")
+            }
+            spin(1)
+        }
         // --scroll-test：把网格（最高的那个 NSScrollView）滚到几个位置，打印时间轴认为「看得见」的章节 ——
         // 验证 Lazy 网格把滚出去的格子注销了（onDisappear），白线不会只增不减。
         if args.contains("--scroll-test") {

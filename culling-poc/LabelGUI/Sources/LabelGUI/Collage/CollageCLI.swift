@@ -1017,7 +1017,7 @@ enum CollageUISnapshot {
                                        inspectorWidth: inspectorWidth, whatsNew: whatsNew)
             .frame(width: inspectorWidth ?? size.width, height: size.height)
             .environment(\.colorScheme, light ? .light : .dark)
-        let host = NSHostingView(rootView: view)
+        let host = NSHostingView(rootView: view.appTheme())
         host.frame = NSRect(origin: .zero, size: NSSize(width: inspectorWidth ?? size.width, height: size.height))
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = NSAppearance(named: light ? .aqua : .darkAqua)

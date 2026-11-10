@@ -114,7 +114,7 @@ struct CollageView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.bar)
+        .background(AppPalette.bar)
         .background(topBarShortcuts)
     }
 
@@ -339,7 +339,7 @@ struct CollageView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(.bar)
+        .background(AppPalette.bar)
     }
 
     private var canvasSummary: String {
@@ -557,7 +557,7 @@ struct CollageTray: View {
             store.relayout(photoIDs: ids)
             tray.clear()
         }
-        .buttonStyle(.borderedProminent)
+        .buttonStyle(.accentProminent)
         .controlSize(.small)
         .disabled(tooMany || store.isSolving)
         .help(tooMany ? "一版最多 \(Self.relayoutLimit) 张：少选几张（现在 \(ids.count) 张）"
@@ -768,7 +768,7 @@ private struct CollageTrayGrid: View, Equatable {
                                 }
                                 .buttonStyle(.plain)
                                 .font(.caption)
-                                .foregroundStyle(Color.accentColor)
+                                .foregroundStyle(AppPalette.accent)
                                 .help("选中这一章的 \(chapter.photos.count) 张（接着可以「排一版」、拖进画布、移除）")
                             }
                             .padding(.top, 4)
@@ -893,11 +893,11 @@ struct CollageTrayItem: View {
                     .monospacedDigit()
                     .foregroundStyle(.white)
                     .frame(minWidth: 16, minHeight: 16)
-                    .background(Color.accentColor, in: Capsule())
+                    .background(AppPalette.accent, in: Capsule())
                     .padding(3)
             } else if uses == 1 {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.white, Color.accentColor)
+                    .foregroundStyle(.white, AppPalette.accent)
                     .padding(3)
             } else if photo.isPick {
                 Image(systemName: "star.fill")
@@ -931,7 +931,7 @@ struct CollageTrayItem: View {
         .overlay {
             if selected {
                 RoundedRectangle(cornerRadius: 4)
-                    .strokeBorder(active ? Color.accentColor : Color.gray, lineWidth: 3)
+                    .strokeBorder(active ? AppPalette.accent : Color.gray, lineWidth: 3)
             }
         }
         .help(helpText)
@@ -1086,7 +1086,7 @@ private struct CollageAlternativeThumbs: View, Equatable {
                             .aspectRatio(contentMode: .fit)
                             .frame(height: 64)
                             .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(
-                                item.offset == selected ? Color.accentColor : Color.clear,
+                                item.offset == selected ? AppPalette.accent : Color.clear,
                                 lineWidth: 2.5))
                     }
                     .buttonStyle(.plain)
@@ -1254,7 +1254,7 @@ struct CollageVariantStrip: View {
                 }
                 .frame(height: 52)
                 .overlay(RoundedRectangle(cornerRadius: 2)
-                    .strokeBorder(current ? Color.accentColor : Color.clear, lineWidth: 2.5))
+                    .strokeBorder(current ? AppPalette.accent : Color.clear, lineWidth: 2.5))
                 (Text(v.name) + Text(modified ? " · 改过" : "").foregroundColor(.orange))
                     .font(.caption2).foregroundStyle(current ? .primary : .secondary)
                     .lineLimit(1)
@@ -1370,7 +1370,7 @@ struct CollagePageStrip: View {
         let label = Text("整本").font(.caption2)
         if ui.overviewShown {
             Button { ui.toggleOverview(store) } label: { label }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accentProminent)
                 .controlSize(.small)
                 .help("回到编辑这个跨页 (G、Esc)")
         } else {
@@ -1437,7 +1437,7 @@ struct CollagePageStrip: View {
             }
             .frame(width: cardWidth, height: Self.thumbHeight)
             .overlay(RoundedRectangle(cornerRadius: 2)
-                .strokeBorder(editing ? Color.accentColor : Color.clear, lineWidth: 2.5))
+                .strokeBorder(editing ? AppPalette.accent : Color.clear, lineWidth: 2.5))
             Text("封面").font(.caption2).foregroundStyle(editing ? .primary : .secondary)
         }
         .contentShape(Rectangle())
@@ -1545,7 +1545,7 @@ struct CollagePageStrip: View {
         if let drag, let dest = destination(drag.id, at: drag.location, metrics: m) {
             let x = CGFloat(dest + leadingSlots) * m.pitchX - m.spacing / 2 - 1.5
             RoundedRectangle(cornerRadius: 1.5)
-                .fill(Color.accentColor)
+                .fill(AppPalette.accent)
                 .frame(width: 3, height: Self.thumbHeight + 4)
                 .offset(x: x, y: -2)
                 .allowsHitTesting(false)
@@ -1582,7 +1582,7 @@ private struct CollageStripCard: View {
                 if locked { CollageLockBadge() }
             }
             .overlay(RoundedRectangle(cornerRadius: 2)
-                .strokeBorder(hover || targeted || selected ? Color.accentColor : Color.clear,
+                .strokeBorder(hover || targeted || selected ? AppPalette.accent : Color.clear,
                               lineWidth: hover || targeted ? 3.5 : 2.5))
             Text("\(number)").font(.caption2).foregroundStyle(tint)
         }
@@ -1648,7 +1648,7 @@ struct CollageExportButtons: View {
                 CollageExportPopover(store: store)
             }
         }
-        .buttonStyle(.borderedProminent)
+        .buttonStyle(.accentProminent)
     }
 }
 

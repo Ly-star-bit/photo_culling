@@ -77,7 +77,7 @@ struct PickView: View {
             Divider()
             footer
         }
-        .background(Color(white: 0.13))
+        .background(AppPalette.canvas)
         .focusable()
         .focused($keyFocus)
         .focusEffectDisabled()
@@ -213,7 +213,7 @@ struct PickView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.bar)
+        .background(AppPalette.bar)
     }
 
     @ViewBuilder
@@ -388,16 +388,17 @@ struct PickView: View {
                     if let event = NSApp.currentEvent, event.type == .keyDown, event.isARepeat { return }
                     withAnimation(.easeOut(duration: 0.15)) { _ = session.confirm() }
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accentProminent)
                 .keyboardShortcut(.return, modifiers: [])
                 .disabled(session.frames.isEmpty)
                 .help("按左边那句话写判决（留的设为精选/可用，其余设为废片，整组一次撤销），然后跳到下一个待处理的组")
             }
             HStack(spacing: 6) {
                 Text(session.isSelection
-                     ? "点 = 留这张（同一场的其余废，别的场不动）· 右上角 = 只改这一张 · 1–9 第几张 · ←/→ 移动 · Z 放大到脸 · ⌘Z 撤销 · Esc 返回"
-                     : "点 = 只留这张 · 鼠标停上去右上角 精选/可用/废 = 只改这一张 · 1–9 只留第几张 · ⇧空格 多留 · ↑/↓ 换组 · Z 放大到脸 · ⌘Z 撤销 · Esc 返回")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                     // 一行只留最常用的几样（以前一长串 10pt 的灰字，1440 宽也要截掉尾巴）：其余的在悬停提示和快捷键一览（?）里。
+                     ? "点 = 留这张 · 右上角 = 只改这一张 · 1–9 第几张 · Z 放大到脸 · Esc 返回"
+                     : "点 = 只留这张 · 右上角 = 只改这一张 · 1–9 只留第几张 · ⇧空格 多留 · ↑↓ 换组 · Z 放大到脸")
+                    .hintText()
                     .lineLimit(1).truncationMode(.tail)
                 Button { showShortcuts.toggle() } label: { Image(systemName: "keyboard").font(.caption) }
                     .buttonStyle(.plain)
@@ -408,7 +409,7 @@ struct PickView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .background(.bar)
+        .background(AppPalette.bar)
     }
 
     private var doneBanner: some View {
@@ -581,7 +582,7 @@ private struct PickTile: View {
             photo(vivid: vivid)
                 .frame(width: layout.image.width, height: layout.image.height)
                 .clipShape(RoundedRectangle(cornerRadius: 5))
-                .overlay(RoundedRectangle(cornerRadius: 5).stroke(kept ? state.color : Color.clear, lineWidth: 3))
+                .overlay(RoundedRectangle(cornerRadius: 5).stroke(kept ? state.color : Color.clear, lineWidth: 2.5))
                 .overlay(alignment: .topLeading) { numberBadge }
                 .overlay(alignment: .topTrailing) {
                     // 悬停时这里换成可点的三个按钮（挂在下面手势的外层）。
@@ -595,7 +596,8 @@ private struct PickTile: View {
         .background(RoundedRectangle(cornerRadius: 9).fill(Color.white.opacity(highlighted ? 0.10 : 0.035)))
         .overlay(
             RoundedRectangle(cornerRadius: 9)
-                .stroke(highlighted ? Color.white.opacity(0.85) : Color.white.opacity(0.06), lineWidth: highlighted ? 2 : 1)
+                // 键盘高亮：外圈一条细白线 + 底亮一点。留下的那张照片自己有判决色的框，两层都是粗线时像套了两个框。
+                .stroke(highlighted ? Color.white.opacity(0.55) : Color.white.opacity(0.06), lineWidth: highlighted ? 1.5 : 1)
         )
         .contentShape(Rectangle())
         // 同网格：双击手势 + 同时识别的单击，单击不必等 300ms 排除双击；双击的第二下也会来一次
@@ -726,7 +728,8 @@ private struct PickTile: View {
         switch state {
         case .pick: return ("★ 留", Verdict.pick.color.opacity(0.9), .white)
         case .usable: return ("留·可用", Verdict.usable.color.opacity(0.9), .white)
-        case .reject: return ("废", Color.black.opacity(0.6), Verdict.reject.color)
+        // 废：红底白字（以前是黑底上一个小红字，深色照片上几乎看不见）。
+        case .reject: return ("✕ 废", Verdict.reject.color.opacity(0.85), .white)
         }
     }
 

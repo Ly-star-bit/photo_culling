@@ -414,7 +414,7 @@ struct CollageLookBox: View {
                 .frame(width: 54, height: 54)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
                 .overlay(RoundedRectangle(cornerRadius: 4)
-                    .strokeBorder(active ? Color.accentColor : Color.clear, lineWidth: 2.5))
+                    .strokeBorder(active ? AppPalette.accent : Color.clear, lineWidth: 2.5))
                 Text(look.label).font(.caption2).foregroundStyle(active ? .primary : .secondary)
             }
         }
@@ -490,7 +490,7 @@ struct CollageOverlayBox: View {
 
     private func blockButton(_ overlay: CollageOverlay, _ i: Int, vars: [String: String]) -> some View {
         let active = i == index
-        let fill: Color = active ? Color.accentColor.opacity(0.85) : Color.gray.opacity(0.18)
+        let fill: Color = active ? AppPalette.accent.opacity(0.85) : Color.gray.opacity(0.18)
         let ink: Color = active ? .white : .primary
         let tip = i == 0 ? "第一块最先摆（刊头放这里）" : "第 \(i + 1) 块：摆在前面几块之外"
         return Button {
@@ -661,7 +661,7 @@ struct CollageOverlayBox: View {
 
     /// 选中的那个填强调色（和九宫格里选中的格子一个画法：窗口不在前台时也看得出选的是哪个）。
     private func sideButton(_ anchor: CollageAnchor, active: Bool) -> some View {
-        let fill: Color = active ? Color.accentColor : Color.gray.opacity(0.25)
+        let fill: Color = active ? AppPalette.accent : Color.gray.opacity(0.25)
         let ink: Color = active ? .white : .primary
         return Button {
             update { $0.anchor = anchor }
@@ -703,7 +703,7 @@ struct CollageOverlayBox: View {
             update { $0.anchor = anchor }
         } label: {
             RoundedRectangle(cornerRadius: 2)
-                .fill(active ? Color.accentColor : Color.gray.opacity(0.25))
+                .fill(active ? AppPalette.accent : Color.gray.opacity(0.25))
                 .frame(width: 18, height: 14)
         }
         .buttonStyle(.plain)
@@ -895,7 +895,7 @@ struct CollageContactBox: View {
                 Button { store.updateContactSheet { $0.paper = entry.color } } label: {
                     RoundedRectangle(cornerRadius: 3).fill(entry.color.swiftUIColor).frame(width: 22, height: 16)
                         .overlay(RoundedRectangle(cornerRadius: 3)
-                            .stroke(on ? Color.accentColor : Color.gray.opacity(0.5), lineWidth: on ? 2 : 1))
+                            .stroke(on ? AppPalette.accent : Color.gray.opacity(0.5), lineWidth: on ? 2 : 1))
                 }
                 .buttonStyle(.plain)
                 .help(entry.name)
@@ -1017,7 +1017,7 @@ struct CollageContactBox: View {
                     let on = sheet.markColor == entry.color
                     Button { store.updateContactSheet { $0.markColor = entry.color } } label: {
                         Circle().fill(entry.color.swiftUIColor).frame(width: 18, height: 18)
-                            .overlay(Circle().stroke(on ? Color.accentColor : Color.gray.opacity(0.5), lineWidth: on ? 2 : 1))
+                            .overlay(Circle().stroke(on ? AppPalette.accent : Color.gray.opacity(0.5), lineWidth: on ? 2 : 1))
                     }
                     .buttonStyle(.plain)
                     .help("油性笔 · \(entry.name)（圈、叉、手写注记同一支笔）")
@@ -1199,7 +1199,7 @@ struct CollageItemBox: View {
                         let entry = CollagePencilMark.palette[i]
                         Button { update { $0.color = entry.color } } label: {
                             Circle().fill(entry.color.swiftUIColor).frame(width: 18, height: 18)
-                                .overlay(Circle().stroke(item.color == entry.color ? Color.accentColor
+                                .overlay(Circle().stroke(item.color == entry.color ? AppPalette.accent
                                                          : Color.gray.opacity(0.5), lineWidth: item.color == entry.color ? 2 : 1))
                         }
                         .buttonStyle(.plain)

@@ -41,6 +41,8 @@ struct ContentView: View {
                 .tabItem { Label("标注校准", systemImage: "checklist") }
                 .tag(AppTab.labeling)
         }
+        // 全 app 一套点缀色和卡片样式（AppTheme.swift）。
+        .appTheme()
         // 批量页多选「拼图」：切到拼图页、带照片进托盘、直接排一版。
         .onChange(of: batchStore.collageRequest) { _, request in
             guard let ids = request, !ids.isEmpty else { return }

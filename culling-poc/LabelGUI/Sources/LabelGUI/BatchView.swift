@@ -45,6 +45,9 @@ struct BatchView: View {
     @State private var pickRequest: PickRequest?
     /// 网格实际宽度 — ↑/↓ 换行导航需要估算列数。
     @State private var gridWidth: CGFloat = 800
+    /// 大场次的宽高比在后台读完了（aspects）：加一，网格按真的比例再排一次。
+    @State private var aspectEpoch = 0
+    @State private var aspectWarming = false
     /// 网格里现在看得见哪些章节（时间轴画「你在这」）。故意用 @State 存引用而不是
     /// @StateObject：批量页不订阅它，滚动时只有时间轴重画。
     @State private var viewport: GridViewport
@@ -170,8 +173,8 @@ struct BatchView: View {
                 .overlay {
                     if folderDropTargeted {
                         RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.accentColor, lineWidth: 3)
-                            .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                            .stroke(AppPalette.accent, lineWidth: 3)
+                            .background(AppPalette.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
                             .overlay(
                                 Label("松开打开这个文件夹", systemImage: "folder.badge.plus")
                                     .font(.title3.bold())
@@ -317,7 +320,7 @@ struct BatchView: View {
         if let first = shown.first {
             focusedID = first
             lastVisitedTake = store.item(withID: first)?.take
-            DispatchQueue.main.async { proxy.scrollTo(first, anchor: .center) }
+            DispatchQueue.main.async { scrollGrid(proxy, first, anchor: .center) }
         }
         store.viewApplied = BatchStore.ViewApplied(token: request.token, selected: request.select ? shown : [],
                                                    focus: shown.first, hidden: ids.filter { !visible.contains($0) })
@@ -462,7 +465,7 @@ struct BatchView: View {
             } else {
                 if store.items.isEmpty {
                     Button("开始分析") { store.runAnalysis() }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.accentProminent)
                         .disabled(store.photoDir == nil)
                         .help("原生引擎分析全部照片 (锐度/闭眼/曝光/连拍分组)")
                 } else {
@@ -494,7 +497,7 @@ struct BatchView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 220)
+            .frame(width: 204)
             clientMenu
             Picker("排序", selection: $store.sortOrder) {
                 ForEach(BatchStore.SortOrder.allCases, id: \.self) { s in
@@ -508,30 +511,48 @@ struct BatchView: View {
 
             Spacer()
 
-            // 撤销 / 全选用图标：顶栏在 1100pt 宽时文件夹名被挤得只剩「f…」，这两个有快捷键、图标也认得出。
-            Button { store.undoLastOverride() } label: { Image(systemName: "arrow.uturn.backward") }
-                .keyboardShortcut("z", modifiers: .command)
-                .disabled(!store.canUndoOverride)
-                .help("撤销上一步：改判、导入 / 清除客户选中、按机身对时 (⌘Z)")
-            Button { selectedIDs = Set(visibleItems.map(\.id)) } label: { Image(systemName: "checkmark.square") }
-                .keyboardShortcut("a", modifiers: .command)
-                .disabled(store.items.isEmpty)
-                .help("全选当前筛选下的照片 (⌘A)，配合批量栏一次改判")
+            // 顶栏右边分三档（以前十来个一样灰的按钮排一行，下一步「开始挑选」却是状态栏里一行 10pt 的橙字）：
+            //   不带框的图标 = 撤销、复盘、右栏开关；带框的字 = 审片、导出；琥珀色 = 现在该做的那一步（还有连拍没挑时才有）。
+            // 全选（⌘A）不占地方：只留快捷键（菜单栏、快捷键一览里都写着）。
+            HStack(spacing: 2) {
+                Button { store.undoLastOverride() } label: { Image(systemName: "arrow.uturn.backward").frame(width: 22, height: 20) }
+                    .keyboardShortcut("z", modifiers: .command)
+                    .disabled(!store.canUndoOverride)
+                    .help("撤销上一步：改判、导入 / 清除客户选中、按机身对时 (⌘Z)")
+                Button { showStatsPopover = true } label: { Image(systemName: "chart.bar.xaxis").frame(width: 22, height: 20) }
+                    .disabled(store.items.isEmpty)
+                    .popover(isPresented: $showStatsPopover) { statsPopover }
+                    .help("复盘：按焦段 / ISO 的出片率统计")
+                    .accessibilityLabel("复盘")
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { showControls.toggle() }
+                } label: {
+                    Image(systemName: "sidebar.right").frame(width: 22, height: 20)
+                }
+                .keyboardShortcut("s", modifiers: [.command, .option])
+                .help(showControls ? "收起右侧筛选面板，网格更宽 (⌥⌘S)" : "显示右侧筛选面板 (⌥⌘S)")
+            }
+            .buttonStyle(.borderless)
+            // 不带框的图标是中性灰：琥珀色只留给右边那一个主按钮。
+            .tint(Color(white: 0.78))
+            .background {
+                Button("全选") { selectedIDs = Set(visibleItems.map(\.id)) }
+                    .keyboardShortcut("a", modifiers: .command)
+                    .disabled(store.items.isEmpty)
+                    .opacity(0).frame(width: 0, height: 0).accessibilityHidden(true)
+            }
             Button("审片") { enterReview() }
                 .keyboardShortcut("f", modifiers: [])
                 .disabled(store.items.isEmpty)
                 .help("全屏逐张审片 · F 进入 · 1精选 2可用 3废片 0恢复")
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) { showControls.toggle() }
-            } label: {
-                Image(systemName: "sidebar.right")
+            if pendingInScope > 0, !store.isRunning {
+                Button { startPicking() } label: {
+                    Label((store.activeChapterFilter != nil ? "本章" : "") + "挑连拍 \(pendingInScope) 场", systemImage: "rectangle.stack")
+                }
+                .buttonStyle(.accentProminent)
+                .help("还有 \(pendingInScope) 场连拍留着 2 张以上没淘汰。一组一组过 (C)：整组并排上台，点一张 = 只留它，⏎ 确认并跳下一组；"
+                      + "按 D 在网格里跳到下一个")
             }
-            .keyboardShortcut("s", modifiers: [.command, .option])
-            .help(showControls ? "收起右侧筛选面板，网格更宽 (⌥⌘S)" : "显示右侧筛选面板 (⌥⌘S)")
-            Button("复盘") { showStatsPopover = true }
-                .disabled(store.items.isEmpty)
-                .popover(isPresented: $showStatsPopover) { statsPopover }
-                .help("按焦段/ISO 的出片率统计")
 
             Menu {
                 // 写过一次以后整场那一项叫「全部重写」：补被删掉、被别的软件整份覆盖的 sidecar；平常只写改了的（下一项、状态栏）。
@@ -554,7 +575,7 @@ struct BatchView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.bar)
+        .background(AppPalette.bar)
     }
 
     /// 「客户 ▾」（优化分析 NU5）：确认表 → 导入客户选择 → 清除 → 复制文件名 / 复制原片，以前挂在「导出」第二段（「导入」
@@ -610,15 +631,7 @@ struct BatchView: View {
                         .font(.caption).foregroundStyle(.green)
                         .help("按 F 进审片模式逐张过一遍留下的，然后在右上角「导出」写 XMP 或导出 JPG")
                 }
-                if pendingInScope > 0 {
-                    // 两种视图都有的入口：点一下就开始一组一组挑（按判决视图下没有分组工具条）。
-                    Button { startPicking() } label: {
-                        Text((store.activeChapterFilter != nil ? "本章" : "") + "待处理 \(pendingInScope) 场连拍 · C 开始挑选")
-                            .font(.caption).foregroundStyle(.orange)
-                    }
-                    .buttonStyle(.plain)
-                    .help("还留着 2 张以上没淘汰的场。点这里（或按 C）一组一组挑；按 D 在网格里跳到下一个")
-                }
+                // 「待处理 N 场连拍」的入口挪到顶栏右边的琥珀色按钮（两种视图都在）。
                 if store.manualOverrideCount > 0 {
                     Text(store.manualOverrideLabel)
                         .font(.caption).foregroundStyle(.secondary)
@@ -695,7 +708,7 @@ struct BatchView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(.bar)
+        .background(AppPalette.bar)
     }
 
     /// 双机位才有：「2 台机身」，点开按机身对时。对过的标出来（排序、章节已经按对过的时间排）。
@@ -748,7 +761,7 @@ struct BatchView: View {
                     showJPEGSheet = false
                     exportJPEGs(to: store.defaultJPEGExportFolder)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accentProminent)
                 .disabled(jpegExportCount == 0 || store.defaultJPEGExportFolder == nil)
             }
         }
@@ -773,7 +786,7 @@ struct BatchView: View {
                  : "共 \(top.ids.count) 张，全部来自精选")
                 .font(.caption).foregroundStyle(top.fromUsable > 0 ? .orange : .secondary)
             Text("每次导到 拍摄文件夹/\(ImageLoader.jpegExportSubfolder)/精华/ 下面一个新文件夹（Top\(top.ids.count)_日期_时间），不和上次导的混")
-                .font(.caption2).foregroundStyle(.tertiary)
+                .hintText()
             HStack {
                 Spacer()
                 Button("取消") { showHighlightsSheet = false }
@@ -783,7 +796,7 @@ struct BatchView: View {
                     store.exportHighlights(count: highlightsCount, into: base.appendingPathComponent("精华"),
                                            options: options.wrappedValue)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accentProminent)
                 .disabled(top.ids.isEmpty || store.defaultJPEGExportFolder == nil)
             }
         }
@@ -815,7 +828,7 @@ struct BatchView: View {
                  + (matches.jpegOnly > 0 ? " (另有 \(matches.jpegOnly) 张只有 JPG，不会复制)" : ""))
                 .font(.caption).foregroundStyle(.secondary)
             Text("复制 (不移动) 到 拍摄文件夹/\(ImageLoader.denoiseSubfolder)/，供 DxO PureRAW、LR AI 降噪等批量处理；该文件夹不参与分析")
-                .font(.caption2).foregroundStyle(.tertiary)
+                .hintText()
             HStack {
                 Spacer()
                 Button("取消") { showISOSheet = false }
@@ -823,7 +836,7 @@ struct BatchView: View {
                     showISOSheet = false
                     store.exportHighISORaws(minISO: isoThreshold, keepersOnly: isoKeepersOnly)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accentProminent)
                 .disabled(matches.raws == 0)
             }
         }
@@ -936,7 +949,8 @@ struct BatchView: View {
                 }
                 ScrollView {
                 // pinnedViews：滚到废片区中间也看得见"在哪个区、多少张、理由 chip"。
-                LazyVStack(alignment: .leading, spacing: 16, pinnedViews: [.sectionHeaders]) {
+                // 行距 8：按判决时每一行照片直接是这个 LazyVStack 的孩子（scrollTo 找得到没铺出来的行），分区之间的空在标题上。
+                LazyVStack(alignment: .leading, spacing: 8, pinnedViews: [.sectionHeaders]) {
                     if store.items.isEmpty {
                         emptyState
                     } else if gridMode == .byGroup {
@@ -951,21 +965,22 @@ struct BatchView: View {
                 }
                 .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                // 量滚动区里面的宽度（经典滚动条占掉的那 15pt 不算）：每一行按它正好排满。
+                .background(GeometryReader { geo in
+                    Color.clear.onChange(of: geo.size.width, initial: true) {
+                        gridWidth = geo.size.width
+                    }
+                })
                 }
             }
-            .background(Color(white: 0.13))
-            .background(GeometryReader { geo in
-                Color.clear.onChange(of: geo.size.width, initial: true) {
-                    gridWidth = geo.size.width
-                }
-            })
+            .background(AppPalette.canvas)
             // 从审片/连拍挑选回来，网格是重新建的，滚动位置归零 —— 滚回焦点那张。
             // 异步一拍：嵌套的 Lazy 网格要先铺出来 scrollTo 才找得到。
             // AI 在别的 tab 时要定位的照片（cull_show_photos 的 pending）也在这里补上。
             .onAppear {
                 applyViewRequest(proxy)
                 guard let id = focusedID else { return }
-                DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) }
+                DispatchQueue.main.async { scrollGrid(proxy, id, anchor: .center) }
             }
             .onChange(of: store.viewRequest) { applyViewRequest(proxy) }
             .focusable()
@@ -1006,7 +1021,7 @@ struct BatchView: View {
                 guard press.modifiers.isDisjoint(with: [.command, .option, .control]) else { return .ignored }
                 let step: Double = press.characters == "-" ? -20 : 20
                 withAnimation(.easeOut(duration: 0.15)) { thumbSize = min(260, max(90, thumbSize + step)) }
-                if let id = focusedID { DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) } }
+                if let id = focusedID { DispatchQueue.main.async { scrollGrid(proxy, id, anchor: .center) } }
                 return .handled
             }
             .overlay(alignment: .bottom) { gridToastView }
@@ -1015,8 +1030,11 @@ struct BatchView: View {
                 switch key {
                 case "→": moveFocus(1, proxy: proxy)
                 case "←": moveFocus(-1, proxy: proxy)
+                case "↓": moveFocusVertically(1, proxy: proxy)
+                case "↑": moveFocusVertically(-1, proxy: proxy)
                 default: _ = applyDigit(key, proxy: proxy)
                 }
+                SnapshotPreview.gridFocus = focusedID
             }
         }
     }
@@ -1222,13 +1240,108 @@ struct BatchView: View {
         focusedID = anchorID
     }
 
-    /// Columns currently on screen, from the measured grid width — ↑/↓ moves
-    /// focus by one visual row. Approximate across section boundaries, exact
-    /// within a section (same adaptive item size everywhere).
-    private var gridColumns: Int {
-        var contentWidth = gridWidth - 28  // LazyVStack padding 14 × 2
-        if gridMode == .byGroup { contentWidth -= 20 }  // takeRow 自己的 padding 10 × 2
-        return max(1, Int((contentWidth + 8) / (thumbSize + 8)))
+    // MARK: 按比例排满一行（算法见 JustifiedRows.swift）
+
+    /// 网格里的一行照片。
+    private struct GridRow: Identifiable {
+        /// 「分区-第几行」：scrollTo 的目标（一行照片是 Lazy 栈的直接孩子，没铺出来也找得到）。
+        let id: String
+        let items: [BatchItem]
+        let widths: [CGFloat]
+        let height: CGFloat
+    }
+
+    /// 一行能用的宽度。
+    private var rowWidth: CGFloat {
+        var width = gridWidth - 28  // LazyVStack padding 14 × 2
+        if gridMode == .byGroup { width -= 20 }  // takeRow 自己的 padding 10 × 2
+        return max(120, width)
+    }
+
+    /// 想要的行高：滑杆的数乘 1.2（以前滑杆是方格的边长，竖片在里面只有三分之二宽；现在同一档照片大一圈）。
+    private var rowTarget: CGFloat { thumbSize * 1.2 }
+
+    private func justified(_ items: [BatchItem]) -> [JustifiedRows.Row] {
+        JustifiedRows.pack(aspects: aspects(items), width: rowWidth, target: rowTarget)
+    }
+
+    /// 这几张的宽高比。没读过文件头的不超过 600 张就当场读（约 0.1 ms 一张）；更多（几千张的场次第一次打开）先按竖拍
+    /// 2:3 排，后台把整场读完再排一次 —— 不在主线程上卡半秒。
+    private func aspects(_ items: [BatchItem]) -> [CGFloat] {
+        _ = aspectEpoch
+        var unknown = 0
+        for item in items where PhotoAspect.known(path: item.previewPath) == nil { unknown += 1 }
+        if unknown <= 600 { return items.map { PhotoAspect.of(path: $0.previewPath) } }
+        DispatchQueue.main.async { warmAspects() }
+        return items.map { PhotoAspect.known(path: $0.previewPath) ?? PhotoAspect.fallback }
+    }
+
+    private func warmAspects() {
+        guard !aspectWarming else { return }
+        aspectWarming = true
+        let paths = store.items.map(\.previewPath)
+        Task.detached(priority: .userInitiated) {
+            for path in paths { _ = PhotoAspect.of(path: path) }
+            await MainActor.run {
+                aspectWarming = false
+                aspectEpoch += 1
+            }
+        }
+    }
+
+    private func gridRows(_ items: [BatchItem], prefix: String) -> [GridRow] {
+        justified(items).enumerated().map { index, row in
+            GridRow(id: "\(prefix)-\(index)", items: Array(items[row.range]), widths: row.widths, height: row.height)
+        }
+    }
+
+    /// 一行照片。`cell` 给每张建格子（宽、高从这一行来）。
+    private func rowView<Cell: View>(_ row: GridRow, @ViewBuilder cell: @escaping (BatchItem, CGFloat, CGFloat) -> Cell) -> some View {
+        HStack(alignment: .top, spacing: JustifiedRows.spacing) {
+            ForEach(Array(zip(row.items, row.widths)), id: \.0.id) { item, width in
+                cell(item, width, row.height).id(item.id)
+            }
+        }
+        .id(row.id)
+    }
+
+    /// 网格里现在的全部行，按屏幕上从上到下的顺序（↑ ↓ 和滚动定位用）：按判决 = 三个分区接起来，按分组 = 每场的行、
+    /// 最后是展开着的单张区。
+    private func navigationRows() -> [(id: String, cells: [JustifiedRows.Cell])] {
+        var out: [(id: String, cells: [JustifiedRows.Cell])] = []
+        func add(_ items: [BatchItem], prefix: String) {
+            let ids = items.map(\.id)
+            for (index, row) in justified(items).enumerated() {
+                out.append(("\(prefix)-\(index)", JustifiedRows.cells(ids: ids, row: row)))
+            }
+        }
+        if gridMode == .byGroup {
+            for entry in groupedItems { add(entry.members, prefix: "take\(entry.group)") }
+            if showSingles { add(singleItems, prefix: "singles") }
+        } else {
+            for verdict in Verdict.allCases.reversed() where store.verdictFilter == nil || store.verdictFilter == verdict {
+                add(sectionItems(verdict), prefix: verdict.rawValue)
+            }
+        }
+        return out
+    }
+
+    /// 滚到这张照片。按判决时滚到它所在的那一行（行是 Lazy 栈的直接孩子，没铺出来也找得到）。按分组时行在每场自己的栈里：
+    /// 这一格已经铺出来了就直接找它；没铺出来（跳到很远的一场）先滚到那一场，下一拍再对准这一格。
+    private func scrollGrid(_ proxy: ScrollViewProxy, _ id: String, anchor: UnitPoint?) {
+        if gridMode == .byVerdict {
+            if let row = navigationRows().first(where: { $0.cells.contains { $0.id == id } }) {
+                proxy.scrollTo(row.id, anchor: anchor)
+            }
+            return
+        }
+        if viewport.isMounted(id) {
+            proxy.scrollTo(id, anchor: anchor)
+            return
+        }
+        let inTake = groupedItems.first { $0.members.contains { $0.id == id } }
+        proxy.scrollTo(inTake.map { "take-\($0.group)" } ?? "singles", anchor: anchor ?? .center)
+        DispatchQueue.main.async { proxy.scrollTo(id, anchor: anchor ?? .center) }
     }
 
     private var emptyState: some View {
@@ -1254,7 +1367,7 @@ struct BatchView: View {
                 Text("已选择 \(dir.lastPathComponent)，还没有分析结果")
                     .foregroundStyle(.secondary)
                 Button("开始分析") { store.runAnalysis() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.accentProminent)
             } else {
                 Text("还没有分析结果")
                     .foregroundStyle(.secondary)
@@ -1322,7 +1435,7 @@ struct BatchView: View {
                 }
                 if store.thresholdSuggestions.contains(where: { $0.kind == .faceQuality }) {
                     Text("人脸质量那条是近似值：小脸按景别自动放宽，连拍组内走相对比较，同一个数对不同照片不是同一条线")
-                        .font(.caption2).foregroundStyle(.tertiary)
+                        .hintText()
                 }
                 if store.manualRejectsWithoutReason > 0 {
                     Text("你手动废掉了 \(store.manualRejectsWithoutReason) 张滑杆一个理由都没给的 —— 滑杆漏掉的，没有信号说明该收紧哪条线")
@@ -1433,10 +1546,9 @@ struct BatchView: View {
                     Label("开始挑选 · " + (store.activeChapterFilter != nil ? "本章" : "") + "待处理 \(pendingInScope) 场",
                           systemImage: "rectangle.stack")
                 }
-                .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .help("一组一组过 (C)：整组并排上台，点一张 = 只留它，⏎ 确认并跳下一组")
-                Text("D 跳到下一场").font(.caption2).foregroundStyle(.tertiary)
+                Text("D 跳到下一场").hintText()
             } else {
                 Label("没有待处理的连拍", systemImage: "checkmark.circle").font(.caption).foregroundStyle(.green)
             }
@@ -1469,7 +1581,7 @@ struct BatchView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(.bar)
+        .background(AppPalette.bar)
     }
 
     /// 批量栏改判：改完清掉选中，焦点和多选按数字键一样落到没改的邻居上（keepPlace，不滚动 —— 鼠标在批量栏上）。
@@ -1502,7 +1614,7 @@ struct BatchView: View {
                 Button("保留选中 · 其余 \(dropCount) 张设为废片") {
                     applyBulk(changing: groupCandidates) { store.keepOnly(selectedIDs, among: groupCandidates) }
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accentProminent)
                 // ⌘⏎ 而不是光秃秃的 ⏎：网格自己用 .onKeyPress(.return) 开大图，
                 // 而按钮的 key equivalent 在 keyDown 之前就被吃掉 —— 只要选中了
                 // 照片，想按回车看大图就会变成"整组定案"。
@@ -1538,7 +1650,7 @@ struct BatchView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.bar)
+        .background(AppPalette.bar)
     }
 
     /// 选了两台机身各一张：「把这两张对成同一时刻」，以照片多的那台为准调另一台的偏移（⌘Z 撤销）。
@@ -1568,7 +1680,7 @@ struct BatchView: View {
             let target = (chapter == nil ? keep.flatMap { id in items.first { $0.id == id } } : nil) ?? items.first
             if let target {
                 focusedID = target.id
-                proxy.scrollTo(target.id, anchor: .center)
+                scrollGrid(proxy, target.id, anchor: .center)
             }
         }
     }
@@ -1578,9 +1690,9 @@ struct BatchView: View {
         let day = segment.start.map { ChapterTimelineLayout.dayText($0) + " " } ?? ""
         let title = segment.undated ? "无拍摄时间的照片" : "章节 \(segment.chapter + 1) · \(day)\(segment.timeRange)"
         return HStack(spacing: 8) {
-            Image(systemName: "line.3.horizontal.decrease.circle.fill").foregroundStyle(Color.accentColor)
+            Image(systemName: "line.3.horizontal.decrease.circle.fill").foregroundStyle(AppPalette.accent)
             Text("只看 \(title) · \(segment.count) 张").font(.caption.bold()).monospacedDigit()
-            Text("[ ] 换到上一章 / 下一章 · 点时间轴别的段直接换").font(.caption2).foregroundStyle(.tertiary)
+            Text("[ ] 换到上一章 / 下一章 · 点时间轴别的段直接换").hintText()
             Spacer()
             Button("显示全部章节") { setChapterFilter(nil, proxy: proxy) }
                 .controlSize(.small)
@@ -1589,7 +1701,7 @@ struct BatchView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 5)
-        .background(Color.accentColor.opacity(0.14))
+        .background(AppPalette.accent.opacity(0.14))
     }
 
     /// 时间轴点了一段：焦点落到当前视图里这一章的第一张。返回 false = 这一章在当前视图
@@ -1602,7 +1714,7 @@ struct BatchView: View {
             DispatchQueue.main.async {
                 if let first = visibleItems.first {
                     focusedID = first.id
-                    proxy.scrollTo(first.id, anchor: .center)
+                    scrollGrid(proxy, first.id, anchor: .center)
                 }
             }
             return true
@@ -1611,7 +1723,7 @@ struct BatchView: View {
         if let target = visibleItems.first(where: inChapter) {
             focusedID = target.id
             // 居中：贴顶会被吸顶的分区标题 / 场标题挡住。
-            withAnimation { proxy.scrollTo(target.id, anchor: .center) }
+            withAnimation { scrollGrid(proxy, target.id, anchor: .center) }
             return true
         }
         // 分组模式下这一章只有单张、单张区又收着：展开再跳（等网格铺出来那一拍）。
@@ -1619,7 +1731,7 @@ struct BatchView: View {
         showSingles = true
         focusedID = target.id
         DispatchQueue.main.async {
-            withAnimation { proxy.scrollTo(target.id, anchor: .center) }
+            withAnimation { scrollGrid(proxy, target.id, anchor: .center) }
         }
         return true
     }
@@ -1641,7 +1753,7 @@ struct BatchView: View {
             focusedID = next
             // 等网格按新判决重新铺一拍再滚：整场叠起来时立刻滚，目标位置还是旧的。
             guard let proxy else { return }
-            DispatchQueue.main.async { withAnimation { proxy.scrollTo(next, anchor: .center) } }
+            DispatchQueue.main.async { withAnimation { scrollGrid(proxy, next, anchor: .center) } }
         }
     }
 
@@ -1703,41 +1815,17 @@ struct BatchView: View {
         }
         focusedID = next
         // 单步 ←/→ 用最小滚动（不跳行）；按列跨行的 ↑/↓ 居中，别停在吸顶标题底下。
-        proxy.scrollTo(next, anchor: abs(delta) > 1 ? .center : nil)
+        scrollGrid(proxy, next, anchor: abs(delta) > 1 ? .center : nil)
     }
 
-    /// ↑/↓。按判决模式按估算的列数跳一行；分组模式每场一行、行内自适应换行，
-    /// 先在本场内按列跳，跳出本场就落到相邻场的第一张 / 最后一张 —— 不会像
-    /// 全局按列数跳那样从一场中间莫名其妙落进下一场中间。
+    /// ↑/↓：上一行 / 下一行里离现在这张最近的那一张（每行照片宽度不一样，按中点的位置找，不按第几列）。
+    /// 两种视图同一套：按分组时从一场的最后一行按 ↓ 落进下一场的第一行。
     private func moveFocusVertically(_ direction: Int, proxy: ScrollViewProxy) {
-        guard gridMode == .byGroup else {
-            moveFocus(direction * gridColumns, proxy: proxy)
-            return
-        }
-        // 单张区展开时当作最后一「行」：从最后一场按 ↓ 能走进去。
-        let singles = showSingles ? singleItems : []
-        let rows = groupedItems + (singles.isEmpty ? [] : [(group: -1, members: singles)])
-        guard !rows.isEmpty else { return }
-        guard let current = focusedID,
-              let rowIdx = rows.firstIndex(where: { $0.members.contains { $0.id == current } }),
-              let col = rows[rowIdx].members.firstIndex(where: { $0.id == current }) else {
-            focusedID = rows[0].members.first?.id
-            if let id = focusedID { proxy.scrollTo(id, anchor: .center) }
-            return
-        }
-        let row = rows[rowIdx].members
-        let inRow = col + direction * gridColumns
-        let next: String
-        if row.indices.contains(inRow) {
-            next = row[inRow].id
-        } else {
-            let adjacent = rowIdx + direction
-            guard rows.indices.contains(adjacent) else { return }
-            next = direction > 0 ? rows[adjacent].members[0].id : rows[adjacent].members.last!.id
-        }
+        let rows = navigationRows().map(\.cells)
+        guard let next = JustifiedRows.vertical(rows: rows, from: focusedID, direction: direction) else { return }
         focusedID = next
         // 吸顶的分区标题会盖住贴着顶边停下的目标；跨行跳转一律居中。
-        proxy.scrollTo(next, anchor: .center)
+        scrollGrid(proxy, next, anchor: .center)
     }
 
     private func openFocused() {
@@ -1761,7 +1849,7 @@ struct BatchView: View {
         lastVisitedTake = next.group
         selectedIDs.removeAll()
         focusedID = target.id
-        withAnimation { proxy.scrollTo(target.id, anchor: .top) }
+        withAnimation { scrollGrid(proxy, target.id, anchor: .top) }
     }
 
     // MARK: 按分组 (每个多张场一行，单张收在最后)
@@ -1769,15 +1857,17 @@ struct BatchView: View {
     /// 每个多张场一行，本场全部照片横向铺开（放不下自动换行）。单张照片（没有连拍、不用挑）
     /// 收进最后的折叠区 —— 以前它们也一张一行，一场婚礼里多半是单张，要挑的连拍被冲散。
     /// 鼠标停在照片上点「只留这张」就是定案；要一组一组细看按 C 进连拍挑选。
+    /// 每一场直接是网格那个 LazyVStack 的孩子（以前外面再包一层 LazyVStack）：滚动定位按「take-场号」找得到还没铺出来的场。
+    @ViewBuilder
     private var groupGrid: some View {
         let singles = singleItems
-        return LazyVStack(alignment: .leading, spacing: 18) {
-            ForEach(groupedItems, id: \.group) { entry in
-                takeRow(entry.group, members: entry.members)
-            }
-            if !singles.isEmpty {
-                singlesSection(singles)
-            }
+        ForEach(groupedItems, id: \.group) { entry in
+            takeRow(entry.group, members: entry.members)
+                .padding(.bottom, 10)
+                .id("take-\(entry.group)")
+        }
+        if !singles.isEmpty {
+            singlesSection(singles).id("singles")
         }
     }
 
@@ -1813,7 +1903,7 @@ struct BatchView: View {
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: allSelected ? "checkmark.square.fill" : "square")
-                            .foregroundStyle(allSelected ? Color.accentColor : .secondary)
+                            .foregroundStyle(allSelected ? AppPalette.accent : .secondary)
                         Text("场 \(take)").font(.subheadline.bold())
                         Text("\(all.count) 张").font(.caption).foregroundStyle(.secondary)
                         if let range = Self.timeRange(all) {
@@ -1862,13 +1952,15 @@ struct BatchView: View {
                     .controlSize(.small)
                     .help("整场并排上台细挑 (焦点在本场时按 C 也行)：点一张 = 只留它，⏎ 确认并跳下一组")
             }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: thumbSize), spacing: 8)], alignment: .leading, spacing: 8) {
-                ForEach(members) { member in
-                    // groupSize 1：行头已经写了张数，缩略图上再贴 ×N 就重复了。
-                    let soleKeeper = member.verdict != .reject && alive.count == 1
-                    gridCell(member, color: member.verdict.color, groupSize: 1, keepOnly: !soleKeeper,
-                             compact: thumbSize < 150)
-                        .id(member.id)
+            // 一场的照片不多，行不用 Lazy：这一场铺出来了，里面每一格都找得到（滚动定位）。
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(gridRows(members, prefix: "take\(take)")) { row in
+                    rowView(row) { member, width, height in
+                        // groupSize 1：行头已经写了张数，缩略图上再贴 ×N 就重复了。
+                        let soleKeeper = member.verdict != .reject && alive.count == 1
+                        gridCell(member, color: member.verdict.color, groupSize: 1, width: width, height: height,
+                                 keepOnly: !soleKeeper, showPick: true)
+                    }
                 }
             }
         }
@@ -1934,10 +2026,11 @@ struct BatchView: View {
             .buttonStyle(.plain)
             .help(showSingles ? "收起单张" : "展开看这 \(singles.count) 张单张照片")
             if showSingles {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: thumbSize), spacing: 8)], alignment: .leading, spacing: 8) {
-                    ForEach(singles) { item in
-                        gridCell(item, color: item.verdict.color, groupSize: 1)
-                            .id(item.id)
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(gridRows(singles, prefix: "singles")) { row in
+                        rowView(row) { item, width, height in
+                            gridCell(item, color: item.verdict.color, groupSize: 1, width: width, height: height, showPick: true)
+                        }
                     }
                 }
             }
@@ -2019,10 +2112,9 @@ struct BatchView: View {
         let takeSizes = store.takeSizes
         if !matching.isEmpty || (verdict == .reject && store.reasonFilter != nil) {
             Section {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: thumbSize), spacing: 8)], spacing: 8) {
-                    ForEach(matching) { item in
-                        gridCell(item, color: color, groupSize: takeSizes[item.take] ?? 1)
-                            .id(item.id)
+                ForEach(gridRows(matching, prefix: verdict.rawValue)) { row in
+                    rowView(row) { item, width, height in
+                        gridCell(item, color: color, groupSize: takeSizes[item.take] ?? 1, width: width, height: height)
                     }
                 }
             } header: {
@@ -2035,9 +2127,9 @@ struct BatchView: View {
                     }
                     Spacer(minLength: 0)
                 }
-                .padding(.vertical, 6)
+                .padding(.top, 10).padding(.bottom, 6)
                 // 吸顶时要盖住下面滚过的缩略图。
-                .background(Color(white: 0.13))
+                .background(AppPalette.canvas)
             }
         }
     }
@@ -2067,15 +2159,18 @@ struct BatchView: View {
     }
 
     /// 一格（GridCell）：画出来要用的值在这里取好传进去，GridCell 按值比、没变的格子不重算 body（优化分析 NP4）。
-    private func gridCell(_ item: BatchItem, color: Color, groupSize: Int, keepOnly: Bool = false,
-                          compact: Bool = false) -> some View {
+    /// `showPick`：角标里带不带精选的绿星 —— 按判决时照片就在「精选」分区里、文件名前面也有，不再重复；按分组时带。
+    private func gridCell(_ item: BatchItem, color: Color, groupSize: Int, width: CGFloat, height: CGFloat,
+                          keepOnly: Bool = false, showPick: Bool = false) -> some View {
         let client = store.clientPicks.contains(item.id)
+        let aspect = PhotoAspect.of(path: item.previewPath)
         return GridCell(item: item, thumbGeneration: ThumbCache.generation(of: item.previewPath),
-                        color: color, groupSize: groupSize, thumbSize: thumbSize,
+                        color: color, groupSize: groupSize, width: width, height: height,
+                        letterbox: !JustifiedRows.aspectRange.contains(aspect),
                         isSelected: selectedIDs.contains(item.id), isFocused: focusedID == item.id,
                         rank: store.takeRank[item.id], manual: store.isManual(item.id), client: client,
-                        note: client ? store.clientNotes[item.id] : nil, keepOnly: keepOnly, compact: compact,
-                        viewport: viewport, actions: cellActions)
+                        note: client ? store.clientNotes[item.id] : nil, keepOnly: keepOnly, compact: width < 150,
+                        showPick: showPick, viewport: viewport, actions: cellActions)
             .equatable()
     }
 
@@ -2350,7 +2445,7 @@ private struct BatchControlPanel: View {
             )
             Slider(value: $store.takeGapSec, in: 1...60, step: 1)
             Text("绿色 = 会并进同一场的间隔。只改怎么分堆，不改任何判决。")
-                .font(.caption2).foregroundStyle(.tertiary)
+                .hintText()
         }
         .help("相邻两张间隔超过这个秒数就算换了一场。直方图是本场拍摄的按快门节奏分布," +
               "白线就是当前这条线。双机位按机身各切各的 —— 两台机器同一秒各拍一张是" +
@@ -2376,7 +2471,7 @@ private struct BatchControlPanel: View {
             Text(stats.groups > 0
                  ? "\(stats.groups) 组近似重复 · \(stats.photos) 张（和上面的「场」是两层）· 开关只改这一场"
                  : "本场没有近似重复的照片")
-                .font(.caption2).foregroundStyle(.tertiary)
+                .hintText()
         }
     }
 
@@ -2454,31 +2549,35 @@ private struct BatchControlPanel: View {
                             .help("某个章节（仪式/晚宴…）留下的张数低于这个数就在状态栏和时间轴上提醒。0 = 只在整章全灭时提醒。" +
                                   "所有场次通用（只管提醒，不改任何判决）")
                         Text("拖动实时生效 · 红字 = 该项当前淘汰数")
-                            .font(.caption2).foregroundStyle(.tertiary)
+                            .hintText()
                     }
                     .padding(6)
                 }
 
                 GroupBox("本地模型（可选）") {
                     VStack(alignment: .leading, spacing: 10) {
-                        LabeledContent("模型") {
-                            Text("MiniCPM-V 4.6").font(.caption).foregroundStyle(.secondary)
+                        HStack {
+                            Text("MiniCPM-V 4.6").font(.callout)
+                            Spacer()
+                            Button("启动服务") { store.startVLMServer() }
+                                .controlSize(.small)
+                                .help("在本机启动看图模型 MiniCPM-V 4.6（经 Ollama；没装的先装 Ollama.app，再在终端里 ollama pull \(BatchStore.ollamaModel)）")
                         }
-                        Button("启动服务") { store.startVLMServer() }
-                            .help("在本机启动看图模型 MiniCPM-V 4.6（经 Ollama；没装的先装 Ollama.app，再在终端里 ollama pull \(BatchStore.ollamaModel)）")
-                        Button("复审废片 (\(store.autoRejectCount))") { store.runAppealOnRejects() }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(store.autoRejectCount == 0 || store.isRunning)
-                            .help("给自动淘汰的照片一个平反机会：按各自的淘汰原因定向复查 (虚焦→主体清晰吗;闭眼→是否眯眼笑;曝光→是否刻意剪影/逆光)。洗清罪名的照片自动回到可用并带“平反”徽章;人工改判过的不复审")
-                        Button("精审幸存照片") { store.runVLMOnSurvivors() }
-                            .disabled(store.items.isEmpty || store.isRunning)
-                            .help("可选:给未淘汰照片打表情分(连拍组挑精选用)并检查构图(抢镜/切肢仅作提示徽章)")
+                        HStack(spacing: 8) {
+                            Button("复审废片 (\(store.autoRejectCount))") { store.runAppealOnRejects() }
+                                .disabled(store.autoRejectCount == 0 || store.isRunning)
+                                .help("给自动淘汰的照片一个平反机会：按各自的淘汰原因定向复查 (虚焦→主体清晰吗;闭眼→是否眯眼笑;曝光→是否刻意剪影/逆光)。洗清罪名的照片自动回到可用并带“平反”徽章;人工改判过的不复审")
+                            Button("精审幸存照片") { store.runVLMOnSurvivors() }
+                                .disabled(store.items.isEmpty || store.isRunning)
+                                .help("可选:给未淘汰照片打表情分(连拍组挑精选用)并检查构图(抢镜/切肢仅作提示徽章)")
+                        }
                     }
                     .padding(6)
                 }
             }
             .padding(12)
         }
+        .background(AppPalette.panel)
     }
 
     /// One threshold row: name + live value + kill count on top, the shoot's
@@ -2525,7 +2624,11 @@ private struct GridCell: View, Equatable {
     let thumbGeneration: Int
     let color: Color
     let groupSize: Int
-    let thumbSize: Double
+    /// 这一格的宽、高：照片按自己的比例排满一行（JustifiedRows），格子就是照片那么大。
+    let width: CGFloat
+    let height: CGFloat
+    /// 全景、长条：排版时比例被夹过，格子里整图显示（上下或左右留边），不裁。
+    let letterbox: Bool
     let isSelected: Bool
     let isFocused: Bool
     /// 本场评分第几（store.takeRank），人工改判，客户选中和客户备注。
@@ -2537,15 +2640,18 @@ private struct GridCell: View, Equatable {
     let keepOnly: Bool
     /// 缩略图窄：悬停条上「只留这张」单独一行（CellHoverBar.compact）。
     let compact: Bool
+    /// 角标里带不带精选的绿星（按分组时带）。
+    let showPick: Bool
     let viewport: GridViewport
     let actions: Actions
 
     /// 分三段比：一长串 && 在 CI 的 Xcode 16 上类型检查会慢。
     static func == (a: GridCell, b: GridCell) -> Bool {
         let photo: Bool = a.item == b.item && a.thumbGeneration == b.thumbGeneration && a.color == b.color
-            && a.groupSize == b.groupSize && a.thumbSize == b.thumbSize
+            && a.groupSize == b.groupSize && a.width == b.width && a.height == b.height && a.letterbox == b.letterbox
         let state: Bool = a.isSelected == b.isSelected && a.isFocused == b.isFocused && a.rank == b.rank && a.manual == b.manual
         let rest: Bool = a.client == b.client && a.note == b.note && a.keepOnly == b.keepOnly && a.compact == b.compact
+            && a.showPick == b.showPick
         return photo && state && rest && a.viewport === b.viewport
     }
 
@@ -2553,7 +2659,7 @@ private struct GridCell: View, Equatable {
         let _ = BatchPerf.body("格子")
         CellHoverBar(id: item.id, verdict: item.verdict,
                      keepOnly: keepOnly ? { [actions, id = item.id] in actions.keepOnly(id) } : nil,
-                     compact: compact,
+                     compact: compact, narrow: width < 84,
                      onSet: { [actions, id = item.id] v in actions.set(id, v) }) {
             cell
         }
@@ -2561,43 +2667,42 @@ private struct GridCell: View, Equatable {
 
     private var cell: some View {
         VStack(spacing: 3) {
-            // 方格 + 整图 fit（Lightroom / Aftershoot 的做法）。以前是 .fill 塞进
-            // 140×100 的横框：一张竖拍只剩中间一条，52% 的画面被裁掉，看不到脚也
-            // 看不到构图 —— 而这类场次全是竖拍。
-            ThumbnailView(path: item.previewPath, fit: true)
-                .frame(maxWidth: .infinity, minHeight: thumbSize, maxHeight: thumbSize)
+            // 格子就是照片那么大（按比例排满一行，JustifiedRows）。以前是方格里整图 fit：竖片只占格子四成宽，两边是灰底。
+            ThumbnailView(path: item.previewPath, fit: letterbox)
+                .frame(width: width, height: height)
                 .background(Color(white: 0.10))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .clipShape(RoundedRectangle(cornerRadius: 4))
                 // 焦点和选中分开：以前都是 3px accent，⌘多选之后分不清焦点在哪，
                 // 而数字键在没有选中时判的正是焦点那张。选中 = accent 粗框 + 左上 ✓，
                 // 焦点 = 白色细框，两者可以同时出现。
                 .overlay {
                     if isSelected {
-                        RoundedRectangle(cornerRadius: 6).stroke(Color.accentColor, lineWidth: 3)
+                        RoundedRectangle(cornerRadius: 4).stroke(AppPalette.accent, lineWidth: 3)
                     }
                     if isFocused {
-                        RoundedRectangle(cornerRadius: 5).inset(by: isSelected ? 3 : 0)
-                            .stroke(Color.white.opacity(0.9), lineWidth: 1.5)
+                        RoundedRectangle(cornerRadius: 4).inset(by: isSelected ? 3 : 0)
+                            .stroke(Color.white.opacity(0.95), lineWidth: 2)
                     }
                 }
-                // 右上一条：状态（排名 · 手判 · ★精选 · ×N）。精选统一用绿星（和判决
-                // 小点、审片头部同一个符号同一个色），排名只用灰度 —— 以前四个角各挂
-                // 一坨、精选绿圆和 #1 黄字打架，代码里自己写着"别弄成圣诞树"。
+                // 右上一条：状态（场内名次 · 手判 · 客户 · 精选）。名次和同场张数并成「1/10」一样东西（以前是「#1 ★ ×10」
+                // 三样挤一个胶囊，一场 10 张的每张都挂一个 ×10）；没有名次的才写 ×N。精选的绿星只在按分组时带。
                 .overlay(alignment: .topTrailing) {
-                    let hasStatus: Bool = rank != nil || manual || client || item.verdict == .pick || groupSize > 1
+                    let star: Bool = showPick && item.verdict == .pick
+                    let hasStatus: Bool = rank != nil || manual || client || star || groupSize > 1
                     if hasStatus {
                         HStack(spacing: 4) {
                             if let rank {
-                                Text("#\(rank)").font(.caption2).bold().monospacedDigit()
+                                Text(groupSize > 1 ? "\(rank)/\(groupSize)" : "#\(rank)").font(.caption2).bold().monospacedDigit()
                                     .foregroundStyle(rank == 1 ? Color.white : Color.white.opacity(0.6))
+                            } else if groupSize > 1 {
+                                Text("×\(groupSize)").font(.caption2).bold().foregroundStyle(Color.white.opacity(0.6))
                             }
                             if manual { Image(systemName: "hand.raised.fill").font(.caption2) }
                             // 客户选中：紫心（和确认表上客户点的那颗、XMP 的紫色标同一个颜色）。
                             if client { Image(systemName: "heart.fill").font(.caption2).foregroundStyle(.purple) }
-                            if item.verdict == .pick {
+                            if star {
                                 Image(systemName: "star.fill").font(.caption2).foregroundStyle(Verdict.pick.color)
                             }
-                            if groupSize > 1 { Text("×\(groupSize)").font(.caption2).bold() }
                         }
                         .padding(.horizontal, 5).padding(.vertical, 3)
                         .background(.black.opacity(0.55), in: Capsule())
@@ -2638,24 +2743,27 @@ private struct GridCell: View, Equatable {
                 .overlay(alignment: .topLeading) {
                     if isSelected {
                         Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(Color.accentColor)
+                            .foregroundStyle(AppPalette.accent)
                             .background(Circle().fill(.white))
                             .padding(4)
                     }
                 }
             HStack(spacing: 4) {
                 Image(systemName: item.verdict.symbol)
-                    .font(.system(size: 7, weight: .bold))
+                    .font(.system(size: 8, weight: .bold))
                     .foregroundStyle(color)
-                    .frame(width: 8)
-                Text(item.id).font(.caption2).lineLimit(1)
+                    .frame(width: 9)
+                Text(item.id).font(.caption2).lineLimit(1).truncationMode(.middle)
                     .foregroundStyle(.secondary)
-                if let iso = item.exif?.iso {
-                    // Orange from ISO 3200 up — the range worth batch-denoising.
+                // 只有高感（ISO 3200 起，值得批量降噪的那些）才写：以前每张都挂一个「ISO 500」。
+                if let iso = item.exif?.iso, iso >= 3200 {
                     Text("ISO \(iso)").font(.caption2).monospacedDigit().lineLimit(1)
-                        .foregroundStyle(iso >= 3200 ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
+                        .foregroundStyle(.orange)
+                        .layoutPriority(1)
                 }
+                Spacer(minLength: 0)
             }
+            .frame(width: width, alignment: .leading)
         }
         .contentShape(Rectangle())
         // 时间轴的「你在这」：只记出现/消失，不在这里读任何会触发重绘的状态。
@@ -2691,6 +2799,8 @@ private struct CellHoverBar<Content: View>: View {
     /// 缩略图窄（< 150pt）：「只留这张」单独一行放在上面。一行放不下时整条比格子宽，✕ 伸到隔壁格子
     /// 底下，鼠标一过去悬停就没了，根本点不到（审查发现）。
     var compact = false
+    /// 格子很窄（最小一档的竖片）：三个判决按钮收窄，整条不伸出格子。
+    var narrow = false
     let onSet: (Verdict) -> Void
     @ViewBuilder let content: () -> Content
     @State private var hovering = false
@@ -2746,7 +2856,7 @@ private struct CellHoverBar<Content: View>: View {
                 Button { if Self.isSingleClick { onSet(v) } } label: {
                     Image(systemName: v.symbol)
                         .font(.system(size: 10, weight: .bold))
-                        .frame(width: 22, height: 18)
+                        .frame(width: narrow ? 17 : 22, height: 18)
                         .background(on ? v.color.opacity(0.9) : Color.clear, in: Capsule())
                         .foregroundStyle(on ? Color.white : v.color)
                         .contentShape(Capsule())
@@ -2832,6 +2942,7 @@ enum ThumbCache {
             FaceStripCache.cache.removeObject(forKey: path as NSString)
         }
         FitCache.forgetHeaders(paths)
+        PhotoAspect.forget(paths)
     }
 
     /// `suffix` 加在路径后面（锐化成品的 "#sharp"），代数照样按原路径算。
@@ -4054,7 +4165,7 @@ struct PhotoInspector: View {
                 .clipShape(RoundedRectangle(cornerRadius: 4))
                 .overlay(
                     RoundedRectangle(cornerRadius: 4)
-                        .stroke(member.id == currentID ? Color.accentColor : verdictColor(member.verdict),
+                        .stroke(member.id == currentID ? AppPalette.accent : verdictColor(member.verdict),
                                 lineWidth: member.id == currentID ? 3 : 1.5)
                 )
             Text(member.verdict.rawValue).font(.caption2)
@@ -4126,7 +4237,7 @@ struct PhotoInspector: View {
                                          face: member.faces[0])
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 6)
-                                        .stroke(member.id == currentID ? Color.accentColor : .clear, lineWidth: 3)
+                                        .stroke(member.id == currentID ? AppPalette.accent : .clear, lineWidth: 3)
                                 )
                             Text(member.verdict.rawValue).font(.caption2)
                                 .foregroundStyle(verdictColor(member.verdict))
@@ -4444,7 +4555,7 @@ struct ReviewView: View {
                         .toggleStyle(.checkbox).font(.caption)
                         .help("最后一遍过留下的时不走进废片区。要审废片（找误杀）就关掉，或在网格里筛选「废片」再按 F")
                     Text("1精选 2可用 3废片(自动下一张) · 0恢复 · Z放大 · ⌘Z撤销 · ←/→ · Esc退出")
-                        .font(.caption2).foregroundStyle(.tertiary)
+                        .hintText()
                         .lineLimit(1).truncationMode(.tail)
                         .layoutPriority(-1)
                     Button(zoomed ? "适应窗口" : (loadingZoom ? "解码原图..." : "放大 (Z)")) { toggleZoom(item) }

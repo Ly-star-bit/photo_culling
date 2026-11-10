@@ -91,7 +91,7 @@ struct CollageAlbumOverview: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
-        .background(.bar)
+        .background(AppPalette.bar)
     }
 
     /// 选中了几个：一排操作（右键里也有）；没选中：一句操作提示。一直占着位置（选上第一个时网格不往下跳）。
@@ -312,7 +312,7 @@ struct CollageAlbumOverview: View {
             if CollageAlbumRules.moveChangesOrder(indices, to: dest, count: pages.count) {
                 let line = Self.lineRect(slot: dest + leadingSlots, slots: slots, metrics: m)
                 RoundedRectangle(cornerRadius: 2)
-                    .fill(Color.accentColor)
+                    .fill(AppPalette.accent)
                     .frame(width: line.width, height: line.height)
                     .offset(x: line.minX, y: line.minY)
                     .allowsHitTesting(false)
@@ -341,7 +341,7 @@ struct CollageAlbumOverview: View {
                 .font(.caption2.weight(.semibold))
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
-                .background(Color.accentColor, in: Capsule())
+                .background(AppPalette.accent, in: Capsule())
                 .foregroundStyle(.white)
                 .fixedSize()
                 .offset(x: drag.location.x + 12, y: drag.location.y + 10)
@@ -397,7 +397,7 @@ private struct CollageOverviewCard: View {
     }
 
     private var borderColor: Color {
-        if targeted || selected { return .accentColor }
+        if targeted || selected { return AppPalette.accent }
         return current ? Color.white.opacity(0.55) : .clear
     }
 

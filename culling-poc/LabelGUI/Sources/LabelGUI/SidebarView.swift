@@ -59,6 +59,6 @@ struct SidebarView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(8)
-        .background(.bar)
+        .background(AppPalette.bar)
     }
 }

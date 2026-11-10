@@ -22,6 +22,8 @@ final class GridViewport: ObservableObject {
 
     /// 网格里现在挂着几张照片的格子（Lazy 网格铺出来的，含屏幕外预先铺好的那几行）。只给 --perf grid 报数用。
     var mountedCells: Int { visible.count }
+    /// 这一格现在铺出来了没有（滚动定位：铺出来的直接找这一格，没铺出来的先滚到它所在的那一场）。
+    func isMounted(_ id: String) -> Bool { visible[id] != nil }
 
     func appeared(_ id: String, chapter: Int) {
         visible[id] = (chapter, (visible[id]?.cells ?? 0) + 1)

@@ -31,6 +31,7 @@ struct WatermarkView: View {
             statusBar
         }
         .shortcutsHotkey(isPresented: $showShortcuts)
+        .appTheme()
     }
 
     // MARK: - 顶栏
@@ -66,14 +67,14 @@ struct WatermarkView: View {
                     .help("停止排新的照片，已写出的保留 (Esc)")
             }
             Button("批量导出 (\(store.photos.count))") { store.exportAll(shootDir: batchStore.photoDir, sessions: batchStore.recentSessions) }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accentProminent)
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(!store.canExport)
                 .help(store.exportBlockedReason ?? "把列表里的照片全部加水印后写到输出目录 (⌘⏎)")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.bar)
+        .background(AppPalette.bar)
     }
 
     /// 「导入选片结果」：精选 / 精选 + 可用 / 客户选中（审查 F19，和拼图托盘「带照片」同一套）。
@@ -157,7 +158,7 @@ struct WatermarkView: View {
         .animation(.default, value: store.notice)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(.bar)
+        .background(AppPalette.bar)
     }
 
     // MARK: - 左: 照片列表 (可拖拽)
@@ -181,9 +182,10 @@ struct WatermarkView: View {
                 )) { url in
                     HStack(spacing: 8) {
                         ThumbnailView(path: url.path, maxPixel: 128)
-                            .frame(width: 48, height: 34)
-                            .clipShape(RoundedRectangle(cornerRadius: 3))
-                        Text(url.lastPathComponent).font(.caption).lineLimit(1)
+                            .frame(width: 54, height: 40)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                        Text(url.deletingPathExtension().lastPathComponent).font(.callout).lineLimit(1).truncationMode(.middle)
+                            .foregroundStyle(.primary)
                             .help(url.path)
                         Spacer()
                         Button {
@@ -204,7 +206,7 @@ struct WatermarkView: View {
         }
         .overlay {
             RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(Color.accentColor, lineWidth: 2)
+                .strokeBorder(AppPalette.accent, lineWidth: 2)
                 .padding(3)
                 .opacity(isDropTargeted ? 1 : 0)
                 .allowsHitTesting(false)
@@ -236,7 +238,7 @@ struct WatermarkView: View {
 
     private var previewPane: some View {
         ZStack {
-            Color(white: 0.13)
+            AppPalette.canvas
             if let image = store.previewImage {
                 Image(nsImage: image)
                     .resizable()
@@ -280,6 +282,7 @@ struct WatermarkView: View {
             }
             .padding(10)
         }
+        .background(AppPalette.panel)
     }
 
     private var signatureBox: some View {
@@ -320,7 +323,7 @@ struct WatermarkView: View {
                     .help(tiling ? "平铺开启时位置和边距不生效" : "")
                     if tiling {
                         Text("平铺开启中：位置、边距、横构图位置不生效")
-                            .font(.caption2).foregroundStyle(.tertiary)
+                            .hintText()
                     }
                     labeledSlider("大小", value: $store.config.sizeRatio, in: CollageMarkLayer.sizeRange,
                                   display: "\(Int(store.config.sizeRatio * 100))%")
@@ -335,6 +338,9 @@ struct WatermarkView: View {
                         tintSwatch(WatermarkEngine.RGB(r: 245, g: 240, b: 230), label: "米", name: "米白")
                         tintSwatch(WatermarkEngine.RGB(r: 128, g: 128, b: 128), label: "灰", name: "灰色")
                         tintSwatch(WatermarkEngine.RGB(r: 0, g: 0, b: 0), label: "黑", name: "黑色")
+                        Spacer(minLength: 4)
+                        // 自定义：前面写上字（以前是色块后面一个没有说明的白色长条）。
+                        Text("自定义").font(.caption).foregroundStyle(.secondary)
                         ColorPicker("", selection: rgbBinding(
                             get: { store.config.tint },
                             set: { store.config.tint = $0; store.config.tintEnabled = true }
@@ -415,7 +421,7 @@ struct WatermarkView: View {
                     frameField("右上", $store.config.frame.rightLine1)
                     frameField("右下", $store.config.frame.rightLine2)
                     Text("支持 {model} {lens} {focal} {fnumber} {shutter} {iso} {date} 等占位符，留空不显示")
-                        .font(.caption2).foregroundStyle(.tertiary)
+                        .hintText()
                 }
             }
             .padding(6)
@@ -508,7 +514,7 @@ struct WatermarkView: View {
                 Text(store.options.stripGPS
                      ? "输出 JPEG (sRGB) · 保留 EXIF 拍摄参数与 XMP 版权/关键词 · 去除 GPS · 方向已烘焙进像素"
                      : "输出 JPEG (sRGB) · 保留 EXIF 拍摄参数、GPS 与 XMP 版权/关键词 · 方向已烘焙进像素")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                    .hintText()
             }
             .padding(6)
         }
@@ -529,7 +535,7 @@ struct WatermarkView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "checkmark")
                             .font(.caption.bold())
-                            .foregroundStyle(Color.accentColor)
+                            .foregroundStyle(AppPalette.accent)
                             .opacity(store.activePresetName == name ? 1 : 0)
                             .frame(width: 12)
                         Button(name) { store.applyPreset(named: name) }
@@ -544,7 +550,7 @@ struct WatermarkView: View {
                     }
                 }
                 if store.presets.isEmpty {
-                    Text("把当前全部参数存成预设，下次一键套用").font(.caption2).foregroundStyle(.tertiary)
+                    Text("把当前全部参数存成预设，下次一键套用").hintText()
                 }
             }
             .padding(6)
@@ -600,29 +606,55 @@ struct WatermarkView: View {
 
     // MARK: - 小组件
 
-    /// 3×3 九宫格锚点选择。
+    /// 3×3 九宫格锚点选择：一个小画框，九个位置。以前是 26×18 的九个小灰块缩在左上角，右边空着大半行。
     private func gridPicker(selection: Binding<WatermarkEngine.GridPosition>) -> some View {
         let rows: [[WatermarkEngine.GridPosition]] = [
             [.topLeft, .topCenter, .topRight],
             [.middleLeft, .center, .middleRight],
             [.bottomLeft, .bottomCenter, .bottomRight],
         ]
-        return VStack(spacing: 3) {
-            ForEach(0..<3, id: \.self) { row in
-                HStack(spacing: 3) {
-                    ForEach(rows[row], id: \.self) { pos in
-                        Button {
-                            selection.wrappedValue = pos
-                        } label: {
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(selection.wrappedValue == pos
-                                      ? Color.accentColor : Color.gray.opacity(0.25))
-                                .frame(width: 26, height: 18)
+        return HStack(alignment: .center, spacing: 12) {
+            VStack(spacing: 3) {
+                ForEach(0..<3, id: \.self) { row in
+                    HStack(spacing: 3) {
+                        ForEach(rows[row], id: \.self) { pos in
+                            let on = selection.wrappedValue == pos
+                            Button {
+                                selection.wrappedValue = pos
+                            } label: {
+                                RoundedRectangle(cornerRadius: 3)
+                                    .fill(on ? AppPalette.accent : Color.white.opacity(0.10))
+                                    .frame(width: 38, height: 24)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help(Self.positionName(pos))
+                            .accessibilityLabel(Self.positionName(pos))
                         }
-                        .buttonStyle(.plain)
                     }
                 }
             }
+            .padding(4)
+            .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 6))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("位置").font(.caption).foregroundStyle(.secondary)
+                Text(Self.positionName(selection.wrappedValue)).font(.callout)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private static func positionName(_ position: WatermarkEngine.GridPosition) -> String {
+        switch position {
+        case .topLeft: return "左上"
+        case .topCenter: return "上中"
+        case .topRight: return "右上"
+        case .middleLeft: return "左中"
+        case .center: return "正中"
+        case .middleRight: return "右中"
+        case .bottomLeft: return "左下"
+        case .bottomCenter: return "下中"
+        case .bottomRight: return "右下"
         }
     }
 
@@ -651,7 +683,7 @@ struct WatermarkView: View {
                 Circle()
                     .fill(rgb.map { Color($0.nsColor) } ?? Color.clear)
                     .frame(width: 20, height: 20)
-                    .overlay(Circle().stroke(isActive ? Color.accentColor : .gray.opacity(0.4),
+                    .overlay(Circle().stroke(isActive ? AppPalette.accent : .gray.opacity(0.4),
                                              lineWidth: isActive ? 2 : 1))
                 if rgb == nil {
                     Text(label).font(.system(size: 9)).foregroundStyle(.secondary)

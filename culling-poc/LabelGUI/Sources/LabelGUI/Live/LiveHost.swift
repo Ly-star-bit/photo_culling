@@ -511,7 +511,7 @@ enum LiveHost {
             .frame(width: size.width, height: size.height)
             .background(Color(nsColor: .windowBackgroundColor))
             .environment(\.colorScheme, .dark)
-        let host = NSHostingView(rootView: view)
+        let host = NSHostingView(rootView: view.appTheme())
         host.sceneBridgingOptions = [.title]
         host.frame = NSRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: host.frame, styleMask: [.titled, .closable, .miniaturizable, .resizable],

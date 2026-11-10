@@ -356,7 +356,7 @@ struct CollageStylePanel: View {
                     }
                 }
                 .overlay(RoundedRectangle(cornerRadius: 2)
-                    .strokeBorder(active ? Color.accentColor : Color.gray.opacity(0.25), lineWidth: active ? 2.5 : 0.5))
+                    .strokeBorder(active ? AppPalette.accent : Color.gray.opacity(0.25), lineWidth: active ? 2.5 : 0.5))
                 .frame(maxWidth: .infinity, maxHeight: 72)
                 Text(preset.name)
                     .font(.caption2)
@@ -528,7 +528,7 @@ struct CollageStylePanel: View {
             Circle()
                 .fill(color.swiftUIColor)
                 .frame(width: 20, height: 20)
-                .overlay(Circle().stroke(active ? Color.accentColor : Color.gray.opacity(0.5), lineWidth: active ? 2 : 1))
+                .overlay(Circle().stroke(active ? AppPalette.accent : Color.gray.opacity(0.5), lineWidth: active ? 2 : 1))
         }
         .buttonStyle(.plain)
         .help(name)
@@ -1093,7 +1093,7 @@ struct CollageExportPanel: View {
             Label(store.isAlbum ? "导出相册" : "导出", systemImage: "square.and.arrow.up")
                 .frame(maxWidth: .infinity)
         }
-        .buttonStyle(.borderedProminent)
+        .buttonStyle(.accentProminent)
         .disabled(store.exportBlockedReason != nil)
         .help(store.exportBlockedReason ?? "⌘E")
     }

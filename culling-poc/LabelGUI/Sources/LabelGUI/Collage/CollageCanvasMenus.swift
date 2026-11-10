@@ -177,7 +177,7 @@ struct CollageEmptyActions: View {
             } label: {
                 Label("带精选进来（\(picks) 张）", systemImage: "star.fill").frame(minWidth: 180)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.accentProminent)
             .controlSize(.large)
             .disabled(picks == 0)
             .help(picks == 0 ? "批量页还没有精选：先在批量页分析、挑片，或者用下面两个" : "把批量页判成精选的照片带进托盘")

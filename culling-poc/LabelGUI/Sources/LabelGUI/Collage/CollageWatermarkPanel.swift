@@ -268,7 +268,7 @@ struct CollageMarkLayerBox: View {
             pick(position)
         } label: {
             RoundedRectangle(cornerRadius: 2)
-                .fill(active ? Color.accentColor : Color.gray.opacity(0.25))
+                .fill(active ? AppPalette.accent : Color.gray.opacity(0.25))
                 .frame(width: 18, height: 14)
         }
         .buttonStyle(.plain)
