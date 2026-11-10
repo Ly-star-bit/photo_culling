@@ -31,27 +31,27 @@ enum WhatsNew {
     }
 
     /// 这一版新增的条目（两三条到五条，一条一句话，能「带我去」的都带上）。发下一版时整张换掉、version 跟着改。
-    static let notes = Notes(version: "1.29.0", entries: [
-        Entry(id: "bigger-canvas",
-              title: "画布大起来",
-              detail: "两边的栏默认窄了，拖边能改宽度；左栏 ⌃⌘S、右栏 ⌥⌘S 收起（页签那一行最边上也有按钮）。没有备选时备选条收成一行。",
+    static let notes = Notes(version: "1.30.0", entries: [
+        Entry(id: "justified-grid",
+              title: "网格里的照片大了",
+              detail: "批量页每张照片按自己的比例排满一行，不再是方格里两边留灰底；↑ ↓ 落到上下行位置最近的那张。",
+              destination: .batch),
+        Entry(id: "one-accent",
+              title: "全 app 一套颜色",
+              detail: "暗房的石墨灰和琥珀色铺到批量、水印、拼图三页：琥珀色只表示选中和下一步，判决还是绿 / 蓝 / 红。",
               destination: nil),
-        Entry(id: "canvas-zoom",
-              title: "画布能放大",
-              detail: "捏合、⌘ 滚轮在指针处放大，放大以后滚动 = 平移；⌘= ⌘- 缩放、⌘0 适应、⌘1 实际像素。右下角有缩放小条。",
-              destination: nil),
-        Entry(id: "canvas-menu",
-              title: "画布右键",
-              detail: "右键照片格：调裁切、景别、完整显示、换一张、加字、暗房、锁定、删除；文字、贴纸、缝、空白处各有自己的几项。",
-              destination: nil),
-        Entry(id: "style-rows",
-              title: "风格收成两排",
-              detail: "「样式 › 风格」默认只摆两排（正在用的一直看得见），色调、留白、底色不用滚半天；面板里的说明字也大了、清楚了。",
-              destination: .collage(.presets)),
-        Entry(id: "sticker-thumbs",
-              title: "贴纸有小图，托盘能分组",
-              detail: "「素材」里每个贴纸一张小图；托盘底下能调缩略图大小、按章节分组；鼠标停在备选上，画布底下浮一张大的。",
-              destination: .collage(.stickers)),
+        Entry(id: "pick-button",
+              title: "「挑连拍」在顶栏",
+              detail: "还有连拍没挑时，批量页顶栏右边有一个琥珀色的「挑连拍 N 场」（以前是状态栏里一行小橙字）。全选只留 ⌘A。",
+              destination: .batch),
+        Entry(id: "quiet-badges",
+              title: "角标少了",
+              detail: "名次和同场张数并成「1/10」；文件名后面只有 ISO 3200 以上才写 ISO。面板里的说明字大了一号。",
+              destination: .batch),
+        Entry(id: "watermark-polish",
+              title: "水印页整齐了",
+              detail: "右栏的卡片一样宽；九宫格放大了、旁边写着位置；自定义颜色前面有字了。",
+              destination: .watermark),
     ])
 
     /// 记「上次见过哪一版」的键（app 自己的 UserDefaults 域；自检写进参数域，不碰这里）。
