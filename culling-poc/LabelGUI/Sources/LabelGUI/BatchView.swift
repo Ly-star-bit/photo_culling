@@ -2410,7 +2410,8 @@ struct BatchView: View {
         if store.clientPickCount > 0 {
             Button("清除客户选中 (\(store.clientPickCount))") { store.clearClientPicks() }
         }
-        let scopeCount = selectedCount > 0 ? selectedCount : store.filteredCount
+        // 当前筛选下有几张：要扫一遍全部照片，按 store 变没变记着（以前方向键每按一下扫一遍，7980 张时是顶栏里最贵的一样）。
+        let scopeCount = selectedCount > 0 ? selectedCount : memo.value("filteredCount") { store.filteredCount }
         let scope = Self.scopeLabel(store: store, selected: selectedCount, count: scopeCount)
         Menu("复制文件名 (\(scope))") {
             ForEach(FilenameList.Format.allCases) { format in
@@ -4091,24 +4092,20 @@ struct PhotoInspector: View {
     }
 
     var body: some View {
+        // 左图右栏（优化分析 2026-11-10 U1）：以前一个 VStack 从上往下排 —— 照片、人脸、同场、场内表情、指标、EXIF、按钮，
+        // 1440×900 里照片只占高度的 47%，下面三条每条右边空着八成宽度。现在照片占满左边全高，信息都进右边一栏（自己滚）。
         VStack(spacing: 0) {
             if let item {
                 header(item)
-                imagePane(item)
-                    // The photo wins the height fight against the strips below —
-                    // on a 13" screen a group with faces squeezed it to a strip itself.
-                    .layoutPriority(1)
-                if !item.faces.isEmpty {
-                    faceStrip(item)
+                Divider()
+                HStack(spacing: 0) {
+                    imagePane(item)
+                        .layoutPriority(1)
+                    Divider()
+                    sidebar(item)
+                        .frame(width: Self.sidebarWidth)
                 }
-                let members = groupMembers(item)
-                if members.count > 1 {
-                    groupStrip(item, members: members)
-                    groupFaceCompareStrip(item, members: members)
-                }
-                signalsRow(item)
-                exifRow(item)
-                vlmInfo(item)
+                Divider()
                 bottomBar(item)
             } else {
                 Text("照片不存在").padding()
@@ -4158,7 +4155,8 @@ struct PhotoInspector: View {
             Button("关闭") { inspectedID = nil }
                 .keyboardShortcut(.escape, modifiers: [])
         }
-        .padding()
+        .padding(.horizontal).padding(.vertical, 10)
+        .background(AppPalette.bar)
     }
 
     private func verdictColor(_ v: Verdict) -> Color { v.color }
@@ -4267,34 +4265,58 @@ struct PhotoInspector: View {
         }
     }
 
-    // MARK: strips
+    // MARK: 右栏
+
+    static let sidebarWidth: CGFloat = 320
+    /// 右栏里小图一排排的列：人脸 84（一排 3 张）、同场 68（一排 4 张），折行。
+    private static let faceColumns = [GridItem(.adaptive(minimum: 84, maximum: 84), spacing: 8, alignment: .leading)]
+    private static let memberColumns = [GridItem(.adaptive(minimum: 68, maximum: 68), spacing: 6, alignment: .top)]
+    private static let signalColumns = Array(repeating: GridItem(.flexible(), spacing: 8, alignment: .leading), count: 3)
+
+    /// 右边那一栏：指标、拍摄参数、本地模型的话、人脸、同场、场内表情。自己滚；照片不跟着它挤。
+    private func sidebar(_ item: BatchItem) -> some View {
+        let members = groupMembers(item)
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                signalsSection(item)
+                if !item.faces.isEmpty { faceSection(item) }
+                if members.count > 1 {
+                    groupSection(item, members: members)
+                    groupFaceCompareSection(item, members: members)
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(AppPalette.panel)
+    }
+
+    private func sectionTitle(_ text: String) -> some View {
+        Text(text).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+    }
 
     /// Face close-ups with eye-state rings — scan this instead of zooming.
-    private func faceStrip(_ item: BatchItem) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                Text("人脸").font(.caption2).foregroundStyle(.secondary)
+    private func faceSection(_ item: BatchItem) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionTitle("人脸 \(item.faces.count)")
+            LazyVGrid(columns: Self.faceColumns, alignment: .leading, spacing: 8) {
                 ForEach(Array(item.faces.enumerated()), id: \.offset) { _, face in
                     FaceCropView(previewPath: item.previewPath, decodePath: item.decodePath, face: face)
                 }
             }
-            .padding(.horizontal)
-            .padding(.vertical, 6)
         }
     }
 
     /// 同一场的全部照片；点击切换，当前那张高亮。场内取舍（留哪张、其余废片）在
     /// 连拍挑选里做 —— 这里以前也有一套勾选定案条，同一个动作两套手势。
-    private func groupStrip(_ item: BatchItem, members: [BatchItem]) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                Text("同场 \(members.count) 张").font(.caption2).foregroundStyle(.secondary)
+    private func groupSection(_ item: BatchItem, members: [BatchItem]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionTitle("同场 \(members.count) 张")
+            LazyVGrid(columns: Self.memberColumns, alignment: .leading, spacing: 6) {
                 ForEach(members) { member in
                     groupStripCell(member)
                 }
             }
-            .padding(.horizontal)
-            .padding(.vertical, 4)
         }
     }
 
@@ -4303,7 +4325,7 @@ struct PhotoInspector: View {
         VStack(spacing: 1) {
             // 整图 fit：竖拍被裁掉一半就看不出是哪一张。
             ThumbnailView(path: member.previewPath, fit: true)
-                .frame(width: 72, height: 72)
+                .frame(width: 68, height: 68)
                 .background(Color(white: 0.10))
                 .clipShape(RoundedRectangle(cornerRadius: 4))
                 .overlay(
@@ -4321,38 +4343,47 @@ struct PhotoInspector: View {
 
     // MARK: info rows
 
-    private func signalsRow(_ item: BatchItem) -> some View {
-        HStack(spacing: 16) {
-            signal("锐度", String(format: "%.0f", item.sharpness))
-            signal("人脸质量", item.faceQuality.map { String(format: "%.2f", $0) } ?? "-")
-            signal("曝光裁切", String(format: "%.1f%%", item.worstClipPct * 100))
-            signal("闭眼", item.dynamicEyeClosed.map { $0 ? "是" : "否" } ?? "-")
-            if let deg = item.horizonDeg, abs(deg) > 1 {
-                signal("水平", String(format: "%+.1f°", deg))
-            }
-            if item.faceCount > 1 { signal("主体人数", "\(item.faceCount)") }
-            if let expr = item.expressionScore { signal("表情分", "\(expr)") }
-            if !item.vlmRescued.isEmpty { signal("平反", item.vlmRescued.joined(separator: "、")) }
+    /// 右栏第一段：淘汰理由、各项指标、直方图、拍摄参数、本地模型的话。
+    private func signalsSection(_ item: BatchItem) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
             if !item.rejectReasons.isEmpty {
-                Text(item.rejectReasons.map(BatchStore.reasonLabel).joined(separator: ", "))
-                    .font(.caption).foregroundStyle(.red)
+                Text(item.rejectReasons.map(BatchStore.reasonLabel).joined(separator: "、"))
+                    .font(.callout).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer()
+            LazyVGrid(columns: Self.signalColumns, alignment: .leading, spacing: 10) {
+                signal("锐度", String(format: "%.0f", item.sharpness))
+                signal("人脸质量", item.faceQuality.map { String(format: "%.2f", $0) } ?? "-")
+                signal("曝光裁切", String(format: "%.1f%%", item.worstClipPct * 100))
+                signal("闭眼", item.dynamicEyeClosed.map { $0 ? "是" : "否" } ?? "-")
+                if let deg = item.horizonDeg, abs(deg) > 1 {
+                    signal("水平", String(format: "%+.1f°", deg))
+                }
+                if item.faceCount > 1 { signal("主体人数", "\(item.faceCount)") }
+                if let expr = item.expressionScore { signal("表情分", "\(expr)") }
+            }
+            if !item.vlmRescued.isEmpty {
+                Label("平反：" + item.vlmRescued.joined(separator: "、"), systemImage: "checkmark.seal.fill")
+                    .font(.caption).foregroundStyle(.green)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HistogramView(path: item.previewPath)
-                .frame(width: 130, height: 44)
+                .frame(maxWidth: .infinity).frame(height: 56)
+            exifRow(item)
+            vlmInfo(item)
         }
-        .padding(.horizontal)
-        .padding(.top, 8)
     }
 
     /// The photographer's own language: shooting parameters + slow-shutter flag.
     @ViewBuilder
     private func exifRow(_ item: BatchItem) -> some View {
         if let exif = item.exif {
-            HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(exif.summary).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let lens = exif.lens {
-                    Text("· \(lens)").font(.caption).foregroundStyle(.tertiary)
+                    Text(lens).font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if exif.slowShutter {
                     Label("低于安全快门", systemImage: "tortoise.fill")
@@ -4360,20 +4391,18 @@ struct PhotoInspector: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal)
-            .padding(.top, 2)
         }
     }
 
     /// Primary-face crop of EVERY group member side by side — expression picking
     /// without flipping back and forth. Click a face to jump to that shot.
     @ViewBuilder
-    private func groupFaceCompareStrip(_ item: BatchItem, members: [BatchItem]) -> some View {
+    private func groupFaceCompareSection(_ item: BatchItem, members: [BatchItem]) -> some View {
         let withFaces = members.filter { !$0.faces.isEmpty }
         if withFaces.count > 1 {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    Text("场内表情").font(.caption2).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                sectionTitle("场内表情")
+                LazyVGrid(columns: Self.faceColumns, alignment: .leading, spacing: 8) {
                     ForEach(withFaces) { member in
                         VStack(spacing: 1) {
                             FaceCropView(previewPath: member.previewPath, decodePath: member.decodePath,
@@ -4388,8 +4417,6 @@ struct PhotoInspector: View {
                         .onTapGesture { currentID = member.id }
                     }
                 }
-                .padding(.horizontal)
-                .padding(.vertical, 4)
             }
         }
     }
@@ -4401,14 +4428,14 @@ struct PhotoInspector: View {
                 if !item.vlmCompositionIssues.isEmpty {
                     Text("构图问题: \(item.vlmCompositionIssues.joined(separator: "、"))")
                         .font(.caption).foregroundStyle(AppPalette.warning)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if let reason = item.vlmReason {
                     Text("本地模型：\(reason)").font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal)
-            .padding(.top, 4)
         }
     }
 
@@ -4420,11 +4447,12 @@ struct PhotoInspector: View {
             Spacer()
             Button("下一张 ▶") { step(1) }.keyboardShortcut(.rightArrow, modifiers: [])
         }
-        .padding()
+        .padding(.horizontal).padding(.vertical, 10)
+        .background(AppPalette.bar)
     }
 
     private func signal(_ label: String, _ value: String) -> some View {
-        VStack(spacing: 2) {
+        VStack(alignment: .leading, spacing: 2) {
             Text(label).font(.caption2).foregroundStyle(.secondary)
             Text(value).font(.callout).monospacedDigit()
         }
