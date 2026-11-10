@@ -1539,7 +1539,7 @@ struct BatchView: View {
                 }
             }
             if gridMode == .byGroup {
-                out = groupLayout.nav
+                out = groupNavRows
                 if showSingles { add(singleItems, prefix: "singles") }
             } else {
                 for verdict in Verdict.allCases.reversed() where store.verdictFilter == nil || store.verdictFilter == verdict {
@@ -2204,11 +2204,13 @@ struct BatchView: View {
         var id: Int { entry.group }
     }
 
-    /// 按分组时整页怎么排（TakeShelves）：每一块、每场在哪一块（滚动定位）、↑ ↓ 的行表。
+    /// 按分组时整页怎么排（TakeShelves）：每一块、每场在哪一块（滚动定位）。`packed`、`groups` 留着给 ↑ ↓ 的行表
+    /// （groupNavRows，用到才算：改判以后整页重排，但多半用不着行表）。blocks 和 packed 一一对应。
     private struct GroupLayout {
         var blocks: [GroupBlock] = []
         var anchors: [Int: String] = [:]
-        var nav: [GridMemo.NavRow] = []
+        var packed: [TakeShelves.Block] = []
+        var groups: [TakeGroup] = []
     }
 
     /// store、视图选项、行宽行高、比例版本都没变就是上次那份（和分行缓存同一套键）。
@@ -2226,9 +2228,10 @@ struct BatchView: View {
             takes.append(Array(flat[offset..<(offset + group.members.count)]))
             offset += group.members.count
         }
-        let ids = groups.map { $0.members.map(\.id) }
         let packed = TakeShelves.pack(takes: takes, width: rowWidth + 2 * TakeShelves.pad, target: rowTarget)
         var out = GroupLayout()
+        out.packed = packed
+        out.groups = groups
         for block in packed {
             switch block {
             case .rows(let index, let rows):
@@ -2238,13 +2241,12 @@ struct BatchView: View {
                 for (k, row) in rows.enumerated() {
                     let rowID = "take\(group.group)-\(k)"
                     gridRows.append(GridRow(id: rowID, items: group.members[row.range], widths: row.widths, height: row.height))
-                    out.nav.append(GridMemo.NavRow(id: rowID, cells: JustifiedRows.cells(ids: ids[index], row: row)))
                 }
                 out.blocks.append(GroupBlock(id: blockID, takes: [ShelfTake(entry: group, rows: gridRows, content: nil)]))
                 out.anchors[group.group] = blockID
             case .shelf(let placed):
-                guard let first = placed.first else { continue }
-                let blockID = "shelf-\(groups[first.take].group)"
+                // 并排的一行至少有一场（TakeShelves.pack 不出空行）。
+                let blockID = "shelf-\(placed.first.map { groups[$0.take].group } ?? -1)"
                 var shelf: [ShelfTake] = []
                 for item in placed {
                     let group = groups[item.take]
@@ -2253,10 +2255,30 @@ struct BatchView: View {
                     out.anchors[group.group] = blockID
                 }
                 out.blocks.append(GroupBlock(id: blockID, takes: shelf))
-                out.nav.append(GridMemo.NavRow(id: blockID, cells: TakeShelves.cells(ids: ids, shelf: placed)))
             }
         }
         return out
+    }
+
+    /// 按分组时 ↑ ↓ 的行表：独占一块的场一行一行，并排的一行算一行（格子中点带着小组的位置）。
+    private var groupNavRows: [GridMemo.NavRow] {
+        memo.value("groupNav", key: GridMemo.NavKey(view: viewKey, layout: layoutKey)) {
+            let layout = groupLayout
+            let ids = layout.groups.map { $0.members.map(\.id) }
+            var out: [GridMemo.NavRow] = []
+            for (k, block) in layout.packed.enumerated() {
+                switch block {
+                case .rows(let index, let rows):
+                    let take = layout.groups[index].group
+                    for (r, row) in rows.enumerated() {
+                        out.append(GridMemo.NavRow(id: "take\(take)-\(r)", cells: JustifiedRows.cells(ids: ids[index], row: row)))
+                    }
+                case .shelf(let placed):
+                    out.append(GridMemo.NavRow(id: layout.blocks[k].id, cells: TakeShelves.cells(ids: ids, shelf: placed)))
+                }
+            }
+            return out
+        }
     }
 
     /// 每个多张场一个带边线的小组，本场全部照片横向铺开（放不下自动换行）；一行放得下的场挨着并排（U2）。单张照片
