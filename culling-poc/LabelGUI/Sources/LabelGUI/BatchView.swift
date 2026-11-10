@@ -2192,10 +2192,8 @@ struct BatchView: View {
     private struct GroupBlock: Identifiable {
         /// 滚动定位的目标：「take-场号」/「shelf-这一行第一场的场号」。
         let id: String
-        /// 独占一块的场（并排的一行 = nil）。
-        var solo: ShelfTake?
-        /// 并排的几场。
-        var shelf: [ShelfTake] = []
+        /// 这一块里的场：独占一块的只有一场（content = nil，撑满），并排的一行有几场。
+        let takes: [ShelfTake]
     }
 
     /// 小组里的一场：成员、怎么分行。`content` = 小组内容的宽度（独占一块的 = nil，撑满）。
@@ -2242,7 +2240,7 @@ struct BatchView: View {
                     gridRows.append(GridRow(id: rowID, items: group.members[row.range], widths: row.widths, height: row.height))
                     out.nav.append(GridMemo.NavRow(id: rowID, cells: JustifiedRows.cells(ids: ids[index], row: row)))
                 }
-                out.blocks.append(GroupBlock(id: blockID, solo: ShelfTake(entry: group, rows: gridRows, content: nil)))
+                out.blocks.append(GroupBlock(id: blockID, takes: [ShelfTake(entry: group, rows: gridRows, content: nil)]))
                 out.anchors[group.group] = blockID
             case .shelf(let placed):
                 guard let first = placed.first else { continue }
@@ -2254,7 +2252,7 @@ struct BatchView: View {
                     shelf.append(ShelfTake(entry: group, rows: [row], content: item.content))
                     out.anchors[group.group] = blockID
                 }
-                out.blocks.append(GroupBlock(id: blockID, shelf: shelf))
+                out.blocks.append(GroupBlock(id: blockID, takes: shelf))
                 out.nav.append(GridMemo.NavRow(id: blockID, cells: TakeShelves.cells(ids: ids, shelf: placed)))
             }
         }
@@ -2288,17 +2286,15 @@ struct BatchView: View {
         }
     }
 
-    @ViewBuilder
+    /// 一块 = 一个 HStack（独占的场也是：里面只有一个撑满的小组）。两种情况同一个视图类型、每块正好一个视图：
+    /// 写成 if / else 的话 Lazy 栈得把每一块都建出来才知道各有几个视图，几千场时方向键每按一下把整页的组头全算一遍。
     private func groupBlockView(_ block: GroupBlock) -> some View {
-        if let solo = block.solo {
-            takeBox(solo)
-        } else {
-            HStack(alignment: .top, spacing: TakeShelves.gap) {
-                ForEach(block.shelf) { take in
-                    takeBox(take)
-                }
+        HStack(alignment: .top, spacing: TakeShelves.gap) {
+            ForEach(block.takes) { take in
+                takeBox(take)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private static let takeTimeFormatter: DateFormatter = {
