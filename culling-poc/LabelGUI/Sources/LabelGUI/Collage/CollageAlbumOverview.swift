@@ -46,7 +46,7 @@ struct CollageAlbumOverview: View {
                 }
             }
         }
-        .background(Color(white: 0.14))
+        .background(AppPalette.canvas)
         .focusable()
         .focusEffectDisabled()
         .focused($focused)
@@ -342,7 +342,7 @@ struct CollageAlbumOverview: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(AppPalette.accent, in: Capsule())
-                .foregroundStyle(.white)
+                .foregroundStyle(AppPalette.onAccent)
                 .fixedSize()
                 .offset(x: drag.location.x + 12, y: drag.location.y + 10)
                 .allowsHitTesting(false)

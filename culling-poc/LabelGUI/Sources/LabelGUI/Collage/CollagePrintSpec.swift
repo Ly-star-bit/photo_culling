@@ -130,13 +130,17 @@ struct CollagePrintRules: Codable, Hashable {
     /// 以前按 P 算「再加 1P」—— 步长 3P、从 20P 起时 22P 提示「再加 1P」做不到；最少 21P 时永远不合规、提示永远是
     /// 「再加 1P 或减 1P」。最少是奇数、整条规则凑不出偶数的，提示里说清楚。
     /// 例：「印厂要 20–60P、每次加 2P；现在 34 个跨页 = 68P，多了 8P：减 4 个跨页（到 60P）」。
-    func pageProblem(spreads n: Int) -> String? {
+    /// assumed = 这本没套过印厂规格、规则是保守默认（优化分析 A9）：不说「印厂要」（没有哪家印厂这么要求过），说清楚是按
+    /// 常见的范围看的 —— 导出前检查里也只算提醒，不拦。
+    func pageProblem(spreads n: Int, assumed: Bool = false) -> String? {
         guard n > 0 else { return nil }
         let p = pages(spreads: n)
         let up = validPages(atLeast: p)
         if up == p { return nil }
         let down = validPages(atMost: p)
-        let head = "印厂要 \(minPages)–\(maxPages)P、每次加 \(pageStep)P；现在 \(n) 个跨页 = \(p)P，"
+        let rule = "\(minPages)–\(maxPages)P、每次加 \(pageStep)P"
+        let head = (assumed ? "还没套印厂规格，按常见的 \(rule) 看（以印厂给的为准，在「文档 › 画布」里套规格）" : "印厂要 \(rule)")
+            + "；现在 \(n) 个跨页 = \(p)P，"
         guard up != nil || down != nil else {
             return head + "这条规则凑不出来：跨页只能 2P 一加（P 数总是偶数），从 \(minPages)P 起每次加 \(pageStep)P、"
                 + "到 \(maxPages)P 为止没有一个偶数。照印厂给的核对一下最少几 P、每次加几 P"
@@ -288,6 +292,12 @@ struct CollagePrintSpec: Codable, Hashable, Identifiable {
 extension CollageCanvas {
     /// 查页数、中缝带、色彩用的规则：没套过规格 = 保守默认。
     var effectivePrintRules: CollagePrintRules { printRules ?? .standard }
+
+    /// 页数合不合规的那句话（跨页条标橙、「文档 › 画布」、导出前检查、MCP 共用）：没套过规格的按保守默认看、文案写明
+    /// （pageProblem 的 assumed）。
+    func pageProblem(spreads n: Int) -> String? {
+        effectivePrintRules.pageProblem(spreads: n, assumed: printRules == nil)
+    }
 
     /// 导出用的色彩（社交画布、没套规格的 = sRGB）。
     var exportColorSpace: CollageColorSpace { printRules?.colorSpace ?? .sRGB }

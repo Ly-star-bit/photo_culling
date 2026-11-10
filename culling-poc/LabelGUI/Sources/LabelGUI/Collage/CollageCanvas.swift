@@ -207,7 +207,7 @@ struct CollageCanvasView: View {
             let geometry = store.geometry
             let origin = geo.frame(in: .global).origin
             ZStack(alignment: .topLeading) {
-                Color(white: 0.14)
+                AppPalette.canvas
                 canvasImage(display.image)
                 CollageCanvasOverlay(store: store, layout: layout, geometry: geometry,
                                      dropTarget: dropTarget, hoverGutter: hoverGutter)
@@ -221,11 +221,6 @@ struct CollageCanvasView: View {
                 }
                 if case .move(let source) = dragMode, let p = dragPoint {
                     dragGhost(source, at: p, layout: layout, geometry: geometry)
-                }
-                if store.root != nil {
-                    CollageZoomBar(zoom: zoom)
-                        .padding(10)
-                        .frame(width: geo.size.width, height: geo.size.height, alignment: .bottomTrailing)
                 }
             }
             // 放大以后画布比视图大：ZStack 会跟着最大的那张图长大，先定回视图这么大再裁，别画到两边的栏、底下的条上去。
@@ -259,6 +254,13 @@ struct CollageCanvasView: View {
             // 进出封面编辑、书脊宽变了：整张封面的比例不一样，视口跟着报（封面预览按它算缩放）。
             .onChange(of: store.editingCover) { _, _ in reportViewport(display.image) }
             .onChange(of: store.coverLayout) { _, _ in reportViewport(display.image) }
+            // 缩放小条盖在手势层外面（优化分析 R12）：以前它是手势层里的一个孩子，连点「+」两下同时被画布的双击手势
+            // （simultaneousGesture）认成双击，进了它底下那一格的裁切。挂成这一层之后的 overlay，点它不经过画布的手势。
+            .overlay(alignment: .bottomTrailing) {
+                if store.root != nil {
+                    CollageZoomBar(zoom: zoom).padding(10)
+                }
+            }
         }
         // 「填跨页号」小框挂在焦点修饰之前（同别处的弹框：挂在 .focusable() 后面有时弹不出来）。
         .collageMoveNumberAlert(store: store, isPresented: $askNumber, path: menuPath)

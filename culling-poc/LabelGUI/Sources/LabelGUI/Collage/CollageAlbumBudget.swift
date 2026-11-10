@@ -463,17 +463,20 @@ struct CollageAlbumSpreadCount: View {
     var body: some View {
         let count = store.project.pages.count
         // 印厂规格的页数规则（CollagePrintRules.pageProblem）：不合规也标橙，悬停说清楚多了 / 少了几 P。
-        let pages = store.project.canvas.effectivePrintRules.pageProblem(spreads: count).map { "\n" + $0 }
+        // 没套过规格的（优化分析 A9）不标橙：那是按保守默认看的，没有哪家印厂这么要求过；悬停照样写上那一句。
+        let canvas = store.project.canvas
+        let pages = canvas.pageProblem(spreads: count).map { "\n" + $0 }
+        let offSpec = pages != nil && canvas.printRules != nil
         if let b = store.project.albumBudget {
             let over = count > b.spreads
             Text("\(count)/\(b.spreads)")
                 .font(.caption2).monospacedDigit()
-                .foregroundStyle(over || pages != nil ? Color.orange : Color.secondary)
+                .foregroundStyle(over || offSpec ? Color.orange : Color.secondary)
                 .help(helpText(count: count, target: b.spreads) + (pages ?? ""))
         } else {
             Text("\(count)")
                 .font(.caption2).monospacedDigit()
-                .foregroundStyle(pages != nil ? Color.orange : Color.secondary)
+                .foregroundStyle(offSpec ? Color.orange : Color.secondary)
                 .help("\(count) 个跨页（\(count * 2)P）。要指定跨页数：右栏「文档 › 画布」里勾「指定跨页数」" + (pages ?? ""))
         }
     }

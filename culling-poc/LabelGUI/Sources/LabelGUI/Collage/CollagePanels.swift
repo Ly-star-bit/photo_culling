@@ -491,7 +491,7 @@ struct CollageOverlayBox: View {
     private func blockButton(_ overlay: CollageOverlay, _ i: Int, vars: [String: String]) -> some View {
         let active = i == index
         let fill: Color = active ? AppPalette.accent.opacity(0.85) : Color.gray.opacity(0.18)
-        let ink: Color = active ? .white : .primary
+        let ink: Color = active ? AppPalette.onAccent : .primary
         let tip = i == 0 ? "第一块最先摆（刊头放这里）" : "第 \(i + 1) 块：摆在前面几块之外"
         return Button {
             store.overlayIndex = i
@@ -662,7 +662,7 @@ struct CollageOverlayBox: View {
     /// 选中的那个填强调色（和九宫格里选中的格子一个画法：窗口不在前台时也看得出选的是哪个）。
     private func sideButton(_ anchor: CollageAnchor, active: Bool) -> some View {
         let fill: Color = active ? AppPalette.accent : Color.gray.opacity(0.25)
-        let ink: Color = active ? .white : .primary
+        let ink: Color = active ? AppPalette.onAccent : .primary
         return Button {
             update { $0.anchor = anchor }
         } label: {

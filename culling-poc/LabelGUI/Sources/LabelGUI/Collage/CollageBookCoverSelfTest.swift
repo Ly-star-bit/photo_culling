@@ -343,10 +343,12 @@ enum CollageBookCoverSelfTest {
         narrowCover.sheetMM = 0.02
         narrowCover.boardMM = 0.5
         pre.bookCover = narrowCover
-        let issues = CollagePreflight.run(project: pre, hints: [:], texts: false).filter { $0.kind == .cover }
-        let noCover = CollagePreflight.run(project: bleed, hints: [:], texts: false).filter { $0.kind == .cover }
+        let issues = CollagePreflight.run(project: pre, hints: [:], texts: false, readable: { _ in true }).filter { $0.kind == .cover || $0.kind == .spine }
+        let noCover = CollagePreflight.run(project: bleed, hints: [:], texts: false, readable: { _ in true })
+            .filter { $0.kind == .cover || $0.kind == .spine }
+        // 「书脊是估的」那一条单独一个种类（spine，优化分析 A4：整本导出时另问一次）；另外两条还是 cover。
         check(issues.count == 3 && issues.allSatisfy { $0.severity == .warn && $0.page == nil }
-              && issues.contains { $0.message.contains("估的") } && issues.contains { $0.message.contains("放不下字") }
+              && issues.contains { $0.kind == .spine && $0.message.contains("估的") } && issues.contains { $0.message.contains("放不下字") }
               && issues.contains { $0.photoID == "F" && $0.message.contains("书脊") } && noCover.isEmpty,
               "导出前检查：封面三条提醒（书脊估的、太窄没印字、脸贴书脊）", issues.map(\.message).joined(separator: "；"))
     }

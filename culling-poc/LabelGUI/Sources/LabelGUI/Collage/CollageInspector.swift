@@ -1048,8 +1048,18 @@ struct CollageExportPanel: View {
                 }
                 .pickerStyle(.segmented)
                 if store.exportOptions.format == .jpeg {
-                    CollageSlider(label: "质量", value: $store.exportOptions.quality, range: 0.7...1,
-                                  display: "\(Int(store.exportOptions.quality * 100))")
+                    // 印厂规格定了 JPEG 质量（优化分析 A11）：导出用的是规格里那个数（writePage），这根滑杆拖了不起作用 ——
+                    // 灰掉、显示规格的数、写明在哪改。
+                    if let fixed = store.project.canvas.printRules?.jpegQuality {
+                        CollageSlider(label: "质量", value: .constant(fixed), range: 0.7...1, display: "\(Int(fixed * 100))")
+                            .disabled(true)
+                        Text("印厂规格定了 JPEG 质量 \(Int(fixed * 100))，这里的不起作用。要改：右栏「文档 › 画布」的「JPEG 质量」。")
+                            .collageHint()
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        CollageSlider(label: "质量", value: $store.exportOptions.quality, range: 0.7...1,
+                                      display: "\(Int(store.exportOptions.quality * 100))")
+                    }
                 }
                 scalePicker
                 watermarkToggle
@@ -1090,7 +1100,7 @@ struct CollageExportPanel: View {
             store.nav.exportShown = false
             store.export()
         } label: {
-            Label(store.isAlbum ? "导出相册" : "导出", systemImage: "square.and.arrow.up")
+            Label(store.exportButtonTitle(), systemImage: "square.and.arrow.up")
                 .frame(maxWidth: .infinity)
         }
         .buttonStyle(.accentProminent)

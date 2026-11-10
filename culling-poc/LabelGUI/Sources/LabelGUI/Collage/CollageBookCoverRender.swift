@@ -29,8 +29,9 @@ enum CollageBookCoverRender {
         return render(cover: cover, project: project, hints: hints, options: options)
     }
 
+    /// failFront：自检用，封面那一页当成渲染失败。
     static func render(cover: CollageBookCover, project: CollageProject, hints: [String: CollageCrop.Hints],
-                       options: CollageRender.Options) -> CGImage? {
+                       options: CollageRender.Options, failFront: Bool = false) -> CGImage? {
         let canvas = project.canvas
         let spreads = project.pages.count
         let scale = options.scale
@@ -49,7 +50,11 @@ enum CollageBookCoverRender {
         pageOptions.guides = false
         pageOptions.debug = false
         pageOptions.region = nil
-        let frontImage = CollageRender.render(page: cover.editPage, project: frontProject, hints: hints, options: pageOptions)
+        let frontImage = failFront ? nil
+            : CollageRender.render(page: cover.editPage, project: frontProject, hints: hints, options: pageOptions)
+        // 导出时封面那一页渲不出来：不出一张只有底色和书脊字的「封面」（优化分析 A12：以前照常写文件、不报错，
+        // 最容易直接发给印厂）。预览、缩略图照旧画剩下的（书脊、封底还看得到）。
+        if frontImage == nil, options.export { return nil }
         // 书脊、封底的底色跟封面那一页（取色底时跟它的主图走）。
         let bg = CollageRender.backgroundColor(project: frontProject, pagePhotoIDs: cover.front.photoIDs, photos: photos)
 
@@ -644,8 +649,11 @@ extension CollageStore {
     /// 导出时写封面（startExport 写完跨页 PDF 之后调）：后台渲成品尺寸 × scale、带包边出血的整张，写图，勾了 PDF 再写
     /// 封面 PDF（不进跨页 PDF：印厂一般要封面单独一份）。names = ExportPlan.cover（图在前、PDF 在后；空 = 什么都不写）。
     /// 色彩、JPEG 质量同跨页（writePage）：印厂规格选了 Adobe RGB 就转过去再写（嵌 ICC），规格定了 JPEG 质量就用它。
+    /// 封面 / 封底有照片用的不是原图（优化分析 A1）：图照写，封面 PDF 不出（同跨页 PDF 的道理），error 里说清楚。
+    /// fakeLowRes、failFront：自检用（这几张当成原图读不了；封面那一页当成渲染失败）。
     nonisolated static func exportCover(project: CollageProject, options: ExportOptions, names: [String], folder: URL,
-                                        scale: Int, hints: [String: CollageCrop.Hints]) async -> CoverExportResult {
+                                        scale: Int, hints: [String: CollageCrop.Hints], fakeLowRes: Set<String> = [],
+                                        failFront: Bool = false) async -> CoverExportResult {
         guard let imageName = names.first else { return CoverExportResult() }
         return await Task.detached(priority: .userInitiated) { () -> CoverExportResult in
             var result = CoverExportResult()
@@ -656,13 +664,14 @@ extension CollageStore {
             let report = CollageRender.RenderReport()
             opts.report = report
             let canvas = project.canvas
-            guard let cover = project.bookCover,
-                  let rendered = CollageBookCoverRender.render(project: project, hints: hints, options: opts),
+            guard let cover = project.bookCover, project.mode == .album,
+                  let rendered = CollageBookCoverRender.render(cover: cover, project: project, hints: hints, options: opts,
+                                                               failFront: failFront),
                   let image = CollageExport.converted(rendered, to: canvas.exportColorSpace) else {
-                result.error = "封面渲染失败"
+                result.error = "封面渲染失败，没有写封面文件"
                 return result
             }
-            result.lowRes = report.lowRes
+            result.lowRes = report.lowRes + cover.photoIDs.filter(fakeLowRes.contains)
             result.missing = report.missing
             var quality = canvas.printRules?.jpegQuality ?? options.quality
             if project.style.halftone != nil { quality = max(0.9, quality) }
@@ -675,6 +684,10 @@ extension CollageStore {
             }
             result.files.append(imageName)
             guard names.count > 1 else { return result }
+            guard result.lowRes.isEmpty, result.missing.isEmpty else {
+                result.error = CollageStore.pdfDegradedNote(missing: result.missing, lowRes: result.lowRes, kept: "封面图")
+                return result
+            }
             let pdfName = names[1]
             let page: CollageExport.PDFPage
             if options.format == .jpeg {

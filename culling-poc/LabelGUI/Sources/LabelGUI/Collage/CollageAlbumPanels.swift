@@ -193,7 +193,7 @@ private struct CollageReplaceTile: View {
                         .padding(.horizontal, 3)
                         .padding(.vertical, 1)
                         .background(AppPalette.accent, in: Capsule())
-                        .foregroundStyle(.white)
+                        .foregroundStyle(AppPalette.onAccent)
                         .padding(2)
                 }
             }

@@ -122,7 +122,7 @@ struct CollagePrintRulesBox: View {
         let canvas = store.project.canvas
         let rules = canvas.effectivePrintRules
         let count = store.project.pages.count
-        let problem = rules.pageProblem(spreads: count)
+        let problem = canvas.pageProblem(spreads: count)
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 4) {
                 Text("页数")

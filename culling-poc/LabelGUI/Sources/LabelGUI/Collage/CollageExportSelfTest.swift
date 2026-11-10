@@ -409,16 +409,20 @@ enum CollageExportSelfTest {
         check(!warning2.isEmpty && shown.hasPrefix("导出失败") && shown.contains(failure2) && shown.contains(warning2),
               "有软警告时「导出失败」不被盖掉，警告接在后面", shown)
 
-        // c) 没有失败、只有软警告：照旧出 PDF，界面显示那条警告（不算失败）
+        // c) 跨页都写出来了、但有一张照片读不了（格子空着）：以前照旧出 PDF、写「导出完成」；现在不出 PDF、算失败
+        // （优化分析 A1：有照片不是原图的 PDF 不能拿去印，和缺页一个道理）。细的在 --album-audit-selftest。
         let c = dir.appendingPathComponent("c")
         options.outputPath = c.path
         options.format = .jpeg
         store.exportOptions = options
         let o3 = runExport(store, project: project, options: options, name: "软警告")
-        check(o3?.failure == nil && o3?.files.last == "软警告.pdf" && pageCount(c.appendingPathComponent("软警告.pdf")) == 3,
-              "只有软警告：PDF 照出（3 页）", "\(o3?.failure ?? "") \(o3?.files ?? [])")
-        check(store.lastError == o3?.warning && store.lastError != nil && store.progressText.hasPrefix("导出完成"),
-              "只有软警告：界面是那条警告 + 导出完成", "\(store.lastError ?? "") / \(store.progressText)")
+        check((o3?.failure ?? "").contains("没生成 PDF") && (o3?.failure ?? "").contains("格子空着")
+              && o3?.files == ["软警告_跨页_01.jpg", "软警告_跨页_02.jpg", "软警告_跨页_03.jpg"]
+              && !fm.fileExists(atPath: c.appendingPathComponent("软警告.pdf").path) && leftovers(c).isEmpty,
+              "有照片读不了：跨页图照写、不出 PDF", "\(o3?.failure ?? "") \(o3?.files ?? [])")
+        check((store.lastError ?? "").hasPrefix("导出失败") && (store.lastError ?? "").contains(o3?.warning ?? "没有警告")
+              && !store.progressText.hasPrefix("导出完成"),
+              "有照片读不了：界面是导出失败 + 那条警告，不写导出完成", "\(store.lastError ?? "") / \(store.progressText)")
 
         // e) PNG：第 2 个跨页的图写出来了，只是 PDF 用的那份 JPEG 编不出来 —— 照样不出 PDF，但不说「没写出来」
         let e = dir.appendingPathComponent("e")

@@ -950,6 +950,10 @@ def album_section():
               "删掉刚加的那个：回到原来的几个跨页")
         _, dl_all = w("collage_pages", {"action": "delete", "pages": f"1-{n}"})
         check(err_code(dl_all) == "invalid_argument" and get().get("pages") == n, f"不能全删（{err_code(dl_all)}）")
+        # 优化分析 A8：delete 必须点名删哪几个（以前不给 = 删当前跨页，用户翻了页就删错）
+        _, dl_none = w("collage_pages", {"action": "delete"})
+        check(err_code(dl_none) == "invalid_argument" and get().get("pages") == n,
+              f"delete 不给 pages → invalid_argument，一个都没删（{err_code(dl_none)}）")
         order0 = [s_["photos"] for s_ in spreads(g0)]
         s0 = st()
         _, mv = w("collage_pages", {"action": "move", "pages": "1", "to": n})
@@ -1099,6 +1103,25 @@ def album_section():
                       f"换成第 {other_page['page']} 个跨页上的 {newcomer}：两格对调、一步撤销（{err_code(rp)} {rp.get('swapped')}）")
                 u = undo()
                 check("error" not in u and where(get(), newcomer) == [other_page["page"]], "app_undo：对调回去")
+                # 优化分析 A8：读完状态以后翻了页 —— 带着旧 digest 的写回 stale_digest（digest 里并着当前页号）；
+                # 写明 page 就换那个跨页的格子，不靠「画布上现在是哪一页」
+                d_here = get().get("digest")
+                _, go_other = w("collage_pages", {"action": "go", "page": other_page["page"]})
+                s0 = st()
+                _, rp_stale = w("collage_replace_photo", {"path": cell["path"], "with": newcomer, "if_digest": d_here})
+                check(go_other.get("digest_before") == d_here and go_other.get("digest_after") != d_here
+                      and err_code(rp_stale) == "stale_digest" and steps(s0, st()) == 0
+                      and where(get(), newcomer) == [other_page["page"]],
+                      f"翻页以后 digest 变了，带旧 if_digest 换照片 → stale_digest，什么都没改（{err_code(rp_stale)}）")
+                _, rp_page = w("collage_replace_photo", {"path": cell["path"], "with": newcomer, "page": here_page["page"]})
+                g7 = get()
+                check(rp_page.get("changed") is True and rp_page.get("page") == here_page["page"]
+                      and where(g7, newcomer) == [here_page["page"]] and where(g7, cell["photo_id"]) == [other_page["page"]],
+                      f"写明 page：先翻到第 {here_page['page']} 个跨页再换它的格子（{err_code(rp_page)}，现在第 {g7.get('page')} 个）")
+                u = undo()
+                _, rp_far = w("collage_replace_photo", {"path": cell["path"], "with": newcomer, "page": 99})
+                check("error" not in u and where(get(), newcomer) == [other_page["page"]] and err_code(rp_far) == "invalid_argument",
+                      f"app_undo：对调回去；page 越界 → invalid_argument（{err_code(rp_far)}）")
             else:
                 skip("只有一个跨页有照片：对调那一条跳过")
             _, rp_bad = w("collage_replace_photo", {"path": cell["path"], "with": "没有这张"})
@@ -1108,18 +1131,24 @@ def album_section():
         else:
             skip("没有放了照片的跨页：换照片那几条跳过")
 
-        # ---------- 导出前检查：拦和提醒分开，页数不合规是「拦」（几个跨页 < 20P）；只读；pages 写错 invalid_argument
+        # ---------- 导出前检查：拦和提醒分开；只读；pages 写错 invalid_argument。页数（几个跨页 < 20P）：这本还没套印厂规格，
+        # 只是提醒、写明是按常见的范围看的（优化分析 A9）；套了规格才是「拦」（下面套完规格再查一次）
         s0 = st()
         _, pf, _ = mcp_call(env, "collage_preflight", {"session": key})
         _, pf_fast, _ = mcp_call(env, "collage_preflight", {"session": key, "texts": False, "pages": "1"})
         _, pf_bad, _ = mcp_call(env, "collage_preflight", {"session": key, "pages": "99"})
         pf = pf or {}
-        rows = (pf.get("blocks") or []) + (pf.get("warnings") or [])
-        check("page_count" in [r_.get("kind") for r_ in pf.get("blocks") or []] and pf.get("export_would_ask") is not None
+        rows = (pf.get("blocks") or []) + (pf.get("reminders") or [])
+        loose = next((r_ for r_ in pf.get("reminders") or [] if r_.get("kind") == "page_count"), None)
+        check(loose is not None and "还没套印厂规格" in (loose.get("message") or "")
+              and "page_count" not in [r_.get("kind") for r_ in pf.get("blocks") or []]
+              and len(pf.get("reminders") or []) == pf.get("warn_count") and all("code" in w_ for w_ in pf.get("warnings") or [])
+              and (pf.get("export_would_ask") is not None) == bool(pf.get("blocks"))
               and all({"kind", "severity", "message", "page", "path"} <= set(r_) for r_ in rows)
               and (pf_fast or {}).get("pages") == [1] and err_code(pf_bad) == "invalid_argument"
               and st()["edit_digest"] == s0["edit_digest"],
-              f"collage_preflight：{pf.get('summary')}（页数不合规在 blocks 里，导出按钮会问）；pages=1 只看第 1 个；写错 invalid_argument；什么都没改")
+              f"collage_preflight：{pf.get('summary')}（没套规格：页数只是提醒；有「拦」导出按钮才问）；pages=1 只看第 1 个；写错 invalid_argument；什么都没改"
+              f"（{[(r_.get('kind'), r_.get('severity')) for r_ in rows]}，问不问 {pf.get('export_would_ask') is not None}）")
 
         # ---------- 印厂规格：读、套一套（尺寸、装订一起换，一步撤销）、改页数规则；app_undo 回去
         s0 = st()
@@ -1133,6 +1162,10 @@ def album_section():
         cur = ps2.get("current") or {}
         check(ps2.get("changed") is True and steps(s0, s1) == 1 and cur.get("binding") == "glued" and cur.get("spec") == "sq25-glued",
               f"套「方册 25×25 胶装」：一步撤销，装订换成胶装（{cur.get('binding')} {cur.get('spec')}）")
+        _, pf_spec, _ = mcp_call(env, "collage_preflight", {"session": key, "texts": False})
+        strict = next((r_ for r_ in (pf_spec or {}).get("blocks") or [] if r_.get("kind") == "page_count"), None)
+        check(strict is not None and (strict.get("message") or "").startswith("印厂要") and (pf_spec or {}).get("export_would_ask") is not None,
+              f"套了规格以后页数不合规是「拦」，导出按钮会问（{(strict or {}).get('message')}）")
         pages_now = get().get("pages") or 0
         _, ps3 = w("collage_print_spec", {"min_pages": 2, "max_pages": 400, "page_step": 2, "color": "adobe_rgb"})
         cur3 = ps3.get("current") or {}
@@ -1162,6 +1195,7 @@ def album_section():
         prev = cv.get("preview") or {}
         check((cv0.get("cover") or {}).get("exists") is False and cv.get("changed") is True and steps(s0, s1) == 1
               and info.get("exists") is True and info.get("spine_mm") == 12.5 and info.get("spine_estimated") is False
+              and info.get("spine_pages") == 2 * (get().get("pages") or 0) and info.get("spine_stale") is False
               and cv.get("preview_kind") == "cover" and len(blocks_c) == 1 and (prev.get("width") or 0) > 1.5 * (prev.get("height") or 1),
               f"做封面 + 书脊 12.5mm：一步撤销，预览是整张封面（{prev.get('width')}×{prev.get('height')}）")
         _, cv_again = w("collage_cover", {"action": "make"})

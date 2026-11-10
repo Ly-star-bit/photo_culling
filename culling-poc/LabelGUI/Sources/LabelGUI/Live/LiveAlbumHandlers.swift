@@ -69,7 +69,9 @@ extension LiveHandlers {
         return row
     }
 
-    /// 导出前检查的结果主体：拦和提醒分开、各列前 limit 条；pages = 只导这几页时导出按钮会不会问（同「导出 ▾」）。
+    /// 导出前检查的结果主体：拦（blocks）和提醒（reminders）分开、各列前 limit 条；pages = 只导这几页时导出按钮会不会问
+    /// （同「导出 ▾」）。提醒以前放在 warnings 键里：collage_preflight 的回复顶层 warnings 是 MCP 自己的提示（hints_pending、
+    /// 窗口看不见……），preflightRead 接着就把它盖掉了 —— 这个工具从来没把提醒那几条给出去过（只有条数）。改叫 reminders。
     nonisolated static func preflightBody(_ issues: [CollagePreflightIssue], project: CollageProject, pages only: [Int]?,
                                           limit: Int = 30) -> [String: Any] {
         let blocks = issues.filter { $0.severity == .block }
@@ -77,7 +79,7 @@ extension LiveHandlers {
         var out: [String: Any] = ["summary": CollagePreflight.summary(issues), "block_count": blocks.count]
         out["warn_count"] = warns.count
         out["blocks"] = blocks.prefix(limit).map(issueRow)
-        out["warnings"] = warns.prefix(limit).map(issueRow)
+        out["reminders"] = warns.prefix(limit).map(issueRow)
         out["truncated"] = blocks.count > limit || warns.count > limit
         if let ask = CollageStore.exportConfirmation(issues, project: project, pages: only) {
             out["export_would_ask"] = ["title": ask.title, "message": ask.message]
@@ -102,7 +104,7 @@ extension LiveHandlers {
         out["pages_p"] = rules.pages(spreads: n)
         // false = 没套过规格：按保守默认查页数（照印厂给的改）
         out["preset"] = canvas.printRules != nil
-        let problem: String? = canvas.seams == .fold ? rules.pageProblem(spreads: n) : nil
+        let problem: String? = canvas.seams == .fold ? canvas.pageProblem(spreads: n) : nil
         out["page_problem"] = problem ?? NSNull()
         return out
     }
@@ -599,6 +601,16 @@ extension LiveHandlers {
         let raw = req.params["path"] as? String ?? ""
         let path = raw.compactMap(\.wholeNumberValue)
         let id = req.params["with"] as? String ?? ""
+        // page（优化分析 A8）：指明换哪个跨页的格子，不靠「画布上现在是哪一页」—— 先翻过去（同 side_layout 的 page；
+        // 编辑封面时先退出）。不给 = 当前页（编辑封面时是封面那块）。
+        if let asked = LiveWire.int(req.params["page"]) {
+            let count = collage.project.pages.count
+            guard (1...max(1, count)).contains(asked), count > 0 else {
+                return invalid("没有第 \(asked) \(collage.isAlbum ? "个跨页" : "页")：一共 \(count)。",
+                               hint: "跨页号从 1 起，看 collage_get_state 的 page、pages 和 album.spreads")
+            }
+            goTo(asked - 1, collage: collage)
+        }
         guard let page = collage.page, !page.freeform, page.contactSheet == nil else {
             let kind = collage.page.map { $0.freeform ? "散落版" : "印样" } ?? "空的"
             return .failure("invalid_state", "当前页是\(kind)，没有能换的格子。", notExecuted("先 collage_pages action=go 翻到网格版的跨页"))
@@ -873,6 +885,9 @@ extension LiveHandlers {
         var out: [String: Any] = ["exists": true, "editing": collage.editingCover, "album": true]
         out["spine_mm"] = MCPReadModel.r3(cover.spineWidthMM(spreads: spreads))
         out["spine_estimated"] = cover.spineMM == nil
+        // 书脊宽是按多少 P 填的（优化分析 A4；估的、这一版之前填的 = null）；和现在的页数对不上 = spine_stale（导出前检查会拦）
+        out["spine_pages"] = cover.spinePages ?? NSNull()
+        out["spine_stale"] = cover.spineStaleNote(spreads: spreads) != nil
         out["estimated_spine_mm"] = MCPReadModel.r3(cover.estimatedSpineMM(spreads: spreads))
         out["wrap_mm"] = MCPReadModel.r3(cover.wrapMM)
         out["board_mm"] = MCPReadModel.r3(cover.boardMM)

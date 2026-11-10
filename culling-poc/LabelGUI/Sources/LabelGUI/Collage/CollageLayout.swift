@@ -891,6 +891,56 @@ enum CollageLayout {
         return out
     }
 
+    /// 重排前后格子比例差多少以内还带着裁切、完整显示走（长宽比的比值）。裁切存的是「窗口中心 + 相对最大窗口的放大
+    /// 倍数」，格子比例变一点照样对着同一处；差太多（横格变竖格）原来框的东西就不在窗口里了，回到自动（按人脸）。
+    static let carryAspectTolerance = 1.3
+
+    /// 挪 / 加照片之后的重排：其余照片的手调按照片 id 带回去（优化分析 A5）。求解器按照片重新建格子，以前只带回压字和
+    /// 单格色调（carryOverlays）—— 往别的跨页挪一张，两页其余照片的裁切、景别、完整显示、形状、抠图全丢，提示还只说
+    /// 「⌘Z 撤回」，而撤回会连挪的那一下一起退。
+    /// - 景别（连同 coverAuto）、形状、抠图：新格子上还是默认值的才带（求解器、锁定格自己定的不盖）。
+    /// - 裁切、完整显示（连同模糊铺底）：格子比例差在 carryAspectTolerance 以内才带。完整显示很多是求解器自己给的
+    ///   （一页只放一张、比例和页面差得多）：那张换到多图页的小格子里比例变了，不带，照常铺满。
+    /// 挪过去的那几张在 moveCells 里已经把裁切、锁定、完整显示清掉了（old 里就是清过的），这里只会带它们的景别、形状。
+    static func carryAdjustments(from old: CollageNode, into new: CollageNode, canvas: CollageCanvas,
+                                 style: CollageStyle) -> CollageNode {
+        var before: [String: (cell: CollageCell, aspect: Double)] = [:]
+        for f in pageGeometry(old, canvas: canvas, style: style).frames where f.cell.kind == .photo {
+            guard let id = f.cell.photoID, before[id] == nil else { continue }
+            let c = f.cell
+            guard c.crop != nil || c.contain || c.framing != .auto || c.shape != nil || c.cutout != nil else { continue }
+            let area = CollageCrop.photoArea(cell: c, rect: f.rect.cgRect, style: style)
+            before[id] = (c, Double(CollageCrop.aspect(of: area)))
+        }
+        guard !before.isEmpty else { return new }
+        var out = new
+        for f in pageGeometry(new, canvas: canvas, style: style).frames where f.cell.kind == .photo {
+            guard let id = f.cell.photoID, let was = before[id] else { continue }
+            var cell = f.cell
+            if cell.shape == nil { cell.shape = was.cell.shape }
+            if cell.cutout == nil { cell.cutout = was.cell.cutout }
+            if cell.framing == .auto, was.cell.framing != .auto {
+                cell.framing = was.cell.framing
+                cell.coverAuto = was.cell.coverAuto
+            }
+            // 比例按带上形状以后的照片区算（圆形、拱形的照片区和格子不一样大）。
+            let area = CollageCrop.photoArea(cell: cell, rect: f.rect.cgRect, style: style)
+            let now = Double(CollageCrop.aspect(of: area))
+            let ratio = now > 0 && was.aspect > 0 ? max(now / was.aspect, was.aspect / now) : .infinity
+            if ratio <= carryAspectTolerance, cell.crop == nil, !cell.contain {
+                if was.cell.contain {
+                    cell.contain = true
+                    cell.containBlur = was.cell.containBlur
+                } else if let crop = was.cell.crop {
+                    cell.crop = crop
+                }
+            }
+            guard cell != f.cell else { continue }
+            out.update(at: f.path) { $0.cell = cell }
+        }
+        return out
+    }
+
     /// 每张照片格单独设的色调（按照片 id）。
     static func cellLooks(_ root: CollageNode) -> [String: CollageLookSetting] {
         var out: [String: CollageLookSetting] = [:]
