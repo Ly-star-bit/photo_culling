@@ -1143,8 +1143,19 @@ extension BatchStore {
     /// 只数张数（「客户」菜单上的范围说明每次重绘都要，别为它建数组）。
     var filteredCount: Int {
         let chapter = activeChapterFilter
+        // 最常见的两种（没筛选、只按判决筛）直接读已经数好的：每次改判顶栏都要这个数，8000 张扫一遍是那一下里最贵的一项。
+        if !clientPickFilter, chapter == nil, !borderlineFilter, reasonFilter == nil {
+            let counts = verdictCounts
+            switch verdictFilter {
+            case nil: return counts.reject + counts.usable + counts.pick
+            case .reject: return counts.reject
+            case .usable: return counts.usable
+            case .pick: return counts.pick
+            }
+        }
+        let items = self.items
         var n = 0
-        for item in items where passesFilters(item, chapter: chapter) { n += 1 }
+        for idx in items.indices where passesFilters(items[idx], chapter: chapter) { n += 1 }
         return n
     }
 

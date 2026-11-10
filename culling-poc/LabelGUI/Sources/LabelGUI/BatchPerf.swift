@@ -33,8 +33,9 @@ enum BatchPerf {
     static let order = ["批量页", "顶栏", "状态栏", "右栏", "网格", "格子", "悬停条", "缩略图", "时间轴", "直方图"]
 
     static func run(_ scenario: String, store: BatchStore, viewport: GridViewport, spin: (Double) -> Void) {
-        guard scenario == "grid" else {
-            print("不认识的场景（grid）")
+        // set = 只量「直接改判 不带动画」，连改 240 下：拿 sample 采样找这一下贵在哪时用（grid 里它只有 12 下，采不到几个样本）。
+        guard scenario == "grid" || scenario == "set" else {
+            print("不认识的场景（grid / set）")
             return
         }
         let activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical],
@@ -47,6 +48,14 @@ enum BatchPerf {
                      store.items.count, viewport.mountedCells, idle.instr, idle.ms))
         // 第一下 → 从「没有焦点」落到第一张；之后每下挪一格。← 再走回来。
         let keyStep: (String) -> () -> Void = { key in { keys.send(key) } }
+        if scenario == "set" {
+            let ids = store.items.map(\.id)
+            guard !ids.isEmpty else { return }
+            let all: [Verdict] = [.pick, .usable, .reject]
+            measure("直接改判 不带动画", (0..<240).map { k in { store.setOverrideBatch([ids[(k * 37) % ids.count]], all[k % 3]) } },
+                    idle: idle, spin: spin)
+            return
+        }
         measure("→ 键", Array(repeating: "→", count: 13).map(keyStep), idle: idle, spin: spin)
         measure("← 键", Array(repeating: "←", count: 12).map(keyStep), idle: idle, spin: spin)
         // 数字键：焦点那张改判（按判决分区时它跳到别的区，焦点落到原来紧挨着的下一张）。1 2 3 轮着按。

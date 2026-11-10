@@ -667,6 +667,8 @@ final class BatchStore: ObservableObject {
         var burstIndices: [Int: [Int]] = [:]
         /// 场号 → 时间轴上的章节。
         var takeChapter: [Int: Int] = [:]
+        /// 章节 → 成员下标（items 顺序）。
+        var chapterMembers: [Int: [Int]] = [:]
     }
 
     /// 一场的小计。
@@ -737,7 +739,8 @@ final class BatchStore: ObservableObject {
     }
 
     /// 跟着判决变的那几样里还是整场扫一遍的（都轻）：待处理的场、人工改判数、三个分区、章节条、阈值建议、XMP 待更新。
-    private func finishDerived(_ d: inout Derived) {
+    /// `chapters`：只有这几章的照片判决变了（局部重算），章节条只重算这几段；nil = 全部。
+    private func finishDerived(_ d: inout Derived, chapters: Set<Int>? = nil) {
         d.pendingTakes = d.takeRows.compactMap { d.takeStats[$0.take]?.pending == true ? $0.take : nil }
         d.pendingTakeCount = d.pendingTakes.count
         d.manualOverrideCount = overrides.keys.filter { !acceptedIDs.contains($0) }.count
@@ -761,8 +764,30 @@ final class BatchStore: ObservableObject {
         for take in d.pendingTakes {
             if let chapter = d.takeChapter[take] { pendingByChapter[chapter, default: 0] += 1 }
         }
-        (d.chapterSegments, d.chapterWarnings) = Self.chapterSummary(items, minKeepers: minKeepersPerChapter,
-                                                                     pendingByChapter: pendingByChapter)
+        if d.chapterMembers.count > 1 {
+            if let chapters, !d.chapterSegments.isEmpty {
+                for k in d.chapterSegments.indices where chapters.contains(d.chapterSegments[k].chapter) {
+                    let chapter = d.chapterSegments[k].chapter
+                    d.chapterSegments[k] = Self.chapterSegment(chapter, members: d.chapterMembers[chapter] ?? [], in: items,
+                                                               minKeepers: minKeepersPerChapter,
+                                                               pending: pendingByChapter[chapter] ?? 0)
+                }
+            } else {
+                // 有时间的章节按编号（= 时间顺序），无时间那段（-1）放最后。
+                let order = d.chapterMembers.keys.sorted { a, b in
+                    if (a == ChapterSegment.undatedID) != (b == ChapterSegment.undatedID) { return b == ChapterSegment.undatedID }
+                    return a < b
+                }
+                d.chapterSegments = order.map {
+                    Self.chapterSegment($0, members: d.chapterMembers[$0]!, in: items, minKeepers: minKeepersPerChapter,
+                                        pending: pendingByChapter[$0] ?? 0)
+                }
+            }
+            d.chapterWarnings = Self.chapterWarnings(d.chapterSegments, minKeepers: minKeepersPerChapter)
+        } else {
+            d.chapterSegments = []
+            d.chapterWarnings = []
+        }
         d.thresholdSuggestions = computeThresholdSuggestions()
         d.xmpStaleCount = xmpStale(in: items)
     }
@@ -1121,7 +1146,9 @@ final class BatchStore: ObservableObject {
             d.burstIndices[item.burstGroup, default: []].append(idx)
             // 时间轴上每章标「还有几场连拍没定」：场不会跨章（场内相邻两张 ≤ 几十秒，章节之间
             // 隔着 15 分钟以上），所以拿任意一张成员的章节就是整场的章节。
-            d.takeChapter[item.take] = Self.timelineChapter(of: item)
+            let chapter = Self.timelineChapter(of: item)
+            d.takeChapter[item.take] = chapter
+            d.chapterMembers[chapter, default: []].append(idx)
         }
         d.sharpnessBins = Self.histogramBins(items.map(\.sharpness), range: Self.sharpnessHistRange, sqrtScale: false)
         d.exposureBins = Self.histogramBins(items.map(\.worstClipPct), range: Self.exposureHistRange, sqrtScale: true)
@@ -3889,74 +3916,65 @@ final class BatchStore: ObservableObject {
     /// computed properties doing the same grouping on every render). Warnings:
     /// chapters where culling left NOTHING — losing a whole scene is a delivery
     /// accident, a few extra keepers is just waste.
-    private static func chapterSummary(_ items: [BatchItem], minKeepers: Int,
-                                       pendingByChapter: [Int: Int]) -> ([ChapterSegment], [String]) {
-        // 按下标分章、就地读字段（以前把每张 BatchItem 拷进各章的数组再拷出来，8000 张的场次改一次判 14 ms 花在这）。
-        var byChapter: [Int: [Int]] = [:]
-        for idx in items.indices {
-            let chapter = items[idx].captureTime == nil ? ChapterSegment.undatedID : items[idx].chapter
-            byChapter[chapter, default: []].append(idx)
+    private static func chapterSegment(_ chapter: Int, members: [Int], in items: [BatchItem], minKeepers: Int,
+                                       pending: Int) -> ChapterSegment {
+        // 按下标就地读字段（以前把每张 BatchItem 拷进各章的数组再拷出来，8000 张的场次改一次判 14 ms 花在这）。
+        var start: Date?, end: Date?
+        var pick = 0, usable = 0, reject = 0
+        // 代表照片：线性挑前 4（每次滑杆都会重算，别为它整章排序）。
+        var top: [Int] = []
+        func key(_ i: Int) -> (Int, Double, Double) {
+            (items[i].expressionScore ?? -1, items[i].faceQuality ?? -1, items[i].sharpness)  // = scoreKey，不拷整张
         }
-        guard byChapter.count > 1 else { return ([], []) }
-        var segments: [ChapterSegment] = []
+        func better(_ a: Int, _ b: Int) -> Bool {
+            let ra = coverRank(items[a].verdict), rb = coverRank(items[b].verdict)
+            return ra != rb ? ra > rb : key(a) > key(b)
+        }
+        for member in members {
+            if let time = items[member].captureTime {
+                if start == nil || time < start! { start = time }
+                if end == nil || time > end! { end = time }
+            }
+            switch items[member].verdict {
+            case .pick: pick += 1
+            case .usable: usable += 1
+            case .reject: reject += 1
+            }
+            // 每场最多一张：前 4 名很可能是同一个连拍的 4 帧，那样卡片上四张长得一样。
+            let take = items[member].take
+            if let same = top.firstIndex(where: { items[$0].take == take }) {
+                guard better(member, top[same]) else { continue }
+                top.remove(at: same)
+            } else if top.count >= 4, !better(member, top[top.count - 1]) {
+                continue
+            }
+            let at = top.firstIndex { better(member, $0) } ?? top.count
+            top.insert(member, at: at)
+            if top.count > 4 { top.removeLast() }
+        }
+        let range = start.map { "\(chapterTimeFormatter.string(from: $0))-\(chapterTimeFormatter.string(from: end!))" } ?? ""
+        let keepers = pick + usable
+        let undated = chapter == ChapterSegment.undatedID
+        return ChapterSegment(chapter: chapter, count: members.count,
+                              pick: pick, usable: usable, reject: reject,
+                              start: start, end: end, timeRange: range,
+                              // 无时间的那堆不是一个场景，「整章全灭」的漏交保护不适用。
+                              underMin: !undated && keepers > 0 && keepers < minKeepers,
+                              pendingTakes: pending,
+                              covers: top.map { items[$0].previewPath })
+    }
+
+    private static func chapterWarnings(_ segments: [ChapterSegment], minKeepers: Int) -> [String] {
         var warnings: [String] = []
-        // 有时间的章节按编号（= 时间顺序），无时间那段（-1）放最后。
-        let order = byChapter.keys.sorted { a, b in
-            if (a == ChapterSegment.undatedID) != (b == ChapterSegment.undatedID) { return b == ChapterSegment.undatedID }
-            return a < b
-        }
-        for chapter in order {
-            let members = byChapter[chapter]!
-            var start: Date?, end: Date?
-            var pick = 0, usable = 0, reject = 0
-            // 代表照片：线性挑前 4（每次滑杆都会重算，别为它整章排序）。
-            var top: [Int] = []
-            func better(_ a: Int, _ b: Int) -> Bool {
-                let ra = coverRank(items[a].verdict), rb = coverRank(items[b].verdict)
-                return ra != rb ? ra > rb : scoreKey(items[a]) > scoreKey(items[b])
-            }
-            for member in members {
-                if let time = items[member].captureTime {
-                    if start == nil || time < start! { start = time }
-                    if end == nil || time > end! { end = time }
-                }
-                switch items[member].verdict {
-                case .pick: pick += 1
-                case .usable: usable += 1
-                case .reject: reject += 1
-                }
-                // 每场最多一张：前 4 名很可能是同一个连拍的 4 帧，那样卡片上四张长得一样。
-                let take = items[member].take
-                if let same = top.firstIndex(where: { items[$0].take == take }) {
-                    guard better(member, top[same]) else { continue }
-                    top.remove(at: same)
-                } else if top.count >= 4, !better(member, top[top.count - 1]) {
-                    continue
-                }
-                let at = top.firstIndex { better(member, $0) } ?? top.count
-                top.insert(member, at: at)
-                if top.count > 4 { top.removeLast() }
-            }
-            let range = start.map { "\(chapterTimeFormatter.string(from: $0))-\(chapterTimeFormatter.string(from: end!))" } ?? ""
-            let keepers = pick + usable
-            let undated = chapter == ChapterSegment.undatedID
-            let segment = ChapterSegment(chapter: chapter, count: members.count,
-                                         pick: pick, usable: usable, reject: reject,
-                                         start: start, end: end, timeRange: range,
-                                         // 无时间的那堆不是一个场景，「整章全灭」的漏交保护不适用。
-                                         underMin: !undated && keepers > 0 && keepers < minKeepers,
-                                         pendingTakes: pendingByChapter[chapter] ?? 0,
-                                         covers: top.map { items[$0].previewPath })
-            segments.append(segment)
-            guard !undated else { continue }
-            let where_ = "章节\(chapter + 1)\(range.isEmpty ? "" : " (\(range))")"
+        for segment in segments where segment.chapter != ChapterSegment.undatedID {
+            let where_ = "章节\(segment.chapter + 1)\(segment.timeRange.isEmpty ? "" : " (\(segment.timeRange))")"
             if segment.allRejected {
-                warnings.append("\(where_) 的 \(members.count) 张全部被淘汰")
+                warnings.append("\(where_) 的 \(segment.count) 张全部被淘汰")
             } else if segment.underMin {
-                warnings.append("\(where_) 只留了 \(keepers) 张 (<\(minKeepers))")
+                warnings.append("\(where_) 只留了 \(segment.pick + segment.usable) 张 (<\(minKeepers))")
             }
         }
-        return (segments, warnings)
+        return warnings
     }
 
     // MARK: - Keeper-rate stats (拍摄复盘)
@@ -4463,7 +4481,7 @@ final class BatchStore: ObservableObject {
             Self.fold(stat, into: &d, sign: 1)
         }
         items = updated
-        finishDerived(&d)
+        finishDerived(&d, chapters: Set(takes.compactMap { d.takeChapter[$0] }))
         derived = d
         derivedStamp = currentStamp
         overrideFastPathRuns += 1

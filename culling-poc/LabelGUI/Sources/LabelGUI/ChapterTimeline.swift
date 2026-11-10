@@ -85,6 +85,23 @@ struct ChapterTimelineLayout: Equatable {
     /// 两个标签之间至少空这么多。
     static let labelSpacing: CGFloat = 10
 
+    /// 几何只看每段的张数和起止时间：改判只变各段的精选 / 可用 / 废片数，几何不用重排（重排要量每个标签的字宽，
+    /// 几百章的文件夹里一次改判 12 ms 花在这）。记最近一次的。
+    private struct Shape: Equatable {
+        let chapter: Int, count: Int
+        let start: Date?, end: Date?
+    }
+    @MainActor private static var last: (width: CGFloat, shapes: [Shape], layout: ChapterTimelineLayout)?
+
+    @MainActor
+    static func remembered(_ segs: [BatchStore.ChapterSegment], width: CGFloat) -> ChapterTimelineLayout {
+        let shapes = segs.map { Shape(chapter: $0.chapter, count: $0.count, start: $0.start, end: $0.end) }
+        if let last, last.width == width, last.shapes == shapes { return last.layout }
+        let layout = compute(segs, width: width, measure: measureText)
+        last = (width, shapes, layout)
+        return layout
+    }
+
     @MainActor
     static func compute(_ segs: [BatchStore.ChapterSegment], width: CGFloat,
                         measure: (String, Bool) -> CGFloat) -> ChapterTimelineLayout {
@@ -274,8 +291,7 @@ struct ChapterTimeline: View, Equatable {
     var body: some View {
         let _ = BatchPerf.body("时间轴")
         GeometryReader { geo in
-            let layout = ChapterTimelineLayout.compute(segments, width: geo.size.width,
-                                                       measure: ChapterTimelineLayout.measureText)
+            let layout = ChapterTimelineLayout.remembered(segments, width: geo.size.width)
             canvas(layout)
                 .contentShape(Rectangle())
                 .onContinuousHover { phase in

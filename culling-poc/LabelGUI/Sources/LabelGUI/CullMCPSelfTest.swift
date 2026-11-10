@@ -61,7 +61,7 @@ enum CullMCPSelfTest {
     /// 去重开关和锐度线），无头时每一步局部重算完都会整场重算一遍对账，对不上进程直接退出 70 —— 能跑到这里的检查就是都对上了。
     static func overrideFuzzChecks(_ check: Check) {
         let store = open()
-        let ids = store.items.map(\.id)
+        var ids = store.items.map(\.id)
         guard ids.count >= 10, BatchStore.verifyOverrideFastPath else {
             check(false, "局部重算对账：fixture 不到 10 张或对账没开")
             return
@@ -74,6 +74,12 @@ enum CullMCPSelfTest {
         let verdicts: [Verdict?] = [.pick, .usable, .reject, nil]
         let before = store.overrideFastPathRuns
         for step in 0..<600 {
+            if step == 200 {
+                // 后 400 步换成 5 份、每份隔一小时（5 个章节）：章节条只重算被牵动的那几段，这一段也要对上账。
+                BatchPerf.expand(store, copies: 5)
+                store.minKeepersPerChapter = 3
+                ids = store.items.map(\.id)
+            }
             if step % 97 == 40 { store.rejectBurstDuplicates.toggle() }
             if step % 151 == 75 { store.sharpnessThreshold += step % 2 == 0 ? 10 : -10 }
             switch next(8) {
@@ -97,6 +103,7 @@ enum CullMCPSelfTest {
         check(store.overrideFastPathRuns - before >= 400, "局部重算对账：600 步里只走了 \(store.overrideFastPathRuns - before) 回局部重算")
         let counts = store.verdictCounts
         check(counts.reject + counts.usable + counts.pick == ids.count, "局部重算对账：三个判决加起来不是 \(ids.count) 张")
+        check(store.chapterSegments.count >= 2, "局部重算对账：复制成 5 份以后应该有好几章，现在 \(store.chapterSegments.count) 章")
     }
 
     static func open() -> BatchStore {
