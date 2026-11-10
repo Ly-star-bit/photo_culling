@@ -58,7 +58,7 @@ struct CollageView: View {
             // 模板格最小 86pt：两列要 230 左右。230 + 画布 420 + 检视器 300 + 两条分隔 = 964。
             // 选中画布上的照片、文字、贴纸：右栏切到「格式」（NU3）；双击文字 / 照片上的字：切过去并滚到编辑器。
             // 相册开着整本概览时中间这一块换成网格（CollageAlbumOverview）。
-            CollageSplit(workspace: store.workspace,
+            CollageSplit(workspace: store.workspace, albumUI: store.albumUI, isAlbum: store.isAlbum,
                          left: CollageLeftPane(store: store, batchStore: batchStore),
                          center: CollageCanvasArea(store: store, isAlbum: store.isAlbum,
                                                    onAutoLayout: { runAutoLayout() }),
@@ -891,13 +891,13 @@ struct CollageTrayItem: View {
                 Text("\(uses)")
                     .font(.system(size: 10, weight: .bold))
                     .monospacedDigit()
-                    .foregroundStyle(.white)
+                    .foregroundStyle(AppPalette.onAccent)
                     .frame(minWidth: 16, minHeight: 16)
                     .background(AppPalette.accent, in: Capsule())
                     .padding(3)
             } else if uses == 1 {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.white, AppPalette.accent)
+                    .foregroundStyle(AppPalette.onAccent, AppPalette.accent)
                     .padding(3)
             } else if photo.isPick {
                 Image(systemName: "star.fill")
@@ -1364,21 +1364,13 @@ struct CollagePageStrip: View {
         .frame(width: 44)
     }
 
-    /// 「整本」：开着概览时实心（再点一下回编辑）。
-    @ViewBuilder
+    /// 「整本」：摊开整本概览。概览开着时这一条跨页条不在视图树里（CollagePageStripSlot），回编辑的按钮在概览自己的
+    /// 顶栏上 —— 以前这里还留着一支「开着概览时实心」的画法，走不到（优化分析 R11）。
     private var overviewButton: some View {
-        let label = Text("整本").font(.caption2)
-        if ui.overviewShown {
-            Button { ui.toggleOverview(store) } label: { label }
-                .buttonStyle(.accentProminent)
-                .controlSize(.small)
-                .help("回到编辑这个跨页 (G、Esc)")
-        } else {
-            Button { ui.toggleOverview(store) } label: { label }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("整本概览：摊开全部跨页，拖动排序、多选锁住 / 镜像 / 删除 (G)")
-        }
+        Button { ui.toggleOverview(store) } label: { Text("整本").font(.caption2) }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("整本概览：摊开全部跨页，拖动排序、多选锁住 / 镜像 / 删除 (G)")
     }
 
     private func cards(_ m: CollageAlbumRules.GridMetrics) -> some View {
@@ -1631,11 +1623,12 @@ struct CollageExportButtons: View {
             Button {
                 store.export()
             } label: {
-                Label(store.isAlbum && !compact ? "导出相册" : "导出", systemImage: "square.and.arrow.up")
+                // 范围不是全部时写清楚这次导哪几个跨页（优化分析 A7）。
+                Label(store.exportButtonTitle(compact: compact), systemImage: "square.and.arrow.up")
             }
             // ⌘E 挂在顶栏那组看不见的快捷键上（CollageView.topBarShortcuts）：顶栏两排里各有一个这个按钮。
             .disabled(store.exportBlockedReason != nil)
-            .help(store.exportBlockedReason ?? "按导出设置写到输出目录 (⌘E)；旁边的 ▾ 改文件名、文件格式、清晰度、输出目录")
+            .help(store.exportBlockedReason ?? store.exportButtonHelp)
             Button {
                 nav.exportShown.toggle()
             } label: {

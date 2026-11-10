@@ -142,7 +142,8 @@ extension CollageCanvasMenu {
         menu.addItem(CollageMenuItem("放大", enabled: zoom.scale < zoom.maxScale - 0.001) { zoom.zoomIn() })
         menu.addItem(CollageMenuItem("缩小", enabled: !zoom.isFit) { zoom.zoomOut() })
         menu.addItem(CollageMenuItem("适应窗口", enabled: !zoom.isFit) { zoom.fit() })
-        menu.addItem(CollageMenuItem("实际像素 100%") { zoom.actualPixels() })
+        // 画布像素比窗口里这一块还少（适应时已经超过 100%）：没有 100% 可看，灰掉（优化分析 R14）。
+        menu.addItem(CollageMenuItem("实际像素 100%", enabled: zoom.canShowActualPixels) { zoom.actualPixels() })
         return menu
     }
 

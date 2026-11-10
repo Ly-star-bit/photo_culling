@@ -152,9 +152,15 @@ final class CollageCanvasZoom: ObservableObject {
     func fit() { zoom(to: 1) }
     /// 实际像素（已经是了就回到适应）。
     func actualPixels() {
+        guard canShowActualPixels else { return }
         let actual = min(maxScale, max(1, 1 / max(0.01, fitPixelRatio)))
         zoom(to: abs(scale - actual) < 0.01 ? 1 : actual)
     }
+
+    /// 「实际像素 100%」做不做得到（优化分析 R14）：适应窗口时一个画布像素已经占了不止一个屏幕像素（Retina 上 1080 宽的
+    /// 社交尺寸），100% 比适应还小，而缩放下限是适应 —— 以前点了什么都不发生。这时按钮灰掉、写明为什么。
+    /// 已经放大着（不是适应）时照常能点：回到适应。
+    var canShowActualPixels: Bool { !isFit || fitPixelRatio < 0.999 }
 
     func pan(by delta: CGSize) {
         guard !isFit else { return }
@@ -199,8 +205,12 @@ struct CollageZoomBar: View {
                 .help("缩小 (⌘-)")
             Button { zoom.actualPixels() } label: {
                 Text("\(zoom.percent)%").monospacedDigit().frame(minWidth: 40)
+                    .opacity(zoom.canShowActualPixels ? 1 : 0.55)
             }
-            .help("实际像素 100%（⌘1，再按一次回到适应）。现在 \(zoom.percent)%")
+            .disabled(!zoom.canShowActualPixels)
+            .help(zoom.canShowActualPixels
+                  ? "实际像素 100%（⌘1，再按一次回到适应）。现在 \(zoom.percent)%"
+                  : "这张画布的像素比窗口里这一块还少：适应窗口时已经是 \(zoom.percent)%，比实际像素还大，没有 100% 可看。要看细节点「+」放大")
             Button { zoom.zoomIn() } label: { Image(systemName: "plus").frame(width: 18, height: 18) }
                 .disabled(zoom.scale >= zoom.maxScale - 0.001)
                 .help("放大 (⌘=)；捏合、⌘ 滚轮在指针处放大，放大以后滚动 = 平移")
@@ -273,6 +283,9 @@ struct CollageScrollAnchor: NSViewRepresentable {
 /// 左栏 | 画布 | 右栏。只订阅工作区（收起、宽度）：拖分隔条只重排这一层。
 struct CollageSplit<Left: View, Center: View, Right: View>: View {
     @ObservedObject var workspace: CollageWorkspace
+    /// 整本概览开没开在它上面（这一层不订阅：只有那两个浮着的按钮看，CollagePaneToggleLayer）。
+    let albumUI: CollageAlbumUI
+    let isAlbum: Bool
     let left: Left
     let center: Center
     let right: Right
@@ -291,18 +304,7 @@ struct CollageSplit<Left: View, Center: View, Right: View>: View {
                 }
                 center
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .overlay(alignment: .topLeading) {
-                        if workspace.trayHidden {
-                            CollagePaneToggle(edge: .leading, shown: false) { workspace.trayHidden = false }
-                                .padding(8)
-                        }
-                    }
-                    .overlay(alignment: .topTrailing) {
-                        if workspace.inspectorHidden {
-                            CollagePaneToggle(edge: .trailing, shown: false) { workspace.inspectorHidden = false }
-                                .padding(8)
-                        }
-                    }
+                    .overlay { CollagePaneToggleLayer(workspace: workspace, ui: albumUI, isAlbum: isAlbum) }
                 if !workspace.inspectorHidden {
                     CollageSplitHandle(width: w.inspector, direction: -1, range: CollageWorkspace.inspectorRange,
                                        set: { workspace.inspectorWidth = $0 },
@@ -375,6 +377,31 @@ struct CollagePaneToggle: View {
         .buttonStyle(.plain)
         .help(left ? (shown ? "收起左栏，画布大一点 (⌃⌘S)" : "显示左栏：照片、模板、素材 (⌃⌘S)")
                    : (shown ? "收起右栏，画布大一点 (⌥⌘S)" : "显示右栏：格式、样式、文档 (⌥⌘S)"))
+    }
+}
+
+/// 两栏收起以后浮在中间区域角上的「显示左栏 / 显示右栏」。平时在上两角；整本概览开着时中间区域顶上是概览自己的一排
+/// 按钮（左「整本」、右「回到编辑」），挪到下两角（优化分析 R13：以前「显示右栏」无条件叠在右上角，正压在「回到编辑」上）。
+/// 单独一层：只有它订阅 albumUI，概览开关不带着三栏重排。
+struct CollagePaneToggleLayer: View {
+    @ObservedObject var workspace: CollageWorkspace
+    @ObservedObject var ui: CollageAlbumUI
+    let isAlbum: Bool
+
+    var body: some View {
+        let low = ui.overviewShown && isAlbum
+        ZStack {
+            if workspace.trayHidden {
+                CollagePaneToggle(edge: .leading, shown: false) { workspace.trayHidden = false }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: low ? .bottomLeading : .topLeading)
+            }
+            if workspace.inspectorHidden {
+                CollagePaneToggle(edge: .trailing, shown: false) { workspace.inspectorHidden = false }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: low ? .bottomTrailing : .topTrailing)
+            }
+        }
     }
 }
 

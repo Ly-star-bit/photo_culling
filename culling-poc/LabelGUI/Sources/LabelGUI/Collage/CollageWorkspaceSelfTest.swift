@@ -73,6 +73,19 @@ enum CollageWorkspaceSelfTest {
         zoom.zoomOut()
         zoom.fit()
         check(zoom.isFit, "⌘0 回到适应")
+        // 优化分析 R14：画布像素比窗口里这一块还少（Retina 上 1080 宽的社交尺寸，适应时已经 140%）—— 没有 100% 可看，
+        // 「实际像素」灰掉、点了什么都不做；放大着的时候照常能点（回到适应）。
+        check(zoom.canShowActualPixels, "画布像素够：实际像素能点")
+        let small = CollageCanvasZoom()
+        small.record(viewSize: view, fitRect: fit, fitPixelRatio: 1.4)
+        check(small.isFit && small.percent == 140 && !small.canShowActualPixels, "小画布适应时已经 140%：实际像素灰掉",
+              "\(small.percent)%")
+        small.actualPixels()
+        check(small.isFit && small.percent == 140, "灰着的时候点它：什么都不变")
+        small.zoomIn()
+        check(!small.isFit && small.canShowActualPixels, "小画布放大着：能点")
+        small.actualPixels()
+        check(small.isFit, "点了回到适应")
         // 放大后的摆放来回换算
         let layout = CollageCanvasLayout(rect: fit, scale: 0.1).zoomed(3, offset: CGSize(width: -40, height: 25), in: view)
         let c = CGPoint(x: 1234, y: 987)
