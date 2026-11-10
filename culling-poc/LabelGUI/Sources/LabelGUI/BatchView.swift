@@ -1459,7 +1459,7 @@ struct BatchView: View {
     /// 一行能用的宽度。
     private var rowWidth: CGFloat {
         var width = gridWidth - 28  // LazyVStack padding 14 × 2
-        if gridMode == .byGroup { width -= 20 }  // takeRow 自己的 padding 10 × 2
+        if gridMode == .byGroup { width -= 2 * TakeShelves.pad }  // 每场那个小组自己的 pad
         return max(120, width)
     }
 
@@ -1539,7 +1539,7 @@ struct BatchView: View {
                 }
             }
             if gridMode == .byGroup {
-                for entry in groupedItems { add(entry.members, prefix: "take\(entry.group)") }
+                out = groupLayout.nav
                 if showSingles { add(singleItems, prefix: "singles") }
             } else {
                 for verdict in Verdict.allCases.reversed() where store.verdictFilter == nil || store.verdictFilter == verdict {
@@ -1573,18 +1573,19 @@ struct BatchView: View {
         DispatchQueue.main.async { proxy.scrollTo(id, anchor: anchor ?? .center) }
     }
 
-    /// 按分组时，这张没铺出来：先滚到哪个 Lazy 栈的直接孩子。在某一场里 = 那一场；在展开的单张区里 = 它所在的那一行
+    /// 按分组时，这张没铺出来：先滚到哪个 Lazy 栈的直接孩子。在某一场里 = 那一场所在的那一块（独占一块的场、或者并排的
+    /// 那一行，groupLayout.anchors）；在展开的单张区里 = 它所在的那一行
     /// （以前滚到整个单张区的中点，几百张单张时离目标很远）；网格里没有它（定完的场里叠起来的废片、被筛掉的）= 它那一场
     /// 还在网格里就滚到那一场，不在就不滚（以前一律滚到最底下的「单张」，R8）。
     private func groupScrollTarget(_ id: String) -> String? {
-        let groups = groupedItems
-        if let inTake = groups.first(where: { $0.members.contains { $0.id == id } }) { return "take-\(inTake.group)" }
+        let anchors = groupLayout.anchors
+        if let inTake = groupedItems.first(where: { $0.members.contains { $0.id == id } }) { return anchors[inTake.group] }
         if showSingles, let row = navigationRows().last(where: { $0.cells.contains { $0.id == id } }),
            row.id.hasPrefix("singles-") {
             return row.id
         }
-        guard let take = store.item(withID: id)?.take, groups.contains(where: { $0.group == take }) else { return nil }
-        return "take-\(take)"
+        guard let take = store.item(withID: id)?.take else { return nil }
+        return anchors[take]
     }
 
     /// 有照片、但现在的筛选下网格里一张都没有：是哪几个筛选（nil = 不是这种情况）。按分组时单张区收着不算空
@@ -2185,19 +2186,92 @@ struct BatchView: View {
         withAnimation { scrollGrid(proxy, target.id, anchor: .top) }
     }
 
-    // MARK: 按分组 (每个多张场一行，单张收在最后)
+    // MARK: 按分组 (每个多张场一个小组，短的并排；单张收在最后)
 
-    /// 每个多张场一行，本场全部照片横向铺开（放不下自动换行）。单张照片（没有连拍、不用挑）
-    /// 收进最后的折叠区 —— 以前它们也一张一行，一场婚礼里多半是单张，要挑的连拍被冲散。
+    /// 按分组时的一块：一行放不下的一场（自己占一块），或者并排的几场。直接是网格那个 LazyVStack 的孩子。
+    private struct GroupBlock: Identifiable {
+        /// 滚动定位的目标：「take-场号」/「shelf-这一行第一场的场号」。
+        let id: String
+        /// 独占一块的场（并排的一行 = nil）。
+        var solo: ShelfTake?
+        /// 并排的几场。
+        var shelf: [ShelfTake] = []
+    }
+
+    /// 小组里的一场：成员、怎么分行。`content` = 小组内容的宽度（独占一块的 = nil，撑满）。
+    private struct ShelfTake: Identifiable {
+        let entry: TakeGroup
+        let rows: [GridRow]
+        let content: CGFloat?
+        var id: Int { entry.group }
+    }
+
+    /// 按分组时整页怎么排（TakeShelves）：每一块、每场在哪一块（滚动定位）、↑ ↓ 的行表。
+    private struct GroupLayout {
+        var blocks: [GroupBlock] = []
+        var anchors: [Int: String] = [:]
+        var nav: [GridMemo.NavRow] = []
+    }
+
+    /// store、视图选项、行宽行高、比例版本都没变就是上次那份（和分行缓存同一套键）。
+    private var groupLayout: GroupLayout {
+        memo.value("groupLayout", key: GridMemo.NavKey(view: viewKey, layout: layoutKey)) { computeGroupLayout() }
+    }
+
+    private func computeGroupLayout() -> GroupLayout {
+        let groups = groupedItems
+        // 整页的比例一把取：没读过的超过 600 张时先按 2:3 排、后台读完再排一次（和按判决同一条路）。
+        let flat = aspects(groups.flatMap(\.members))
+        var takes: [[CGFloat]] = []
+        var offset = 0
+        for group in groups {
+            takes.append(Array(flat[offset..<(offset + group.members.count)]))
+            offset += group.members.count
+        }
+        let ids = groups.map { $0.members.map(\.id) }
+        let packed = TakeShelves.pack(takes: takes, width: rowWidth + 2 * TakeShelves.pad, target: rowTarget)
+        var out = GroupLayout()
+        for block in packed {
+            switch block {
+            case .rows(let index, let rows):
+                let group = groups[index]
+                let blockID = "take-\(group.group)"
+                var gridRows: [GridRow] = []
+                for (k, row) in rows.enumerated() {
+                    let rowID = "take\(group.group)-\(k)"
+                    gridRows.append(GridRow(id: rowID, items: group.members[row.range], widths: row.widths, height: row.height))
+                    out.nav.append(GridMemo.NavRow(id: rowID, cells: JustifiedRows.cells(ids: ids[index], row: row)))
+                }
+                out.blocks.append(GroupBlock(id: blockID, solo: ShelfTake(entry: group, rows: gridRows, content: nil)))
+                out.anchors[group.group] = blockID
+            case .shelf(let placed):
+                guard let first = placed.first else { continue }
+                let blockID = "shelf-\(groups[first.take].group)"
+                var shelf: [ShelfTake] = []
+                for item in placed {
+                    let group = groups[item.take]
+                    let row = GridRow(id: "take\(group.group)-0", items: group.members[...], widths: item.widths, height: item.height)
+                    shelf.append(ShelfTake(entry: group, rows: [row], content: item.content))
+                    out.anchors[group.group] = blockID
+                }
+                out.blocks.append(GroupBlock(id: blockID, shelf: shelf))
+                out.nav.append(GridMemo.NavRow(id: blockID, cells: TakeShelves.cells(ids: ids, shelf: placed)))
+            }
+        }
+        return out
+    }
+
+    /// 每个多张场一个带边线的小组，本场全部照片横向铺开（放不下自动换行）；一行放得下的场挨着并排（U2）。单张照片
+    /// （没有连拍、不用挑）收进最后的折叠区 —— 以前它们也一张一行，一场婚礼里多半是单张，要挑的连拍被冲散。
     /// 鼠标停在照片上点「只留这张」就是定案；要一组一组细看按 C 进连拍挑选。
-    /// 每一场直接是网格那个 LazyVStack 的孩子（以前外面再包一层 LazyVStack）：滚动定位按「take-场号」找得到还没铺出来的场。
+    /// 每一块直接是网格那个 LazyVStack 的孩子：滚动定位按块的 id 找得到还没铺出来的场。
     @ViewBuilder
     private var groupGrid: some View {
         let singles = singleItems
-        ForEach(groupedItems, id: \.group) { entry in
-            takeRow(entry.group, members: entry.members)
-                .padding(.bottom, 10)
-                .id("take-\(entry.group)")
+        ForEach(groupLayout.blocks) { block in
+            groupBlockView(block)
+                .padding(.bottom, 4)
+                .id(block.id)
         }
         if !singles.isEmpty {
             singlesHeader(singles).id("singles")
@@ -2208,7 +2282,20 @@ struct BatchView: View {
                     rowView(row) { item, width, height in
                         gridCell(item, color: item.verdict.color, groupSize: 1, width: width, height: height, showPick: true)
                     }
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, TakeShelves.pad)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func groupBlockView(_ block: GroupBlock) -> some View {
+        if let solo = block.solo {
+            takeBox(solo)
+        } else {
+            HStack(alignment: .top, spacing: TakeShelves.gap) {
+                ForEach(block.shelf) { take in
+                    takeBox(take)
                 }
             }
         }
@@ -2221,102 +2308,247 @@ struct BatchView: View {
         return f
     }()
 
-    @ViewBuilder
-    private func takeRow(_ take: Int, members: [BatchItem]) -> some View {
+    /// 一场的组头要用的东西，算一次（组头有三种宽度的写法、右键菜单也要）。
+    private struct TakeInfo {
+        let take: Int
+        /// 网格里这一场现在看得见的（可能被判决筛选过 / 叠起来过）。
+        let members: [BatchItem]
+        /// 整场（定案要作用在整场上）。
+        let all: [BatchItem]
+        let alive: Int
+        let picks: [String]
+        let pending: Bool
+        /// 这一行被叠起来藏掉的废片张数（判决筛选、只看客户选中藏掉的不算 —— 那是你自己要的）。
+        let folded: Int
+        /// 展开着、可以收起废片。
+        let canFold: Bool
+        let allSelected: Bool
+        let recommended: [String: Verdict]
+        let recRejects: Int
+    }
+
+    private func takeInfo(_ entry: TakeGroup) -> TakeInfo {
+        let take = entry.group, members = entry.members
         // members 可能被判决筛选过 / 叠起来过；定案要作用在整场上，所以另取全部成员。
         let all = store.members(ofTake: take)
         let alive = all.filter { $0.verdict != .reject }
-        let picks = all.filter { $0.verdict == .pick }
         let pending = store.isPendingTake(alive: alive)
-        // 这一行被叠起来藏掉的废片张数（判决筛选、只看客户选中藏掉的不算 —— 那是你自己要的）。
         let unfiltered = store.verdictFilter == nil && !store.clientPickFilter
         let folded = unfiltered ? all.count - members.count : 0
-        let allSelected = members.allSatisfy { selectedIDs.contains($0.id) }
+        let canFold: Bool = folded == 0 && !pending && unfiltered && expandedTakes.contains(take) && alive.count < all.count
         let recommended = pending ? store.recommendedDecision(for: all) : [:]
-        let recRejects = alive.filter { recommended[$0.id] == .reject }.count
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                // 点标题 = 选中整场（再点取消），批量栏随即出现。
-                Button {
-                    if allSelected {
-                        members.forEach { selectedIDs.remove($0.id) }
-                    } else {
-                        members.forEach { selectedIDs.insert($0.id) }
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: allSelected ? "checkmark.square.fill" : "square")
-                            .foregroundStyle(allSelected ? AppPalette.accent : .secondary)
-                        Text("场 \(take)").font(.subheadline.bold())
-                        Text("\(all.count) 张").font(.caption).foregroundStyle(.secondary)
-                        if let range = Self.timeRange(all) {
-                            Text(range).font(.caption2).monospacedDigit().foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .buttonStyle(.plain)
-                .help(allSelected ? "取消选中这一场" : "选中这一场的全部 \(members.count) 张")
+        return TakeInfo(take: take, members: members, all: all, alive: alive.count,
+                        picks: all.filter { $0.verdict == .pick }.map(\.id), pending: pending, folded: folded, canFold: canFold,
+                        allSelected: members.allSatisfy { selectedIDs.contains($0.id) }, recommended: recommended,
+                        recRejects: alive.filter { recommended[$0.id] == .reject }.count)
+    }
 
-                let pillColor: Color = pending ? AppPalette.warning : .green
-                Text(Self.takeStatusText(pending: pending, alive: alive.count, picks: picks.count))
-                    .font(.caption2).bold()
-                    .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(pillColor.opacity(pending ? 0.25 : 0.2), in: Capsule())
-                    .foregroundStyle(pillColor)
-                if folded > 0 {
-                    Button {
-                        withAnimation(.easeOut(duration: 0.15)) { _ = expandedTakes.insert(take) }
-                    } label: {
-                        Label("显示被废的 \(folded) 张", systemImage: "square.stack.3d.up")
-                    }
-                    .buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)
-                    .help("这一场定完了，被废的照片叠起来了。点开再看一遍")
-                } else if !pending, unfiltered, expandedTakes.contains(take), alive.count < all.count {
-                    Button {
-                        withAnimation(.easeOut(duration: 0.15)) { _ = expandedTakes.remove(take) }
-                    } label: {
-                        Label("收起废片", systemImage: "rectangle.compress.vertical")
-                    }
-                    .buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)
-                }
-                Spacer()
-                // 一键接受算法的推荐：精选留、你标过可用的留，其余废。快速过场用的。
-                if pending {
-                    Button(recRejects > 0 ? "接受推荐 · 废 \(recRejects) 张" : "接受推荐") {
-                        withAnimation { store.applyOverrides(recommended, accepted: true) }
-                        // 定完这一场会叠起来：焦点落到留下的那张上，别停在被叠掉的照片上（←/→ 会从头开始）。
-                        if let keep = all.first(where: { recommended[$0.id] == .pick }) { focusedID = keep.id }
-                    }
-                    .controlSize(.small)
-                    .help(Self.acceptHelp(picks: picks.map(\.id), rejects: recRejects))
-                }
-                Button(pending ? "挑选" : "复查") { pickTake(take, focus: focus(in: members)) }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("整场并排上台细挑 (焦点在本场时按 C 也行)：点一张 = 只留它，⏎ 确认并跳下一组")
+    // 组头上的几个动作（按钮、右键菜单、「⋯」共用）。
+
+    /// 点标题 = 选中整场（再点取消），批量栏随即出现。
+    private func toggleTakeSelection(_ info: TakeInfo) {
+        if info.allSelected {
+            info.members.forEach { selectedIDs.remove($0.id) }
+        } else {
+            info.members.forEach { selectedIDs.insert($0.id) }
+        }
+    }
+
+    /// 一键接受算法的推荐：精选留、你标过可用的留，其余废。快速过场用的。
+    private func acceptTake(_ info: TakeInfo) {
+        withAnimation { store.applyOverrides(info.recommended, accepted: true) }
+        // 定完这一场会叠起来：焦点落到留下的那张上，别停在被叠掉的照片上（←/→ 会从头开始）。
+        if let keep = info.all.first(where: { info.recommended[$0.id] == .pick }) { focusedID = keep.id }
+    }
+
+    private func setTakeExpanded(_ take: Int, _ expanded: Bool) {
+        withAnimation(.easeOut(duration: 0.15)) {
+            if expanded {
+                _ = expandedTakes.insert(take)
+            } else {
+                _ = expandedTakes.remove(take)
             }
+        }
+    }
+
+    /// 右键菜单、最窄那种组头的「⋯」：组头上能做的事全在这里。
+    @ViewBuilder
+    private func takeMenuItems(_ info: TakeInfo) -> some View {
+        Button(info.allSelected ? "取消选中这一场" : "选中这一场的 \(info.members.count) 张") { toggleTakeSelection(info) }
+        if info.pending {
+            Button(info.recRejects > 0 ? "接受推荐 · 废 \(info.recRejects) 张" : "接受推荐") { acceptTake(info) }
+        }
+        Button(info.pending ? "挑选这一场 (C)" : "复查这一场 (C)") { pickTake(info.take, focus: focus(in: info.members)) }
+        if info.folded > 0 {
+            Button("显示被废的 \(info.folded) 张") { setTakeExpanded(info.take, true) }
+        } else if info.canFold {
+            Button("收起废片") { setTakeExpanded(info.take, false) }
+        }
+    }
+
+    /// 一场 = 一个带边线的小组：组头（场号 / 张数 / 待处理标记 / 接受推荐 / 挑选）+ 照片。
+    private func takeBox(_ take: ShelfTake) -> some View {
+        let info = takeInfo(take.entry)
+        return VStack(alignment: .leading, spacing: 6) {
+            // 组头按小组的宽度挑写法：全写 → 短写（按钮只剩图标）→ 最短（场号 + 状态点 + 「⋯」）。两张竖片的小组
+            // 最小一档缩略图时只有 150pt 宽。哪种写法都能右键出全部动作。
+            ViewThatFits(in: .horizontal) {
+                takeHeaderFull(info)
+                takeHeaderShort(info)
+                takeHeaderTiny(info)
+            }
+            .contentShape(Rectangle())
+            .contextMenu { takeMenuItems(info) }
             // 一场的照片不多，行不用 Lazy：这一场铺出来了，里面每一格都找得到（滚动定位）。
             VStack(alignment: .leading, spacing: 8) {
-                ForEach(gridRows(members, prefix: "take\(take)")) { row in
+                ForEach(take.rows) { row in
                     rowView(row) { member, width, height in
                         // groupSize 1：行头已经写了张数，缩略图上再贴 ×N 就重复了。
-                        let soleKeeper = member.verdict != .reject && alive.count == 1
+                        let soleKeeper = member.verdict != .reject && info.alive == 1
                         gridCell(member, color: member.verdict.color, groupSize: 1, width: width, height: height,
                                  keepOnly: !soleKeeper, showPick: true)
                     }
                 }
             }
         }
-        .padding(10)
+        .frame(width: take.content, alignment: .leading)
+        .frame(maxWidth: take.content == nil ? .infinity : nil, alignment: .leading)
+        .padding(TakeShelves.pad)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(pending ? Color.white.opacity(0.04) : Color.clear)
+                .fill(info.pending ? Color.white.opacity(0.04) : Color.clear)
         )
-        // 待处理的场左边一条橙线 —— 比 4% 的白底醒目得多，又不和照片争颜色。
+        // 每场一圈细边线：并排以后靠它看出哪几张是一场。
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
+        // 待处理的场左边一条线 —— 比 4% 的白底醒目得多，又不和照片争颜色。
         .overlay(alignment: .leading) {
-            if pending {
+            if info.pending {
                 RoundedRectangle(cornerRadius: 2).fill(AppPalette.warning.opacity(0.8)).frame(width: 3).padding(.vertical, 8)
             }
+        }
+    }
+
+    /// 组头左边那一截：选中框 + 场号（+ 张数、时间）。点它 = 选中整场。
+    private func takeTitleButton(_ info: TakeInfo, count: Bool, time: Bool) -> some View {
+        Button { toggleTakeSelection(info) } label: {
+            HStack(spacing: 6) {
+                Image(systemName: info.allSelected ? "checkmark.square.fill" : "square")
+                    .foregroundStyle(info.allSelected ? AppPalette.accent : .secondary)
+                Text("场 \(info.take)").font(.subheadline.bold())
+                if count {
+                    Text("\(info.all.count) 张").font(.caption).foregroundStyle(.secondary)
+                }
+                if time, let range = Self.timeRange(info.all) {
+                    Text(range).font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+                }
+            }
+            .lineLimit(1)
+            .fixedSize()
+        }
+        .buttonStyle(.plain)
+        .help(info.allSelected ? "取消选中这一场" : "选中这一场的全部 \(info.members.count) 张")
+    }
+
+    private func takePill(_ info: TakeInfo, short: Bool) -> some View {
+        let color: Color = info.pending ? AppPalette.warning : .green
+        let text = short ? Self.takeStatusShort(pending: info.pending, picks: info.picks.count)
+                         : Self.takeStatusText(pending: info.pending, alive: info.alive, picks: info.picks.count)
+        return Text(text)
+            .font(.caption2).bold()
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(color.opacity(info.pending ? 0.25 : 0.2), in: Capsule())
+            .foregroundStyle(color)
+            .help(Self.takeStatusText(pending: info.pending, alive: info.alive, picks: info.picks.count))
+    }
+
+    /// 全写（独占一块的场、照片多的小组）。
+    private func takeHeaderFull(_ info: TakeInfo) -> some View {
+        HStack(spacing: 8) {
+            takeTitleButton(info, count: true, time: true)
+            takePill(info, short: false)
+            if info.folded > 0 {
+                Button { setTakeExpanded(info.take, true) } label: {
+                    Label("显示被废的 \(info.folded) 张", systemImage: "square.stack.3d.up").lineLimit(1).fixedSize()
+                }
+                .buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)
+                .help("这一场定完了，被废的照片叠起来了。点开再看一遍")
+            } else if info.canFold {
+                Button { setTakeExpanded(info.take, false) } label: {
+                    Label("收起废片", systemImage: "rectangle.compress.vertical").lineLimit(1).fixedSize()
+                }
+                .buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 4)
+            if info.pending {
+                Button(info.recRejects > 0 ? "接受推荐 · 废 \(info.recRejects) 张" : "接受推荐") { acceptTake(info) }
+                    .controlSize(.small)
+                    .fixedSize()
+                    .help(Self.acceptHelp(picks: info.picks, rejects: info.recRejects))
+            }
+            Button(info.pending ? "挑选" : "复查") { pickTake(info.take, focus: focus(in: info.members)) }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .fixedSize()
+                .help("整场并排上台细挑 (焦点在本场时按 C 也行)：点一张 = 只留它，⏎ 确认并跳下一组")
+        }
+    }
+
+    /// 短写（并排的小组）：状态只写「待处理 / 已定」，两个按钮只剩图标。
+    private func takeHeaderShort(_ info: TakeInfo) -> some View {
+        HStack(spacing: 6) {
+            takeTitleButton(info, count: true, time: false)
+            takePill(info, short: true)
+            if info.folded > 0 {
+                Button { setTakeExpanded(info.take, true) } label: {
+                    Label("\(info.folded)", systemImage: "square.stack.3d.up").lineLimit(1).fixedSize()
+                }
+                .buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)
+                .help("这一场定完了，被废的 \(info.folded) 张叠起来了。点开再看一遍")
+            } else if info.canFold {
+                Button { setTakeExpanded(info.take, false) } label: {
+                    Image(systemName: "rectangle.compress.vertical")
+                }
+                .buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)
+                .help("收起废片")
+            }
+            Spacer(minLength: 2)
+            if info.pending {
+                Button { acceptTake(info) } label: { Image(systemName: "checkmark") }
+                    .controlSize(.small)
+                    .fixedSize()
+                    .help("接受推荐：" + Self.acceptHelp(picks: info.picks, rejects: info.recRejects))
+                    .accessibilityLabel("接受推荐")
+            }
+            Button { pickTake(info.take, focus: focus(in: info.members)) } label: { Image(systemName: "rectangle.stack") }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .fixedSize()
+                .help((info.pending ? "挑选" : "复查") + "：整场并排上台细挑 (焦点在本场时按 C 也行)：点一张 = 只留它，⏎ 确认并跳下一组")
+                .accessibilityLabel(info.pending ? "挑选" : "复查")
+        }
+    }
+
+    /// 最短（最小一档缩略图的两张竖片）：场号 + 状态点，动作都在「⋯」里（右键也一样）。
+    private func takeHeaderTiny(_ info: TakeInfo) -> some View {
+        HStack(spacing: 5) {
+            takeTitleButton(info, count: false, time: false)
+            Circle().fill(info.pending ? AppPalette.warning : Color.green).frame(width: 7, height: 7)
+                .help(Self.takeStatusText(pending: info.pending, alive: info.alive, picks: info.picks.count))
+            Spacer(minLength: 0)
+            Menu {
+                takeMenuItems(info)
+            } label: {
+                Image(systemName: "ellipsis")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            // 中性灰：琥珀色留给选中和主按钮。
+            .tint(Color(white: 0.78))
+            .help("这一场：接受推荐、挑选、选中整场")
+            .accessibilityLabel("场 \(info.take) 的操作")
         }
     }
 
@@ -2324,6 +2556,11 @@ struct BatchView: View {
     private static func takeStatusText(pending: Bool, alive: Int, picks: Int) -> String {
         if pending { return "待处理 · \(alive) 张没淘汰" }
         return picks == 0 ? "已定" : "已定 · 精选 \(picks)"
+    }
+
+    /// 并排的小组里那个短的：只写「待处理 / 已定」。
+    private static func takeStatusShort(pending: Bool, picks: Int) -> String {
+        pending ? "待处理" : "已定"
     }
 
     /// 行头「接受推荐」的说明。单独拼：放在视图构建器里一长串 + 连接，CI 的 Xcode 16 类型检查会超时。

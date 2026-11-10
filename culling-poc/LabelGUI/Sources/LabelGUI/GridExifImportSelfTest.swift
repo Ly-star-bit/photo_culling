@@ -396,6 +396,8 @@ enum GridExifImportSelfTest {
         t.check(JustifiedRows.vertical(rows: cells, from: nil, direction: 1) == "p0", "↑ ↓：没有焦点 = 第一张")
         t.check(JustifiedRows.vertical(rows: cells, from: "不在网格里", direction: 1) == "p0", "↑ ↓：焦点那张被筛掉了 = 第一张")
 
+        shelfCases(t)
+
         // 宽高比从文件头读：横的、竖的各一张；读不出来用 2:3，不记（文件补上以后读得到）。
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("aspect-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -478,6 +480,75 @@ enum GridExifImportSelfTest {
         let took = clock.measure { for path in copies { _ = PhotoAspect.of(path: path) } }
         let micros = Double(took.components.attoseconds) / 1e12 / Double(max(1, copies.count))
         print(String(format: "     （读文件头：%.0f 微秒 / 张，%d 张）", micros, copies.count))
+    }
+
+    // MARK: - 按分组：短的场并排（TakeShelves，优化分析 2026-11-10 U2）
+
+    @MainActor
+    private static func shelfCases(_ t: Tally) {
+        let sp = JustifiedRows.spacing, pad = TakeShelves.pad, gap = TakeShelves.gap
+        let tall: CGFloat = 2.0 / 3.0
+        // 三场两张竖片 + 一场十张（一行放不下）+ 两场两张：1100 宽、行高 168。两张竖片的小组 = 112×2 + 6 + 两边 pad = 250。
+        let ten: [CGFloat] = [tall, tall, tall, 1.5, 1.5, 1.5, tall, tall, 1.5, 1.5]
+        let takes: [[CGFloat]] = [[tall, tall], [tall, tall], [tall, tall], ten, [tall, tall], [1.5, tall]]
+        let blocks = TakeShelves.pack(takes: takes, width: 1100, target: 168)
+        var order: [Int] = []
+        var shelves: [[TakeShelves.Placed]] = []
+        var soloRows: [JustifiedRows.Row] = []
+        for block in blocks {
+            switch block {
+            case .rows(let take, let rows):
+                order.append(take)
+                soloRows = rows
+            case .shelf(let placed):
+                order += placed.map(\.take)
+                shelves.append(placed)
+            }
+        }
+        t.check(order == [0, 1, 2, 3, 4, 5], "并排：每场正好在一块里，顺序不变（场号 = 时间）", "\(order)")
+        let firstShelf = shelves.first ?? []
+        let box = 112 * 2 + sp + 2 * pad
+        let xs = firstShelf.map(\.x)
+        t.check(blocks.count == 3 && xs == [0, box + gap, 2 * (box + gap)],
+                "并排：三场两张竖片排在一行里（以前各占一整行）", "\(blocks.count) 块 · x = \(xs)")
+        let natural = firstShelf.allSatisfy { $0.height == 168 && $0.widths == [112, 112] && $0.content == 112 * 2 + sp }
+        t.check(natural, "并排：小组里的照片还是原来的大小（目标行高、不拉伸）")
+        let soloFull = soloRows.count == 2 && soloRows.dropLast().allSatisfy { row in
+            abs(row.widths.reduce(0, +) + sp * CGFloat(row.widths.count - 1) - (1100 - 2 * pad)) < 0.5
+        }
+        t.check(soloFull, "并排：一行放不下的场自己占一块，照旧每一行排满", "\(soloRows.map(\.widths))")
+        let inside = shelves.allSatisfy { shelf in shelf.allSatisfy { $0.x + $0.content + 2 * pad <= 1100.5 } }
+        t.check(inside, "并排：一行里的小组都不出界")
+        // 放不下就换行：四场两张竖片、560 宽只放得下两个小组（250 + 10 + 250）。
+        let wrapped = TakeShelves.pack(takes: Array(repeating: [tall, tall], count: 4), width: 560, target: 168)
+        let perShelf = wrapped.map { block -> Int in
+            if case .shelf(let placed) = block { return placed.count }
+            return 0
+        }
+        t.check(perShelf == [2, 2], "并排：一行排不下就换行", "\(perShelf)")
+        // 很窄的小组（最小一档缩略图）内容宽度有下限，放得下组头。
+        let tiny = TakeShelves.pack(takes: [[0.5, 0.5]], width: 800, target: 108)
+        var tinyContent: CGFloat = 0
+        if case .shelf(let placed)? = tiny.first { tinyContent = placed.first?.content ?? 0 }
+        t.check(tinyContent == TakeShelves.minContent, "并排：很窄的小组内容宽度有下限（放得下组头）", "\(tinyContent)")
+        // ↑ ↓：并排的一行是一行，格子中点带着小组的位置；从下面那一块的第一行按 ↑ 落到上面一行里最近的那张。
+        let ids = takes.enumerated().map { index, take in take.indices.map { "t\(index)p\($0)" } }
+        let shelfCells = TakeShelves.cells(ids: ids, shelf: firstShelf)
+        let mids = shelfCells.map(\.mid)
+        let leftToRight: Bool = shelfCells.map(\.id) == ["t0p0", "t0p1", "t1p0", "t1p1", "t2p0", "t2p1"] && mids == mids.sorted()
+        let offset: Bool = mids.first == 56 && mids.count > 2 && mids[2] == box + gap + 56
+        t.check(leftToRight && offset, "并排：一行里的格子从左到右，中点带着小组的位置", "\(mids)")
+        let soloCells = soloRows.map { JustifiedRows.cells(ids: ids[3], row: $0) }
+        let rowsForNav = [shelfCells] + soloCells
+        let from = soloCells.first?.last
+        let want = from.flatMap { f in shelfCells.min { abs($0.mid - f.mid) < abs($1.mid - f.mid) }?.id }
+        let up = JustifiedRows.vertical(rows: rowsForNav, from: from?.id, direction: -1)
+        t.check(up != nil && up == want, "并排：从下面一场的第一行按 ↑，落到并排那一行里离得最近的照片", "\(String(describing: up))")
+        let down = JustifiedRows.vertical(rows: rowsForNav, from: "t1p0", direction: 1)
+        let anchor = box + gap + 56
+        let downWant = soloCells.first?.min { abs($0.mid - anchor) < abs($1.mid - anchor) }?.id
+        t.check(down != nil && down == downWant, "并排：从并排那一行按 ↓，落到下面一场第一行里离得最近的照片", "\(String(describing: down))")
+        t.check(TakeShelves.pack(takes: [], width: 1000, target: 100).isEmpty, "并排：没有多张的场 = 没有块")
     }
 
     // MARK: - 网格多选（S21）

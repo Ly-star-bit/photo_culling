@@ -117,6 +117,84 @@ enum JustifiedRows {
     }
 }
 
+// MARK: - 按分组：短的场并排
+
+/// 「按分组」里一场一个带边线的小组。以前每场独占一整行：两张的场右边空着八成，1440×900 一屏只放得下 3 场，几百场的婚礼
+/// 要滚一百多屏（优化分析 2026-11-10 U2）。现在一行放得下的场按原来的大小（目标行高、不拉伸）挨着排，排不下再换行；
+/// 一行放不下的场（照片多）照旧自己占一块、每一行排满。顺序不变（场号 = 时间顺序，从左到右、从上到下）。
+/// 纯算法（--ux-selftest 直接测），画在 BatchView。
+enum TakeShelves {
+    /// 小组里照片到边线的距离。
+    static let pad: CGFloat = 10
+    /// 并排的小组之间的空。
+    static let gap: CGFloat = 10
+    /// 小组内容最窄多少（放得下组头：选中框、场号、状态点、「⋯」）。
+    static let minContent: CGFloat = 132
+
+    /// 并排的一行里的一场。
+    struct Placed: Equatable {
+        /// 输入里的第几场。
+        let take: Int
+        /// 小组左边线离这一行左边多远。
+        let x: CGFloat
+        /// 小组内容的宽度（不含两边的 pad）。
+        let content: CGFloat
+        /// 每张的宽度。
+        let widths: [CGFloat]
+        let height: CGFloat
+    }
+
+    enum Block: Equatable {
+        /// 一行放不下的场：自己一块，里面照 JustifiedRows 分行。
+        case rows(take: Int, rows: [JustifiedRows.Row])
+        /// 一行里并排的几场。
+        case shelf([Placed])
+    }
+
+    /// `takes` = 每场各张的宽高比，`width` = 一行能用的宽度（小组连边线、pad 都得在里面），`target` = 行高。
+    static func pack(takes: [[CGFloat]], width: CGFloat, target: CGFloat) -> [Block] {
+        guard width > 1, target > 1 else { return [] }
+        var blocks: [Block] = []
+        var shelf: [Placed] = []
+        var x: CGFloat = 0
+        func flush() {
+            if !shelf.isEmpty { blocks.append(.shelf(shelf)) }
+            shelf = []
+            x = 0
+        }
+        for (index, raw) in takes.enumerated() where !raw.isEmpty {
+            let widths = raw.map { JustifiedRows.clamped($0) * target }
+            let natural = widths.reduce(0, +) + JustifiedRows.spacing * CGFloat(widths.count - 1)
+            if natural + 2 * pad > width {
+                flush()
+                let rows = JustifiedRows.pack(aspects: raw, width: max(2, width - 2 * pad), target: target)
+                blocks.append(.rows(take: index, rows: rows))
+                continue
+            }
+            let content = max(natural, minContent)
+            let box = content + 2 * pad
+            if !shelf.isEmpty, x + box > width { flush() }
+            shelf.append(Placed(take: index, x: x, content: content, widths: widths, height: target))
+            x += box + gap
+        }
+        flush()
+        return blocks
+    }
+
+    /// 并排的一行里每一格的中点（↑ ↓ 用；x 从这一行里照片能到的最左边算起，和独占一块的场、单张区的行同一个原点）。
+    static func cells(ids: [[String]], shelf: [Placed]) -> [JustifiedRows.Cell] {
+        var out: [JustifiedRows.Cell] = []
+        for placed in shelf {
+            var x = placed.x
+            for (k, width) in placed.widths.enumerated() {
+                out.append(JustifiedRows.Cell(id: ids[placed.take][k], mid: x + width / 2))
+                x += width + JustifiedRows.spacing
+            }
+        }
+        return out
+    }
+}
+
 // MARK: - 分行结果缓存
 
 /// 分行结果按「分区、照片 id 序列、行宽、目标行高、比例的版本」记住（优化分析 2026-11-10 R3）。以前每按一下方向键，批量页
