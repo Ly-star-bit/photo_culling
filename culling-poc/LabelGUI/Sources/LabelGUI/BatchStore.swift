@@ -204,7 +204,9 @@ final class OutputCollector: @unchecked Sendable {
 @MainActor
 final class BatchStore: ObservableObject {
     @Published var photoDir: URL?
-    @Published var items: [BatchItem] = []
+    @Published var items: [BatchItem] = [] { didSet { itemsRevision &+= 1 } }
+    /// items 被整份换过几回。改判的局部重算（applyOverrideChange）拿它确认 derived 里的下标还指着现在这份 items。
+    private var itemsRevision = 0
     @Published var isRunning = false
     /// isRunning 里具体是哪两种（存储卡确认框据此决定：分析可以「停下并导入」，另一张卡在导就等它）。
     /// 只有 runAnalysis 写（离屏快照 --card-ui --running 也写，假装在分析）。
@@ -656,6 +658,113 @@ final class BatchStore: ObservableObject {
         /// shows just these instead of implying the line kills burst frames.
         var faceQualityAbsoluteValues: [Double] = []
         var indexByID: [String: Int] = [:]
+        /// 每一场自己的那份小计（张数、理由、待处理、场内前三、推荐）：整场的数是它们加起来。改判只动几场，
+        /// 局部重算把那几场的旧小计减掉、新小计加上（applyOverrideChange）。
+        var takeStats: [Int: TakeStat] = [:]
+        /// 场号 → takeRows 里第几行。
+        var takeSlot: [Int: Int] = [:]
+        /// 近似重复组 → 成员下标（items 顺序）。
+        var burstIndices: [Int: [Int]] = [:]
+        /// 场号 → 时间轴上的章节。
+        var takeChapter: [Int: Int] = [:]
+    }
+
+    /// 一场的小计。
+    struct TakeStat: Equatable {
+        var reject = 0, usable = 0, pick = 0
+        var reasons: [String: Int] = [:]
+        var autoReject = 0
+        var clientPick = 0
+        var clientPickReject = 0
+        var pending = false
+        /// 场内前三（没淘汰的 ≥ 2 张才排）。
+        var ranks: [String] = []
+        /// 「接受全部推荐」会动到这一场吗、会多出几张废片。
+        var recTake = 0
+        var recRejects = 0
+    }
+
+    /// 一场的小计。`indices` 要按 items 顺序（升序）：同分时谁排前面跟着它走，整场重算和局部重算得是同一个顺序。
+    private func takeStat(_ indices: [Int], in items: [BatchItem]) -> TakeStat {
+        var s = TakeStat()
+        var alive: [Int] = []
+        for idx in indices {
+            let item = items[idx]
+            switch item.verdict {
+            case .reject: s.reject += 1
+            case .usable: s.usable += 1
+            case .pick: s.pick += 1
+            }
+            for reason in item.rejectReasons { s.reasons[reason, default: 0] += 1 }
+            if item.verdict == .reject, overrides[item.id] == nil { s.autoReject += 1 }
+            if clientPicks.contains(item.id) {
+                s.clientPick += 1
+                if item.verdict == .reject { s.clientPickReject += 1 }
+            }
+            if item.verdict != .reject { alive.append(idx) }
+        }
+        s.pending = alive.count >= 2 && alive.contains { overrides[items[$0].id] == nil }
+        if alive.count > 1 {
+            let ranked = alive.sorted { Self.scoreKey(items[$0]) > Self.scoreKey(items[$1]) }
+            s.ranks = ranked.prefix(3).map { items[$0].id }
+        }
+        if alive.contains(where: { items[$0].verdict == .pick }) {
+            let losers = alive.filter { items[$0].verdict == .usable && overrides[items[$0].id] == nil }.count
+            if losers > 0 { s.recTake = 1; s.recRejects = losers }
+        }
+        return s
+    }
+
+    /// 把一场的小计加进（sign = 1）或减出（-1）整场的数。
+    private static func fold(_ s: TakeStat, into d: inout Derived, sign: Int) {
+        d.verdictCounts.reject += sign * s.reject
+        d.verdictCounts.usable += sign * s.usable
+        d.verdictCounts.pick += sign * s.pick
+        for (reason, n) in s.reasons {
+            let left = (d.reasonCounts[reason] ?? 0) + sign * n
+            d.reasonCounts[reason] = left == 0 ? nil : left
+        }
+        d.autoRejectCount += sign * s.autoReject
+        d.clientPickCount += sign * s.clientPick
+        d.clientPickRejectCount += sign * s.clientPickReject
+        d.recommendationSummary.takes += sign * s.recTake
+        d.recommendationSummary.rejects += sign * s.recRejects
+        if sign > 0 {
+            for (i, id) in s.ranks.enumerated() { d.takeRank[id] = i + 1 }
+        } else {
+            for id in s.ranks { d.takeRank[id] = nil }
+        }
+    }
+
+    /// 跟着判决变的那几样里还是整场扫一遍的（都轻）：待处理的场、人工改判数、三个分区、章节条、阈值建议、XMP 待更新。
+    private func finishDerived(_ d: inout Derived) {
+        d.pendingTakes = d.takeRows.compactMap { d.takeStats[$0.take]?.pending == true ? $0.take : nil }
+        d.pendingTakeCount = d.pendingTakes.count
+        d.manualOverrideCount = overrides.keys.filter { !acceptedIDs.contains($0) }.count
+        d.aiOverrideCount = aiOverrides.keys.filter { isManual($0) }.count
+        // 下面几趟都是整场扫：拿一份本地的（每次读 @Published 的 items 都要过一遍包装），按下标就地读字段，不整张拷出来。
+        let items = self.items
+        var rejects: [Int] = [], usables: [Int] = [], picks: [Int] = []
+        for idx in items.indices {
+            switch items[idx].verdict {
+            case .reject: rejects.append(idx)
+            case .usable: usables.append(idx)
+            case .pick: picks.append(idx)
+            }
+        }
+        var byVerdict: [Verdict: [Int]] = [:]
+        if !rejects.isEmpty { byVerdict[.reject] = rejects }
+        if !usables.isEmpty { byVerdict[.usable] = usables }
+        if !picks.isEmpty { byVerdict[.pick] = picks }
+        d.byVerdict = byVerdict
+        var pendingByChapter: [Int: Int] = [:]
+        for take in d.pendingTakes {
+            if let chapter = d.takeChapter[take] { pendingByChapter[chapter, default: 0] += 1 }
+        }
+        (d.chapterSegments, d.chapterWarnings) = Self.chapterSummary(items, minKeepers: minKeepersPerChapter,
+                                                                     pendingByChapter: pendingByChapter)
+        d.thresholdSuggestions = computeThresholdSuggestions()
+        d.xmpStaleCount = xmpStale(in: items)
     }
 
     @Published private(set) var derived = Derived()
@@ -1002,52 +1111,21 @@ final class BatchStore: ObservableObject {
 
     private func rebuildDerived(groupQCount: [Int: Int]) {
         var d = Derived()
-        var r = 0, u = 0, p = 0
         d.indexByID.reserveCapacity(items.count)
         for (idx, item) in items.enumerated() {
             d.indexByID[item.id] = idx
-            switch item.verdict {
-            case .reject: r += 1
-            case .usable: u += 1
-            case .pick: p += 1
-            }
-            for reason in item.rejectReasons { d.reasonCounts[reason, default: 0] += 1 }
             if isBorderline(item) { d.borderlineCount += 1 }
-            if item.verdict == .reject, overrides[item.id] == nil { d.autoRejectCount += 1 }
-            if clientPicks.contains(item.id) {
-                d.clientPickCount += 1
-                if item.verdict == .reject { d.clientPickRejectCount += 1 }
-            }
             if let q = item.faceQuality, (groupQCount[item.burstGroup] ?? 0) < 2 {
                 d.faceQualityAbsoluteValues.append(q)
             }
+            d.burstIndices[item.burstGroup, default: []].append(idx)
+            // 时间轴上每章标「还有几场连拍没定」：场不会跨章（场内相邻两张 ≤ 几十秒，章节之间
+            // 隔着 15 分钟以上），所以拿任意一张成员的章节就是整场的章节。
+            d.takeChapter[item.take] = Self.timelineChapter(of: item)
         }
-        var aliveByTake: [Int: [BatchItem]] = [:]
-        for item in items where item.verdict != .reject { aliveByTake[item.take, default: []].append(item) }
-        d.pendingTakes = aliveByTake.filter { isPendingTake(alive: $0.value) }.map(\.key).sorted()
-        d.pendingTakeCount = d.pendingTakes.count
-        for (_, alive) in aliveByTake where alive.count > 1 {
-            let ranked = alive.sorted { Self.scoreKey($0) > Self.scoreKey($1) }
-            for (i, item) in ranked.prefix(3).enumerated() { d.takeRank[item.id] = i + 1 }
-        }
-        d.verdictCounts = (r, u, p)
-        d.manualOverrideCount = overrides.keys.filter { !acceptedIDs.contains($0) }.count
-        d.aiOverrideCount = aiOverrides.keys.filter { isManual($0) }.count
-        for (idx, item) in items.enumerated() { d.byVerdict[item.verdict, default: []].append(idx) }
         d.sharpnessBins = Self.histogramBins(items.map(\.sharpness), range: Self.sharpnessHistRange, sqrtScale: false)
         d.exposureBins = Self.histogramBins(items.map(\.worstClipPct), range: Self.exposureHistRange, sqrtScale: true)
         d.faceQualityBins = Self.histogramBins(d.faceQualityAbsoluteValues, range: Self.faceQualityHistRange, sqrtScale: false)
-        // 时间轴上每章标「还有几场连拍没定」：场不会跨章（场内相邻两张 ≤ 几十秒，章节之间
-        // 隔着 15 分钟以上），所以拿任意一张成员的章节就是整场的章节。
-        var takeChapter: [Int: Int] = [:]
-        for item in items { takeChapter[item.take] = Self.timelineChapter(of: item) }
-        var pendingByChapter: [Int: Int] = [:]
-        for take in d.pendingTakes {
-            if let chapter = takeChapter[take] { pendingByChapter[chapter, default: 0] += 1 }
-        }
-        (d.chapterSegments, d.chapterWarnings) = Self.chapterSummary(items, minKeepers: minKeepersPerChapter,
-                                                                     pendingByChapter: pendingByChapter)
-        d.thresholdSuggestions = computeThresholdSuggestions()
         let order = items.indices.sorted { a, b in
             let ia = items[a], ib = items[b]
             if ia.take != ib.take { return ia.take < ib.take }
@@ -1060,14 +1138,30 @@ final class BatchStore: ObservableObject {
             else { rows.append((items[idx].take, [idx])) }
         }
         d.takeRows = rows
-        var recTakes = 0, recRejects = 0
-        for (_, alive) in aliveByTake where alive.contains(where: { $0.verdict == .pick }) {
-            let losers = alive.filter { $0.verdict == .usable && overrides[$0.id] == nil }.count
-            if losers > 0 { recTakes += 1; recRejects += losers }
+        for (slot, row) in rows.enumerated() {
+            d.takeSlot[row.take] = slot
+            let stat = takeStat(row.indices.sorted(), in: items)
+            d.takeStats[row.take] = stat
+            Self.fold(stat, into: &d, sign: 1)
         }
-        d.recommendationSummary = (recTakes, recRejects)
-        d.xmpStaleCount = xmpStale(in: items)
+        finishDerived(&d)
         derived = d
+        derivedStamp = currentStamp
+    }
+
+    /// derived 是照哪一份 items、哪一组线算的。对不上 = 中间有东西变了还没整场重算，改判就不走局部重算。
+    private struct DerivedStamp: Equatable {
+        var itemsRevision = -1
+        var sharpness = 0.0, exposure = 0.0, faceQuality = 0.0
+        var dedupe = false
+        var minKeepers = 0
+        var clientPicks = 0
+    }
+    private var derivedStamp = DerivedStamp()
+    private var currentStamp: DerivedStamp {
+        DerivedStamp(itemsRevision: itemsRevision, sharpness: sharpnessThreshold, exposure: exposureThreshold,
+                     faceQuality: faceQualityThreshold, dedupe: rejectBurstDuplicates,
+                     minKeepers: minKeepersPerChapter, clientPicks: clientPicks.count)
     }
 
     // MARK: - Sort order (拍摄时间 / 文件名)
@@ -2416,7 +2510,7 @@ final class BatchStore: ObservableObject {
             aiOverrides[id] = ai
         }
         saveOverrides()  // 出处（aiOverrides）一起写
-        applyThresholds()
+        applyOverrideChange(last.map(\.id))
         return last.map(\.id)
     }
 
@@ -2433,7 +2527,7 @@ final class BatchStore: ObservableObject {
         }
         dropAIMarks(ids)
         saveOverrides()
-        applyThresholds()
+        applyOverrideChange(ids)
     }
 
     /// 实时桥（AI 的 cull_set_verdicts）改判：一组判决（nil = 恢复自动）一次写进去，一条撤销记录、一次保存、一次重算。
@@ -2457,7 +2551,7 @@ final class BatchStore: ObservableObject {
             aiOverrides[id] = AIOverride(opID: opID, tool: tool, at: now, previous: first, aiVerdict: verdict.rawValue)
         }
         saveOverrides()  // 出处（aiOverrides）一起写
-        applyThresholds()
+        applyOverrideChange(changes.map(\.id))
     }
 
     /// 连拍组定案：`keepers` 留下，`candidates` 里其余的全部设为废片。
@@ -2481,7 +2575,7 @@ final class BatchStore: ObservableObject {
         }
         dropAIMarks(all)
         saveOverrides()
-        applyThresholds()
+        applyOverrideChange(all)
     }
 
     /// 一组判决一次写进去：一条撤销记录、一次保存、一次重算。连拍挑选的 ⏎、分组行的
@@ -2502,7 +2596,7 @@ final class BatchStore: ObservableObject {
         }
         dropAIMarks(ids)
         saveOverrides()
-        applyThresholds()
+        applyOverrideChange(ids)
     }
 
     /// 一场的「推荐结果」：现在的精选留（自动提名的或你按 1 的），你手动标过可用的留作可用，
@@ -3797,8 +3891,12 @@ final class BatchStore: ObservableObject {
     /// accident, a few extra keepers is just waste.
     private static func chapterSummary(_ items: [BatchItem], minKeepers: Int,
                                        pendingByChapter: [Int: Int]) -> ([ChapterSegment], [String]) {
-        var byChapter: [Int: [BatchItem]] = [:]
-        for item in items { byChapter[timelineChapter(of: item), default: []].append(item) }
+        // 按下标分章、就地读字段（以前把每张 BatchItem 拷进各章的数组再拷出来，8000 张的场次改一次判 14 ms 花在这）。
+        var byChapter: [Int: [Int]] = [:]
+        for idx in items.indices {
+            let chapter = items[idx].captureTime == nil ? ChapterSegment.undatedID : items[idx].chapter
+            byChapter[chapter, default: []].append(idx)
+        }
         guard byChapter.count > 1 else { return ([], []) }
         var segments: [ChapterSegment] = []
         var warnings: [String] = []
@@ -3809,24 +3907,27 @@ final class BatchStore: ObservableObject {
         }
         for chapter in order {
             let members = byChapter[chapter]!
-            let times = members.compactMap(\.captureTime)
-            let start = times.min(), end = times.max()
-            let range = start.map { "\(chapterTimeFormatter.string(from: $0))-\(chapterTimeFormatter.string(from: end!))" } ?? ""
+            var start: Date?, end: Date?
             var pick = 0, usable = 0, reject = 0
             // 代表照片：线性挑前 4（每次滑杆都会重算，别为它整章排序）。
-            var top: [BatchItem] = []
-            func better(_ a: BatchItem, _ b: BatchItem) -> Bool {
-                let ra = coverRank(a.verdict), rb = coverRank(b.verdict)
-                return ra != rb ? ra > rb : scoreKey(a) > scoreKey(b)
+            var top: [Int] = []
+            func better(_ a: Int, _ b: Int) -> Bool {
+                let ra = coverRank(items[a].verdict), rb = coverRank(items[b].verdict)
+                return ra != rb ? ra > rb : scoreKey(items[a]) > scoreKey(items[b])
             }
             for member in members {
-                switch member.verdict {
+                if let time = items[member].captureTime {
+                    if start == nil || time < start! { start = time }
+                    if end == nil || time > end! { end = time }
+                }
+                switch items[member].verdict {
                 case .pick: pick += 1
                 case .usable: usable += 1
                 case .reject: reject += 1
                 }
                 // 每场最多一张：前 4 名很可能是同一个连拍的 4 帧，那样卡片上四张长得一样。
-                if let same = top.firstIndex(where: { $0.take == member.take }) {
+                let take = items[member].take
+                if let same = top.firstIndex(where: { items[$0].take == take }) {
                     guard better(member, top[same]) else { continue }
                     top.remove(at: same)
                 } else if top.count >= 4, !better(member, top[top.count - 1]) {
@@ -3836,6 +3937,7 @@ final class BatchStore: ObservableObject {
                 top.insert(member, at: at)
                 if top.count > 4 { top.removeLast() }
             }
+            let range = start.map { "\(chapterTimeFormatter.string(from: $0))-\(chapterTimeFormatter.string(from: end!))" } ?? ""
             let keepers = pick + usable
             let undated = chapter == ChapterSegment.undatedID
             let segment = ChapterSegment(chapter: chapter, count: members.count,
@@ -3844,7 +3946,7 @@ final class BatchStore: ObservableObject {
                                          // 无时间的那堆不是一个场景，「整章全灭」的漏交保护不适用。
                                          underMin: !undated && keepers > 0 && keepers < minKeepers,
                                          pendingTakes: pendingByChapter[chapter] ?? 0,
-                                         covers: top.map(\.previewPath))
+                                         covers: top.map { items[$0].previewPath })
             segments.append(segment)
             guard !undated else { continue }
             let where_ = "章节\(chapter + 1)\(range.isEmpty ? "" : " (\(range))")"
@@ -4163,7 +4265,6 @@ final class BatchStore: ObservableObject {
             }
         }
 
-        var rejected = Set<String>()
         for i in updated.indices {
             let group = updated[i].burstGroup
             let earCount = groupEarCount[group] ?? 0
@@ -4239,7 +4340,6 @@ final class BatchStore: ObservableObject {
             let auto: Verdict = reasons.isEmpty ? .usable : .reject
             let effective = overrides[updated[i].id] ?? auto
             updated[i].verdict = effective
-            if effective == .reject { rejected.insert(updated[i].id) }
         }
 
         // 两趟，作用在两个不同的层上 —— 别合并回一趟：
@@ -4255,52 +4355,148 @@ final class BatchStore: ObservableObject {
         // 人工改判过的一律不碰（手判永远压过规则）。
         if rejectBurstDuplicates {
             var dupGroups: [Int: [Int]] = [:]
-            for (idx, item) in updated.enumerated() where !rejected.contains(item.id) {
+            for (idx, item) in updated.enumerated() where item.verdict != .reject {
                 dupGroups[item.burstGroup, default: []].append(idx)
             }
-            for (_, indices) in dupGroups where indices.count >= 2 {
-                // 组里有人工精选就以它为准，不另外自动挑一张。
-                let manualPicks = indices.filter { overrides[updated[$0].id] == .pick }
-                var winners = Set(manualPicks)
-                if manualPicks.isEmpty,
-                   let best = Self.bestIndex(indices.filter { overrides[updated[$0].id] == nil },
-                                             in: updated) {
-                    winners.insert(best)
-                }
-                for idx in indices where !winners.contains(idx) && overrides[updated[idx].id] == nil {
-                    // RAW、JPG 分卡存 / 分文件夹放时同一帧成了两张（审查 M01）：组里有它那张 JPG 时 RAW 不算「连拍重复」，
-                    // 不然「移到废纸篓」会把这一帧唯一的 RAW 挪走。只护 RAW，那张 JPG 照常去重。
-                    if indices.contains(where: { $0 != idx && Self.isSplitTwin(raw: updated[idx], of: updated[$0]) }) { continue }
-                    updated[idx].rejectReasons.append("连拍重复")
-                    updated[idx].verdict = .reject
-                    rejected.insert(updated[idx].id)
-                }
-            }
+            for (_, indices) in dupGroups { dedupe(indices, in: &updated) }
         }
 
         // B. 精选提名，按「场」，且只在还剩 2 张以上存活时 —— 精选必须是赢过真实
         // 对手来的，不能只是没人跟它抢。
         var takeGroups: [Int: [Int]] = [:]
-        for (idx, item) in updated.enumerated() where !rejected.contains(item.id) {
+        for (idx, item) in updated.enumerated() where item.verdict != .reject {
             takeGroups[item.take, default: []].append(idx)
         }
-        for (_, indices) in takeGroups where indices.count >= 2 {
-            // 按「帧」数对手：分卡存 / 分文件夹放的同一帧（RAW 和它那张 JPG，审查 M01）只算一张 —— 去重护住 RAW 以后，
-            // 单帧的场里剩下这一对，不该提出一张没有真实对手的精选。只用来数，候选还是这一场全部存活的照片。
-            let frames = indices.filter { idx in
-                !indices.contains { $0 != idx && Self.isSplitTwin(raw: updated[idx], of: updated[$0]) }
-            }
-            guard frames.count >= 2 else { continue }
-            // 场里有人工精选就让给它，不在旁边再自动挑一张。
-            if indices.contains(where: { overrides[updated[$0].id] == .pick }) { continue }
-            if let best = Self.bestIndex(indices.filter { overrides[updated[$0].id] == nil },
-                                         in: updated) {
-                updated[best].verdict = .pick
-            }
-        }
+        for (_, indices) in takeGroups { nominate(indices, in: &updated) }
 
         items = updated
         rebuildDerived(groupQCount: groupQCount)
+    }
+
+    /// 一个近似重复组的去重。`indices` = 组里还没被淘汰的（items 顺序）。
+    private func dedupe(_ indices: [Int], in updated: inout [BatchItem]) {
+        guard indices.count >= 2 else { return }
+        // 组里有人工精选就以它为准，不另外自动挑一张。
+        let manualPicks = indices.filter { overrides[updated[$0].id] == .pick }
+        var winners = Set(manualPicks)
+        if manualPicks.isEmpty,
+           let best = Self.bestIndex(indices.filter { overrides[updated[$0].id] == nil }, in: updated) {
+            winners.insert(best)
+        }
+        for idx in indices where !winners.contains(idx) && overrides[updated[idx].id] == nil {
+            // RAW、JPG 分卡存 / 分文件夹放时同一帧成了两张（审查 M01）：组里有它那张 JPG 时 RAW 不算「连拍重复」，
+            // 不然「移到废纸篓」会把这一帧唯一的 RAW 挪走。只护 RAW，那张 JPG 照常去重。
+            if indices.contains(where: { $0 != idx && Self.isSplitTwin(raw: updated[idx], of: updated[$0]) }) { continue }
+            updated[idx].rejectReasons.append("连拍重复")
+            updated[idx].verdict = .reject
+        }
+    }
+
+    /// 一场的精选提名。`indices` = 这一场还没被淘汰的（items 顺序）。
+    private func nominate(_ indices: [Int], in updated: inout [BatchItem]) {
+        guard indices.count >= 2 else { return }
+        // 按「帧」数对手：分卡存 / 分文件夹放的同一帧（RAW 和它那张 JPG，审查 M01）只算一张 —— 去重护住 RAW 以后，
+        // 单帧的场里剩下这一对，不该提出一张没有真实对手的精选。只用来数，候选还是这一场全部存活的照片。
+        let frames = indices.filter { idx in
+            !indices.contains { $0 != idx && Self.isSplitTwin(raw: updated[idx], of: updated[$0]) }
+        }
+        guard frames.count >= 2 else { return }
+        // 场里有人工精选就让给它，不在旁边再自动挑一张。
+        if indices.contains(where: { overrides[updated[$0].id] == .pick }) { return }
+        if let best = Self.bestIndex(indices.filter { overrides[updated[$0].id] == nil }, in: updated) {
+            updated[best].verdict = .pick
+        }
+    }
+
+    // MARK: - 改判的局部重算
+
+    /// 无头运行（自检、冒烟、门禁）时每次局部重算完再整场重算一遍对账，对不上就退出（--perf 量手感时关掉）。
+    static var verifyOverrideFastPath = AppRuntime.headless
+    /// 局部重算走了几回（自检看它确实走到了）。
+    private(set) var overrideFastPathRuns = 0
+
+    /// 只有人工改判变了（overrides / acceptedIDs / aiOverrides）时的重算。以前改一张也整场重算（8000 张约 90 ms）。
+    /// 一张照片的理由（闭眼、虚焦…）只看它自己和线，和改判无关；改判能牵动的只有两样：它那个近似重复组谁被去重、
+    /// 它那一场（和被去重牵到的场）提名谁。所以只重算这几组、这几场，其余照片原样不动；derived 里按场的小计换掉这几场的。
+    /// derived 不是照现在这份 items 和线算的（derivedStamp 对不上）就老老实实整场重算。
+    private func applyOverrideChange(_ ids: some Collection<String>) {
+        guard derivedStamp == currentStamp, derived.indexByID.count == items.count else {
+            applyThresholds()
+            return
+        }
+        var d = derived
+        var updated = items
+        var groups = Set<Int>(), takes = Set<Int>()
+        for id in ids {
+            guard let idx = d.indexByID[id], updated.indices.contains(idx), updated[idx].id == id else { continue }
+            groups.insert(updated[idx].burstGroup)
+            takes.insert(updated[idx].take)
+        }
+        func auto(_ item: BatchItem) -> Verdict {
+            overrides[item.id] ?? (item.rejectReasons.isEmpty ? .usable : .reject)
+        }
+        // 这几个近似重复组：去掉上次去重贴的理由，回到去重之前，再去重一次。
+        var inGroups = Set<Int>()
+        for group in groups {
+            let members = d.burstIndices[group] ?? []
+            for idx in members {
+                inGroups.insert(idx)
+                takes.insert(updated[idx].take)
+                if updated[idx].rejectReasons.contains("连拍重复") {
+                    updated[idx].rejectReasons.removeAll { $0 == "连拍重复" }
+                }
+                updated[idx].verdict = auto(updated[idx])
+            }
+            if rejectBurstDuplicates {
+                dedupe(members.filter { updated[$0].verdict != .reject }, in: &updated)
+            }
+        }
+        // 牵到的场：组外的照片去重结果没变（理由还在），只把上次提名的精选放回去，再提名一次。
+        for take in takes {
+            guard let slot = d.takeSlot[take] else { continue }
+            let members = d.takeRows[slot].indices.sorted()
+            for idx in members where !inGroups.contains(idx) { updated[idx].verdict = auto(updated[idx]) }
+            nominate(members.filter { updated[$0].verdict != .reject }, in: &updated)
+            if let old = d.takeStats[take] { Self.fold(old, into: &d, sign: -1) }
+            let stat = takeStat(members, in: updated)
+            d.takeStats[take] = stat
+            Self.fold(stat, into: &d, sign: 1)
+        }
+        items = updated
+        finishDerived(&d)
+        derived = d
+        derivedStamp = currentStamp
+        overrideFastPathRuns += 1
+
+        if Self.verifyOverrideFastPath {
+            let fastItems = items, fast = derived
+            applyThresholds()
+            if let diff = Self.fastPathDiff(fastItems, fast, items, derived) {
+                FileHandle.standardError.write("改判局部重算和整场重算对不上：\(diff)\n".data(using: .utf8)!)
+                exit(70)
+            }
+        }
+    }
+
+    private static func fastPathDiff(_ a: [BatchItem], _ da: Derived, _ b: [BatchItem], _ db: Derived) -> String? {
+        guard a.count == b.count else { return "张数 \(a.count) / \(b.count)" }
+        for i in a.indices where a[i].verdict != b[i].verdict || a[i].rejectReasons != b[i].rejectReasons {
+            return "\(a[i].id)：\(a[i].verdict.rawValue) \(a[i].rejectReasons) / \(b[i].verdict.rawValue) \(b[i].rejectReasons)"
+        }
+        if da.verdictCounts != db.verdictCounts { return "verdictCounts \(da.verdictCounts) / \(db.verdictCounts)" }
+        if da.reasonCounts != db.reasonCounts { return "reasonCounts \(da.reasonCounts) / \(db.reasonCounts)" }
+        if da.pendingTakes != db.pendingTakes { return "pendingTakes" }
+        if da.takeRank != db.takeRank { return "takeRank" }
+        if da.takeStats != db.takeStats { return "takeStats" }
+        if da.recommendationSummary != db.recommendationSummary { return "recommendationSummary" }
+        if da.byVerdict != db.byVerdict { return "byVerdict" }
+        if da.autoRejectCount != db.autoRejectCount { return "autoRejectCount" }
+        if da.manualOverrideCount != db.manualOverrideCount || da.aiOverrideCount != db.aiOverrideCount { return "overrideCount" }
+        if da.clientPickCount != db.clientPickCount || da.clientPickRejectCount != db.clientPickRejectCount { return "clientPick" }
+        if da.borderlineCount != db.borderlineCount { return "borderline" }
+        if da.chapterSegments != db.chapterSegments || da.chapterWarnings != db.chapterWarnings { return "chapters" }
+        if da.xmpStaleCount != db.xmpStaleCount { return "xmpStale" }
+        return nil
     }
 
     // MARK: - 接受全部推荐（Aftershoot 的一键过）
@@ -4402,11 +4598,17 @@ final class BatchStore: ObservableObject {
     /// 有一张锐度 20 的纪念照，建议就变成"降到 15"，按这个拧全场虚焦全放进来。
     /// AI 经实时桥放行的（aiOverrides）也不算：那是模型的判断，不是你在纠正滑杆。
     private func computeThresholdSuggestions() -> [ThresholdSuggestion] {
-        func released(_ reason: String) -> [BatchItem] {
-            items.filter { item in
-                item.rejectReasons.contains(reason) && overrides[item.id].map { $0 != .reject } == true
-                    && !acceptedIDs.contains(item.id) && aiOverrides[item.id] == nil
+        // 整场只扫一遍、就地读（每次改判都会走到这）：先挑出「带着理由、又被你亲手放行」的那几张，再按理由分。
+        let items = self.items
+        var freed: [BatchItem] = []
+        for idx in items.indices where !items[idx].rejectReasons.isEmpty {
+            let id = items[idx].id
+            if overrides[id].map({ $0 != .reject }) == true, !acceptedIDs.contains(id), aiOverrides[id] == nil {
+                freed.append(items[idx])
             }
+        }
+        func released(_ reason: String) -> [BatchItem] {
+            freed.filter { $0.rejectReasons.contains(reason) }
         }
         /// 排好序的值里，覆盖 ≥75% 的那个分位点。`lineIsMinimum` = 这条线是下限
         /// （锐度/人脸质量：值 ≥ 线才放行），否则是上限（曝光：值 ≤ 线才放行）。

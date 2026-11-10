@@ -45,6 +45,7 @@ enum CullMCPSelfTest {
         deliveredNoteChecks(check)
         provenanceChecks(check, sessionDir: sessionDir)
         sceneChecks(check)
+        overrideFuzzChecks(check)
         for f in failures { print("FAIL " + f) }
         if failures.isEmpty {
             print("选片 MCP 自检：\(total) 条检查全部通过")
@@ -55,6 +56,48 @@ enum CullMCPSelfTest {
     }
 
     typealias Check = (Bool, @autoclosure () -> String) -> Void
+
+    /// 改判的局部重算（BatchStore.applyOverrideChange）：乱改 600 步（单张、多张、定案、接受推荐、恢复自动、撤销，中途拨
+    /// 去重开关和锐度线），无头时每一步局部重算完都会整场重算一遍对账，对不上进程直接退出 70 —— 能跑到这里的检查就是都对上了。
+    static func overrideFuzzChecks(_ check: Check) {
+        let store = open()
+        let ids = store.items.map(\.id)
+        guard ids.count >= 10, BatchStore.verifyOverrideFastPath else {
+            check(false, "局部重算对账：fixture 不到 10 张或对账没开")
+            return
+        }
+        var seed: UInt64 = 0x9E3779B97F4A7C15
+        func next(_ n: Int) -> Int {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Int((seed >> 33) % UInt64(n))
+        }
+        let verdicts: [Verdict?] = [.pick, .usable, .reject, nil]
+        let before = store.overrideFastPathRuns
+        for step in 0..<600 {
+            if step % 97 == 40 { store.rejectBurstDuplicates.toggle() }
+            if step % 151 == 75 { store.sharpnessThreshold += step % 2 == 0 ? 10 : -10 }
+            switch next(8) {
+            case 0, 1, 2:
+                store.setOverride(ids[next(ids.count)], verdicts[next(4)])
+            case 3:
+                let some = (0..<(1 + next(5))).map { _ in ids[next(ids.count)] }
+                store.setOverrideBatch(Set(some), verdicts[next(4)])
+            case 4:
+                let take = store.items[next(ids.count)].take
+                let members = store.items.filter { $0.take == take }.map(\.id)
+                store.keepOnly([members[next(members.count)]], among: members)
+            case 5:
+                var changes: [String: Verdict] = [:]
+                for _ in 0..<(1 + next(4)) { changes[ids[next(ids.count)]] = verdicts[next(3)]! }
+                store.applyOverrides(changes, accepted: next(2) == 0)
+            default:
+                store.undoLastOverride()
+            }
+        }
+        check(store.overrideFastPathRuns - before >= 400, "局部重算对账：600 步里只走了 \(store.overrideFastPathRuns - before) 回局部重算")
+        let counts = store.verdictCounts
+        check(counts.reject + counts.usable + counts.pick == ids.count, "局部重算对账：三个判决加起来不是 \(ids.count) 张")
+    }
 
     static func open() -> BatchStore {
         let store = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))

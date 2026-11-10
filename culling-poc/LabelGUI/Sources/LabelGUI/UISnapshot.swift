@@ -274,6 +274,8 @@ enum BatchUISnapshot {
         print("界面快照 \(Int(size.width))x\(Int(size.height)) · \(store.items.count) 张 · 章节 \(store.chapterSegments.count) · \(out.path)")
         // 截完图再量：按键会改焦点、改判决（数据目录本来就是临时的那份），截图照旧是没按之前的样子。
         if let scenario = option("--perf") {
+            // 量的是用户按下去那一下：无头时默认开着的「局部重算完再整场对一遍账」会把整场重算算进来。
+            BatchStore.verifyOverrideFastPath = false
             BatchPerf.run(scenario, store: store, viewport: viewport, spin: spin)
         }
         exit(0)
