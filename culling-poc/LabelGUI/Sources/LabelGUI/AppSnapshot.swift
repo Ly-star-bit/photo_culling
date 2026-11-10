@@ -8,6 +8,7 @@ import AppKit
 /// 和 --batch-ui / --collage-ui 同一套离屏画法，但画的是整个 ContentView（四个 tab 加上 tab 之间的接线），
 /// store 走和 app 一模一样的 AppModel.make —— 那几个快照自己建 store、直接建单个页面，证明不了接线。
 /// 窗口是无边框的，没有标题栏和工具栏（标注校准 tab 顶上那行「已标注 N / M」拍不到）。
+/// 加 --events "move:x,y;click:x,y;dblclick:x,y;rclick:x,y;scroll:x,y,dy;wait:0.2"：截图前发假鼠标（和 --batch-ui 同一套，见 SnapshotEvents.swift）。
 /// 用户永远走不到这里：只认 `--` 开头的参数，必须设临时数据目录，不开桥。
 enum AppUISnapshot {
     /// --tab 的写法 = 界面上 tab 的名字。
@@ -24,7 +25,7 @@ enum AppUISnapshot {
         }
         guard args.count > flagIndex + 2 else {
             print("用法: --app-ui <photo_dir> <out.png> [--tab 批量处理|水印|拼图|标注校准] [--size 1440x900] [--wait 4]"
-                  + " [--batch-task running|done|failed|cycle] [--ax-dump]")
+                  + " [--batch-task running|done|failed|cycle] [--ax-dump] [" + SnapshotEvents.usage + "]")
             exit(1)
         }
         // 整套 store 都会写数据目录（sessions.json、拼图工程、水印设置）：只在临时数据目录里跑，
@@ -66,12 +67,19 @@ enum AppUISnapshot {
 
         let sizeParts = (option("--size") ?? "1440x900").split(separator: "x").compactMap { Double($0) }
         let size = NSSize(width: sizeParts.first ?? 1440, height: sizeParts.count > 1 ? sizeParts[1] : 900)
-        let (window, host) = offscreenWindow(model: model, size: size)
+        // --events：假鼠标（SnapshotEvents.swift，和 --batch-ui 同一套）。写错了在这里就退出（退出码 2）。
+        let eventSteps = SnapshotEvents.fromCommandLine(args)
+        let (window, host) = offscreenWindow(model: model, size: size, events: eventSteps != nil)
         host.layoutSubtreeIfNeeded()
         // 缩略图、大图、拼图预览都是后台出的，等它们回来。
         spin(Double(option("--wait") ?? "4") ?? 4)
         host.layoutSubtreeIfNeeded()
         spin(1)
+        if let eventSteps {
+            let mouse = SnapshotEvents.Mouse(window: window, host: host)
+            for step in eventSteps { print(mouse.run(step).line) }
+            mouse.pump(0.4)
+        }
         guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
             print("快照失败")
             exit(1)
@@ -145,14 +153,14 @@ enum AppUISnapshot {
     /// 把整个 ContentView 放进一个从不 order front 的无边框窗口（不 makeKey、不激活）。
     /// 窗口要拿着：放掉它，视图就没有窗口可画了。
     @MainActor
-    static func offscreenWindow(model: AppModel, size: NSSize) -> (NSWindow, NSView) {
+    static func offscreenWindow(model: AppModel, size: NSSize, events: Bool = false) -> (NSWindow, NSView) {
         let view = ContentView(model: model)
             .frame(width: size.width, height: size.height)
             .background(Color(nsColor: .windowBackgroundColor))
             .environment(\.colorScheme, .dark)
         let host = NSHostingView(rootView: view.appTheme())
         host.frame = NSRect(origin: .zero, size: size)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        let window = SnapshotEvents.snapshotWindow(contentRect: host.frame, events: events)
         window.appearance = NSAppearance(named: .darkAqua)
         window.contentView = host
         return (window, host)

@@ -151,6 +151,13 @@ struct DetailView: View {
             }
 
             Section {
+                AccuracyPanel(report: store.accuracyReport, hasJudgements: !store.judgements.isEmpty,
+                              currentID: photo.id) { store.show($0) }
+            } header: {
+                Text("和自动判决对比")
+            }
+
+            Section {
                 HStack {
                     Button("上一张") { store.previous() }
                     Button("下一张") { store.next() }
@@ -165,5 +172,117 @@ struct DetailView: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+// MARK: - 和自动判决对比
+
+/// 标注页右栏最下面那一块：这一场的人工标注和批量页的自动判决对一遍（AccuracyReport），标一张变一次。
+/// 误杀 / 漏掉的照片列成小按钮，点一下跳到那张。句子和 `LabelGUI --accuracy` 打印的是同一份。
+struct AccuracyPanel: View {
+    let report: AccuracyReport
+    /// 批量页这一场有没有判决（没分析过 = 没有）。
+    let hasJudgements: Bool
+    let currentID: String
+    let jump: (String) -> Void
+
+    /// 一张清单最多列这么多个按钮，剩下的说「还有 N 张」（全部的用 --accuracy 看）。
+    static let listCap = 12
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !hasJudgements {
+                Text("这一场还没有自动判决：先在「批量处理」页跑一次分析。").hintText()
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(report.scopeLine).hintText().fixedSize(horizontal: false, vertical: true)
+                if let few = report.tooFewLine {
+                    Text(few).font(.system(size: 11)).foregroundStyle(AppPalette.accent)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if report.reviewed > 0 {
+                    ForEach(report.categories, id: \.kind) { category in
+                        categoryBlock(category)
+                    }
+                    scoreBlock("你打 4 分以上、app 却判废", report.lovedButRejected)
+                    scoreBlock("你打 2 分以下、app 却选成精选", report.dislikedButPicked)
+                }
+                Text(AccuracyReport.reviewedRule + "。点照片名跳到那张。").hintText()
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func categoryBlock(_ c: AccuracyReport.Category) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(c.kind.rawValue).font(.system(size: 12, weight: .semibold))
+                Text(report.countsLine(c)).font(.system(size: 11)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let ratio = report.ratioLine(c) {
+                Text(ratio).hintText().fixedSize(horizontal: false, vertical: true)
+            }
+            idList("误杀", c.falseKills, tint: Verdict.reject.color)
+            idList("漏掉", c.missed, tint: AppPalette.accent)
+        }
+    }
+
+    @ViewBuilder
+    private func scoreBlock(_ title: String, _ rows: [AccuracyReport.ScoreMismatch]) -> some View {
+        if !rows.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("\(title)：\(rows.count) 张").font(.system(size: 12, weight: .semibold))
+                idList(nil, rows.map(\.id), tint: Verdict.reject.color,
+                       detail: Dictionary(rows.map { ($0.id, scoreDetail($0)) }, uniquingKeysWith: { a, _ in a }))
+            }
+        }
+    }
+
+    private func scoreDetail(_ m: AccuracyReport.ScoreMismatch) -> String {
+        let reasons = m.reasons.map(BatchStore.reasonLabel).joined(separator: "、")
+        return reasons.isEmpty ? "\(m.score) 分" : "\(m.score) 分 · \(reasons)"
+    }
+
+    /// 一排照片名的小按钮（自动换行）；`label` 是排头的「误杀」「漏掉」。
+    @ViewBuilder
+    private func idList(_ label: String?, _ ids: [String], tint: Color, detail: [String: String] = [:]) -> some View {
+        if !ids.isEmpty {
+            let shown = Array(ids.prefix(Self.listCap))
+            VStack(alignment: .leading, spacing: 3) {
+                if let label {
+                    Text("\(label) \(ids.count) 张").font(.system(size: 11, weight: .medium)).foregroundStyle(tint)
+                }
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: detail.isEmpty ? 82 : 130), spacing: 4, alignment: .leading)],
+                          alignment: .leading, spacing: 4) {
+                    ForEach(shown, id: \.self) { id in
+                        Button { jump(id) } label: {
+                            Text(detail[id].map { "\(id) · \($0)" } ?? id)
+                                .font(.system(size: 11).monospacedDigit())
+                                .lineLimit(1)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.white.opacity(id == currentID ? 0.16 : 0.07),
+                                            in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                                .overlay {
+                                    if id == currentID {
+                                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                            .strokeBorder(AppPalette.accent.opacity(0.8), lineWidth: 1)
+                                    }
+                                }
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("跳到 \(id)")
+                    }
+                }
+                if ids.count > shown.count {
+                    Text("还有 \(ids.count - shown.count) 张（全部的用 LabelGUI --accuracy 看）").hintText()
+                }
+            }
+        }
     }
 }

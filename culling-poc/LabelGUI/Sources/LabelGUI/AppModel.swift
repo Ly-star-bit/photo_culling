@@ -74,6 +74,8 @@ final class AppModel: ObservableObject {
         // 两个 @StateObject，水印在前）。CollageStore.init 会设水印资源目录这类进程级的全局变量，顺序别动。
         let batch = BatchStore(dataDir: dataDir, pythonRoot: pythonRoot)
         let labels = LabelStore(dataDir: batch.sessionDir)
+        // 标注页的「和自动判决对比」读批量页这一场的判决（AccuracyReport.swift）。
+        labels.follow(batch)
         let cardCenter = CardImportCenter(store: batch)
         let watermark = WatermarkStore(dataDir: dataDir)
         // 水印页导出的文件名记进当前场次的交付对照（DeliveryLedger.swift）。

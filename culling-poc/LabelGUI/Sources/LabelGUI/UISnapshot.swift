@@ -13,6 +13,10 @@ import AppKit
 /// LabelGUI --batch-ui <photo_dir> <out.png> --body-clock-ui   （状态栏「N 台机身」点开的按机身对时面板）
 /// LabelGUI --batch-ui <photo_dir> <out.png> --shortcuts-ui [--shortcuts-page 批量处理|水印|拼图|暗房]
 ///     （快捷键一览：键盘按钮、? 键、「帮助 › 快捷键一览」弹的那张表，翻到这一页；不给 = 批量处理）
+/// 都可以加 --events "move:x,y;click:x,y;dblclick:x,y;rclick:x,y;scroll:x,y,dy;wait:0.2"：截图前在这个离屏窗口上发假鼠标
+///     （坐标 = 截图上的点，左上原点）。能送到的：悬停（onHover）、单击 / 双击（Button、TapGesture、AppKit 控件）、滚动区；
+///     rclick 只打印这里的右键菜单有哪几项、不弹。送不到的：拖放、捏合、靠事件监听接鼠标的地方（拼图画布的 ⌘滚轮、右键）、
+///     会弹真窗口的按钮。细节和每次实测的结果见 SnapshotEvents.swift、`--events-selftest`。
 /// 都可以加 --ax-dump：截图前打印辅助功能树（输入框、滑杆这类 AppKit 控件带着值），按文字断言。
 /// LabelGUI --batch-ui <photo_dir> <out.png> --perf grid [--copies 15] [--size 2560x1440 -batch.thumbSize 90]
 ///     （截完图接着在网格里按 → ← 和数字键，打印每一下哪些视图 body 重算了几次、主线程 CPU、进程指令数：BatchPerf；
@@ -198,7 +202,9 @@ enum BatchUISnapshot {
             .environment(\.colorScheme, light ? .light : .dark)
         let host = NSHostingView(rootView: view.appTheme())
         host.frame = NSRect(origin: .zero, size: size)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        // --events：假鼠标（SnapshotEvents.swift）。写错了在这里就退出（退出码 2）；带了它窗口换成永远不上屏的那种。
+        let eventSteps = SnapshotEvents.fromCommandLine(args)
+        let window = SnapshotEvents.snapshotWindow(contentRect: host.frame, events: eventSteps != nil)
         window.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
         window.contentView = host
         host.layoutSubtreeIfNeeded()
@@ -213,6 +219,13 @@ enum BatchUISnapshot {
                                                        ids: [show], select: false)
             for _ in 0..<4 { host.layoutSubtreeIfNeeded(); spin(0.4) }
             print("--show \(show)：焦点 \(store.viewApplied?.focus ?? "无")")
+        }
+        // --events "move:x,y;click:x,y;dblclick:x,y;rclick:x,y;scroll:x,y,dy;wait:0.2"：在这个离屏窗口上发假鼠标事件，
+        // 每个事件打印一行它落在哪个视图上，发完照常截图（在 --press 之前：点一下格子再按键，--press 打印的焦点就是点完以后的）。
+        if let eventSteps {
+            let mouse = SnapshotEvents.Mouse(window: window, host: host)
+            for step in eventSteps { print(mouse.run(step).line) }
+            mouse.pump(0.4)
         }
         if let press = option("--press") {
             for key in press.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }) where !key.isEmpty {

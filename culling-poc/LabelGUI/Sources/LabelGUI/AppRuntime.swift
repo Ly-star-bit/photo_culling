@@ -17,6 +17,7 @@ enum AppRuntime {
         "--app-ui", "--live-host",
         "--mcp", "--mcp-call", "--mcp-tools",
         "--diag-export",
+        "--accuracy",
     ]
 
     /// true = 无头跑（测试、自动化）。

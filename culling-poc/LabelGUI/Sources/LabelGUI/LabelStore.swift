@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import SwiftUI
 import AppKit
 
@@ -19,6 +20,11 @@ final class LabelStore: ObservableObject {
     @Published var saveError: String?
     /// Sidebar filter; auto-advance follows it so the next photo stays visible.
     @Published var showOnlyUnlabeled = false
+
+    /// 批量页这一场的自动判决（「和自动判决对比」用，见 AccuracyReport.swift）。批量页的场次和这里不是同一场的那一小会儿是空的。
+    @Published private(set) var judgements: [AppJudgement] = []
+    private weak var batch: BatchStore?
+    private var judgementWatch: AnyCancellable?
 
     var layer1ById: [String: Layer1Result] = [:]
     var layer2ById: [String: Layer2Result] = [:]
@@ -52,6 +58,7 @@ final class LabelStore: ObservableObject {
                 let keepIndex = self.currentIndex
                 if let dir { self.dataDir = dir }
                 self.load()
+                self.refreshJudgements()
                 // Same session (VLM finished, trash, re-analysis): stay where the
                 // user was instead of yanking them back to photo 1.
                 if sameDir, !self.photos.isEmpty {
@@ -66,6 +73,41 @@ final class LabelStore: ObservableObject {
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.flush() }
         }
+    }
+
+    // MARK: - 和自动判决对比
+
+    /// 跟着批量页的判决走（AppModel.make 调一次）：阈值滑杆、改判、重新分析以后这里的对比跟着变。
+    /// receive(on:)：@Published 在赋值之前就发，回调里读 batch.items 要等它落下。只在内容真的变了才发布，
+    /// 批量页拖滑杆时标注页不跟着每一下重画。
+    func follow(_ batch: BatchStore) {
+        self.batch = batch
+        judgementWatch = batch.$items
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshJudgements() }
+            }
+        refreshJudgements()
+    }
+
+    private func refreshJudgements() {
+        guard let batch else { return }
+        // 照片 id 是文件名，跨场次大量重复：两边不是同一场时不比（切场次时这里晚一拍才跟上）。
+        let sameSession = batch.sessionDir.standardizedFileURL == dataDir.standardizedFileURL
+        let fresh = sameSession ? AppJudgement.all(from: batch) : []
+        if fresh != judgements { judgements = fresh }
+    }
+
+    /// 人工标注 × 自动判决（纯函数现算：几千张也是毫秒级）。
+    var accuracyReport: AccuracyReport {
+        AccuracyReport.make(labels: labels, judgements: judgements)
+    }
+
+    /// 「和自动判决对比」里点一张：跳到它。「只看未标注」开着时它在侧栏里是藏着的，先关掉。
+    func show(_ id: String) {
+        guard let idx = photos.firstIndex(where: { $0.id == id }) else { return }
+        if showOnlyUnlabeled, isComplete(id) { showOnlyUnlabeled = false }
+        goTo(idx)
     }
 
     var currentPhoto: Photo? {
@@ -220,15 +262,25 @@ final class LabelStore: ObservableObject {
             refuseLabels("读取 labels.csv 失败: \(error.localizedDescription)")
             return
         }
-        let rows = CSV.parseRows(text)
-        // Empty / whitespace-only file: nothing to lose, saving is fine.
-        guard let header = rows.first else { return }
-        let colIndex = CSV.columnIndex(header)
-        guard let idIdx = colIndex["id"] else {
-            refuseLabels("labels.csv 表头缺少 id 列")
+        let parsed = Self.parseLabels(text)
+        if let problem = parsed.problem {
+            refuseLabels(problem)
             return
         }
+        for (id, row) in parsed.rows { labels[id] = row }
+        persistedRowCount = labels.count
+    }
 
+    /// labels.csv 的文字 → 每个 id 一行。标注页和 `--accuracy` 读的是同一段代码。
+    /// `problem` 不是 nil = 这份文件不能当标注用（表头缺 id 列）。空文件 = 没有标注，不算错。
+    nonisolated static func parseLabels(_ text: String) -> (rows: [String: LabelRow], problem: String?) {
+        let rows = CSV.parseRows(text)
+        // Empty / whitespace-only file: nothing to lose, saving is fine.
+        guard let header = rows.first else { return ([:], nil) }
+        let colIndex = CSV.columnIndex(header)
+        guard let idIdx = colIndex["id"] else { return ([:], "labels.csv 表头缺少 id 列") }
+
+        var labels: [String: LabelRow] = [:]
         for fields in rows.dropFirst() {
             guard idIdx < fields.count else { continue }
             let id = fields[idIdx]
@@ -241,7 +293,7 @@ final class LabelStore: ObservableObject {
             if let i = colIndex["human_score"], i < fields.count, let v = Int(fields[i]) { row.humanScore = v }
             labels[id] = row
         }
-        persistedRowCount = labels.count
+        return (labels, nil)
     }
 
     private func refuseLabels(_ reason: String) {
