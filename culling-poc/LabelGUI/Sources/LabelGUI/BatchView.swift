@@ -348,7 +348,7 @@ struct BatchView: View {
         }
         if let notice = store.importNotice {
             HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(AppPalette.warning)
                 Text(notice).font(.callout)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
@@ -358,12 +358,12 @@ struct BatchView: View {
                     .help("知道了（关掉这条提醒）")
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(Color.orange.opacity(0.14))
+            .background(AppPalette.warning.opacity(0.14))
         }
         // 直接把存储卡当一场打开（审查 S07）：卡上的东西一个不动，给导入的入口。
         if store.isCardSession {
             HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "sdcard").foregroundStyle(.orange)
+                Image(systemName: "sdcard").foregroundStyle(AppPalette.warning)
                 Text(cardSessionText).font(.callout)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer()
@@ -374,7 +374,7 @@ struct BatchView: View {
                 .disabled(store.isRunning)
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(Color.orange.opacity(0.10))
+            .background(AppPalette.warning.opacity(0.10))
         }
     }
 
@@ -524,7 +524,8 @@ struct BatchView: View {
                     .help("撤销上一步：改判、导入 / 清除客户选中、按机身对时 (⌘Z)")
                 Button { showStatsPopover = true } label: { Image(systemName: "chart.bar.xaxis").frame(width: 22, height: 20) }
                     .disabled(store.items.isEmpty)
-                    .popover(isPresented: $showStatsPopover) { statsPopover }
+                    // 弹出框里要回到琥珀（这一排图标按钮的 tint 是中性灰，不挡的话进度条跟着变浅灰，R9）。
+                    .popover(isPresented: $showStatsPopover) { statsPopover.tint(AppPalette.accent) }
                     .help("复盘：按焦段 / ISO 的出片率统计")
                     .accessibilityLabel("复盘")
                 Button {
@@ -650,7 +651,7 @@ struct BatchView: View {
             if store.xmpStaleCount > 0 {
                 Button { store.exportXMP(.changed) } label: {
                     Label(xmpStaleLabel, systemImage: "arrow.triangle.2.circlepath")
-                        .font(.caption).foregroundStyle(.orange)
+                        .font(.caption).foregroundStyle(AppPalette.warning)
                 }
                 .buttonStyle(.plain)
                 .disabled(store.isRunning)
@@ -660,13 +661,13 @@ struct BatchView: View {
                 // Photos the engine couldn't read are invisible in the grid;
                 // without this the folder silently has more photos than shown.
                 Label("\(store.unparsedCount) 张未能解析", systemImage: "questionmark.square.dashed")
-                    .font(.caption).foregroundStyle(.orange).lineLimit(1)
+                    .font(.caption).foregroundStyle(AppPalette.warning).lineLimit(1)
                     .help("文件夹里有 \(store.unparsedCount) 张照片无法解码 (文件损坏、格式不支持或分析时还在拷贝)，不在网格中。修复后重新分析即可")
             }
             // 解得出来但文件不完整的：在网格里、已判废片，这条一直挂着 —— 别以为卡上的原片没问题就格式化了。
             if let corrupt = store.reasonCounts["文件损坏"] {
                 Label("\(corrupt) 张文件损坏", systemImage: "exclamationmark.triangle")
-                    .font(.caption).foregroundStyle(.orange).lineLimit(1)
+                    .font(.caption).foregroundStyle(AppPalette.warning).lineLimit(1)
                     .help("这 \(corrupt) 张文件不完整 (JPEG 结尾缺失、解出来缺的那截是灰的，多半是读卡出错或拷贝中断)，已判废片。卡先别格式化，从卡上重新拷一次再分析")
             }
             // 章节警告收成一条：长场次里几十章，一条一个会把状态栏挤爆。全文在提示里，时间轴上有三角标。
@@ -679,7 +680,7 @@ struct BatchView: View {
                     ? "\(wiped) 个章节全部被淘汰" + (thin > 0 ? "，\(thin) 个留得太少" : "")
                     : "\(all.count) 个章节留得太少（时间轴上标了三角）"
                 Label(all.count == 1 ? first : summary, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(wiped > 0 ? .red : .orange).lineLimit(1)
+                    .font(.caption).foregroundStyle(wiped > 0 ? .red : AppPalette.warning).lineLimit(1)
                     .help(all.joined(separator: "\n"))
             }
             if let error = store.lastError {
@@ -787,7 +788,7 @@ struct BatchView: View {
             Text(top.fromUsable > 0
                  ? "精选只有 \(top.ids.count - top.fromUsable) 张，从可用里按评分补了 \(top.fromUsable) 张"
                  : "共 \(top.ids.count) 张，全部来自精选")
-                .font(.caption).foregroundStyle(top.fromUsable > 0 ? .orange : .secondary)
+                .font(.caption).foregroundStyle(top.fromUsable > 0 ? AppPalette.warning : .secondary)
             Text("每次导到 拍摄文件夹/\(ImageLoader.jpegExportSubfolder)/精华/ 下面一个新文件夹（Top\(top.ids.count)_日期_时间），不和上次导的混")
                 .hintText()
             HStack {
@@ -1396,9 +1397,23 @@ struct BatchView: View {
             proxy.scrollTo(id, anchor: anchor)
             return
         }
-        let inTake = groupedItems.first { $0.members.contains { $0.id == id } }
-        proxy.scrollTo(inTake.map { "take-\($0.group)" } ?? "singles", anchor: anchor ?? .center)
+        guard let target = groupScrollTarget(id) else { return }
+        proxy.scrollTo(target, anchor: anchor ?? .center)
         DispatchQueue.main.async { proxy.scrollTo(id, anchor: anchor ?? .center) }
+    }
+
+    /// 按分组时，这张没铺出来：先滚到哪个 Lazy 栈的直接孩子。在某一场里 = 那一场；在展开的单张区里 = 它所在的那一行
+    /// （以前滚到整个单张区的中点，几百张单张时离目标很远）；网格里没有它（定完的场里叠起来的废片、被筛掉的）= 它那一场
+    /// 还在网格里就滚到那一场，不在就不滚（以前一律滚到最底下的「单张」，R8）。
+    private func groupScrollTarget(_ id: String) -> String? {
+        let groups = groupedItems
+        if let inTake = groups.first(where: { $0.members.contains { $0.id == id } }) { return "take-\(inTake.group)" }
+        if showSingles, let row = navigationRows().last(where: { $0.cells.contains { $0.id == id } }),
+           row.id.hasPrefix("singles-") {
+            return row.id
+        }
+        guard let take = store.item(withID: id)?.take, groups.contains(where: { $0.group == take }) else { return nil }
+        return "take-\(take)"
     }
 
     private var emptyState: some View {
@@ -1475,7 +1490,7 @@ struct BatchView: View {
                 let released = vlmSuggested.filter { $0.verdict != .reject }.count
                 Text("本地模型建议淘汰 \(vlmSuggested.count) 张 · 你放行了其中 \(released) 张 (\(released * 100 / vlmSuggested.count)%)")
                     .font(.caption)
-                    .foregroundStyle(released * 2 > vlmSuggested.count ? .orange : .primary)
+                    .foregroundStyle(released * 2 > vlmSuggested.count ? AppPalette.warning : .primary)
             }
             // 从你的改判反推滑杆：你放行了哪些被这条线判死的，线就该退到哪。
             // 不是机器学习，是算术 —— 但它是"学习你的风格"里诚实能做的那部分。
@@ -1922,7 +1937,17 @@ struct BatchView: View {
                 .id("take-\(entry.group)")
         }
         if !singles.isEmpty {
-            singlesSection(singles).id("singles")
+            singlesHeader(singles).id("singles")
+            // 单张区的每一行直接是网格那个 LazyVStack 的孩子（以前包在单张区自己的 LazyVStack 里）：滚动定位按行 id
+            // 找得到还没铺出来的行，远跳到某张单张不再先落到单张区中点（R8）。
+            if showSingles {
+                ForEach(gridRows(singles, prefix: "singles")) { row in
+                    rowView(row) { item, width, height in
+                        gridCell(item, color: item.verdict.color, groupSize: 1, width: width, height: height, showPick: true)
+                    }
+                    .padding(.horizontal, 10)
+                }
+            }
         }
     }
 
@@ -1962,14 +1987,14 @@ struct BatchView: View {
                         Text("场 \(take)").font(.subheadline.bold())
                         Text("\(all.count) 张").font(.caption).foregroundStyle(.secondary)
                         if let range = Self.timeRange(all) {
-                            Text(range).font(.caption2).monospacedDigit().foregroundStyle(.tertiary)
+                            Text(range).font(.caption2).monospacedDigit().foregroundStyle(.secondary)
                         }
                     }
                 }
                 .buttonStyle(.plain)
                 .help(allSelected ? "取消选中这一场" : "选中这一场的全部 \(members.count) 张")
 
-                let pillColor: Color = pending ? .orange : .green
+                let pillColor: Color = pending ? AppPalette.warning : .green
                 Text(Self.takeStatusText(pending: pending, alive: alive.count, picks: picks.count))
                     .font(.caption2).bold()
                     .padding(.horizontal, 6).padding(.vertical, 2)
@@ -2027,7 +2052,7 @@ struct BatchView: View {
         // 待处理的场左边一条橙线 —— 比 4% 的白底醒目得多，又不和照片争颜色。
         .overlay(alignment: .leading) {
             if pending {
-                RoundedRectangle(cornerRadius: 2).fill(Color.orange.opacity(0.8)).frame(width: 3).padding(.vertical, 8)
+                RoundedRectangle(cornerRadius: 2).fill(AppPalette.warning.opacity(0.8)).frame(width: 3).padding(.vertical, 8)
             }
         }
     }
@@ -2064,8 +2089,8 @@ struct BatchView: View {
                                         uniquingKeysWith: { first, _ in first }))
     }
 
-    /// 单张照片的折叠区。
-    private func singlesSection(_ singles: [BatchItem]) -> some View {
+    /// 单张照片折叠区的标题（照片的行在 groupGrid 里，直接挂在网格的 LazyVStack 上）。
+    private func singlesHeader(_ singles: [BatchItem]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Button {
                 withAnimation(.easeOut(duration: 0.15)) { showSingles.toggle() }
@@ -2080,17 +2105,10 @@ struct BatchView: View {
             }
             .buttonStyle(.plain)
             .help(showSingles ? "收起单张" : "展开看这 \(singles.count) 张单张照片")
-            if showSingles {
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(gridRows(singles, prefix: "singles")) { row in
-                        rowView(row) { item, width, height in
-                            gridCell(item, color: item.verdict.color, groupSize: 1, width: width, height: height, showPick: true)
-                        }
-                    }
-                }
-            }
         }
-        .padding(10)
+        .padding(.horizontal, 10)
+        .padding(.top, 10)
+        .padding(.bottom, 2)
     }
 
     static func timeRange(_ members: [BatchItem]) -> String? {
@@ -2883,7 +2901,7 @@ private struct GridCell: View, Equatable {
                 // 只有高感（ISO 3200 起，值得批量降噪的那些）才写：以前每张都挂一个「ISO 500」。
                 if let iso = item.exif?.iso, iso >= 3200 {
                     Text("ISO \(iso)").font(.caption2).monospacedDigit().lineLimit(1)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(AppPalette.warning)
                         .layoutPriority(1)
                 }
                 Spacer(minLength: 0)
@@ -4110,7 +4128,7 @@ struct PhotoInspector: View {
             Text("场 \(item.take)").foregroundStyle(.secondary)
             if (store.groupSizes[item.burstGroup] ?? 1) > 1 {
                 Label("近似重复", systemImage: "square.stack.3d.down.right")
-                    .font(.caption).foregroundStyle(.orange)
+                    .font(.caption).foregroundStyle(AppPalette.warning)
                     .help("和同场的另一张几乎是同一张画面（2 秒内、画面几乎一模一样），" +
                           "自动「只留最佳」作用的就是这一层")
             }
@@ -4382,7 +4400,7 @@ struct PhotoInspector: View {
             VStack(alignment: .leading, spacing: 2) {
                 if !item.vlmCompositionIssues.isEmpty {
                     Text("构图问题: \(item.vlmCompositionIssues.joined(separator: "、"))")
-                        .font(.caption).foregroundStyle(.orange)
+                        .font(.caption).foregroundStyle(AppPalette.warning)
                 }
                 if let reason = item.vlmReason {
                     Text("本地模型：\(reason)").font(.caption).foregroundStyle(.secondary)
@@ -4673,7 +4691,7 @@ struct ReviewView: View {
                     if skipping, position == order.count - 1 {
                         let skipped = orderIDs.count - order.count
                         if skipped > 0 {
-                            Text("留下的看完了 · 另有 \(skipped) 张废片跳过了").font(.caption).foregroundStyle(.orange)
+                            Text("留下的看完了 · 另有 \(skipped) 张废片跳过了").font(.caption).foregroundStyle(AppPalette.warning)
                         }
                     }
                     Toggle("跳过废片", isOn: $skipRejects)

@@ -176,7 +176,7 @@ struct PickView: View {
             }
             let unconfirmed = session.unconfirmedGroups.count
             if unconfirmed > 0 {
-                Text("\(unconfirmed) 组未确认").font(.caption).foregroundStyle(.orange)
+                Text("\(unconfirmed) 组未确认").font(.caption).foregroundStyle(AppPalette.warning)
                     .help("这几组点过但没按 ⏎，判决还没写进去。离开时会问你要不要一起确认")
             }
             Divider().frame(height: 16)
@@ -224,13 +224,13 @@ struct PickView: View {
                 Text("场 \(take)").font(.subheadline.bold())
                 Text("\(frames.count) 张").font(.caption).foregroundStyle(.secondary)
                 if let range = BatchView.timeRange(frames) {
-                    Text(range).font(.caption2).monospacedDigit().foregroundStyle(.tertiary)
+                    Text(range).font(.caption2).monospacedDigit().foregroundStyle(.secondary)
                 }
                 Text(pending ? "待处理" : "已定")
                     .font(.caption2.bold())
                     .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background((pending ? Color.orange : Color.green).opacity(0.22), in: Capsule())
-                    .foregroundStyle(pending ? .orange : .green)
+                    .background((pending ? AppPalette.warning : Color.green).opacity(0.22), in: Capsule())
+                    .foregroundStyle(pending ? AppPalette.warning : .green)
             }
             .lineLimit(1)
         } else {
@@ -762,7 +762,7 @@ private struct PickTile: View {
                     RoundedRectangle(cornerRadius: 6)
                         .strokeBorder(Color.white.opacity(0.25), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
                         .frame(width: size, height: size)
-                        .overlay(Text("没检测到").font(.caption2).foregroundStyle(.tertiary))
+                        .overlay(Text("没检测到").font(.caption2).foregroundStyle(.secondary))
                         .help("这一张里没检测到这个人的脸（转头、被挡住或出画）")
                 }
             }
@@ -770,7 +770,7 @@ private struct PickTile: View {
                 Text("+\(faceSlots.count - shown.count)").font(.caption).foregroundStyle(.secondary)
             }
             if faceSlots.isEmpty {
-                Text("没有检测到人脸").font(.caption2).foregroundStyle(.tertiary)
+                Text("没有检测到人脸").font(.caption2).foregroundStyle(.secondary)
             }
         }
         .frame(width: layout.image.width, height: size, alignment: .leading)
@@ -789,7 +789,7 @@ private struct PickTile: View {
             }
             eyeSummary
             Spacer(minLength: 4)
-            Text(item.id).font(.caption2).foregroundStyle(.tertiary)
+            Text(item.id).font(.caption2).foregroundStyle(.secondary)
                 .lineLimit(1).truncationMode(.middle)
                 .layoutPriority(-1)
         }

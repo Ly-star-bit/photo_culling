@@ -35,6 +35,7 @@ struct BodyClockSheet: View {
                     if apply() { isPresented = false }
                 }
                 .keyboardShortcut(.defaultAction)
+                .buttonStyle(.accentProminent)
                 .disabled(hasInvalid)
             }
         }

@@ -780,6 +780,7 @@ struct CardImportSheet: View {
                     center.confirm(analyzeAfter: analyzeAfter)
                 }
                 .keyboardShortcut(.defaultAction)
+                .buttonStyle(.accentProminent)
                 .disabled(blockedByOtherTask)
             } else {
                 Button(offer.planning ? "不导入" : "好") { center.dismiss() }

@@ -41,8 +41,6 @@ struct ContentView: View {
                 .tabItem { Label("标注校准", systemImage: "checklist") }
                 .tag(AppTab.labeling)
         }
-        // 全 app 一套点缀色和卡片样式（AppTheme.swift）。
-        .appTheme()
         // 批量页多选「拼图」：切到拼图页、带照片进托盘、直接排一版。
         .onChange(of: batchStore.collageRequest) { _, request in
             guard let ids = request, !ids.isEmpty else { return }
@@ -93,6 +91,9 @@ struct ContentView: View {
         }
         // 标题栏副标题：AI 连着 / 正在操作 / 刚做了什么（§9.6a，四个 tab 都在）。不连 AI 时是空的，和以前一样。
         .modifier(LiveIndicatorSubtitle(indicator: model.indicator))
+        // 全 app 一套点缀色和卡片样式（AppTheme.swift）。挂在修饰链最后：以前挂在 TabView 上，上面两个 .sheet 在它外层，
+        // 「这一版新增」「存储卡导入」两个弹框拿不到主题（优化分析 2026-11-10 R4）。
+        .appTheme()
     }
 
     private var labelingTab: some View {

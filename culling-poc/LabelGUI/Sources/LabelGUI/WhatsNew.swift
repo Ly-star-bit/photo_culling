@@ -211,6 +211,7 @@ struct WhatsNewSheet: View {
                 Spacer()
                 Button("知道了", action: onClose)
                     .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.accentProminent)
             }
         }
         .padding(22)
