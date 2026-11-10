@@ -46,6 +46,12 @@ struct BatchView: View {
     @State private var pickRequest: PickRequest?
     /// 网格实际宽度 — ↑/↓ 换行导航需要估算列数。
     @State private var gridWidth: CGFloat = 800
+    /// 顶栏现在多宽、「全写」「去字」两档各要多宽（量出来的，barTier 按它们挑档）。
+    @State private var barWidth: CGFloat = 0
+    @State private var fullBarWidth: CGFloat = 0
+    @State private var iconsBarWidth: CGFloat = 0
+    /// 顶栏上「排序」那个菜单实际多宽（量宽度的替身按它占位）。
+    @State private var sortPickerWidth: CGFloat = 84
     /// 大场次的宽高比在后台读完了（aspects）：加一，网格按真的比例再排一次。
     @State private var aspectEpoch = 0
     /// 网格的可见顺序、分区、分行结果，按「store 变过几回 + 视图选项」记住（GridMemo）：按一下方向键什么都不用重算。
@@ -161,7 +167,8 @@ struct BatchView: View {
                     HStack(spacing: 0) {
                         gridArea
                             .frame(minWidth: 500, maxWidth: .infinity)
-                        if showControls {
+                        // 第一次打开（还没有分析结果）右栏先不出来：四根滑杆和空直方图没有东西可调（U7）。
+                        if showControls, !store.items.isEmpty {
                             Divider()
                             BatchControlPanel(store: store)
                                 .frame(width: 300)
@@ -390,94 +397,65 @@ struct BatchView: View {
 
     // MARK: - Top bar (workflow-ordered: source → analyze → view → review → export)
 
+    /// 顶栏按宽度分三档（优化分析 2026-11-10 U4）。以前只有一档，约要 1180pt：窄了以后「重新分析」截成「重…」、
+    /// 「挑连拍 5 场」截成「…」，更窄两头的按钮出界（13 寸分屏会碰到）。
+    enum BarTier: Int {
+        /// 全写出来。
+        case full
+        /// 去字留图标：重新分析、客户、挑连拍、导出只剩图标（挑连拍带场数）。
+        case icons
+        /// 再把不常用的（排序、客户、复盘、右栏开关）收进「⋯」。
+        case menu
+    }
+
+    /// 现在用哪一档：全写放得下就全写，不然去字，再不然收进「⋯」。两档各要多宽是量出来的（barProbes），
+    /// 不写死数：两套系统外观（发版的 15、本机的 26）控件宽度不一样，文件夹名、客户选中张数、待处理场数也会变。
+    private var barTier: BarTier {
+        // 还没量到（第一帧）：先全写。
+        guard barWidth > 0, fullBarWidth > 0, iconsBarWidth > 0 else { return .full }
+        let room = barWidth - 24  // 左右 padding 12 × 2
+        if fullBarWidth <= room { return .full }
+        return iconsBarWidth <= room ? .icons : .menu
+    }
+
     private var topBar: some View {
         BatchPerf.body("顶栏")
-        return HStack(spacing: 10) {
-            Menu {
-                Button("选择文件夹...") { pickFolder() }
-                // 插卡时会自己问；这条给「卡早就插着、当时点了不导入」的时候用。
-                Button("从存储卡导入...") {
-                    NotificationCenter.default.post(name: .cardImportRequested, object: nil)
-                }
-                // 「废片移到废纸篓」从「导出」挪到这里（优化分析 NU5）：它动的是这一场文件夹里的原片，和打开、导卡、重新定位、
-                // 移除历史记录是一类（Lightroom 的「删除被拒绝的照片」也在图库 / 照片菜单，不在导出里）；「导出」只留往外写文件的。
-                // 顶栏在 1280pt 已经挤满，不另加按钮。
-                Divider()
-                trashMenuButton
-                if !store.recentSessions.isEmpty {
-                    Divider()
-                    ForEach(store.recentSessions) { session in
-                        let missing = store.missingSessionKeys.contains(session.key)
-                        Button("\(session.name) · \(session.photoCount) 张\(missing ? " (文件夹已不存在)" : "")") {
-                            store.switchSession(to: URL(fileURLWithPath: session.path))
-                        }
-                    }
-                    // 找不到照片文件夹的那几场（挪到了别的盘、卷名变了）：指给它现在的位置，判决、拼图接着用（审查 S04）。
-                    // NSMenu 的一行挂不了右键菜单，和下面「移除历史记录」一样放子菜单。
-                    let missingSessions = store.recentSessions.filter { store.missingSessionKeys.contains($0.key) }
-                    if !missingSessions.isEmpty {
-                        Menu("重新定位文件夹...") {
-                            Text("照片挪到了别处：指给它现在的位置，判决、拼图接着用")
-                            ForEach(missingSessions) { session in
-                                Button("\(session.name) · \(session.photoCount) 张...") { relocateSession(session) }
-                            }
-                        }
-                    }
-                    Divider()
-                    // NSMenu items can't carry their own context menu, so removal
-                    // lives in a submenu rather than a right-click on each row.
-                    // 缓存体积在这里显示：预览图约 190KB/张，15 场大拍摄能到几个 GB，
-                    // 而菜单本来完全看不出占了多少盘。只报移除真会释放的（预览图 + 拼图蒙版）。
-                    // 单场移除只清预览：判决、客户选中、拼图和方案留着（审查 S06：以前点一下整场永久删掉）。
-                    Menu("移除历史记录 (可释放 \(BatchStore.sizeText(store.totalSessionBytes)))") {
-                        Text("只清预览图，判决、客户选中、拼图和方案都留着")
-                        ForEach(store.recentSessions) { session in
-                            let bytes = store.sessionSizes[session.key] ?? 0
-                            Button("\(session.name) · \(session.photoCount) 张 · 释放 \(BatchStore.sizeText(bytes))") {
-                                store.removeSession(session)
-                            }
-                        }
-                        Divider()
-                        Button("全部清除...", role: .destructive) { showClearRecentsConfirm = true }
-                    }
-                }
-            } label: {
-                Label(store.photoDir?.lastPathComponent ?? "选择文件夹",
-                      systemImage: "folder")
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            // Capped: `.fixedSize()` let a long Chinese folder name push 撤销/
-            // 审片/导出 off the right edge of a 1280pt window.
-            // 保底 110：窄窗口里别的控件把它挤得只剩「f…」，连是哪场拍摄都看不出。
-            .frame(minWidth: 110, maxWidth: 260)
-            .fixedSize(horizontal: false, vertical: true)
-            // 处理中换文件夹会污染网格并让"重新分析"卡死，store 里也有守卫兜底。
-            .disabled(store.isRunning)
-            .help(store.isRunning ? "正在处理中，先取消再切换文件夹"
-                                  : (store.photoDir?.path ?? "选择一场拍摄的照片文件夹"))
-            // Folders get deleted in Finder while the app sits open — recheck on
-            // the way back in so the menu isn't showing yesterday's truth.
-            .onReceive(NotificationCenter.default.publisher(
-                for: NSApplication.didBecomeActiveNotification)) { _ in
-                store.refreshSessionAvailability()
-            }
+        return topBarContent(tier: barTier, live: true)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+            .background(AppPalette.bar)
+            .background(GeometryReader { geo in
+                Color.clear.onChange(of: geo.size.width, initial: true) { barWidth = geo.size.width }
+            })
+            .background(alignment: .leading) { barProbes }
+    }
 
-            if store.isRunning {
-                Button("取消") { store.cancel() }
-            } else {
-                if store.items.isEmpty {
-                    Button("开始分析") { store.runAnalysis() }
-                        .buttonStyle(.accentProminent)
-                        .disabled(store.photoDir == nil)
-                        .help("原生引擎分析全部照片 (锐度/闭眼/曝光/连拍分组)")
-                } else {
-                    // 分析过了就不再是主按钮：以前分析完它还是醒目的蓝色，像是「下一步」，容易误点重跑。
-                    Button("重新分析") { store.runAnalysis() }
-                        .disabled(store.photoDir == nil)
-                        .help("只分析新增或改动过的照片，没动过的直接沿用（拷进了新照片时用）")
-                }
-            }
+    /// 量「全写」「去字」两档各要多宽：两份不画出来、点不到、不带快捷键和弹出框的顶栏（文件夹按钮按最窄的 110 算）。
+    /// 按 TopBarProbe.Key 比：影响宽度的那几样没变就不重算（方向键、改判都不动它）。
+    private var barProbes: some View {
+        let key = TopBarProbe.Key(running: store.isRunning, empty: store.items.isEmpty, hasFolder: store.photoDir != nil,
+                                  clientPicks: store.clientPickCount, clientFilter: store.clientPickFilter,
+                                  pending: pendingInScope, chapter: store.activeChapterFilter != nil,
+                                  sort: store.sortOrder.rawValue, sortWidth: sortPickerWidth)
+        return ZStack(alignment: .leading) {
+            TopBarProbe(key: key, content: { AnyView(topBarContent(tier: .full, live: false)) },
+                        onWidth: { fullBarWidth = $0 })
+                .equatable()
+            TopBarProbe(key: key, content: { AnyView(topBarContent(tier: .icons, live: false)) },
+                        onWidth: { iconsBarWidth = $0 })
+                .equatable()
+        }
+        .hidden()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    /// 顶栏的内容。`live` = 真的那一份；false = 量宽度用的替身（barProbes）：菜单里不放东西、不挂快捷键和弹出框。
+    private func topBarContent(tier: BarTier, live: Bool) -> some View {
+        HStack(spacing: 10) {
+            folderMenu(live: live)
+            analyzeButton(tier: tier)
 
             Divider().frame(height: 16)
 
@@ -501,16 +479,27 @@ struct BatchView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .frame(width: 204)
-            clientMenu
-            Picker("排序", selection: $store.sortOrder) {
-                ForEach(BatchStore.SortOrder.allCases, id: \.self) { s in
-                    Text(s.rawValue).tag(s)
+            // 最窄一档：「客户」没导入过客户选择时收进「⋯」；导入过的（分体按钮，点字是「只看客户选中」）留着。
+            if tier != .menu || clientIsSplit {
+                clientMenu(tier: tier, live: live)
+            }
+            if tier != .menu {
+                if live {
+                    sortPicker
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .fixedSize()
+                        .background(GeometryReader { geo in
+                            Color.clear.onChange(of: geo.size.width, initial: true) {
+                                if geo.size.width > 40 { sortPickerWidth = geo.size.width }
+                            }
+                        })
+                        .help("排序：网格内的顺序按拍摄时间 (双机位混排也按时间)、按文件名或按评分")
+                } else {
+                    // 菜单式的 Picker 要等一拍才撑到选中那一项的宽度（先是 32pt），藏着的替身里一直不撑：按真的那个量到的宽度占位。
+                    Color.clear.frame(width: sortPickerWidth, height: 1)
                 }
             }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .fixedSize()
-            .help("排序：网格内的顺序按拍摄时间 (双机位混排也按时间)、按文件名或按评分")
 
             Spacer()
 
@@ -519,80 +508,247 @@ struct BatchView: View {
             // 全选（⌘A）不占地方：只留快捷键（菜单栏、快捷键一览里都写着）。
             HStack(spacing: 2) {
                 Button { store.undoLastOverride() } label: { Image(systemName: "arrow.uturn.backward").frame(width: 22, height: 20) }
-                    .keyboardShortcut("z", modifiers: .command)
+                    .barShortcut("z", .command, live: live)
                     .disabled(!store.canUndoOverride)
                     .help("撤销上一步：改判、导入 / 清除客户选中、按机身对时 (⌘Z)")
-                Button { showStatsPopover = true } label: { Image(systemName: "chart.bar.xaxis").frame(width: 22, height: 20) }
+                if tier != .menu {
+                    Button { showStatsPopover = true } label: { Image(systemName: "chart.bar.xaxis").frame(width: 22, height: 20) }
+                        .disabled(store.items.isEmpty)
+                        .barStatsPopover(live ? $showStatsPopover : .constant(false)) { statsPopover }
+                        .help("复盘：按焦段 / ISO 的出片率统计")
+                        .accessibilityLabel("复盘")
+                    Button { toggleControls() } label: {
+                        Image(systemName: "sidebar.right").frame(width: 22, height: 20)
+                    }
+                    .barShortcut("s", [.command, .option], live: live)
                     .disabled(store.items.isEmpty)
-                    // 弹出框里要回到琥珀（这一排图标按钮的 tint 是中性灰，不挡的话进度条跟着变浅灰，R9）。
-                    .popover(isPresented: $showStatsPopover) { statsPopover.tint(AppPalette.accent) }
-                    .help("复盘：按焦段 / ISO 的出片率统计")
-                    .accessibilityLabel("复盘")
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) { showControls.toggle() }
-                } label: {
-                    Image(systemName: "sidebar.right").frame(width: 22, height: 20)
+                    .help(showControls ? "收起右侧筛选面板，网格更宽 (⌥⌘S)" : "显示右侧筛选面板 (⌥⌘S)")
                 }
-                .keyboardShortcut("s", modifiers: [.command, .option])
-                .help(showControls ? "收起右侧筛选面板，网格更宽 (⌥⌘S)" : "显示右侧筛选面板 (⌥⌘S)")
             }
             .buttonStyle(.borderless)
             // 不带框的图标是中性灰：琥珀色只留给右边那一个主按钮。
             .tint(Color(white: 0.78))
             .background {
-                Button("全选") { selectedIDs = Set(visibleIDs) }
-                    .keyboardShortcut("a", modifiers: .command)
-                    .disabled(store.items.isEmpty)
-                    .opacity(0).frame(width: 0, height: 0).accessibilityHidden(true)
+                if live {
+                    Button("全选") { selectedIDs = Set(visibleItems.map(\.id)) }
+                        .keyboardShortcut("a", modifiers: .command)
+                        .disabled(store.items.isEmpty)
+                        .opacity(0).frame(width: 0, height: 0).accessibilityHidden(true)
+                    // 最窄一档右栏开关在「⋯」里：快捷键照旧。
+                    if tier == .menu {
+                        Button("右栏") { toggleControls() }
+                            .keyboardShortcut("s", modifiers: [.command, .option])
+                            .disabled(store.items.isEmpty)
+                            .opacity(0).frame(width: 0, height: 0).accessibilityHidden(true)
+                    }
+                }
+            }
+            if tier == .menu {
+                overflowMenu(live: live)
             }
             Button("审片") { enterReview() }
-                .keyboardShortcut("f", modifiers: [])
+                .barShortcut("f", [], live: live)
                 .disabled(store.items.isEmpty)
                 .help("全屏逐张审片 · F 进入 · 1精选 2可用 3废片 0恢复")
             if pendingInScope > 0, !store.isRunning {
                 Button { startPicking() } label: {
-                    Label((store.activeChapterFilter != nil ? "本章" : "") + "挑连拍 \(pendingInScope) 场", systemImage: "rectangle.stack")
+                    Label(pickTitle(tier: tier), systemImage: "rectangle.stack")
                 }
                 .buttonStyle(.accentProminent)
-                .help("还有 \(pendingInScope) 场连拍留着 2 张以上没淘汰。一组一组过 (C)：整组并排上台，点一张 = 只留它，⏎ 确认并跳下一组；"
+                .help("挑连拍：还有 \(pendingInScope) 场连拍留着 2 张以上没淘汰。一组一组过 (C)：整组并排上台，点一张 = 只留它，⏎ 确认并跳下一组；"
                       + "按 D 在网格里跳到下一个")
+                .accessibilityLabel("挑连拍 \(pendingInScope) 场")
             }
 
             Menu {
-                // 写过一次以后整场那一项叫「全部重写」：补被删掉、被别的软件整份覆盖的 sidecar；平常只写改了的（下一项、状态栏）。
-                Button(store.hasWrittenXMP ? "全部重写 XMP (LR/C1 可读)" : "写入 XMP (LR/C1 可读)") { store.exportXMP(.all) }
-                    .disabled(store.items.isEmpty || store.isRunning)
-                if store.xmpStaleCount > 0 {
-                    Button("只更新改了的 \(store.xmpStaleCount) 张 XMP") { store.exportXMP(.changed) }
-                        .disabled(store.isRunning)
-                }
-                Button("导出 JPG...") { showJPEGSheet = true }
-                    .disabled(jpegExportCount == 0 || store.isRunning)
-                Button("精华 Top N (JPG)...") { showHighlightsSheet = true }
-                    .disabled(store.items.isEmpty || store.isRunning)
-                Button("导出高 ISO RAW (降噪)...") { showISOSheet = true }
-                    .disabled(store.items.isEmpty || store.isRunning)
+                if live { exportMenuItems } else { Button("-") {} }
             } label: {
-                Label("导出", systemImage: "square.and.arrow.up")
+                if tier == .full {
+                    Label("导出", systemImage: "square.and.arrow.up")
+                } else {
+                    Image(systemName: "square.and.arrow.up")
+                }
             }
             .fixedSize()
+            .help("导出：写 XMP、导出 JPG、精华 Top N、高 ISO RAW")
+            .accessibilityLabel("导出")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(AppPalette.bar)
     }
+
+    /// 琥珀主按钮上的字：全写「挑连拍 5 场」，去字以后只剩图标和场数。
+    private func pickTitle(tier: BarTier) -> String {
+        if tier == .full { return (store.activeChapterFilter != nil ? "本章" : "") + "挑连拍 \(pendingInScope) 场" }
+        return "\(pendingInScope) 场"
+    }
+
+    private func toggleControls() {
+        withAnimation(.easeInOut(duration: 0.2)) { showControls.toggle() }
+    }
+
+    private var sortPicker: some View {
+        Picker("排序", selection: $store.sortOrder) {
+            ForEach(BatchStore.SortOrder.allCases, id: \.self) { s in
+                Text(s.rawValue).tag(s)
+            }
+        }
+    }
+
+    /// 文件夹按钮（打开、导卡、移废片、最近的场次、重新定位、移除历史记录）。
+    private func folderMenu(live: Bool) -> some View {
+        Menu {
+            if live { folderMenuItems } else { Button("-") {} }
+        } label: {
+            Label(store.photoDir?.lastPathComponent ?? "选择文件夹",
+                  systemImage: "folder")
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        // Capped: `.fixedSize()` let a long Chinese folder name push 撤销/
+        // 审片/导出 off the right edge of a 1280pt window.
+        // 保底 110：窄窗口里别的控件把它挤得只剩「f…」，连是哪场拍摄都看不出。
+        // 量宽度的替身按保底的 110 算：先让文件夹名收窄，放不下了才去字。
+        .frame(minWidth: 110, maxWidth: live ? 260 : 110)
+        .fixedSize(horizontal: false, vertical: true)
+        // 处理中换文件夹会污染网格并让"重新分析"卡死，store 里也有守卫兜底。
+        .disabled(store.isRunning)
+        .help(store.isRunning ? "正在处理中，先取消再切换文件夹"
+                              : (store.photoDir?.path ?? "选择一场拍摄的照片文件夹"))
+        // Folders get deleted in Finder while the app sits open — recheck on
+        // the way back in so the menu isn't showing yesterday's truth.
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification)) { _ in
+            if live { store.refreshSessionAvailability() }
+        }
+    }
+
+    @ViewBuilder private var folderMenuItems: some View {
+        Button("选择文件夹...") { pickFolder() }
+        // 插卡时会自己问；这条给「卡早就插着、当时点了不导入」的时候用。
+        Button("从存储卡导入...") {
+            NotificationCenter.default.post(name: .cardImportRequested, object: nil)
+        }
+        // 「废片移到废纸篓」从「导出」挪到这里（优化分析 NU5）：它动的是这一场文件夹里的原片，和打开、导卡、重新定位、
+        // 移除历史记录是一类（Lightroom 的「删除被拒绝的照片」也在图库 / 照片菜单，不在导出里）；「导出」只留往外写文件的。
+        // 顶栏在 1280pt 已经挤满，不另加按钮。
+        Divider()
+        trashMenuButton
+        if !store.recentSessions.isEmpty {
+            Divider()
+            ForEach(store.recentSessions) { session in
+                let missing = store.missingSessionKeys.contains(session.key)
+                Button("\(session.name) · \(session.photoCount) 张\(missing ? " (文件夹已不存在)" : "")") {
+                    store.switchSession(to: URL(fileURLWithPath: session.path))
+                }
+            }
+            // 找不到照片文件夹的那几场（挪到了别的盘、卷名变了）：指给它现在的位置，判决、拼图接着用（审查 S04）。
+            // NSMenu 的一行挂不了右键菜单，和下面「移除历史记录」一样放子菜单。
+            let missingSessions = store.recentSessions.filter { store.missingSessionKeys.contains($0.key) }
+            if !missingSessions.isEmpty {
+                Menu("重新定位文件夹...") {
+                    Text("照片挪到了别处：指给它现在的位置，判决、拼图接着用")
+                    ForEach(missingSessions) { session in
+                        Button("\(session.name) · \(session.photoCount) 张...") { relocateSession(session) }
+                    }
+                }
+            }
+            Divider()
+            // NSMenu items can't carry their own context menu, so removal
+            // lives in a submenu rather than a right-click on each row.
+            // 缓存体积在这里显示：预览图约 190KB/张，15 场大拍摄能到几个 GB，
+            // 而菜单本来完全看不出占了多少盘。只报移除真会释放的（预览图 + 拼图蒙版）。
+            // 单场移除只清预览：判决、客户选中、拼图和方案留着（审查 S06：以前点一下整场永久删掉）。
+            Menu("移除历史记录 (可释放 \(BatchStore.sizeText(store.totalSessionBytes)))") {
+                Text("只清预览图，判决、客户选中、拼图和方案都留着")
+                ForEach(store.recentSessions) { session in
+                    let bytes = store.sessionSizes[session.key] ?? 0
+                    Button("\(session.name) · \(session.photoCount) 张 · 释放 \(BatchStore.sizeText(bytes))") {
+                        store.removeSession(session)
+                    }
+                }
+                Divider()
+                Button("全部清除...", role: .destructive) { showClearRecentsConfirm = true }
+            }
+        }
+    }
+
+    /// 开始分析 / 重新分析 / 取消。去字以后「重新分析」只剩图标；「开始分析」「取消」是这时候唯一要点的，字留着。
+    @ViewBuilder private func analyzeButton(tier: BarTier) -> some View {
+        if store.isRunning {
+            Button("取消") { store.cancel() }
+        } else if store.items.isEmpty {
+            // 第一次打开：琥珀色的「开始分析」只留网格正中那一个（emptyState），这里是普通按钮（U7）。
+            Button("开始分析") { store.runAnalysis() }
+                .disabled(store.photoDir == nil)
+                .help("原生引擎分析全部照片 (锐度/闭眼/曝光/连拍分组)")
+        } else {
+            // 分析过了就不再是主按钮：以前分析完它还是醒目的蓝色，像是「下一步」，容易误点重跑。
+            Button { store.runAnalysis() } label: {
+                if tier == .full {
+                    Text("重新分析")
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                }
+            }
+            .disabled(store.photoDir == nil)
+            .help("重新分析：只分析新增或改动过的照片，没动过的直接沿用（拷进了新照片时用）")
+            .accessibilityLabel("重新分析")
+        }
+    }
+
+    @ViewBuilder private var exportMenuItems: some View {
+        // 写过一次以后整场那一项叫「全部重写」：补被删掉、被别的软件整份覆盖的 sidecar；平常只写改了的（下一项、状态栏）。
+        Button(store.hasWrittenXMP ? "全部重写 XMP (LR/C1 可读)" : "写入 XMP (LR/C1 可读)") { store.exportXMP(.all) }
+            .disabled(store.items.isEmpty || store.isRunning)
+        if store.xmpStaleCount > 0 {
+            Button("只更新改了的 \(store.xmpStaleCount) 张 XMP") { store.exportXMP(.changed) }
+                .disabled(store.isRunning)
+        }
+        Button("导出 JPG...") { showJPEGSheet = true }
+            .disabled(jpegExportCount == 0 || store.isRunning)
+        Button("精华 Top N (JPG)...") { showHighlightsSheet = true }
+            .disabled(store.items.isEmpty || store.isRunning)
+        Button("导出高 ISO RAW (降噪)...") { showISOSheet = true }
+            .disabled(store.items.isEmpty || store.isRunning)
+    }
+
+    /// 最窄一档的「⋯」：排序、客户（没导入过客户选择时）、复盘、右栏开关。复盘的弹出框从这个按钮底下出来。
+    private func overflowMenu(live: Bool) -> some View {
+        Menu {
+            if live {
+                sortPicker.pickerStyle(.inline)
+                Divider()
+                if !clientIsSplit {
+                    Menu("客户") { clientMenuItems }
+                }
+                Button("复盘：按焦段 / ISO 的出片率...") { showStatsPopover = true }
+                    .disabled(store.items.isEmpty)
+                Button(showControls ? "收起右侧筛选面板 (⌥⌘S)" : "显示右侧筛选面板 (⌥⌘S)") { toggleControls() }
+                    .disabled(store.items.isEmpty)
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .barStatsPopover(live ? $showStatsPopover : .constant(false)) { statsPopover }
+        .help("更多：排序、客户选片、复盘、右侧筛选面板")
+        .accessibilityLabel("更多")
+    }
+
+    /// 导入过客户选择（或者开着「只看客户选中」）：「客户」是分体按钮，点字 = 只看客户选中。
+    private var clientIsSplit: Bool { store.clientPickCount > 0 || store.clientPickFilter }
 
     /// 「客户 ▾」（优化分析 NU5）：确认表 → 导入客户选择 → 清除 → 复制文件名 / 复制原片，以前挂在「导出」第二段（「导入」
     /// 要到「导出」里找）。放在原来「客户选中 N」开关的位置：导入过客户选择以后它是分体按钮 —— 点字还是「只看客户选中」的开关
     /// （紫色实心 = 开着，和判决筛选叠加），点 ▾ 是菜单。开关、菜单分成两个按钮在 1280pt 的窗口里放不下（量过：有客户选中时
-    /// 文件夹名、「重新分析」被挤出窗口，「导出」被截掉）。
-    @ViewBuilder private var clientMenu: some View {
-        if store.clientPickCount > 0 || store.clientPickFilter {
+    /// 文件夹名、「重新分析」被挤出窗口，「导出」被截掉）。去字以后：没导入过的只剩一颗心，导入过的是心 + 张数。
+    @ViewBuilder private func clientMenu(tier: BarTier, live: Bool) -> some View {
+        if clientIsSplit {
             Menu {
-                clientMenuItems
+                if live { clientMenuItems } else { Button("-") {} }
             } label: {
                 Label {
-                    Text("客户选中 \(store.clientPickCount)")
+                    Text(tier == .full ? "客户选中 \(store.clientPickCount)" : "\(store.clientPickCount)")
                 } icon: {
                     // 菜单按钮上的图默认按模板画（统统一个颜色）：开着时用调色板画成紫色的实心，关着是空心 —— 看得出筛选开没开。
                     if store.clientPickFilter {
@@ -605,16 +761,22 @@ struct BatchView: View {
                 store.clientPickFilter.toggle()
             }
             .fixedSize()
-            .help("点字：只看客户选中的照片（紫色实心 = 开着，和左边的判决筛选叠加；没选中照片时，复制文件名、复制原片就按这个范围）。"
+            .help("客户选中 \(store.clientPickCount) 张。点字：只看客户选中的照片（紫色实心 = 开着，和左边的判决筛选叠加；没选中照片时，复制文件名、复制原片就按这个范围）。"
                   + "点 ▾：选片确认表、导入客户选择、清除客户选中、复制文件名、复制原片")
+            .accessibilityLabel("客户选中 \(store.clientPickCount)")
         } else {
             Menu {
-                clientMenuItems
+                if live { clientMenuItems } else { Button("-") {} }
             } label: {
-                Label("客户", systemImage: "heart")
+                if tier == .full {
+                    Label("客户", systemImage: "heart")
+                } else {
+                    Image(systemName: "heart")
+                }
             }
             .fixedSize()
             .help("客户选片：导出选片确认表发给客户，导入客户的选择（紫心），复制文件名、复制原片给修图")
+            .accessibilityLabel("客户")
         }
     }
 
@@ -987,6 +1149,10 @@ struct BatchView: View {
                             }
                         }
                     }
+                    // 有照片、但现在的筛选下一张都没有：说清楚是哪个筛选，给一个「显示全部」（U3）。以前整块空白，一句话没有。
+                    if let filters = emptyFilterNames {
+                        filterEmptyState(filters)
+                    }
                 }
                 .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -999,6 +1165,11 @@ struct BatchView: View {
                 }
             }
             .background(AppPalette.canvas)
+            // 预览图被清掉的场次（掉出最近 15 场、或者「移除历史记录」里移除过）：整屏灰格子，在格子区正中说一句、给「重新分析」
+            // （U6；以前只有状态栏一行红字）。分析在跑就不挡着了。
+            .overlay {
+                if previewsMissing, !store.isRunning { prunedPreviewsCard }
+            }
             // 从审片/连拍挑选回来，网格是重新建的，滚动位置归零 —— 滚回焦点那张。
             // 异步一拍：嵌套的 Lazy 网格要先铺出来 scrollTo 才找得到。
             // AI 在别的 tab 时要定位的照片（cull_show_photos 的 pending）也在这里补上。
@@ -1414,6 +1585,98 @@ struct BatchView: View {
         }
         guard let take = store.item(withID: id)?.take, groups.contains(where: { $0.group == take }) else { return nil }
         return "take-\(take)"
+    }
+
+    /// 有照片、但现在的筛选下网格里一张都没有：是哪几个筛选（nil = 不是这种情况）。按分组时单张区收着不算空
+    /// （「单张 N」那一行还在）。
+    private var emptyFilterNames: [String]? {
+        guard !store.items.isEmpty else { return nil }
+        let byGroup = gridMode == .byGroup
+        if byGroup {
+            guard groupedItems.isEmpty, singleItems.isEmpty else { return nil }
+        } else {
+            guard visibleItems.isEmpty else { return nil }
+        }
+        var names: [String] = []
+        if let segment = store.activeChapterFilter.flatMap({ c in store.chapterSegments.first { $0.chapter == c } }) {
+            names.append(segment.undated ? "无拍摄时间的照片" : "章节 \(segment.chapter + 1)")
+        }
+        if store.clientPickFilter { names.append("客户选中") }
+        if let verdict = store.verdictFilter { names.append(verdict.rawValue) }
+        if byGroup {
+            if pendingTakesOnly { names.append("只看待处理") }
+        } else {
+            if store.borderlineFilter { names.append("只看临界照片") }
+            // 理由筛选只管废片区：别的区本来就没有照片时才轮到它。
+            if let reason = store.reasonFilter, store.verdictFilter == nil || store.verdictFilter == .reject {
+                names.append("理由「\(BatchStore.reasonLabel(reason))」")
+            }
+        }
+        return names.isEmpty ? nil : names
+    }
+
+    private func filterEmptyState(_ filters: [String]) -> some View {
+        VStack(spacing: 10) {
+            Image(systemName: "line.3.horizontal.decrease.circle")
+                .font(.system(size: 34))
+                .foregroundStyle(.tertiary)
+            Text("「" + filters.joined(separator: "」+「") + "」下没有照片")
+                .foregroundStyle(.secondary)
+            Text("这一场共 \(store.items.count) 张，都被" + (filters.count > 1 ? "这几个" : "这个") + "筛选条件挡在外面了")
+                .font(.caption).foregroundStyle(.secondary)
+            Button("显示全部") { clearGridFilters() }
+                .buttonStyle(.accentProminent)
+                .help("关掉判决筛选、只看客户选中、只看这一章、只看临界、理由筛选和只看待处理")
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 90)
+        .padding(.bottom, 40)
+    }
+
+    /// 「显示全部」：把会让网格变空的筛选全关掉（视图方式、排序、单张区展开不动）。
+    private func clearGridFilters() {
+        store.verdictFilter = nil
+        store.clientPickFilter = false
+        store.reasonFilter = nil
+        store.borderlineFilter = false
+        store.chapterFilter = nil
+        pendingTakesOnly = false
+    }
+
+    /// 这一场的预览图被清掉了（判决还在）：预览文件夹没了、第一张的预览也读不到。和 store 里那句状态栏提示同一个判断；
+    /// 按 store 变没变记着，不是每次重绘都去看磁盘。
+    private var previewsMissing: Bool {
+        memo.value("previewsMissing") {
+            guard let first = store.items.first else { return false }
+            let fm = FileManager.default
+            return !fm.fileExists(atPath: store.sessionDir.appendingPathComponent("previews").path)
+                && !fm.fileExists(atPath: first.previewPath)
+        }
+    }
+
+    private var prunedPreviewsCard: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "photo.badge.arrow.down")
+                .font(.system(size: 30))
+                .foregroundStyle(.secondary)
+            Text("这一场的预览图清掉了")
+                .font(.headline)
+            Text("为了省空间（掉出了最近 15 场，或者从「移除历史记录」里移除过）。判决和人工改判都还在。")
+                .font(.callout).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("重新分析") { store.runAnalysis() }
+                .buttonStyle(.accentProminent)
+                .controlSize(.large)
+                .disabled(store.photoDir == nil)
+            Text("没变的照片只重做预览，人工改判不会动")
+                .hintText()
+        }
+        .padding(22)
+        .frame(maxWidth: 380)
+        .background(AppPalette.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color.white.opacity(0.10), lineWidth: 1))
+        .shadow(color: .black.opacity(0.45), radius: 18, y: 6)
     }
 
     private var emptyState: some View {
@@ -2491,6 +2754,55 @@ struct BatchView: View {
         guard let folder else { return }
         store.exportJPEGs(to: folder, includeUsable: jpegIncludeUsable, options: jpegOptions.wrappedValue,
                           overwrite: jpegOverwrite)
+    }
+}
+
+// MARK: - 顶栏量宽度
+
+/// 量顶栏某一档要多宽的替身（BatchView.barProbes）：按内容自己的宽度排（fixedSize），量到了报回去。
+/// 只在 Key 变了才重算：里面是一整条顶栏，不能跟着方向键、改判每下重建。
+private struct TopBarProbe: View, Equatable {
+    /// 顶栏里会改变宽度的那几样。
+    struct Key: Equatable {
+        var running: Bool
+        var empty: Bool
+        var hasFolder: Bool
+        var clientPicks: Int
+        var clientFilter: Bool
+        var pending: Int
+        var chapter: Bool
+        var sort: String
+        var sortWidth: CGFloat
+    }
+
+    let key: Key
+    let content: () -> AnyView
+    let onWidth: (CGFloat) -> Void
+
+    static func == (a: TopBarProbe, b: TopBarProbe) -> Bool { a.key == b.key }
+
+    var body: some View {
+        content()
+            .fixedSize()
+            .background(GeometryReader { geo in
+                Color.clear.onChange(of: geo.size.width, initial: true) { onWidth(geo.size.width) }
+            })
+    }
+}
+
+private extension View {
+    /// 顶栏按钮的快捷键：量宽度的替身不挂（同一个快捷键挂两份）。
+    @ViewBuilder func barShortcut(_ key: KeyEquivalent, _ modifiers: EventModifiers, live: Bool) -> some View {
+        if live {
+            keyboardShortcut(key, modifiers: modifiers)
+        } else {
+            self
+        }
+    }
+
+    /// 复盘的弹出框。弹出框里要回到琥珀（这一排图标按钮的 tint 是中性灰，不挡的话进度条跟着变浅灰，R9）。
+    func barStatsPopover<Content: View>(_ isPresented: Binding<Bool>, @ViewBuilder content: @escaping () -> Content) -> some View {
+        popover(isPresented: isPresented) { content().tint(AppPalette.accent) }
     }
 }
 

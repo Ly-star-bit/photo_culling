@@ -7,6 +7,7 @@ import AppKit
 /// LabelGUI --compare-ui <photo_dir> <out.png> [--take N | --select a,b] [--keys "2,cmd:<id>,..."] [--zoom [--person N]] [--size 1440x900] [--light]
 /// LabelGUI --batch-ui <photo_dir> <out.png> --timeline-only [--hover N] [--pending]   （只画时间轴 + 悬停卡片）
 /// LabelGUI --batch-ui <photo_dir> <out.png> [--client-only] [--client-import-ui <回复.txt>]   （只看客户选中 / 导入客户选择对话框）
+/// LabelGUI --batch-ui <photo_dir> <out.png> [--verdict 精选|可用|废片]   （先开判决筛选）
 /// LabelGUI --batch-ui <photo_dir> <out.png> --delivery-ui jpeg|highlights|watermark [--delivery-json '{"size":"long:3000"}']
 ///     （导出 JPG / 精华 Top N / 水印页的导出设置那一段）
 /// LabelGUI --batch-ui <photo_dir> <out.png> --body-clock-ui   （状态栏「N 台机身」点开的按机身对时面板）
@@ -94,6 +95,8 @@ enum BatchUISnapshot {
         if let n = option("--chapter").flatMap(Int.init) { store.chapterFilter = n - 1 }
         // --client-only：先开「只看客户选中」（客户选中先用 --client-import --apply 导进同一个数据目录）。
         if args.contains("--client-only") { store.clientPickFilter = true }
+        // --verdict 精选|可用|废片：先开判决筛选（看筛选结果是 0 张时的空状态）。
+        if let verdict = option("--verdict").flatMap(Verdict.init(rawValue:)) { store.verdictFilter = verdict }
         // 存储卡导入的两条横幅：--import-notice "文字" 假装有导入提醒；--finished-import 假装导完一批还没打开
         // （同时假装有任务在跑，不然 BatchView 一出来就把它打开了）。
         if let notice = option("--import-notice") { store.importNotice = notice }
