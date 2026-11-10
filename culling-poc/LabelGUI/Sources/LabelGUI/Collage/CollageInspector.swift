@@ -28,13 +28,21 @@ struct CollageInspector: View {
     var body: some View {
         let _ = CollagePerf.body("检视器")
         VStack(spacing: 0) {
-            Picker("", selection: $nav.inspectorTab) {
-                ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            // 页签居中，最右边是收起右栏的按钮（⌥⌘S；收起以后画布右上角有一个按钮摊开），左边留一样宽的空当。
+            HStack(spacing: 4) {
+                Color.clear.frame(width: 22, height: 1)
+                Spacer(minLength: 0)
+                Picker("", selection: $nav.inspectorTab) {
+                    ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .help("格式：选中的照片、文字、贴纸（没选中 = 这一页）；样式：整组的风格、色调、留白；文档：画布、标题、水印")
+                Spacer(minLength: 0)
+                CollagePaneToggle(edge: .trailing, shown: true) { store.workspace.inspectorHidden = true }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
             .padding(8)
-            .help("格式：选中的照片、文字、贴纸（没选中 = 这一页）；样式：整组的风格、色调、留白；文档：画布、标题、水印")
             Divider()
             ScrollViewReader { proxy in
                 ScrollView {
@@ -203,7 +211,7 @@ struct CollageCanvasBox: View {
             ? "照片不跨中缝，中缝两侧各 \(band) 不放脸" + (canvas.binding == .glued ? "" : "（婚礼相册编排不跨缝）")
             : "横图可以铺满两页，中缝两侧各 \(band) 不放脸"
         Text("\(rule)；出血 \(mm(canvas.bleed)) · 安全区 \(mm(canvas.safe))")
-            .font(.caption2).foregroundStyle(.secondary)
+            .collageHint()
             .fixedSize(horizontal: false, vertical: true)
         if canvas.binding == .glued {
             let crossing = store.crossFoldPages()
@@ -237,10 +245,24 @@ struct CollageStylePanel: View {
     @ObservedObject var store: CollageStore
     /// 风格预设样张在 store.thumbs 里。
     @ObservedObject var thumbs: CollageThumbs
+    /// 「风格」摊没摊开（store.workspace）。
+    @ObservedObject var workspace: CollageWorkspace
 
     init(store: CollageStore) {
         self.store = store
         self.thumbs = store.thumbs
+        self.workspace = store.workspace
+    }
+
+    /// 「风格」收着时显示几个（两排）。
+    static let collapsedPresetCount = 6
+
+    /// 收着时显示哪几个预设（下标）：前 limit 个；正在用的那个排在后面就顶掉最后一个（收着也看得见现在用的是哪个）。
+    nonisolated static func collapsedPresets(count: Int, active: Int?, limit: Int) -> [Int] {
+        guard count > limit else { return Array(0..<count) }
+        var shown = Array(0..<limit)
+        if let active, active >= limit, active < count { shown[limit - 1] = active }
+        return shown
     }
 
     private let swatches: [(String, CollageColor)] = [
@@ -283,10 +305,28 @@ struct CollageStylePanel: View {
 
     /// 风格预设：这一页套上去的样子当按钮，正在用的那个描边（拖过滑杆就哪个都不是了）。
     private var presetBox: some View {
-        GroupBox("风格") {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 8)], spacing: 8) {
-                ForEach(CollageStyles.all) { preset in
-                    presetTile(preset)
+        // 默认只摆两排（以前二十来个预设一口气排下去超过一屏，色调、留白、底色、边框都要滚过它才看得到）。
+        let all = CollageStyles.all
+        let active = all.firstIndex { isActive($0) }
+        let shown = workspace.presetsExpanded ? Array(all.indices)
+            : Self.collapsedPresets(count: all.count, active: active, limit: Self.collapsedPresetCount)
+        return GroupBox("风格") {
+            VStack(alignment: .leading, spacing: 8) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 8)], spacing: 8) {
+                    ForEach(shown, id: \.self) { i in
+                        presetTile(all[i], active: i == active)
+                    }
+                }
+                if all.count > Self.collapsedPresetCount {
+                    Button {
+                        workspace.presetsExpanded.toggle()
+                    } label: {
+                        Label(workspace.presetsExpanded ? "收起" : "全部 \(all.count) 个风格",
+                              systemImage: workspace.presetsExpanded ? "chevron.up" : "chevron.down")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .controlSize(.small)
+                    .help(workspace.presetsExpanded ? "只留两排（正在用的那个一直看得见）" : "摊开全部风格预设")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -296,10 +336,13 @@ struct CollageStylePanel: View {
         .onChange(of: store.styleThumbSource) { _, _ in store.renderStyleThumbs() }
     }
 
-    private func presetTile(_ preset: CollageStyles.Preset) -> some View {
-        // 婚礼 fine-art 的预设按册子尺寸重算过边距（setStyle）：按重算后的比。
-        let active = store.project.style == (CollageStyleFineArt.adapted(preset.style, to: store.project.canvas) ?? preset.style)
-        return Button {
+    /// 正在用这个预设（拖过滑杆就哪个都不是了）。婚礼 fine-art 的预设按册子尺寸重算过边距（setStyle）：按重算后的比。
+    private func isActive(_ preset: CollageStyles.Preset) -> Bool {
+        store.project.style == (CollageStyleFineArt.adapted(preset.style, to: store.project.canvas) ?? preset.style)
+    }
+
+    private func presetTile(_ preset: CollageStyles.Preset, active: Bool) -> some View {
+        Button {
             store.setStyle(preset.style, coalesce: false)
         } label: {
             VStack(spacing: 3) {
@@ -330,7 +373,7 @@ struct CollageStylePanel: View {
     /// 半天画面不动还记一堆撤销。相框和投影在选中的相纸上按张调。
     private func gridOnlyHint(_ text: String) -> some View {
         Text(text)
-            .font(.caption2).foregroundStyle(.tertiary)
+            .collageHint()
             .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -389,7 +432,7 @@ struct CollageStylePanel: View {
         let spread = store.project.canvas.seams == .fold
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text("四边边距分开设（样式预设带的）")
-                .font(.caption2).foregroundStyle(.secondary)
+                .collageHint()
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 4)
             Button("改回统一") {
@@ -450,7 +493,7 @@ struct CollageStylePanel: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 Text(backgroundHint)
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .collageHint()
                     .fixedSize(horizontal: false, vertical: true)
                 CollageSlider(label: "纸纹", value: styleBinding(\.grain), range: 0...1,
                               display: String(format: "%.2f", store.project.style.grain))
@@ -552,7 +595,7 @@ struct CollageTitleBox: View {
                 TextField("拾光", text: $title)
                     .onSubmit { store.setTitle(title) }
                     .onChange(of: title) { _, v in store.setTitle(v) }
-                TextField("副标题 / 地点（{subtitle}）", text: $subtitle)
+                TextField("副标题 / 地点", text: $subtitle)
                     .onChange(of: subtitle) { _, v in store.setSubtitle(v) }
                 HStack(spacing: 6) {
                     // 刊头不预置任何刊名：空着就用标题（拉丁字母转大写，中文转拼音大写）。
@@ -561,7 +604,7 @@ struct CollageTitleBox: View {
                     TextField("刊头（空 = 标题拼音）", text: $masthead)
                         .onChange(of: masthead) { _, v in store.setMasthead(v) }
                         .help("{masthead}：刊头。空着 = 用标题（拉丁字母转大写，中文转拼音大写）")
-                    TextField("期号（{issue}）", text: $issue)
+                    TextField("期号", text: $issue)
                         .onChange(of: issue) { _, v in store.setIssue(v) }
                         .frame(width: 96)
                 }
@@ -572,7 +615,7 @@ struct CollageTitleBox: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Text("模板里的 {title} {subtitle} {masthead} {issue} 就是这几行；选中画布上的字，在「格式」里改字体、字号、花字。")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                    .collageHint()
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -636,7 +679,7 @@ struct CollageTextEditor: View {
                 Toggle("竖排（右起）", isOn: Binding(get: { text.vertical }, set: { v in update { $0.vertical = v } }))
                 if alignFollowsAnchor {
                     Text("对齐跟着字的位置走：贴左边左对齐、居中居中、贴右边右对齐")
-                        .font(.caption2).foregroundStyle(.tertiary)
+                        .collageHint()
                         .fixedSize(horizontal: false, vertical: true)
                 } else if isOverlay {
                     if !text.vertical { horizontalPicker }
@@ -867,7 +910,7 @@ struct CollageTextEditor: View {
                 }
                 if line.accentFromPhoto {
                     Text("现在用照片里的颜色；关掉「从照片取」或挑一个颜色，才用左边那个")
-                        .font(.caption2).foregroundStyle(.secondary)
+                        .collageHint()
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 effectControls(index: index, line: line)
@@ -1012,7 +1055,7 @@ struct CollageExportPanel: View {
                 watermarkToggle
                 // 相册：全部 / 当前跨页 / 自定义（CollagePrintPanels）。
                 if store.isAlbum { CollageExportRangeBox(store: store) }
-                Text(summary).font(.caption2).foregroundStyle(.secondary)
+                Text(summary).collageHint()
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)

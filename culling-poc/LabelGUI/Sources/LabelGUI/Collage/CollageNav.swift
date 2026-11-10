@@ -204,6 +204,8 @@ extension CollageStore {
             selection = nil
             selectItem(nil)
         }
+        // 要去的那一栏收着：先摊开。
+        workspace.reveal(spot.area)
         nav.go(spot, flash: flash)
     }
 }
@@ -281,8 +283,7 @@ struct CollageJumpText: View {
 
     var body: some View {
         Text(Self.attributed(lead: lead, link: title ?? spot.label, spot: spot, tail: tail))
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
+            .collageHint()
             .fixedSize(horizontal: false, vertical: true)
             .environment(\.openURL, OpenURLAction { url in
                 guard url.scheme == Self.scheme, let target = CollageSpot(rawValue: url.absoluteString

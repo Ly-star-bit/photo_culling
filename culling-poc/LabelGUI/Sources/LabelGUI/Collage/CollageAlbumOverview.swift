@@ -100,7 +100,7 @@ struct CollageAlbumOverview: View {
         return HStack(spacing: 8) {
             if picked.isEmpty {
                 Text("单击选中 · ⌘ 加减 · ⇧ 连选 · 拖动排序 · 双击编辑 · 托盘的照片拖到跨页上 = 加进那个跨页")
-                    .font(.caption).foregroundStyle(.tertiary)
+                    .collageHint()
                     .lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 0)
             } else {

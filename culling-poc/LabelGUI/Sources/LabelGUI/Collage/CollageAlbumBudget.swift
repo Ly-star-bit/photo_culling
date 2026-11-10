@@ -445,11 +445,11 @@ struct CollageAlbumBudgetControls: View {
                     + "并了会破坏版式（连着 4 个多图跨页、同姿势 / 黑白彩色同页、左右亮度差太大）的不并，凑不够就多出几个（不删片）"
                     : "照片全部排进去、不替你删：每跨页最多 \(b.maxPerSpread) 张放不下时，多出来的跨页在跨页条上标橙"
                 Text(rule + "。改完点工具条的「自动编排」生效")
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .collageHint()
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 Text("不指定 = 照片多少编多少（默认 4-3-5-2-4-3 的疏密）")
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .collageHint()
                     .fixedSize(horizontal: false, vertical: true)
             }
         }

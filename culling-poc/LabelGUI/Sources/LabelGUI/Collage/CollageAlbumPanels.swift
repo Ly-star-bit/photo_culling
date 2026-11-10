@@ -80,7 +80,7 @@ struct CollageCoverEditBox: View {
                     .fixedSize(horizontal: false, vertical: true)
                 CollageJumpText(store: store, lead: "书脊宽、书脊上的字、封底在", spot: .cover, tail: "里改。")
                 ForEach(store.coverNotes, id: \.self) { note in
-                    Text(note).font(.caption2).foregroundStyle(.tertiary)
+                    Text(note).collageHint()
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 HStack {
@@ -122,7 +122,7 @@ struct CollageReplaceBox: View {
                     strip
                 }
                 Text(footnote)
-                    .font(.caption2).foregroundStyle(.tertiary)
+                    .collageHint()
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)

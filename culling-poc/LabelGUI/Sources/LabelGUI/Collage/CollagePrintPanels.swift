@@ -165,7 +165,7 @@ struct CollagePrintRulesBox: View {
             .font(.caption)
             .help("印厂常要「JPEG 质量拉满、基线（不是渐进式）」：导出写的一直是基线 JPEG，这里只定质量")
             Text("这些是保守默认：照印厂给的改。改好了点上面的菜单「存成规格…」，下次直接选")
-                .font(.caption2).foregroundStyle(.tertiary)
+                .collageHint()
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -181,7 +181,7 @@ struct CollagePrintRulesBox: View {
                 .fixedSize(horizontal: false, vertical: true)
         } else {
             Text(range + now)
-                .font(.caption2).foregroundStyle(.secondary)
+                .collageHint()
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -303,7 +303,7 @@ struct CollageExportRangeBox: View {
             let pdf = store.exportOptions.pdf ? "、不出 PDF（缺页的 PDF 不能拿去印，要 PDF 选「全部」）" : ""
             let cover = store.project.bookCover != nil ? "、不写封面" : ""
             Text("只导第 \(CollageExportRange.label(only)) 个跨页（\(only.count) 个）：只写这几张跨页图\(pdf)\(cover)；文件名里的序号还是原来的跨页号")
-                .font(.caption2).foregroundStyle(.secondary)
+                .collageHint()
                 .fixedSize(horizontal: false, vertical: true)
         case .failure(let bad):
             Label(bad.message, systemImage: "exclamationmark.triangle.fill")
@@ -336,7 +336,7 @@ struct CollagePreflightBox: View {
                     }
                     if issues.contains(where: { $0.severity == .block }) {
                         Text("有「拦」的，点导出时会先问一句")
-                            .font(.caption2).foregroundStyle(.tertiary)
+                            .collageHint()
                     }
                 } else {
                     Text("检查中…").font(.caption).foregroundStyle(.secondary)

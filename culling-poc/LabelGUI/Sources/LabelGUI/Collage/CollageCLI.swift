@@ -925,6 +925,20 @@ enum CollageUISnapshot {
         // --tray-filter all|unused|used、--tray-select ID,ID：截托盘的筛选和多选（离屏点不了）。
         if let f = option("--tray-filter").flatMap(CollageTrayState.Filter.init(rawValue:)) { store.tray.filter = f }
         if let ids = option("--tray-select") { store.tray.selection = Set(ids.split(separator: ",").map(String.init)) }
+        // 工作区（离屏点不了、也不读偏好）：--hide-tray / --hide-inspector 收起一栏；--pane-widths 250,330 两栏的宽度；
+        // --tray-thumb 96 托盘缩略图大小；--tray-group 按章节分组；--presets-expanded「样式 › 风格」摊开全部。
+        let workspace = store.workspace
+        if args.contains("--hide-tray") { workspace.trayHidden = true }
+        if args.contains("--hide-inspector") { workspace.inspectorHidden = true }
+        if let w = option("--pane-widths")?.split(separator: ",").compactMap({ Double($0) }), w.count == 2 {
+            workspace.trayWidth = CGFloat(w[0])
+            workspace.inspectorWidth = CGFloat(w[1])
+        }
+        if let t = option("--tray-thumb").flatMap(Double.init) {
+            workspace.trayThumb = min(CollageWorkspace.thumbRange.upperBound, max(CollageWorkspace.thumbRange.lowerBound, t))
+        }
+        if args.contains("--tray-group") { workspace.trayGrouped = true }
+        if args.contains("--presets-expanded") { workspace.presetsExpanded = true }
         // 检视器「水印」页读水印页的签名和预设：和 app 一样从同一个数据目录读。
         let watermarkStore = WatermarkStore(dataDir: appDataDir)
         // --adopt photos|page[:预设名]：走检视器「用水印页的设置 / 预设 ▸」同一条路把水印页设置套进来。
@@ -1032,6 +1046,46 @@ enum CollageUISnapshot {
                 spin(0.5)
             }
             print("托盘点完选中: " + store.project.photos.map(\.id).filter(store.tray.selection.contains).joined(separator: ","))
+        }
+        // 画布缩放（要等画布排过一次版、记下适应时的几何）：--zoom 2.5（倍，1 = 适应）/ --zoom actual（实际像素）；
+        // --zoom-pan dx,dy 再平移（视图点）。打印缩放、实际像素的百分比、平移（夹过的）。
+        if let z = option("--zoom") {
+            let zoom = workspace.zoom
+            if z == "actual" { zoom.actualPixels() } else if let v = Double(z) { zoom.zoom(to: CGFloat(v)) }
+            if let d = option("--zoom-pan")?.split(separator: ",").compactMap({ Double($0) }), d.count == 2 {
+                zoom.pan(by: CGSize(width: d[0], height: d[1]))
+            }
+            host.layoutSubtreeIfNeeded()
+            // 等放大的那一档预览渲出来。
+            spin(6) { !store.previewRendering }
+            spin(1.5)
+            print(String(format: "画布缩放 %.2f× · 实际像素 %d%% · 平移 %.0f,%.0f · 最大 %.2f× · 预览 %.0f×%.0f px",
+                         Double(zoom.scale), zoom.percent, Double(zoom.offset.width), Double(zoom.offset.height),
+                         Double(zoom.maxScale), Double(store.previewViewport.width), Double(store.previewViewport.height)))
+        }
+        // --alt-hover N：鼠标停在备选条第 N 张上（从 0 起）：画布底下浮一张大的。
+        if let i = option("--alt-hover").flatMap(Int.init) {
+            store.hoverAlternative(i)
+            spin(8) { workspace.altHover.image != nil }
+            print("备选悬停 第 \(i) 张：" + (workspace.altHover.image.map { "大图 \(Int($0.size.width))×\(Int($0.size.height))" } ?? "没有"))
+        }
+        // --menu-at x,y：在画布区的这一点（视图坐标，左上原点；frac:0.5,0.5 = 画布区的比例）右键：打印现建的那份菜单
+        // （先选中点到的那一样，同真的右键）。
+        if let spec = option("--menu-at") {
+            let zoom = workspace.zoom
+            let frac = spec.hasPrefix("frac:")
+            let nums = spec.replacingOccurrences(of: "frac:", with: "").split(separator: ",").compactMap { Double($0) }
+            if nums.count == 2, zoom.viewSize.width > 0 {
+                let p = frac ? CGPoint(x: zoom.viewSize.width * nums[0], y: zoom.viewSize.height * nums[1])
+                             : CGPoint(x: nums[0], y: nums[1])
+                let fit = CollageCanvasLayout.display(store: store, in: zoom.viewSize)
+                let layout = fit.edit.zoomed(zoom.scale, offset: zoom.offset, in: zoom.viewSize)
+                let menu = CollageCanvasView.contextMenu(at: p, store: store, layout: layout, geometry: store.geometry,
+                                                         onSelect: { store.nav.showFormat() }, onEditText: { _ in }, ask: { _ in })
+                print("右键 \(Int(p.x)),\(Int(p.y))（画布区 \(Int(zoom.viewSize.width))×\(Int(zoom.viewSize.height))）：")
+                for line in menu.map(CollageCanvasMenu.describe) ?? ["（不弹菜单）"] { print("  " + line) }
+                spin(0.5)
+            }
         }
         // --notice <字>：状态栏提示（平常 5 秒就清掉，等不到截图）—— 截图前放上，核对长提示不把状态栏撑高。
         if let text = option("--notice") { store.setNotice(text) }

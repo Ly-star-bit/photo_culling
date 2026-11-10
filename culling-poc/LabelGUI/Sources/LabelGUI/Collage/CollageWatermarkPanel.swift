@@ -174,7 +174,7 @@ struct CollageMarkLayerBox: View {
             pageRows(layer)
         }
         if let name = layer.presetName {
-            Text("来自水印页预设「\(name)」").font(.caption2).foregroundStyle(.tertiary)
+            Text("来自水印页预设「\(name)」").collageHint()
         }
     }
 
@@ -217,7 +217,7 @@ struct CollageMarkLayerBox: View {
         .disabled(tiled)
         .opacity(tiled ? 0.45 : 1)
         if tiled {
-            Text("平铺时位置和边距不起作用").font(.caption2).foregroundStyle(.tertiary)
+            Text("平铺时位置和边距不起作用").collageHint()
         }
         CollageSlider(label: "大小", value: value(\.sizeRatio),
                       range: Self.range(CollageMarkLayer.sizeRange, including: layer.sizeRatio),
@@ -240,7 +240,7 @@ struct CollageMarkLayerBox: View {
                 Text("签名位置：\(layer.position.label)").font(.caption2).foregroundStyle(.secondary)
                 if let landscape = layer.landscapePosition, layer.tile == nil {
                     Text("横的区域放「\(landscape.label)」（水印页带来的）；点左边统一成一个")
-                        .font(.caption2).foregroundStyle(.tertiary)
+                        .collageHint()
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -302,7 +302,7 @@ struct CollageMarkLayerBox: View {
         .pickerStyle(.segmented)
         .help("自动：底下亮用黑、暗用白（签名、字各看各的落点）；白 / 黑：签名和字都染成白 / 近黑（字带底色时底色换成反色）；原色：照签名本来的颜色")
         Text(Self.contrastNote(layer))
-            .font(.caption2).foregroundStyle(.tertiary)
+            .collageHint()
             .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -424,7 +424,7 @@ struct CollageMarkSplitPicker: View {
             .pickerStyle(.segmented)
             if let hint = Self.onceHint(store.project, page: store.page) {
                 Text(hint)
-                    .font(.caption2).foregroundStyle(.tertiary)
+                    .collageHint()
                     .fixedSize(horizontal: false, vertical: true)
             }
         } else if seams == .fold {
@@ -541,7 +541,7 @@ struct CollageWatermarkAdoptBox: View {
                 }
                 .font(.caption)
                 Text("拿过来的是一份快照：之后改水印页不会改掉这里。边距按水印页那张照片折成比例，每格成比例。")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                    .collageHint()
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)

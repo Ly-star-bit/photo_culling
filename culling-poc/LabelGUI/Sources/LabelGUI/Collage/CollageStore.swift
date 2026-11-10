@@ -137,6 +137,8 @@ final class CollageStore: ObservableObject {
     let nav = CollageNav()
     /// 相册界面状态（整本概览、跨页条拖动，CollageAlbumUI.swift）：只有跨页条、画布区、概览订阅。
     let albumUI = CollageAlbumUI()
+    /// 两边的栏（收起 / 宽度）、画布缩放、托盘缩略图大小这些视图偏好（CollageWorkspace.swift）。
+    let workspace = CollageWorkspace()
     var preview: NSImage? { previewState.image }
     /// 相册跨页条的缩略图（按页 id）。
     var pageThumbs: [UUID: NSImage] { thumbs.pages }
@@ -1495,6 +1497,7 @@ final class CollageStore: ObservableObject {
 
     private func clearAlternatives() {
         alternatives = []
+        hoverAlternative(nil)
         alternativeThumbs = []
         alternativesPageID = nil
         alternativesScatter = nil
@@ -1562,6 +1565,39 @@ final class CollageStore: ObservableObject {
         pushUndo()
         setRoot(CollageLayout.refit(root, context: context))
         commitEdit()
+    }
+
+    /// 备选条上鼠标停在第 index 张上（nil = 移开了）：后台渲一张大的，浮在画布底下（CollageAltHoverPreview）。
+    /// 和缩略图同一个函数拼页（pageFor），看到的就是点下去的样子。
+    func hoverAlternative(_ index: Int?) {
+        let hover = workspace.altHover
+        hover.token += 1
+        guard let index, alternatives.indices.contains(index) else {
+            hover.index = nil
+            hover.image = nil
+            return
+        }
+        let token = hover.token
+        let page = pageFor(alternatives[index], replacing: self.page)
+        var snapshot = project
+        let hints = self.hints
+        let c = project.canvas
+        let scale = min(1, 840 / Double(max(c.width, c.height)))
+        Task { [weak self] in
+            // 鼠标扫过一排时不每张都渲：停住一小会儿才渲。
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            guard let self, self.workspace.altHover.token == token else { return }
+            let image = await Task.detached(priority: .userInitiated) { () -> NSImage? in
+                snapshot.pages = [page]
+                var opts = CollageRender.Options(scale: scale)
+                opts.includeBleed = false
+                guard let cg = CollageRender.render(page: page, project: snapshot, hints: hints, options: opts) else { return nil }
+                return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+            }.value
+            guard self.workspace.altHover.token == token else { return }
+            hover.image = image
+            hover.index = image == nil ? nil : index
+        }
     }
 
     private func renderAlternativeThumbs() {

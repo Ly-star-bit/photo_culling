@@ -271,7 +271,7 @@ struct CollageLookBox: View {
                     .help("其余照片的色温、明暗往主图靠：不同时间、不同光线拍的放在一起才像一组")
                 halftoneControls
                 Text("整组照片套同一个色调；导出和预览一样。黑白、旧照的强度只管影调。")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                    .collageHint()
                     .fixedSize(horizontal: false, vertical: true)
                 // 这一页的色调在「格式 › 这一页」，这一格的在选中照片的「格式 › 色调」（三级各在各的位置）。
                 CollageJumpText(store: store, lead: "只给这一页换：", spot: .pageLook,
@@ -290,7 +290,7 @@ struct CollageLookBox: View {
 
     private func hint(_ text: String) -> some View {
         Text(text)
-            .font(.caption2).foregroundStyle(.tertiary)
+            .collageHint()
             .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -539,7 +539,7 @@ struct CollageOverlayBox: View {
                     .help("按人脸、身体和画面空处重新挑位置（同一张照片上的别的字块也让开）")
                 Text(overlay.anchor == .custom ? "手动拖过" : "位置：\(overlay.anchor.label)")
                     .font(.caption2).foregroundStyle(.secondary)
-                Text("画布上可以直接拖字").font(.caption2).foregroundStyle(.tertiary)
+                Text("画布上可以直接拖字").collageHint()
             }
         }
         sideAnchors(overlay)
@@ -715,17 +715,38 @@ struct CollageOverlayBox: View {
 
 struct CollageDecorBox: View {
     @ObservedObject var store: CollageStore
+    /// 每个贴纸的样子（进程里渲一次）。
+    @ObservedObject private var thumbs = CollageStickerThumbs.shared
 
     var body: some View {
         GroupBox("贴纸与手写") {
             VStack(alignment: .leading, spacing: 8) {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 78), spacing: 6)], spacing: 6) {
+                // 一个贴纸一张小图（以前是九个纯文字按钮，加之前看不到样子）。
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 64), spacing: 6)], spacing: 8) {
                     ForEach(CollageSticker.allCases, id: \.self) { kind in
-                        Button(kind.label) { store.addSticker(kind) }
-                            .font(.caption)
-                            .frame(maxWidth: .infinity)
+                        Button { store.addSticker(kind) } label: {
+                            VStack(spacing: 3) {
+                                Group {
+                                    if let image = thumbs.images[kind] {
+                                        Image(nsImage: image).resizable().interpolation(.high)
+                                            .aspectRatio(contentMode: .fit)
+                                    } else {
+                                        Rectangle().fill(Color.gray.opacity(0.18))
+                                            .aspectRatio(CGFloat(CollageStickerThumbs.paper.width)
+                                                         / CGFloat(CollageStickerThumbs.paper.height), contentMode: .fit)
+                                    }
+                                }
+                                .clipShape(RoundedRectangle(cornerRadius: 3))
+                                .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(Color.gray.opacity(0.25), lineWidth: 0.5))
+                                Text(kind.label).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("加一个「\(kind.label)」")
                     }
                 }
+                .onAppear { thumbs.load() }
                 .disabled(!CollageAlbumRules.allows(.freeItems, editingCover: store.editingCover))
                 HStack {
                     Button("加手写字") { store.addItemText() }
@@ -741,7 +762,7 @@ struct CollageDecorBox: View {
                 Text(store.isFreeform
                      ? "散落版：托盘里的照片拖进画布 = 放一张照片。选中后拖动挪位置，拖上方圆点旋转、右下圆点缩放；[ ] 微调角度。先选中一张照片再加胶带、回形针，会贴在它上沿并跟着它走。"
                      : "贴纸浮在版面上。先选中一个照片格再加胶带，会贴在那一格的上沿。")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                    .collageHint()
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -792,7 +813,7 @@ struct CollageContactBox: View {
                 Divider()
                 edgeControls
                 Text(frameSummary)
-                    .font(.caption2).foregroundStyle(.tertiary)
+                    .collageHint()
                     .fixedSize(horizontal: false, vertical: true)
                 frameList
                 HStack {
@@ -825,7 +846,7 @@ struct CollageContactBox: View {
                 // 自己挑了深色的纸（或者跟着偏深的工程底色）：黑场压在深色上分不出来。
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text("印样印在白纸上：现在的纸偏深，黑场和纸分不出来")
-                        .font(.caption2).foregroundStyle(.secondary)
+                        .collageHint()
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                     Button("换白纸") { store.useWhitePaper() }

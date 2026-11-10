@@ -449,7 +449,7 @@ struct CollagePageBox: View {
                 Text("画布上还没有版式。").font(.caption).foregroundStyle(.secondary)
                 CollageJumpText(store: store, lead: "到左栏", spot: .templates, tail: "里套一个，")
                 Text(store.isAlbum ? "或者点顶栏的「自动编排」把托盘编成跨页。" : "或者点顶栏的「自动排版」。")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                    .collageHint()
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -464,11 +464,11 @@ struct CollagePageBox: View {
     private var layoutRows: some View {
         if store.isContactSheet {
             Text("这一页是印样：规格、排法、记号在下面「印样」里；改回网格也在那里。")
-                .font(.caption2).foregroundStyle(.secondary)
+                .collageHint()
                 .fixedSize(horizontal: false, vertical: true)
         } else if store.isFreeform {
             Text("散落版：托盘里的照片拖进画布 = 放一张照片。选中后拖动挪位置，拖上方圆点旋转、右下圆点缩放；[ ] 微调角度。")
-                .font(.caption2).foregroundStyle(.secondary)
+                .collageHint()
                 .fixedSize(horizontal: false, vertical: true)
         } else {
             HStack {
@@ -482,7 +482,7 @@ struct CollagePageBox: View {
                 }
             }
             Text("画布上：拖缝调大小 · ⌥点缝横竖翻转 · 拖格子到另一格中间互换、到边上劈开插入 · 双击调裁切")
-                .font(.caption2).foregroundStyle(.tertiary)
+                .collageHint()
                 .fixedSize(horizontal: false, vertical: true)
         }
     }

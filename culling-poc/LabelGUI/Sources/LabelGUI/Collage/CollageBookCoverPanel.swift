@@ -21,7 +21,7 @@ struct CollageBookCoverBox: View {
                         made(cover)
                     } else {
                         Text("精装封面：封底 | 书脊 | 封面一整张，四周包边。主图用扉页那张（没有就挑分数最高、有人脸的），标题、日期照扉页。导出时单独出「名_封面」图和 PDF。")
-                            .font(.caption2).foregroundStyle(.secondary)
+                            .collageHint()
                             .fixedSize(horizontal: false, vertical: true)
                         Button("做封面") { store.makeCover() }
                             .disabled(store.project.photos.isEmpty)
@@ -54,7 +54,7 @@ struct CollageBookCoverBox: View {
              ? String(format: "估的：%dP × 每张纸 %.2f mm ÷ 2 + 两块板 2 × %.1f mm ≈ %.1f mm。照印厂给的书脊宽填进去。",
                       CollageBookCover.pageCount(spreads: spreads), cover.sheetMM, cover.boardMM, estimate)
              : String(format: "填的是印厂给的数（按页数估是 %.1f mm）。", estimate))
-            .font(.caption2).foregroundStyle(.secondary)
+            .collageHint()
             .fixedSize(horizontal: false, vertical: true)
         if cover.hasSpineText, !CollageBookCover.spineFitsText(cover.spineWidthMM(spreads: spreads)) {
             Label(String(format: "书脊只有 %.1f mm，放不下字（至少 %.0f mm）：书脊上不印字",
@@ -89,7 +89,7 @@ struct CollageBookCoverBox: View {
         TextField("日期（{date}；空 = 不印）", text: $spineDate)
             .onChange(of: spineDate) { _, v in if v != cover.spineDate { store.setCoverSpineText(date: v) } }
         Text("中文从上往下竖排，拉丁字母、数字转 90° 从上往下读。")
-            .font(.caption2).foregroundStyle(.tertiary)
+            .collageHint()
             .fixedSize(horizontal: false, vertical: true)
         Divider()
         HStack(spacing: 6) {

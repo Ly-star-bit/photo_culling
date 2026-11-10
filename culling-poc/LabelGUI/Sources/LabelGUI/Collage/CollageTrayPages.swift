@@ -23,15 +23,23 @@ struct CollageLeftPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("", selection: $nav.trayTab) {
-                ForEach(CollageTrayTab.allCases) { Text($0.label).tag($0) }
+            // 页签居中，最左边是收起左栏的按钮（⌃⌘S；收起以后画布左上角有一个按钮摊开），右边留一样宽的空当。
+            HStack(spacing: 4) {
+                CollagePaneToggle(edge: .leading, shown: true) { store.workspace.trayHidden = true }
+                Spacer(minLength: 0)
+                Picker("", selection: $nav.trayTab) {
+                    ForEach(CollageTrayTab.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .help("照片：托盘；模板：一键成套和模板库；素材：文字格、手写字、贴纸、印样")
+                Spacer(minLength: 0)
+                Color.clear.frame(width: 22, height: 1)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 8)
             .padding(.top, 8)
             .padding(.bottom, 2)
-            .help("照片：托盘；模板：一键成套和模板库；素材：文字格、手写字、贴纸、印样")
             switch nav.trayTab {
             case .photos: CollageTray(store: store, batchStore: batchStore)
             case .templates: CollageTemplatesPage(store: store)
@@ -111,7 +119,7 @@ struct CollageTemplatesPage: View {
                             title: "照片")
             Text(store.batch == nil ? "或者把照片文件拖到左栏。"
                  : "或者直接点下面的一键成套（从批量页的选片结果拿照片）。")
-                .font(.caption2).foregroundStyle(.tertiary)
+                .collageHint()
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(8)
@@ -141,7 +149,7 @@ struct CollageTemplatesPage: View {
                     .disabled(CollageStyleFashion.coverPhotoID(store.project) == nil)
                     .help("在前 \(CollageStyleFashion.coverChoices) 个主图候选里换下一张当封面，内页留着")
                 Text("一次出一整套：一期杂志、一卷印样、一本婚礼相册（替换当前拼图，可以撤销）")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                    .collageHint()
                     .fixedSize(horizontal: false, vertical: true)
             }
             .disabled(store.isSolving || (store.project.photos.isEmpty && store.batch == nil))
@@ -180,7 +188,7 @@ struct CollageMyTemplatesBox: View {
                 }
                 .font(.caption)
                 Text("存过的在上面「我的模板」一组里；右键可以删。")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                    .collageHint()
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -248,7 +256,7 @@ struct CollageAssetsPage: View {
                 .disabled(store.root == nil || store.isFreeform)
                 Text(store.isFreeform ? "散落版没有格子：用下面的「加手写字」。"
                      : "选中一个格子时加在那一格旁边，否则加在整版的这一边。点画布上的文字格，右栏「格式」里改字。")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                    .collageHint()
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)

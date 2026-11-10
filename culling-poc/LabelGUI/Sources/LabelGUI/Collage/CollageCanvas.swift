@@ -157,6 +157,19 @@ struct CollageCanvasView: View {
     /// 用户在画布上选中了一样东西（格子、字块、图层）：检视器切到「格式」（NU3）。点空白处不调。
     /// 只接手势：撤销恢复的选中、实时桥、命令行设的选中不切页签（正在样式页拖滑杆时按 ⌘Z 不该被拽走）。
     var onSelect: () -> Void = {}
+    /// 空画布中间的「自动排版」/「自动编排」（顶栏那个按钮的同一条路）。
+    var onAutoLayout: () -> Void = {}
+    /// 画布的缩放和平移（store.workspace.zoom）。
+    @ObservedObject private var zoom: CollageCanvasZoom
+
+    init(store: CollageStore, onEditText: @escaping (CollageSpot) -> Void = { _ in }, onSelect: @escaping () -> Void = {},
+         onAutoLayout: @escaping () -> Void = {}) {
+        self.store = store
+        self.onEditText = onEditText
+        self.onSelect = onSelect
+        self.onAutoLayout = onAutoLayout
+        self.zoom = store.workspace.zoom
+    }
 
     private enum DragMode {
         case gutter(CollageLayout.Gutter)
@@ -172,6 +185,10 @@ struct CollageCanvasView: View {
     @State private var dropTarget: CollageDropTarget?
     @State private var hoverGutter: CollageLayout.Gutter?
     @State private var magnifyBase: CollageCropOverride?
+    /// 捏合放大画布（不在调裁切时）：起手时的缩放。
+    @State private var zoomBase: CGFloat?
+    /// 拖着一格照片时指针在哪（视图坐标）：跟手画一张半透明的小图。
+    @State private var dragPoint: CGPoint?
     /// 右键「移到第…个跨页（填号）…」的小框、点的是哪一格。
     @State private var askNumber = false
     @State private var menuPath: [Int]?
@@ -181,7 +198,11 @@ struct CollageCanvasView: View {
         let _ = CollagePerf.body("画布")
         GeometryReader { geo in
             // 编辑封面：图是整张封面，格子按封面那一页（CollageCanvasLayout.display）。
-            let display = CollageCanvasLayout.display(store: store, in: geo.size)
+            // 放大 / 平移（zoom）：两层摆放一起放大，下面的命中、落点、选中框都按放大后的 layout，不用另外换算。
+            let fit = CollageCanvasLayout.display(store: store, in: geo.size)
+            let pan = CollageCanvasZoom.clamp(zoom.offset, scale: zoom.scale, fitRect: fit.image.rect, viewSize: geo.size)
+            let display = (image: fit.image.zoomed(zoom.scale, offset: pan, in: geo.size),
+                           edit: fit.edit.zoomed(zoom.scale, offset: pan, in: geo.size))
             let layout = display.edit
             let geometry = store.geometry
             let origin = geo.frame(in: .global).origin
@@ -198,14 +219,34 @@ struct CollageCanvasView: View {
                 if store.editingCover {
                     coverHint.frame(width: geo.size.width, height: geo.size.height, alignment: .bottom)
                 }
+                if case .move(let source) = dragMode, let p = dragPoint {
+                    dragGhost(source, at: p, layout: layout, geometry: geometry)
+                }
+                if store.root != nil {
+                    CollageZoomBar(zoom: zoom)
+                        .padding(10)
+                        .frame(width: geo.size.width, height: geo.size.height, alignment: .bottomTrailing)
+                }
             }
-            // 右键一格：「移到第…个跨页」（垫在底下、点击穿过去；右键由它自己的监听接，CollageContextMenuAnchor）。
+            // 放大以后画布比视图大：ZStack 会跟着最大的那张图长大，先定回视图这么大再裁，别画到两边的栏、底下的条上去。
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+            .clipped()
+            // 右键：选中的那一样的常用操作（垫在底下、点击穿过去；右键由它自己的监听接，CollageContextMenuAnchor）。
             .background(CollageContextMenuAnchor { p in contextMenu(at: p, layout: layout, geometry: geometry) })
+            // 滚轮：按着 ⌘ / ⌥ = 在指针处缩放；放大以后 = 平移；没放大的普通滚动不拦。
+            .background(CollageScrollAnchor { delta, p, zooming in scroll(delta, at: p, zooming: zooming) })
             .contentShape(Rectangle())
             .gesture(singleTapGesture(layout: layout, geometry: geometry))
             .simultaneousGesture(doubleTapGesture(layout: layout, geometry: geometry))
             .simultaneousGesture(dragGesture(layout: layout, geometry: geometry, origin: origin))
             .simultaneousGesture(magnifyGesture(geometry: geometry))
+            .onAppear { recordZoom(fit.image, in: geo.size) }
+            .onChange(of: fit.image.rect) { _, _ in recordZoom(fit.image, in: geo.size) }
+            .onChange(of: geo.size) { _, _ in recordZoom(fit.image, in: geo.size) }
+            .onChange(of: zoom.scale) { _, _ in reportViewport(display.image) }
+            // 换了画布（另一个尺寸、印厂规格、单张 ↔ 相册）、进出封面编辑：回到适应（放大着的那一块在新画布上不是同一个地方）。
+            .onChange(of: store.project.canvas) { _, _ in zoom.fit() }
+            .onChange(of: store.editingCover) { _, _ in zoom.fit() }
             .onContinuousHover { phase in
                 hover(phase, layout: layout, geometry: geometry)
             }
@@ -236,8 +277,9 @@ struct CollageCanvasView: View {
         .onKeyPress(.escape) { keyEscape() }
         .onKeyPress(.delete) { keyDelete() }
         .onKeyPress(.deleteForward) { keyDelete() }
+        // ⌘= ⌘- 是画布缩放（顶栏那组快捷键）：带 ⌘ 的不当成裁切缩放。
         .onKeyPress(characters: CharacterSet(charactersIn: "+=-")) { press in
-            keyZoom(press.characters)
+            press.modifiers.contains(.command) ? .ignored : keyZoom(press.characters)
         }
         .onKeyPress(characters: CharacterSet(charactersIn: "[]")) { press in
             keyRotate(press.characters)
@@ -254,6 +296,28 @@ struct CollageCanvasView: View {
 
     /// 画布上正在拖动或捏合（实时桥用）。
     private var gestureActive: Bool { dragMode != nil || magnifyBase != nil }
+
+    // MARK: - 画布缩放
+
+    /// 适应时的几何记给 zoom（顶栏快捷键、右下角小条、滚轮都按它算）；视图大小变了平移跟着夹。
+    private func recordZoom(_ fitImage: CollageCanvasLayout, in size: CGSize) {
+        let backing = NSScreen.main?.backingScaleFactor ?? 2
+        zoom.record(viewSize: size, fitRect: fitImage.rect, fitPixelRatio: fitImage.scale * backing)
+        zoom.reclamp()
+    }
+
+    private func scroll(_ delta: CGSize, at p: CGPoint, zooming: Bool) -> Bool {
+        guard store.root != nil else { return false }
+        if zooming {
+            // 往上滚 = 放大。一下滚得再多也只算 ±40 点（鼠标滚轮带惯性时别一下放到头）。
+            let d = max(-40, min(40, delta.height))
+            zoom.zoom(to: zoom.scale * exp(d * 0.01), anchor: p)
+            return true
+        }
+        guard !zoom.isFit else { return false }
+        zoom.pan(by: delta)
+        return true
+    }
 
     // MARK: - 画面
 
@@ -276,39 +340,121 @@ struct CollageCanvasView: View {
             .allowsHitTesting(false)
     }
 
-    /// 右键点在 p：照片格就先选中它（看得见点的是哪一格），给「移到第…个跨页」菜单；别的不弹。
+    /// 右键点在 p：先选中点到的那一样（看得见点的是哪个），再给它的菜单（CollageCanvasMenus.swift）。
     private func contextMenu(at p: CGPoint, layout: CollageCanvasLayout, geometry: CollageLayout.Geometry) -> NSMenu? {
-        guard case .cell(let f) = CollageHit.at(p, geometry: geometry, layout: layout),
-              f.cell.kind == .photo, f.cell.photoID != nil else { return nil }
-        let path = f.path
-        guard let menu = CollageCanvasMenu.build(store: store, path: path, ask: {
+        guard store.root != nil else { return nil }
+        focused = true
+        return Self.contextMenu(at: p, store: store, layout: layout, geometry: geometry, onSelect: onSelect,
+                                onEditText: onEditText) { path in
             menuPath = path
             askNumber = true
-        }) else { return nil }
-        focused = true
-        if store.cropEditing, store.selection != path { store.exitCropEdit() }
-        store.selection = path
-        onSelect()
-        return menu
-    }
-
-    private var emptyHint: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "rectangle.3.offgrid")
-                .font(.system(size: 38))
-                .foregroundStyle(.secondary)
-            // 相册的按钮叫「自动编排」（NU7：以前提示一律说「自动排版」，相册里找不到这个按钮）。
-            Text(store.isAlbum ? "把托盘里的照片拖进来，或点「自动编排」" : "把托盘里的照片拖进来，或点「自动排版」")
-                .foregroundStyle(.secondary)
-            Text("批量页多选后点「拼图」也能直接带过来")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
         }
     }
 
+    /// 同上，不碰视图状态（命令行 --menu-at 也走它）。
+    static func contextMenu(at p: CGPoint, store: CollageStore, layout: CollageCanvasLayout,
+                            geometry: CollageLayout.Geometry, onSelect: () -> Void,
+                            onEditText: @escaping (CollageSpot) -> Void, ask: @escaping ([Int]) -> Void) -> NSMenu? {
+        switch CollageHit.at(p, store: store, geometry: geometry, layout: layout) {
+        case .item(let item), .rotateHandle(let item), .resizeHandle(let item):
+            store.selectItem(item.id)
+            onSelect()
+            return CollageCanvasMenu.item(store: store, item: item, editText: onEditText)
+        case .overlay(let f, let i, _):
+            store.selection = f.path
+            store.overlayIndex = i
+            onSelect()
+            return CollageCanvasMenu.cell(store: store, frame: f, editText: onEditText) { ask(f.path) }
+        case .cell(let f):
+            if store.cropEditing, store.selection != f.path { store.exitCropEdit() }
+            store.selection = f.path
+            onSelect()
+            return CollageCanvasMenu.cell(store: store, frame: f, editText: onEditText) { ask(f.path) }
+        case .gutter(let g):
+            return CollageCanvasMenu.gutter(store: store, gutter: g)
+        case .none:
+            return CollageCanvasMenu.page(store: store)
+        }
+    }
+
+    /// 空画布：托盘也空着 = 几个能点的入口（带精选、添加文件）；托盘有照片 = 一个「自动排版」。
+    private var emptyHint: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "rectangle.3.offgrid")
+                .font(.system(size: 38))
+                .foregroundStyle(.secondary)
+            if store.project.photos.isEmpty {
+                Text("先带几张照片进来").foregroundStyle(.secondary)
+                if let batch = store.batch {
+                    CollageEmptyActions(store: store, batch: batch)
+                } else {
+                    CollageAddFilesButton(store: store).controlSize(.large)
+                }
+                Text("也可以把照片文件直接拖进来 · 批量页多选后点「拼图」也能带过来")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                // 相册的按钮叫「自动编排」（NU7：以前提示一律说「自动排版」，相册里找不到这个按钮）。
+                Text("托盘里有 \(store.project.photos.count) 张照片").foregroundStyle(.secondary)
+                Button(action: onAutoLayout) {
+                    Label(store.isAlbum ? "自动编排" : "自动排版", systemImage: "wand.and.stars").frame(minWidth: 140)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(store.isSolving)
+                Text("或者把托盘里的照片拖进来 · 左栏「模板」里套一个")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// 拖着一格时跟手的小图（半透明）：以前只有落点高亮，被拖的那张原地不动，看不出「正拖着它」。
+    @ViewBuilder
+    private func dragGhost(_ source: [Int], at p: CGPoint, layout: CollageCanvasLayout,
+                           geometry: CollageLayout.Geometry) -> some View {
+        if let frame = geometry.frames.first(where: { $0.path == source }) {
+            let r = layout.toView(frame.rect.cgRect)
+            let k = min(1, 150 / max(1, max(r.width, r.height)))
+            let w = max(24, r.width * k)
+            let h = max(24, r.height * k)
+            Group {
+                if let id = frame.cell.photoID, let photo = store.photoMap[id] {
+                    ThumbnailView(path: photo.quickPath, maxPixel: 256)
+                        .aspectRatio(contentMode: .fill)
+                } else {
+                    ZStack {
+                        Color(white: 0.92)
+                        Image(systemName: frame.cell.kind == .text ? "textformat" : "square.dashed")
+                            .foregroundStyle(.gray)
+                    }
+                }
+            }
+            .frame(width: w, height: h)
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+            .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(Color.white, lineWidth: 1.5))
+            .shadow(color: .black.opacity(0.45), radius: 6, y: 2)
+            .opacity(0.82)
+            .offset(x: p.x - w / 2, y: p.y - h / 2)
+            .allowsHitTesting(false)
+        }
+    }
+
+    /// 预览渲多大：适应时 = 画布在屏幕上占的像素；放大了按缩放档（√2 一档）往上渲，最多 1600 万像素
+    /// （30×30 的相册实际像素是 2500 万，一帧渲不动；再往里放就是这张放大了看）。
     private func reportViewport(_ layout: CollageCanvasLayout) {
         let backing = NSScreen.main?.backingScaleFactor ?? 2
-        store.setViewport(pixels: CGSize(width: layout.rect.width * backing, height: layout.rect.height * backing))
+        let z = max(1, zoom.scale)
+        let k = CollageCanvasZoom.renderBucket(z) / z
+        var w = layout.rect.width * backing * k
+        var h = layout.rect.height * backing * k
+        let limit: CGFloat = 16_000_000
+        if w * h > limit {
+            let shrink = (limit / (w * h)).squareRoot()
+            w *= shrink
+            h *= shrink
+        }
+        store.setViewport(pixels: CGSize(width: w, height: h))
     }
 
     // MARK: - 点击
@@ -456,6 +602,7 @@ struct CollageCanvasView: View {
             let ratio = CollageLayout.ratio(forDrag: position, gutter: g, gutterWidth: gutterWidth, minPixels: minPixels)
             store.setRatio(ratio, at: g.path)
         case .move(let source):
+            dragPoint = value.location
             // 拖出画布、指到跨页条的卡片上：松手 = 挪到那个跨页（S1 moveCells）；卡片描边，画布上不画落点。
             let global = CGPoint(x: value.location.x + origin.x, y: value.location.y + origin.y)
             let hover = spreadTarget(source, at: global)
@@ -524,6 +671,7 @@ struct CollageCanvasView: View {
     private func endDrag() {
         defer {
             dragMode = nil
+            dragPoint = nil
             dropTarget = nil
             if store.albumUI.stripHover != nil { store.albumUI.stripHover = nil }
         }
@@ -557,13 +705,22 @@ struct CollageCanvasView: View {
         MagnifyGesture()
             .onChanged { value in
                 guard store.cropEditing, let path = store.selection,
-                      let frame = geometry.frames.first(where: { $0.path == path }) else { return }
+                      let frame = geometry.frames.first(where: { $0.path == path }) else {
+                    // 不在调裁切：捏合 = 放大画布，手指中间那一点不动。
+                    guard store.root != nil else { return }
+                    if zoomBase == nil { zoomBase = zoom.scale }
+                    zoom.zoom(to: (zoomBase ?? 1) * value.magnification, anchor: value.startLocation)
+                    return
+                }
                 if magnifyBase == nil { magnifyBase = store.cropBaseline(for: frame) }
                 guard let base = magnifyBase else { return }
                 let zoom = min(8, max(1, base.zoom * Double(value.magnification)))
                 store.setCrop(CollageCropOverride(cx: base.cx, cy: base.cy, zoom: zoom), at: path)
             }
-            .onEnded { _ in magnifyBase = nil }
+            .onEnded { _ in
+                magnifyBase = nil
+                zoomBase = nil
+            }
     }
 
     // MARK: - 悬停：缝上换光标
