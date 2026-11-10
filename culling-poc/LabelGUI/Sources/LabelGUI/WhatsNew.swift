@@ -31,27 +31,27 @@ enum WhatsNew {
     }
 
     /// 这一版新增的条目（两三条到五条，一条一句话，能「带我去」的都带上）。发下一版时整张换掉、version 跟着改。
-    static let notes = Notes(version: "1.28.0", entries: [
-        Entry(id: "album-overview",
-              title: "相册整本概览",
-              detail: "跨页条左边「整本」（G）摊开整本：拖动排序，多选锁住 / 镜像 / 删除；托盘的照片、画布的格子能直接拖到跨页卡片上。⌘← / ⌘→ 换跨页。",
+    static let notes = Notes(version: "1.29.0", entries: [
+        Entry(id: "bigger-canvas",
+              title: "画布大起来",
+              detail: "两边的栏默认窄了，拖边能改宽度；左栏 ⌃⌘S、右栏 ⌥⌘S 收起（页签那一行最边上也有按钮）。没有备选时备选条收成一行。",
               destination: nil),
-        Entry(id: "this-spread",
-              title: "「这个跨页」和「换一张」",
-              detail: "不选格子时右栏能左页 / 右页分开换切法、镜像、锁住这个跨页；选中一张照片，「换一张」列出同连拍、同场的候选。",
-              destination: .collage(.page)),
-        Entry(id: "print-spec",
-              title: "印厂规格",
-              detail: "「文档 › 画布」的相册尺寸换成印厂规格：页数规则、中缝、色彩（sRGB / Adobe RGB）、JPEG 质量照印厂给的改，还能存成规格。",
-              destination: .collage(.canvas)),
-        Entry(id: "preflight",
-              title: "导出前检查、看版 PDF",
-              detail: "「导出 ▾」先查空照片格、放大过头、脸压中缝；能只导某几个跨页，也能出给客户看的看版 PDF。",
-              destination: .collage(.export)),
-        Entry(id: "book-cover",
-              title: "封面",
-              detail: "跨页条最前面的「封面」卡：封底 | 书脊 | 封面排在一整张上，书脊宽按页数估；导出时单独出封面的 JPG 和 PDF。",
-              destination: .collage(.cover)),
+        Entry(id: "canvas-zoom",
+              title: "画布能放大",
+              detail: "捏合、⌘ 滚轮在指针处放大，放大以后滚动 = 平移；⌘= ⌘- 缩放、⌘0 适应、⌘1 实际像素。右下角有缩放小条。",
+              destination: nil),
+        Entry(id: "canvas-menu",
+              title: "画布右键",
+              detail: "右键照片格：调裁切、景别、完整显示、换一张、加字、暗房、锁定、删除；文字、贴纸、缝、空白处各有自己的几项。",
+              destination: nil),
+        Entry(id: "style-rows",
+              title: "风格收成两排",
+              detail: "「样式 › 风格」默认只摆两排（正在用的一直看得见），色调、留白、底色不用滚半天；面板里的说明字也大了、清楚了。",
+              destination: .collage(.presets)),
+        Entry(id: "sticker-thumbs",
+              title: "贴纸有小图，托盘能分组",
+              detail: "「素材」里每个贴纸一张小图；托盘底下能调缩略图大小、按章节分组；鼠标停在备选上，画布底下浮一张大的。",
+              destination: .collage(.stickers)),
     ])
 
     /// 记「上次见过哪一版」的键（app 自己的 UserDefaults 域；自检写进参数域，不碰这里）。
