@@ -229,10 +229,13 @@ enum LiveHandlers {
         if include && collage.previewDeferred { _ = await collage.previewSettled(timeout: 1.5) }
         let image: CGImage? = include ? collage.preview?.cgImage(forProposedRect: nil, context: nil, hints: nil) : nil
         // 编辑指纹和预览的编码离开主线程（工程是值类型，复制一份带过去）
+        // 指纹里并着当前页号、是否在编辑封面（优化分析 A8）：在主线程上取这一刻的
+        let at = (page: collage.pageIndex, cover: collage.editingCover)
         let box = LiveBox((project, image))
         let extra = await Task.detached(priority: .userInitiated) { () -> LiveBox<[String: Any]> in
             let (p, img) = box.value
-            var e: [String: Any] = ["digest": CollageStore.editDigest(p)]
+            let digest = CollageStore.viewDigest(content: CollageStore.editDigest(p), pageIndex: at.page, editingCover: at.cover)
+            var e: [String: Any] = ["digest": digest]
             if let img, let enc = LiveImages.encode(img, maxEdge: edge) {
                 e["preview_jpeg_b64"] = enc.data.base64EncodedString()
                 e["preview_width"] = enc.width
@@ -594,7 +597,7 @@ extension LiveHandlers {
             if want != now {
                 var data = notExecuted("先 collage_get_state 看现在的样子，再带新的 digest 调")
                 data["digest"] = now
-                return .failure("stale_digest", "拼图在你上次 collage_get_state 之后被改过（if_digest 对不上）：这次操作没有执行", data)
+                return .failure("stale_digest", "拼图在你上次 collage_get_state 之后被改过、或者用户翻到了别的页（if_digest 对不上）：这次操作没有执行", data)
             }
         }
         return nil

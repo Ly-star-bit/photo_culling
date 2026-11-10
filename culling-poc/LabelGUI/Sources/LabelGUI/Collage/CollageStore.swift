@@ -123,6 +123,14 @@ final class CollageStore: ObservableObject {
     /// 自检：相册 PNG / TIFF 导出时这几页（从 0 起）的跨页文件照常写出，PDF 用的那份 JPEG 当成编不出来（writePage 里
     /// pdfEncode 那一刻），测失败提示不说「没写出来」。GUI 和命令行永远是空的。
     var testExportFailPDFEncodePages: Set<Int> = []
+    /// 自检：导出前检查、导出时这几张（照片 id）当成原图读不了（检查报「原图读不了」；导出照实渲，记账里补成用了预览图）。
+    /// nil = 查盘（GUI 和命令行永远是 nil）。
+    var testUnreadableOriginals: Set<String>?
+    /// 自检：导出封面时封面那一页当成渲染失败。GUI 和命令行永远是 false。
+    var testExportFailCover = false
+    /// 「书脊是估的」整本导出时问过、用户点了「仍然导出」的那一版（封面 id、页数、估算用的纸厚板厚）：这几样没变就不再问
+    /// （优化分析 A4：问一次，不是每次导出都弹）。不存盘：下次打开再导还会问一次。
+    private var estimatedSpineAsked: String?
     /// 进入裁切模式时不急着记撤销：第一次真的挪动/缩放才记，双击一下再 Esc 不留空步。
     private var cropUndoPending = false
 
@@ -530,6 +538,9 @@ final class CollageStore: ObservableObject {
         CollageMasks.setDirectory(newURL.deletingLastPathComponent().appendingPathComponent("collage_masks"))
         self.photoDir = photoDir
         sessionToken = UUID()
+        // 上一场选的「当前跨页 / 自定义」不带到这一场（优化分析 A7）：跨页号对不上，按 ⌘E 以为导整本、实际只写一页。
+        exportRange = .all
+        estimatedSpineAsked = nil
         solveGeneration += 1
         isSolving = false
         pendingRefines.removeAll()
@@ -1450,6 +1461,9 @@ final class CollageStore: ObservableObject {
         alternativesPageID = page?.id
         alternativeIndex = 0
         alternativesBatch += 1
+        // 悬停着的大图是上一批的第 N 个（优化分析 R15）：「换一批」回来鼠标没动，大图还是旧的，点下去用的却是新一批的
+        // 第 N 个。清掉，鼠标再动一下按新的一批重渲。
+        hoverAlternative(nil)
         commitEdit()
         renderAlternativeThumbs()
     }
@@ -1523,6 +1537,8 @@ final class CollageStore: ObservableObject {
         }
         alternatives.remove(at: index)
         alternativeThumbs.remove(at: index)
+        // 后面的往前挪了一位：悬停着的大图对不上号了（R15）。
+        hoverAlternative(nil)
         if index == alternativeIndex {
             alternativeIndex = -1
         } else if index < alternativeIndex {
@@ -2299,6 +2315,9 @@ final class CollageStore: ObservableObject {
     /// 自检用：整份换成合成的工程（不进撤销、不存盘），撤销栈清空。
     func loadForTesting(_ p: CollageProject) {
         project = p
+        // 合成工程的照片路径大多不在盘上：导出前检查的「原图读不了」默认当成都读得了（要测它的自己设 testUnreadableOriginals，
+        // 设 nil = 按盘查）。
+        testUnreadableOriginals = []
         pageIndex = 0
         selection = nil
         undoStack.removeAll()
@@ -2919,29 +2938,44 @@ final class CollageStore: ObservableObject {
     /// 有照片压在中缝上的跨页（页号从 0 起）：网格页看照片实际画的区域（完整显示按画出来的那块），
     /// 散落页看相纸外框。
     func crossFoldPages() -> [Int] {
+        var out: [Int] = []
+        for use in Self.crossFoldUses(project: project) where out.last != use.page { out.append(use.page) }
+        return out
+    }
+
+    /// 压在中缝上的一张照片：哪一页、哪一格（网格页）或哪个图层（散落页的相纸）。
+    struct CrossFoldUse: Hashable {
+        var page: Int
+        var path: [Int]?
+        var item: UUID?
+        var photoID: String
+    }
+
+    /// 全部页里压在中缝上的照片（按页、阅读顺序）。检视器橙字、换装订时的提示（crossFoldPages）和导出前检查的
+    /// 「照片跨中缝」（优化分析 A3，胶装才报）共用这一个判断。
+    nonisolated static func crossFoldUses(project: CollageProject) -> [CrossFoldUse] {
         let canvas = project.canvas
         guard canvas.seams == .fold else { return [] }
         let mid = CGFloat(canvas.width) / 2
-        let map = photoMap
+        var map: [String: CollagePhotoRef] = [:]
+        for p in project.photos where map[p.id] == nil { map[p.id] = p }
         func crosses(_ r: CGRect) -> Bool { r.minX < mid - 1 && r.maxX > mid + 1 }
-        var out: [Int] = []
+        var out: [CrossFoldUse] = []
         for (i, page) in project.pages.enumerated() {
             if page.freeform {
-                let hit = page.items.contains { it in
-                    it.kind == .photo && it.photoID.flatMap { map[$0] } != nil
-                        && crosses(CollageItems.bounds(it, canvas: canvas))
+                for it in page.items where it.kind == .photo {
+                    guard let id = it.photoID, map[id] != nil, crosses(CollageItems.bounds(it, canvas: canvas)) else { continue }
+                    out.append(CrossFoldUse(page: i, path: nil, item: it.id, photoID: id))
                 }
-                if hit { out.append(i) }
                 continue
             }
             let frames = CollageLayout.pageGeometry(page.root, canvas: canvas, style: project.style).frames
-            let hit = frames.contains { f in
-                guard f.cell.kind == .photo, let id = f.cell.photoID, let photo = map[id] else { return false }
+            for f in frames {
+                guard f.cell.kind == .photo, let id = f.cell.photoID, let photo = map[id] else { continue }
                 let area = CollageCrop.photoArea(cell: f.cell, rect: f.rect.cgRect, style: project.style)
                 let drawn = f.cell.contain ? CollageCrop.aspectFit(photo.aspect, in: area) : area
-                return crosses(drawn)
+                if crosses(drawn) { out.append(CrossFoldUse(page: i, path: f.path, item: nil, photoID: id)) }
             }
-            if hit { out.append(i) }
         }
         return out
     }
@@ -3391,7 +3425,11 @@ final class CollageStore: ObservableObject {
                                                                  tries: tries, keep: 1, seed: seed)).first?.root
                     ?? CollageAlbum.fallbackRow(photos, context: ctx)
             }
-            if let carry { root = CollageLayout.carryOverlays(from: carry, into: root) }
+            if let carry {
+                root = CollageLayout.carryOverlays(from: carry, into: root)
+                // 这一页其余照片的手调（裁切、景别、完整显示、形状、抠图）按照片 id 带回去（优化分析 A5）。
+                root = CollageLayout.carryAdjustments(from: carry, into: root, canvas: ctx.canvas, style: ctx.style)
+            }
             return root
         }
 
@@ -3627,7 +3665,8 @@ final class CollageStore: ObservableObject {
         clearAlternatives()
         commitEdit()
         let what = ids.count == 1 ? "" : " \(ids.count) 张"
-        setNotice("已移到第 \(target + 1) 个\(pageUnit)\(what)（两边都重排了；⌘Z 撤回）"
+        // 两页其余照片的裁切、景别、形状照旧（PageSolve.run 按照片 id 带回去；格子比例差太多的那几张裁切回到自动）。
+        setNotice("已移到第 \(target + 1) 个\(pageUnit)\(what)（两页重排了，其余照片的裁切、景别留着；⌘Z 撤回这次挪动）"
                   + (destination.freeform ? "：放在照片少的那半页，拖到想要的位置" : ""))
         let pageIDs = [source.id, destination.id]
         return refinePages(jobs.indices.map { RefineJob(pageID: pageIDs[$0], job: jobs[$0], seed: seeds[$0], landed: landed[$0]) },
@@ -3683,7 +3722,7 @@ final class CollageStore: ObservableObject {
             clearAlternatives()
         }
         commitEdit()
-        setNotice("第 \(target + 1) 个\(pageUnit)加了 \(fresh.count) 张，重排了" + skipped)
+        setNotice("第 \(target + 1) 个\(pageUnit)加了 \(fresh.count) 张，重排了（原有照片的裁切、景别留着）" + skipped)
         return refinePages([RefineJob(pageID: destination.id, job: job, seed: seed, landed: landed)], context: ctx)
     }
 
@@ -4398,17 +4437,16 @@ final class CollageStore: ObservableObject {
         rest.bookCover = nil
         var shared = Hasher()
         shared.combine(rest)
-        shared.combine(project.pages.count)
         shared.combine(hintsVersion)
         shared.combine(masksVersion)
         let base = shared.finalize()
+        // 页码、页数只算进用得着它的页（优化分析 A13）：以前每一页的键都带页码和页数，大相册里加 / 删 / 挪一个跨页，
+        // 后面几十个跨页的小图全部重渲，其实画面一个像素没变。
+        let numbered = Self.thumbsUsePageNumber(rest)
         var todo: [(page: CollagePage, key: Int)] = []
         for (i, page) in project.pages.enumerated() {
-            var h = Hasher()
-            h.combine(base)
-            h.combine(i)
-            h.combine(page)
-            let key = h.finalize()
+            let key = Self.pageThumbKey(page, index: i, count: project.pages.count, shared: base,
+                                        numbered: numbered || Self.usesPageNumber(page))
             if pageThumbKeys[page.id] != key || pageThumbs[page.id] == nil { todo.append((page, key)) }
         }
         let live = Set(project.pages.map(\.id))
@@ -4420,10 +4458,16 @@ final class CollageStore: ObservableObject {
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
             let pages = todo.map(\.page)
-            let rendered = await Task.detached(priority: .utility) { () -> [UUID: (image: NSImage, complete: Bool)] in
+            // 这一批被新的取代（thumbTask 取消）时后台那一串也停下（优化分析 A13）：Task.detached 不跟着外面的任务取消，
+            // 以前工程级的改动（拖样式滑杆）每停一下就起一批、三十个跨页各渲一遍，旧批次全都渲到底才被丢掉。
+            // 用一个标记传过去（不抓着那个任务本身：它的结果带 NSImage，不是 Sendable）。
+            let stop = CollageCancelFlag()
+            let rendered = await withTaskCancellationHandler {
+              await Task.detached(priority: .utility) { () -> [UUID: (image: NSImage, complete: Bool)] in
                 let scale = min(1, 260 / Double(max(snapshot.canvas.width, snapshot.canvas.height)))
                 var out: [UUID: (image: NSImage, complete: Bool)] = [:]
                 for page in pages {
+                    if stop.isCancelled { break }
                     var opts = CollageRender.Options(scale: scale)
                     opts.includeBleed = false
                     opts.placeholders = true
@@ -4433,7 +4477,10 @@ final class CollageStore: ObservableObject {
                     out[page.id] = (NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height)), report.missing.isEmpty)
                 }
                 return out
-            }.value
+              }.value
+            } onCancel: {
+                stop.cancel()
+            }
             guard let self, !Task.isCancelled else { return }
             var out = self.thumbs.pages.filter { live.contains($0.key) }
             var keys = self.pageThumbKeys.filter { live.contains($0.key) }
@@ -4447,6 +4494,31 @@ final class CollageStore: ObservableObject {
             self.pageThumbKeys = keys
             self.thumbs.pages = out
         }
+    }
+
+    /// 一页小图的键：这一页 + 工程里别的东西（shared）；页码、页数只在这一页用得着时才算进去（numbered）。
+    nonisolated static func pageThumbKey(_ page: CollagePage, index: Int, count: Int, shared: Int, numbered: Bool) -> Int {
+        var h = Hasher()
+        h.combine(shared)
+        if numbered {
+            h.combine(index)
+            h.combine(count)
+        }
+        h.combine(page)
+        return h.finalize()
+    }
+
+    /// 这一页的画面跟不跟页码走。页码不只是 {no}、{issue} 这些占位符：灰条正文、胶带撕口、印样的卷号都拿它当种子
+    /// （CollageRender.barOwner、CollageItems、CollageContact）—— 所以只有「纯照片的网格页」（没有文字格、没有压字、
+    /// 没有自由图层、不是印样）才算不跟。相册里绝大多数跨页是这种。
+    nonisolated static func usesPageNumber(_ page: CollagePage) -> Bool {
+        if page.contactSheet != nil || page.freeform || !page.items.isEmpty { return true }
+        return page.root.leaves.contains { $0.kind == .text || !$0.overlays.isEmpty }
+    }
+
+    /// 工程级的东西里有没有跟页码走的：水印的记号拿页码当种子（CollageWatermarks），开着任何一层就整本都算。
+    nonisolated static func thumbsUsePageNumber(_ project: CollageProject) -> Bool {
+        project.watermark?.anyLayerOn == true
     }
 
     // MARK: - 预览渲染（只渲最新的那一次）
@@ -4591,13 +4663,52 @@ final class CollageStore: ObservableObject {
     /// 「仍然导出」。只导几个跨页时只看那几个跨页上的（页数是整本的事，不拦）。字出安全区这类「提醒」不弹，列在「导出 ▾」里。
     func export(confirmed: Bool = false) {
         guard exportBlockedReason == nil, case .success(let only) = exportPageSelection else { return }
-        if !confirmed, let ask = Self.exportConfirmation(preflight(texts: false), project: project, pages: only) {
-            exportConfirmTitle = ask.title
-            exportConfirm = ask.message
-            return
+        let spine = estimatedSpineKey
+        if !confirmed {
+            // 胶装：字压进中缝带是「拦」（优化分析 A6），要排一遍字才知道在哪（每页低清一遍、不解码照片）；平铺、单张
+            // 照旧只算不用排字的那几样（字的事都是提醒，导出完那句后面带一句条数）。
+            let canvas = project.canvas
+            let glued = isAlbum && canvas.seams == .fold && canvas.binding == .glued
+            if let ask = Self.exportConfirmation(preflight(texts: glued), project: project, pages: only,
+                                                 askEstimatedSpine: spine != estimatedSpineAsked) {
+                exportConfirmTitle = ask.title
+                exportConfirm = ask.message
+                return
+            }
+        } else if only == nil {
+            // 点了「仍然导出」：书脊是估的这件事这一版问过了。
+            estimatedSpineAsked = spine
         }
         exportConfirm = nil
-        startExport(project: project, options: exportOptions, name: exportName, reveal: true, pages: only)
+        startExport(project: project, options: exportOptions, name: exportName, reveal: true, pages: only) { [weak self] outcome in
+            // 部分导出成了：范围复位成「全部」（优化分析 A7）。以前选过「当前跨页 / 自定义」就一直粘着，之后按 ⌘E 以为整本
+            // 重导，实际只写一页、不出 PDF、不出封面。失败、取消的留着（多半要原样再来一次）。
+            guard let self, only != nil, outcome.failure == nil, !outcome.cancelled else { return }
+            self.exportRange = .all
+        }
+    }
+
+    /// 封面的书脊宽还是估的时，「问过了」记的是哪一版：封面 id、几个跨页、估算用的纸厚板厚。不是估的 / 没有封面 = nil。
+    private var estimatedSpineKey: String? {
+        guard isAlbum, let cover = project.bookCover, cover.spineMM == nil else { return nil }
+        return "\(cover.id.uuidString)|\(project.pages.count)|\(cover.sheetMM)|\(cover.boardMM)"
+    }
+
+    /// 顶栏、「导出 ▾」底下那个按钮上的字（优化分析 A7）：范围不是全部时写清楚这次导的是哪几个跨页，不再一律叫「导出相册」。
+    /// compact = 顶栏窄的那一排。
+    func exportButtonTitle(compact: Bool = false) -> String {
+        guard isAlbum else { return "导出" }
+        guard case .success(let only?) = exportPageSelection else { return compact ? "导出" : "导出相册" }
+        let label = CollageExportRange.label(only)
+        if compact { return label.count <= 5 ? "导出 \(label)" : "导出 \(only.count) 个" }
+        return label.count <= 9 ? "导出第 \(label) 个跨页" : "导出 \(only.count) 个跨页"
+    }
+
+    /// 导出按钮悬停的那句：范围不是全部时先说这次只导哪几个、不出 PDF 和封面。
+    var exportButtonHelp: String {
+        let base = "按导出设置写到输出目录 (⌘E)；旁边的 ▾ 改文件名、文件格式、清晰度、输出目录"
+        guard isAlbum, case .success(let only?) = exportPageSelection else { return base }
+        return "只导第 \(CollageExportRange.label(only)) 个跨页（不出印刷 PDF、不出封面）；导完范围回到「全部」。要导整本：▾ 里把范围改回「全部」。" + base
     }
 
     /// 输出目录落在这一场的拍摄文件夹里面、下次分析会扫到（审查 S11，ExportFolderGuard）：拦下的那句话；能导 = nil。
@@ -4698,6 +4809,21 @@ final class CollageStore: ObservableObject {
         let scale = Self.exportScale(canvas: snapshot.canvas, options: options)
         let faults = testExportFailPages
         let pdfFaults = testExportFailPDFEncodePages
+        let fakeLowRes = testUnreadableOriginals ?? []
+        let failCover = testExportFailCover
+        // 导出前检查里的「提醒」有几条（优化分析 A6）：⌘E / 顶栏按钮只问「拦」的，提醒以前在导出时完全不出现 —— 导完那句
+        // 后面带一句条数。和导出同时在后台算（要排一遍字），只对相册、印刷画布（「导出 ▾」里有那张清单的）。
+        let readable = preflightReadable
+        let wantReminders = snapshot.mode == .album || snapshot.canvas.isPrint
+        let reminderTask = Task.detached(priority: .utility) { () -> Int in
+            guard wantReminders else { return 0 }
+            let picked = subset.map(Set.init)
+            return CollagePreflight.run(project: snapshot, hints: hints, texts: true, readable: readable).filter { issue in
+                guard issue.severity == .warn else { return false }
+                guard let picked else { return true }
+                return issue.page.map(picked.contains) ?? false
+            }.count
+        }
         Task { [weak self] in
             var outcome = ExportOutcome(folder: folder, scale: scale)
             defer { done?(outcome) }
@@ -4734,7 +4860,8 @@ final class CollageStore: ObservableObject {
                         if pdfFaults.contains(i), case .data? = data, let name = plan.pages[i].first {
                             throw CollageExport.ExportError.pdfEncode(name)
                         }
-                        return PageResult(pdfData: data, error: nil, lowRes: report.lowRes, missing: report.missing,
+                        let faked = fakeLowRes.isEmpty ? [] : page.photoIDs.filter(fakeLowRes.contains)
+                        return PageResult(pdfData: data, error: nil, lowRes: report.lowRes + faked, missing: report.missing,
                                           signatureLost: Self.signatureLost(report),
                                           fillerBody: Self.fillerBody(report, canvas: snapshot.canvas))
                     } catch {
@@ -4769,6 +4896,11 @@ final class CollageStore: ObservableObject {
             if wantPDF, plan.pdf != nil, !pdfMissing.isEmpty, !(self?.exportCancelled ?? true) {
                 let note = Self.pdfSkippedNote(pdfMissing, written: pdfWritten)
                 failure = failure.map { "\($0)；\(note)" } ?? note
+            } else if wantPDF, plan.pdf != nil, !lowRes.isEmpty || !missing.isEmpty, !(self?.exportCancelled ?? true) {
+                // 有照片用的不是原图（退回了 1024 预览、或者格子空着）：同一个道理，这样的 PDF 不能拿去印，不出（优化分析 A1）。
+                // 跨页图照常留着（已经写了，文件名里看得出是哪几个跨页），算导出失败、说清楚缺哪几张。
+                let note = Self.pdfDegradedNote(missing: missing, lowRes: lowRes)
+                failure = failure.map { "\($0)；\(note)" } ?? note
             } else if wantPDF, let pdfName = plan.pdf, !pdfPages.isEmpty, !(self?.exportCancelled ?? true) {
                 self?.progressText = "生成 PDF…"
                 let pdfURL = folder.appendingPathComponent(pdfName)
@@ -4789,13 +4921,14 @@ final class CollageStore: ObservableObject {
             if !plan.cover.isEmpty, !(self?.exportCancelled ?? true) {
                 self?.progressText = "导出封面…"
                 let cover = await Self.exportCover(project: snapshot, options: options, names: plan.cover, folder: folder,
-                                                   scale: scale, hints: hints)
+                                                   scale: scale, hints: hints, fakeLowRes: fakeLowRes, failFront: failCover)
                 outcome.files += cover.files
                 lowRes += cover.lowRes
                 missing += cover.missing
                 if let e = cover.error, failure == nil { failure = "封面：\(e)" }
             }
             outcome.failure = failure
+            let reminders = await reminderTask.value
             guard let self else {
                 if outcome.failure == nil { outcome.failure = "导出中断（拼图页关了）" }
                 return
@@ -4815,7 +4948,11 @@ final class CollageStore: ObservableObject {
                 // 部分导出：说清只导了哪几个、没出 PDF（选了「另出印刷 PDF」也不出）。
                 let partial = subset.map { "（只导了第 \(CollageExportRange.label($0)) 个跨页"
                     + (snapshot.mode == .album && options.pdf ? "，部分导出不出 PDF）" : "）") } ?? ""
-                self.progressText = "导出完成\(clean)\(partial) → \(main)" + (files.count > 1 ? "（共 \(files.count) 个文件）" : "")
+                // 有照片用的不是原图（没勾 PDF、单张拼图走到这里）：不写「导出完成」，那句会被当成「可以交了」（优化分析 A1）。
+                let degraded = Set(lowRes).union(missing).count
+                let head = degraded > 0 ? "导出了，但有 \(degraded) 张照片用的不是原图（见提示）" : "导出完成"
+                let remind = reminders > 0 ? "；导出前检查还有 \(reminders) 条提醒（导出 ▾ 里看）" : ""
+                self.progressText = "\(head)\(clean)\(partial) → \(main)" + (files.count > 1 ? "（共 \(files.count) 个文件）" : "") + remind
                 if reveal { AppRuntime.revealInFinder(files.map { folder.appendingPathComponent($0) }) }
             }
             if let warning = Self.exportWarning(missing: missing, lowRes: lowRes, signatureLost: signatureLost,
@@ -4946,14 +5083,25 @@ final class CollageStore: ObservableObject {
         return "没生成 PDF：" + parts.joined(separator: "，") + "（缺页的 PDF 不能拿去印），处理好以后重新导出"
     }
 
+    /// 相册有照片用的不是原图、没生成 PDF 时 failure 里接的一句（同 pdfSkippedNote 的道理）。
+    /// kept：已经写出来的是什么（内页 = 跨页图，封面 = 封面图）。
+    nonisolated static func pdfDegradedNote(missing: [String], lowRes: [String], kept: String = "跨页图") -> String {
+        var parts: [String] = []
+        if !lowRes.isEmpty { parts.append("\(Set(lowRes).count) 张原图读不了、用的是 1024 预览") }
+        if !missing.isEmpty { parts.append("\(Set(missing).count) 张照片读不了、格子空着") }
+        return "没生成 PDF：" + parts.joined(separator: "，") + "（这样的 PDF 不能拿去印；\(kept)写出来了，只能看个样子），接上原图所在的盘重新导出"
+    }
+
     /// 成品里有退化的地方：说清楚是哪几张、缺了什么（导出本身不算失败）。命令行 renderexport 也打印这一句。
     /// fillerBody = 印刷画布上的正文还是灰条 / 占位字（社交尺寸上那只是纹理，印出来是要被人读的）。
     static func exportWarning(missing: [String], lowRes: [String], signatureLost: Bool,
                               fillerBody: Bool = false) -> String? {
         var parts: [String] = []
+        // 两种都有就两种都报（优化分析 A2：以前 if … else if，缺图时用了预览的那几张不说）。
         if !missing.isEmpty {
             parts.append("\(Set(missing).count) 张照片读不了，格子空着：" + Set(missing).sorted().prefix(4).joined(separator: " "))
-        } else if !lowRes.isEmpty {
+        }
+        if !lowRes.isEmpty {
             parts.append("\(Set(lowRes).count) 张原图读不了，用了 1024 预览（印刷会糊）：" + Set(lowRes).sorted().prefix(4).joined(separator: " "))
         }
         if signatureLost { parts.append(CollageWatermarks.signatureLostWarning) }
@@ -5091,13 +5239,16 @@ final class CollageStore: ObservableObject {
         let ext = options.format.ext
         let count = project.pages.count
         let picked = only.map(Set.init)
+        // 序号的位数 = max(2, 页数的位数)（优化分析 A10）：100 个跨页以上还补两位的话 _100 按名字排在 _11 前面，
+        // 印厂按文件名排页序就乱了。不到 100 页和以前一字不差。
+        let digits = max(2, String(count).count)
         var pages: [[String]] = []
         for i in 0..<count {
             if let picked, !picked.contains(i) {
                 pages.append([])
                 continue
             }
-            let two = String(format: "%02d", i + 1)
+            let two = String(format: "%0\(digits)d", i + 1)
             if project.mode == .album {
                 pages.append(["\(base)_跨页_\(two).\(ext)"])
                 continue
@@ -5705,14 +5856,44 @@ extension CollageStore {
     }
 }
 
+/// 后台一串活的取消标记：外面的任务被取消时置上，里面每做完一件看一眼（Task.detached 不跟着外面的任务取消）。
+final class CollageCancelFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+}
+
 // MARK: - 实时桥（DESIGN §9.3、§9.5.1、§10.6「STEP 1 不做了」）：AI 经桥调的几样，界面和命令行都不走这里
 
 extension CollageStore {
     /// 编辑指纹（§9.3 第二轮改）：工程的 JSON（键排序）取 SHA-1 前 12 位，但托盘照片只留按顺序的 id —— 判决、
     /// 亮度、黑白这些后台自己会刷新的字段不算（改判后刷新托盘、路人信息算完都不让 if_digest 失效）。
-    /// collage_get_state 的 digest、写工具的 digest_before / digest_after、externalEdit 的 changed 都用它；
-    /// 命令行的 digest op（整个工程，CollageWatermarkCLI.digest）不变。
-    var editDigest: String { Self.editDigest(project) }
+    /// 再并进「画布上现在是哪一页、是不是在编辑封面」（优化分析 A8，viewDigest）：好几个 AI 工具按「当前页」定位
+    /// （collage_replace_photo、collage_set_layout、collage_auto_layout……），AI 读完状态以后用户翻了页，带着旧 if_digest
+    /// 的写以前照样通过、改到用户刚翻到的那一页上；现在翻页也让 if_digest 过期（回 stale_digest，什么都没改）。
+    /// collage_get_state 的 digest、写工具的 digest_before / digest_after 都用它；externalEdit 的 changed 只看内容
+    /// （contentDigest：翻页不算改了拼图）；命令行的 digest op（整个工程，CollageWatermarkCLI.digest）不变。
+    var editDigest: String { Self.viewDigest(content: contentDigest, pageIndex: pageIndex, editingCover: editingCover) }
+
+    /// 只看工程内容的那一半（盘上的 collage.json 算出来的也是这个）。
+    var contentDigest: String { Self.editDigest(project) }
+
+    /// 内容指纹 + 当前页号 + 是否在编辑封面 → AI 手里的那个 digest（还是 12 位十六进制）。
+    nonisolated static func viewDigest(content: String, pageIndex: Int, editingCover: Bool) -> String {
+        let text = "\(content)|\(pageIndex)|\(editingCover ? "cover" : "page")"
+        return Insecure.SHA1.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined().prefix(12).description
+    }
 
     nonisolated static func editDigest(_ full: CollageProject) -> String {
         // 存 / 删方案不改这一版的样子：不让 AI 手里的 if_digest 因此失效（切到别的方案会改页面，照样变）。编码之前就
@@ -5734,13 +5915,13 @@ extension CollageStore {
     /// 返回编辑指纹变没变。
     @discardableResult
     func externalEdit(_ body: () -> Void) -> Bool {
-        let before = editDigest
+        let before = contentDigest
         lastPushCoalesced = false
         lastUndoPush = .distantPast
         asOneUndoStep(body)
         lastPushCoalesced = false
         lastUndoPush = .distantPast
-        return editDigest != before
+        return contentDigest != before
     }
 
     /// 成套的结局，连同落地那一刻的撤销计数、深度和提示：在 outcome 回调里当场取。回调恢复 continuation 以后，

@@ -238,15 +238,22 @@ enum CollagePrintSelfTest {
         // 10 个跨页（20P）：前 6 个跨页 12 张不同的，后 4 个是空格 —— 空格 8 个，别的不拦。
         let pairs: [(String?, String?)] = (0..<10).map { i in (i < 6 ? tray[i * 2].id : nil, i < 6 ? tray[i * 2 + 1].id : nil) }
         let clean = album(pairs, photos: tray)
-        let issues = CollagePreflight.run(project: clean, hints: [:], texts: false)
+        let issues = CollagePreflight.run(project: clean, hints: [:], texts: false, readable: { _ in true })
         let empties = issues.filter { $0.kind == .emptySlot }
         check(empties.count == 8 && empties.allSatisfy { $0.severity == .block && ($0.page ?? 0) >= 6 },
               "空照片格：8 个，都拦、在第 7–10 个跨页", kinds(issues))
         check(!issues.contains { $0.kind == .pageCount || $0.kind == .duplicate }, "20P、没重复：不报页数、不报重复", kinds(issues))
 
         // 3 个跨页（6P）、a 用了两次：页数拦（整本，page = nil）、第 2 次用的那一格拦。
-        let dup = album([("a", "b"), ("c", "a"), ("d", "e")], photos: tray)
-        let d = CollagePreflight.run(project: dup, hints: [:], texts: false)
+        // 套了印厂规格的才拦（优化分析 A9）；没套过的只是提醒、文案不说「印厂要」。
+        let loose = album([("a", "b"), ("c", "a"), ("d", "e")], photos: tray)
+        let looseIssue = CollagePreflight.run(project: loose, hints: [:], texts: false, readable: { _ in true }).first { $0.kind == .pageCount }
+        check(looseIssue?.severity == .warn && looseIssue?.message.contains("还没套印厂规格") == true
+              && looseIssue?.message.contains("现在 3 个跨页 = 6P，少了 14P") == true,
+              "没套规格的页数：只是提醒，写明是按常见的范围看", looseIssue?.message ?? "没报")
+        var dup = loose
+        dup.canvas.printRules = .standard
+        let d = CollagePreflight.run(project: dup, hints: [:], texts: false, readable: { _ in true })
         let pageIssue = d.first { $0.kind == .pageCount }
         check(pageIssue?.severity == .block && pageIssue?.page == nil
               && pageIssue?.message.contains("现在 3 个跨页 = 6P，少了 14P") == true,
@@ -264,7 +271,7 @@ enum CollagePrintSelfTest {
         let blur = photo("blur", w: Int((side / 1.8).rounded()), h: Int((side / 1.8).rounded()))
         let soft = photo("soft", w: Int((side / 1.3).rounded()), h: Int((side / 1.3).rounded()))
         let upProject = album([("blur", "x"), ("soft", "y")], photos: [blur, soft, photo("x"), photo("y")])
-        let up = CollagePreflight.run(project: upProject, hints: [:], texts: false).filter { $0.kind == .upscale }
+        let up = CollagePreflight.run(project: upProject, hints: [:], texts: false, readable: { _ in true }).filter { $0.kind == .upscale }
         let factors = Dictionary(CollagePreflight.placements(project: upProject, hints: [:]).map {
             ($0.photo.id, CollageCrop.upscale(photo: $0.photo, window: $0.window, drawn: $0.drawn))
         }, uniquingKeysWith: { a, _ in a })
@@ -283,40 +290,40 @@ enum CollagePrintSelfTest {
         let face = photo("face", w: 4000, h: 2000, faces: [[0.46, 0.3, 0.54, 0.5]])
         var full = album([], photos: [face], canvas: spread)
         full.pages = [CollagePage(root: .leaf(cell("face")))]
-        let flat = CollagePreflight.run(project: full, hints: [:], texts: false).first { $0.kind == .foldFace }
+        let flat = CollagePreflight.run(project: full, hints: [:], texts: false, readable: { _ in true }).first { $0.kind == .foldFace }
         check(flat?.severity == .warn && flat?.path == [], "平铺：脸压中缝 = 提醒", flat?.message ?? "没报")
         spread.binding = .glued
         full.canvas = spread
-        let glued = CollagePreflight.run(project: full, hints: [:], texts: false).first { $0.kind == .foldFace }
+        let glued = CollagePreflight.run(project: full, hints: [:], texts: false, readable: { _ in true }).first { $0.kind == .foldFace }
         check(glued?.severity == .block && glued?.message.contains("胶装会被书脊吃掉") == true,
               "胶装：脸压中缝 = 拦", glued?.message ?? "没报")
         let side2 = album([("face", "x")], photos: [face, photo("x")])
-        check(!CollagePreflight.run(project: side2, hints: [:], texts: false).contains { $0.kind == .foldFace },
+        check(!CollagePreflight.run(project: side2, hints: [:], texts: false, readable: { _ in true }).contains { $0.kind == .foldFace },
               "脸在左页里面（没进中缝带）：不报")
 
         // 贴边没铺出血：零边距、出血 0 → 报；零边距、有出血、普通矩形格 → 渲染器会铺，不报；圆形格贴边 → 报。
         var edge = album([("a", "b")], photos: tray)
         edge.style.margin = 0
         edge.canvas.bleed = 0
-        let noBleed = CollagePreflight.run(project: edge, hints: [:], texts: false).filter { $0.kind == .bleed }
+        let noBleed = CollagePreflight.run(project: edge, hints: [:], texts: false, readable: { _ in true }).filter { $0.kind == .bleed }
         check(noBleed.count == 2 && noBleed.allSatisfy { $0.severity == .warn && $0.message.contains("出血是 0") },
               "出血是 0、零边距：两格都报", kinds(noBleed))
         edge.canvas.bleed = 12
-        check(!CollagePreflight.run(project: edge, hints: [:], texts: false).contains { $0.kind == .bleed },
+        check(!CollagePreflight.run(project: edge, hints: [:], texts: false, readable: { _ in true }).contains { $0.kind == .bleed },
               "有出血、零边距、矩形格：渲染器铺进出血，不报")
         _ = edge.pages[0].root.update(at: [0]) { $0.cell?.shape = .circle }
-        let round = CollagePreflight.run(project: edge, hints: [:], texts: false).filter { $0.kind == .bleed }
+        let round = CollagePreflight.run(project: edge, hints: [:], texts: false, readable: { _ in true }).filter { $0.kind == .bleed }
         check(round.count == 1 && round.first?.path == [0], "圆形格贴边：不往出血里铺，报那一格", kinds(round))
         var margined = album([("a", "b")], photos: tray)
         margined.canvas.bleed = 0
-        check(!CollagePreflight.run(project: margined, hints: [:], texts: false).contains { $0.kind == .bleed },
+        check(!CollagePreflight.run(project: margined, hints: [:], texts: false, readable: { _ in true }).contains { $0.kind == .bleed },
               "有边距（照片不贴边）：出血是 0 也不报")
 
         // 首尾单页：第 1 个跨页左页、最后一个跨页右页有照片 → 提醒。
         var ends = album([("a", "b"), ("c", "d"), ("e", "f")], photos: tray)
         ends.canvas.printRules = CollagePrintRules()
         ends.canvas.printRules?.singleEnds = true
-        let hidden = CollagePreflight.run(project: ends, hints: [:], texts: false).filter { $0.kind == .singleEnd }
+        let hidden = CollagePreflight.run(project: ends, hints: [:], texts: false, readable: { _ in true }).filter { $0.kind == .singleEnd }
         check(hidden.map(\.photoID) == ["a", "f"] && hidden.allSatisfy { $0.severity == .warn },
               "首尾单页：第 1 个跨页的 a（左页）、最后一个的 f（右页）", kinds(hidden))
 
@@ -330,17 +337,17 @@ enum CollagePrintSelfTest {
         item.height = 0.2
         item.text = CollageText(lines: [CollageTextLine("出界的字")])
         texted.pages[1].items = [item]
-        let textIssues = CollagePreflight.run(project: texted, hints: [:], texts: true).filter { $0.kind == .textSafe }
+        let textIssues = CollagePreflight.run(project: texted, hints: [:], texts: true, readable: { _ in true }).filter { $0.kind == .textSafe }
         check(textIssues.count == 1 && textIssues.first?.page == 1 && textIssues.first?.item == item.id
               && textIssues.first?.message.contains("出界的字") == true,
               "字出安全区：提醒，指到那个文字图层", textIssues.first?.message ?? "没报 \(kinds(textIssues))")
-        check(!CollagePreflight.run(project: texted, hints: [:], texts: false).contains { $0.kind == .textSafe },
+        check(!CollagePreflight.run(project: texted, hints: [:], texts: false, readable: { _ in true }).contains { $0.kind == .textSafe },
               "texts = false 不渲字、不报字")
 
         // 导出确认：只有空格时标题、那句话和以前一样；有别的列出来；部分导出只看那几页，页数不拦。
         let onlyEmpty = album((0..<10).map { i in (i == 2 ? nil : "p\(i)a", "p\(i)b") },
                               photos: (0..<10).flatMap { [photo("p\($0)a"), photo("p\($0)b")] })
-        let ask1 = CollageStore.exportConfirmation(CollagePreflight.run(project: onlyEmpty, hints: [:], texts: false),
+        let ask1 = CollageStore.exportConfirmation(CollagePreflight.run(project: onlyEmpty, hints: [:], texts: false, readable: { _ in true }),
                                                     project: onlyEmpty, pages: nil)
         check(ask1?.title == "有空照片格，仍要导出吗？"
               && ask1?.message == "第 3 个跨页上有 1 个空照片格：导出来是一块底色（预览里的虚线框不会印出来）。从托盘拖照片进去，或者选中那一格「删除格子」。",

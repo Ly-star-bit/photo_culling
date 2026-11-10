@@ -84,7 +84,12 @@ extension CollageStore {
     func setCoverSpine(_ mm: Double?) {
         let v = mm.flatMap { $0.isFinite ? min(CollageBookCover.spineRange.upperBound,
                                                max(CollageBookCover.spineRange.lowerBound, $0)) : nil }
-        updateBookCover(coalesce: true, key: "coverSpine") { $0?.spineMM = v }
+        // 记下这一刻是多少 P（优化分析 A4）：之后加减跨页，导出前检查报「书脊是按 xP 填的，现在 yP」。清空（按估算）= 不记。
+        let pages = CollageBookCover.pageCount(spreads: project.pages.count)
+        updateBookCover(coalesce: true, key: "coverSpine") {
+            $0?.spineMM = v
+            $0?.spinePages = v == nil ? nil : pages
+        }
     }
 
     func setCoverWrap(_ mm: Double) {

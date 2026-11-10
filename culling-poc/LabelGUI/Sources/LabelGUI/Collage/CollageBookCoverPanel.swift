@@ -56,6 +56,17 @@ struct CollageBookCoverBox: View {
              : String(format: "填的是印厂给的数（按页数估是 %.1f mm）。", estimate))
             .collageHint()
             .fixedSize(horizontal: false, vertical: true)
+        // 书脊宽是按别的页数填的（优化分析 A4）：填完以后加减过跨页。导出前检查里是「拦」。
+        if let stale = cover.spineStaleNote(spreads: spreads) {
+            Label(stale, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption2).foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("印厂给的数没变，按现在的 \(CollageBookCover.pageCount(spreads: spreads))P 记") {
+                store.setCoverSpine(cover.spineMM)
+            }
+            .font(.caption)
+            .help("书脊宽不改，只把「这是按多少 P 填的」记成现在的页数；导出前检查不再报")
+        }
         if cover.hasSpineText, !CollageBookCover.spineFitsText(cover.spineWidthMM(spreads: spreads)) {
             Label(String(format: "书脊只有 %.1f mm，放不下字（至少 %.0f mm）：书脊上不印字",
                          cover.spineWidthMM(spreads: spreads), CollageBookCover.minSpineTextMM),
@@ -116,6 +127,10 @@ struct CollageBookCoverBox: View {
                 .help("不做封面了（⌘Z 能撤回）")
         }
         .font(.caption)
+        // 优化分析 A14：飘口、书槽各印厂做法不同，这里不做；写明这张图是按哪种做法算的。
+        Text("这张展开图按「封面板和内页一样大」算：封底、封面各是一页的宽高，中间一条书脊，四周包边。印厂的封面板比内页大一圈（飘口）、或者板和书脊之间要留书槽的，这张图不能直接用：照印厂的封面模板量好尺寸再排。")
+            .collageHint()
+            .fixedSize(horizontal: false, vertical: true)
         .onAppear { syncFields(cover) }
         .onChange(of: cover) { _, c in syncFields(c) }
     }

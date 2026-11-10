@@ -449,7 +449,9 @@ enum LiveHost {
         // 盘上的 collage.json 解出来的编辑指纹：拼图写、app_undo 回复到达时应该已经和内存里的一样（flushSaves，§9.5.3）
         let saved = batch.sessionDir.appendingPathComponent("collage.json", isDirectory: false)
         if let data = try? Data(contentsOf: saved), let p = try? JSONDecoder().decode(CollageProject.self, from: data) {
-            out["disk_edit_digest"] = CollageStore.editDigest(p)
+            // 盘上不存「画布上是哪一页」：按内存里现在的页号、封面状态并进去，内容一样时两个指纹就一样
+            out["disk_edit_digest"] = CollageStore.viewDigest(content: CollageStore.editDigest(p), pageIndex: collage.pageIndex,
+                                                               editingCover: collage.editingCover)
         } else {
             out["disk_edit_digest"] = NSNull()
         }

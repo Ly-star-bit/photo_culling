@@ -4,10 +4,11 @@ import CoreGraphics
 // MARK: - 导出前检查（相册 B · P3）
 //
 // 一本相册交出去之前要看的几样，一条一条列出来，点一下跳到那个跨页、选中那一格（CollageStore.reveal）。
-// 拦（导出按钮先确认）：空照片格、放大超过 150%、页数不合规、同一张用了两次、胶装时脸压中缝；相册封面上的空照片格、
-// 放大超过 150%。
-// 提醒（只列在「导出 ▾」里）：放大 120–150%、平铺时脸压中缝、字出安全区 / 压进中缝带、贴边的照片没铺进出血、
-// 首尾单页那半边有东西、印刷画布上正文还是灰条；封面放大 120–150%、书脊是估的 / 太窄、脸贴书脊。
+// 拦（导出按钮先确认）：空照片格、原图读不了、放大超过 150%、页数不合规（套了印厂规格的）、同一张用了两次、胶装时
+// 脸压中缝 / 照片横跨中缝 / 字压进中缝带；相册封面上的空照片格、放大超过 150%、书脊宽是按别的页数填的。
+// 提醒（只列在「导出 ▾」里；导出完成那句后面带一句「还有 N 条提醒」）：放大 120–150%、没套规格时的页数、平铺时脸压中缝、
+// 字出安全区 / 平铺时压进中缝带、贴边的照片没铺进出血、首尾单页那半边有东西、印刷画布上正文还是灰条；封面放大
+// 120–150%、书脊是估的（整本导出时另问一次，见 exportConfirmation）/ 太窄、脸贴书脊。
 // 同一份结果给导出按钮的确认框、「导出 ▾」的清单、命令行 ops 的 preflight；MCP collage_export 的 warnings 以后也接这一份
 // （CollagePreflight.run 吃 project + hints，不碰界面状态，后台线程也能跑）。
 
@@ -15,6 +16,8 @@ struct CollagePreflightIssue: Hashable, Identifiable {
     enum Kind: String, CaseIterable, Hashable {
         /// 空照片格（导出来是一块底色）。
         case emptySlot
+        /// 原图读不了（移动硬盘没插、文件挪走了）：导出会退回 1024 预览、或者那一格空着，印出来是糊的（优化分析 A1）。
+        case source
         /// 放大：超过 150% 拦，120–150% 提醒。
         case upscale
         /// 页数不合规（印厂规格的页数规则）。
@@ -23,7 +26,9 @@ struct CollagePreflightIssue: Hashable, Identifiable {
         case duplicate
         /// 脸压在中缝带里：胶装拦（书脊会吃掉），平铺提醒。
         case foldFace
-        /// 字出了安全区、或压进了中缝带。
+        /// 胶装：照片横跨中缝（书脊吃掉中间一条；优化分析 A3）。平铺对裱跨中缝是正常做法，不报。
+        case foldCross
+        /// 字出了安全区、或压进了中缝带（胶装压进中缝带 = 拦：书脊会吃掉）。
         case textSafe
         /// 贴着成品边的照片没铺进出血（裁切差一点边上露底色）。
         case bleed
@@ -34,19 +39,25 @@ struct CollagePreflightIssue: Hashable, Identifiable {
         /// 相册封面（CollageBookCover.preflightIssues）：空照片格、放大超过 150% 拦；放大 120–150%、书脊宽还是估的、
         /// 书脊太窄印不下字、脸贴着书脊 / 出了安全区提醒。page = nil，path 是封面那一块的格子。
         case cover
+        /// 封面书脊宽对不上现在的页数（优化分析 A4）：填的时候是 xP、现在 yP = 拦；还是估的 = 提醒（整本导出时另问一次）。
+        /// page = nil；点了去「文档 › 封面」。
+        case spine
 
         var label: String {
             switch self {
             case .emptySlot: return "空照片格"
+            case .source: return "原图读不了"
             case .upscale: return "放大"
             case .pageCount: return "页数"
             case .duplicate: return "用了两次"
             case .foldFace: return "脸压中缝"
+            case .foldCross: return "照片跨中缝"
             case .textSafe: return "字出安全区"
             case .bleed: return "没铺出血"
             case .singleEnd: return "首尾单页"
             case .fillerBody: return "占位正文"
             case .cover: return "封面"
+            case .spine: return "书脊"
             }
         }
     }
@@ -171,7 +182,9 @@ enum CollagePreflight {
 
     /// 整本过一遍。texts = 字出安全区、占位正文这两样要不要查（要按页低清渲一遍拿字块的位置，几十个跨页约一两秒：
     /// 导出按钮只要「拦」的，传 false；「导出 ▾」的清单在后台传 true）。结果按「拦」在前、再按页排。
-    static func run(project: CollageProject, hints: [String: CollageCrop.Hints], texts: Bool) -> [CollagePreflightIssue] {
+    /// readable：这张照片的原图读不读得了（默认查盘：CollagePreflight.originalReadable；自检给假的）。
+    static func run(project: CollageProject, hints: [String: CollageCrop.Hints], texts: Bool,
+                    readable: (CollagePhotoRef) -> Bool = CollagePreflight.originalReadable) -> [CollagePreflightIssue] {
         guard !project.pages.isEmpty else { return [] }
         let canvas = project.canvas
         let album = project.mode == .album
@@ -193,12 +206,31 @@ enum CollagePreflight {
                                              message: "\(at(slot.page))有一个空照片格：导出来是一块底色"))
         }
 
-        // 页数（相册；没套规格的按保守默认查）。
-        if album, fold, let problem = canvas.effectivePrintRules.pageProblem(spreads: project.pages.count) {
-            out.append(CollagePreflightIssue(kind: .pageCount, severity: .block, message: problem))
+        // 页数（相册）。套了印厂规格的才拦；没套过的按保守默认看、只提醒，文案写明是「按常见的范围看」（优化分析 A9：
+        // 以前没套规格的 12 个跨页的小册子也被「印厂要 20–60P」拦一下，没有哪家印厂这么要求过）。
+        if album, fold, let problem = canvas.pageProblem(spreads: project.pages.count) {
+            out.append(CollagePreflightIssue(kind: .pageCount, severity: canvas.printRules == nil ? .warn : .block,
+                                             message: problem))
         }
 
         let placed = placements(project: project, hints: hints)
+        var photoByID: [String: CollagePhotoRef] = [:]
+        for p in project.photos where photoByID[p.id] == nil { photoByID[p.id] = p }
+        // 原图读不了（优化分析 A1）：导出时渲染器退回 1024 预览（30×30 跨页上约等于放大 7 倍），预览也没有就空着 ——
+        // 以前检查说「都没问题」，整本照常出 PDF，只在状态栏有一句。一张照片报一次（第一次用到它的那一页、那一格），
+        // 印样页上的也算。封面上的在 CollageBookCover.preflightIssues。
+        var sourceChecked = Set<String>()
+        for (i, page) in project.pages.enumerated() {
+            for id in page.photoIDs where !sourceChecked.contains(id) {
+                guard let photo = photoByID[id] else { continue }
+                sourceChecked.insert(id)
+                guard !readable(photo) else { continue }
+                let spot = placed.first { $0.page == i && $0.photo.id == id }
+                out.append(CollagePreflightIssue(kind: .source, severity: .block, page: i, path: spot?.path,
+                                                 item: spot?.item, photoID: id,
+                                                 message: "\(lead(i))\(name(photo)) 的原图读不了（\(sourceWhy(photo))）：导出只能用小预览图，印出来是糊的。接上原图所在的盘再导"))
+            }
+        }
         // 放大（印刷画布才查：社交尺寸上的放大看不出来）。
         if canvas.isPrint {
             for p in placed {
@@ -222,6 +254,17 @@ enum CollagePreflight {
                 out.append(CollagePreflightIssue(kind: .foldFace, severity: glued ? .block : .warn, page: p.page,
                                                  path: p.path, item: p.item, photoID: p.photo.id,
                                                  message: "\(lead(p.page))\(name(p.photo)) 的脸压在中缝带里：\(why)，点备选条的「换一批」或挪一下取景"))
+            }
+        }
+
+        // 胶装：照片横跨中缝（优化分析 A3）。和检视器橙字、换装订时那句提示同一个判断（CollageStore.crossFoldUses）——
+        // 以前导出前检查只查脸：平铺排好的整版跨页换成胶装、或者手动把格子拖过中缝，导出时一声不吭。
+        if fold, canvas.binding == .glued {
+            for use in CollageStore.crossFoldUses(project: project) {
+                let shown = photoByID[use.photoID].map(name) ?? use.photoID
+                out.append(CollagePreflightIssue(kind: .foldCross, severity: .block, page: use.page, path: use.path,
+                                                 item: use.item, photoID: use.photoID,
+                                                 message: "\(lead(use.page))\(shown) 横跨中缝：胶装书脊会吃掉中间一条，点备选条的「换一批」重排，或把它收进一页里"))
             }
         }
 
@@ -303,7 +346,7 @@ enum CollagePreflight {
 
         if texts { out += textIssues(project: project, hints: hints, hidden: hidden, at: at) }
         // 相册封面：和「文档 › 封面」标橙的是同几句（CollageBookCover.preflightIssues）。
-        if album { out += CollageBookCover.preflightIssues(project: project, hints: hints) }
+        if album { out += CollageBookCover.preflightIssues(project: project, hints: hints, readable: readable) }
 
         // 拦在前；同一档按页（整本的事在最前）、再按种类。
         let kindOrder = Dictionary(uniqueKeysWithValues: CollagePreflightIssue.Kind.allCases.enumerated().map { ($1, $0) })
@@ -326,6 +369,7 @@ enum CollagePreflight {
         let trim = CGRect(x: 0, y: 0, width: canvas.width, height: canvas.height)
         let safe = canvas.safe > 0 ? trim.insetBy(dx: CGFloat(canvas.safe), dy: CGFloat(canvas.safe)) : nil
         let band = canvas.seams == .fold ? CollageLayout.seamLines(canvas).first : nil
+        let glued = canvas.binding == .glued
         let scale = min(1, 480 / Double(max(1, max(canvas.width, canvas.height))))
         var out: [CollagePreflightIssue] = []
         for (i, page) in project.pages.enumerated() {
@@ -341,11 +385,18 @@ enum CollagePreflight {
                 let first = t.lines.first.map { String($0.prefix(12)) } ?? ""
                 let quote = first.isEmpty ? "" : "「\(first)」"
                 let tol: CGFloat = 0.5
+                // 胶装时字压进中缝带（优化分析 A6）：书脊会吃掉那几个字 = 拦（和脸压中缝一个道理），出没出安全区都报；
+                // 平铺摊得开，照旧只是提醒（出了安全区的只报安全区那一句）。
+                let inBand = band.map { t.rect.intersects($0) } ?? false
+                if inBand, glued {
+                    out.append(CollagePreflightIssue(kind: .textSafe, severity: .block, page: i, path: path, item: item,
+                                                     message: "\(at(i))的字\(quote)压进了中缝带：胶装书脊会吃掉，往一边挪开"))
+                }
                 if let safe, !safe.insetBy(dx: -tol, dy: -tol).contains(t.rect) {
                     let mm = String(format: "%.0f", Double(canvas.safe) / max(1, canvas.dpi) * 25.4)
                     out.append(CollagePreflightIssue(kind: .textSafe, severity: .warn, page: i, path: path, item: item,
                                                      message: "\(at(i))的字\(quote)出了安全区（离裁切边不到 \(mm)mm）：裁切时可能切到"))
-                } else if let band, t.rect.intersects(band) {
+                } else if inBand, !glued {
                     out.append(CollagePreflightIssue(kind: .textSafe, severity: .warn, page: i, path: path, item: item,
                                                      message: "\(at(i))的字\(quote)压进了中缝带：摊开时在折缝上"))
                 }
@@ -372,6 +423,21 @@ enum CollagePreflight {
         return digits.count == owner.count ? (digits, nil) : (nil, nil)
     }
 
+    /// 原图读不读得了：文件在、能读。只查得出「盘没插 / 文件挪走了 / 没权限」这几种（最常见的）；机型 RAW 解不了这类
+    /// 要真解码才知道，导出时渲染器照样记账（RenderReport.lowRes / missing），startExport 按那个不出印刷 PDF。
+    static func originalReadable(_ photo: CollagePhotoRef) -> Bool {
+        FileManager.default.isReadableFile(atPath: photo.path)
+    }
+
+    /// 原图为什么读不了：照片所在的文件夹都不在 = 多半是盘没接上；文件夹在、文件不在 = 挪走或改名了。
+    static func sourceWhy(_ photo: CollagePhotoRef) -> String {
+        let url = URL(fileURLWithPath: photo.path)
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: url.deletingLastPathComponent().path) { return "它所在的文件夹不在：移动硬盘、存储卡没接上？" }
+        if !fm.fileExists(atPath: url.path) { return "文件不在原来的位置：挪走或改名了？" }
+        return "文件在、但打不开"
+    }
+
     /// 清单上方那一行：「2 条拦、3 条提醒」/「都没问题」。
     static func summary(_ issues: [CollagePreflightIssue]) -> String {
         let blocks = issues.filter { $0.severity == .block }.count
@@ -387,7 +453,13 @@ enum CollagePreflight {
 extension CollageStore {
     /// 这一版的导出前检查（同步；texts 见 CollagePreflight.run）。
     func preflight(texts: Bool = true) -> [CollagePreflightIssue] {
-        CollagePreflight.run(project: project, hints: hints, texts: texts)
+        CollagePreflight.run(project: project, hints: hints, texts: texts, readable: preflightReadable)
+    }
+
+    /// 原图读不读得了用哪个判断：自检给了假的（testUnreadableOriginals）就用它，否则查盘。
+    var preflightReadable: @Sendable (CollagePhotoRef) -> Bool {
+        guard let fake = testUnreadableOriginals else { return { CollagePreflight.originalReadable($0) } }
+        return { !fake.contains($0.id) }
     }
 
     /// 清单上点一条：换到那个跨页（走 pageIndex，同跨页条），选中那一格 / 那个图层，右栏切到「格式」。
@@ -395,7 +467,7 @@ extension CollageStore {
     /// 还停在封面上、选中的路径也套到封面那块上）。整本的事（页数）不跳。
     /// 封面的几条（page == nil）：空照片格进封面编辑、选中那一格；别的（书脊、脸贴书脊、放大）去「文档 › 封面」。
     func reveal(_ issue: CollagePreflightIssue) {
-        if issue.kind == .cover {
+        if issue.kind == .cover || issue.kind == .spine {
             revealCover(issue)
             return
         }
@@ -429,10 +501,15 @@ extension CollageStore {
 
     /// 导出按钮要不要先问（只看「拦」的）：pages = 只导这几页时只看这几页上的（页数是整本的事，部分导出不拦）。
     /// 只有空照片格时标题、那句话和以前一字不差；有别的「拦」就列前几条。nil = 不用问。
+    /// askEstimatedSpine（优化分析 A4）：整本导出、封面的书脊宽还是估的，也问一次（「书脊是估的」平时只是提醒；封面印出来
+    /// 书脊差几毫米整张作废，不能不问就导）。store.export 问过一次、这本的页数和估出来的数没变就不再问
+    /// （estimatedSpineAsked）；MCP 的 export_would_ask、命令行照实报。
     nonisolated static func exportConfirmation(_ issues: [CollagePreflightIssue], project: CollageProject,
-                                               pages: [Int]?) -> (title: String, message: String)? {
+                                               pages: [Int]?, askEstimatedSpine: Bool = true)
+        -> (title: String, message: String)? {
         let picked = pages.map(Set.init)
         let blocks = issues.filter { issue in
+            if issue.kind == .spine, issue.severity == .warn { return askEstimatedSpine && picked == nil }
             guard issue.severity == .block else { return false }
             guard let picked else { return true }
             return issue.page.map(picked.contains) ?? false
@@ -479,13 +556,14 @@ final class CollagePreflightRunner: ObservableObject {
         key = now
         let project = store.project
         let hints = store.hints
+        let readable = store.preflightReadable
         task?.cancel()
         running = true
         task = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(300))
             guard !Task.isCancelled else { return }
             let result = await Task.detached(priority: .utility) {
-                CollagePreflight.run(project: project, hints: hints, texts: true)
+                CollagePreflight.run(project: project, hints: hints, texts: true, readable: readable)
             }.value
             guard !Task.isCancelled, let self else { return }
             self.issues = result

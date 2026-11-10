@@ -20,6 +20,9 @@ struct CollageBookCover: Codable, Hashable {
     var back = CollageBookCoverBack()
     /// 书脊宽（mm），照印厂给的数填；nil = 按页数估（estimatedSpineMM，界面上写明是估的）。
     var spineMM: Double?
+    /// 填书脊宽那一刻这本是多少 P（优化分析 A4）：印厂给的书脊宽是按页数算的，之后加减跨页这个数就不对了 —— 导出前检查
+    /// 拿它和现在的 P 数比。nil = 不知道（书脊是估的，或者这一版之前填的旧工程：缺键读成 nil，不报）。
+    var spinePages: Int?
     /// 包边（mm）：封面纸翻过板边包到里面的那一圈。15mm 是精装常见的量级，照印厂的模板改。
     var wrapMM = CollageBookCover.defaultWrapMM
     /// 封面板厚（mm）：只用来估书脊（前后两块板）。
@@ -72,18 +75,32 @@ struct CollageBookCover: Codable, Hashable {
         !spineTitle.trimmingCharacters(in: .whitespaces).isEmpty || !spineDate.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
-    /// 界面、ops、导出提示用的几句：书脊是估的（怎么估的）、书脊太窄没印字。
+    /// 界面、ops、导出提示用的几句：书脊宽是按别的页数填的、书脊是估的（怎么估的）、书脊太窄没印字。
     func notes(spreads: Int) -> [String] {
-        var out: [String] = []
+        [spineStaleNote(spreads: spreads), spineEstimateNote(spreads: spreads), spineNarrowNote(spreads: spreads)]
+            .compactMap { $0 }
+    }
+
+    /// 书脊宽是手填的、填的时候和现在不是同一个页数（优化分析 A4）：「书脊是按 40P 填的，现在 44P」。对得上 / 不知道 = nil。
+    func spineStaleNote(spreads: Int) -> String? {
+        let now = Self.pageCount(spreads: spreads)
+        guard let mm = spineMM, let then = spinePages, then != now else { return nil }
+        return String(format: "书脊 %.1f mm 是按 %dP 填的，现在 %dP：问印厂要 %dP 的书脊宽，在「文档 › 封面」重新填（数没变就点那里的「按现在的页数记」）",
+                      mm, then, now, now)
+    }
+
+    /// 书脊是估的（怎么估的）；填了 = nil。
+    func spineEstimateNote(spreads: Int) -> String? {
+        guard spineMM == nil else { return nil }
+        return String(format: "书脊 %.1f mm 是估的：%dP × 每张 %.2f mm ÷ 2 + 两块板 2 × %.1f mm，照印厂给的数改",
+                      spineWidthMM(spreads: spreads), Self.pageCount(spreads: spreads), sheetMM, boardMM)
+    }
+
+    /// 书脊太窄、上面的字没印。
+    func spineNarrowNote(spreads: Int) -> String? {
         let spine = spineWidthMM(spreads: spreads)
-        if spineMM == nil {
-            out.append(String(format: "书脊 %.1f mm 是估的：%dP × 每张 %.2f mm ÷ 2 + 两块板 2 × %.1f mm，照印厂给的数改",
-                              spine, Self.pageCount(spreads: spreads), sheetMM, boardMM))
-        }
-        if hasSpineText, !Self.spineFitsText(spine) {
-            out.append(String(format: "书脊只有 %.1f mm，放不下字（至少 %.0f mm）：书脊上没印字", spine, Self.minSpineTextMM))
-        }
-        return out
+        guard hasSpineText, !Self.spineFitsText(spine) else { return nil }
+        return String(format: "书脊只有 %.1f mm，放不下字（至少 %.0f mm）：书脊上没印字", spine, Self.minSpineTextMM)
     }
 
     // MARK: 脸离书脊、包边折线太近
@@ -132,15 +149,34 @@ struct CollageBookCover: Codable, Hashable {
     }
 
     /// 导出前检查（CollagePreflight）里封面的几条（不指到哪个跨页：page = nil，格子路径是封面那一块的）：
-    /// - 拦：封面上的空照片格（导出来是一块底色，同跨页的空格）、放大超过 150%；
-    /// - 提醒：放大 120–150%、书脊宽还是估的、书脊太窄印不下字、脸贴着书脊 / 出了安全区。
+    /// - 拦：封面上的空照片格（导出来是一块底色，同跨页的空格）、放大超过 150%、封面 / 封底照片的原图读不了、
+    ///   书脊宽是按别的页数填的（kind = .spine）；
+    /// - 提醒：放大 120–150%、书脊宽还是估的（kind = .spine；整本导出时另问一次）、书脊太窄印不下字、脸贴着书脊 / 出了安全区。
     /// 以前只有后面那几样提醒：封面上一格空着、或者放大到糊，导出时一声不吭（R2#3）。没有封面 = 空。
-    static func preflightIssues(project: CollageProject, hints: [String: CollageCrop.Hints]) -> [CollagePreflightIssue] {
+    static func preflightIssues(project: CollageProject, hints: [String: CollageCrop.Hints],
+                                readable: (CollagePhotoRef) -> Bool = CollagePreflight.originalReadable)
+        -> [CollagePreflightIssue] {
         guard project.mode == .album, let cover = project.bookCover else { return [] }
+        let spreads = project.pages.count
         var out = cover.photoIssues(project: project, hints: hints)
-        let notes = cover.notes(spreads: project.pages.count).map { (photo: String?.none, text: $0) }
+        // 原图读不了（优化分析 A1）：封面那块的格子带路径（点了进封面编辑、选中那一格），封底那张去「文档 › 封面」。
+        var seen = Set<String>()
+        for id in cover.photoIDs where seen.insert(id).inserted {
+            guard let photo = project.photo(id), !readable(photo) else { continue }
+            let file = URL(fileURLWithPath: photo.path).deletingPathExtension().lastPathComponent
+            let path = cover.front.leafPaths().first { cover.front.node(at: $0)?.cell?.photoID == id }
+            out.append(CollagePreflightIssue(kind: .cover, severity: .block, page: nil, path: path, photoID: id,
+                                             message: "封面：\(file.isEmpty ? id : file) 的原图读不了（\(CollagePreflight.sourceWhy(photo))）：导出只能用小预览图，印出来是糊的。接上原图所在的盘再导"))
+        }
+        if let stale = cover.spineStaleNote(spreads: spreads) {
+            out.append(CollagePreflightIssue(kind: .spine, severity: .block, page: nil, message: "封面：" + stale))
+        }
+        if let estimate = cover.spineEstimateNote(spreads: spreads) {
+            out.append(CollagePreflightIssue(kind: .spine, severity: .warn, page: nil, message: "封面：" + estimate))
+        }
+        let narrow = cover.spineNarrowNote(spreads: spreads).map { [(photo: String?.none, text: $0)] } ?? []
         let faces = cover.faceWarningItems(project: project, hints: hints).map { (photo: Optional($0.photo), text: $0.text) }
-        out += (notes + faces).map {
+        out += (narrow + faces).map {
             CollagePreflightIssue(kind: .cover, severity: .warn, page: nil, photoID: $0.photo, message: "封面：" + $0.text)
         }
         return out
@@ -337,6 +373,9 @@ extension CollageBookCover {
         id = c.coverSoft(.id, UUID())
         back = c.coverSoft(.back, CollageBookCoverBack())
         spineMM = clampedMM(c.coverOptional(.spineMM), Self.spineRange)
+        // 缺键（这一版之前的工程）、坏值 = nil：不知道是按多少 P 填的，不报过期。书脊不是手填的也不留这个数。
+        let pages: Int? = c.coverOptional(.spinePages)
+        spinePages = spineMM == nil ? nil : pages.flatMap { $0 > 0 && $0 <= 100_000 ? $0 : nil }
         wrapMM = clampedMM(c.coverSoft(.wrapMM, Self.defaultWrapMM), Self.wrapRange) ?? Self.defaultWrapMM
         boardMM = clampedMM(c.coverSoft(.boardMM, Self.defaultBoardMM), Self.boardRange) ?? Self.defaultBoardMM
         let sheetDefault = Self.defaultSheetMM(.layflat)

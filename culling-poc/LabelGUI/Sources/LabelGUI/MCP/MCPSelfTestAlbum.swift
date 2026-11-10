@@ -26,7 +26,7 @@ extension MCPSelfTest {
             ("collage_pages", ["session": k, "action": "add", "page": 4, "reveal": true, "op_id": op], true),
             ("collage_pages", ["session": k, "action": "add", "to": 2], false),
             ("collage_pages", ["session": k, "action": "delete", "pages": "1-3, 7"], true),
-            ("collage_pages", ["session": k, "action": "delete"], true),
+            ("collage_pages", ["session": k, "action": "delete"], false),
             ("collage_pages", ["session": k, "action": "delete", "page": 2], false),
             ("collage_pages", ["session": k, "action": "delete", "pages": ""], false),
             ("collage_pages", ["session": k, "action": "move", "pages": "25", "to": 3], true),
@@ -54,6 +54,9 @@ extension MCPSelfTest {
             ("collage_move_photos", ["session": k, "photos": ["a"], "to": 0], false),
             ("collage_move_photos", ["session": k, "photos": ["a"], "to": 2, "cells": ["00"]], false),
             ("collage_replace_photo", ["session": k, "path": "01", "with": "DSCF7213"], true),
+            ("collage_replace_photo", ["session": k, "path": "01", "with": "DSCF7213", "page": 3], true),
+            ("collage_replace_photo", ["session": k, "path": "01", "with": "DSCF7213", "page": 0], false),
+            ("collage_replace_photo", ["session": k, "path": "01", "with": "DSCF7213", "page": "3"], false),
             ("collage_replace_photo", ["session": k, "path": "", "with": "DSCF7213", "op_id": op], true),
             ("collage_replace_photo", ["session": k, "path": "0a", "with": "x"], false),
             ("collage_replace_photo", ["session": k, "path": "012345678", "with": "x"], false),
@@ -215,13 +218,14 @@ extension MCPSelfTest {
         let issues = [upscale, slot, pages, warn]
         let all = LiveHandlers.preflightBody(issues, project: project, pages: nil)
         check(all["block_count"] as? Int == 3 && all["warn_count"] as? Int == 1 && (all["blocks"] as? [Any])?.count == 3
-              && (all["warnings"] as? [Any])?.count == 1 && all["export_would_ask"] is [String: Any] && all["pages"] is NSNull,
+              && (all["reminders"] as? [Any])?.count == 1 && all["warnings"] == nil
+              && all["export_would_ask"] is [String: Any] && all["pages"] is NSNull,
               "整本：3 条拦、1 条提醒，导出按钮会问：\(MCPJSON.string(all).prefix(200))")
         let only = LiveHandlers.preflightBody(issues, project: project, pages: [1])
         check(only["export_would_ask"] is NSNull && (only["pages"] as? [Int]) == [2],
               "只导第 2 个跨页（上面只有提醒）：导出按钮不问")
         let cut = LiveHandlers.preflightBody(Array(repeating: warn, count: 5), project: project, pages: nil, limit: 2)
-        check((cut["warnings"] as? [Any])?.count == 2 && cut["truncated"] as? Bool == true && cut["warn_count"] as? Int == 5,
+        check((cut["reminders"] as? [Any])?.count == 2 && cut["truncated"] as? Bool == true && cut["warn_count"] as? Int == 5,
               "超过上限：列前几条、truncated、计数照实")
 
         // 印厂规格的页数摘要：3 个跨页 = 6P，按保守默认 20–60P 查 → 少了

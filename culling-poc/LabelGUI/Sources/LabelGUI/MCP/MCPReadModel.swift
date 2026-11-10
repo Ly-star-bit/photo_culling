@@ -833,6 +833,8 @@ enum MCPArgs {
         var p: [String: Spec] = ["session": session, "if_digest": digest, "reveal": .bool, "op_id": .opID, "inline": .bool]
         p["path"] = .cellPath
         p["with"] = .string(maxLength: 256)
+        // 换哪个跨页的格子（优化分析 A8）：不给 = 当前页
+        p["page"] = .int(1...999)
         return ToolSpec(props: p, required: ["path", "with"])
     }()
     static let printSpecSpec: ToolSpec = {
@@ -984,6 +986,11 @@ enum MCPArgs {
             }
             if action == "go" && !given("page") {
                 return Problem(message: "action=go 要给 page：翻到第几个跨页（从 1 起）。", hint: "跨页号看 collage_get_state 的 album.spreads")
+            }
+            // delete 必须点名删哪几个（优化分析 A8）：以前不给 = 删当前跨页，AI 读完状态以后用户翻了页，删掉的是用户刚翻到的那个
+            if action == "delete" && !given("pages") {
+                return Problem(message: "action=delete 要给 pages：删哪几个跨页（从 1 起）。",
+                               hint: "写成「3」「1-3, 7」；跨页号看 collage_get_state 的 album.spreads")
             }
             if action == "move" && !given("to") {
                 return Problem(message: "action=move 要给 to：挪完以后从第几个跨页开始。", hint: "pages 不给 = 挪当前跨页")

@@ -266,7 +266,7 @@ enum CollageAlbumReviewSelfTest {
             check(false, "封面上有照片格", "")
             return
         }
-        let clean = CollageBookCover.preflightIssues(project: store.project, hints: [:])
+        let clean = CollageBookCover.preflightIssues(project: store.project, hints: [:], readable: { _ in true })
         check(!clean.contains { $0.severity == .block }, "照片够大、格子都有照片：封面没有「拦」的",
               clean.map(\.message).joined(separator: "；"))
 
