@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 import CoreImage
 import UniformTypeIdentifiers
 
@@ -47,7 +48,8 @@ struct BatchView: View {
     @State private var gridWidth: CGFloat = 800
     /// 大场次的宽高比在后台读完了（aspects）：加一，网格按真的比例再排一次。
     @State private var aspectEpoch = 0
-    @State private var aspectWarming = false
+    /// 网格的可见顺序、分区、分行结果，按「store 变过几回 + 视图选项」记住（GridMemo）：按一下方向键什么都不用重算。
+    @State private var memo = GridMemo()
     /// 网格里现在看得见哪些章节（时间轴画「你在这」）。故意用 @State 存引用而不是
     /// @StateObject：批量页不订阅它，滚动时只有时间轴重画。
     @State private var viewport: GridViewport
@@ -111,6 +113,7 @@ struct BatchView: View {
 
     var body: some View {
         let _ = BatchPerf.body("批量页")
+        let _ = memo.attach(store)
         Group {
             if reviewMode {
                 ReviewView(store: store, orderIDs: pagingOrder, rejectsSkippable: reviewSkippable,
@@ -313,7 +316,7 @@ struct BatchView: View {
         store.viewRequest = nil
         guard store.photoDir != nil, request.session == store.sessionDir.lastPathComponent else { return }
         let ids = request.ids.filter { store.item(withID: $0) != nil }
-        let visible = Set(visibleItems.map(\.id))
+        let visible = Set(visibleIDs)
         let shown = ids.filter { visible.contains($0) }
         // 要的一张都看不见（被筛选藏起来、折在连拍里）：用户原来的选中不动，只报回去
         if request.select && !shown.isEmpty { selectedIDs = Set(shown) }
@@ -536,7 +539,7 @@ struct BatchView: View {
             // 不带框的图标是中性灰：琥珀色只留给右边那一个主按钮。
             .tint(Color(white: 0.78))
             .background {
-                Button("全选") { selectedIDs = Set(visibleItems.map(\.id)) }
+                Button("全选") { selectedIDs = Set(visibleIDs) }
                     .keyboardShortcut("a", modifiers: .command)
                     .disabled(store.items.isEmpty)
                     .opacity(0).frame(width: 0, height: 0).accessibilityHidden(true)
@@ -844,21 +847,38 @@ struct BatchView: View {
         .frame(width: 400)
     }
 
+    /// 决定网格里有哪些照片、什么顺序的视图选项（store 那边的筛选、判决由 memo 的 revision 管）。
+    private var viewKey: GridMemo.ViewKey {
+        GridMemo.ViewKey(byGroup: gridMode == .byGroup, showSingles: showSingles, pendingOnly: pendingTakesOnly,
+                         sortByScore: takeSortByScore, expanded: expandedTakes)
+    }
+
     /// Grid order under the current filter — shared by keyboard nav and inspector paging.
     private var visibleItems: [BatchItem] {
-        if gridMode == .byGroup {
-            // 每场一行、行内按拍摄顺序，单张区展开了就接在最后 —— 键盘 ←/→ 和检视器翻页走的
-            // 就是这个顺序（收起的单张不在里面：看不见的照片不该被翻到）。
-            return groupedItems.flatMap(\.members) + (showSingles ? singleItems : [])
+        memo.value("visible", key: viewKey) {
+            if gridMode == .byGroup {
+                // 每场一行、行内按拍摄顺序，单张区展开了就接在最后 —— 键盘 ←/→ 和检视器翻页走的
+                // 就是这个顺序（收起的单张不在里面：看不见的照片不该被翻到）。
+                return groupedItems.flatMap(\.members) + (showSingles ? singleItems : [])
+            }
+            let ordered = [Verdict.pick, .usable, .reject].flatMap { sectionItems($0) }
+            guard let filter = store.verdictFilter else { return ordered }
+            return ordered.filter { $0.verdict == filter }
         }
-        let ordered = [Verdict.pick, .usable, .reject].flatMap { sectionItems($0) }
-        guard let filter = store.verdictFilter else { return ordered }
-        return ordered.filter { $0.verdict == filter }
+    }
+
+    /// visibleItems 的 id（焦点、选中、翻页都按它）。
+    private var visibleIDs: [String] {
+        memo.value("visibleIDs", key: viewKey) { visibleItems.map(\.id) }
     }
 
     /// 每场一行的数据（只有多张的场；单张见 singleItems）。分组本身在 store 的 Derived 里算好
     /// （takeRows），这里只做筛选：以前这是个计算属性，每次按键都对全部照片 Dictionary(grouping:) + 排序。
-    private var groupedItems: [(group: Int, members: [BatchItem])] {
+    private var groupedItems: [TakeGroup] {
+        memo.value("grouped", key: viewKey) { computeGroupedItems() }
+    }
+
+    private func computeGroupedItems() -> [TakeGroup] {
         let items = store.items
         let chapter = store.activeChapterFilter
         return store.takeRows.compactMap { row in
@@ -890,12 +910,16 @@ struct BatchView: View {
                     return ka == kb ? $0.id < $1.id : ka > kb
                 }
             }
-            return (row.take, members)
+            return TakeGroup(group: row.take, members: members)
         }
     }
 
     /// 分组模式里的单张照片（这一场只有它一张），按拍摄顺序。「只看待处理」时不显示。
     private var singleItems: [BatchItem] {
+        memo.value("singles", key: viewKey) { computeSingleItems() }
+    }
+
+    private func computeSingleItems() -> [BatchItem] {
         guard !pendingTakesOnly else { return [] }
         let items = store.items
         return store.takeRows.compactMap { row -> BatchItem? in
@@ -983,6 +1007,15 @@ struct BatchView: View {
                 DispatchQueue.main.async { scrollGrid(proxy, id, anchor: .center) }
             }
             .onChange(of: store.viewRequest) { applyViewRequest(proxy) }
+            // 大场次第一次打开：先全按 2:3 排，后台读完比例整屏重排一次 —— 重排以后把焦点那张滚回眼前（R7）。
+            .onChange(of: aspectEpoch) {
+                guard let id = focusedID else { return }
+                DispatchQueue.main.async { scrollGrid(proxy, id, anchor: .center) }
+            }
+            // 分析 / 导出这类任务跑完：读不出比例的预览可能补回来了（重新分析），再给一次机会。
+            .onChange(of: store.isRunning) { _, running in
+                if !running, PhotoAspect.retryFailed() { aspectEpoch += 1 }
+            }
             .focusable()
             .focusEffectDisabled()
             .onKeyPress(.leftArrow) { moveFocus(-1, proxy: proxy); return .handled }
@@ -1045,7 +1078,7 @@ struct BatchView: View {
         // "select five, press 3" used to reject only the focused photo.
         // 只改选中里还看得见的，改完清掉选中（和批量栏一样）：以前不清，接着用方向键走到别的照片
         // 再按数字，改的还是早先那几张（GridSelectionRules.swift）。
-        let before = visibleItems.map(\.id)
+        let before = visibleIDs
         let pick = GridSelectionRules.digitTargets(selected: selectedIDs, visible: before, focused: focusedID)
         if pick.clearSelection { selectedIDs.removeAll() }
         guard !pick.ids.isEmpty else { return false }
@@ -1112,7 +1145,7 @@ struct BatchView: View {
     /// 看不见了的选中剪掉：留着的话顶栏还写「已选 N 张」，数字键、批量栏、拼图都会改到看不见的照片。
     private func pruneSelectionToVisible() {
         guard !selectedIDs.isEmpty else { return }
-        let kept = GridSelectionRules.pruned(selectedIDs, visible: visibleItems.map(\.id))
+        let kept = GridSelectionRules.pruned(selectedIDs, visible: visibleIDs)
         if kept != selectedIDs { selectedIDs = kept }
     }
 
@@ -1120,7 +1153,7 @@ struct BatchView: View {
     /// 分组模式下 visibleItems 是每场展开后的全部成员（以前只有封面：打开一场
     /// 10 张按 → 会跳到下一场，审片也只审封面、18 张静默跳过 13 张）。
     private func openInspector(_ id: String) {
-        pagingOrder = visibleItems.map(\.id)
+        pagingOrder = visibleIDs
         inspectedID = id
     }
 
@@ -1134,7 +1167,7 @@ struct BatchView: View {
     /// 「只看待处理」还会把定完的场藏掉 —— 连拍挑完按 F，审的要么是空的、要么漏掉全部单张（审查发现）。
     /// 分组模式就按拍摄时间过整场（判决筛选、只看这一章照样生效）。
     private func reviewOrder() -> [String] {
-        guard gridMode == .byGroup else { return visibleItems.map(\.id) }
+        guard gridMode == .byGroup else { return visibleIDs }
         let items = store.items
         let chapter = store.activeChapterFilter
         let ids = store.takeRows.flatMap { row in
@@ -1147,7 +1180,7 @@ struct BatchView: View {
                 return item.id
             }
         }
-        return ids.isEmpty ? visibleItems.map(\.id) : ids
+        return ids.isEmpty ? visibleIDs : ids
     }
 
     /// 进连拍挑选，从这一场开始。focus = 键盘高亮先落在哪张。
@@ -1222,7 +1255,7 @@ struct BatchView: View {
     private func handleClick(ids: [String], anchorID: String) {
         let flags = NSEvent.modifierFlags
         if flags.contains(.shift), let anchor = focusedID {
-            let order = visibleItems.map(\.id)
+            let order = visibleIDs
             if let a = order.firstIndex(of: anchor), let b = order.firstIndex(of: anchorID) {
                 selectedIDs.formUnion(order[min(a, b)...max(a, b)])
                 return
@@ -1246,7 +1279,7 @@ struct BatchView: View {
     private struct GridRow: Identifiable {
         /// 「分区-第几行」：scrollTo 的目标（一行照片是 Lazy 栈的直接孩子，没铺出来也找得到）。
         let id: String
-        let items: [BatchItem]
+        let items: ArraySlice<BatchItem>
         let widths: [CGFloat]
         let height: CGFloat
     }
@@ -1261,37 +1294,54 @@ struct BatchView: View {
     /// 想要的行高：滑杆的数乘 1.2（以前滑杆是方格的边长，竖片在里面只有三分之二宽；现在同一档照片大一圈）。
     private var rowTarget: CGFloat { thumbSize * 1.2 }
 
-    private func justified(_ items: [BatchItem]) -> [JustifiedRows.Row] {
-        JustifiedRows.pack(aspects: aspects(items), width: rowWidth, target: rowTarget)
+    /// 分行结果的键：行宽、目标行高、比例的版本。读 aspectEpoch：后台读完比例以后 body 跟着重算。
+    private var layoutKey: GridLayoutCache.Key {
+        GridLayoutCache.Key(width: rowWidth, target: rowTarget, epoch: aspectEpoch, generation: PhotoAspect.generation)
     }
 
-    /// 这几张的宽高比。没读过文件头的不超过 600 张就当场读（约 0.1 ms 一张）；更多（几千张的场次第一次打开）先按竖拍
-    /// 2:3 排，后台把整场读完再排一次 —— 不在主线程上卡半秒。
+    /// 这几张的分行（缓存：id 序列、行宽、行高、比例版本都没变就是上次那份，GridLayoutCache）。
+    private func layout(_ items: [BatchItem], ids: [String]? = nil, prefix: String) -> GridLayoutCache.Section {
+        memo.layout.section(prefix: prefix, ids: ids ?? items.map(\.id), key: layoutKey) { aspects(items) }
+    }
+
+    /// 这几张的宽高比（一把锁批量取）。没读过文件头的不超过 600 张就当场读（约 0.1 ms 一张）；更多（几千张的场次第一次打开）
+    /// 先按竖拍 2:3 排，后台把整场读完再排一次 —— 不在主线程上卡半秒。读不出来的（预览被清了）记过「试过」，不算没读过：
+    /// 不会每次重算再读一遍，也不会后台读完 → 重排 → 再读地空转（R1 / R2）。
     private func aspects(_ items: [BatchItem]) -> [CGFloat] {
-        _ = aspectEpoch
-        var unknown = 0
-        for item in items where PhotoAspect.known(path: item.previewPath) == nil { unknown += 1 }
-        if unknown <= 600 { return items.map { PhotoAspect.of(path: $0.previewPath) } }
+        let paths = items.map(\.previewPath)
+        let found = PhotoAspect.lookup(paths: paths)
+        if found.untried.isEmpty { return found.aspects.map { $0 ?? PhotoAspect.fallback } }
+        if found.untried.count <= 600 { return PhotoAspect.resolve(paths: paths) }
         DispatchQueue.main.async { warmAspects() }
-        return items.map { PhotoAspect.known(path: $0.previewPath) ?? PhotoAspect.fallback }
+        return found.aspects.map { $0 ?? PhotoAspect.fallback }
     }
 
+    /// 后台把整场的文件头读完。只有真学到了新比例才加 aspectEpoch（重排一次）：全读不出来时再排一次也是原样。
     private func warmAspects() {
-        guard !aspectWarming else { return }
-        aspectWarming = true
+        guard !memo.warming else {
+            // 正在读的可能是上一场的：读完以后再看一眼现在这一场。
+            memo.warmAgain = true
+            return
+        }
         let paths = store.items.map(\.previewPath)
+        guard !PhotoAspect.lookup(paths: paths).untried.isEmpty else { return }
+        memo.warming = true
         Task.detached(priority: .userInitiated) {
-            for path in paths { _ = PhotoAspect.of(path: path) }
+            let learned = PhotoAspect.warm(paths: paths)
             await MainActor.run {
-                aspectWarming = false
-                aspectEpoch += 1
+                memo.warming = false
+                let again = memo.warmAgain
+                memo.warmAgain = false
+                if learned > 0 || again { aspectEpoch += 1 }
             }
         }
     }
 
-    private func gridRows(_ items: [BatchItem], prefix: String) -> [GridRow] {
-        justified(items).enumerated().map { index, row in
-            GridRow(id: "\(prefix)-\(index)", items: Array(items[row.range]), widths: row.widths, height: row.height)
+    private func gridRows(_ items: [BatchItem], ids: [String]? = nil, prefix: String) -> [GridRow] {
+        let section = layout(items, ids: ids, prefix: prefix)
+        return section.rows.indices.map { index in
+            let row = section.rows[index]
+            return GridRow(id: section.rowIDs[index], items: items[row.range], widths: row.widths, height: row.height)
         }
     }
 
@@ -1306,24 +1356,31 @@ struct BatchView: View {
     }
 
     /// 网格里现在的全部行，按屏幕上从上到下的顺序（↑ ↓ 和滚动定位用）：按判决 = 三个分区接起来，按分组 = 每场的行、
-    /// 最后是展开着的单张区。
-    private func navigationRows() -> [(id: String, cells: [JustifiedRows.Cell])] {
-        var out: [(id: String, cells: [JustifiedRows.Cell])] = []
-        func add(_ items: [BatchItem], prefix: String) {
-            let ids = items.map(\.id)
-            for (index, row) in justified(items).enumerated() {
-                out.append(("\(prefix)-\(index)", JustifiedRows.cells(ids: ids, row: row)))
+    /// 最后是展开着的单张区。和 body 用同一份分行缓存，自己也记着（store、视图选项、分行的键都没变就是上次那份）。
+    private func navigationRows() -> [GridMemo.NavRow] {
+        memo.value("navRows", key: GridMemo.NavKey(view: viewKey, layout: layoutKey)) {
+            var out: [GridMemo.NavRow] = []
+            func add(_ items: [BatchItem], ids: [String]? = nil, prefix: String) {
+                let section = layout(items, ids: ids, prefix: prefix)
+                for (index, cells) in section.cells.enumerated() {
+                    out.append(GridMemo.NavRow(id: section.rowIDs[index], cells: cells))
+                }
             }
-        }
-        if gridMode == .byGroup {
-            for entry in groupedItems { add(entry.members, prefix: "take\(entry.group)") }
-            if showSingles { add(singleItems, prefix: "singles") }
-        } else {
-            for verdict in Verdict.allCases.reversed() where store.verdictFilter == nil || store.verdictFilter == verdict {
-                add(sectionItems(verdict), prefix: verdict.rawValue)
+            if gridMode == .byGroup {
+                for entry in groupedItems { add(entry.members, prefix: "take\(entry.group)") }
+                if showSingles { add(singleItems, prefix: "singles") }
+            } else {
+                for verdict in Verdict.allCases.reversed() where store.verdictFilter == nil || store.verdictFilter == verdict {
+                    add(sectionItems(verdict), ids: sectionIDs(verdict), prefix: verdict.rawValue)
+                }
             }
+            return out
         }
-        return out
+    }
+
+    /// ↑ ↓ 用：每一行的格子。
+    private func navigationCells() -> [[JustifiedRows.Cell]] {
+        memo.value("navCells", key: GridMemo.NavKey(view: viewKey, layout: layoutKey)) { navigationRows().map(\.cells) }
     }
 
     /// 滚到这张照片。按判决时滚到它所在的那一行（行是 Lazy 栈的直接孩子，没铺出来也找得到）。按分组时行在每场自己的栈里：
@@ -1587,7 +1644,7 @@ struct BatchView: View {
     /// 批量栏改判：改完清掉选中，焦点和多选按数字键一样落到没改的邻居上（keepPlace，不滚动 —— 鼠标在批量栏上）。
     /// 以前焦点不动：焦点那张也在选中里、被筛掉或整场叠掉时，下一次数字键改的是看不见的它。
     private func applyBulk(changing changed: [String], _ apply: () -> Void) {
-        let before = visibleItems.map(\.id)
+        let before = visibleIDs
         withAnimation { apply() }
         selectedIDs.removeAll()
         keepPlace(changed: changed, before: before, proxy: nil)
@@ -1744,7 +1801,7 @@ struct BatchView: View {
     /// （GridSelectionRules.refocus）。`proxy` = nil：不滚动（批量栏是鼠标点的）。
     private func keepPlace(changed: [String], before: [String], proxy: ScrollViewProxy?) {
         switch GridSelectionRules.refocus(focused: focusedID, changed: changed, before: before,
-                                          after: visibleItems.map(\.id)) {
+                                          after: visibleIDs) {
         case .stay:
             return
         case .clear:
@@ -1804,9 +1861,8 @@ struct BatchView: View {
     }
 
     private func moveFocus(_ delta: Int, proxy: ScrollViewProxy) {
-        let items = visibleItems
-        guard !items.isEmpty else { return }
-        let ids = items.map(\.id)
+        let ids = visibleIDs
+        guard !ids.isEmpty else { return }
         let next: String
         if let current = focusedID, let idx = ids.firstIndex(of: current) {
             next = ids[max(0, min(ids.count - 1, idx + delta))]
@@ -1821,8 +1877,7 @@ struct BatchView: View {
     /// ↑/↓：上一行 / 下一行里离现在这张最近的那一张（每行照片宽度不一样，按中点的位置找，不按第几列）。
     /// 两种视图同一套：按分组时从一场的最后一行按 ↓ 落进下一场的第一行。
     private func moveFocusVertically(_ direction: Int, proxy: ScrollViewProxy) {
-        let rows = navigationRows().map(\.cells)
-        guard let next = JustifiedRows.vertical(rows: rows, from: focusedID, direction: direction) else { return }
+        guard let next = JustifiedRows.vertical(rows: navigationCells(), from: focusedID, direction: direction) else { return }
         focusedID = next
         // 吸顶的分区标题会盖住贴着顶边停下的目标；跨行跳转一律居中。
         scrollGrid(proxy, next, anchor: .center)
@@ -1996,9 +2051,9 @@ struct BatchView: View {
     /// ←/→ 从那儿接着走。不滚动 —— 鼠标就停在这儿。
     private func setFromHover(_ id: String, _ verdict: Verdict) {
         guard store.item(withID: id)?.verdict != verdict || store.overrides[id] != verdict else { return }
-        let before = id == focusedID ? visibleItems.map(\.id) : nil
+        let before = id == focusedID ? visibleIDs : nil
         withAnimation(.easeInOut(duration: 0.2)) { store.setOverrideBatch([id], verdict) }
-        if let before, let next = Self.placeAfterChange(of: id, before: before, after: visibleItems.map(\.id)) {
+        if let before, let next = Self.placeAfterChange(of: id, before: before, after: visibleIDs) {
             focusedID = next
         }
     }
@@ -2085,6 +2140,15 @@ struct BatchView: View {
     /// Items of one verdict section, narrowed by the borderline filter and (for
     /// rejects) the active reason filter. Shared with keyboard navigation.
     private func sectionItems(_ verdict: Verdict) -> [BatchItem] {
+        memo.value("section-" + verdict.rawValue) { computeSectionItems(verdict) }
+    }
+
+    /// 这个分区的 id 序列（分行缓存按它认是不是同一批）。
+    private func sectionIDs(_ verdict: Verdict) -> [String] {
+        memo.value("sectionIDs-" + verdict.rawValue) { sectionItems(verdict).map(\.id) }
+    }
+
+    private func computeSectionItems(_ verdict: Verdict) -> [BatchItem] {
         // 分区下标在 Derived 里；这里只对本分区做筛选（以前每个分区各扫一遍全部）。
         let items = store.items
         var matching = (store.byVerdict[verdict] ?? []).compactMap { idx -> BatchItem? in
@@ -2112,7 +2176,7 @@ struct BatchView: View {
         let takeSizes = store.takeSizes
         if !matching.isEmpty || (verdict == .reject && store.reasonFilter != nil) {
             Section {
-                ForEach(gridRows(matching, prefix: verdict.rawValue)) { row in
+                ForEach(gridRows(matching, ids: sectionIDs(verdict), prefix: verdict.rawValue)) { row in
                     rowView(row) { item, width, height in
                         gridCell(item, color: color, groupSize: takeSizes[item.take] ?? 1, width: width, height: height)
                     }
@@ -2163,7 +2227,8 @@ struct BatchView: View {
     private func gridCell(_ item: BatchItem, color: Color, groupSize: Int, width: CGFloat, height: CGFloat,
                           keepOnly: Bool = false, showPick: Bool = false) -> some View {
         let client = store.clientPicks.contains(item.id)
-        let aspect = PhotoAspect.of(path: item.previewPath)
+        // 分行时已经读过（或者后台正在读：读完加 aspectEpoch，这里跟着重算）—— 不在建格子时碰文件。
+        let aspect = PhotoAspect.known(path: item.previewPath) ?? PhotoAspect.fallback
         return GridCell(item: item, thumbGeneration: ThumbCache.generation(of: item.previewPath),
                         color: color, groupSize: groupSize, width: width, height: height,
                         letterbox: !JustifiedRows.aspectRange.contains(aspect),
@@ -2407,6 +2472,66 @@ struct BatchView: View {
         guard let folder else { return }
         store.exportJPEGs(to: folder, includeUsable: jpegIncludeUsable, options: jpegOptions.wrappedValue,
                           overwrite: jpegOverwrite)
+    }
+}
+
+// MARK: - 网格的记忆
+
+/// 按分组时的一场（只有多张的场）。
+struct TakeGroup {
+    let group: Int
+    let members: [BatchItem]
+}
+
+/// 网格里「看得见哪些照片、什么顺序、怎么分行」的记忆（优化分析 2026-11-10 R3）。这些以前都是批量页的计算属性：每按一下
+/// 方向键，可见顺序、三个分区、分行各算两三遍（7980 张时一下 3 亿条指令里大半是它们），而焦点挪一格它们根本没变。
+/// 现在按「store 变过几回（revision）+ 视图选项」记住：store 的任何 @Published 要变之前（objectWillChange，SwiftUI 自己
+/// 也靠它重算视图）revision 加一，记着的全部作废。批量页拿 @State 存着这个对象（不是 @StateObject：它不发布任何东西）。
+@MainActor
+final class GridMemo {
+    /// 决定网格里有哪些照片、什么顺序的视图选项。
+    struct ViewKey: Hashable {
+        var byGroup: Bool
+        var showSingles: Bool
+        var pendingOnly: Bool
+        var sortByScore: Bool
+        var expanded: Set<Int>
+    }
+
+    struct NavKey: Hashable {
+        var view: ViewKey
+        var layout: GridLayoutCache.Key
+    }
+
+    /// 网格里的一行：滚动定位的目标 id、每格的中点。
+    struct NavRow {
+        let id: String
+        let cells: [JustifiedRows.Cell]
+    }
+
+    private(set) var revision = 0
+    private weak var store: BatchStore?
+    private var watching: AnyCancellable?
+    private var values: [String: (revision: Int, key: AnyHashable, value: Any)] = [:]
+    /// 分行结果。
+    let layout = GridLayoutCache()
+    /// 后台正在读整场的宽高比；读的时候又有人要（换了场次）。
+    var warming = false
+    var warmAgain = false
+
+    func attach(_ store: BatchStore) {
+        guard self.store !== store else { return }
+        self.store = store
+        revision += 1
+        watching = store.objectWillChange.sink { [weak self] _ in self?.revision += 1 }
+    }
+
+    /// 记着的值：revision 和 key 都没变就是上次那份，否则现算。
+    func value<T>(_ name: String, key: AnyHashable = 0, _ compute: () -> T) -> T {
+        if let hit = values[name], hit.revision == revision, hit.key == key, let value = hit.value as? T { return value }
+        let value = compute()
+        values[name] = (revision, key, value)
+        return value
     }
 }
 

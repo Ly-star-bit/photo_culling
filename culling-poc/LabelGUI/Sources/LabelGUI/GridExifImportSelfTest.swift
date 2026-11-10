@@ -405,11 +405,69 @@ enum GridExifImportSelfTest {
         let wrote = writeJPEG(wide, width: 300, height: 200) && writeJPEG(tall, width: 200, height: 300)
         let read: Bool = wrote && abs(PhotoAspect.of(path: wide.path) - 1.5) < 0.001 && abs(PhotoAspect.of(path: tall.path) - 2.0 / 3.0) < 0.001
         t.check(read, "宽高比：从预览图的文件头读（横 1.5、竖 0.667）")
+        // 读不出来的（预览被清了）：按 2:3 排，记一笔「试过」—— 不然每次排版都当它没读过、再读一遍（R1 / R2）。
         let missing = PhotoAspect.of(path: late.path)
-        let unknown: Bool = PhotoAspect.known(path: late.path) == nil
-        t.check(unknown, "宽高比：读不出来的不记")
-        let later: Bool = writeJPEG(late, width: 400, height: 200) && abs(PhotoAspect.of(path: late.path) - 2) < 0.001
-        t.check(missing == PhotoAspect.fallback && later, "宽高比：文件没了先按 2:3 排，不记住；文件补上以后读得到")
+        let marked: Bool = PhotoAspect.known(path: late.path) == nil && PhotoAspect.tried(path: late.path)
+        t.check(missing == PhotoAspect.fallback && marked, "宽高比：读不出来的按 2:3 排，比例不记、但记一笔「试过」")
+        let wroteLate = writeJPEG(late, width: 400, height: 200)
+        let still: Bool = PhotoAspect.of(path: late.path) == PhotoAspect.fallback
+        t.check(wroteLate && still, "宽高比：试过的不再碰文件（文件后来有了也要等「忘掉」）")
+        let generation = PhotoAspect.generation
+        PhotoAspect.forget([late.path])
+        let later: Bool = !PhotoAspect.tried(path: late.path) && abs(PhotoAspect.of(path: late.path) - 2) < 0.001
+        t.check(later && PhotoAspect.generation == generation + 1, "宽高比：预览重写后忘掉（「试过」一起清），重读得到，版本加一")
+        // R1：750 张读不出来的大分区。第一遍后台读完学到 0 张（不重排）；之后一张「没试过」的都没有（不再起后台读）。
+        // 以前：读一遍全失败 → 重排 → 还是「没读过」→ 再读，没有出口。
+        let ghosts = (0..<750).map { dir.appendingPathComponent("ghost\($0).jpg").path }
+        let before = PhotoAspect.lookup(paths: ghosts)
+        let learned = PhotoAspect.warm(paths: ghosts)
+        let after = PhotoAspect.lookup(paths: ghosts)
+        let settled: Bool = before.untried.count == 750 && learned == 0 && after.untried.isEmpty
+            && after.aspects.allSatisfy { $0 == nil } && PhotoAspect.warm(paths: ghosts) == 0
+        t.check(settled, "宽高比：750 张读不出来的，读一遍学到 0 张（不重排），之后没有「没试过」的（不再空转）",
+                "之前没试过 \(before.untried.count)、学到 \(learned)、之后没试过 \(after.untried.count)")
+        // 混着的一批：只读没试过的，学到几张报几张；再来一遍学到 0。
+        let mixed = [wide.path, tall.path, late.path] + ghosts.prefix(3) + [dir.appendingPathComponent("new.jpg").path]
+        let wroteNew = writeJPEG(URL(fileURLWithPath: mixed[mixed.count - 1]), width: 100, height: 100)
+        let firstPass = PhotoAspect.warm(paths: mixed)
+        let resolved = PhotoAspect.resolve(paths: mixed)
+        let mixedOK: Bool = wroteNew && firstPass == 1 && PhotoAspect.warm(paths: mixed) == 0
+            && resolved == [1.5, 2.0 / 3.0, 2, PhotoAspect.fallback, PhotoAspect.fallback, PhotoAspect.fallback, 1]
+        t.check(mixedOK, "宽高比：混着的一批只读没试过的（学到 1 张），整批的比例一把锁取出来", "学到 \(firstPass) · \(resolved)")
+        // 任务跑完再给读失败的一次机会：没有读失败的 = 不用重排。
+        let retried = PhotoAspect.retryFailed()
+        let fresh = PhotoAspect.lookup(paths: ghosts).untried.count
+        PhotoAspect.warm(paths: ghosts)
+        PhotoAspect.forget(ghosts)
+        t.check(retried && fresh == 750, "宽高比：任务跑完，读失败的重新算「没试过」")
+
+        // 分行缓存（R3）：id 序列、行宽、行高、比例版本都没变 = 不重新分行；变了哪样都重分。
+        let cache = GridLayoutCache()
+        var asked = 0
+        let give: () -> [CGFloat] = { asked += 1; return aspects }
+        var key = GridLayoutCache.Key(width: 1100, target: 168, epoch: 0, generation: 0)
+        let first = cache.section(prefix: "精选", ids: ids, key: key, aspects: give)
+        let again = cache.section(prefix: "精选", ids: ids, key: key, aspects: give)
+        t.check(first === again && cache.packs == 1 && asked == 1 && first.rows == rows,
+                "分行缓存：同一批照片、同样的行宽行高 = 上次那份（不重新分行、不重取比例）", "分了 \(cache.packs) 次")
+        t.check(first.rowIDs.first == "精选-0" && first.cells == cells, "分行缓存：行的 id 是「分区-第几行」，格子中点和现算的一样")
+        _ = cache.section(prefix: "可用", ids: ids, key: key, aspects: give)
+        let other = cache.section(prefix: "精选", ids: ids, key: key, aspects: give)
+        t.check(other === first && cache.packs == 2, "分行缓存：各分区各记各的")
+        let fewer = cache.section(prefix: "精选", ids: Array(ids.dropLast()), key: key, aspects: { Array(aspects.dropLast()) })
+        t.check(fewer !== first && cache.packs == 3 && fewer.ids.count == ids.count - 1, "分行缓存：照片变了（改判挪走一张）就重分")
+        var changes = 0
+        let mutations: [(inout GridLayoutCache.Key) -> Void] = [
+            { $0.width = 900 }, { $0.target = 120 }, { $0.epoch += 1 }, { $0.generation += 1 },
+        ]
+        for mutate in mutations {
+            mutate(&key)
+            let packsBefore = cache.packs
+            _ = cache.section(prefix: "精选", ids: ids, key: key, aspects: give)
+            _ = cache.section(prefix: "精选", ids: ids, key: key, aspects: give)
+            if cache.packs == packsBefore + 1 { changes += 1 }
+        }
+        t.check(changes == 4, "分行缓存：行宽、行高、后台读完比例、预览重写，变了哪样都重分一次", "\(changes)/4")
         // 一整场第一次打开要把每张的文件头读一遍：量一下一张多久（只打印，不判）。
         let clock = ContinuousClock()
         var copies: [String] = []
