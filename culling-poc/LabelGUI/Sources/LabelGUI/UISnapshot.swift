@@ -127,26 +127,29 @@ enum BatchUISnapshot {
         var order: [String] = []
         for v in sections { order += store.items.filter { $0.verdict == v }.map(\.id) }
         let startID = option("--id") ?? order.first ?? ""
-        if args.contains("--shortcuts-ui") {
+        if args.contains("--theme-ui") {
+            // 状态栏主题按钮点开的那六张小样（popover 在离屏窗口里画不出来，单独当根视图画）。
+            root = AnyView(ThemePicker().fixedSize().frame(maxWidth: .infinity, maxHeight: .infinity).background(AppPalette.canvas))
+        } else if args.contains("--shortcuts-ui") {
             let name = option("--shortcuts-page") ?? ShortcutsPage.batch.rawValue
             guard let page = ShortcutsPage(rawValue: name) else {
                 print("--shortcuts-page 只认 \(ShortcutsPage.allCases.map(\.rawValue).joined(separator: "|"))：\(name)")
                 exit(2)
             }
-            root = AnyView(ShortcutsPanel(page: page).background(Color(white: 0.16)))
+            root = AnyView(ShortcutsPanel(page: page).background(AppPalette.card))
         } else if let kind = option("--delivery-ui") {
             root = AnyView(deliveryPreview(kind, store: store, json: option("--delivery-json") ?? "")
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .background(Color(white: 0.16)))
+                .background(AppPalette.card))
         } else if let path = option("--client-import-ui") {
             // 导入客户选择对话框（sheet 在离屏窗口里画不出来，单独当根视图画），框里预先放好这段回复。
             let text = (try? Data(contentsOf: URL(fileURLWithPath: path))).flatMap(ClientReply.decode) ?? ""
             root = AnyView(ClientImportSheet(store: store, isPresented: .constant(true), text: text)
-                .background(Color(white: 0.16)))
+                .background(AppPalette.card))
         } else if args.contains("--body-clock-ui") {
             // 按机身对时面板（sheet 在离屏窗口里画不出来，单独当根视图画）。
             root = AnyView(BodyClockSheet(store: store, isPresented: .constant(true))
-                .background(Color(white: 0.16)))
+                .background(AppPalette.card))
         } else if args.contains("--review-ui") {
             let skippable = order.contains { store.item(withID: $0).map { $0.verdict != .reject } ?? false }
             root = AnyView(ReviewView(store: store, orderIDs: order, rejectsSkippable: skippable,
@@ -163,8 +166,8 @@ enum BatchUISnapshot {
                                 filtered: store.activeChapterFilter, previewHover: hover) { _ in true }
                     .padding(.horizontal, 14).padding(.top, 8)
                     .zIndex(1)
-                Color(white: 0.13)
-            }.background(Color(white: 0.13)))
+                AppPalette.canvas
+            }.background(AppPalette.canvas))
             for (i, seg) in store.chapterSegments.enumerated() {
                 print("段 \(i): 章节 \(seg.chapter) · \(seg.count) 张 · \(seg.timeRange) · 待处理 \(seg.pendingTakes)\(seg.undated ? " · 无时间" : "")")
             }
@@ -199,19 +202,20 @@ enum BatchUISnapshot {
         let view = root
             .frame(width: size.width, height: size.height)
             .background(Color(nsColor: .windowBackgroundColor))
-            .environment(\.colorScheme, light ? .light : .dark)
-        let host = NSHostingView(rootView: view.appTheme())
+        // 不带 --light 时深 / 浅跟着主题（LABELGUI_THEME），appTheme() 自己设。
+        let host = NSHostingView(rootView: light ? AnyView(view.appTheme().environment(\.colorScheme, .light)) : AnyView(view.appTheme()))
         host.frame = NSRect(origin: .zero, size: size)
         // --events：假鼠标（SnapshotEvents.swift）。写错了在这里就退出（退出码 2）；带了它窗口换成永远不上屏的那种。
         let eventSteps = SnapshotEvents.fromCommandLine(args)
         let window = SnapshotEvents.snapshotWindow(contentRect: host.frame, events: eventSteps != nil)
-        window.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
+        window.appearance = light ? NSAppearance(named: .aqua) : ThemeCenter.shared.appearance
         window.contentView = host
         host.layoutSubtreeIfNeeded()
         // 缩略图 / 大图都是后台解的，等它们回来。
         spin(Double(option("--wait") ?? "3") ?? 3)
         host.layoutSubtreeIfNeeded()
         spin(1)
+        if ThemeCenter.switchForSnapshot(window: window) { host.layoutSubtreeIfNeeded(); spin(3); host.displayIfNeeded(); spin(0.5) }
         // --show <id>：和 AI 的「给我看这张」同一条路（store.viewRequest）—— 焦点落到这张、网格滚过去。验证滚动定位找得到
         // 还没铺出来的行。--press "↓,↓,→"：接着在网格里按这几个键（和 --perf grid 同一个入口），打印每按一下焦点在哪。
         if let show = option("--show") {

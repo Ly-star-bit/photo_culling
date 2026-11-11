@@ -31,27 +31,19 @@ enum WhatsNew {
     }
 
     /// 这一版新增的条目（两三条到五条，一条一句话，能「带我去」的都带上）。发下一版时整张换掉、version 跟着改。
-    static let notes = Notes(version: "1.31.0", entries: [
-        Entry(id: "inspector-side",
-              title: "看单张时照片大了",
-              detail: "空格打开的检视器改成左边整高的照片、右边一栏放淘汰理由、指标和 EXIF（以前照片只占一半高）。",
+    static let notes = Notes(version: "1.32.0", entries: [
+        Entry(id: "themes",
+              title: "界面可以换主题了",
+              detail: "六套：石墨（原来的）、灰卡、胡桃、午夜、纯黑，和一套浅色的相纸。状态栏右下角的半圆按钮点开就能挑，点了立刻换；「显示 › 主题」里也有。",
               destination: .batch),
-        Entry(id: "takes-side-by-side",
-              title: "按分组一屏看到更多场",
-              detail: "一行放得下的几场挨着排；筛选没结果时写明是哪几个筛选、给「显示全部」；窗口窄了顶栏会收起字。",
-              destination: .batch),
-        Entry(id: "arrow-fast",
-              title: "大场次方向键跟手了",
-              detail: "几千张的场次里按方向键和几百张一样快。预览被清掉的旧场次不再让网格空转，给一个「重新分析」。",
-              destination: .batch),
-        Entry(id: "album-preflight",
-              title: "相册导出前查得更严",
-              detail: "原图读不了、胶装照片跨中缝、书脊按旧页数填的，现在都会拦下；用了预览图就不出印刷 PDF。",
-              destination: .collage(.export)),
-        Entry(id: "accuracy",
-              title: "标注校准能看准确率了",
-              detail: "在「标注校准」里标过的照片会和自动判决对比：虚焦、闭眼、曝光各抓到几张、漏了几张、误杀几张。",
+        Entry(id: "themes-photos-untouched",
+              title: "换的只是界面",
+              detail: "照片、判决的绿蓝红、导出的图都不跟着主题变；看大图、审片时照片四周一直是黑的。",
               destination: nil),
+        Entry(id: "override-fast",
+              title: "大场次改判跟手了",
+              detail: "几千张的场次里按 1 / 2 / 3 改判，和几百张时差不多快（v1.31.1、v1.31.2 做的）。",
+              destination: .batch),
     ])
 
     /// 记「上次见过哪一版」的键（app 自己的 UserDefaults 域；自检写进参数域，不碰这里）。

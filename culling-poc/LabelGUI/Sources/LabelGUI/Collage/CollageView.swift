@@ -331,6 +331,7 @@ struct CollageView: View {
                 ProgressView(value: fraction).frame(width: 140)
             }
             Text(canvasSummary).collageHint()
+            ThemeButton()
             Button { showShortcuts.toggle() } label: { Image(systemName: "keyboard") }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)

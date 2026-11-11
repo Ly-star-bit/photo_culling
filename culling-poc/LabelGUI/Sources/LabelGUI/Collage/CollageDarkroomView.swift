@@ -78,19 +78,20 @@ struct CollageDarkroomView: View {
 // MARK: - 设计语言
 
 enum DarkroomPalette {
-    /// 外壳、侧栏、浮起的控件、发丝线：中性灰，不带色。
-    static let shell = Color(white: 0x11 / 255.0)
-    static let sidebar = Color(white: 0x1A / 255.0)
-    static let raised = Color(white: 0x24 / 255.0)
-    static let hairline = Color(white: 0x2A / 255.0)
+    private static var c: ThemeColors { ThemeCenter.shared.colors }
+    /// 外壳、侧栏、浮起的控件、发丝线。跟着主题走（AppTheme.swift 的 ThemeColors）；石墨主题是不带色的中性灰。
+    static var shell: Color { c.bar }
+    static var sidebar: Color { c.panel }
+    static var raised: Color { c.card }
+    static var hairline: Color { c.hairline }
     /// 大预览、样张四周。
-    static let surround = Color(white: 0x2E / 255.0)
-    static let track = Color(white: 0x3A / 255.0)
-    static let text = Color(white: 0xED / 255.0)
-    static let secondary = Color(white: 0xA3 / 255.0)
-    static let tertiary = Color(white: 0x6B / 255.0)
-    /// 唯一的点缀色：现在套着的（#FFB340，#1A1A1A 上约 9:1）。
-    static let accent = Color(red: 1, green: 0.702, blue: 0.251)
+    static var surround: Color { c.surround }
+    static var track: Color { c.track }
+    static var text: Color { c.text }
+    static var secondary: Color { c.secondary }
+    static var tertiary: Color { c.tertiary }
+    /// 唯一的点缀色：现在套着的。
+    static var accent: Color { c.accent }
 }
 
 private struct DarkroomHairline: View {
@@ -155,7 +156,7 @@ private struct DarkroomSegmented: View {
             }
         }
         .padding(2)
-        .background(RoundedRectangle(cornerRadius: 7).fill(Color.black.opacity(0.35)))
+        .background(RoundedRectangle(cornerRadius: 7).fill(AppPalette.well))
         .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(DarkroomPalette.hairline, lineWidth: 1))
     }
 }
@@ -453,7 +454,7 @@ private struct DarkroomSwatch: View, Equatable {
         let _ = CollagePerf.body("暗房样张")
         let corner: CGFloat = small ? 5 : 6
         let border: Color = applied ? DarkroomPalette.accent
-            : focused ? Color.white.opacity(0.6) : hovered ? Color.white.opacity(0.3) : DarkroomPalette.hairline
+            : focused ? AppPalette.ink.opacity(0.6) : hovered ? AppPalette.ink.opacity(0.3) : DarkroomPalette.hairline
         VStack(alignment: .leading, spacing: 5) {
             ZStack {
                 DarkroomPalette.surround

@@ -75,6 +75,7 @@ enum AppUISnapshot {
         spin(Double(option("--wait") ?? "4") ?? 4)
         host.layoutSubtreeIfNeeded()
         spin(1)
+        if ThemeCenter.switchForSnapshot(window: window) { host.layoutSubtreeIfNeeded(); spin(3); host.displayIfNeeded(); spin(0.5) }
         if let eventSteps {
             let mouse = SnapshotEvents.Mouse(window: window, host: host)
             for step in eventSteps { print(mouse.run(step).line) }
@@ -157,11 +158,10 @@ enum AppUISnapshot {
         let view = ContentView(model: model)
             .frame(width: size.width, height: size.height)
             .background(Color(nsColor: .windowBackgroundColor))
-            .environment(\.colorScheme, .dark)
         let host = NSHostingView(rootView: view.appTheme())
         host.frame = NSRect(origin: .zero, size: size)
         let window = SnapshotEvents.snapshotWindow(contentRect: host.frame, events: events)
-        window.appearance = NSAppearance(named: .darkAqua)
+        window.appearance = ThemeCenter.shared.appearance
         window.contentView = host
         return (window, host)
     }

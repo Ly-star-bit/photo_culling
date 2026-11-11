@@ -1016,11 +1016,11 @@ enum CollageUISnapshot {
         let view = CollageSnapshotHost(store: store, batchStore: batch, watermarkStore: watermarkStore,
                                        inspectorWidth: inspectorWidth, whatsNew: whatsNew)
             .frame(width: inspectorWidth ?? size.width, height: size.height)
-            .environment(\.colorScheme, light ? .light : .dark)
+            .environment(\.colorScheme, light ? .light : ThemeCenter.shared.scheme)
         let host = NSHostingView(rootView: view.appTheme())
         host.frame = NSRect(origin: .zero, size: NSSize(width: inspectorWidth ?? size.width, height: size.height))
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-        window.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
+        window.appearance = light ? NSAppearance(named: .aqua) : ThemeCenter.shared.appearance
         window.contentView = host
         host.layoutSubtreeIfNeeded()
         // 等备选缩略图、预览渲染、跨页缩略图都出来。

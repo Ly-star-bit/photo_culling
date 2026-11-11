@@ -229,8 +229,8 @@ struct PickView: View {
                 Text(pending ? "待处理" : "已定")
                     .font(.caption2.bold())
                     .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background((pending ? AppPalette.warning : Color.green).opacity(0.22), in: Capsule())
-                    .foregroundStyle(pending ? AppPalette.warning : .green)
+                    .background((pending ? AppPalette.warning : AppPalette.pick).opacity(0.22), in: Capsule())
+                    .foregroundStyle(pending ? AppPalette.warning : AppPalette.pick)
             }
             .lineLimit(1)
         } else {
@@ -246,7 +246,7 @@ struct PickView: View {
                        size: CGSize) -> some View {
         if frames.isEmpty {
             VStack(spacing: 8) {
-                Image(systemName: "checkmark.circle").font(.largeTitle).foregroundStyle(.green)
+                Image(systemName: "checkmark.circle").font(.largeTitle).foregroundStyle(AppPalette.pick)
                 Text(session.groups.isEmpty ? "没有要挑的连拍" : "这一组已经没有照片了").foregroundStyle(.secondary)
             }
             .frame(width: size.width, height: size.height)
@@ -417,7 +417,7 @@ struct PickView: View {
             Label(session.isSelection ? "这一组定好了" : "待处理的组都定完了 · ↑ 可以回去看",
                   systemImage: "checkmark.circle.fill")
                 .font(.callout.bold())
-                .foregroundStyle(.green)
+                .foregroundStyle(AppPalette.pick)
             // 鼠标用户也得有条路回去（以前只写了「Esc 返回网格」）；回网格后按 F 逐张审片。
             // 直接回网格：放大着确认完最后一组时，这里点一下不该只是退出放大。
             Button(backLabel) {
@@ -427,7 +427,7 @@ struct PickView: View {
             .controlSize(.small)
         }
         .padding(.horizontal, 14).padding(.vertical, 6)
-        .background(Color.green.opacity(0.2), in: Capsule())
+        .background(AppPalette.pick.opacity(0.2), in: Capsule())
         .padding(.top, 10)
     }
 
@@ -593,11 +593,11 @@ private struct PickTile: View {
             metrics
         }
         .padding(PickLayout.tilePadding)
-        .background(RoundedRectangle(cornerRadius: 9).fill(Color.white.opacity(highlighted ? 0.10 : 0.035)))
+        .background(RoundedRectangle(cornerRadius: 9).fill(AppPalette.ink.opacity(highlighted ? 0.10 : 0.035)))
         .overlay(
             RoundedRectangle(cornerRadius: 9)
                 // 键盘高亮：外圈一条细白线 + 底亮一点。留下的那张照片自己有判决色的框，两层都是粗线时像套了两个框。
-                .stroke(highlighted ? Color.white.opacity(0.55) : Color.white.opacity(0.06), lineWidth: highlighted ? 1.5 : 1)
+                .stroke(highlighted ? AppPalette.ink.opacity(0.55) : AppPalette.ink.opacity(0.06), lineWidth: highlighted ? 1.5 : 1)
         )
         .contentShape(Rectangle())
         // 同网格：双击手势 + 同时识别的单击，单击不必等 300ms 排除双击；双击的第二下也会来一次
@@ -632,8 +632,8 @@ private struct PickTile: View {
                         .font(.caption.bold())
                         .labelStyle(.titleAndIcon)
                         .padding(.horizontal, 7).padding(.vertical, 3)
-                        .background(on ? verdict.color.opacity(0.9) : Color.clear, in: Capsule())
-                        .foregroundStyle(on ? Color.white : verdict.color)
+                        .background(on ? verdict.onPhotoColor.opacity(0.9) : Color.clear, in: Capsule())
+                        .foregroundStyle(on ? Color.white : verdict.onPhotoColor)
                         .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
@@ -760,7 +760,7 @@ private struct PickTile: View {
                                  size: size, eye: slot.eye, bestEyes: slot.bestEyes)
                 } else {
                     RoundedRectangle(cornerRadius: 6)
-                        .strokeBorder(Color.white.opacity(0.25), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+                        .strokeBorder(AppPalette.ink.opacity(0.25), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
                         .frame(width: size, height: size)
                         .overlay(Text("没检测到").font(.caption2).foregroundStyle(.secondary))
                         .help("这一张里没检测到这个人的脸（转头、被挡住或出画）")
@@ -823,7 +823,7 @@ private struct PickTile: View {
                 } else if eyes.squint > 0 {
                     Label("眯眼 \(eyes.squint)/\(total)", systemImage: "eye").foregroundStyle(Color.yellow)
                 } else {
-                    Label("睁眼 \(eyes.known)/\(total)", systemImage: "eye").foregroundStyle(Color.green)
+                    Label("睁眼 \(eyes.known)/\(total)", systemImage: "eye").foregroundStyle(AppPalette.pick)
                 }
             }
             .fixedSize()

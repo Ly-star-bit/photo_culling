@@ -104,6 +104,8 @@ enum SelfTestRegistry {
               ci: .selftests()) { _ in CollageFilmLooksSelfTest.run() },
         .init("--darkroom-selftest", "暗房：悬停只预览、整组 / 这一页 / 这一格各改各的、强度、颗粒晕光、←→、原图、撤销；1:1 细节只渲那一块和渲整页再裁逐字节相同",
               ci: .selftests()) { _ in CollageDarkroomSelfTest.run() },
+        .init("--theme-selftest", "六套主题的颜色表：字的对比度、点缀色认不认得出、和判决色 / 待处理色撞不撞、层次、放照片的底带不带色、石墨的数值没动；纯函数，不读写任何文件",
+              stage: .beforeDataDir, ci: .selftests()) { _ in ThemeSelfTest.run() },
         .init("--accuracy-selftest", "标注校准页「和自动判决对比」：虚焦 / 闭眼 / 曝光各抓到、漏掉、误杀几张，高分被判废 / 低分进精选，样本太少不给百分比，labels.csv 解析；纯函数，不读写任何文件",
               stage: .beforeDataDir, ci: .selftests()) { _ in AccuracySelfTest.run() },
         .init("--mcp-selftest", "MCP 这一层的纯函数（含不开界面那道闸的判断表）：不起服务器、不读写任何文件（[--json]）",

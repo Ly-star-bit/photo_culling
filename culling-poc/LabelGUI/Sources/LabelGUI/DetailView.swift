@@ -265,7 +265,7 @@ struct AccuracyPanel: View {
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color.white.opacity(id == currentID ? 0.16 : 0.07),
+                                .background(AppPalette.ink.opacity(id == currentID ? 0.16 : 0.07),
                                             in: RoundedRectangle(cornerRadius: 5, style: .continuous))
                                 .overlay {
                                     if id == currentID {

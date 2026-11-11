@@ -405,7 +405,7 @@ struct CollageDarkroomButton: View {
     }
 
     /// 暗房的琥珀色（安全灯）：顶栏按钮、样式页的大按钮同一个颜色。
-    static let amber = Color(red: 1, green: 0.702, blue: 0.251)
+    static var amber: Color { AppPalette.accent }
 
     /// 整组进暗房的悬停（顶栏「暗房」、样式页「进暗房…」同一句；以前两处各说各的）。
     static let projectHelp = "整页的看片台：大样张分胶片 / 滤镜两页，悬停就在大预览里看，拖竖线比原图；强度试条、颗粒、晕光、1:1 细节都在一处。"

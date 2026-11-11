@@ -655,7 +655,8 @@ struct LabelGUIApp: App {
             ContentView(model: model)
                 // 深色是产品的一部分，不跟随系统外观：照片必须在中性深底上
                 // 判断，浅色系统下半白半黑的窗口曾被当成"主题坏了"报障。
-                .preferredColorScheme(.dark)
+                // 「显示 › 主题」里有一套浅色，窗口的深 / 浅跟着主题走（themedWindow）。
+                .themedWindow()
                 // 升级后第一次打开弹「这一版新增」（只有这条开界面的路查：--app-ui、--live-host 用的是同一个 ContentView，
                 // 但不经过这里；WhatsNew.checkOnLaunch 自己也看无头、看版本号是不是 dev）。
                 .onAppear { WhatsNew.checkOnLaunch(model) }
@@ -676,6 +677,11 @@ struct LabelGUIApp: App {
             }
             // 系统默认的「帮助」只有一项、点了说「帮助不可用」（没有帮助手册）。换成：快捷键一览、使用说明、导出 / 复制诊断信息、
             // 日志文件夹（审查 D03，见 Diagnostics/Diagnostics.swift）。
+            // 「显示 › 主题」：四套深色 + 一套浅色，点了立刻换，记在 app 自己的 UserDefaults（ui.theme）。
+            CommandGroup(before: .toolbar) {
+                ThemeMenu()
+                Divider()
+            }
             CommandGroup(replacing: .help) {
                 // 插卡的导入框开着时不弹（同一个窗口同时只能出一个 sheet，弹不出来还会让 whatsNewShown 卡在 true）。
                 HelpMenuItems { if model.cardCenter.offer == nil { model.whatsNewShown = true } }
@@ -686,7 +692,7 @@ struct LabelGUIApp: App {
             // 打开时翻到主窗口现在在的那一页（批量处理 / 水印 / 拼图 / 暗房），顶上可以换。
             ShortcutsPanel(page: ShortcutsPage.current(model), follow: { ShortcutsPage.current(model) })
                 .appTheme()
-                .preferredColorScheme(.dark)
+                .themedWindow()
         }
         .windowResizability(.contentSize)
     }

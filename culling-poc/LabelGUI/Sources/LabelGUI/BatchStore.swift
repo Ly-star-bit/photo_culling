@@ -18,6 +18,15 @@ enum Verdict: String, CaseIterable {
     /// colour-blind fallback (a red and a green dot look alike to 8% of men).
     var color: Color {
         switch self {
+        case .pick: return AppPalette.pick
+        case .usable: return AppPalette.usable
+        case .reject: return AppPalette.reject
+        }
+    }
+
+    /// 压在照片上的黑底胶囊里用的（名次旁的星、悬停的改判条）：照片不跟主题变，这里一律是系统的亮绿 / 蓝 / 红。
+    var onPhotoColor: Color {
+        switch self {
         case .pick: return .green
         case .usable: return .blue
         case .reject: return .red

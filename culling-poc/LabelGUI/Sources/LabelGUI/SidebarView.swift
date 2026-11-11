@@ -29,7 +29,7 @@ struct SidebarView: View {
                     }
                     Spacer()
                     if store.isComplete(photo.id) {
-                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(AppPalette.pick)
                     }
                 }
                 .tag(photo.id)

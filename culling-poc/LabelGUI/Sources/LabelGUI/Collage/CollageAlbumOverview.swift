@@ -398,7 +398,7 @@ private struct CollageOverviewCard: View {
 
     private var borderColor: Color {
         if targeted || selected { return AppPalette.accent }
-        return current ? Color.white.opacity(0.55) : .clear
+        return current ? AppPalette.ink.opacity(0.55) : .clear
     }
 
     private var caption: some View {
@@ -436,7 +436,7 @@ private struct CollageOverviewCoverCard: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay {
                 RoundedRectangle(cornerRadius: 2)
-                    .strokeBorder(store.editingCover ? Color.white.opacity(0.55) : Color.clear, lineWidth: 1.5)
+                    .strokeBorder(store.editingCover ? AppPalette.ink.opacity(0.55) : Color.clear, lineWidth: 1.5)
                     .padding(-3)
             }
             Text(store.project.bookCover == nil ? "还没有封面" : "封面")

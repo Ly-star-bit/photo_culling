@@ -892,12 +892,11 @@ enum CardImportSnapshot {
         }
         let view = CardImportSheet(center: center, store: store)
             .background(Color(nsColor: .windowBackgroundColor))
-            .environment(\.colorScheme, .dark)
         let host = NSHostingView(rootView: view.appTheme())
         let size = host.fittingSize
         host.frame = NSRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-        window.appearance = NSAppearance(named: .darkAqua)
+        window.appearance = ThemeCenter.shared.appearance
         window.contentView = host
         host.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.5))

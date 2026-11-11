@@ -149,6 +149,7 @@ struct WatermarkView: View {
             if let fraction = store.progressFraction {
                 ProgressView(value: fraction).frame(width: 140)
             }
+            ThemeButton()
             Button { showShortcuts.toggle() } label: { Image(systemName: "keyboard") }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
@@ -623,7 +624,7 @@ struct WatermarkView: View {
                                 selection.wrappedValue = pos
                             } label: {
                                 RoundedRectangle(cornerRadius: 3)
-                                    .fill(on ? AppPalette.accent : Color.white.opacity(0.10))
+                                    .fill(on ? AppPalette.accent : AppPalette.ink.opacity(0.10))
                                     .frame(width: 38, height: 24)
                                     .contentShape(Rectangle())
                             }
@@ -635,7 +636,7 @@ struct WatermarkView: View {
                 }
             }
             .padding(4)
-            .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 6))
+            .background(AppPalette.well, in: RoundedRectangle(cornerRadius: 6))
             VStack(alignment: .leading, spacing: 2) {
                 Text("位置").font(.caption).foregroundStyle(.secondary)
                 Text(Self.positionName(selection.wrappedValue)).font(.callout)

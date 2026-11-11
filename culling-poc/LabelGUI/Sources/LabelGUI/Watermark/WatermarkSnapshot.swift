@@ -58,11 +58,11 @@ enum WatermarkUISnapshot {
         let view = WatermarkView(store: store, batchStore: batch)
             .frame(width: size.width, height: size.height)
             .background(Color(nsColor: .windowBackgroundColor))
-            .environment(\.colorScheme, light ? .light : .dark)
+            .environment(\.colorScheme, light ? .light : ThemeCenter.shared.scheme)
         let host = NSHostingView(rootView: view.appTheme())
         host.frame = NSRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-        window.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
+        window.appearance = light ? NSAppearance(named: .aqua) : ThemeCenter.shared.appearance
         window.contentView = host
         host.layoutSubtreeIfNeeded()
         // 预览是后台解码 + 合成的，等它回来；缩略图也是后台解的。
@@ -72,7 +72,7 @@ enum WatermarkUISnapshot {
 
         // 顶栏不受窗口宽度限制时要多宽（按钮、文字都不截）：和窗口宽比。
         let bar = NSHostingView(rootView: WatermarkView(store: store, batchStore: batch).topBar.fixedSize()
-            .environment(\.colorScheme, light ? .light : .dark))
+            .environment(\.colorScheme, light ? .light : ThemeCenter.shared.scheme))
         let idealBar = bar.fittingSize.width
 
         guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {

@@ -374,7 +374,7 @@ struct ChapterTimeline: View, Equatable {
                     }
                 }
                 if hovered == s.index {
-                    ctx.fill(shape, with: .color(.white.opacity(0.3)))
+                    ctx.fill(shape, with: .color(AppPalette.ink.opacity(0.3)))
                 }
                 if filtered == seg.chapter {
                     ctx.stroke(Path(roundedRect: rect.insetBy(dx: -1.5, dy: -1.5), cornerRadius: 3),
@@ -383,7 +383,7 @@ struct ChapterTimeline: View, Equatable {
                 // 现在网格里看得见的章节：条下面一道白线（相邻的连成一片）。
                 if visible.contains(seg.chapter) {
                     ctx.fill(Path(CGRect(x: s.x, y: barY + Self.barHeight + 1.5, width: s.width, height: 2)),
-                             with: .color(.white.opacity(0.85)))
+                             with: .color(AppPalette.ink.opacity(0.85)))
                 }
                 // 条上方的记号：漏交警告优先（全灭红、不够数橙），其次分组模式下的待处理连拍。
                 let cx = s.x + s.width / 2
@@ -400,12 +400,12 @@ struct ChapterTimeline: View, Equatable {
             }
             for x in layout.dayMarks {
                 ctx.fill(Path(CGRect(x: x - 0.5, y: 0, width: 1, height: barY + Self.barHeight + 4)),
-                         with: .color(.white.opacity(0.35)))
+                         with: .color(AppPalette.ink.opacity(0.35)))
             }
             for label in layout.labels {
                 let seg = segments[label.index]
                 let color: Color = seg.allRejected ? .red
-                    : (label.isDay ? .white.opacity(0.9) : .white.opacity(seg.undated ? 0.4 : 0.6))
+                    : (label.isDay ? AppPalette.ink.opacity(0.9) : AppPalette.ink.opacity(seg.undated ? 0.4 : 0.6))
                 let text = Text(label.text)
                     .font(.system(size: 10, weight: label.isDay ? .semibold : .regular).monospacedDigit())
                     .foregroundColor(color)
@@ -491,8 +491,8 @@ private struct TimelineCard: View {
         }
         .padding(10)
         .frame(width: ChapterTimeline.cardWidth, alignment: .leading)
-        .background(Color(white: 0.17), in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.12)))
+        .background(AppPalette.card, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppPalette.ink.opacity(0.12)))
         .shadow(color: .black.opacity(0.5), radius: 8, y: 3)
     }
 
