@@ -36,6 +36,9 @@ struct PickView: View {
     /// Esc 离开时还有改过没确认的组：先问一声（草稿模式下点了不按 ⏎ 是不会写的）。
     @State private var confirmExit = false
     @State private var showShortcuts = false
+    /// 顶栏现在多宽、全写要多宽（见 headerTier）。
+    @State private var headerWidth: CGFloat = 0
+    @State private var fullHeaderWidth: CGFloat = 0
     @FocusState private var keyFocus: Bool
 
     init(store: BatchStore, request: PickRequest, sortByScore: Bool, onExit: @escaping (String?) -> Void) {
@@ -158,13 +161,51 @@ struct PickView: View {
 
     // MARK: 顶栏
 
+    /// 顶栏分两档（ux 复核漏网 2，照批量页 v1.31.0 的 U4）：全写要约 1000pt，900 宽（13 寸分屏）时「返回…」「上…」「下…」、
+    /// 时间段、状态胶囊全被截掉。放不下就让按钮去字留图标（悬停提示、读屏名字照旧写全）。
+    enum HeaderTier {
+        case full
+        case icons
+    }
+
+    /// 全写放得下就全写。全写要多宽是量出来的（header 底下垫的替身）：两套系统外观控件宽度不一样，组号、时间段、人数也会变。
+    private var headerTier: HeaderTier {
+        // 还没量到（第一帧）：先全写。
+        guard headerWidth > 0, fullHeaderWidth > 0 else { return .full }
+        return fullHeaderWidth <= headerWidth - 24 ? .full : .icons  // 左右 padding 12 × 2
+    }
+
     private func header(_ frames: [BatchItem], people: Int) -> some View {
-        HStack(spacing: 10) {
+        headerContent(frames, people: people, tier: headerTier, live: true)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(AppPalette.bar)
+            .background(GeometryReader { geo in
+                Color.clear.onChange(of: geo.size.width, initial: true) { headerWidth = geo.size.width }
+            })
+            .background(alignment: .leading) {
+                // 量「全写」要多宽：一份不画出来、点不到、不挂快捷键的替身。
+                headerContent(frames, people: people, tier: .full, live: false)
+                    .fixedSize()
+                    .background(GeometryReader { geo in
+                        Color.clear.onChange(of: geo.size.width, initial: true) { fullHeaderWidth = geo.size.width }
+                    })
+                    .hidden()
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+    }
+
+    /// 顶栏的内容。`live` = 真的那一份；false = 量宽度的替身（不挂快捷键：同一个键挂两份）。
+    private func headerContent(_ frames: [BatchItem], people: Int, tier: HeaderTier, live: Bool) -> some View {
+        let icons: Bool = tier == .icons
+        return HStack(spacing: 10) {
             Button { exitOrUnzoom() } label: {
                 Label(zoomed ? "适应" : backLabel,
                       systemImage: zoomed ? "arrow.down.right.and.arrow.up.left" : "chevron.left")
+                    .iconOnlyLabel(icons)
             }
-            .keyboardShortcut(.escape, modifiers: [])
+            .headerShortcut(.escape, [], live: live)
             .help(zoomed ? "退出放大 (Esc)" : (returnsToReview ? "回到审片 (Esc)，接着刚才那张往下" : "回到网格 (Esc)，焦点落在高亮的那张"))
             Text("连拍挑选").font(.headline)
             if !session.isSelection && !session.groups.isEmpty {
@@ -183,16 +224,28 @@ struct PickView: View {
             groupTitle(frames)
             Spacer(minLength: 8)
             if !session.isSelection {
-                Button { session.previous() } label: { Label("上一组", systemImage: "chevron.up") }
+                Button { session.previous() } label: {
+                    Label("上一组", systemImage: "chevron.up").iconOnlyLabel(icons)
+                }
                     .disabled(!session.hasPrevious)
                     .help("上一组 (↑)。没确认的草稿会留着，回来还是你点过的样子")
-                Button { session.next() } label: { Label("下一组", systemImage: "chevron.down") }
+                Button { session.next() } label: {
+                    Label("下一组", systemImage: "chevron.down").iconOnlyLabel(icons)
+                }
                     .disabled(!session.hasNext)
                     .help("下一组 (↓)，这一组先不定")
             }
             Divider().frame(height: 16)
-            Button(zoomed ? "适应 (Z)" : "放大到脸 (Z)") { toggleZoom() }
+            // 全写那一档照旧只有字（和改之前一个像素不差）；去字那一档只剩图标。
+            Button { toggleZoom() } label: {
+                if icons {
+                    Image(systemName: zoomed ? "arrow.down.right.and.arrow.up.left" : "plus.magnifyingglass")
+                } else {
+                    Text(zoomed ? "适应 (Z)" : "放大到脸 (Z)")
+                }
+            }
                 .help("所有格一起放大到 100%，各自以主脸为中心；拖动、捏合任何一格，其余跟着走。双击照片也行")
+                .accessibilityLabel(zoomed ? "适应 (Z)" : "放大到脸 (Z)")
             if zoomed && people > 1 {
                 HStack(spacing: 2) {
                     Button { cyclePerson(-1, people: people) } label: { Image(systemName: "chevron.left") }
@@ -203,17 +256,20 @@ struct PickView: View {
                 .help("每格都以同一个人的脸居中，一个人一个人地比 ([ ])。从左到右数，这张里没检测到他就停在主脸")
             }
             // 不再灰着（UX-06，和看单张、审片一样）：没放大时点它 = 先放大到脸再开。
-            Toggle("对焦 (P)", isOn: Binding(get: { focusPeak }, set: { setFocusPeak($0) }))
+            Toggle(isOn: Binding(get: { focusPeak }, set: { setFocusPeak($0) })) {
+                if icons { Image(systemName: "scope") } else { Text("对焦 (P)") }
+            }
                 .toggleStyle(.button)
                 .help("放大后红色标出合焦区域，看焦点落在眼睛还是耳朵 (P)；没放大时先放大到脸")
-            Button("撤销") { withAnimation(AppMotion.animation(.easeOut(duration: 0.12))) { session.undo() } }
-                .keyboardShortcut("z", modifiers: .command)
+                .accessibilityLabel("对焦 (P)")
+            Button { withAnimation(AppMotion.animation(.easeOut(duration: 0.12))) { session.undo() } } label: {
+                if icons { Image(systemName: "arrow.uturn.backward") } else { Text("撤销") }
+            }
+                .headerShortcut("z", .command, live: live)
                 .disabled(!session.canUndo)
                 .help("撤销 (⌘Z)：先撤这一组你刚点的；没有了再撤上一次确认的判决（撤的是别的组就跳回那一组）")
+                .accessibilityLabel("撤销")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(AppPalette.bar)
     }
 
     @ViewBuilder
@@ -302,9 +358,11 @@ struct PickView: View {
 
     private func tile(_ item: BatchItem, index: Int, state: Verdict, best: CompareBest,
                       faces: FaceAlignment, layout: PickLayout.Result) -> some View {
-        PickTile(item: item, number: index + 1, state: state,
+        // 单行滚动时每张按自己的宽高比算框（横竖混拍的一场，竖片不再塞进横框）；铺满时就是 layout.image。
+        let box: CGSize = layout.frame(aspect: PreviewAspect.ratio(item.previewPath))
+        return PickTile(item: item, number: index + 1, state: state,
                  rank: store.takeRank[item.id], manual: store.isManual(item.id),
-                 highlighted: index == session.highlight, layout: layout, best: best,
+                 highlighted: index == session.highlight, layout: layout, box: box, best: best,
                  faceSlots: faces.slots[item.id] ?? [], eyes: faces.summary(item.id),
                  zoomFace: zoomPerson.flatMap { p in
                      let slots = faces.slots[item.id] ?? []
@@ -538,6 +596,26 @@ struct PickView: View {
     }
 }
 
+private extension View {
+    /// 顶栏按钮的快捷键：量宽度的替身不挂（同一个快捷键挂两份）。
+    @ViewBuilder func headerShortcut(_ key: KeyEquivalent, _ modifiers: EventModifiers, live: Bool) -> some View {
+        if live {
+            keyboardShortcut(key, modifiers: modifiers)
+        } else {
+            self
+        }
+    }
+
+    /// 去字那一档只留图标（Label 的字照旧当读屏名字）；全写那一档原样不动。
+    @ViewBuilder func iconOnlyLabel(_ on: Bool) -> some View {
+        if on {
+            labelStyle(.iconOnly)
+        } else {
+            self
+        }
+    }
+}
+
 // MARK: - 一格
 
 private struct PickTile: View {
@@ -550,6 +628,8 @@ private struct PickTile: View {
     let manual: Bool
     let highlighted: Bool
     let layout: PickLayout.Result
+    /// 这一张的照片框（layout.frame(aspect:)）：人脸条、数值行跟着它的宽度走。
+    let box: CGSize
     let best: CompareBest
     /// 按人对齐的脸（下标 = 人，nil = 这张里没检测到这个人）。
     let faceSlots: [FaceAlignment.Slot?]
@@ -575,7 +655,7 @@ private struct PickTile: View {
     /// 格子够大（物理像素超过预览）才走大图解码 + 锐化的清晰版；格子小的大组用 1024 预览就够，
     /// 不然一组十几张就是十几张大图解码。
     private var sharp: Bool {
-        max(layout.image.width, layout.image.height) * (NSScreen.main?.backingScaleFactor ?? 2)
+        max(box.width, box.height) * (NSScreen.main?.backingScaleFactor ?? 2)
             > CGFloat(ImageLoader.previewMaxPixel) * 1.1
     }
 
@@ -586,7 +666,7 @@ private struct PickTile: View {
         let vivid = kept || highlighted || showHover
         VStack(alignment: .leading, spacing: PickLayout.innerSpacing) {
             photo(vivid: vivid)
-                .frame(width: layout.image.width, height: layout.image.height)
+                .frame(width: box.width, height: box.height)
                 .clipShape(RoundedRectangle(cornerRadius: 5))
                 .overlay(RoundedRectangle(cornerRadius: 5).stroke(kept ? state.color : Color.clear, lineWidth: 2.5))
                 .overlay(alignment: .topLeading) { numberBadge }
@@ -757,7 +837,7 @@ private struct PickTile: View {
     /// 虚框（转头、被挡住一眼看得出）。圈：绿睁眼、黄眯眼（比这个人本组最好的那张明显小）、红闭眼。
     private var faces: some View {
         let size = layout.faceSize
-        let fit = max(1, Int((layout.image.width + 4) / (size + 4)))
+        let fit = max(1, Int((box.width + 4) / (size + 4)))
         let shown = faceSlots.count > fit ? Array(faceSlots.prefix(max(1, fit - 1))) : faceSlots
         return HStack(spacing: 4) {
             ForEach(Array(shown.enumerated()), id: \.offset) { _, slot in
@@ -779,7 +859,7 @@ private struct PickTile: View {
                 Text("没有检测到人脸").font(.caption2).foregroundStyle(.secondary)
             }
         }
-        .frame(width: layout.image.width, height: size, alignment: .leading)
+        .frame(width: box.width, height: size, alignment: .leading)
     }
 
     private var metrics: some View {
@@ -801,7 +881,7 @@ private struct PickTile: View {
         }
         .font(.caption)
         .lineLimit(1)
-        .frame(width: layout.image.width, height: PickLayout.metricsHeight, alignment: .leading)
+        .frame(width: box.width, height: PickLayout.metricsHeight, alignment: .leading)
     }
 
     /// 本组最高的那一项标绿 + ▲。

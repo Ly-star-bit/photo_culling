@@ -190,6 +190,7 @@ enum UXSelfTest {
         failed += CollageNavSelfTest.run()      // 拼图检视器重排：去那儿（页签、滚动请求）、--tab 新老名字、色调两节
         failed += WhatsNewSelfTest.run()        // 这一版新增：版本号、弹不弹、记账只写独立的 suite、数据表
         failed += ShortcutsSelfTest.run()       // 快捷键一览：? 键的判断表、每页的表、拼图 / 暗房 / 水印绑着的键都列了
+        failed += SmallUXSelfTest.run()         // 连拍挑选单行每张的框
         exit(failed == 0 ? 0 : 1)
     }
 }
