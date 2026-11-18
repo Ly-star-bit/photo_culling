@@ -1316,6 +1316,19 @@ def album_section():
         _, e4 = w("collage_export", {"proof": True, "pages": "1"})
         check(err_code(e3) == "invalid_argument" and err_code(e4) == "invalid_argument",
               f"pages 越界、proof 带 pages → invalid_argument（{err_code(e3)} {err_code(e4)}）")
+
+        # ---------- 优化分析 MC-03：锁住第 1 个跨页再成套整本婚礼相册（不问就重排）：锁住的原样留着，结果里报换掉了几个、留着几个
+        g_l0 = get()
+        n_l = g_l0.get("pages") or 0
+        first_l = spreads(g_l0)[0].get("photos") if spreads(g_l0) else None
+        w("collage_pages", {"action": "lock", "pages": "1"})
+        _, kit_l = w("collage_run_kit", {"kit": "weddingAlbum"}, timeout=150)
+        alb_l = kit_l.get("album") or {}
+        kept_l = [s_ for s_ in spreads(get()) if s_.get("locked")]
+        check("error" not in kit_l and alb_l.get("spreads_kept") == 1 and alb_l.get("spreads_replaced") == n_l - 1
+              and len(kept_l) == 1 and kept_l[0].get("photos") == first_l,
+              f"锁住第 1 个跨页再成套：album 报换掉 {alb_l.get('spreads_replaced')} 个（原有 {n_l} 个）、留着 {alb_l.get('spreads_kept')} 个，"
+              f"锁住的那个照片没变（{err_code(kit_l)}）")
     finally:
         h.term()
 
@@ -4632,9 +4645,16 @@ __attribute__((constructor)) static void init(void) {
         _, rk_bad3 = lw("collage_run_kit", {"kit": "weddingAlbum", "max_per_spread": 2})
         check(all(err_code(x) == "invalid_argument" for x in (rk_bad, rk_bad2, rk_bad3)) and lst()["edit_digest"] == sb0["edit_digest"],
               f"成套的 spreads：不是整本婚礼相册、最少比最多大、只给每跨页张数 → invalid_argument，没动（{err_code(rk_bad)} {err_code(rk_bad2)} {err_code(rk_bad3)}）")
+        pages_k2 = lget().get("pages") or 0
         _, rk2 = lw("collage_run_kit", {"kit": "weddingAlbum", "spreads": 2, "max_per_spread": 3}, timeout=120)
         gt = lget()
         alb = rk2.get("album") or {}
+        # 优化分析 MC-03：整本重排不问，结果里报换掉了几个原有跨页（没锁 = 全换）；从出一期（单张拼图）成套时是 0
+        alb_k2 = kit2.get("album") or {}
+        check(alb_k2.get("spreads_replaced") == 0 and alb_k2.get("spreads_kept") == 0
+              and ("error" in rk2 or (alb.get("spreads_replaced") == pages_k2 and alb.get("spreads_kept") == 0)),
+              f"成套报换掉的跨页：出一期之后 {alb_k2.get('spreads_replaced')}/{alb_k2.get('spreads_kept')}；"
+              f"{pages_k2} 个没锁的跨页上再成套 {alb.get('spreads_replaced')}/{alb.get('spreads_kept')}")
         over = max(0, (gt.get("pages") or 0) - 2)
         warned = "over_target" in [w.get("code") for w in rk2.get("warnings") or []]
         check("error" not in rk2 and (gt.get("album_target") or {}).get("spreads") == 2

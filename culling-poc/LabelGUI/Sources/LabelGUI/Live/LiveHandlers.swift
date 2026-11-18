@@ -1409,6 +1409,9 @@ extension LiveHandlers {
         if coverStep > 0 && CollageStyleFashion.coverPhotoID(collage.project) == nil { return notAnIssue() }
         let before = collage.editDigest
         let coverBefore = CollageStyleFashion.coverPhotoID(collage.project)
+        // 已经排好的相册上再成套整本婚礼相册：界面先问「重排会替换没锁的 N 个跨页」，桥上不问（11-09 的决定），落地后至少在
+        // 结果里说换掉了几个、原样留着几个（优化分析 MC-03 复核）。锁住的跨页 mergeLocked 原样插回去，id 不变；重排的是新 id
+        let oldSpreads: [UUID] = kit == .weddingAlbum && collage.isAlbum ? collage.project.pages.map(\.id) : []
         // = 「一键成套 ▾」/「换封面」：applyKit 自己按 sessionToken、solveGeneration 丢掉作废的结果
         let epoch = model.aiLog.sessionEpoch
         let landing = await collage.externalKit(kit, coverStep: coverStep, budget: albumBudget)
@@ -1444,7 +1447,12 @@ extension LiveHandlers {
             // 整本婚礼相册：几个跨页、目标几个、多了几个（F06；多了给一条 over_target）
             if kit == .weddingAlbum {
                 let album = CollageBudgetChange.report(collage.project)
-                body["album"] = album.body
+                var info = album.body
+                let now = Set(collage.project.pages.map(\.id))
+                let kept = oldSpreads.filter { now.contains($0) }.count
+                info["spreads_replaced"] = oldSpreads.count - kept
+                info["spreads_kept"] = kept
+                body["album"] = info
                 if let w = album.warning { warnings.append(w) }
             }
             if !settled {

@@ -264,7 +264,7 @@ enum MCPToolDefs {
      "annotations":"$WRITE_IDEMPOTENT"},
 
     {"name":"collage_run_kit","title":"在 app 里一键成套",
-     "description":"在 app 里一键成套（= 拼图页左栏「模板 › 一键成套」）：{{kits}}。替换当前拼图工程，落地时是一步撤销。weddingAlbum 在已经排好的相册上会整本重排、不先问（界面上点会先问）：只换没锁的跨页，要保留的跨页先 collage_pages action=lock 锁住（锁住的原样留着，上面的照片不再参与编排）。要等 app 算完（最长约 50 秒）；被用户的新操作作废或用户切了场次回 superseded，没有能用的照片回 nothing_to_render（整本婚礼相册只编托盘里的照片，托盘空着先用 collage_auto_layout 的 photos 带照片进托盘；出一期托盘空着时从这一场借，按卷出印样用这一场的全部帧）。结果里有页数、封面和 app 当前画面的预览图。",
+     "description":"在 app 里一键成套（= 拼图页左栏「模板 › 一键成套」）：{{kits}}。替换当前拼图工程，落地时是一步撤销。weddingAlbum 在已经排好的相册上会整本重排、不先问（界面上点会先问）：只换没锁的跨页，要保留的跨页先 collage_pages action=lock 锁住（锁住的原样留着，上面的照片不再参与编排）。要等 app 算完（最长约 50 秒）；被用户的新操作作废或用户切了场次回 superseded，没有能用的照片回 nothing_to_render（整本婚礼相册只编托盘里的照片，托盘空着先用 collage_auto_layout 的 photos 带照片进托盘；出一期托盘空着时从这一场借，按卷出印样用这一场的全部帧）。结果里有页数、封面和 app 当前画面的预览图；weddingAlbum 的 album 里 spreads_replaced 是换掉的原有跨页数、spreads_kept 是原样留着的（锁住的），之前不是相册都是 0。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "kit":{"type":"string","enum":"$KITS"},
