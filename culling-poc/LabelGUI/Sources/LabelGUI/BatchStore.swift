@@ -4410,10 +4410,11 @@ final class BatchStore: ObservableObject {
            let best = Self.bestIndex(indices.filter { overrides[updated[$0].id] == nil }, in: updated) {
             winners.insert(best)
         }
+        let twins = Self.splitTwinRaws(indices, in: updated)
         for idx in indices where !winners.contains(idx) && overrides[updated[idx].id] == nil {
             // RAW、JPG 分卡存 / 分文件夹放时同一帧成了两张（审查 M01）：组里有它那张 JPG 时 RAW 不算「连拍重复」，
             // 不然「移到废纸篓」会把这一帧唯一的 RAW 挪走。只护 RAW，那张 JPG 照常去重。
-            if indices.contains(where: { $0 != idx && Self.isSplitTwin(raw: updated[idx], of: updated[$0]) }) { continue }
+            if twins.contains(idx) { continue }
             updated[idx].rejectReasons.append("连拍重复")
             updated[idx].verdict = .reject
         }
@@ -4424,10 +4425,9 @@ final class BatchStore: ObservableObject {
         guard indices.count >= 2 else { return }
         // 按「帧」数对手：分卡存 / 分文件夹放的同一帧（RAW 和它那张 JPG，审查 M01）只算一张 —— 去重护住 RAW 以后，
         // 单帧的场里剩下这一对，不该提出一张没有真实对手的精选。只用来数，候选还是这一场全部存活的照片。
-        let frames = indices.filter { idx in
-            !indices.contains { $0 != idx && Self.isSplitTwin(raw: updated[idx], of: updated[$0]) }
-        }
-        guard frames.count >= 2 else { return }
+        // （查表，不逐对比：一场几百上千张时逐对比是 n²，见 splitTwinRaws。）
+        let twins = Self.splitTwinRaws(indices, in: updated)
+        guard indices.count - twins.count >= 2 else { return }
         // 场里有人工精选就让给它，不在旁边再自动挑一张。
         if indices.contains(where: { overrides[updated[$0].id] == .pick }) { return }
         if let best = Self.bestIndex(indices.filter { overrides[updated[$0].id] == nil }, in: updated) {

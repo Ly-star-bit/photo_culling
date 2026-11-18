@@ -12,4 +12,33 @@ extension BatchStore {
         let otherExt = (other.rawPath as NSString).pathExtension.lowercased()
         return ImageLoader.rawExtensions.contains(rawExt) && !ImageLoader.rawExtensions.contains(otherExt)
     }
+
+    /// `indices` 里哪几张是「同一帧拆开的那张 RAW」：组里另有一张，isSplitTwin(raw: 它, of: 那张) 成立。去重、提名用它。
+    /// 以前是逐对比（每张都把整组扫一遍），一场几百上千张连着拍（相邻都 ≤8 秒，串成一场）时提名一次要比几十万到上千万对，
+    /// --verdicts 一个场 100 / 300 / 1000 张是 0.37 / 1.12 / 6.93 G 条指令（优化分析 2026-11-18 edge 复核 N1）。现在不是 RAW 的
+    /// 按（拍摄时刻、小数秒、机身）记一张表、RAW 去表里找，结果和逐对比一样：isSplitTwin 只看这三样和两边的扩展名。
+    static func splitTwinRaws(_ indices: [Int], in items: [BatchItem]) -> Set<Int> {
+        struct Frame: Hashable {
+            let time: Date
+            let subsec: Double?
+            let body: String
+        }
+        // 按下标就地读字段，不把整张 BatchItem 拷出来（几千张时拷贝本身就显眼）。
+        func frame(_ idx: Int) -> Frame? {
+            guard let time = items[idx].captureTime else { return nil }
+            return Frame(time: time, subsec: items[idx].captureSubsec, body: items[idx].body)
+        }
+        var raws: [Int] = []
+        var others = Set<Frame>()
+        for idx in indices {
+            guard let key = frame(idx) else { continue }
+            if ImageLoader.rawExtensions.contains((items[idx].rawPath as NSString).pathExtension.lowercased()) {
+                raws.append(idx)
+            } else {
+                others.insert(key)
+            }
+        }
+        guard !raws.isEmpty, !others.isEmpty else { return [] }
+        return Set(raws.filter { idx in frame(idx).map { others.contains($0) } ?? false })
+    }
 }

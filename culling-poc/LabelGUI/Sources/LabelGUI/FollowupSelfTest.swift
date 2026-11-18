@@ -554,6 +554,15 @@ enum FollowupSelfTest {
         for (name, id, want) in rows {
             check(dup(id) == want, "去重 " + name, "\(id)：理由 \(store.item(withID: id)?.rejectReasons ?? []) · \(verdict(id).map(\.rawValue) ?? "—")")
         }
+        // 去重、提名认同一帧的 RAW 改成查表（splitTwinRaws，优化分析 2026-11-18：一场上千张时逐对比是 n²）：整场一起认，
+        // 和逐对比（isSplitTwin 两两比）认出来的得是同一批（T1、W1、G1；S1 小数秒不同、B1 机身不同都不算）。
+        let everyone = Array(store.items.indices)
+        let pairwise = Set(everyone.filter { i in
+            everyone.contains { $0 != i && BatchStore.isSplitTwin(raw: store.items[i], of: store.items[$0]) }
+        })
+        let looked = BatchStore.splitTwinRaws(everyone, in: store.items)
+        check(looked == pairwise && pairwise.count == 3, "同一帧的 RAW：查表和逐对比认出来的一样（3 张）",
+              "查表 \(looked.map { store.items[$0].id }.sorted()) · 逐对比 \(pairwise.map { store.items[$0].id }.sorted())")
         check(verdict("T1") != .reject && verdict("G1") != .reject, "护着的 RAW 不是废片（移到废纸篓不会动它）",
               "T1 \(verdict("T1").map(\.rawValue) ?? "—") · G1 \(verdict("G1").map(\.rawValue) ?? "—")")
         // 精选按帧数对手：单帧的场里只剩同一帧的 RAW + JPG，两张都不提成精选（以前 JPG 会被提成一张没有对手的精选）
