@@ -1243,8 +1243,27 @@ extension LiveHandlers {
         let summary = collage.notice ?? "套了模板「\(template.name)」"
         var body: [String: Any] = ["template": template.name]
         body["category"] = template.builtin ? template.category : "我的模板"
+        let holes = emptySlotsOnPage(collage).map { [$0] } ?? []
         return await collageDone(req, live: live, model: model, tool: "collage_apply_template", changed: changed,
-                                 pushesBefore: pushes, digestBefore: before, summary: summary, body: body)
+                                 pushesBefore: pushes, digestBefore: before, summary: summary, body: body, warnings: holes)
+    }
+
+    /// 套完模板这一页还有空照片格（托盘空着、或者托盘的照片比模板的格子少）：界面上托盘空时模板是灰的，桥上照套，以前回
+    /// changed:true、warnings:[]，预览是一排空框（优化分析 MC-01）。话和 collage_export 的 empty_slots 是同一句
+    /// （CollageStore.emptySlotWarning），只看套了模板的这一页。
+    static func emptySlotsOnPage(_ collage: CollageStore) -> [String: Any]? {
+        let index = collage.pageIndex
+        guard collage.project.pages.indices.contains(index) else { return nil }
+        var one = collage.project
+        one.pages = [collage.project.pages[index]]
+        let holes = CollageStore.emptyPhotoSlots(project: one)
+        guard let text = CollageStore.emptySlotWarning(holes, project: one) else { return nil }
+        let short = "托盘里的照片不够填满这个模板：collage_get_state 的 cells 里 kind 是 photo、photo_id 是 null 的就是，"
+            + "用 collage_set_layout 放上照片，或者换个格子少的模板"
+        var item = MCPReadModel.warning("empty_slots", text, hint: collage.project.photos.isEmpty ? trayEmptyHint : short)
+        item["pages"] = [index + 1]
+        item["count"] = holes.count
+        return item
     }
 
     // MARK: collage.run_kit / collage.next_cover（一键成套、换封面）
@@ -1274,6 +1293,18 @@ extension LiveHandlers {
     static func notAnIssue() -> Reply {
         .failure("invalid_state", "当前拼图不是「出一期」的结果，没有封面可换",
                  ["hint": "先 collage_run_kit kit=fashionIssue", "executed": false])
+    }
+
+    /// 托盘空着时怎么让照片进去（优化分析 MC-01）：桥上没有单独「带照片进托盘」的工具，collage_auto_layout /
+    /// collage_set_layout 的 photos 会把不在托盘的照片顺带放进托盘（两个工具的说明里写着）。以前空托盘时成套说「请用户把
+    /// 照片带进拼图托盘」，加跨页、套规格、做封面说「先 collage_run_kit kit=weddingAlbum」，互相指、哪个都走不通。
+    nonisolated static let trayEmptyHint = "托盘是空的：先用 collage_auto_layout（或 collage_set_layout）的 photos 填这一场的照片 id（cull_list_photos 拿），不在托盘的会自动进托盘（一次最多 \(CollageLayoutSpec.maxLeaves) 张，当前页换成排好的这一版）；或者请用户在拼图页点「带精选进来」"
+
+    /// 要相册（整本婚礼相册、加跨页、锁跨页、套印厂规格、做封面）却被挡下时的 hint：托盘空着先说怎么进托盘、进了再成套；
+    /// 托盘里有照片照旧给 fallback（多半是「先 collage_run_kit kit=weddingAlbum 排一本」）。
+    static func albumEntryHint(_ collage: CollageStore, _ fallback: String) -> String {
+        guard collage.project.photos.isEmpty else { return fallback }
+        return trayEmptyHint + "；照片进了托盘再 collage_run_kit kit=weddingAlbum 排一本（会切到相册）"
     }
 
     /// 成套和换封面（§9.5.1「异步操作」）：不包 asOneUndoStep，发起前复位合并状态、等结局、落地后再复位一次。
@@ -1313,8 +1344,13 @@ extension LiveHandlers {
                                : "成套还在算的时候用户切了场次，这一次作废了：没有落地，没有压撤销"
             return .failure("superseded", message, data)
         case .notGenerated:
-            return .failure("nothing_to_render", "「\(kit.name)」没出来：托盘（和这一场）里没有能用的照片，工程没动",
-                            ["hint": "先改判出几张精选，或者请用户把照片带进拼图托盘", "executed": false])
+            // 话用 store 落地那一刻自己说的那句（landing.notice，就是状态栏上用户看到的，CollageStore.applyKit）：整本婚礼相册
+            // 只编托盘里的，托盘空着是「按托盘里的照片编：托盘是空的」。以前桥上另写「托盘（和这一场）里没有能用的照片」「先改判
+            // 出几张精选」，这一场明明有精选，AI 照着会去改判（优化分析 MC-01）。空托盘的 hint 说怎么进托盘
+            let message = landing.notice ?? "「\(kit.name)」没出来：托盘（和这一场）里没有能用的照片，工程没动"
+            let trayEmpty = kit == .weddingAlbum && collage.project.photos.isEmpty
+            let hint = trayEmpty ? trayEmptyHint + "；再调一次" : "先改判出几张精选，或者请用户把照片带进拼图托盘"
+            return .failure("nothing_to_render", message, ["hint": hint, "executed": false])
         case .landed, .unchanged:
             let landed = outcome == .landed
             var body: [String: Any] = ["kit": kit.rawValue, "kit_name": kit.name, "landing": landed ? "landed" : "unchanged"]
@@ -1911,8 +1947,12 @@ extension LiveHandlers {
             return .failure("superseded", "引擎还在排的时候用户在拼图里做了新的操作，这一次作废了：没有落地，没有压撤销", data)
         }
         guard let plan else {
+            // 没给 photos、托盘又空着：照片从哪来就是这个工具自己的 photos（优化分析 MC-01）
+            let hint = wanted == nil && collage.project.photos.isEmpty
+                ? "托盘是空的：给 photos 填这一场的照片 id（cull_list_photos 拿），不在托盘的会自动进托盘"
+                : "先往托盘里带几张照片，或者给 photos 少一点、换个画布比例"
             return .failure("nothing_to_render", "引擎没排出来：没有能用的照片，或者照片太多、比例差太远，工程没动",
-                            ["hint": "先往托盘里带几张照片，或者给 photos 少一点、换个画布比例", "executed": false])
+                            ["hint": hint, "executed": false])
         }
         let pushes = collage.undoPushes
         let added = refs.filter { collage.photoMap[$0.id] == nil }.count

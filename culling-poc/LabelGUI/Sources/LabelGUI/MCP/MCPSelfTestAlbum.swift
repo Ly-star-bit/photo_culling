@@ -151,6 +151,16 @@ extension MCPSelfTest {
         check(props("collage_get_state").isSuperset(of: ["candidates_for", "candidates_limit"]), "collage_get_state 有 candidates_for")
         let instructions = MCPToolDefs.instructions(live: true)
         check(album.allSatisfy(instructions.contains), "instructions 提到了相册整本的 6 个工具")
+        // 优化分析 MC-01：空托盘时的报错指的路（排版工具的 photos 顺带进托盘）两个工具的说明里真的写着；instructions 说了托盘
+        let tray = LiveHandlers.trayEmptyHint
+        check(tray.contains("collage_auto_layout") && tray.contains("collage_set_layout") && tray.contains("photos")
+              && tray.contains("\(CollageLayoutSpec.maxLeaves) 张"), "空托盘的 hint 指 collage_auto_layout / collage_set_layout 的 photos")
+        check(description("collage_auto_layout").contains("不在托盘的自动进托盘")
+              && description("collage_set_layout").contains("不在托盘的会自动进托盘"),
+              "collage_auto_layout / collage_set_layout 的说明写了 photos 会把不在托盘的照片带进托盘（空托盘的 hint 靠它）")
+        check(instructions.contains("托盘空着") && instructions.contains("collage_auto_layout 的 photos"),
+              "instructions 说了托盘是什么、空着怎么进")
+        check(description("collage_apply_template").contains("empty_slots"), "collage_apply_template 的说明写了空照片格报 empty_slots")
         // 路由：导出前检查是读（不排进写的 FIFO）；翻页 / 改跨页、挪照片在后台排，50 s
         check(MCPLiveTools.routes["collage_preflight"]?.write == false && MCPLiveTools.routes["collage_pages"]?.write == true,
               "collage_preflight 走读，collage_pages 走写")

@@ -896,7 +896,42 @@ def album_section():
     def undo():
         return mcp_full(env, "app_undo", {"target": "collage"})[1] or {}
 
+    def hint(x):
+        return (x.get("error") or {}).get("hint") or ""
+
     try:
+        # ---------- 优化分析 MC-01：托盘空着时，成套、加跨页、套规格、做封面、引擎排版都挡下来，但都指同一条进托盘的路
+        # （collage_auto_layout / collage_set_layout 的 photos），不再互相指；成套那句和 store 在状态栏上说的一样（以前桥上另写
+        # 「托盘（和这一场）里没有能用的照片」「先改判」）；空托盘套模板带 empty_slots（以前 warnings:[]），撤销回到空工程
+        g_e = get()
+        if g_e.get("tray") != 0 or g_e.get("pages"):
+            skip(f"空托盘的报错：这一场开局托盘不是空的（tray {g_e.get('tray')}、{g_e.get('pages')} 页），测不了")
+        else:
+            _, e_kit = w("collage_run_kit", {"kit": "weddingAlbum"}, timeout=150)
+            notice_e = (st().get("collage") or {}).get("notice") or ""
+            _, e_add = w("collage_pages", {"action": "add"})
+            _, e_spec = w("collage_print_spec", {"spec": "sq25-flat"})
+            _, e_cov = w("collage_cover", {"action": "make"})
+            _, e_al = w("collage_auto_layout", {})
+            codes_e = [err_code(x) for x in (e_kit, e_add, e_spec, e_cov, e_al)]
+            to_tray = [hint(x) for x in (e_kit, e_add, e_spec, e_cov, e_al)]
+            check(codes_e == ["nothing_to_render", "invalid_state", "invalid_state", "invalid_state", "nothing_to_render"]
+                  and (e_kit.get("error") or {}).get("message") == notice_e and "托盘是空的" in notice_e
+                  and all("托盘是空的" in x and "photos" in x for x in to_tray)
+                  and all("collage_auto_layout" in x for x in to_tray[:4])
+                  and all("collage_run_kit kit=weddingAlbum" in x for x in to_tray[1:4])
+                  and get().get("tray") == 0 and not get().get("pages"),
+                  f"空托盘：成套 / 加跨页 / 套规格 / 做封面 / 引擎排版 {codes_e}，hint 都指 photos 进托盘（不再互相指），"
+                  f"成套的话 = 状态栏「{notice_e}」；什么都没改")
+            _, e_tpl = w("collage_apply_template", {"template": "九宫格"})
+            holes = [x for x in e_tpl.get("warnings") or [] if x.get("code") == "empty_slots"]
+            u_tpl = undo()
+            g_u = get()
+            check(e_tpl.get("changed") is True and len(holes) == 1 and (holes[0].get("count") or 0) > 0 and holes[0].get("pages") == [1]
+                  and "collage_auto_layout" in (holes[0].get("hint") or "") and "error" not in u_tpl
+                  and g_u.get("tray") == 0 and not g_u.get("pages"),
+                  f"空托盘套模板：照样套上、warnings 带 empty_slots（{holes}）；app_undo 回到空工程（{g_u.get('pages')} 页）")
+
         # ---------- 还不是相册：跨页类、印厂规格、封面的写都说清楚为什么不行（照片先进托盘）
         w("collage_set_layout", {"layout": {"split": "row", "items": [{"photo": i} for i in ids[:2]]}})
         w("collage_set_layout", {"layout": {"split": "row", "items": [{"photo": i} for i in ids[2:4]]}})
@@ -906,8 +941,10 @@ def album_section():
         _, n2 = w("collage_print_spec", {"spec": "sq25-flat"})
         _, n3 = w("collage_cover", {"action": "make"})
         _, n4 = w("collage_export", {"proof": True})
-        check(all(err_code(x) == "invalid_state" for x in (n1, n2, n3, n4)),
-              f"单张拼图：锁跨页、套印厂规格、做封面、看版 PDF 都回 invalid_state（{err_code(n1)} {err_code(n2)} {err_code(n3)} {err_code(n4)}）")
+        check(all(err_code(x) == "invalid_state" for x in (n1, n2, n3, n4))
+              and all("collage_run_kit kit=weddingAlbum" in hint(x) and "托盘是空的" not in hint(x) for x in (n1, n2, n3)),
+              f"单张拼图：锁跨页、套印厂规格、做封面、看版 PDF 都回 invalid_state（{err_code(n1)} {err_code(n2)} {err_code(n3)} {err_code(n4)}）；"
+              f"托盘里有照片时 hint 照旧指成套")
         _, kit = w("collage_run_kit", {"kit": "weddingAlbum"}, timeout=150)
         g0 = get()
         if g0.get("mode") != "album" or not spreads(g0):

@@ -812,6 +812,10 @@ check((lp_def["inputSchema"]["properties"].get("client_pick") or {}).get("type")
       and (lg_def["inputSchema"]["properties"].get("pending_only") or {}).get("type") == "boolean"
       and "client_note" in lp_def["description"] and "client_note" in gp_def["description"] and "pending_only" in lg_def["description"],
       "cull_list_photos 有 client_pick、cull_list_groups 有 pending_only（布尔），两个读照片的说明写了 client_note")
+# 优化分析 MC-01：instructions 说了托盘是什么、空着怎么进（以前一次都没提「托盘」，空托盘时几个报错互相指）
+check("托盘空着" in INSTRUCTIONS and "collage_auto_layout 的 photos" in INSTRUCTIONS
+      and "empty_slots" in by_name["collage_apply_template"]["description"],
+      "instructions 说了托盘空着用 collage_auto_layout 的 photos 进托盘；collage_apply_template 的说明写了 empty_slots")
 
 # 错误码（§1.2）
 s.send_raw(b'{"jsonrpc":"2.0","id":10,"method":\n')

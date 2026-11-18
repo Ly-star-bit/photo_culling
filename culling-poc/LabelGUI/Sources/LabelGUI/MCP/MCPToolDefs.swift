@@ -36,7 +36,7 @@ enum MCPToolDefs {
 
     static let liveInstructions = """
     xuanpian 是本机「选片工具」（photo culling + collage）的接口，这一版只做实时：用户开着 app 时，读 app 当前打开的那一场（判决 pick/usable/reject、废片理由、章节、场、近似重复、人脸/闭眼/锐度/EXIF、预览图），以及改判、在 app 里定位照片、切场次、套拼图模板、一键成套、换封面、改标题/刊头/期号、换样式色调、存成方案、切方案、导出图片、撤销，都由 app 自己执行，窗口里当场看得到，用户按 ⌘Z 能撤。app 没开时只能看状态、列场次、列模板，其余工具返回 app_not_running：MCP 绝不会启动 app，请用户自己打开。先调 app_status。
-    流程：app_status（live.state 是 live 才能用其余工具；live.open_session 是 app 当前打开的那一场，所有 session 参数都填它）→ cull_session_overview → cull_list_groups / cull_list_photos → cull_get_photos / cull_preview_photos（看眼睛、对焦用 crop=face）。要别的场次：cull_list_sessions 找到它，再 app_open_session（只能打开 app「最近场次」里的；会清掉 app 里这一场的撤销记录，先问用户）。改判用 cull_set_verdicts，给用户看用 cull_show_photos，客户发回来的选择用 cull_import_client_picks（先 dry_run 给用户看认出了哪些）；拼图先 collage_get_state，再 collage_apply_template / collage_run_kit / collage_next_cover / collage_set_text / collage_set_style，结果里有 app 当前画面的预览；模板不合适就自己设计：collage_list_templates（include=["layout_grammar"]）看语法，collage_set_layout 把版式放进当前页（collage_auto_layout 让 app 的引擎先排一版，读回 layout 再改）；要给用户出几版设计挑，每排好一版就 collage_save_variant 存成方案（不会被下一版盖掉），collage_open_variant 切回某一版；相册改整本：collage_get_state 的 album.spreads 看每个跨页放了哪几张，collage_pages 翻页、加删挪锁跨页、镜像、单边换版式，collage_move_photos 把照片挪到别的跨页，collage_replace_photo 换一格照片（候选用 collage_get_state 的 candidates_for 拿），collage_cover 做封面，交印厂前 collage_preflight 导出前检查、collage_print_spec 看和套印厂规格；导出成图片用 collage_export（清晰度 1–3 倍，写到拼图页「导出 ▾」里设的目录；pages 只导几个跨页，proof 出给客户的看版 PDF）；撤销 AI 自己刚做的一步用 app_undo。
+    流程：app_status（live.state 是 live 才能用其余工具；live.open_session 是 app 当前打开的那一场，所有 session 参数都填它）→ cull_session_overview → cull_list_groups / cull_list_photos → cull_get_photos / cull_preview_photos（看眼睛、对焦用 crop=face）。要别的场次：cull_list_sessions 找到它，再 app_open_session（只能打开 app「最近场次」里的；会清掉 app 里这一场的撤销记录，先问用户）。改判用 cull_set_verdicts，给用户看用 cull_show_photos，客户发回来的选择用 cull_import_client_picks（先 dry_run 给用户看认出了哪些）；拼图先 collage_get_state（tray 是托盘里的照片数：模板、整本婚礼相册、封面都只用托盘里的照片；托盘空着就先用 collage_auto_layout 的 photos 填这一场的照片 id，不在托盘的会自动进托盘），再 collage_apply_template / collage_run_kit / collage_next_cover / collage_set_text / collage_set_style，结果里有 app 当前画面的预览；模板不合适就自己设计：collage_list_templates（include=["layout_grammar"]）看语法，collage_set_layout 把版式放进当前页（collage_auto_layout 让 app 的引擎先排一版，读回 layout 再改）；要给用户出几版设计挑，每排好一版就 collage_save_variant 存成方案（不会被下一版盖掉），collage_open_variant 切回某一版；相册改整本：collage_get_state 的 album.spreads 看每个跨页放了哪几张，collage_pages 翻页、加删挪锁跨页、镜像、单边换版式，collage_move_photos 把照片挪到别的跨页，collage_replace_photo 换一格照片（候选用 collage_get_state 的 candidates_for 拿），collage_cover 做封面，交印厂前 collage_preflight 导出前检查、collage_print_spec 看和套印厂规格；导出成图片用 collage_export（清晰度 1–3 倍，写到拼图页「导出 ▾」里设的目录；pages 只导几个跨页，proof 出给客户的看版 PDF）；撤销 AI 自己刚做的一步用 app_undo。
     出错时：user_busy 的 data.transient 为 true 是用户正在拖动或打字，等几秒再调；为 false 是开着对话框、连拍挑选或裁切，请用户先关掉，不要重试。app_outcome_unknown：用结果里的 op_id 原样再调同一个工具，不要换工具。session_not_open：先 app_status 看 open_session。其他错误按 hint 改。读到的是 app 内存里的状态（含还没存盘的改动）。图片是缩小预览，文字结果里有预览文件的路径；不要直接读原图（几十 MB）。session 可以填照片文件夹的绝对路径，也可以填 16 位 session key。
     """
 
@@ -250,7 +250,7 @@ enum MCPToolDefs {
      "annotations":"$WRITE_IDEMPOTENT"},
 
     {"name":"collage_apply_template","title":"套模板",
-     "description":"给 app 里当前的拼图套一个模板（= 拼图页左栏「模板」里点模板），画布当场换版式。template 可以写模板全名、分类名（套这个分类的第一个）或名字里的几个字，取值见 collage_list_templates。一次调用是一步撤销（拼图页 ⌘Z，或 app_undo target=collage）。正在编辑相册封面时回 invalid_state（模板是给跨页的）。结果里有 app 当前画面的预览图。",
+     "description":"给 app 里当前的拼图套一个模板（= 拼图页左栏「模板」里点模板），画布当场换版式。template 可以写模板全名、分类名（套这个分类的第一个）或名字里的几个字，取值见 collage_list_templates。照片从托盘里挑：托盘的照片比模板的照片格少（托盘空着就一张都没有）时照样套上、多出来的格子空着，warnings 报 empty_slots（托盘怎么进见 hint）。一次调用是一步撤销（拼图页 ⌘Z，或 app_undo target=collage）。正在编辑相册封面时回 invalid_state（模板是给跨页的）。结果里有 app 当前画面的预览图。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "template":{"type":"string","minLength":1,"maxLength":80,"description":"模板全名、分类名或名字里的几个字"},
@@ -262,7 +262,7 @@ enum MCPToolDefs {
      "annotations":"$WRITE_IDEMPOTENT"},
 
     {"name":"collage_run_kit","title":"在 app 里一键成套",
-     "description":"在 app 里一键成套（= 拼图页左栏「模板 › 一键成套」）：{{kits}}。替换当前拼图工程，落地时是一步撤销。要等 app 算完（最长约 50 秒）；被用户的新操作作废或用户切了场次回 superseded，托盘里没有能用的照片回 nothing_to_render。结果里有页数、封面和 app 当前画面的预览图。",
+     "description":"在 app 里一键成套（= 拼图页左栏「模板 › 一键成套」）：{{kits}}。替换当前拼图工程，落地时是一步撤销。要等 app 算完（最长约 50 秒）；被用户的新操作作废或用户切了场次回 superseded，没有能用的照片回 nothing_to_render（整本婚礼相册只编托盘里的照片，托盘空着先用 collage_auto_layout 的 photos 带照片进托盘；出一期托盘空着时从这一场借，按卷出印样用这一场的全部帧）。结果里有页数、封面和 app 当前画面的预览图。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "kit":{"type":"string","enum":"$KITS"},
