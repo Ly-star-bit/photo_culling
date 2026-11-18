@@ -189,6 +189,21 @@ enum ThemeSelfTest {
                 let focus = blend(ink, 0.95, over: c(surface))
                 check(contrast(focus, c(surface)) >= 3, "\(name)：焦点框在 \(surface) 上 \(fmt(contrast(focus, c(surface))))")
             }
+            // 浅色主题的直方图（TA-09）：槽是卡片 / 栏压一点黑，留下的柱子、检视器的亮度柱、阈值线（ink 0.9）、
+            // 被线淘汰的红柱（废片红 0.8）对槽都 ≥ 3:1。深色主题照旧是 v1.32.0 的写法，不在这里核对。
+            if !colors.dark {
+                let light = AppPalette.lightHistogram
+                for surface in ["card", "panel"] {
+                    let trough = blend(0x000000, light.trough, over: c(surface))
+                    let marks: [(String, UInt32)] = [("留下的柱子", blend(0x000000, light.bar, over: trough)),
+                                                     ("亮度柱", blend(0x000000, light.luma, over: trough)),
+                                                     ("阈值线", blend(0x000000, 0.9, over: trough)),
+                                                     ("红柱", blend(own["reject"] ?? 0xFF0000, 0.8, over: trough))]
+                    for (label, mark) in marks {
+                        check(contrast(mark, trough) >= 3, "\(name)：直方图\(label)在 \(surface) 的槽上 \(fmt(contrast(mark, trough)))")
+                    }
+                }
+            }
             check(!theme.title.isEmpty && !theme.subtitle.isEmpty, "\(name)：没有名字")
         }
         // 默认主题的数值不能动：v1.30 起发出去的就是这一套。判决色、提醒黄、客户紫也不能给值（一直是系统色）。

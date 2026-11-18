@@ -78,12 +78,14 @@ enum AppPalette {
     static var toastFill: Color { c.dark ? Color.black.opacity(0.7) : c.card }
 
     /// 直方图（右栏筛选严格度）的槽和留下的柱子。深色主题照旧（石墨不变）；浅色主题以前也是黑 0.25 的槽、灰 0.55 的柱、
-    /// 白线，相纸下柱子对槽 1.3:1、阈值线 1.7:1（TA-09）：槽只压一点（同 well），柱子墨色 0.45（对槽 ≥ 3:1），线用 ink。
-    static var histogramTrough: Color { c.dark ? Color.black.opacity(0.25) : Color.black.opacity(0.07) }
-    static var histogramBar: Color { c.dark ? Color.gray.opacity(0.55) : Color.black.opacity(0.45) }
+    /// 白线，相纸下柱子对槽 1.3:1、阈值线 1.7:1（TA-09）：槽只压一点（同 well），柱子墨色（对槽 ≥ 3:1），线用 ink。
+    static var histogramTrough: Color { c.dark ? Color.black.opacity(0.25) : Color.black.opacity(lightHistogram.trough) }
+    static var histogramBar: Color { c.dark ? Color.gray.opacity(0.55) : Color.black.opacity(lightHistogram.bar) }
     /// 检视器的亮度直方图：深色主题照旧是黑 0.5 的槽、白柱；浅色主题浅槽、墨色柱（以前是浅栏里一块深灰板）。
-    static var lumaTrough: Color { c.dark ? Color.black.opacity(0.5) : Color.black.opacity(0.07) }
-    static var lumaBar: Color { c.dark ? Color.white.opacity(0.85) : Color.black.opacity(0.5) }
+    static var lumaTrough: Color { c.dark ? Color.black.opacity(0.5) : Color.black.opacity(lightHistogram.trough) }
+    static var lumaBar: Color { c.dark ? Color.white.opacity(0.85) : Color.black.opacity(lightHistogram.luma) }
+    /// 浅色主题直方图的黑色不透明度：槽、右栏的柱子、检视器的柱子。自检按这几个数算柱子 / 阈值线 / 红柱对槽的对比度。
+    static let lightHistogram = (trough: 0.07, bar: 0.45, luma: 0.5)
 }
 
 /// 压在照片上的（黑底胶囊里的星、心、淘汰理由，人脸小图的睁闭眼记号，审片照片区的提示条）：照片不跟主题变，这里一律是系统的
