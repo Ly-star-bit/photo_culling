@@ -117,6 +117,9 @@ curl -fsSL https://raw.githubusercontent.com/Ly-star-bit/photo_culling/main/inst
 cd culling-poc/LabelGUI
 swift build -c release
 # 产物: .build/release/LabelGUI，装进 app bundle 或直接运行
+# 推 feature 分支之前的类型检查预检（CI 是 Xcode 16.4 的 Swift 6.1.2，有的表达式比本机新编译器慢几十倍，本机看不出、CI 上超时就红）:
+#   Scripts/typecheck_612.sh [--limit-ms 3000]（要 swift.org 的 6.1.2 工具链，路径见脚本开头；列最慢的表达式、函数体和 15 SDK 下的编译警告，
+#   一句超过阈值退出 1）
 # 无头模式(测试用): LabelGUI --analyze <照片文件夹>
 # 会写数据的无头命令（--collage、--compare-crop、--compare 带 --keys、--verdicts 带 --accept-all / --clear-recents、--export-xmp、
 #   --ingest、下面各种离屏快照和大部分 --*-selftest……）都必须设 LABELGUI_DATA_DIR=<临时目录>：不设、或者指到真实数据目录

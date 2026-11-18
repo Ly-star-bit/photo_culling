@@ -363,7 +363,10 @@ enum GridExifImportSelfTest {
         let tail = JustifiedRows.pack(aspects: aspects + [2.0 / 3.0], width: 1100, target: 168).last
         t.check(tail?.height == 168 && tail?.widths == [112], "分行：最后一行凑不满时不拉伸（行高 = 目标）",
                 "\(String(describing: tail))")
-        let ratio = zip(rows.first?.widths ?? [], aspects).allSatisfy { abs($0 / (rows.first?.height ?? 1) - $1) < 0.001 }
+        // 第一行的宽、高先取成带类型的局部量：写在一句闭包里 CI 的 Swift 6.1.2 类型检查要 2.6 秒（Scripts/typecheck_612.sh）。
+        let firstWidths: [CGFloat] = rows.first?.widths ?? []
+        let firstHeight: CGFloat = rows.first?.height ?? 1
+        let ratio = zip(firstWidths, aspects).allSatisfy { (w: CGFloat, a: CGFloat) -> Bool in abs(w / firstHeight - a) < 0.001 }
         t.check(ratio, "分行：格子的宽高比就是照片的宽高比（不裁、不留边）")
 
         // 全景（6:1）夹到 2.4，极窄的夹到 0.5；读不出比例（0、NaN）当 1.5。

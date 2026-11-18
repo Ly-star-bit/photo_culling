@@ -499,12 +499,17 @@ extension CollageBookCoverRender {
         }
         let canvas = CollageBookCover.frontCanvas(project.canvas)
         let tolerance = CGFloat(canvas.height) * 0.02
-        let spots = CollageLayout.pageGeometry(cover.front, canvas: canvas, style: project.style).frames
-            .filter { $0.cell.kind == .photo && !$0.rect.isEmpty && $0.cell.photoID != nil }
-            .map { (id: $0.cell.photoID ?? "", rect: $0.rect.cgRect) }
-            .sorted { a, b in
-                abs(a.rect.minY - b.rect.minY) > tolerance ? a.rect.minY < b.rect.minY : a.rect.minX < b.rect.minX
-            }
+        // 拆成几句、元组写明类型：原来 filter → map 成元组 → sorted 一条链，CI 的 Swift 6.1.2 上类型检查一句 12 秒
+        // （本机 6.3 只要 0.45 秒，看不出来；Scripts/typecheck_612.sh）。
+        typealias Spot = (id: String, rect: CGRect)
+        let frames: [CollageLayout.Frame] = CollageLayout.pageGeometry(cover.front, canvas: canvas, style: project.style).frames
+        let photoFrames = frames.filter { (f: CollageLayout.Frame) -> Bool in
+            f.cell.kind == .photo && !f.rect.isEmpty && f.cell.photoID != nil
+        }
+        let unsorted: [Spot] = photoFrames.map { (f: CollageLayout.Frame) -> Spot in (id: f.cell.photoID ?? "", rect: f.rect.cgRect) }
+        let spots: [Spot] = unsorted.sorted { (a: Spot, b: Spot) -> Bool in
+            abs(a.rect.minY - b.rect.minY) > tolerance ? a.rect.minY < b.rect.minY : a.rect.minX < b.rect.minX
+        }
         return (spots.map(\.id) + (cover.back.photoID.map { [$0] } ?? [])).compactMap(fileName)
     }
 }
