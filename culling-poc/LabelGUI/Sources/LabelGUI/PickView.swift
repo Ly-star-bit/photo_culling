@@ -686,7 +686,9 @@ private struct PickTile: View {
             .opacity(vivid ? 1 : 0.6)
             .overlay {
                 if zoomed && loadingCrop {
+                    // 压在照片上的黑底：转圈按深色外观画（相纸下跟着外观是深灰转圈压在黑底上，TA-07 同一类）。
                     ProgressView().controlSize(.small)
+                        .environment(\.colorScheme, .dark)
                         .padding(8)
                         .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
                 }

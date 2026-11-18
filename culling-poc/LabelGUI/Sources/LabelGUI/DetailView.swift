@@ -65,7 +65,9 @@ struct DetailView: View {
                 ThumbnailView(path: photo.previewPath, maxPixel: 1600, fit: true)
                     .padding()
             } else {
+                // 底是黑的（照片区）：字不跟外观走，相纸下不写颜色就是黑字压黑底（TA-07 同一类）。
                 Text("无法加载预览图: \(photo.previewPath)")
+                    .foregroundStyle(OnPhotoPalette.text)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
