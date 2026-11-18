@@ -4797,6 +4797,7 @@ struct PhotoInspector: View {
     /// 对焦高亮开关 + 当前这张的遮罩（带 key，翻页不串图）。
     @State private var focusPeak = false
     @State private var focusMask: (key: String, image: CGImage)?
+    @State private var showShortcuts = false
     /// 「挑选本场」：关掉检视器，进全窗口的连拍挑选（参数是当前这张的 id，高亮先落在它上面）。
     /// 场内的取舍全在连拍挑选里做，检视器只看一张。
     let onPickTake: (String) -> Void
@@ -4849,6 +4850,48 @@ struct PhotoInspector: View {
         .onChange(of: focusPeak) { refreshFocusMask() }
         .onChange(of: zoomed) { refreshFocusMask() }
         .onChange(of: currentID) { refreshFocusMask() }
+        // ?：快捷键一览（看单张是 sheet，键盘落在它自己的窗口上，网格的 ? 接不到）。
+        .shortcutsHotkey(isPresented: $showShortcuts)
+        // 无头（--inspector-ui --press）：按键从这里进来，走和按钮、快捷键同一段代码。界面运行时从不发。
+        .onReceive(BatchPerf.keys) { headlessKey($0) }
+        .onAppear { if AppRuntime.headless { SnapshotPreview.viewer = { describe() } } }
+    }
+
+    /// 对焦高亮开关（按钮和 P 键）：没放大时打开 = 先放大再开（UX-06：以前按钮灰着、按 P 没反应，也不说为什么）。
+    private func setFocusPeak(_ on: Bool) {
+        if on, !zoomed, !loadingFullRes, let item { toggleZoom(item) }
+        focusPeak = on
+    }
+
+    /// Esc：放大着先退出放大，再按才关闭（UX-06：以前放大着按 Esc 整个关掉回网格，审片里是退一层）。
+    private func closeOrUnzoom() {
+        if zoomed { zoomed = false } else { inspectedID = nil }
+    }
+
+    /// 无头按键：和上面的按钮、快捷键调同一个函数（离屏窗口收不到键盘，见 BatchPerf.keys）。
+    private func headlessKey(_ key: String) {
+        guard let item else { return }
+        switch key {
+        case "→": step(1)
+        case "←": step(-1)
+        case "z": toggleZoom(item)
+        case "p": setFocusPeak(!focusPeak)
+        case "esc": closeOrUnzoom()
+        case "1": store.setOverride(item.id, .pick)
+        case "2": store.setOverride(item.id, .usable)
+        case "3": store.setOverride(item.id, .reject)
+        case "0": store.setOverride(item.id, nil)
+        default: print("--press：看单张不认 \(key)")
+        }
+    }
+
+    /// 无头打印：现在是哪张、放大开没开、原图是哪张的、对焦高亮。busy = 原图 / 遮罩还在算，等它。
+    private func describe() -> (busy: Bool, text: String) {
+        let full = fullResImage.map { "\(Int($0.size.width))×\(Int($0.size.height))" } ?? "无"
+        let mask = focusMask.map { URL(fileURLWithPath: $0.key).deletingPathExtension().lastPathComponent } ?? "无"
+        let busy = loadingFullRes || (focusPeak && zoomed && focusMask?.key != item?.decodePath)
+        return (busy, "看单张 \(currentID) · 判决 \(item?.verdict.rawValue ?? "-") · 放大 \(zoomed ? "开" : "关")"
+                + (loadingFullRes ? "（解码中）" : "") + " · 原图 \(full) · 对焦高亮 \(focusPeak ? "开" : "关")（遮罩 \(mask)）")
     }
 
     // MARK: header
@@ -4875,19 +4918,23 @@ struct PhotoInspector: View {
                     .help("进连拍挑选：本场照片并排上台，点一张 = 只留它，⏎ 确认并跳下一组，Z 一起放大到脸")
             }
             Toggle("分析框", isOn: $showOverlay).toggleStyle(.button)
-            Toggle("对焦高亮", isOn: $focusPeak).toggleStyle(.button)
+            // 键位、按钮字和审片对齐（UX-06）：Z 放大、P 对焦高亮、Esc 先退出放大。对焦高亮不再灰着：没放大时按 = 先放大再开。
+            Toggle("对焦高亮 (P)", isOn: Binding(get: { focusPeak }, set: { setFocusPeak($0) }))
+                .toggleStyle(.button)
                 .keyboardShortcut("p", modifiers: [])
-                .disabled(!zoomed)
-                .help("100% 视图上红色标出合焦区域（本图梯度 95 分位以上），看焦点落在眼睛还是耳朵 (P)")
-            Button(zoomed ? "适应窗口" : (loadingFullRes ? "解码原图..." : "放大 100%")) {
+                .help("100% 视图上红色标出合焦区域，看焦点落在眼睛还是耳朵 (P)；没放大时先放大")
+            Button(zoomed ? "适应窗口" : (loadingFullRes ? "解码原图..." : "放大 (Z)")) {
                 toggleZoom(item)
             }
+            .keyboardShortcut("z", modifiers: [])
             .disabled(loadingFullRes)
+            .help("放大到 100%（Z，双击照片也行）；再按回到适应窗口")
             Button("在访达中显示") {
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: item.rawPath)])
             }
-            Button("关闭") { inspectedID = nil }
+            Button("关闭") { closeOrUnzoom() }
                 .keyboardShortcut(.escape, modifiers: [])
+                .help("关闭 (Esc)。放大着时 Esc 先退出放大，再按才关闭（和审片一样）")
         }
         .padding(.horizontal).padding(.vertical, 10)
         .background(AppPalette.bar)
@@ -5178,6 +5225,11 @@ struct PhotoInspector: View {
             Button("◀ 上一张") { step(-1) }.keyboardShortcut(.leftArrow, modifiers: [])
             Spacer()
             verdictButtons(item)
+            Button { showShortcuts.toggle() } label: { Image(systemName: "keyboard") }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("快捷键一览 (?)")
+                .popover(isPresented: $showShortcuts, arrowEdge: .top) { ShortcutsPanel() }
             Spacer()
             Button("下一张 ▶") { step(1) }.keyboardShortcut(.rightArrow, modifiers: [])
         }
@@ -5195,21 +5247,22 @@ struct PhotoInspector: View {
     @ViewBuilder
     private func verdictButtons(_ item: BatchItem) -> some View {
         let override = store.overrides[item.id]
+        // 按钮上写键（UX-06，和审片的判决条一样）。看单张里改判不自动下一张：这里是看一张，审片才是过一串。
         HStack(spacing: 8) {
             Text("改判:").foregroundStyle(.secondary)
-            Button("精选") { store.setOverride(item.id, .pick) }
+            Button("精选  1") { store.setOverride(item.id, .pick) }
                 .buttonStyle(.bordered)
                 .tint(override == .pick ? AppPalette.pick : nil)
                 .keyboardShortcut("1", modifiers: [])
-            Button("可用") { store.setOverride(item.id, .usable) }
+            Button("可用  2") { store.setOverride(item.id, .usable) }
                 .buttonStyle(.bordered)
                 .tint(override == .usable ? .blue : nil)
                 .keyboardShortcut("2", modifiers: [])
-            Button("废片") { store.setOverride(item.id, .reject) }
+            Button("废片  3") { store.setOverride(item.id, .reject) }
                 .buttonStyle(.bordered)
                 .tint(override == .reject ? .red : nil)
                 .keyboardShortcut("3", modifiers: [])
-            Button("恢复自动") { store.setOverride(item.id, nil) }
+            Button("恢复自动  0") { store.setOverride(item.id, nil) }
                 .buttonStyle(.bordered)
                 .disabled(override == nil)
                 .keyboardShortcut("0", modifiers: [])
@@ -5465,17 +5518,15 @@ struct ReviewView: View {
                         .layoutPriority(-1)
                     Button(zoomed ? "适应窗口" : (loadingZoom ? "解码原图..." : "放大 (Z)")) { toggleZoom(item) }
                         .disabled(loadingZoom)
-                    Toggle("对焦高亮 (P)", isOn: $focusPeak).toggleStyle(.button)
-                        .disabled(!zoomed)
-                        .help("100% 视图上红色标出合焦区域")
+                    // 不再灰着（UX-06）：没放大时点它 = 先放大再开。
+                    Toggle("对焦高亮 (P)", isOn: Binding(get: { focusPeak }, set: { setFocusPeak($0) }))
+                        .toggleStyle(.button)
+                        .help("100% 视图上红色标出合焦区域 (P)；没放大时先放大")
                     Button("撤销") { store.undoLastOverride() }
                         .keyboardShortcut("z", modifiers: .command)
                         .disabled(!store.canUndoOverride)
-                    Button("退出") {
-                        // Esc backs out one level at a time: zoom first, then review.
-                        if zoomed { zoomed = false } else { reviewMode = false }
-                    }
-                    .keyboardShortcut(.escape, modifiers: [])
+                    Button("退出") { exitOrUnzoom() }
+                        .keyboardShortcut(.escape, modifiers: [])
                 }
                 .padding(8)
 
@@ -5565,6 +5616,7 @@ struct ReviewView: View {
                 focusedID = order.first
             }
             prefetchNeighbors()
+            if AppRuntime.headless { SnapshotPreview.viewer = { describe() } }
         }
         .onChange(of: focusedID) {
             zoomed = false
@@ -5579,14 +5631,16 @@ struct ReviewView: View {
         .onChange(of: focusPeak) { refreshFocusMask() }
         .onChange(of: zoomed) { refreshFocusMask() }
         .onKeyPress(characters: .init(charactersIn: "pP")) { press in
-            guard press.modifiers.isSubset(of: [.shift, .capsLock]), zoomed else { return .ignored }
-            focusPeak.toggle()
+            guard press.modifiers.isSubset(of: [.shift, .capsLock]) else { return .ignored }
+            setFocusPeak(!focusPeak)
             return .handled
         }
         .onKeyPress(characters: .init(charactersIn: "?")) { _ in
             showShortcuts.toggle()
             return .handled
         }
+        // 无头（--review-ui --press）：按键从这里进来，走和上下这几个真按键同一段代码。界面运行时从不发。
+        .onReceive(BatchPerf.keys) { headlessKey($0) }
         // C：这张在连拍里就去挑这一场。⌘C 放过去。
         .onKeyPress(characters: .init(charactersIn: "cC")) { press in
             guard press.modifiers.isSubset(of: [.shift, .capsLock]), let item = current,
@@ -5612,6 +5666,45 @@ struct ReviewView: View {
             }
             return .handled
         }
+    }
+
+    /// Esc backs out one level at a time: zoom first, then review.
+    private func exitOrUnzoom() {
+        if zoomed { zoomed = false } else { reviewMode = false }
+    }
+
+    /// 对焦高亮开关（按钮和 P 键）：没放大时打开 = 先放大再开（UX-06：以前按钮灰着、P 没放大时不响应）。
+    private func setFocusPeak(_ on: Bool) {
+        if on, !zoomed, let item = current { toggleZoom(item) }
+        focusPeak = on
+    }
+
+    /// 无头按键：和上面的真按键调同一个函数（离屏窗口收不到键盘，见 BatchPerf.keys）。
+    private func headlessKey(_ key: String) {
+        guard let item = current else { return }
+        switch key {
+        case "→": step(1)
+        case "←": step(-1)
+        case "z": toggleZoom(item)
+        case "p": setFocusPeak(!focusPeak)
+        case "esc": exitOrUnzoom()
+        case "1": apply(.pick, to: item)
+        case "2": apply(.usable, to: item)
+        case "3": apply(.reject, to: item)
+        case "0": apply(nil, to: item)
+        default: print("--press：审片不认 \(key)")
+        }
+    }
+
+    /// 无头打印：现在是哪张、放大开没开、原图是哪张的、对焦高亮。busy = 原图 / 遮罩还在算，等它。
+    private func describe() -> (busy: Bool, text: String) {
+        guard reviewMode else { return (false, "已退出审片") }
+        let item = current
+        let full = zoomImage.map { "\(Int($0.size.width))×\(Int($0.size.height))" } ?? "无"
+        let mask = focusMask.map { URL(fileURLWithPath: $0.key).deletingPathExtension().lastPathComponent } ?? "无"
+        let busy = loadingZoom || (focusPeak && zoomed && focusMask?.key != item?.decodePath)
+        return (busy, "审片 \(focusedID ?? "无") · 判决 \(item?.verdict.rawValue ?? "-") · 放大 \(zoomed ? "开" : "关")"
+                + (loadingZoom ? "（解码中）" : "") + " · 原图 \(full) · 对焦高亮 \(focusPeak ? "开" : "关")（遮罩 \(mask)）")
     }
 
     /// 判一张：按键和下面那排按钮走同一条路 —— 写判决、闪提示、判了（不是恢复）就自动下一张。

@@ -138,8 +138,8 @@ struct PickView: View {
             return .handled
         }
         .onKeyPress(characters: .init(charactersIn: "pP")) { press in
-            guard press.modifiers.isSubset(of: [.shift, .capsLock]), zoomed else { return .ignored }
-            focusPeak.toggle()
+            guard press.modifiers.isSubset(of: [.shift, .capsLock]) else { return .ignored }
+            setFocusPeak(!focusPeak)
             return .handled
         }
         .onKeyPress(characters: .init(charactersIn: "?")) { _ in
@@ -202,10 +202,10 @@ struct PickView: View {
                 }
                 .help("每格都以同一个人的脸居中，一个人一个人地比 ([ ])。从左到右数，这张里没检测到他就停在主脸")
             }
-            Toggle("对焦 (P)", isOn: $focusPeak)
+            // 不再灰着（UX-06，和看单张、审片一样）：没放大时点它 = 先放大到脸再开。
+            Toggle("对焦 (P)", isOn: Binding(get: { focusPeak }, set: { setFocusPeak($0) }))
                 .toggleStyle(.button)
-                .disabled(!zoomed)
-                .help("放大后红色标出合焦区域，看焦点落在眼睛还是耳朵")
+                .help("放大后红色标出合焦区域，看焦点落在眼睛还是耳朵 (P)；没放大时先放大到脸")
             Button("撤销") { withAnimation(.easeOut(duration: 0.12)) { session.undo() } }
                 .keyboardShortcut("z", modifiers: .command)
                 .disabled(!session.canUndo)
@@ -443,6 +443,12 @@ struct PickView: View {
             return
         }
         onExit(session.highlightedID)
+    }
+
+    /// 对焦高亮开关（按钮和 P 键）：没放大时打开 = 先放大到脸再开（UX-06：以前按钮灰着、P 没放大时不响应）。
+    private func setFocusPeak(_ on: Bool) {
+        if on, !zoomed { toggleZoom() }
+        focusPeak = on
     }
 
     private func toggleZoom() {

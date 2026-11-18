@@ -18,6 +18,9 @@ import AppKit
 ///     rclick 只打印这里的右键菜单有哪几项、不弹。送不到的：拖放、捏合、靠事件监听接鼠标的地方（拼图画布的 ⌘滚轮、右键）、
 ///     会弹真窗口的按钮。细节和每次实测的结果见 SnapshotEvents.swift、`--events-selftest`。
 /// 都可以加 --ax-dump：截图前打印辅助功能树（输入框、滑杆这类 AppKit 控件带着值），按文字断言。
+/// LabelGUI --batch-ui <photo_dir> <out.png> --review-ui|--inspector-ui [--id X] [--press "z,p,→,←,1,2,3,0,esc"]
+///     （审片 / 看单张，停在 X；--press 按这几个键 —— 和真按键调同一个函数 —— 每按一下等原图、对焦遮罩解完，打印一行
+///     哪张、放大开没开、原图多大、对焦高亮。截图是按完以后的样子）
 /// LabelGUI --batch-ui <photo_dir> <out.png> --perf grid [--copies 15] [--size 2560x1440 -batch.thumbSize 90]
 ///     （截完图接着在网格里按 → ← 和数字键，打印每一下哪些视图 body 重算了几次、主线程 CPU、进程指令数：BatchPerf；
 ///     带改判动画的两行（数字键、直接改判 带动画）头一个数是估计 = 首圈 + 每帧 × 24 帧，见 BatchPerf.measure；
@@ -38,6 +41,9 @@ enum SnapshotPreview {
     /// 拼图顶栏「导出 ▾」的内容画在顶栏下面、不弹真的弹出框（--collage-ui：离屏截不到弹出框的窗口）。
     /// 界面运行时永远是 false。
     @MainActor static var inlineExport = false
+    /// --review-ui / --inspector-ui --press：审片 / 看单张现在的样子（哪张、放大开没开、原图是哪张的、对焦高亮），
+    /// busy = 原图或遮罩还在解，--press 等它算完再打印。只有无头时才设，界面运行时永远是 nil。
+    @MainActor static var viewer: (() -> (busy: Bool, text: String))?
 }
 
 /// 离屏快照的辅助功能树（--ax-dump）：AppKit 那几样控件（滑杆、分段、输入框、菜单按钮）带着值和能不能点，
@@ -153,12 +159,11 @@ enum BatchUISnapshot {
             root = AnyView(BodyClockSheet(store: store, isPresented: .constant(true))
                 .background(AppPalette.card))
         } else if args.contains("--review-ui") {
+            // 焦点、审片开关是活的（不是 .constant）：--press 的 → / Esc 要真的翻页、退出。
             let skippable = order.contains { store.item(withID: $0).map { $0.verdict != .reject } ?? false }
-            root = AnyView(ReviewView(store: store, orderIDs: order, rejectsSkippable: skippable,
-                                      focusedID: .constant(startID), reviewMode: .constant(true)))
+            root = AnyView(ReviewSnapshotHost(store: store, order: order, skippable: skippable, startID: startID))
         } else if args.contains("--inspector-ui") {
-            root = AnyView(PhotoInspector(store: store, inspectedID: .constant(startID), gridOrder: order,
-                                          initialID: startID, onPickTake: { _ in }))
+            root = AnyView(InspectorSnapshotHost(store: store, order: order, startID: startID))
         } else if args.contains("--timeline-only") {
             // 只画时间轴 + 悬停卡片（--hover N = 第 N 段），下面垫一块网格色看卡片压在网格上的样子。
             let hover = option("--hover").flatMap(Int.init)
@@ -237,7 +242,15 @@ enum BatchUISnapshot {
             for key in press.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }) where !key.isEmpty {
                 BatchPerf.keys.send(key)
                 for _ in 0..<2 { host.layoutSubtreeIfNeeded(); spin(0.25) }
-                print("--press \(key)：焦点 \(SnapshotPreview.gridFocus ?? "无")")
+                if let viewer = SnapshotPreview.viewer {
+                    // 审片 / 看单张：原图（40 MP 约 1 秒）、对焦遮罩是后台解的，等它们回来再打印（最多 6 秒）。
+                    let deadline = Date().addingTimeInterval(6)
+                    while viewer().busy, Date() < deadline { host.layoutSubtreeIfNeeded(); spin(0.1) }
+                    host.layoutSubtreeIfNeeded()
+                    print("--press \(key)：\(viewer().text)")
+                } else {
+                    print("--press \(key)：焦点 \(SnapshotPreview.gridFocus ?? "无")")
+                }
             }
             spin(1)
         }
@@ -304,6 +317,60 @@ enum BatchUISnapshot {
             let options = DeliveryOptions.load(json, defaults: .jpegExport(legacyMaxPixel: 0, legacyQuality: 90))
             return DeliveryOptionsPreview(options: options,
                                           preview: store.jpegNamePreview(options, includeUsable: true))
+        }
+    }
+}
+
+/// --review-ui：审片外面包一层，焦点和审片开关是活的 @State（ReviewView 拿的是绑定，给 .constant 的话 → / Esc 都是空按）。
+private struct ReviewSnapshotHost: View {
+    let store: BatchStore
+    let order: [String]
+    let skippable: Bool
+    @State private var focusedID: String?
+    @State private var reviewMode = true
+
+    init(store: BatchStore, order: [String], skippable: Bool, startID: String) {
+        self.store = store
+        self.order = order
+        self.skippable = skippable
+        _focusedID = State(initialValue: startID.isEmpty ? nil : startID)
+    }
+
+    var body: some View {
+        if reviewMode {
+            ReviewView(store: store, orderIDs: order, rejectsSkippable: skippable,
+                       focusedID: $focusedID, reviewMode: $reviewMode)
+        } else {
+            Text("已退出审片").frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+/// --inspector-ui：看单张外面包一层，关闭（Esc）是真的关掉。
+private struct InspectorSnapshotHost: View {
+    let store: BatchStore
+    let order: [String]
+    let startID: String
+    @State private var inspectedID: String?
+
+    init(store: BatchStore, order: [String], startID: String) {
+        self.store = store
+        self.order = order
+        self.startID = startID
+        _inspectedID = State(initialValue: startID)
+    }
+
+    var body: some View {
+        Group {
+            if inspectedID != nil {
+                PhotoInspector(store: store, inspectedID: $inspectedID, gridOrder: order,
+                               initialID: startID, onPickTake: { _ in })
+            } else {
+                Text("看单张已关闭").frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .onChange(of: inspectedID) {
+            if inspectedID == nil { SnapshotPreview.viewer = { (false, "看单张已关闭") } }
         }
     }
 }

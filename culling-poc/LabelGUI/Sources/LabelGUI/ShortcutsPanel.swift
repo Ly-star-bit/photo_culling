@@ -82,22 +82,23 @@ enum ShortcutsTable {
         Row("0", "恢复推荐"),
         Row("← →  ↑ ↓", "移动高亮 · 上一组 / 下一组"),
         Row("⏎", "确认并下一组"),
-        Row("Z  [ ]  P", "放大到脸 · 放大时换人 · 对焦高亮"),
+        Row("Z  [ ]  P", "放大到脸 · 放大时换人 · 对焦高亮（没放大时先放大）"),
         Row("⌘Z  Esc", "撤销 · 先退出放大，再返回（网格；从审片来的回审片）"),
     ])
     static let review = ShortcutsSection("审片", [
         Row("1  2  3", "精选 · 可用 · 废片（判完自动下一张）"),
         Row("0", "恢复自动"),
         Row("← →", "上一张 / 下一张"),
-        Row("Z  P", "放大 · 对焦高亮"),
+        Row("Z  P", "放大 · 对焦高亮（没放大时先放大）"),
         Row("C", "这张是连拍：去挑这一场（⏎ 定完自动回到审片）"),
         Row("⌘Z  Esc", "撤销 · 先退出放大，再退出审片"),
     ])
-    static let detail = ShortcutsSection("大图（双击打开）", [
+    static let detail = ShortcutsSection("看单张（双击 / 空格 / ⏎ 打开）", [
         Row("← →", "上一张 / 下一张"),
-        Row("1  2  3  0", "精选 · 可用 · 废片 · 恢复自动"),
-        Row("C  P", "挑选本场 · 对焦高亮（放大时）"),
-        Row("⌘Z  Esc", "撤销 · 关闭"),
+        Row("1  2  3  0", "精选 · 可用 · 废片 · 恢复自动（不自动下一张）"),
+        Row("Z  P", "放大 · 对焦高亮（没放大时先放大）"),
+        Row("C", "挑选本场"),
+        Row("⌘Z  Esc", "撤销 · 先退出放大，再关闭"),
     ])
     static let timeline = ShortcutsSection("时间轴", [
         Row("点一段", "跳到这一章"),
@@ -447,7 +448,7 @@ enum ShortcutsSelfTest {
                         "⌃⌘S  ⌥⌘S", "⌘=  ⌘-  ⌘0  ⌘1", "捏合  ⌘滚轮"]),
             (.darkroom, ["← →", "↑ ↓", "⏎  点样张", "按住空格", "拖竖线", "⌘←  ⌘→", "⌘Z  ⇧⌘Z", "Esc"]),
             (.watermark, ["⌘O", "⌘⏎", "Esc", "⌫"]),
-            (.batch, ["C  D  F", "⌥⌘S", "⇧Esc"]),
+            (.batch, ["C  D  F", "⌥⌘S", "⇧Esc", "Z  P", "Z  [ ]  P"]),
         ]
         for (page, keys) in expected {
             let columns = ShortcutsTable.columns(page)
