@@ -285,14 +285,18 @@ extension MCPSelfTest {
 
     /// 托盘超过 200 张（复核补 2）和文字上限（MC-05）：没列全时标出从哪接着翻、带一条 tray_truncated；列全了不带。
     private static func trayPageChecks(_ check: Check) {
+        // 判断都拆成单独的 Bool（6.1.2 的类型检查碰到一长串 && 混着 as? 会超时）
         var head: [String: Any] = [:]
         let w1 = LiveHandlers.markTray(&head, offset: 0, kept: 200, total: 216)
-        check(head["tray_photos_truncated"] as? Bool == true && head["tray_next_offset"] as? Int == 200
-              && w1?["code"] as? String == "tray_truncated" && (w1?["hint"] as? String ?? "").contains("tray_offset:200"),
+        let headMarked: Bool = head["tray_photos_truncated"] as? Bool == true && head["tray_next_offset"] as? Int == 200
+        let w1Hint: String = w1?["hint"] as? String ?? ""
+        let w1Code: String = w1?["code"] as? String ?? ""
+        check(headMarked && w1Code == "tray_truncated" && w1Hint.contains("tray_offset:200"),
               "216 张列了前 200：truncated、next 200、warning 指 tray_offset:200（\(w1.map(MCPJSON.string) ?? "nil")）")
         var tail: [String: Any] = ["tray_photos_truncated": true, "tray_next_offset": 1]
-        check(LiveHandlers.markTray(&tail, offset: 200, kept: 16, total: 216) == nil && tail["tray_photos_truncated"] == nil
-              && tail["tray_next_offset"] == nil, "从 200 起列到底：不带 truncated、next、warning")
+        let w2 = LiveHandlers.markTray(&tail, offset: 200, kept: 16, total: 216)
+        let tailClean: Bool = tail["tray_photos_truncated"] == nil && tail["tray_next_offset"] == nil
+        check(w2 == nil && tailClean, "从 200 起列到底：不带 truncated、next、warning")
         // 文字上限：从 tray_photos 尾部截，warning 跟着换成截到哪；预览图的字节不算进去、原样留着
         let rows: [[String: Any]] = (0..<216).map { i in ["id": "DSCF\(7000 + i)_copy", "width": 6240, "height": 4160, "used": 0] }
         var state: [String: Any] = ["tray": 216, "tray_photos": Array(rows.prefix(200)), "page": 1]
@@ -305,10 +309,12 @@ extension MCPSelfTest {
         let fw = (fitted["warnings"] as? [[String: Any]] ?? []).filter { $0["code"] as? String == "tray_truncated" }
         var measured = fitted
         measured.removeValue(forKey: "preview_jpeg_b64")
-        check(kept > 10 && kept < 200 && fitted["tray_next_offset"] as? Int == kept && fw.count == 1
-              && (fw.first?["hint"] as? String ?? "").contains("tray_offset:\(kept)")
-              && MCPJSON.string(measured).count <= 6_000 - LiveHandlers.stateTextReserve
-              && (fitted["preview_jpeg_b64"] as? String)?.count == 40_000,
+        let nextOK: Bool = fitted["tray_next_offset"] as? Int == kept
+        let fwHint: String = fw.first?["hint"] as? String ?? ""
+        let oneWarning: Bool = fw.count == 1 && fwHint.contains("tray_offset:\(kept)")
+        let fits: Bool = MCPJSON.string(measured).count <= 6_000 - LiveHandlers.stateTextReserve
+        let previewKept: Bool = (fitted["preview_jpeg_b64"] as? String)?.count == 40_000
+        check(kept > 10 && kept < 200 && nextOK && oneWarning && fits && previewKept,
               "文字上限 6000：tray_photos 截到 \(kept) 行、next_offset 跟着、只有一条 tray_truncated、预览原样留着")
         let roomy = LiveHandlers.fitState(state, textMax: 1_000_000, offset: 0, total: 216)
         check((roomy["tray_photos"] as? [Any])?.count == 200, "放得下就不截")

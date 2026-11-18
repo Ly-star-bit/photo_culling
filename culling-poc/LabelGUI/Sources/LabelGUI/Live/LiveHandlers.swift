@@ -207,6 +207,11 @@ enum LiveHandlers {
             out["tray_photos"] = rows
             if trayOffset > 0 { out["tray_offset"] = trayOffset }
             trayWarning = markTray(&out, offset: trayOffset, kept: rows.count, total: project.photos.count)
+            if trayOffset > 0 && trayOffset >= project.photos.count {
+                let n = project.photos.count
+                trayWarning = MCPReadModel.warning("tray_offset_past_end", "托盘一共 \(n) 张，tray_offset \(trayOffset) 已经过了最后一张。",
+                                                   hint: n == 0 ? "托盘是空的" : "tray_offset 从 0 起，填 0–\(n - 1)")
+            }
         }
         // 页码、格子、版式（编辑封面时是封面那一块，editing_cover: true，见 LiveAlbumHandlers 的文件头）
         out.merge(pageFields(collage)) { _, new in new }
@@ -406,7 +411,7 @@ enum LiveHandlers {
         let pages = collage.project.pages
         let at = pages.indices.first { pages[$0].photoIDs.contains(id) }
         out["page"] = at.map { $0 + 1 } ?? NSNull()
-        let path = at.flatMap { i in pages[i].root.leafPaths().first { pages[i].root.node(at: $0)?.cell?.photoID == id } }
+        let path: [Int]? = at.flatMap { i in pages[i].root.leafPaths().first { pages[i].root.node(at: $0)?.cell?.photoID == id } }
         out["path"] = path.map { $0.map(String.init).joined() } ?? NSNull()
         return out
     }
