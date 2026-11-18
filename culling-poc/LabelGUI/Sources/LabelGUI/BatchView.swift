@@ -2034,7 +2034,8 @@ struct BatchView: View {
 
     /// 时间轴下面那一条：现在只看哪一章、怎么换、怎么回到全部。
     private func chapterFilterBar(_ segment: BatchStore.ChapterSegment, proxy: ScrollViewProxy) -> some View {
-        let day = segment.start.map { ChapterTimelineLayout.dayText($0) + " " } ?? ""
+        let year: Bool = ChapterTimelineLayout.spansYears(store.chapterSegments)  // 章节跨年份时带年（EC-07）
+        let day = segment.start.map { ChapterTimelineLayout.dayText($0, year: year) + " " } ?? ""
         let title = segment.undated ? "无拍摄时间的照片" : "章节 \(segment.chapter + 1) · \(day)\(segment.timeRange)"
         return HStack(spacing: 8) {
             Image(systemName: "line.3.horizontal.decrease.circle.fill").foregroundStyle(AppPalette.accent)
