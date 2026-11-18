@@ -86,6 +86,13 @@ enum AppPalette {
     static var lumaBar: Color { c.dark ? Color.white.opacity(0.85) : Color.black.opacity(lightHistogram.luma) }
     /// 浅色主题直方图的黑色不透明度：槽、右栏的柱子、检视器的柱子。自检按这几个数算柱子 / 阈值线 / 红柱对槽的对比度。
     static let lightHistogram = (trough: 0.07, bar: 0.45, luma: 0.5)
+
+    /// 成品的边：拼图画布上那一张、备选条 / 方案栏 / 跨页条 / 概览的缩略图、还没出图时的占位，外面一圈 1pt 界面发丝线
+    /// （深色主题白、浅色主题黑，带 opacity）。只画在界面上，导出不读它。墨黑 #1D1D1F、胶片感 #2A2826 这类深纸色的成品放在
+    /// 石墨 / 胡桃 / 午夜的画布上和画布只差 1.01–1.10:1，以前只靠一圈很淡的阴影认得出边，看不出外边距到哪为止（TB-05）。
+    /// 自检核对这条线在 canvas / bar 上 ≥ 1.25:1（一条看得出的细线，不当字用）。
+    static var sheetEdge: Color { ink.opacity(sheetEdgeOpacity) }
+    static let sheetEdgeOpacity = 0.12
 }
 
 /// 压在照片上的（黑底胶囊里的星、心、淘汰理由，人脸小图的睁闭眼记号，审片照片区的提示条）：照片不跟主题变，这里一律是系统的
@@ -569,6 +576,11 @@ extension View {
     /// 不是 SwiftUI 的 `.secondary`：系统的二级字相纸下只有 3.8:1（优化分析 2026-11-18 V-01）；石墨从系统的 #989898 变成 #A3A3A3。
     func hintText() -> some View {
         font(.system(size: 11)).foregroundStyle(AppPalette.secondary)
+    }
+
+    /// 成品（或成品的缩略图、占位）外面一圈 1pt 发丝线（`AppPalette.sheetEdge`，TB-05）：画在外面，不压成品的像素。
+    func sheetEdge() -> some View {
+        overlay(Rectangle().strokeBorder(AppPalette.sheetEdge, lineWidth: 1).padding(-1).allowsHitTesting(false))
     }
 
     /// 一页的根上挂一次：点缀色、卡片样式、深 / 浅。弹出框、sheet 跟着环境走。

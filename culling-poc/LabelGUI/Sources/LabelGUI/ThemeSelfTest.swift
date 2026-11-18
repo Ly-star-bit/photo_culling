@@ -216,8 +216,14 @@ enum ThemeSelfTest {
                 let best = max(contrast(c("accent"), bg), contrast(keyline, bg))
                 check(best >= 3, "\(name)：选中框压在\(label)上 \(fmt(best))")
             }
-            // 焦点框（TA-03）：深色白、浅色黑，0.95 不透明，画在放照片的底、栏（审片胶片条）、卡片上 ≥ 3:1。
             let ink: UInt32 = colors.dark ? 0xFFFFFF : 0x000000
+            // 成品的边（TB-05）：sheetEdge（ink × sheetEdgeOpacity）画在拼图画布、底部条上看得出一条线（≥ 1.25:1）。成品是什么
+            // 纸色都一样：线和底分得开，边就在那儿（墨黑的成品在石墨画布上 1.05:1，只靠这条线）。
+            for surface in ["canvas", "bar"] {
+                let edge = blend(ink, AppPalette.sheetEdgeOpacity, over: c(surface))
+                check(contrast(edge, c(surface)) >= 1.25, "\(name)：成品的边在 \(surface) 上 \(fmt(contrast(edge, c(surface))))")
+            }
+            // 焦点框（TA-03）：深色白、浅色黑，0.95 不透明，画在放照片的底、栏（审片胶片条）、卡片上 ≥ 3:1。
             for surface in ["canvas", "bar", "card"] {
                 let focus = blend(ink, 0.95, over: c(surface))
                 check(contrast(focus, c(surface)) >= 3, "\(name)：焦点框在 \(surface) 上 \(fmt(contrast(focus, c(surface))))")

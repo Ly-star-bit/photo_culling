@@ -376,9 +376,10 @@ private struct CollageOverviewCard: View {
         }
     }
 
+    /// 缩略图没出来时是卡片色的占位（以前写死 #383838，TB-02）；外面一圈成品的发丝线（TB-05）。
     private var image: some View {
         ZStack {
-            Rectangle().fill(Color(white: 0.22))
+            Rectangle().fill(AppPalette.card)
             if let thumb {
                 Image(nsImage: thumb).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
             }
@@ -386,6 +387,7 @@ private struct CollageOverviewCard: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .shadow(color: .black.opacity(0.3), radius: 3, y: 1)
+        .sheetEdge()
         .overlay(alignment: .topLeading) {
             if locked { CollageLockBadge() }
         }
@@ -425,8 +427,9 @@ private struct CollageOverviewCoverCard: View {
     var body: some View {
         VStack(spacing: 2) {
             ZStack {
+                // 封面的小图比格子窄一点：底下不再垫写死的 #383838（相纸下两侧各露一条 4px 深灰，TB-02）；
+                // 还没渲出来时 CollageCoverThumb 自己画占位。
                 if store.project.bookCover != nil {
-                    Rectangle().fill(Color(white: 0.22))
                     CollageCoverThumb(store: store, longEdge: 520)
                 } else {
                     RoundedRectangle(cornerRadius: 4)

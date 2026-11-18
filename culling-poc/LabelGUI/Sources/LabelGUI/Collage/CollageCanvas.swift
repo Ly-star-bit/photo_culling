@@ -841,6 +841,9 @@ private struct CollageCanvasImage: View {
         return abs(got / want - 1) < 0.015
     }
 
+    /// 成品外面一圈界面发丝线（sheetEdge，TB-05：墨黑的成品在深色画布上看得出边）；还没有预览（空画布、刚换版式、刚进 / 出封面
+    /// 编辑）时是一张还没印的纸：卡片色 + 同一圈线。以前占位写死 #383838，相纸下压在上面的深色说明字只有 1.45:1（TB-02）。
+    /// 都只画在界面上，导出不经过这里。
     var body: some View {
         if let image = preview.image, fits(image) {
             Image(nsImage: image)
@@ -848,11 +851,13 @@ private struct CollageCanvasImage: View {
                 .interpolation(.high)
                 .frame(width: rect.width, height: rect.height)
                 .shadow(color: .black.opacity(0.35), radius: 10, y: 3)
+                .sheetEdge()
                 .offset(x: rect.minX, y: rect.minY)
         } else {
             Rectangle()
-                .fill(Color(white: 0.22))
+                .fill(AppPalette.card)
                 .frame(width: rect.width, height: rect.height)
+                .sheetEdge()
                 .offset(x: rect.minX, y: rect.minY)
         }
     }

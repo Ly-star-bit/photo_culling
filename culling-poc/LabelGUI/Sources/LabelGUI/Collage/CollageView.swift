@@ -1088,6 +1088,7 @@ private struct CollageAlternativeThumbs: View, Equatable {
                             .resizable()
                             .aspectRatio(contentMode: .fit)
                             .frame(height: 64)
+                            .sheetEdge()
                             .overlay {
                                 // 共用的选中框（TB-01）：点缀色还在缩略图里那 2.5pt，外面、里面各一圈 keyline。
                                 if item.offset == selected { SelectionRing(shape: RoundedRectangle(cornerRadius: 2)).padding(-1) }
@@ -1257,6 +1258,7 @@ struct CollageVariantStrip: View {
                     }
                 }
                 .frame(height: 52)
+                .sheetEdge()
                 .overlay {
                     if current { SelectionRing(shape: RoundedRectangle(cornerRadius: 2)).padding(-1) }
                 }
@@ -1578,6 +1580,7 @@ private struct CollageStripCard: View {
                 if pending { ProgressView().controlSize(.small) }
             }
             .frame(width: width, height: CollagePageStrip.thumbHeight)
+            .sheetEdge()
             .overlay(alignment: .topLeading) {
                 if locked { CollageLockBadge() }
             }
