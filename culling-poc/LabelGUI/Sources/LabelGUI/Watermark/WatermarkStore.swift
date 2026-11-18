@@ -706,11 +706,12 @@ final class WatermarkStore: ObservableObject {
                             preset: String? = nil) -> WatermarkCollageRequest {
         let presetConfig = preset.flatMap { presets[$0] }
         let cfg = presetConfig ?? config
+        // 拼图只用水印参数：认预设名也只比水印参数（预设带的导出设置和拼图无关，和 --collage 读 state.json 时一样）。
         return WatermarkCollageRequest(
             action: action, config: cfg,
             signatureURL: cfg.signatureEnabled && signatureImage != nil ? signatureURL : nil,
             refShort: WatermarkCollageRequest.refShort(of: selectedPhoto ?? photos.first),
-            presetName: presetConfig != nil ? preset : activePresetName)
+            presetName: presetConfig != nil ? preset : Self.presetName(matching: config, in: presets))
     }
 
     /// 水印页现在有没有读得出的签名图（拼图检视器「用水印页的签名」用）。

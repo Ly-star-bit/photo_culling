@@ -115,6 +115,13 @@ enum DeliveryPresetSelfTest {
         let third = WatermarkStore(dataDir: dir)
         check(third.presets["社交"] == nil && third.presetOptions["社交"] == nil && third.presetOptions["交付"] != nil,
               "水印预设：删了「社交」，它的导出设置也没了，「交付」的还在", "\(third.presetOptions.keys.sorted())")
+        // 带进拼图只看水印参数：导出尺寸和预设不一样，水印页上不打勾，可带进拼图时照样认得出是「交付」的水印。
+        third.applyPreset(named: "交付")
+        third.options.size = xhs
+        let request = third.makeCollageRequest(.newCollage([]))
+        check(third.activePresetName == nil && request.presetName == "交付",
+              "水印预设：导出尺寸改了 → 水印页不打勾，带进拼图的预设名照样是「交付」（拼图只比水印参数）",
+              "勾 \(third.activePresetName ?? "-") · 拼图 \(request.presetName ?? "-")")
 
         // 老版本存的 state.json：预设只有水印参数 → 套用时不动现在的导出设置。
         let oldDir = dir.appendingPathComponent("old")
