@@ -145,6 +145,12 @@ jobs:
           LABELGUI_DATA_DIR="$D/data" LABELGUI_NO_GUI=1 LABELGUI_LIVE_SOCK_ROOT="$D/sock" LABELGUI_MCP_OUT="$D/mcp" \
             "$APP_BIN" --film-looks-selftest
 
+      # 打包后的 Info.plist（优化分析 2026-11-18 OP-06）：开发语言 zh-Hans（不写的话系统菜单、打开 / 存储面板、系统报错都是英文）。
+      # 裸二进制没有 Info.plist，自检、回归看不到，只能拿 DMG 里那份查。查哪些见脚本开头。
+      - name: 打包后的 Info.plist
+        timeout-minutes: 5
+        run: culling-poc/LabelGUI/Scripts/check_package.sh "$DMG_MNT/选片工具.app"
+
       # 包里的 Python 运行时（NE5）：VLM 那一段在用户机器上跑的就是 Contents/Resources/culling-poc（app 每次启动同步到数据目录的
       # runtime/culling-poc，在那里 uv run python layer2.py），CI 以前从来没跑过它 —— 和 v1.26.2 以前漏 .json 是同一类。
       # 照 app 的做法拷到仓库外面再跑（仓库里往上找得到开发用的 pyproject，包里漏了文件也测不出）：--locked 要求包里的 uv.lock

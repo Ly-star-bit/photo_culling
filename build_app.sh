@@ -73,11 +73,18 @@ if [ -f "$ICON_SRC" ]; then
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>"
 fi
+# CFBundleDevelopmentRegion = zh-Hans（优化分析 2026-11-18 OP-06）：包里没有任何 .lproj，不写开发语言时系统框架按英文取字 ——
+# 菜单栏是 File / Edit / View / Window / Help（「显示 › 主题」实际叫 View）、打开 / 存储面板的按钮、系统报错的原话都是英文。
+# 写上这一个键就够（不用建空的 zh-Hans.lproj）：app 只有这一种语言，英文系统上系统给的字也是中文，和 app 自己的字一致。
+# 日期写法跟的是地区（Locale.current），不跟这个键（macOS 26.5 上实测，四种包一样）。系统报错一变中文，诊断包的打码要认
+# 中文句式（Diagnostics.swift 的 Redactor，--diag-selftest C2c）。裸二进制没有 Info.plist，永远是英文：CI 用 DMG 里那份核对。
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh-Hans</string>
     <key>CFBundleExecutable</key>
     <string>LabelGUI</string>
     <key>CFBundleIdentifier</key>

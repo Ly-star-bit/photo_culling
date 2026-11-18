@@ -664,9 +664,12 @@ enum DiagnosticsBundle {
 ///      最后一段是英文数字名字的文件（DSCF0001.RAF、app.1.log）照原样，中文名的文件换成 <文件 N>.扩展名；其余每段换成
 ///      <文件夹 N>（同一个名字在整个包里是同一个代号）。
 ///   3. 「」里的名字：上面认得的、路径里打过码的同一个名字换成同一个代号；「文件夹「X」」「场次「X」」「存储卡「X」」
-///      「「X」里找不到」这种一看就是文件夹 / 盘名的，没见过也换掉。弯引号 “X”（系统 NSError 的 localizedDescription：
-///      The file “X” couldn’t be opened…，这个 app 拿到的是英文）、直引号 "X"（日志里打印的 NSError、英文）同样认，
-///      英文的 the folder / the directory “X”、不像文件名的 the file “X”（列不存在的文件夹时系统也说 file）也算文件夹。
+///      「「X」里找不到」这种一看就是文件夹 / 盘名的，没见过也换掉。弯引号 “X”（系统 NSError 的 localizedDescription）、
+///      直引号 "X"（日志里打印的 NSError）同样认。系统报错两种语言都认：打包的 app 写了开发语言 zh-Hans（build_app.sh，
+///      OP-06），拿到的是中文（未能打开文件“X”，因为它不存在。/ 文件“X”不存在。/ 未能将“X”移到“Y”…）；裸二进制、
+///      v1.32.0 以前的包拿到的是英文（The file “X” couldn’t be opened…）。英文的 the folder / the directory “X”、
+///      不像文件名的 the file “X”、中文的 文件“X” / 未能将“X” / 移到“X” / 拷贝到“X”（列不存在的文件夹时系统也说「文件」）
+///      都算文件夹；宗卷“X” / “X”是只读宗卷 / the volume “X” 是盘名。
 /// 不做裸词替换：文件夹叫「照片」「婚礼」也不会把正文里的这几个字换掉。
 final class Redactor {
     /// 第 1 步：整条路径 → 代号（长的在前）。
@@ -996,6 +999,9 @@ final class Redactor {
 
     /// 「」前面是这些字：里面是文件夹 / 场次的名字。
     private static let folderBefore = ["文件夹", "场次", "认出了", "移除", "目录"]
+    /// 前面是这些字：里面是文件或者文件夹 —— 中文的系统报错（未能打开文件“X”、文件“X”不存在、未能将“X”移到“Y”、拷贝到“Y”；
+    /// 「文件夹」以「夹」结尾，不会被「文件」误认）。和英文的 the file “X” 一样，不像文件名的才当文件夹换。
+    private static let fileOrFolderBefore = ["文件", "未能将", "移到", "拷贝到"]
     /// 「」后面是这些字：里面是文件夹的名字（「X」里找不到…、「X」的照片现在在哪、「X」不是一个文件夹…）。
     private static let folderAfter = ["里找不到", "里面", "的照片", "不是一个文件夹", "已有分析结果", "已经不在", "重新定位", "那一场",
                                       "的位置"]
@@ -1017,11 +1023,15 @@ final class Redactor {
         forEachQuoted(ns) { name, before, after in
             guard !name.isEmpty, !Self.isLabel(name), knownLabel(name) == nil else { return }
             let english = Self.englishWord(before: before)
+            let fileOrFolder = english == "file" || Self.fileOrFolderBefore.contains(where: { before.hasSuffix($0) })
             let folderish = Self.folderBefore.contains(where: { before.hasSuffix($0) })
                 || Self.folderAfter.contains(where: { after.hasPrefix($0) })
                 || english == "folder" || english == "directory"
-                || (english == "file" && !Self.looksLikeFile(name) && !Self.keepsName(name))
-            if before.hasSuffix("卡") || after.hasPrefix("上，") {
+                || (fileOrFolder && !Self.looksLikeFile(name) && !Self.keepsName(name))
+            // 盘名：存储卡「X」、「X」上，…；系统报错的 宗卷“X”空间不足、“X”是只读宗卷、the volume “X”。
+            let volume = before.hasSuffix("卡") || after.hasPrefix("上，") || before.hasSuffix("宗卷")
+                || after.hasPrefix("是只读宗卷") || english == "volume"
+            if volume {
                 _ = volumeLabel(name)
             } else if folderish {
                 _ = folderLabel(name)

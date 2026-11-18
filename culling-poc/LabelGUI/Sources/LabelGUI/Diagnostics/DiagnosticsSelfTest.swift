@@ -8,7 +8,8 @@ import UniformTypeIdentifiers
 ///   B 持久日志：一条一行、换行折掉、轮转（个数、大小）、提示历史跟着进日志、实时桥的 LiveServer.log 也进日志
 ///   C 诊断包：zip 里有说明 / 诊断信息 / 提示 / 日志 / 场次概况 / 目录结构 / 崩溃报告（只要最近的、选片工具的），
 ///     没有照片、预览图（连名字都没有）、bookmark、客户备注原文、场次文件夹名、家目录；目标已经有文件 / 文件夹时一个字节都不动；
-///     打码不只认 sessions.json（纯函数：任意路径逐段打码、「」里的文件夹名、不误伤；界面那一路：真的 AppModel 里认回的场次、
+///     打码不只认 sessions.json（纯函数：任意路径逐段打码、「」里的文件夹名、英文和中文系统报错里 “” 里的文件夹名 / 盘名、
+///     不误伤；界面那一路：真的 AppModel 里认回的场次、
 ///     没登记的当前文件夹、掉出最近场次的旧场次、日志里的新路径、崩溃报告里转义过的路径 —— zip 里哪个文件都没有客户名）
 ///   D 失败原因：盘不支持废纸篓、没权限、只读盘、盘满、EPERM；原因汇总；废纸篓移走一半（拼的那句话，和真正判断的
 ///     BatchStore.trashFiles：假的移动动作，RAW 移走、JPG 抛 EPERM / 都不在 / 第一个就抛错 / 再移一次）；不限体积那条路逐字节和以前一样、
@@ -256,6 +257,7 @@ enum DiagnosticsSelfTest {
         targetChecks(work, data: data, check)
         redactorChecks(check)
         quoteChecks(work, check)
+        chineseQuoteChecks(check)
         liveFolderChecks(work, check)
     }
 
@@ -314,9 +316,9 @@ enum DiagnosticsSelfTest {
               "文件夹名里的括号算路径的一部分；包着路径的括号留在外面", at(15))
     }
 
-    /// 打码（纯函数）：系统错误文案（Foundation 的 NSError，这个 app 拿到的是英文、名字用弯引号 “X”）、日志里打印出来的 NSError
-    /// （"…" 里套着 “…”）、直引号里的文件夹名，和「」一样按前后文换代号（英文的 the folder / the file 也算）；弯引号包着的整条路径
-    /// 也打码；按钮名、照片文件名不误伤。
+    /// 打码（纯函数）：系统错误文案（Foundation 的 NSError，名字用弯引号 “X”；裸二进制拿到的是英文，打包的 app 是中文 —— 中文那一半
+    /// 在 C2c）、日志里打印出来的 NSError（"…" 里套着 “…”）、直引号里的文件夹名，和「」一样按前后文换代号（英文的 the folder /
+    /// the file 也算）；弯引号包着的整条路径也打码；按钮名、照片文件名不误伤。
     @MainActor
     private static func quoteChecks(_ work: URL, _ check: Check) {
         print("C2b. 打码：系统错误文案里 “…” 和 \"…\" 里的文件夹名")
@@ -381,6 +383,57 @@ enum DiagnosticsSelfTest {
         let zhao = label(in: at(3))
         check(at(11) == "又看了一遍：「\(li)」、“\(wang)”、\"\(zhao)\"",
               "一处认出的文件夹名，别处「」、“”、\"\" 里的也换成同一个代号", at(11) + " / " + li + wang + zhao)
+    }
+
+    /// 打码（纯函数）：中文的系统报错（优化分析 2026-11-18 OP-06 + 复核漏 1）。打包的 app 写了开发语言 zh-Hans，Foundation 的报错
+    /// 变成中文，列不存在的文件夹也说「文件“X”」—— 以前只认前面是「文件夹」的，客户文件夹名原样进包。这里的句子是从写了
+    /// CFBundleDevelopmentRegion = zh-Hans 的探针包里原样抄的（macOS 26.5）：自检跑的是裸二进制，拿到的永远是英文，只能直接喂句子。
+    @MainActor
+    private static func chineseQuoteChecks(_ check: Check) {
+        print("C2c. 打码：中文系统报错里 “…” 里的文件夹名、盘名")
+        let key = BatchStore.sessionKey(for: URL(fileURLWithPath: "/Volumes/T7/张三婚礼"))
+        let sessions = [DiagnosticsBundle.SessionDigest(key: key, path: "/Volumes/T7/张三婚礼", name: "张三婚礼_交付",
+                                                        photoCount: 3, lastAnalyzed: "")]
+        let redact = Redactor(home: "/Users/someone", sessions: sessions)
+        let texts: [String] = [
+            "分析失败: 未能打开文件“孙女士旗袍”，因为它不存在。",
+            "文件“朱先生毕业”不存在。",
+            "未能打开文件“王小姐婚礼精修”，因为你没有查看它的权限。",
+            "你没有将文件“b.txt”保存到文件夹“沈家全家福”中的权限。",
+            "你没有将文件“周老师毕业照”保存到文件夹“钱先生只读”中的权限。",
+            "未能将“郑十一写真”移到“冯十三挑错的”，因为前者不存在，或包含后者的文件夹不存在。",
+            "未能将“DSCF0001.RAF”拷贝到“褚先生婚纱”，因为已经存在同名项目。",
+            "未能打开文件“x.json”，因为它不存在。",
+            "你不能保存文件“DSCF0002.JPG”，因为“韩老师的盘”是只读宗卷。",
+            "你不能保存文件“DSCF0003.JPG”，因为宗卷“杨小姐备份”空间不足。",
+            "你不能保存文件“a.jpg”，因为“Macintosh HD”是只读宗卷。",
+            "列照片失败: 未能打开文件“张三婚礼”，因为它不存在。",
+            "又看了一遍：「孙女士旗袍」、“王小姐婚礼精修”",
+        ]
+        let out = redact.applyAll(texts)
+        func at(_ i: Int) -> String { i < out.count ? out[i] : "" }
+        let banned = ["孙女士", "朱先生", "王小姐", "沈家", "周老师", "钱先生", "郑十一", "冯十三", "褚先生", "韩老师", "杨小姐", "张三"]
+        let all = out.joined(separator: "\n")
+        check(banned.allSatisfy { !all.contains($0) }, "中文系统报错里的客户名、盘名都换掉了", all)
+        check(at(0).hasPrefix("分析失败: 未能打开文件“<文件夹 ") && at(0).hasSuffix(">”，因为它不存在。"),
+              "未能打开文件“X”，因为它不存在（列不存在的文件夹）", at(0))
+        check(at(1).hasPrefix("文件“<文件夹 ") && at(1).hasSuffix(">”不存在。"), "文件“X”不存在", at(1))
+        check(at(2).hasPrefix("未能打开文件“<文件夹 ") && at(2).hasSuffix(">”，因为你没有查看它的权限。"),
+              "未能打开文件“X”，因为你没有查看它的权限", at(2))
+        check(at(3).hasPrefix("你没有将文件“b.txt”保存到文件夹“<文件夹 "), "保存到文件夹“X”：文件名 b.txt 留着、文件夹名换掉", at(3))
+        check(at(4).hasPrefix("你没有将文件“<文件夹 ") && at(4).contains(">”保存到文件夹“<文件夹 "),
+              "将文件“X”（建文件夹没权限）：不像文件名的也换", at(4))
+        check(at(5).hasPrefix("未能将“<文件夹 ") && at(5).contains(">”移到“<文件夹 "), "未能将“X”移到“Y”：两个都换", at(5))
+        check(at(6).hasPrefix("未能将“DSCF0001.RAF”拷贝到“<文件夹 "), "拷贝到“Y”换掉，照片文件名留着", at(6))
+        check(at(7) == texts[7], "未能打开文件“x.json”：文件名不误伤", at(7))
+        check(at(8).hasPrefix("你不能保存文件“DSCF0002.JPG”，因为“<盘 ") && at(8).hasSuffix(">”是只读宗卷。"),
+              "“X”是只读宗卷：换成 <盘 N>", at(8))
+        check(at(9).contains("因为宗卷“<盘 ") && at(9).hasSuffix(">”空间不足。"), "宗卷“X”空间不足：换成 <盘 N>", at(9))
+        check(at(10) == texts[10], "Macintosh HD 照原样", at(10))
+        check(at(11) == "列照片失败: 未能打开文件“<场次 1>”，因为它不存在。", "认得的场次名在中文报错里也换成 <场次 1>", at(11))
+        let sun = ProofSheetSelfTest.matches("文件“(<文件夹 [0-9]+>)”，因为它不存在", in: at(0)).first ?? "?"
+        let wang = ProofSheetSelfTest.matches("文件“(<文件夹 [0-9]+>)”，因为你没有", in: at(2)).first ?? "?"
+        check(at(12) == "又看了一遍：「\(sun)」、“\(wang)”", "中文报错里认出的名字，别处「」、“” 里的也换成同一个代号", at(12))
     }
 
     /// 界面那一路（真的 AppModel、BatchStore）：认回的场次（photoDir 是改名以后的新路径、sessions.json 里钉着旧路径）、
