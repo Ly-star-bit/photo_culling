@@ -241,5 +241,35 @@ extension MCPSelfTest {
               && LiveHandlers.candidateReason(.similar) == "similar", "候选的理由：burst / take / similar")
         check(MCPArgs.coverFields.allSatisfy { LiveHandlers.coverFieldLabel($0) != $0 }, "封面每个字段都有中文名（提示里用）")
         check(LiveHandlers.pageKind(CollagePage(root: .leaf(CollageCell()))) == "grid", "普通页 = grid")
+        styleKeyChecks(check)
+    }
+
+    /// 婚礼两套样式按这本册子重算过边距（MC-09）：跨页画布上读回来也是 weddingFineArt / weddingCanon，不是 null；
+    /// 别的预设照旧认得出，改过边距的哪个都不是。
+    private static func styleKeyChecks(_ check: Check) {
+        var canvases: [CollageCanvas] = [CollageStyleFineArt.albumCanvas]
+        canvases += CollagePrintSpec.builtin.map(\.canvas)
+        for canvas in canvases {
+            let fine = CollageStyleFineArt.style(for: canvas, canon: false)
+            let canon = CollageStyleFineArt.style(for: canvas, canon: true)
+            let size = "\(canvas.width)×\(canvas.height)"
+            check(LiveHandlers.styleKey(fine, canvas: canvas) == "weddingFineArt", "跨页画布 \(size) 上的婚礼 · 雅致认得出")
+            check(LiveHandlers.styleKey(canon, canvas: canvas) == "weddingCanon", "跨页画布 \(size) 上的古典版心认得出")
+            var moved = fine
+            moved.margin += 0.01
+            moved.insets = nil
+            check(LiveHandlers.styleKey(moved, canvas: canvas) == nil, "跨页画布 \(size) 上改过边距的不是任何预设")
+        }
+        let album = CollageStyleFineArt.albumCanvas
+        let single = CollageProject().canvas
+        let gallery = CollageStyles.preset("gallery")
+        check(LiveHandlers.styleKey(gallery, canvas: album) == "gallery" && LiveHandlers.styleKey(gallery, canvas: single) == "gallery",
+              "别的预设在跨页、单张画布上都照旧认得出")
+        check(LiveHandlers.styleKey(CollageStyleFineArt.style, canvas: single) == "weddingFineArt",
+              "单张画布上的婚礼 · 雅致（预设原样）认得出")
+        var tinted = CollageStyleFineArt.style(for: album, canon: false)
+        tinted.look = .mono
+        tinted.lookStrength = 0.4
+        check(LiveHandlers.styleKey(tinted, canvas: album) == "weddingFineArt", "换了色调、强度还是那一套样式")
     }
 }

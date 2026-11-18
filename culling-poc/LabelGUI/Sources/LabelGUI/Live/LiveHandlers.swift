@@ -172,7 +172,7 @@ enum LiveHandlers {
         var out: [String: Any] = ["source": "app"]
         out["session"] = current ?? NSNull()
         out["mode"] = project.mode.rawValue
-        let key = styleKey(project.style)
+        let key = styleKey(project.style, canvas: project.canvas)
         out["style"] = key ?? NSNull()
         out["style_name"] = key.flatMap { k in CollageStyles.all.first { $0.key == k }?.name } ?? NSNull()
         out["look"] = project.style.look.rawValue
@@ -345,18 +345,22 @@ enum LiveHandlers {
     }
 
     /// 工程的样式是哪个预设（色调、强度另算，§9.3 的 style / look 分开报）；改过任何一项就不是任何预设 = nil。
-    static func styleKey(_ style: CollageStyle) -> String? {
+    /// 婚礼 fine-art 的两套预设套上去时边距和缝按这本册子重算过（CollageStore.setStyle、一键成套）：和预设里 30×30 的数
+    /// 不相等，拿没 adapted 的预设直接比，跨页画布上读回来就是 null（MC-09）。照界面的写法（CollageInspector.isActive）
+    /// 先按这张画布 adapted 一遍再比。
+    nonisolated static func styleKey(_ style: CollageStyle, canvas: CollageCanvas) -> String? {
         CollageStyles.all.first { preset in
+            let target = CollageStyleFineArt.adapted(preset.style, to: canvas) ?? preset.style
             // 色调这一类（色调、强度、光谱胶片的颗粒晕光）不算样式：换进光谱色调会带上起始颗粒，样式还是那一套。
             var s = style
-            s.look = preset.style.look
-            s.lookStrength = preset.style.lookStrength
-            s.filmGrain = preset.style.filmGrain
-            s.filmHalation = preset.style.filmHalation
-            s.filmExposure = preset.style.filmExposure
-            s.filmWarmth = preset.style.filmWarmth
-            s.filmFormat = preset.style.filmFormat
-            return s == preset.style
+            s.look = target.look
+            s.lookStrength = target.lookStrength
+            s.filmGrain = target.filmGrain
+            s.filmHalation = target.filmHalation
+            s.filmExposure = target.filmExposure
+            s.filmWarmth = target.filmWarmth
+            s.filmFormat = target.filmFormat
+            return s == target
         }?.key
     }
 }
@@ -1688,7 +1692,7 @@ extension LiveHandlers {
         let changed = collage.externalEdit { collage.setStyleParts(preset: preset, look: look, strength: strength, fields: fields) }
         let summary = "换了" + parts.joined(separator: "、")
         var body: [String: Any] = ["look": collage.project.style.look.rawValue]
-        body["style"] = styleKey(collage.project.style) ?? NSNull()
+        body["style"] = styleKey(collage.project.style, canvas: collage.project.canvas) ?? NSNull()
         body["look_strength"] = MCPReadModel.r3(collage.project.style.lookStrength)
         body["film_grain"] = MCPReadModel.r3(collage.project.style.filmGrain)
         body["film_halation"] = MCPReadModel.r3(collage.project.style.filmHalation)

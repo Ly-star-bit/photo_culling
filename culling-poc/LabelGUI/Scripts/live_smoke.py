@@ -914,6 +914,16 @@ def album_section():
             skip(f"整本婚礼相册没排出来（{err_code(kit)}，{g0.get('mode')}，{len(spreads(g0))} 个跨页）：相册整本那一组跳过")
             return
         settled()
+        # 优化分析 MC-09：婚礼两套样式按这本册子重算过边距，跨页画布上读回来也认得出（以前是 style: null）
+        _, wc = w("collage_set_style", {"style": "weddingCanon"})
+        g_c = get()
+        u_c = undo()
+        g_f = get()
+        check(g0.get("style") == "weddingFineArt" and g0.get("style_name") == "婚礼 · 雅致" and wc.get("style") == "weddingCanon"
+              and g_c.get("style") == "weddingCanon" and "error" not in u_c and g_f.get("style") == "weddingFineArt"
+              and (st().get("collage") or {}).get("style") == "weddingFineArt",
+              f"婚礼相册的样式读得回来：成套后 {g0.get('style')}，换古典版心 {wc.get('style')} / {g_c.get('style')}，"
+              f"撤销后 {g_f.get('style')}（{err_code(wc)} {err_code(u_c)}）")
         # 至少 3 个跨页：不够就在最后补空跨页
         while len(spreads(get())) < 3:
             w("collage_pages", {"action": "add", "page": len(spreads(get()))})
