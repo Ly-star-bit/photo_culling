@@ -4938,6 +4938,8 @@ final class BatchStore: ObservableObject {
         let failed: [String]
     }
     private(set) var lastJPEGExport: JPEGExportReport?
+    /// 上一次 JPG / 精华导出完在访达里选中了什么（无头不弹访达，--export-jpeg 打印它；优化分析 UX-04）。
+    private(set) var lastJPEGRevealed: URL?
 
     /// 文件名模板要的字段：原名就是 id（以前固定的 {id}.jpg），日期 = 拍摄时间，星级 = 写进 XMP 的那个。
     func nameFields(_ item: BatchItem, index: Int, rank: Int?) -> DeliveryNaming.Fields {
@@ -5029,6 +5031,7 @@ final class BatchStore: ObservableObject {
         isRunning = true
         lastError = nil
         lastJPEGExport = nil
+        lastJPEGRevealed = nil
         cancelFlag = AnalysisEngine.CancelFlag()
         let flag = cancelFlag
         let total = jobs.count
@@ -5117,6 +5120,10 @@ final class BatchStore: ObservableObject {
                     let title = isHighlights ? "精华导出完成" : "JPG 导出完成"
                     self.progressText = "\(title): \(count) 张 → \(folderLabel)" + kept
                     if !overIds.isEmpty { self.lastError = DeliveryEncoder.overLimitNote(overIds, maxMB: options.maxMB) }
+                    // 做完在访达里选中导出的文件夹（精华是这次新建的 Top20_日期_时间，名字事先不知道），下一步就是拖去发；
+                    // 和高 ISO、水印、拼图导出一样只在全部成功时弹（UX-04）。确认表、复制原片的位置是刚在面板里自己挑的，不弹。
+                    self.lastJPEGRevealed = folder
+                    AppRuntime.revealInFinder([folder])
                 } else {
                     self.lastError = failedNote
                 }

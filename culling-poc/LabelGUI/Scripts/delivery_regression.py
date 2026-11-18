@@ -14,7 +14,7 @@ Scripts/selftests.sh 里跑）；这里验它们在命令行出口上确实接�
    自己写的（x:xmptk="选片工具"）和以前 culling-poc 写的 → 整份重写成现在的模板；读不全的（rdf:resource）、
    读不了的（chmod 000）→ 字节不变、点名「没写星级」；没有 sidecar 的 → 新写一份。星级按 --verdicts 的判决算。
 4. --export-jpeg --scope top:N（精华，出厂默认去 GPS）：原片 EXIF 带 GPS → 输出没有 GPS（命令行自己说的「无GPS」和
-   这里自己读 EXIF / XMP 两边都看）；--keep-gps 的对照组 GPS 还在。
+   这里自己读 EXIF / XMP 两边都看）；--keep-gps 的对照组 GPS 还在。做完「在访达中显示」的是这次新建的 Top2_… 文件夹（UX-04）。
 5. --watermark --config '{"stripGPS":true}' → 输出没有 GPS；false 的对照组 GPS 还在。
 6. --export-jpeg 失败多于 3 张（4 张原片挪开）：状态栏那句列前 3 张、写「等 4 张」（EC-08，以前只列 3 张不写「等」），
    全名单（按导出顺序、带原因）记进这一场 exports.json 那一条的 failed。
@@ -420,6 +420,12 @@ def gps_section():
         check(tags == [want] * 2 and mine == [want] * 2,
               f"{label}：输出{'带着' if want else '没有'} GPS（命令行说 {['有GPS' if x else '无GPS' for x in tags]}，"
               f"自己读 EXIF / XMP {mine}）")
+        # UX-04：做完在访达里选中这次新建的 Top2_日期_时间（无头不弹，打出来）。
+        shown = re.findall(r"^在访达中显示: (.+)$", r.stdout, re.M)
+        tops = [os.path.join(dest, n) for n in os.listdir(dest)]
+        check(len(shown) == 1 and len(tops) == 1 and os.path.realpath(shown[0]) == os.path.realpath(tops[0])
+              and os.path.basename(tops[0]).startswith("Top2_"),
+              f"{label}：做完在访达里选中这次新建的精华文件夹（{shown}，文件夹里 {[os.path.basename(t) for t in tops]}）")
     print("5. --watermark --config stripGPS")
     for strip in (True, False):
         out = os.path.join(WORK, f"wm-gps-{strip}.jpg")
@@ -471,6 +477,7 @@ def failure_list_section():
           f"（{[f['id'] for f in failed]}，要 {gone}）")
     check(shown == [f["id"] for f in failed][:3], f"状态栏列的就是全名单的前 3 张、同一个顺序（{shown}）")
     check("交付对照里记的失败 4 张: " in r.stdout, "命令行把记下的失败全名单打出来")
+    check("在访达中显示" not in r.stdout, "有失败的那次不在访达里弹（和高 ISO、水印一样只在全部成功时弹，UX-04）")
 
 
 try:

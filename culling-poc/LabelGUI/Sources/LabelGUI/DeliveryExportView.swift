@@ -261,6 +261,8 @@ enum JPEGExportCLI {
         guard let report = store.lastJPEGExport else { exit(1) }
         print("文件夹 \(report.folder.path)")
         for url in report.written { print("  " + describe(url)) }
+        // 界面上做完会在访达里选中它（UX-04）；无头不弹，打出来给脚本断言。
+        if let revealed = store.lastJPEGRevealed { print("在访达中显示: \(revealed.path)") }
         // 交付对照：这次写出去的都要记进这一场的 exports.json（没记下就算失败，别把上一次的当成这次的）。
         let records = store.deliveryRecords
         guard let record = records.last, record != ledgerBefore else {
