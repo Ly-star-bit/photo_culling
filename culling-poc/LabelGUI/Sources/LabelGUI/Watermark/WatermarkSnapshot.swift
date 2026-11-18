@@ -55,11 +55,15 @@ enum WatermarkUISnapshot {
         let size = NSSize(width: width, height: height)
         // 离屏截图里 AppKit 控件底色会画成白的：--light 用浅色看控件（和 --collage-ui 一样）。
         let light = args.contains("--light")
+        // 深 / 浅交给 appTheme()（在它的 body 里读，LABELGUI_THEME_THEN 换完跟着变）；以前写死的建视图那一刻的 colorScheme 在
+        // appTheme() 里面一层，换主题后盖住了它（优化分析 2026-11-18 TB-11）。--light 要在里面一层才盖得住 appTheme()。
+        func themed<V: View>(_ v: V) -> some View {
+            (light ? AnyView(v.environment(\.colorScheme, .light)) : AnyView(v)).appTheme()
+        }
         let view = WatermarkView(store: store, batchStore: batch)
             .frame(width: size.width, height: size.height)
             .background(Color(nsColor: .windowBackgroundColor))
-            .environment(\.colorScheme, light ? .light : ThemeCenter.shared.scheme)
-        let host = NSHostingView(rootView: view.appTheme())
+        let host = NSHostingView(rootView: themed(view))
         host.frame = NSRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = light ? NSAppearance(named: .aqua) : ThemeCenter.shared.appearance
@@ -69,10 +73,11 @@ enum WatermarkUISnapshot {
         spin(15) { store.previewImage != nil && !store.previewStale }
         host.layoutSubtreeIfNeeded()
         spin(1.5)
+        // LABELGUI_THEME_THEN：画完换主题再截（和 --batch-ui / --app-ui 同一个，TB-11）。
+        if ThemeCenter.switchForSnapshot(window: window) { host.layoutSubtreeIfNeeded(); spin(3); host.displayIfNeeded(); spin(0.5) }
 
         // 顶栏不受窗口宽度限制时要多宽（按钮、文字都不截）：和窗口宽比。
-        let bar = NSHostingView(rootView: WatermarkView(store: store, batchStore: batch).topBar.fixedSize()
-            .environment(\.colorScheme, light ? .light : ThemeCenter.shared.scheme))
+        let bar = NSHostingView(rootView: themed(WatermarkView(store: store, batchStore: batch).topBar.fixedSize()))
         let idealBar = bar.fittingSize.width
 
         guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {

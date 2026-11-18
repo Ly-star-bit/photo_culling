@@ -902,6 +902,13 @@ enum CardImportSnapshot {
         window.contentView = host
         host.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        // LABELGUI_THEME_THEN：画完换主题再截（和 --batch-ui / --app-ui 同一个；以前这里不接，「从石墨切过来」截的还是石墨）。
+        if ThemeCenter.switchForSnapshot(window: window) {
+            host.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(3))
+            host.displayIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        }
         guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { exit(1) }
         host.cacheDisplay(in: host.bounds, to: rep)
         guard let data = rep.representation(using: .png, properties: [:]), (try? data.write(to: out)) != nil else {
