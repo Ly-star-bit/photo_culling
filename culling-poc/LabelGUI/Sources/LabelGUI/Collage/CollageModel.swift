@@ -1101,6 +1101,20 @@ struct CollageCanvas: Codable, Hashable {
     /// 厘米 → 像素。
     static func px(cm: Double, dpi: Double) -> Int { Int((cm / 2.54 * dpi).rounded()) }
 
+    /// 出血 mm → 像素，向上取整：印厂要的是「不少于 3mm」。以前和尺寸一样四舍五入，3mm@300dpi = 35.43 → 35 =
+    /// 2.963mm，PDF 的 BleedBox 比 TrimBox 每边只大 2.963mm（优化分析 2026-11-18 MC-12）；现在 36 = 3.048mm。
+    /// 减 0.01 再取整：「存成规格」量回来的 mm 只留四位小数（1200dpi 下最多差 0.0024 像素），36 像素 → 3.048mm →
+    /// 套回来要还是 36，不能被浮点误差进成 37。尺寸、安全区还是四舍五入（px），像素一个不变。
+    static func bleedPx(mm: Double, dpi: Double) -> Int { max(0, Int((mm / 25.4 * dpi - 0.01).rounded(.up))) }
+
+    /// v1.32 及以前 3mm 出血按四舍五入存下的像素（35@300dpi、41@350dpi）；和向上取整一样的 dpi（150、600、1200…）= nil。
+    /// 读旧工程、旧规格时认它（见 init(from:) 和 CollagePrintSpec.init(from:)）：内置规格、四个老相册画布、A4 的出血都是
+    /// 3mm，「存成规格」也是从这样的画布量回来的，存下来的出血只会是这一个数。
+    static func legacyBleed3mm(dpi: Double) -> Int? {
+        let old = px(cm: 0.3, dpi: dpi)
+        return old == bleedPx(mm: 3, dpi: dpi) ? nil : old
+    }
+
     /// 相册对开跨页：单页 pageCM × pageCM（方册）或自定义宽高，跨页宽 ×2。
     static func spread(name: String, pageWidthCM: Double, pageHeightCM: Double, dpi: Double = 300,
                        bleedMM: Double = 3, safeMM: Double = 5) -> CollageCanvas {
@@ -1108,7 +1122,7 @@ struct CollageCanvas: Codable, Hashable {
                       width: px(cm: pageWidthCM * 2, dpi: dpi),
                       height: px(cm: pageHeightCM, dpi: dpi),
                       dpi: dpi,
-                      bleed: px(cm: bleedMM / 10, dpi: dpi),
+                      bleed: bleedPx(mm: bleedMM, dpi: dpi),
                       safe: px(cm: safeMM / 10, dpi: dpi),
                       seams: .fold)
     }
@@ -1123,7 +1137,7 @@ struct CollageCanvas: Codable, Hashable {
         CollageCanvas(name: "横幅 16:9", width: 2560, height: 1440),
         CollageCanvas(name: "轮播 3 张 3:4", width: 4320, height: 1920, seams: .carousel, slides: 3),
         CollageCanvas(name: "A4 竖 300dpi", width: 2480, height: 3508, dpi: 300,
-                      bleed: px(cm: 0.3, dpi: 300), safe: px(cm: 0.5, dpi: 300)),
+                      bleed: bleedPx(mm: 3, dpi: 300), safe: px(cm: 0.5, dpi: 300)),
     ]
 
     static let albums: [CollageCanvas] = [
@@ -2126,6 +2140,12 @@ extension CollageCanvas {
         if seams == .grid9, name == "九宫格 1:1", width == 2160, height == 2160 {
             width = 3240
             height = 3240
+        }
+        // v1.32 以前出血四舍五入（3mm@300dpi 存成 35 = 2.963mm，MC-12）：存下来的工程、方案、模板、默认画布读回来
+        // 升到向上取整的 36。只认 3mm 四舍五入出来的那一个数（出血只有这一个来源，见 legacyBleed3mm）；升过的 36
+        // 不是它，再读不会再升。成品尺寸不变，导出的跨页图每边多 1 像素。
+        if bleed > 0, let old = Self.legacyBleed3mm(dpi: dpi), bleed == old {
+            bleed = Self.bleedPx(mm: 3, dpi: dpi)
         }
     }
 }

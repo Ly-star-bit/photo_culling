@@ -8,6 +8,8 @@ import PDFKit
 /// 2. 页数规则（合规、少了、多了、步长不对）、规则的容错解码、旧画布读回来没有规则、nil 不写进 JSON；
 ///    内置规格：短名、名字不重复，前四个尺寸和以前的四个相册画布像素一样；默认规则下中缝带和以前一样（求解不变）；
 ///    「存成规格」量回来再套上去像素不变；
+///    出血（MC-12）：3mm 换像素向上取整（300dpi = 36），旧工程 / 方案里四舍五入的 35 读回来升到 36、别的数不动、再读不再升，
+///    旧规格的 2.9633mm 读回来当 3mm（和升过的画布对得上），导出的跨页 PDF、封面 PDF 四边出血都 ≥ 3mm；
 /// 3. 导出前检查各种类：空照片格、页数、用了两次、放大（拦 / 提醒）、脸压中缝（胶装拦 / 平铺提醒）、贴边没铺出血、
 ///    首尾单页、字出安全区；导出确认框（只有空格时和以前一字不差、有别的列前几条、部分导出只看那几页）；
 ///    reveal 换页、选中那一格；
@@ -24,6 +26,8 @@ enum CollagePrintSelfTest {
         ranges(check: check)
         print("== 页数规则 / 印厂规格")
         rules(check: check)
+        print("== 出血不少于 3mm（MC-12）")
+        bleedMigration(root.appendingPathComponent("bleed"), check: check)
         print("== 导出前检查")
         preflight(check: check)
         preflightStore(store, check: check)
@@ -112,6 +116,8 @@ enum CollagePrintSelfTest {
         let oldCanvas = #"{"name": "相册 30×30cm 跨页", "width": 7087, "height": 3543, "dpi": 300, "bleed": 35, "safe": 59, "seams": "fold", "slides": 1, "binding": "glued"}"#
         let old = try? JSONDecoder().decode(CollageCanvas.self, from: Data(oldCanvas.utf8))
         check(old != nil && old?.printRules == nil && old?.binding == .glued, "旧画布读回来：没有规则（nil）")
+        check(old?.bleed == 36 && old?.width == 7087 && old?.safe == 59,
+              "旧画布读回来：出血 35 升到 36（MC-12），尺寸、安全区不动", "\(old?.bleed ?? -1)")
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let plain = (try? encoder.encode(CollageCanvas.albums[0])).map { String(decoding: $0, as: UTF8.self) } ?? ""
@@ -174,8 +180,9 @@ enum CollagePrintSelfTest {
                 for odd in [0, 1] {
                     let w = Int((cm * 2 / 2.54 * dpi).rounded()) + odd
                     let h = Int((cm / 2.54 * dpi).rounded()) + odd
+                    // 出血从向上取整的 3mm 起（四舍五入的那个是旧值，存的规格读回来按 3mm 升，见 bleedMigration）。
                     var c = CollageCanvas(name: "我的", width: w, height: h, dpi: dpi,
-                                          bleed: Int((dpi * 3 / 25.4).rounded()) + odd,
+                                          bleed: CollageCanvas.bleedPx(mm: 3, dpi: dpi) + odd,
                                           safe: Int((dpi * 5 / 25.4).rounded()) + odd, seams: .fold)
                     c.printRules = .standard
                     let spec = CollagePrintSpec(name: "我的", canvas: c)
@@ -200,6 +207,99 @@ enum CollagePrintSelfTest {
         let lossy = (try? JSONDecoder().decode([CollageLossy<CollagePrintSpec>].self, from: Data(broken.utf8)))?
             .compactMap(\.value)
         check(lossy?.map(\.name) == ["好的"], "坏了的规格只丢它自己", "\(lossy?.map(\.name) ?? [])")
+    }
+
+    // MARK: - 2b. 出血不少于 3mm（MC-12）
+
+    /// 出血向上取整、旧工程 / 旧规格读回来升上去、导出的 PDF 四边都 ≥ 3mm（跨页 PDF 和封面 PDF 两份）。
+    private static func bleedMigration(_ dir: URL, check: Checks) {
+        func mm(_ px: Int, _ dpi: Double) -> Double { Double(px) / dpi * 25.4 }
+        // 1. 换算：各种 dpi 都 ≥ 3mm，且少 1 像素就不够（不多给）。
+        var conv: [String] = []
+        for dpi in [150.0, 240, 300, 350, 400, 600, 720, 1200] {
+            let b = CollageCanvas.bleedPx(mm: 3, dpi: dpi)
+            if !(mm(b, dpi) >= 3 && mm(b - 1, dpi) < 3) { conv.append("\(Int(dpi))dpi→\(b)") }
+        }
+        check(conv.isEmpty, "出血 3mm 换像素向上取整：各种 dpi 都 ≥ 3mm、少 1 像素就不够", conv.joined(separator: " "))
+        var fresh: [CollageCanvas] = CollageCanvas.albums + CollageCanvas.social.filter(\.isPrint)
+        fresh += CollagePrintSpec.builtin.map(\.canvas)
+        let short = fresh.filter { mm($0.bleed, $0.dpi) < 3 }.map { "\($0.name) \($0.bleed)px" }
+        check(short.isEmpty && CollageCanvas.albums[0].bleed == 36 && CollagePrintSpec.builtin[0].canvas.bleed == 36,
+              "内置的相册画布、A4、印厂规格出血都 ≥ 3mm（300dpi = 36 像素）", short.joined(separator: " "))
+
+        // 2. 旧工程：3mm 四舍五入的那个数升上去，别的数不动；升过的再读不再升。
+        func decoded(_ bleed: Int, dpi: Double, name: String = "相册 30×30cm 跨页") -> Int? {
+            let json = #"{"name": "\#(name)", "width": 7087, "height": 3543, "dpi": \#(dpi), "bleed": \#(bleed), "safe": 59, "seams": "fold"}"#
+            return (try? JSONDecoder().decode(CollageCanvas.self, from: Data(json.utf8)))?.bleed
+        }
+        let cases: [(Int, Double, Int)] = [(35, 300, 36), (36, 300, 36), (34, 300, 34), (37, 300, 37), (12, 300, 12),
+                                           (41, 350, 42), (71, 600, 71), (9, 72, 9), (0, 300, 0)]
+        let wrong = cases.filter { decoded($0.0, dpi: $0.1) != $0.2 }
+            .map { "\($0.0)@\(Int($0.1)) → \(decoded($0.0, dpi: $0.1) ?? -1)" }
+        check(wrong.isEmpty, "旧画布读回来：35@300 → 36、41@350 → 42，别的数（34、37、12、600dpi 的 71、72dpi）不动",
+              wrong.joined(separator: " "))
+        check(decoded(35, dpi: 300, name: "自定义 单页 30×30cm") == 36 && decoded(35, dpi: 300, name: "我的") == 36,
+              "自定义尺寸、自己存的规格名字的画布也升（出血都是从 3mm 来的）")
+        // 整个工程（collage.json、存着的方案、模板都是 CollageProject）存了读、再存再读。
+        var project = CollageExportSelfTest.albumProject(pages: 1)
+        project.canvas = CollageCanvas.albums[1]
+        project.canvas.bleed = 35
+        let encoder = JSONEncoder()
+        let once = (try? encoder.encode(project)).flatMap { try? JSONDecoder().decode(CollageProject.self, from: $0) }
+        let twice = once.flatMap { try? encoder.encode($0) }.flatMap { try? JSONDecoder().decode(CollageProject.self, from: $0) }
+        check(once?.canvas.bleed == 36 && twice?.canvas.bleed == 36 && once?.canvas.width == CollageCanvas.albums[1].width,
+              "旧工程读回来出血 36，存了再读还是 36（不会一直往上加）", "\(once?.canvas.bleed ?? -1) / \(twice?.canvas.bleed ?? -1)")
+
+        // 3. 旧规格：v1.32 从 35 像素的画布「存成规格」= 2.9633mm，读回来当 3mm，和升过的画布对得上（菜单打勾）。
+        var oldCanvas = CollageCanvas.albums[0]
+        oldCanvas.bleed = 35
+        oldCanvas.name = "我的"
+        oldCanvas.printRules = .standard
+        let oldSpec = CollagePrintSpec(name: "我的", canvas: oldCanvas)
+        let specBack = (try? encoder.encode(oldSpec)).flatMap { try? JSONDecoder().decode(CollagePrintSpec.self, from: $0) }
+        let canvasBack = (try? encoder.encode(oldCanvas)).flatMap { try? JSONDecoder().decode(CollageCanvas.self, from: $0) }
+        check(abs(oldSpec.bleedMM - 2.9633) < 0.00001 && specBack?.bleedMM == 3 && specBack?.canvas.bleed == 36
+              && canvasBack.map { specBack?.matches($0) == true } == true,
+              "旧规格（2.9633mm）读回来是 3mm、套上去 36，和读回来的旧画布对得上",
+              "\(specBack?.bleedMM ?? -1)mm → \(specBack?.canvas.bleed ?? -1)px")
+        func specMM(_ v: Double) -> Double? {
+            let json = #"{"name": "我的", "pageWidthCM": 30, "pageHeightCM": 30, "dpi": 300, "bleedMM": \#(v)}"#
+            return (try? JSONDecoder().decode(CollagePrintSpec.self, from: Data(json.utf8)))?.bleedMM
+        }
+        check(specMM(2.5) == 2.5 && specMM(3.048) == 3.048 && specMM(5) == 5,
+              "别的出血（2.5、3.048、5mm）的规格不动")
+        let newSpec = CollagePrintSpec(name: "我的", canvas: CollageCanvas.albums[0])
+        let newBack = (try? encoder.encode(newSpec)).flatMap { try? JSONDecoder().decode(CollagePrintSpec.self, from: $0) }
+        check(newSpec.canvas.bleed == 36 && newBack?.canvas.bleed == 36,
+              "新画布存成规格（3.048mm）再套回来、存了再读还是 36", "\(newSpec.bleedMM)mm")
+
+        // 4. 导出的 PDF：BleedBox 比 TrimBox 四边都大 ≥ 3mm（跨页 PDF、封面 PDF）。
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let need = 3 / 25.4 * 72 - 1e-6
+        func sides(_ url: URL) -> [Double]? {
+            guard let page = CGPDFDocument(url as CFURL)?.page(at: 1) else { return nil }
+            let b = page.getBoxRect(.bleedBox)
+            let t = page.getBoxRect(.trimBox)
+            return [t.minX - b.minX, t.minY - b.minY, b.maxX - t.maxX, b.maxY - t.maxY]
+        }
+        func text(_ s: [Double]?) -> String { (s ?? []).map { String(format: "%.3fmm", $0 / 72 * 25.4) }.joined(separator: " ") }
+        let canvas = CollagePrintSpec.builtin[0].canvas
+        let spreadPDF = dir.appendingPathComponent("出血.pdf")
+        if let jpeg = CollageExportSelfTest.jpeg(width: 64, height: 32, gray: 0.5) {
+            try? CollageExport.writePDF(jpegPages: [jpeg], canvas: canvas, to: spreadPDF, title: "出血", cropMarks: true)
+        }
+        let s1 = sides(spreadPDF)
+        check(s1.map { $0.count == 4 && $0.allSatisfy { $0 >= need } } == true,
+              "跨页 PDF：BleedBox 比 TrimBox 四边都 ≥ 3mm", text(s1))
+        let coverPDF = dir.appendingPathComponent("出血_封面.pdf")
+        let layout = CollageBookCover(front: .leaf(CollageCell(kind: .empty))).layout(canvas: canvas, spreads: 10)
+        if let jpeg = CollageExportSelfTest.jpeg(width: 64, height: 32, gray: 0.5) {
+            try? CollageExport.writeCoverPDF(page: .data(jpeg), layout: layout, dpi: canvas.dpi, to: coverPDF,
+                                             title: "出血", cropMarks: true)
+        }
+        let s2 = sides(coverPDF)
+        check(s2.map { $0.count == 4 && $0.allSatisfy { $0 >= need } } == true,
+              "封面 PDF：BleedBox 比 TrimBox 四边都 ≥ 3mm", text(s2))
     }
 
     // MARK: - 3. 导出前检查
