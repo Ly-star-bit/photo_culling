@@ -7,6 +7,8 @@
 #   包版本号是 0.1，见 build_app.sh）、重签，release job 照旧发 Release（附 release-notes/<tag>.md）；没绿过 / 产物过期了
 #   → 照旧完整跑再发。
 # 发版流程：feature 推上去等绿 → 合进 main 推上去（秒过）→ 打 tag（直接用 feature 那次的包）。
+# 符号文件（OP-04）：完整跑那次把 .build/release/LabelGUI.dSYM 压成 zip 传成 PhotoCulling-dSYM（和 DMG 同样留 14 天），restamp
+# 跟着 DMG 一起下载、再传；Release 上挂 PhotoCulling-<tag>.dmg 和 PhotoCulling-<tag>.dSYM.zip 两个文件。
 name: Release
 
 on:
@@ -161,6 +163,38 @@ jobs:
           uv run --locked python layer2.py --help
           uv run --locked --offline python -c "import PIL, requests, tqdm; from PIL import Image; print('pillow', PIL.__version__, 'requests', requests.__version__, 'tqdm', tqdm.__version__)"
 
+      # 符号文件（优化分析 2026-11-18 OP-04 / CH-01）：发出去的二进制 strip -x 过（build_app.sh），app 自己的函数名一个不剩；
+      # 诊断包会带崩溃报告，没有这一次构建的 dSYM 就翻不回函数名和行号，事后也补不回（编译器、输入要一模一样才重编得出同样的地址）。
+      # swift build -c release 本来就出 .build/release/LabelGUI.dSYM：核对它的 UUID 和 DMG 里那份二进制一样（restamp 只改
+      # Info.plist、重签，UUID 不变），只用它（-o 明指 dSYM 里的 DWARF，不让 atos 自己去找）把 _main 翻一次、要翻出 main.swift，
+      # 再压成 zip，后面「上传符号文件」传成 PhotoCulling-dSYM，推 tag 时跟 DMG 一起挂到 Release 上。
+      # 翻一份崩溃报告：atos -o LabelGUI.dSYM/Contents/Resources/DWARF/LabelGUI -arch arm64 -l <报告里 LabelGUI 的加载地址> <帧地址…>
+      - name: 符号文件 (dSYM)
+        run: |
+          DSYM=culling-poc/LabelGUI/.build/release/LabelGUI.dSYM
+          DWARF="$DSYM/Contents/Resources/DWARF/LabelGUI"
+          if [ ! -f "$DWARF" ]; then
+            echo "::error title=dSYM::swift build -c release 没出 $DSYM"
+            exit 1
+          fi
+          # awk 读完整个输入、不提前 exit：提前退出时上游吃 SIGPIPE，开着 pipefail 这一步就红了。
+          SHIP="$(dwarfdump --uuid "$APP_BIN" | awk 'NR == 1 {print $2}')"
+          SYM="$(dwarfdump --uuid "$DWARF" | awk 'NR == 1 {print $2}')"
+          echo "DMG 里的二进制 UUID ${SHIP}；dSYM ${SYM}"
+          if [ -z "$SHIP" ] || [ "$SHIP" != "$SYM" ]; then
+            echo "::error title=dSYM::UUID 对不上：DMG 里的二进制 ${SHIP:-?}，dSYM ${SYM:-?}"
+            exit 1
+          fi
+          ADDR="$(nm "$DWARF" | awk '$3 == "_main" && !n {print $1; n = 1}')"
+          GOT="$(atos -o "$DWARF" -arch arm64 -l 0x100000000 "0x${ADDR:-0}")"
+          echo "atos 0x${ADDR} → ${GOT}"
+          case "$GOT" in
+            *main.swift:*) ;;
+            *) echo "::error title=dSYM::只用 dSYM 翻不出 _main 的文件和行号：${GOT}"; exit 1 ;;
+          esac
+          ditto -c -k --keepParent "$DSYM" LabelGUI.dSYM.zip
+          ls -lh LabelGUI.dSYM.zip
+
       - name: 卸下 DMG
         if: always() && env.DMG_MNT != ''
         run: hdiutil detach "$DMG_MNT" || hdiutil detach "$DMG_MNT" -force
@@ -258,10 +292,20 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # 和 DMG 同一次构建的 dSYM（「符号文件 (dSYM)」那一步压的），留得一样久：推 tag 沿用这次的 DMG 时 restamp 一起下载。
+      - name: 上传符号文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhotoCulling-dSYM
+          path: LabelGUI.dSYM.zip
+          if-no-files-found: error
+          retention-days: 14
+
   # 推 tag、这个提交绿过：拿那一次的 DMG，只把版本号换成 tag 的（feature / main 上打的包 CFBundleShortVersionString 是
   # 0.1：build_app.sh 只从 tag 带版本号；它会出现在「关于」、诊断包、MCP 的 serverInfo 里）。CFBundleVersion 是提交数，
   # 同一个提交本来就一样。只改 Info.plist、重签（和 build_app.sh 同一句 codesign），代码段、色调表、Python 运行时和那次
-  # 测过的一样；访达排版（.DS_Store、背景图）跟着 DMG 原样留着。传成这次 run 的 PhotoCulling-dmg，release 照旧下载。
+  # 测过的一样；访达排版（.DS_Store、背景图）跟着 DMG 原样留着。传成这次 run 的 PhotoCulling-dmg，release 照旧下载；那次的
+# PhotoCulling-dSYM 原样一起下载、再传（UUID 不变）。
   # 这一步红了不会自动退回完整跑：重跑这个 run，或者在网页上对这个 tag 手动 Run workflow（手动跑一律完整跑，照样发 Release）。
   restamp:
     needs: check
@@ -280,6 +324,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: PhotoCulling-dmg
+          run-id: ${{ needs.check.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      # 那次构建的 dSYM：restamp 只改 Info.plist、重签，二进制的 UUID 不变，那次的 dSYM 照样对得上。同一个提交跑的是同一份
+      # workflow，那次有 DMG 就有它（同一个 job 里紧挨着传的、留得一样久）。
+      - uses: actions/download-artifact@v4
+        with:
+          name: PhotoCulling-dSYM
           run-id: ${{ needs.check.outputs.run_id }}
           github-token: ${{ github.token }}
 
@@ -304,6 +356,15 @@ jobs:
           retention-days: 14
           overwrite: true
 
+      - name: 上传符号文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhotoCulling-dSYM
+          path: LabelGUI.dSYM.zip
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+
   # 只认 tag。DMG 从这次 run 里下载：完整跑的是 build 传的，沿用的是 restamp 传的（两个只会跑一个）。build 跳过时 release
   # 默认也会跟着跳过，所以要 !cancelled()。
   release:
@@ -322,6 +383,11 @@ jobs:
         with:
           name: PhotoCulling-dmg
 
+      # 同一次构建的 dSYM（完整跑是 build 传的，沿用的是 restamp 跟着 DMG 一起传的）。
+      - uses: actions/download-artifact@v4
+        with:
+          name: PhotoCulling-dSYM
+
       - name: 发布 Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -330,6 +396,9 @@ jobs:
           # 资产名必须 ASCII — GitHub 会把非 ASCII 字符从文件名里剥掉
           # (选片工具-v1.1.2.dmg 上传后变成 -v1.1.2.dmg)。
           cp 选片工具.dmg "PhotoCulling-${GITHUB_REF_NAME}.dmg"
+          # 符号文件：翻诊断包里崩溃报告用的（atos -o …/DWARF/LabelGUI），和 DMG 里的二进制同一个 UUID。
+          cp LabelGUI.dSYM.zip "PhotoCulling-${GITHUB_REF_NAME}.dSYM.zip"
+          ASSETS=("PhotoCulling-${GITHUB_REF_NAME}.dmg" "PhotoCulling-${GITHUB_REF_NAME}.dSYM.zip")
           # 发布说明：有 release-notes/<tag>.md 就放在正文最前面（这一版新增 / 修改了什么），
           # 后面接 GitHub 自动生成的提交对比；没有就只有自动生成的。
           NOTES="release-notes/${GITHUB_REF_NAME}.md"
@@ -338,10 +407,10 @@ jobs:
           # Release 已存在就只补/换资产（有说明文件就顺手换正文）：半途失败后点 "Re-run jobs" 时
           # gh release create 会以 422 already_exists 再次失败。
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "PhotoCulling-${GITHUB_REF_NAME}.dmg" --clobber
+            gh release upload "$GITHUB_REF_NAME" "${ASSETS[@]}" --clobber
             if [ -f "$NOTES" ]; then gh release edit "$GITHUB_REF_NAME" --notes-file "$NOTES"; fi
           else
-            gh release create "$GITHUB_REF_NAME" "PhotoCulling-${GITHUB_REF_NAME}.dmg" \
+            gh release create "$GITHUB_REF_NAME" "${ASSETS[@]}" \
               --title "选片工具 $GITHUB_REF_NAME" \
               "${NOTES_ARGS[@]}" \
               --generate-notes

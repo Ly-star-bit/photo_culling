@@ -113,8 +113,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 plutil -lint "$APP/Contents/Info.plist"
 cp .build/release/LabelGUI "$APP/Contents/MacOS/LabelGUI"
-# 去掉本地符号（-x：只删局部符号，全局符号和 Swift 运行时要的元数据都留着）：28 MB → 14 MB，DMG 小 4 MB 左右。
-# 要在 codesign 之前（签完再改二进制，签名就坏了）。崩溃报告里本地函数名会变成地址，这个工具没有收崩溃报告。
+# 去掉本地符号（-x：只删局部符号，Swift 运行时要的元数据留着）：28 MB → 14 MB，DMG 小 4 MB 左右。要在 codesign 之前
+# （签完再改二进制，签名就坏了）。这个可执行文件是整模块优化的，函数名全是局部符号，-x 等于把函数名全剥了（只剩 _main 等 3 个）。
+# 诊断包会带最近的崩溃报告（Diagnostics.swift 的 recentCrashReports），里面 app 自己的帧只剩地址：翻回函数名和行号要这一次构建的
+# .build/release/LabelGUI.dSYM（strip 不改 UUID，对得上）。CI 把它压成 zip 存下来、推 tag 时和 DMG 一起挂到 Release 上
+# （release.yml「符号文件 (dSYM)」，优化分析 2026-11-18 OP-04）；本机打的包自己留着 .build 就行。
 strip -x "$APP/Contents/MacOS/LabelGUI"
 
 # 精简 Python 运行时进 Resources:只放 layer2.py 及其 import (common.py、
