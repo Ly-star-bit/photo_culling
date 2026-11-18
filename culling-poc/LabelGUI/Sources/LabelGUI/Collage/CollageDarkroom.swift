@@ -674,9 +674,11 @@ final class CollageDarkroom: ObservableObject {
         let key = LaneKey(project, "\(store.pageIndex)|\(scale)|\(hints.count)")
         let pageIndex = store.pageIndex
         submit("preview", key: key) { [weak self] in
+            // 渲好的图装在 LiveBox 里递回来（同 ThumbnailView）：NSImage 在 15.x SDK 里不是 Sendable，发版用 15 SDK 编，
+            // 不包一层每处 5 条并发警告（这个文件里几处后台渲图都这么包）。
             let image = await Task.detached(priority: .userInitiated) {
-                Self.renderPage(project, pageIndex: pageIndex, fallback: page, hints: hints, scale: scale)
-            }.value
+                LiveBox(Self.renderPage(project, pageIndex: pageIndex, fallback: page, hints: hints, scale: scale))
+            }.value.value
             guard let self, self.current("preview", key) else { return }
             self.output.processed = image
         }
@@ -694,8 +696,8 @@ final class CollageDarkroom: ObservableObject {
         let key = LaneKey(keyed, "\(pageIndex)|\(scale)|\(hints.count)")
         submit("original", key: key) { [weak self] in
             let image = await Task.detached(priority: .utility) {
-                Self.renderPage(project, pageIndex: pageIndex, fallback: page, hints: hints, scale: scale)
-            }.value
+                LiveBox(Self.renderPage(project, pageIndex: pageIndex, fallback: page, hints: hints, scale: scale))
+            }.value.value
             guard let self, self.current("original", key) else { return }
             self.output.original = image
         }
@@ -710,21 +712,22 @@ final class CollageDarkroom: ObservableObject {
         let key = LaneKey("\(id)|\(Int((strength * 20).rounded()))|\(base.style.halftone.map { "\($0)" } ?? "")|\(hints[id] != nil)"
                           + "|\(Self.printingKey(base.style))")
         submit("frames", key: key) { [weak self] in
-            let images = await Task.detached(priority: .utility) { () -> [CollageLook: NSImage] in
+            let images = await Task.detached(priority: .utility) { () -> LiveBox<[CollageLook: NSImage]> in
                 // 27 张互不相干：并发渲（每张和一张张挨着渲逐字节一样）。工程是值类型、几个线程只读不改：装进 LiveBox
                 // 递给 concurrentPerform（它的闭包是 @Sendable，CollageProject 没标 Sendable，直接捕获有一条警告）。
+                // 收图的字典同理，图各装一个 LiveBox（15.x SDK 里 NSImage 不是 Sendable），渲完再拆出来。
                 let shared = LiveBox(base)
-                var out: [CollageLook: NSImage] = [:]
+                var out: [CollageLook: LiveBox<NSImage>] = [:]
                 let lock = NSLock()
                 DispatchQueue.concurrentPerform(iterations: looks.count) { i in
                     let image = Self.sample(id, base: shared.value, hints: hints, look: looks[i], strength: strength,
                                             width: 330, height: 220)
                     lock.lock()
-                    out[looks[i]] = image
+                    out[looks[i]] = image.map { LiveBox($0) }
                     lock.unlock()
                 }
-                return out
-            }.value
+                return LiveBox(out.mapValues { $0.value })
+            }.value.value
             guard let self, self.current("frames", key) else { return }
             self.frames = images
         }
@@ -738,20 +741,20 @@ final class CollageDarkroom: ObservableObject {
         let steps = Self.stripSteps
         let key = LaneKey("\(id)|\(look.rawValue)|\(hints[id] != nil)|\(Self.printingKey(base.style))")
         submit("strip", key: key) { [weak self] in
-            let images = await Task.detached(priority: .utility) { () -> [NSImage] in
-                // 同样并发渲，按强度的先后放回去（渲不出来的那格照旧去掉）。工程同样装进 LiveBox 递过去。
+            let images = await Task.detached(priority: .utility) { () -> LiveBox<[NSImage]> in
+                // 同样并发渲，按强度的先后放回去（渲不出来的那格照旧去掉）。工程、收回来的图同样装进 LiveBox。
                 let shared = LiveBox(base)
-                var out = [NSImage?](repeating: nil, count: steps.count)
+                var out = [LiveBox<NSImage?>](repeating: LiveBox(nil), count: steps.count)
                 let lock = NSLock()
                 DispatchQueue.concurrentPerform(iterations: steps.count) { i in
                     let image = Self.sample(id, base: shared.value, hints: hints, look: look, strength: steps[i],
                                             width: 150, height: 100)
                     lock.lock()
-                    out[i] = image
+                    out[i] = LiveBox(image)
                     lock.unlock()
                 }
-                return out.compactMap { $0 }
-            }.value
+                return LiveBox(out.compactMap { $0.value })
+            }.value.value
             guard let self, self.current("strip", key) else { return }
             self.testStrip = images
         }
@@ -817,9 +820,9 @@ final class CollageDarkroom: ObservableObject {
         if laneKey["loupe"] != key { output.loupeStale = output.loupe != nil }
         submit("loupe", key: key) { [weak self] in
             let image = await Task.detached(priority: .utility) {
-                Self.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints, scale: scale, center: center,
-                                 side: side, density: density, originals: originals)
-            }.value
+                LiveBox(Self.renderLoupe(project, pageIndex: pageIndex, fallback: page, hints: hints, scale: scale, center: center,
+                                         side: side, density: density, originals: originals))
+            }.value.value
             guard let self, self.current("loupe", key) else { return }
             self.output.loupe = image
             self.output.loupeStale = false

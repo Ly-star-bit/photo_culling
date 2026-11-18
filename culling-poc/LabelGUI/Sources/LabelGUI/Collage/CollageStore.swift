@@ -1603,13 +1603,15 @@ final class CollageStore: ObservableObject {
             // 鼠标扫过一排时不每张都渲：停住一小会儿才渲。
             try? await Task.sleep(nanoseconds: 180_000_000)
             guard let self, self.workspace.altHover.token == token else { return }
-            let image = await Task.detached(priority: .userInitiated) { () -> NSImage? in
+            // 渲好的图装在 LiveBox 里递回来（同 ThumbnailView）：NSImage 在 15.x SDK 里不是 Sendable，发版用 15 SDK 编，
+            // 不包一层每处 5 条并发警告（这个文件里几处后台渲小图都这么包）。
+            let image = await Task.detached(priority: .userInitiated) { () -> LiveBox<NSImage?> in
                 snapshot.pages = [page]
                 var opts = CollageRender.Options(scale: scale)
                 opts.includeBleed = false
-                guard let cg = CollageRender.render(page: page, project: snapshot, hints: hints, options: opts) else { return nil }
-                return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
-            }.value
+                guard let cg = CollageRender.render(page: page, project: snapshot, hints: hints, options: opts) else { return LiveBox(nil) }
+                return LiveBox(NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height)))
+            }.value.value
             guard self.workspace.altHover.token == token else { return }
             hover.image = image
             hover.index = image == nil ? nil : index
@@ -1629,9 +1631,9 @@ final class CollageStore: ObservableObject {
         let c = project.canvas
         let scale = min(1, max(150 / Double(max(c.width, c.height)), 136 / Double(max(1, c.height))))
         Task { [weak self] in
-            let thumbs = await Task.detached(priority: .utility) { () -> [NSImage] in
+            let thumbs = await Task.detached(priority: .utility) { () -> LiveBox<[NSImage]> in
                 // 渲染失败也占个位：下标必须和 alternatives 一一对应，点第 5 张就是第 5 版。
-                items.map { page in
+                LiveBox(items.map { page -> NSImage in
                     snapshot.pages = [page]
                     var opts = CollageRender.Options(scale: scale)
                     opts.includeBleed = false
@@ -1639,8 +1641,8 @@ final class CollageStore: ObservableObject {
                         return NSImage(size: NSSize(width: 60, height: 60))
                     }
                     return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
-                }
-            }.value
+                })
+            }.value.value
             guard let self, self.solveGeneration == generation, self.alternativesPageID == pageID,
                   self.alternativesBatch == batch, self.alternatives.count == thumbs.count else { return }
             self.alternativeThumbs = thumbs
@@ -4089,7 +4091,7 @@ final class CollageStore: ObservableObject {
         base.pages = [page]
         let hints = self.hints
         Task { [weak self] in
-            let thumbs = await Task.detached(priority: .utility) { () -> [CollageLook: NSImage] in
+            let thumbs = await Task.detached(priority: .utility) { () -> LiveBox<[CollageLook: NSImage]> in
                 var out: [CollageLook: NSImage] = [:]
                 for look in CollageLook.allCases {
                     var p = base
@@ -4100,8 +4102,8 @@ final class CollageStore: ObservableObject {
                         out[look] = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
                     }
                 }
-                return out
-            }.value
+                return LiveBox(out)
+            }.value.value
             guard let self, self.lookThumbKey == key else { return }
             self.thumbs.looks = thumbs
         }
@@ -4147,7 +4149,7 @@ final class CollageStore: ObservableObject {
         styleThumbTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(300))
             guard !Task.isCancelled else { return }
-            let thumbs = await Task.detached(priority: .utility) { () -> [String: NSImage] in
+            let thumbs = await Task.detached(priority: .utility) { () -> LiveBox<[String: NSImage]> in
                 var out: [String: NSImage] = [:]
                 for preset in CollageStyles.all {
                     var p = base
@@ -4159,8 +4161,8 @@ final class CollageStore: ObservableObject {
                         out[preset.key] = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
                     }
                 }
-                return out
-            }.value
+                return LiveBox(out)
+            }.value.value
             guard let self, !Task.isCancelled, self.styleThumbKey == key else { return }
             self.thumbs.styles = thumbs
         }
@@ -4226,10 +4228,10 @@ final class CollageStore: ObservableObject {
             for (template, key) in todo {
                 if Task.isCancelled { return }
                 let source = template.contactSheet != nil ? rollPhotos : photos
-                let thumb = await Task.detached(priority: .utility) { () -> NSImage? in
-                    Self.templateThumb(template, base: base, photos: source, hints: hints, album: album,
-                                       pageLook: pageLook, lookSource: lookSource)
-                }.value
+                let thumb = await Task.detached(priority: .utility) { () -> LiveBox<NSImage?> in
+                    LiveBox(Self.templateThumb(template, base: base, photos: source, hints: hints, album: album,
+                                               pageLook: pageLook, lookSource: lookSource))
+                }.value.value
                 guard let self, self.sessionToken == token, !Task.isCancelled else { return }
                 if let thumb { pending.append(TemplateThumb(name: template.name, image: thumb, key: key)) }
                 if CACurrentMediaTime() - lastFlush >= 0.15 {
@@ -4463,7 +4465,7 @@ final class CollageStore: ObservableObject {
             // 用一个标记传过去（不抓着那个任务本身：它的结果带 NSImage，不是 Sendable）。
             let stop = CollageCancelFlag()
             let rendered = await withTaskCancellationHandler {
-              await Task.detached(priority: .utility) { () -> [UUID: (image: NSImage, complete: Bool)] in
+              await Task.detached(priority: .utility) { () -> LiveBox<[UUID: (image: NSImage, complete: Bool)]> in
                 let scale = min(1, 260 / Double(max(snapshot.canvas.width, snapshot.canvas.height)))
                 var out: [UUID: (image: NSImage, complete: Bool)] = [:]
                 for page in pages {
@@ -4476,8 +4478,8 @@ final class CollageStore: ObservableObject {
                     guard let cg = CollageRender.render(page: page, project: snapshot, hints: hints, options: opts) else { continue }
                     out[page.id] = (NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height)), report.missing.isEmpty)
                 }
-                return out
-              }.value
+                return LiveBox(out)
+              }.value.value
             } onCancel: {
                 stop.cancel()
             }
@@ -5813,7 +5815,7 @@ extension CollageStore {
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
             let jobs = todo.map(\.variant)
-            let rendered = await Task.detached(priority: .utility) { () -> [String: (image: NSImage, complete: Bool)] in
+            let rendered = await Task.detached(priority: .utility) { () -> LiveBox<[String: (image: NSImage, complete: Bool)]> in
                 var out: [String: (image: NSImage, complete: Bool)] = [:]
                 for v in jobs {
                     guard let page = v.project.pages.first else { continue }
@@ -5831,8 +5833,8 @@ extension CollageStore {
                     out[v.id] = (NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height)),
                                  report.missing.isEmpty && settled)
                 }
-                return out
-            }.value
+                return LiveBox(out)
+            }.value.value
             guard let self, !Task.isCancelled else { return }
             let still = Set(self.project.variants.map(\.id))
             var images = self.thumbs.variants.filter { still.contains($0.key) }

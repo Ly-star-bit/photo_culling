@@ -415,7 +415,7 @@ private struct DarkroomSwatches: View {
                             LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
                                 ForEach(group.looks, id: \.self) { look in
                                     DarkroomSwatch(model: model, look: look, small: group.kind == .filter,
-                                                   image: model.frames[look], applied: applied == look,
+                                                   image: LiveBox(model.frames[look]), applied: applied == look,
                                                    focused: model.focus == look && applied != look,
                                                    hovered: model.hover == look)
                                         .equatable()
@@ -440,13 +440,14 @@ private struct DarkroomSwatch: View, Equatable {
     let model: CollageDarkroom
     let look: CollageLook
     let small: Bool
-    let image: NSImage?
+    /// 装在 LiveBox 里：15.x SDK 里 NSImage 不是 Sendable，直接存的话它算主线程隔离的，下面 nonisolated 的 == 一碰就是警告。
+    let image: LiveBox<NSImage?>
     let applied: Bool
     let focused: Bool
     let hovered: Bool
 
     nonisolated static func == (a: Self, b: Self) -> Bool {
-        a.model === b.model && a.look == b.look && a.small == b.small && a.image === b.image
+        a.model === b.model && a.look == b.look && a.small == b.small && a.image.value === b.image.value
             && a.applied == b.applied && a.focused == b.focused && a.hovered == b.hovered
     }
 
@@ -458,7 +459,7 @@ private struct DarkroomSwatch: View, Equatable {
         VStack(alignment: .leading, spacing: 5) {
             ZStack {
                 DarkroomPalette.surround
-                if let image {
+                if let image = image.value {
                     Image(nsImage: image).resizable().interpolation(.high).aspectRatio(contentMode: .fill)
                         .transition(.opacity)
                 }
@@ -475,7 +476,7 @@ private struct DarkroomSwatch: View, Equatable {
                 .lineLimit(1)
         }
         .animation(.easeOut(duration: 0.12), value: hovered)
-        .animation(.easeOut(duration: 0.12), value: image != nil)
+        .animation(.easeOut(duration: 0.12), value: image.value != nil)
         .contentShape(Rectangle())
         .onHover { inside in
             if inside { model.hover = look } else if model.hover == look { model.hover = nil }
