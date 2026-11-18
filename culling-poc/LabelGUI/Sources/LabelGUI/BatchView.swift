@@ -4252,6 +4252,41 @@ enum FullResCache {
         cache.setObject(image, forKey: path as NSString, cost: cg.width * cg.height * 4)
         return image
     }
+
+    /// 在解的原图（同一张只解一份）：放大时预解下一张（ViewerZoom），预解还没完就翻到了，等那一份 —— 不然同一个文件
+    /// 两份整幅解码一起跑，40 MP 一份 160 MB。和 FitCache.Book 同一个写法。
+    private final class InFlight: @unchecked Sendable {
+        private let lock = NSLock()
+        private var tasks: [String: Task<LiveBox<NSImage?>, Never>] = [:]
+
+        /// 这张已经有人在解就交出那一份，没有才 `start` 一个（在锁里登记，任务要等锁放了才能 finish）。
+        func task(for path: String, start: () -> Task<LiveBox<NSImage?>, Never>) -> Task<LiveBox<NSImage?>, Never> {
+            lock.lock(); defer { lock.unlock() }
+            if let running = tasks[path] { return running }
+            let made = start()
+            tasks[path] = made
+            return made
+        }
+
+        func finish(_ path: String) {
+            lock.lock(); defer { lock.unlock() }
+            tasks[path] = nil
+        }
+    }
+    private static let inFlight = InFlight()
+
+    /// 后台解原图（进缓存）。同一张已经在解（预解的）就等那一份，不另起。
+    static func image(path: String, priority: TaskPriority = .userInitiated) async -> LiveBox<NSImage?> {
+        if let hit = cache.object(forKey: path as NSString) { return LiveBox(hit) }
+        let task = inFlight.task(for: path) {
+            Task.detached(priority: priority) { () -> LiveBox<NSImage?> in
+                let image = load(path: path)
+                inFlight.finish(path)
+                return LiveBox(image)
+            }
+        }
+        return await task.value
+    }
 }
 
 // MARK: - 对焦高亮 (focus peaking)
@@ -4784,12 +4819,11 @@ struct PhotoInspector: View {
     /// The grid's current visible order — paging must match what's on screen.
     let gridOrder: [String]
     @State var currentID: String
-    @State private var zoomed = false
-    @State private var fullResImage: NSImage?
-    @State private var loadingFullRes = false
-    /// How the zoom pane opens: at fit×pinch-factor (pinch entry, continuous
-    /// with the gesture) or straight at 100% (double-click / toolbar button).
-    @State private var zoomEntry: ZoomPane.Entry = .hundred
+    /// 放大（Z / 双击 / 捏合）：翻页不退出，原图按同一个倍数落在主脸上，开着时预解下一张（ViewerZoom，和审片共用）。
+    /// 怎么进的放大（捏合 = 适应 × 捏合倍数，和手势接得上；双击 / 按钮 = 100%）也记在它里面。
+    @StateObject private var zoom = ViewerZoom()
+    /// 上一次往哪边翻（→ = 1）：放大时预解的是这个方向的下一张。
+    @State private var direction = 1
     /// Live scale of the fit view while an entry pinch is in progress — visual
     /// feedback so the gesture never feels dead before zoom mode takes over.
     @State private var fitPinch: CGFloat = 1.0
@@ -4848,7 +4882,7 @@ struct PhotoInspector: View {
         }
         .frame(minWidth: 960, idealWidth: 1240, minHeight: 700, idealHeight: 880)
         .onChange(of: focusPeak) { refreshFocusMask() }
-        .onChange(of: zoomed) { refreshFocusMask() }
+        .onChange(of: zoom.full?.path) { refreshFocusMask() }
         .onChange(of: currentID) { refreshFocusMask() }
         // ?：快捷键一览（看单张是 sheet，键盘落在它自己的窗口上，网格的 ? 接不到）。
         .shortcutsHotkey(isPresented: $showShortcuts)
@@ -4859,13 +4893,13 @@ struct PhotoInspector: View {
 
     /// 对焦高亮开关（按钮和 P 键）：没放大时打开 = 先放大再开（UX-06：以前按钮灰着、按 P 没反应，也不说为什么）。
     private func setFocusPeak(_ on: Bool) {
-        if on, !zoomed, !loadingFullRes, let item { toggleZoom(item) }
+        if on, !zoom.on, let item { toggleZoom(item) }
         focusPeak = on
     }
 
     /// Esc：放大着先退出放大，再按才关闭（UX-06：以前放大着按 Esc 整个关掉回网格，审片里是退一层）。
     private func closeOrUnzoom() {
-        if zoomed { zoomed = false } else { inspectedID = nil }
+        if zoom.on { zoom.off() } else { inspectedID = nil }
     }
 
     /// 无头按键：和上面的按钮、快捷键调同一个函数（离屏窗口收不到键盘，见 BatchPerf.keys）。
@@ -4887,11 +4921,11 @@ struct PhotoInspector: View {
 
     /// 无头打印：现在是哪张、放大开没开、原图是哪张的、对焦高亮。busy = 原图 / 遮罩还在算，等它。
     private func describe() -> (busy: Bool, text: String) {
-        let full = fullResImage.map { "\(Int($0.size.width))×\(Int($0.size.height))" } ?? "无"
+        let path = item?.decodePath
         let mask = focusMask.map { URL(fileURLWithPath: $0.key).deletingPathExtension().lastPathComponent } ?? "无"
-        let busy = loadingFullRes || (focusPeak && zoomed && focusMask?.key != item?.decodePath)
-        return (busy, "看单张 \(currentID) · 判决 \(item?.verdict.rawValue ?? "-") · 放大 \(zoomed ? "开" : "关")"
-                + (loadingFullRes ? "（解码中）" : "") + " · 原图 \(full) · 对焦高亮 \(focusPeak ? "开" : "关")（遮罩 \(mask)）")
+        let maskPending = focusPeak && path.map { zoom.image(for: $0) != nil } == true && focusMask?.key != path
+        return (!zoom.settled || maskPending, "看单张 \(currentID) · 判决 \(item?.verdict.rawValue ?? "-") · "
+                + zoom.summary(for: path) + " · 对焦高亮 \(focusPeak ? "开" : "关")（遮罩 \(mask)）")
     }
 
     // MARK: header
@@ -4923,12 +4957,11 @@ struct PhotoInspector: View {
                 .toggleStyle(.button)
                 .keyboardShortcut("p", modifiers: [])
                 .help("100% 视图上红色标出合焦区域，看焦点落在眼睛还是耳朵 (P)；没放大时先放大")
-            Button(zoomed ? "适应窗口" : (loadingFullRes ? "解码原图..." : "放大 (Z)")) {
+            Button(zoom.on ? "适应窗口" : "放大 (Z)") {
                 toggleZoom(item)
             }
             .keyboardShortcut("z", modifiers: [])
-            .disabled(loadingFullRes)
-            .help("放大到 100%（Z，双击照片也行）；再按回到适应窗口")
+            .help("放大到 100%，落在主脸上（Z，双击照片也行）；放大着翻页保持放大。再按回到适应窗口")
             Button("在访达中显示") {
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: item.rawPath)])
             }
@@ -4947,22 +4980,29 @@ struct PhotoInspector: View {
     @ViewBuilder
     private func imagePane(_ item: BatchItem) -> some View {
         Group {
-            if zoomed, let full = fullResImage {
+            if zoom.on, let full = zoom.image(for: item.decodePath) {
                 // AppKit-native magnification: NSScrollView handles the pinch
                 // itself — smooth, continuous, anchored at the pointer. The old
                 // SwiftUI ScrollView + frame-resize approach re-laid the content
                 // on every tick with no anchor control, which felt like the
                 // zoom "jumping around".
+                // 一张照片一个 ZoomPane（.id）：同一个滚动视图换图时，联动会按上一张的人脸算偏移（ViewerZoom）。
                 ZoomPane(image: full,
-                         entry: zoomEntry,
+                         entry: zoom.entry,
                          faceBbox: showOverlay ? item.faceBbox : nil,
                          boxColor: item.dynamicEyeClosed == true ? .systemRed : .systemYellow,
-                         focusMask: focusPeak && focusMask?.key == item.decodePath ? focusMask?.image : nil)
+                         focusMask: focusPeak && focusMask?.key == item.decodePath ? focusMask?.image : nil,
+                         anchor: ViewerZoom.faceAnchor(item.faceBbox),
+                         link: zoom.link)
+                    .id(item.decodePath)
             } else {
                 // Async cached decode — a synchronous NSImage(contentsOfFile:)
                 // here blocked the main thread on every open/photo switch.
                 SharpImageView(previewPath: item.previewPath, decodePath: item.decodePath)
                     .overlay { analysisOverlay(item) }
+                    .overlay(alignment: .bottomLeading) {
+                        if zoom.loading(item.decodePath) { ViewerDecodingBadge() }
+                    }
                     .scaleEffect(fitPinch)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color.black)
@@ -4979,18 +5019,18 @@ struct PhotoInspector: View {
                                 let factor = value.magnification
                                 fitPinch = 1.0
                                 if factor > 1.1 {
-                                    toggleZoom(item, entry: .fit(factor: factor))
+                                    zoom.enter(path: item.decodePath, next: upcomingPath(), entry: .fit(factor: factor))
                                 }
                             }
                     )
-                    .onTapGesture(count: 2) { toggleZoom(item, entry: .hundred) }
+                    .onTapGesture(count: 2) { zoom.enter(path: item.decodePath, next: upcomingPath(), entry: .hundred) }
             }
         }
         .onAppear { prefetchNeighbors() }
         .onChange(of: currentID) {
-            zoomed = false
-            fullResImage = nil
+            // 放大开着就保持（UX-01）：这张的原图解出来照同样的倍数落在主脸上，先显示适应窗口的图。
             fitPinch = 1.0
+            zoom.show(self.item?.decodePath, next: upcomingPath())
             prefetchNeighbors()
         }
     }
@@ -5274,39 +5314,22 @@ struct PhotoInspector: View {
         }
     }
 
-    private func toggleZoom(_ item: BatchItem, entry: ZoomPane.Entry = .hundred) {
-        if zoomed {
-            zoomed = false
-            return
-        }
-        zoomEntry = entry
-        if let cached = FullResCache.cache.object(forKey: item.decodePath as NSString) {
-            fullResImage = cached
-            zoomed = true
-            return
-        }
-        loadingFullRes = true
-        let path = item.decodePath
-        let requestedID = item.id
-        Task.detached(priority: .userInitiated) {
-            let loaded = LiveBox(FullResCache.load(path: path))
-            await MainActor.run {
-                let image = loaded.value
-                loadingFullRes = false
-                // 一张 40MP 原图要解码约 1 秒，期间用户可能已经 ←/→ 翻走了。
-                // 不校验的话放大窗里是上一张、而头部信息和判决键作用在这一张。
-                guard requestedID == currentID else { return }
-                if let image {
-                    fullResImage = image
-                    zoomed = true
-                }
-            }
-        }
+    /// Z / 按钮：放大开 ↔ 关。一张 40MP 原图要解码约 1 秒，期间用户可能已经 ←/→ 翻走了：ViewerZoom 里解好的图带着路径，
+    /// 只给那一张用 —— 不然放大窗里是上一张、而头部信息和判决键作用在这一张。
+    private func toggleZoom(_ item: BatchItem) {
+        zoom.toggle(path: item.decodePath, next: upcomingPath())
     }
 
-    /// 放大 + 开关都亮着才算；算完核对 key，翻页了就丢掉。
+    /// 接着可能翻到的那张（上一次翻的方向）：放大开着时预解它的原图。
+    private func upcomingPath() -> String? {
+        let ids = visibleIDs
+        guard let idx = ids.firstIndex(of: currentID), ids.indices.contains(idx + direction) else { return nil }
+        return store.item(withID: ids[idx + direction])?.decodePath
+    }
+
+    /// 放大 + 开关都亮着、这张原图解好了才算；算完核对 key，翻页了就丢掉。
     private func refreshFocusMask() {
-        guard focusPeak, zoomed, let item, let full = fullResImage else { return }
+        guard focusPeak, zoom.on, let item, let full = zoom.image(for: item.decodePath) else { return }
         let key = item.decodePath
         if focusMask?.key == key { return }
         Task.detached(priority: .userInitiated) {
@@ -5323,6 +5346,7 @@ struct PhotoInspector: View {
         guard let idx = ids.firstIndex(of: currentID) else { return }
         let next = idx + delta
         if ids.indices.contains(next) {
+            direction = delta
             currentID = ids[next]
         }
     }
@@ -5440,9 +5464,10 @@ struct ReviewView: View {
     @State private var showShortcuts = false
     /// In-flow focus check: Z / double-click / pinch opens the full-res ZoomPane
     /// right here — no detour through the inspector and back.
-    @State private var zoomed = false
-    @State private var zoomImage: NSImage?
-    @State private var loadingZoom = false
+    /// 翻页保持放大、落在主脸上、预解下一张原图（ViewerZoom，和看单张共用；UX-01 / 11-04 F16）。
+    @StateObject private var zoom = ViewerZoom()
+    /// 上一次往哪边翻（→ / 判完自动下一张 = 1）：放大时预解的是这个方向的下一张。
+    @State private var direction = 1
     @State private var focusPeak = false
     @State private var focusMask: (key: String, image: CGImage)?
     /// 最后一遍过「留下的」时不走进废片区（默认开）。本来就只看废片（筛选了废片再进来审）时不起作用。
@@ -5516,8 +5541,8 @@ struct ReviewView: View {
                         .hintText()
                         .lineLimit(1).truncationMode(.tail)
                         .layoutPriority(-1)
-                    Button(zoomed ? "适应窗口" : (loadingZoom ? "解码原图..." : "放大 (Z)")) { toggleZoom(item) }
-                        .disabled(loadingZoom)
+                    Button(zoom.on ? "适应窗口" : "放大 (Z)") { toggleZoom(item) }
+                        .help("放大到 100%，落在主脸上 (Z)；放大着翻页、判完自动下一张都保持放大")
                     // 不再灰着（UX-06）：没放大时点它 = 先放大再开。
                     Toggle("对焦高亮 (P)", isOn: Binding(get: { focusPeak }, set: { setFocusPeak($0) }))
                         .toggleStyle(.button)
@@ -5530,12 +5555,18 @@ struct ReviewView: View {
                 }
                 .padding(8)
 
-                if zoomed, let full = zoomImage {
-                    ZoomPane(image: full, entry: .hundred,
+                if zoom.on, let full = zoom.image(for: item.decodePath) {
+                    // 一张照片一个 ZoomPane（.id）：同一个滚动视图换图时，联动会按上一张的人脸算偏移（ViewerZoom）。
+                    ZoomPane(image: full, entry: zoom.entry,
                              faceBbox: item.faceBbox,
                              boxColor: item.dynamicEyeClosed == true ? .systemRed : .systemYellow,
-                             focusMask: focusPeak && focusMask?.key == item.decodePath ? focusMask?.image : nil)
+                             focusMask: focusPeak && focusMask?.key == item.decodePath ? focusMask?.image : nil,
+                             anchor: ViewerZoom.faceAnchor(item.faceBbox),
+                             link: zoom.link)
+                        .id(item.decodePath)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        // 放大着判完自动下一张也要看得到判成了什么（以前一判就退出放大，提示画在适应窗口那张图上）。
+                        .overlay(alignment: .top) { toastView }
                 } else {
                     SharpImageView(previewPath: item.previewPath, decodePath: item.decodePath)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -5543,10 +5574,15 @@ struct ReviewView: View {
                         // 右上角：这张里每个人的脸，带睁闭眼圈 —— 不用放大就能看眼睛。
                         .overlay(alignment: .topTrailing) { faceColumn(item) }
                         .overlay(alignment: .top) { toastView }
-                        .onTapGesture(count: 2) { toggleZoom(item) }
+                        .overlay(alignment: .bottomLeading) {
+                            if zoom.loading(item.decodePath) { ViewerDecodingBadge() }
+                        }
+                        .onTapGesture(count: 2) { zoom.enter(path: item.decodePath, next: upcomingPath(), entry: .hundred) }
                         .gesture(
                             MagnifyGesture().onEnded { value in
-                                if value.magnification > 1.1 { toggleZoom(item) }
+                                if value.magnification > 1.1 {
+                                    zoom.enter(path: item.decodePath, next: upcomingPath(), entry: .hundred)
+                                }
                             }
                         )
                 }
@@ -5619,8 +5655,8 @@ struct ReviewView: View {
             if AppRuntime.headless { SnapshotPreview.viewer = { describe() } }
         }
         .onChange(of: focusedID) {
-            zoomed = false
-            zoomImage = nil
+            // 放大开着就保持（UX-01）：这张的原图解出来照同样的倍数落在主脸上，先显示适应窗口的图。
+            zoom.show(current?.decodePath, next: upcomingPath())
             prefetchNeighbors()
         }
         .onDisappear {
@@ -5629,7 +5665,7 @@ struct ReviewView: View {
         .onKeyPress(.leftArrow) { step(-1); return .handled }
         .onKeyPress(.rightArrow) { step(1); return .handled }
         .onChange(of: focusPeak) { refreshFocusMask() }
-        .onChange(of: zoomed) { refreshFocusMask() }
+        .onChange(of: zoom.full?.path) { refreshFocusMask() }
         .onKeyPress(characters: .init(charactersIn: "pP")) { press in
             guard press.modifiers.isSubset(of: [.shift, .capsLock]) else { return .ignored }
             setFocusPeak(!focusPeak)
@@ -5670,12 +5706,12 @@ struct ReviewView: View {
 
     /// Esc backs out one level at a time: zoom first, then review.
     private func exitOrUnzoom() {
-        if zoomed { zoomed = false } else { reviewMode = false }
+        if zoom.on { zoom.off() } else { reviewMode = false }
     }
 
     /// 对焦高亮开关（按钮和 P 键）：没放大时打开 = 先放大再开（UX-06：以前按钮灰着、P 没放大时不响应）。
     private func setFocusPeak(_ on: Bool) {
-        if on, !zoomed, let item = current { toggleZoom(item) }
+        if on, !zoom.on, let item = current { toggleZoom(item) }
         focusPeak = on
     }
 
@@ -5700,11 +5736,11 @@ struct ReviewView: View {
     private func describe() -> (busy: Bool, text: String) {
         guard reviewMode else { return (false, "已退出审片") }
         let item = current
-        let full = zoomImage.map { "\(Int($0.size.width))×\(Int($0.size.height))" } ?? "无"
+        let path = item?.decodePath
         let mask = focusMask.map { URL(fileURLWithPath: $0.key).deletingPathExtension().lastPathComponent } ?? "无"
-        let busy = loadingZoom || (focusPeak && zoomed && focusMask?.key != item?.decodePath)
-        return (busy, "审片 \(focusedID ?? "无") · 判决 \(item?.verdict.rawValue ?? "-") · 放大 \(zoomed ? "开" : "关")"
-                + (loadingZoom ? "（解码中）" : "") + " · 原图 \(full) · 对焦高亮 \(focusPeak ? "开" : "关")（遮罩 \(mask)）")
+        let maskPending = focusPeak && path.map { zoom.image(for: $0) != nil } == true && focusMask?.key != path
+        return (!zoom.settled || maskPending, "审片 \(focusedID ?? "无") · 判决 \(item?.verdict.rawValue ?? "-") · "
+                + zoom.summary(for: path) + " · 对焦高亮 \(focusPeak ? "开" : "关")（遮罩 \(mask)）")
     }
 
     /// 判一张：按键和下面那排按钮走同一条路 —— 写判决、闪提示、判了（不是恢复）就自动下一张。
@@ -5752,7 +5788,7 @@ struct ReviewView: View {
     }
 
     private func refreshFocusMask() {
-        guard focusPeak, zoomed, let item = current, let full = zoomImage else { return }
+        guard focusPeak, zoom.on, let item = current, let full = zoom.image(for: item.decodePath) else { return }
         let key = item.decodePath
         if focusMask?.key == key { return }
         Task.detached(priority: .userInitiated) {
@@ -5764,40 +5800,25 @@ struct ReviewView: View {
         }
     }
 
+    /// Z / 按钮：放大开 ↔ 关。解码期间可能已经翻页了：ViewerZoom 里解好的图带着路径，只给那一张用 —— 否则放大的是
+    /// 上一张，而数字键判在这一张。同一张只解一份（连按 Z、预解还没完就翻到了都不会并发解两次，FullResCache.image）。
     private func toggleZoom(_ item: BatchItem) {
-        if zoomed {
-            zoomed = false
-            return
-        }
-        if let cached = FullResCache.cache.object(forKey: item.decodePath as NSString) {
-            zoomImage = cached
-            zoomed = true
-            return
-        }
-        // 已经在解上一张了就别再排一个：连按 Z 会对同一文件并发跑两次原图解码。
-        guard !loadingZoom else { return }
-        loadingZoom = true
-        let path = item.decodePath
-        let requestedID = item.id
-        Task.detached(priority: .userInitiated) {
-            let loaded = LiveBox(FullResCache.load(path: path))
-            await MainActor.run {
-                let image = loaded.value
-                loadingZoom = false
-                // 解码期间可能已经翻页了 —— 否则放大的是上一张，而数字键判在这一张。
-                guard requestedID == focusedID else { return }
-                if let image {
-                    zoomImage = image
-                    zoomed = true
-                }
-            }
-        }
+        zoom.toggle(path: item.decodePath, next: upcomingPath())
+    }
+
+    /// 接着可能翻到的那张（上一次翻的方向，跳过废片照样跳）：放大开着时预解它的原图。
+    private func upcomingPath() -> String? {
+        let order = self.order
+        let next = index(in: order) + direction
+        guard order.indices.contains(next) else { return nil }
+        return store.item(withID: order[next])?.decodePath
     }
 
     private func step(_ delta: Int) {
         let order = self.order
         let next = index(in: order) + delta
         if order.indices.contains(next) {
+            direction = delta
             focusedID = order[next]
         }
     }
@@ -5810,6 +5831,7 @@ struct ReviewView: View {
         let skip = skipping
         while orderIDs.indices.contains(i) {
             if !skip || store.item(withID: orderIDs[i])?.verdict != .reject {
+                direction = delta
                 focusedID = orderIDs[i]
                 return
             }
