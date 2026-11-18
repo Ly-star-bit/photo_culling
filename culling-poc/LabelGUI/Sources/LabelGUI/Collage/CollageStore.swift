@@ -128,6 +128,10 @@ final class CollageStore: ObservableObject {
     var testUnreadableOriginals: Set<String>?
     /// 自检：导出封面时封面那一页当成渲染失败。GUI 和命令行永远是 false。
     var testExportFailCover = false
+    /// 导出同时渲几页，盖过按内存定的（exportLanes）：自检、命令行 ops 的 exportlanes:N（量并行前后用）。GUI 永远是 nil。
+    var exportLanesOverride: Int?
+    /// 自检：记导出每页什么时候开始、结束、同时最多几页在渲，让指定的页先睡一会儿（完成顺序和页序对不上）。GUI 和命令行永远是 nil。
+    var testExportProbe: CollageExportProbe?
     /// 「书脊是估的」整本导出时问过、用户点了「仍然导出」的那一版（封面 id、页数、估算用的纸厚板厚）：这几样没变就不再问
     /// （优化分析 A4：问一次，不是每次导出都弹）。不存盘：下次打开再导还会问一次。
     private var estimatedSpineAsked: String?
@@ -265,6 +269,15 @@ final class CollageStore: ObservableObject {
     /// 命令行 renderexport 都走这一个。原图不够大的照片会被放大（不比标准的更糊，只是不会更清楚）。
     nonisolated static func exportScale(canvas: CollageCanvas, options: ExportOptions) -> Int {
         min(max(1, options.scale), maxExportScale(canvas))
+    }
+
+    /// 导出同时渲几页（优化分析 2026-11-18 PP-03）：以前一页渲完、写完才开下一页，16 核只用 1 核（并行度 0.97）。
+    /// 按内存定、不按核数：一个 30×30cm 跨页渲染时峰值 1.0–1.4 GB（解原图、转正、调色的中间图），胶片色调再 +1.2 GB。
+    /// 内存 < 12 GB 照旧一页一页来；< 32 GB 两页；再大三页（每页本身基本是单线程，再多吃不满的是解码器和内存带宽）。
+    nonisolated static func exportLanes(physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
+        let gb = physicalMemory >> 30
+        if gb < 12 { return 1 }
+        return gb < 32 ? 2 : 3
     }
 
     @Published var exportOptions = ExportOptions() { didSet { scheduleStateSave() } }
@@ -4847,6 +4860,8 @@ final class CollageStore: ObservableObject {
         let pdfFaults = testExportFailPDFEncodePages
         let fakeLowRes = testUnreadableOriginals ?? []
         let failCover = testExportFailCover
+        let probe = testExportProbe
+        let lanes = min(max(1, order.count), max(1, exportLanesOverride ?? Self.exportLanes()))
         // 导出前检查里的「提醒」有几条（优化分析 A6）：⌘E / 顶栏按钮只问「拦」的，提醒以前在导出时完全不出现 —— 导完那句
         // 后面带一句条数。和导出同时在后台算（要排一遍字），只对相册、印刷画布（「导出 ▾」里有那张清单的）。
         let readable = preflightReadable
@@ -4875,10 +4890,13 @@ final class CollageStore: ObservableObject {
             var missing: [String] = []
             var signatureLost = false
             var fillerBody = false
-            for (n, i) in order.enumerated() {
+            // 一页的渲染 + 写盘（后台）。同时最多 lanes 页在飞（PP-03），结果照页序一页页收：files、PDF 页序、「第一个出错的页」
+            // 都和以前一页一页串着时一样；进度按收到的页数走。
+            func launch(_ i: Int) -> Task<PageResult, Never> {
                 let page = snapshot.pages[i]
-                if self?.exportCancelled ?? true { break }
-                let result = await Task.detached(priority: .userInitiated) { () -> PageResult in
+                return Task.detached(priority: .userInitiated) { () -> PageResult in
+                    probe?.begin(i)
+                    defer { probe?.end(i) }
                     var opts = CollageRender.Options(scale: Double(scale))
                     opts.export = true
                     opts.includeBleed = true
@@ -4903,7 +4921,10 @@ final class CollageStore: ObservableObject {
                     } catch {
                         return PageResult(pdfData: nil, error: error.localizedDescription, lowRes: [], missing: [])
                     }
-                }.value
+                }
+            }
+            // 收一页：照页序调（先写完的后面的页等前面的收了再收），每页做的和以前一页一页串着时一样。
+            func take(_ i: Int, _ result: PageResult) {
                 if let f = result.error, failure == nil { failure = f }
                 // 这一页出错时也照实报已经写出的（九宫格 / 轮播先写整张、再写切片，切片写失败时整张已经在盘上了；
                 // 文件名是这次新起的，盘上有就是这次写的）
@@ -4921,12 +4942,49 @@ final class CollageStore: ObservableObject {
                 missing += result.missing
                 signatureLost = signatureLost || result.signatureLost
                 fillerBody = fillerBody || result.fillerBody
-                guard let self else {
-                    outcome.failure = "导出中断（拼图页关了）"
-                    return
+            }
+            var orphaned = false
+            await withTaskGroup(of: (Int, PageResult).self) { group in
+                var next = 0
+                var running = 0
+                var received = 0
+                var stopped = false
+                // 写完了、前面还有页没写完的（按 order 里的位置）：攒着的只是文件名和小结果，位图早放掉了。
+                var ready: [Int: PageResult] = [:]
+                var taken = 0
+                while true {
+                    // 补满：取消了（拼图页关了也算）就不再开新页；已经在渲的照样等它写完、照实列进 files（「已写出的保留」）。
+                    while !stopped, running < lanes, next < order.count {
+                        if self?.exportCancelled ?? true {
+                            stopped = true
+                        } else {
+                            let n = next
+                            let task = launch(order[n])
+                            group.addTask { (n, await task.value) }
+                            running += 1
+                            next += 1
+                        }
+                    }
+                    guard let (n, result) = await group.next() else { break }
+                    running -= 1
+                    received += 1
+                    ready[n] = result
+                    while let r = ready.removeValue(forKey: taken) {
+                        take(order[taken], r)
+                        taken += 1
+                    }
+                    guard let self else {
+                        // 以前这里直接返回；现在可能还有页在渲：等它们写完、列进 files 再返回（不开新页，见上）。
+                        orphaned = true
+                        continue
+                    }
+                    self.progressFraction = Double(received) / Double(order.count)
+                    self.progressText = "导出 \(received)/\(order.count)…"
                 }
-                self.progressFraction = Double(n + 1) / Double(order.count)
-                self.progressText = "导出 \(n + 1)/\(order.count)…"
+            }
+            if orphaned {
+                outcome.failure = "导出中断（拼图页关了）"
+                return
             }
             // 缺页的 PDF 不能拿去印（页序整体前移、文件名照常，最容易直接发给印厂）：有跨页没写出来就不出 PDF。
             if wantPDF, plan.pdf != nil, !pdfMissing.isEmpty, !(self?.exportCancelled ?? true) {
@@ -6196,4 +6254,40 @@ enum CollageTextTarget: Hashable {
     /// 路径 + 那一格当时的照片 + 所在页（换一批后路径上换了照片就不认）+ 第几个字块。
     case overlay([Int], String?, UUID?, Int)
     case item(UUID)
+}
+
+/// 自检用（CollageStore.testExportProbe）：导出时每页开始、结束各记一笔，数同时最多几页在渲；delays 里的页开始后先睡
+/// 这么多秒，好让完成顺序和页序对不上（并行导出时 files、PDF 页序还得照页序）。后台线程上调，自己加锁。
+final class CollageExportProbe: @unchecked Sendable {
+    let delays: [Int: Double]
+    private let lock = NSLock()
+    private var active = 0
+    private var peakValue = 0
+    private var startedPages: [Int] = []
+    private var finishedPages: [Int] = []
+
+    init(delays: [Int: Double] = [:]) { self.delays = delays }
+
+    func begin(_ page: Int) {
+        lock.lock()
+        active += 1
+        peakValue = max(peakValue, active)
+        startedPages.append(page)
+        lock.unlock()
+        if let d = delays[page] { Thread.sleep(forTimeInterval: d) }
+    }
+
+    func end(_ page: Int) {
+        lock.lock()
+        active -= 1
+        finishedPages.append(page)
+        lock.unlock()
+    }
+
+    /// 同时最多几页在渲、开始的页序、写完的页序。
+    var snapshot: (peak: Int, started: [Int], finished: [Int]) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (peakValue, startedPages, finishedPages)
+    }
 }

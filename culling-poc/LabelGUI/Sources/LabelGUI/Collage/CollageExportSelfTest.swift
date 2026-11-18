@@ -13,6 +13,8 @@ import ImageIO
 ///    缺第几个跨页，写出来的跨页照实列出；同一次导出还有软警告（照片读不了）时「导出失败」不被它盖掉，警告接在后面。
 ///    PNG 跨页写出来了、只是 PDF 那份 JPEG 编不出来（testExportFailPDFEncodePages）：照样不出 PDF，提示说「图写出来了、
 ///    但没能放进 PDF」、不说「没写出来」，和 files 对得上；和渲染失败的同时有时两句各说各的页号。
+///    几页一起渲（PP-03）：路数按内存；前面的页故意睡一会儿、后面的先写完，files 和 PDF 页序照样是页序，跨页图和一页一页渲的
+///    逐字节一样；渲到一半取消，在渲的写完照实列出、没开的不开、不出 PDF。
 /// 4. 空照片格（emptyPhotoSlots / emptySlotWarning，导出按钮和 MCP 共用）：只数网格页上没照片（或照片不在托盘）的照片格，
 ///    留白格、文字格、散落版、印样不算；提醒那句话写对页号；导出按钮有空格时先不导、等确认（exportConfirm），点了「仍然导出」
 ///    才导，没有空格直接导、不问。
@@ -41,6 +43,8 @@ enum CollageExportSelfTest {
         albumExport(store, root.appendingPathComponent("album"), check: check)
         print("== 相册有跨页没写出来")
         albumFailure(store, root.appendingPathComponent("fail"), check: check)
+        print("== 几页一起渲（PP-03）")
+        parallelExport(store, root.appendingPathComponent("parallel"), check: check)
         print("== 空照片格")
         emptySlots(check: check)
         emptySlotConfirm(store, root.appendingPathComponent("confirm"), check: check)
@@ -477,6 +481,100 @@ enum CollageExportSelfTest {
         single.pages = [CollagePage(root: .leaf(CollageCell(kind: .empty)))]
         let o4 = runExport(store, project: single, options: options, name: "单张")
         check(o4?.failure == nil && o4?.files == ["单张.jpg"], "单张模式照旧", "\(o4?.files ?? [])")
+    }
+
+    // MARK: - 3b. 几页一起渲（PP-03）
+
+    /// 路数按内存；几页一起渲时让前面的页先睡一会儿（后面的先写完），files、PDF 页序照样是页序，同时在渲的真有几页，
+    /// 跨页图和一页一页渲的逐字节一样；渲到一半取消：已经在渲的写完、照实列出，没开的不开，不出 PDF。
+    @MainActor
+    private static func parallelExport(_ store: CollageStore, _ dir: URL, check: Checks) {
+        let fm = FileManager.default
+        let lanes = [8, 16, 24, 32, 128].map { CollageStore.exportLanes(physicalMemory: UInt64($0) << 30) }
+        check(lanes == [1, 2, 2, 3, 3], "按内存定几页一起渲：8 GB 1、16 / 24 GB 2、32 / 128 GB 3", "\(lanes)")
+
+        // 4 个跨页，每页左格一张不同灰度的小照片（有了内容，PDF 页序才看得出对不对）。
+        let photos = dir.appendingPathComponent("photos")
+        try? fm.createDirectory(at: photos, withIntermediateDirectories: true)
+        let grays = [0.15, 0.4, 0.65, 0.9]
+        var project = albumProject(pages: grays.count)
+        for (k, gray) in grays.enumerated() {
+            let url = photos.appendingPathComponent("g\(k).jpg")
+            try? jpeg(width: 96, height: 96, gray: gray)?.write(to: url)
+            project.photos.append(CollagePhotoRef(id: "g\(k)", path: url.path, width: 96, height: 96))
+            project.pages[k].root = .split(.row, 0.5, .leaf(photoCell("g\(k)")), .leaf(CollageCell(kind: .empty)))
+        }
+        let names = (1...grays.count).map { String(format: "并行_跨页_%02d.jpg", $0) }
+        var options = CollageStore.ExportOptions()
+        options.pdf = true
+        var bytes: [Int: [Data?]] = [:]
+        for lanes in [3, 1] {
+            let out = dir.appendingPathComponent("lanes\(lanes)")
+            options.outputPath = out.path
+            store.exportOptions = options
+            store.exportLanesOverride = lanes
+            let probe = CollageExportProbe(delays: [0: 0.6, 1: 0.3])
+            store.testExportProbe = probe
+            let outcome = runExport(store, project: project, options: options, name: "并行")
+            let seen = probe.snapshot
+            let pdf = out.appendingPathComponent("并行.pdf")
+            let want: [String] = names + ["并行.pdf"]
+            let listed = outcome?.failure == nil && outcome?.files == want
+            check(listed && CollageExport.verifyPDF(at: pdf, pages: 4) == nil && leftovers(out).isEmpty,
+                  "\(lanes) 页一起渲：4 个跨页 + PDF，照页序列出、PDF 在最后", "\(outcome?.files ?? []) \(outcome?.failure ?? "")")
+            let inOrder: Bool = seen.finished == [0, 1, 2, 3]
+            let parallel: Bool = lanes == 1 ? seen.peak == 1 && inOrder : seen.peak >= 2 && !inOrder
+            check(parallel, lanes == 1 ? "1 页：一页写完才开下一页" : "\(lanes) 页：真有几页同时在渲、后面的先写完（完成顺序和页序不一样）",
+                  "同时最多 \(seen.peak) 页 · 写完的顺序 \(seen.finished)")
+            let samples = (1...4).map { pdfSample(pdf, page: $0) ?? -1 }
+            let rising = zip(samples, samples.dropFirst()).allSatisfy { $0 + 0.08 < $1 }
+            check(rising, "\(lanes) 页一起渲：PDF 第 1–4 页的照片灰度照页序（从暗到亮）",
+                  samples.map { String(format: "%.2f", $0) }.joined(separator: " "))
+            bytes[lanes] = names.map { try? Data(contentsOf: out.appendingPathComponent($0)) }
+        }
+        let same = bytes[3] != nil && bytes[3] == bytes[1] && bytes[1]?.allSatisfy { $0 != nil } == true
+        check(same, "3 页一起渲和一页一页渲：每个跨页图逐字节一样")
+
+        // 渲到一半取消：前两页在渲（各睡 0.8 秒）时点取消 —— 这两页写完、列进 files，后两页不开，不出 PDF。
+        let out = dir.appendingPathComponent("cancel")
+        options.outputPath = out.path
+        store.exportOptions = options
+        store.exportLanesOverride = 2
+        let probe = CollageExportProbe(delays: [0: 0.8, 1: 0.8])
+        store.testExportProbe = probe
+        var result: CollageStore.ExportOutcome?
+        let refused = store.startExport(project: project, options: options, name: "取消", reveal: false) { result = $0 }
+        spin(20) { probe.snapshot.started.count >= 2 }
+        store.cancelExport()
+        spin(60) { result != nil }
+        spin(5) { !store.isExporting }
+        let written = ((try? fm.contentsOfDirectory(atPath: out.path)) ?? []).filter { !$0.hasPrefix(".") }.sorted()
+        let firstTwo = ["取消_跨页_01.jpg", "取消_跨页_02.jpg"]
+        let stoppedOK: Bool = refused == nil && result?.cancelled == true && probe.snapshot.started == [0, 1]
+        check(stoppedOK && result?.files == firstTwo && written == firstTwo && leftovers(out).isEmpty,
+              "渲到一半取消：在渲的两页写完照实列出、没开的不开、不出 PDF",
+              "files \(result?.files ?? []) · 盘上 \(written) · 开过 \(probe.snapshot.started)")
+        check(store.progressText == "导出已取消（已写出的保留）", "取消后界面那句照旧", store.progressText)
+        store.exportLanesOverride = nil
+        store.testExportProbe = nil
+    }
+
+    /// PDF 第 page 页（从 1 起）左半边正中的灰度（0…1）：按 TrimBox 画成 120×60 的小图取一点。
+    static func pdfSample(_ url: URL, page k: Int) -> Double? {
+        guard let page = CGPDFDocument(url as CFURL)?.page(at: k) else { return nil }
+        let trim = page.getBoxRect(.trimBox)
+        let w = 120
+        let h = 60
+        guard trim.width > 0, trim.height > 0,
+              let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.scaleBy(x: CGFloat(w) / trim.width, y: CGFloat(h) / trim.height)
+        ctx.translateBy(x: -trim.minX, y: -trim.minY)
+        ctx.drawPDFPage(page)
+        guard let data = ctx.data else { return nil }
+        let px = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
+        return Double(px[(h / 2 * w + w / 4) * 4]) / 255
     }
 
     // MARK: - 4. 空照片格
