@@ -116,7 +116,7 @@ struct PickView: View {
         .onKeyPress(.upArrow) { session.previous(); return .handled }
         .onKeyPress(.downArrow) { session.next(); return .handled }
         .onKeyPress(.space, phases: .down) { press in
-            withAnimation(.easeOut(duration: 0.12)) {
+            withAnimation(AppMotion.animation(.easeOut(duration: 0.12))) {
                 if press.modifiers.contains(.shift) { session.toggleHighlighted() } else { session.chooseHighlighted() }
             }
             return .handled
@@ -126,7 +126,7 @@ struct PickView: View {
         .onKeyPress(characters: .decimalDigits, phases: .down) { press in
             guard press.modifiers.isDisjoint(with: [.command, .option, .control]),
                   let n = Int(press.characters) else { return .ignored }
-            withAnimation(.easeOut(duration: 0.12)) {
+            withAnimation(AppMotion.animation(.easeOut(duration: 0.12))) {
                 if n == 0 { session.resetDraft() } else { session.press(number: n) }
             }
             return .handled
@@ -206,7 +206,7 @@ struct PickView: View {
             Toggle("对焦 (P)", isOn: Binding(get: { focusPeak }, set: { setFocusPeak($0) }))
                 .toggleStyle(.button)
                 .help("放大后红色标出合焦区域，看焦点落在眼睛还是耳朵 (P)；没放大时先放大到脸")
-            Button("撤销") { withAnimation(.easeOut(duration: 0.12)) { session.undo() } }
+            Button("撤销") { withAnimation(AppMotion.animation(.easeOut(duration: 0.12))) { session.undo() } }
                 .keyboardShortcut("z", modifiers: .command)
                 .disabled(!session.canUndo)
                 .help("撤销 (⌘Z)：先撤这一组你刚点的；没有了再撤上一次确认的判决（撤的是别的组就跳回那一组）")
@@ -291,7 +291,7 @@ struct PickView: View {
                     }
                     .onChange(of: session.highlight) {
                         guard let id = session.highlightedID else { return }
-                        withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(id) }
+                        withAnimation(AppMotion.animation(.easeOut(duration: 0.2))) { proxy.scrollTo(id) }
                     }
                 }
                 // 换组就是新的一条：滚动位置从这一组的高亮那张开始，不接着上一组的。
@@ -320,7 +320,7 @@ struct PickView: View {
                      keyFocus = true
                  },
                  onSet: { verdict in
-                     withAnimation(.easeOut(duration: 0.12)) { session.set(item.id, verdict) }
+                     withAnimation(AppMotion.animation(.easeOut(duration: 0.12))) { session.set(item.id, verdict) }
                      keyFocus = true
                  })
             .onAppear {
@@ -337,7 +337,7 @@ struct PickView: View {
 
     private func click(_ item: BatchItem, command: Bool) {
         lastClick = (session.currentKey, Date())
-        withAnimation(.easeOut(duration: 0.12)) {
+        withAnimation(AppMotion.animation(.easeOut(duration: 0.12))) {
             if command { session.toggle(item.id) } else { session.choose(item.id) }
         }
         keyFocus = true
@@ -370,11 +370,11 @@ struct PickView: View {
                     Text("（和现在一样）").font(.caption).foregroundStyle(.tertiary)
                 }
                 if session.draftEdited {
-                    Button("恢复推荐 (0)") { withAnimation(.easeOut(duration: 0.12)) { session.resetDraft() } }
+                    Button("恢复推荐 (0)") { withAnimation(AppMotion.animation(.easeOut(duration: 0.12))) { session.resetDraft() } }
                         .controlSize(.small)
                         .help("扔掉这一组你点过的，回到算法推荐（精选留、其余废）")
                 }
-                Button("这组全留") { withAnimation(.easeOut(duration: 0.12)) { session.keepAll() } }
+                Button("这组全留") { withAnimation(AppMotion.animation(.easeOut(duration: 0.12))) { session.keepAll() } }
                     .controlSize(.small)
                     .help("整组都想留时用：现在的精选（你点过的；没点过就是推荐的那张）还是精选，其余都设可用。⏎ 才写进去")
                 Spacer(minLength: 8)
@@ -386,7 +386,7 @@ struct PickView: View {
                 Button(session.isSelection ? "确认 (⏎)" : "确认并下一组 (⏎)") {
                     // 按住 ⏎ 的重复事件不算：不然一路确认下去。
                     if let event = NSApp.currentEvent, event.type == .keyDown, event.isARepeat { return }
-                    withAnimation(.easeOut(duration: 0.15)) { _ = session.confirm() }
+                    withAnimation(AppMotion.animation(.easeOut(duration: 0.15))) { _ = session.confirm() }
                 }
                 .buttonStyle(.accentProminent)
                 .keyboardShortcut(.return, modifiers: [])

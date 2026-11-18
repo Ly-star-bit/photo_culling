@@ -48,6 +48,7 @@ enum BatchPerf {
         print(String(format: "perf grid：%d 张 · 挂着的格子 %d 个 · 空转 0.3 秒 进程 %.2f 百万条指令、主线程 %.2f ms（下面的都已减掉）",
                      store.items.count, viewport.mountedCells, idle.instr, idle.ms))
         print("perf 视图：" + viewSettings())
+        print("perf 动画：" + AppMotion.summary)
         // 第一下 → 从「没有焦点」落到第一张；之后每下挪一格。← 再走回来。
         let keyStep: (String) -> () -> Void = { key in { keys.send(key) } }
         if scenario == "set" {
@@ -63,9 +64,10 @@ enum BatchPerf {
         // 数字键：焦点那张改判（按判决分区时它跳到别的区，焦点落到原来紧挨着的下一张）。1 2 3 轮着按。
         let digits: [Verdict] = [.pick, .usable, .reject]
         measure("数字键", (0..<12).map { keyStep(["1", "2", "3"][$0 % 3]) }, idle: idle, spin: spin, animated: true)
-        // 同样改 12 张，不走按键：直接 store.setOverrideBatch，一遍套着按键那个 0.2 秒的改判动画、一遍不套 —— 分得清
+        // 同样改 12 张，不走按键：直接 store.setOverrideBatch，一遍套着 v1.32.0 按键那个 0.2 秒的整格挪位动画、一遍不套 —— 分得清
         // 贵的是改判本身（store 重算 + 整页重画）、按键那一套（焦点、滚动），还是动画那几帧。照网格的顺序（精选、可用、废片）
-        // 从前往后各改一张。
+        // 从前往后各改一张。PI-01 以后 app 里默认不再套这个动画（AppMotion.reflow = nil，「数字键」那行量的是现在的样子）；
+        // 「直接改判 带动画」照旧套着它：看得出改回去（AppMotion.reflow 那一行）要多花多少。
         let order = [Verdict.pick, .usable, .reject].flatMap { v in store.items.filter { $0.verdict == v }.map(\.id) }
         let targets = Array(order.prefix(24))
         func setStep(_ k: Int, animated: Bool) -> () -> Void {

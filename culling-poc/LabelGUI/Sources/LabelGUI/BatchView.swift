@@ -265,7 +265,7 @@ struct BatchView: View {
         .confirmationDialog(acceptTitle, isPresented: $showAcceptAllConfirm) {
             Button("定案 · \(acceptPreview.rejects) 张设为废片") {
                 let scope = acceptScope
-                withAnimation { _ = store.acceptAllRecommendations(inChapter: scope) }
+                withAnimation(AppMotion.reverdict) { _ = store.acceptAllRecommendations(inChapter: scope) }
                 selectedIDs.removeAll()
             }
             Button("取消", role: .cancel) {}
@@ -588,7 +588,7 @@ struct BatchView: View {
     }
 
     private func toggleControls() {
-        withAnimation(.easeInOut(duration: 0.2)) { showControls.toggle() }
+        withAnimation(AppMotion.animation(.easeInOut(duration: 0.2))) { showControls.toggle() }
     }
 
     private var sortPicker: some View {
@@ -1234,7 +1234,7 @@ struct BatchView: View {
             .onKeyPress(characters: .init(charactersIn: "-=+")) { press in
                 guard press.modifiers.isDisjoint(with: [.command, .option, .control]) else { return .ignored }
                 let step: Double = press.characters == "-" ? -20 : 20
-                withAnimation(.easeOut(duration: 0.15)) { thumbSize = min(260, max(90, thumbSize + step)) }
+                withAnimation(AppMotion.animation(.easeOut(duration: 0.15))) { thumbSize = min(260, max(90, thumbSize + step)) }
                 if let id = focusedID { DispatchQueue.main.async { scrollGrid(proxy, id, anchor: .center) } }
                 return .handled
             }
@@ -1270,7 +1270,8 @@ struct BatchView: View {
         case "3": verdict = .reject
         default: verdict = nil
         }
-        withAnimation(.easeInOut(duration: 0.2)) {
+        // 改判动画（PI-01）：格子、行不再挪位动画，只有被改那一格的判决色过渡（AppMotion.reflow 一行改回去）。
+        withAnimation(AppMotion.reverdict) {
             store.setOverrideBatch(pick.ids, verdict)
         }
         // 改的是选中的几张也要管焦点：焦点那张也在选中里（⇧点、⌘A、点场标题）、被筛掉或整场叠掉时
@@ -1933,7 +1934,7 @@ struct BatchView: View {
     /// 以前焦点不动：焦点那张也在选中里、被筛掉或整场叠掉时，下一次数字键改的是看不见的它。
     private func applyBulk(changing changed: [String], _ apply: () -> Void) {
         let before = visibleIDs
-        withAnimation { apply() }
+        withAnimation(AppMotion.reverdict) { apply() }
         selectedIDs.removeAll()
         keepPlace(changed: changed, before: before, proxy: nil)
     }
@@ -2005,7 +2006,7 @@ struct BatchView: View {
             let shift = BodyClock.formatOffset(align.offset)
             Divider().frame(height: 16)
             Button("把这两张对成同一时刻") {
-                withAnimation { store.setBodyOffsets([align.moved.key: align.offset]) }
+                withAnimation(AppMotion.animation(.default)) { store.setBodyOffsets([align.moved.key: align.offset]) }
                 selectedIDs.removeAll()
             }
             .buttonStyle(.bordered)
@@ -2068,7 +2069,7 @@ struct BatchView: View {
         if let target = visibleItems.first(where: inChapter) {
             focusedID = target.id
             // 居中：贴顶会被吸顶的分区标题 / 场标题挡住。
-            withAnimation { scrollGrid(proxy, target.id, anchor: .center) }
+            withAnimation(AppMotion.animation(.default)) { scrollGrid(proxy, target.id, anchor: .center) }
             return true
         }
         // 分组模式下这一章只有单张、单张区又收着：展开再跳（等网格铺出来那一拍）。
@@ -2076,7 +2077,7 @@ struct BatchView: View {
         showSingles = true
         focusedID = target.id
         DispatchQueue.main.async {
-            withAnimation { scrollGrid(proxy, target.id, anchor: .center) }
+            withAnimation(AppMotion.animation(.default)) { scrollGrid(proxy, target.id, anchor: .center) }
         }
         return true
     }
@@ -2098,7 +2099,7 @@ struct BatchView: View {
             focusedID = next
             // 等网格按新判决重新铺一拍再滚：整场叠起来时立刻滚，目标位置还是旧的。
             guard let proxy else { return }
-            DispatchQueue.main.async { withAnimation { scrollGrid(proxy, next, anchor: .center) } }
+            DispatchQueue.main.async { withAnimation(AppMotion.animation(.default)) { scrollGrid(proxy, next, anchor: .center) } }
         }
     }
 
@@ -2192,7 +2193,7 @@ struct BatchView: View {
         lastVisitedTake = next.group
         selectedIDs.removeAll()
         focusedID = target.id
-        withAnimation { scrollGrid(proxy, target.id, anchor: .top) }
+        withAnimation(AppMotion.animation(.default)) { scrollGrid(proxy, target.id, anchor: .top) }
     }
 
     // MARK: 按分组 (每个多张场一个小组，短的并排；单张收在最后)
@@ -2387,7 +2388,7 @@ struct BatchView: View {
     private func acceptTake(_ info: TakeInfo) {
         let kept = info.all.filter { (info.recommended[$0.id] ?? .reject) != .reject }.map(\.id)
         let rejected = info.all.filter { info.recommended[$0.id] == .reject && $0.verdict != .reject }.count
-        withAnimation { store.applyOverrides(info.recommended, accepted: true) }
+        withAnimation(AppMotion.reverdict) { store.applyOverrides(info.recommended, accepted: true) }
         // 定完这一场会叠起来：焦点落到留下的那张上，别停在被叠掉的照片上（←/→ 会从头开始）。
         if let keep = info.all.first(where: { info.recommended[$0.id] == .pick }) { focusedID = keep.id }
         showGridToast(GridSelectionRules.acceptNotice(take: info.take, kept: kept, rejected: rejected),
@@ -2395,7 +2396,7 @@ struct BatchView: View {
     }
 
     private func setTakeExpanded(_ take: Int, _ expanded: Bool) {
-        withAnimation(.easeOut(duration: 0.15)) {
+        withAnimation(AppMotion.animation(.easeOut(duration: 0.15))) {
             if expanded {
                 _ = expandedTakes.insert(take)
             } else {
@@ -2610,7 +2611,7 @@ struct BatchView: View {
     private func setFromHover(_ id: String, _ verdict: Verdict) {
         guard store.item(withID: id)?.verdict != verdict || store.overrides[id] != verdict else { return }
         let before = id == focusedID ? visibleIDs : nil
-        withAnimation(.easeInOut(duration: 0.2)) { store.setOverrideBatch([id], verdict) }
+        withAnimation(AppMotion.reverdict) { store.setOverrideBatch([id], verdict) }
         if let before, let next = Self.placeAfterChange(of: id, before: before, after: visibleIDs) {
             focusedID = next
         }
@@ -2626,7 +2627,7 @@ struct BatchView: View {
     private func singlesHeader(_ singles: [BatchItem]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Button {
-                withAnimation(.easeOut(duration: 0.15)) { showSingles.toggle() }
+                withAnimation(AppMotion.animation(.easeOut(duration: 0.15))) { showSingles.toggle() }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: showSingles ? "chevron.down" : "chevron.right")
@@ -2800,7 +2801,7 @@ struct BatchView: View {
             keepOnly: { id in
                 guard let take = store.item(withID: id)?.take else { return }
                 let all = store.members(ofTake: take)
-                withAnimation { keepOnly(id, inTake: all) }
+                withAnimation(AppMotion.reverdict) { keepOnly(id, inTake: all) }
                 focusedID = id
             },
             menuState: menuState)
@@ -2926,7 +2927,7 @@ struct BatchView: View {
         }
         guard store.isManual(id) else { return }
         let before = id == focusedID ? visibleIDs : nil
-        withAnimation(.easeInOut(duration: 0.2)) { store.setOverrideBatch([id], nil) }
+        withAnimation(AppMotion.reverdict) { store.setOverrideBatch([id], nil) }
         if let before, let next = Self.placeAfterChange(of: id, before: before, after: visibleIDs) {
             focusedID = next
         }
@@ -3629,6 +3630,9 @@ private struct GridCell: View, Equatable {
                     .font(.system(size: 8, weight: .bold))
                     .foregroundStyle(color)
                     .frame(width: 9)
+                    // 改判的「变了」反馈只剩这一小块（PI-01，AppMotion）：格子、行不再跟着挪位动画。减少动态效果开着也不做
+                    // （不用 @Environment(\.accessibilityReduceMotion)：格子带上环境依赖，release 315 张按方向键每下多约 0.4 百万条指令，实测）。
+                    .animation(AppMotion.animation(AppMotion.verdictFade), value: item.verdict)
                 Text(item.id).font(.caption2).lineLimit(1).truncationMode(.middle)
                     .foregroundStyle(.secondary)
                 // 只有高感（ISO 3200 起，值得批量降噪的那些）才写：以前每张都挂一个「ISO 500」。
@@ -4418,9 +4422,13 @@ struct ZoomPane: NSViewRepresentable {
             // clicked point, so the detail you aimed at stays under the cursor.
             let target = abs(scroll.magnification - hundred) < 0.01 ? fit : hundred
             let point = gesture.location(in: doc)
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.25
-                scroll.animator().setMagnification(target, centeredAt: point)
+            if MainActor.assumeIsolated({ AppMotion.reduce }) {
+                scroll.setMagnification(target, centeredAt: point)  // 减少动态效果：直接到位（UX-12）
+            } else {
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0.25
+                    scroll.animator().setMagnification(target, centeredAt: point)
+                }
             }
             onDoubleClick?()
         }
