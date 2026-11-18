@@ -25,6 +25,8 @@ struct BatchView: View {
     @State private var showJPEGSheet = false
     /// 导出 JPG 面板上的「范围」（UX-03）：每次打开面板时定（选了照片 = 选中的，否则上次的精选 / 精选 + 可用）。
     @State private var jpegScope: JPEGExportScope = .picksUsable
+    /// 导出 JPG 的具名预设、勾着一起导的几套（GP-09，存数据目录的 delivery/jpeg_presets.json）。
+    @StateObject private var jpegPresets = JPEGPresetStore(dataDir: appDataDir)
     /// 高ISO RAW 导出 (降噪流程)。
     @State private var showISOSheet = false
     /// 精华 Top N（Aftershoot 的 Sneak Peek）：当天发朋友圈用的那二十张。
@@ -918,9 +920,10 @@ struct BatchView: View {
             Text("导出 JPG").font(.headline)
             JPEGScopeRow(choices: choices, selection: jpegScopeBinding)
             DeliveryOptionsSection(options: options, namePreview: preview)
+            JPEGPresetSection(presets: jpegPresets, options: options)
             Toggle("覆盖已存在的同名文件", isOn: $jpegOverwrite)
                 .help("关闭时目标里已有同名文件就另存为 -2、-3，旧文件不动 (防止覆盖客户已精修的文件)")
-            Text("共 \(count) 张 · 重编码，保留 EXIF · 默认导出到 拍摄文件夹/\(ImageLoader.jpegExportSubfolder)/ (不参与分析)")
+            Text(jpegPresets.countLine(count))
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Spacer()
@@ -930,7 +933,7 @@ struct BatchView: View {
                     exportJPEGs(to: nil)
                 }
                 .disabled(count == 0)
-                Button("导出到 \(ImageLoader.jpegExportSubfolder)/") {
+                Button(jpegPresets.exportTitle) {
                     showJPEGSheet = false
                     exportJPEGs(to: store.defaultJPEGExportFolder)
                 }
@@ -3050,6 +3053,12 @@ struct BatchView: View {
             folder = url
         }
         guard let folder else { return }
+        // 勾了几套预设（GP-09）：每套进自己的子文件夹；一个都没勾 = 按面板上的设置导一套（和以前一样）。
+        let sets = jpegPresets.checkedSets
+        if !sets.isEmpty {
+            store.exportJPEGSets(to: folder, sets: sets, includeUsable: jpegIncludeUsable, overwrite: jpegOverwrite, ids: ids)
+            return
+        }
         store.exportJPEGs(to: folder, includeUsable: jpegIncludeUsable, options: jpegOptions.wrappedValue,
                           overwrite: jpegOverwrite, ids: ids)
     }

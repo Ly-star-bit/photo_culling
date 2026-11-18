@@ -4986,6 +4986,8 @@ final class BatchStore: ObservableObject {
     private(set) var lastJPEGExport: JPEGExportReport?
     /// 上一次 JPG / 精华导出完在访达里选中了什么（无头不弹访达，--export-jpeg 打印它；优化分析 UX-04）。
     private(set) var lastJPEGRevealed: URL?
+    /// 上一次「几套一起导」每套的结果（GP-09，无头 --sets 打印）；一套的导出 / 精华是空的。
+    private(set) var lastJPEGSets: [(name: String, report: JPEGExportReport)] = []
 
     /// 文件名模板要的字段：原名就是 id（以前固定的 {id}.jpg），日期 = 拍摄时间，星级 = 写进 XMP 的那个。
     func nameFields(_ item: BatchItem, index: Int, rank: Int?) -> DeliveryNaming.Fields {
@@ -5038,6 +5040,59 @@ final class BatchStore: ObservableObject {
     /// 同一条通道：isRunning 守卫、并发上限、进度文字全部复用。
     func exportJPEGs(to folder: URL, includeUsable: Bool, options: DeliveryOptions, overwrite: Bool = false,
                      ids: [String]? = nil, ranked: Bool = false, label: String? = nil) {
+        runJPEGExport(parent: folder, sets: [JPEGExportSet(name: nil, options: options, folder: folder)],
+                      includeUsable: includeUsable, overwrite: overwrite, ids: ids, ranked: ranked, label: label)
+    }
+
+    /// 导出 JPG 的一套（GP-09）：这一套的设置、写进哪个文件夹；`name` = 预设名（nil = 面板上那一套，直接写进选的文件夹）。
+    struct JPEGExportSet: Sendable {
+        let name: String?
+        let options: DeliveryOptions
+        let folder: URL
+    }
+
+    /// 「一次导出勾选的几套」（优化分析 GP-09）：原尺寸给客户、小红书、朋友圈以前要导三遍。每套进 `folder` 下以预设名
+    /// 命名的子文件夹（JPEGPresetStore.folderNames：去掉 / : 、重名加 -2），一套一套按顺序导（每套自己的路数），
+    /// 一个进度、一次取消；交付对照每套记一次（文件夹是那一套的子文件夹）。
+    func exportJPEGSets(to folder: URL, sets: [(name: String, options: DeliveryOptions)], includeUsable: Bool,
+                        overwrite: Bool = false, ids: [String]? = nil) {
+        let folders = JPEGPresetStore.folderNames(sets.map(\.name))
+        let planned = zip(sets, folders).map { set, sub in
+            JPEGExportSet(name: set.name, options: set.options, folder: folder.appendingPathComponent(sub, isDirectory: true))
+        }
+        guard !planned.isEmpty else { return }
+        runJPEGExport(parent: folder, sets: planned, includeUsable: includeUsable, overwrite: overwrite, ids: ids,
+                      ranked: false, label: nil)
+    }
+
+    /// 一套排好的活：这一套、每张写到哪、因为目标里已有而改名的张数。
+    private struct PlannedJPEGSet: Sendable {
+        let set: JPEGExportSet
+        let jobs: [JPEGJob]
+        let renamed: Int
+    }
+
+    private struct JPEGJob: Sendable {
+        let id: String
+        let source: URL
+        let dest: URL
+    }
+
+    /// 一套导完的结果（导出顺序）。
+    private struct JPEGSetOutcome: Sendable {
+        let planned: PlannedJPEGSet
+        let written: [URL]
+        let failedIds: [String]
+        let failures: [DeliveryRecord.Failure]
+        let reasons: [String]
+        let overIds: [String]
+        let delivered: [DeliveryRecord.File]
+        let concurrency: String
+    }
+
+    /// 导出 JPG / 精华 / 几套一起导共用的那条路。`sets` 只有一套、没名字 = 以前的导出 JPG / 精华（文案、交付对照一个字不变）。
+    private func runJPEGExport(parent folder: URL, sets: [JPEGExportSet], includeUsable: Bool, overwrite: Bool,
+                               ids: [String]?, ranked: Bool, label: String?) {
         guard !isRunning else { return }
         let chosen = jpegExportItems(includeUsable: includeUsable, ids: ids)
         guard !chosen.isEmpty else {
@@ -5046,8 +5101,8 @@ final class BatchStore: ObservableObject {
         }
         // 拍摄文件夹本身（选文件夹的面板一打开就在这儿）或里面会被分析扫到的子文件夹：勾了覆盖，{原名}.jpg
         // 在不分大小写的 APFS 上就是原片 DSCF7207.JPG，原片被缩小版盖掉；不勾也会写进一堆 -2，下次分析当成新照片。
-        // 「导出JPG/」和它下面（精华）不参与分析，照常。
-        if let photoDir, OriginalsCopier.insideAnalysis(folder, shoot: photoDir) {
+        // 「导出JPG/」和它下面（精华、几套一起导的子文件夹）不参与分析，照常。
+        if let photoDir, ([folder] + sets.map(\.folder)).contains(where: { OriginalsCopier.insideAnalysis($0, shoot: photoDir) }) {
             lastError = "不能导出到拍摄文件夹里面：勾了覆盖会把原片换成导出的 JPG，不勾下次分析也会把它们当成新照片。" +
                 "请用「导出到 \(ImageLoader.jpegExportSubfolder)/」，或选拍摄文件夹外面的文件夹"
             return
@@ -5057,18 +5112,22 @@ final class BatchStore: ObservableObject {
             lastError = why
             return
         }
-        // 目标路径在开工前一次排好（并发的 worker 各自算会撞名）。
-        let names = chosen.enumerated().map { index, item in
-            DeliveryNaming.render(options.nameTemplate, nameFields(item, index: index + 1, rank: ranked ? index + 1 : nil))
+        // 目标路径在开工前一次排好（并发的 worker 各自算会撞名）；几套各排各的（各自的文件名模板、各自的子文件夹）。
+        var plans: [PlannedJPEGSet] = []
+        for set in sets {
+            let names = chosen.enumerated().map { index, item in
+                DeliveryNaming.render(set.options.nameTemplate, nameFields(item, index: index + 1, rank: ranked ? index + 1 : nil))
+            }
+            let plan = DeliveryNaming.plan(names, in: set.folder, overwrite: overwrite)
+            let jobs = zip(chosen, plan.dests).map { JPEGJob(id: $0.0.id, source: URL(fileURLWithPath: $0.0.decodePath), dest: $0.1) }
+            // 再兜一道：要覆盖的目标里有哪个就是原片（软链接过去的文件夹之类），整个不导。不覆盖时目标都是新名字。
+            if overwrite, let hit = Self.firstOriginal(among: jobs.map(\.dest), originals: chosen) {
+                lastError = "导出目标 \(hit.lastPathComponent) 就是原片，没有导出：请换一个文件夹"
+                return
+            }
+            plans.append(PlannedJPEGSet(set: set, jobs: jobs, renamed: plan.renamed))
         }
-        let plan = DeliveryNaming.plan(names, in: folder, overwrite: overwrite)
-        let jobs = zip(chosen, plan.dests).map { (id: $0.0.id, source: URL(fileURLWithPath: $0.0.decodePath), dest: $0.1) }
-        // 再兜一道：要覆盖的目标里有哪个就是原片（软链接过去的文件夹之类），整个不导。不覆盖时目标都是新名字。
-        if overwrite, let hit = Self.firstOriginal(among: jobs.map(\.dest), originals: chosen) {
-            lastError = "导出目标 \(hit.lastPathComponent) 就是原片，没有导出：请换一个文件夹"
-            return
-        }
-        let renamed = plan.renamed
+        let multi = sets.count > 1 || sets.first?.name != nil
         let folderLabel = label ?? folder.lastPathComponent
         let isHighlights = ranked
         // 交付对照（DeliveryLedger.swift）：收尾时把写出去的文件名 → 哪一张、原片在哪记进这一场的 exports.json。
@@ -5078,96 +5137,75 @@ final class BatchStore: ObservableObject {
         lastError = nil
         lastJPEGExport = nil
         lastJPEGRevealed = nil
+        lastJPEGSets = []
         cancelFlag = AnalysisEngine.CancelFlag()
         let flag = cancelFlag
-        let total = jobs.count
+        let total = chosen.count
+        let grand = total * plans.count
         // 几百张整幅解码再编码，外接盘上要好几分钟：期间不让 Mac 闲置睡眠（优化分析 NR1）。
         let sleepGuard = longTasks.begin(isHighlights ? .highlights : .jpegExport)
 
         Task.detached { [weak self] in
             defer { sleepGuard.end() }  // 所有出口（建不了文件夹、取消、导完）都放掉
-            do {
-                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            } catch {
-                await MainActor.run { [weak self] in
-                    self?.lastError = "无法创建导出文件夹「\(folder.lastPathComponent)」: \(Diagnostics.describeIO(error))"
-                    self?.isRunning = false
+            var outcomes: [JPEGSetOutcome] = []
+            var folderError: String?
+            for (k, planned) in plans.enumerated() {
+                if flag.isSet { break }
+                let setFolder = planned.set.folder
+                do {
+                    try FileManager.default.createDirectory(at: setFolder, withIntermediateDirectories: true)
+                } catch {
+                    folderError = "无法创建导出文件夹「\(setFolder.lastPathComponent)」: \(Diagnostics.describeIO(error))"
+                    break
                 }
-                return
-            }
-            await MainActor.run { [weak self] in self?.progressText = "导出 JPG 0/\(total)..." }
-            // 路数按这一批走哪条路、每路要多少内存定（优化分析 PP-01，见 DeliveryConcurrency）：原尺寸边解边编、
-            // 整幅解放开到核数 − 2（整幅的按物理内存封顶），缩到原图一半以内的卡在硬件解码器上、RAW 没量过，照旧 4 路。
-            // Width-limited TaskGroup: seed `workers` tasks, add one more as each finishes.
-            let plan = DeliveryConcurrency.jpegExport(sources: jobs.map(\.source), options: options)
-            let workers = plan.workers
-            AppLog.info("delivery", "\(isHighlights ? "精华" : "JPG") 导出 \(total) 张：并发 \(plan.label)")
-            var failed: [String] = []
-            var failureReasons: [String: String] = [:]
-            var overLimit: [String] = []
-            var written: [URL] = []
-            var done = 0
-            var iterator = jobs.makeIterator()
-            await withTaskGroup(of: (String, URL, DeliveryEncoder.Outcome).self) { group in
-                func addNext() {
-                    guard !flag.isSet, let job = iterator.next() else { return }
-                    group.addTask {
-                        (job.id, job.dest, Self.writeJPEG(from: job.source, to: job.dest, options: options))
-                    }
-                }
-                for _ in 0..<workers { addNext() }
-                for await (id, dest, outcome) in group {
-                    switch outcome {
-                    case .ok: written.append(dest)
-                    case .overLimit: written.append(dest); overLimit.append(id)
-                    case .failed(let why): failed.append(id); failureReasons[id] = why
-                    }
-                    done += 1
-                    let doneNow = done
+                // 几套时进度写「第 2/3 套「小红书」」，一套时和以前一样。
+                let head = multi ? "导出 JPG 第 \(k + 1)/\(plans.count) 套「\(planned.set.name ?? "")」" : "导出 JPG"
+                let base = k * total
+                await MainActor.run { [weak self] in self?.progressText = "\(head) 0/\(total)..." }
+                let outcome = await Self.writeJPEGSet(planned, isHighlights: isHighlights, originals: originals, flag: flag) { [weak self] done in
+                    let overall = base + done
                     await MainActor.run { [weak self] in
-                        self?.progressText = "导出 JPG \(doneNow)/\(total)..."
-                        self?.progressFraction = Double(doneNow) / Double(total)
+                        self?.progressText = "\(head) \(done)/\(total)..."
+                        self?.progressFraction = Double(overall) / Double(grand)
                     }
-                    addNext()
                 }
+                outcomes.append(outcome)
             }
-
-            // 按导出顺序（几个 worker 谁先失败不一定，状态栏那句每次一样）。
-            let failedSet = Set(failed)
-            let failedIds = jobs.map(\.id).filter(failedSet.contains)
-            let failures = failedIds.map { DeliveryRecord.Failure(id: $0, reason: failureReasons[$0] ?? "") }
-            let reasonText = Diagnostics.reasonSummary(failed.compactMap { failureReasons[$0] })
-            let overIds = overLimit
-            let writtenFiles = written.sorted { $0.lastPathComponent < $1.lastPathComponent }
-            // 按导出顺序（精华按名次）；取消了也记已经写出去的那些，文件都在。
-            let writtenPaths = Set(written.map(\.path))
-            let delivered = jobs.filter { writtenPaths.contains($0.dest.path) }.map {
-                DeliveryRecord.File(file: $0.dest.lastPathComponent, id: $0.id, original: originals[$0.id] ?? $0.source.path)
-            }
+            let results = outcomes
+            let createError = folderError
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
                 self.isRunning = false
+                if multi {
+                    self.finishJPEGSets(results, parent: folder, setCount: plans.count, cancelled: flag.isSet,
+                                        createError: createError, ledger: ledger)
+                    return
+                }
+                guard let only = results.first else {
+                    // 建不了文件夹（以前的那一句，一个字不变）。
+                    self.lastError = createError
+                    return
+                }
+                let failedIds = only.failedIds
+                let overIds = only.overIds
+                let writtenFiles = only.written
                 self.lastJPEGExport = JPEGExportReport(folder: folder, written: writtenFiles, overLimit: overIds,
-                                                       failed: failedIds, concurrency: plan.label)
+                                                       failed: failedIds, concurrency: only.concurrency)
                 let count = writtenFiles.count
+                let renamed = only.planned.renamed
                 let kept = renamed > 0 ? "（\(renamed) 张目标里已有同名，另存为 -2、-3…，旧文件没动）" : ""
                 // 逐张失败的原因（盘满了、没有权限、原片不在了……）跟在张数后面，几种不同的分开数（审查 D03）。
                 // 名单只列前 3 张、多了写「等 N 张」（EC-08）；全名单进交付对照（有写出去的那次）和日志。
                 let failedNote = "JPG 导出: \(count) 成功, \(failedIds.count) 失败 (\(FailureNames.list(failedIds, unit: "张")))"
-                    + reasonText
-                if !failures.isEmpty {
-                    let all = failures.map { $0.reason.isEmpty ? $0.id : "\($0.id)（\($0.reason)）" }
-                    AppLog.warning("delivery", "\(isHighlights ? "精华" : "JPG") 导出失败 \(failures.count) 张 → "
-                                   + "\(folder.path)：" + all.joined(separator: ", "))
-                }
+                    + Diagnostics.reasonSummary(only.reasons)
                 if flag.isSet {
                     self.progressText = "导出已取消: 已写出 \(count) 张 → \(folderLabel)"
                     if !failedIds.isEmpty { self.lastError = failedNote }
                 } else if failedIds.isEmpty {
                     let title = isHighlights ? "精华导出完成" : "JPG 导出完成"
                     self.progressText = "\(title): \(count) 张 → \(folderLabel)" + kept
-                    if !overIds.isEmpty { self.lastError = DeliveryEncoder.overLimitNote(overIds, maxMB: options.maxMB) }
+                    if !overIds.isEmpty { self.lastError = DeliveryEncoder.overLimitNote(overIds, maxMB: only.planned.set.options.maxMB) }
                     // 做完在访达里选中导出的文件夹（精华是这次新建的 Top20_日期_时间，名字事先不知道），下一步就是拖去发；
                     // 和高 ISO、水印、拼图导出一样只在全部成功时弹（UX-04）。确认表、复制原片的位置是刚在面板里自己挑的，不弹。
                     self.lastJPEGRevealed = folder
@@ -5175,9 +5213,110 @@ final class BatchStore: ObservableObject {
                 } else {
                     self.lastError = failedNote
                 }
-                self.recordDelivery(isHighlights ? .highlights : .jpeg, folder: folder, files: delivered, into: ledger,
-                                    failed: failures)
+                self.recordDelivery(isHighlights ? .highlights : .jpeg, folder: folder, files: only.delivered, into: ledger,
+                                    failed: only.failures)
             }
+        }
+    }
+
+    /// 导一套：Width-limited TaskGroup（先排 `workers` 个，完一个补一个），路数按这一套走哪条路、每路要多少内存定
+    /// （优化分析 PP-01，见 DeliveryConcurrency）：原尺寸边解边编、整幅解放开到核数 − 2（整幅的按物理内存封顶），
+    /// 缩到原图一半以内的卡在硬件解码器上、RAW 没量过，照旧 4 路。`progress(done)` 每写完一张回一次。
+    private nonisolated static func writeJPEGSet(_ planned: PlannedJPEGSet, isHighlights: Bool, originals: [String: String],
+                                                 flag: AnalysisEngine.CancelFlag,
+                                                 progress: @escaping @Sendable (Int) async -> Void) async -> JPEGSetOutcome {
+        let jobs = planned.jobs
+        let options = planned.set.options
+        let total = jobs.count
+        let plan = DeliveryConcurrency.jpegExport(sources: jobs.map(\.source), options: options)
+        let workers = plan.workers
+        AppLog.info("delivery", "\(isHighlights ? "精华" : "JPG") 导出 \(total) 张：并发 \(plan.label)")
+        var failed: [String] = []
+        var failureReasons: [String: String] = [:]
+        var overLimit: [String] = []
+        var written: [URL] = []
+        var done = 0
+        var iterator = jobs.makeIterator()
+        await withTaskGroup(of: (String, URL, DeliveryEncoder.Outcome).self) { group in
+            func addNext() {
+                guard !flag.isSet, let job = iterator.next() else { return }
+                group.addTask {
+                    (job.id, job.dest, Self.writeJPEG(from: job.source, to: job.dest, options: options))
+                }
+            }
+            for _ in 0..<workers { addNext() }
+            for await (id, dest, outcome) in group {
+                switch outcome {
+                case .ok: written.append(dest)
+                case .overLimit: written.append(dest); overLimit.append(id)
+                case .failed(let why): failed.append(id); failureReasons[id] = why
+                }
+                done += 1
+                await progress(done)
+                addNext()
+            }
+        }
+        // 按导出顺序（几个 worker 谁先失败不一定，状态栏那句每次一样）。
+        let failedSet = Set(failed)
+        let failedIds = jobs.map(\.id).filter(failedSet.contains)
+        let failures = failedIds.map { DeliveryRecord.Failure(id: $0, reason: failureReasons[$0] ?? "") }
+        if !failures.isEmpty {
+            let all = failures.map { $0.reason.isEmpty ? $0.id : "\($0.id)（\($0.reason)）" }
+            AppLog.warning("delivery", "\(isHighlights ? "精华" : "JPG") 导出失败 \(failures.count) 张 → "
+                           + "\(planned.set.folder.path)：" + all.joined(separator: ", "))
+        }
+        // 按导出顺序（精华按名次）；取消了也记已经写出去的那些，文件都在。
+        let writtenPaths = Set(written.map(\.path))
+        let delivered = jobs.filter { writtenPaths.contains($0.dest.path) }.map {
+            DeliveryRecord.File(file: $0.dest.lastPathComponent, id: $0.id, original: originals[$0.id] ?? $0.source.path)
+        }
+        return JPEGSetOutcome(planned: planned, written: written.sorted { $0.lastPathComponent < $1.lastPathComponent },
+                              failedIds: failedIds, failures: failures, reasons: failed.compactMap { failureReasons[$0] },
+                              overIds: overLimit, delivered: delivered, concurrency: plan.label)
+    }
+
+    /// 几套一起导的收尾（GP-09）：状态栏一句说几套、每套几张；失败按套列；全部成功才在访达里选中外面那层文件夹；
+    /// 交付对照每套记一次。`lastJPEGExport` 是合起来的（文件夹 = 外面那层），`lastJPEGSets` 是每套的（无头 --sets 打印）。
+    private func finishJPEGSets(_ results: [JPEGSetOutcome], parent: URL, setCount: Int, cancelled: Bool,
+                                createError: String?, ledger: URL) {
+        let reports = results.map {
+            JPEGExportReport(folder: $0.planned.set.folder, written: $0.written, overLimit: $0.overIds, failed: $0.failedIds,
+                             concurrency: $0.concurrency)
+        }
+        lastJPEGSets = zip(results, reports).map { (name: $0.0.planned.set.name ?? "", report: $0.1) }
+        lastJPEGExport = JPEGExportReport(folder: parent, written: reports.flatMap(\.written), overLimit: reports.flatMap(\.overLimit),
+                                          failed: reports.flatMap(\.failed), concurrency: reports.map(\.concurrency).joined(separator: "；"))
+        let count = reports.reduce(0) { $0 + $1.written.count }
+        let names = results.map { $0.planned.set.folder.lastPathComponent + "/" }.joined(separator: "、")
+        let renamed = results.reduce(0) { $0 + $1.planned.renamed }
+        let kept = renamed > 0 ? "（\(renamed) 张目标里已有同名，另存为 -2、-3…，旧文件没动）" : ""
+        // 失败按套列：「小红书 1 张（DSCF7208）；朋友圈 2 张（…）」。
+        let failedSets = results.filter { !$0.failedIds.isEmpty }
+        let failedCount = failedSets.reduce(0) { $0 + $1.failedIds.count }
+        let perSet = failedSets.map { "\($0.planned.set.name ?? "") \($0.failedIds.count) 张（\(FailureNames.list($0.failedIds, unit: "张"))）" }
+        let failedNote = "JPG 导出 \(setCount) 套: \(count) 张成功, \(failedCount) 张失败 — " + perSet.joined(separator: "；")
+            + Diagnostics.reasonSummary(results.flatMap(\.reasons))
+        if cancelled {
+            progressText = "导出已取消: 已写出 \(count) 张 → \(parent.lastPathComponent)（\(results.count)/\(setCount) 套）"
+            if failedCount > 0 { lastError = failedNote }
+        } else if failedCount == 0 && createError == nil {
+            let each = Set(reports.map(\.written.count)).count == 1 ? "\(setCount) 套 × \(reports.first?.written.count ?? 0) 张"
+                : "\(setCount) 套共 \(count) 张"
+            progressText = "JPG 导出完成: \(each) → \(parent.lastPathComponent)/ 下的 \(names)" + kept
+            let over = results.filter { !$0.overIds.isEmpty }
+            if let first = over.first {
+                lastError = DeliveryEncoder.overLimitNote(over.flatMap(\.overIds), maxMB: first.planned.set.options.maxMB)
+            }
+            // 全部成功：在访达里选中外面那层（几个子文件夹都在里面，UX-04 同一个规矩）。
+            lastJPEGRevealed = parent
+            AppRuntime.revealInFinder([parent])
+        } else {
+            progressText = "JPG 导出结束: \(results.count)/\(setCount) 套 · \(count) 张 → \(parent.lastPathComponent)/"
+            lastError = failedCount > 0 ? failedNote : nil
+        }
+        if let createError { lastError = (lastError.map { $0 + "；" } ?? "") + createError }
+        for result in results {
+            recordDelivery(.jpeg, folder: result.planned.set.folder, files: result.delivered, into: ledger, failed: result.failures)
         }
     }
 

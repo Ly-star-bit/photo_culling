@@ -284,11 +284,24 @@ struct DeliveryOptionsPreview: View {
     /// 导出 JPG 面板上面那行「范围」（空 = 不画；精华、水印页没有）。
     var scopes: [JPEGScopeChoice] = []
     @State var scope: JPEGExportScope = .picksUsable
+    /// 导出 JPG 面板的「预设」一节（GP-09；nil = 不画，精华、水印页没有）。
+    var presets: JPEGPresetStore?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             if !scopes.isEmpty { JPEGScopeRow(choices: scopes, selection: $scope) }
             DeliveryOptionsSection(options: $options, namePreview: preview, showsColor: showsColor, tokensHint: tokensHint)
+            if let presets {
+                JPEGPresetSection(presets: presets, options: $options)
+                Text(presets.countLine(scopes.first { $0.scope == scope }?.count ?? 0))
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Spacer()
+                    Button("取消") {}
+                    Button("其他文件夹...") {}
+                    Button(presets.exportTitle) {}.buttonStyle(.accentProminent)
+                }
+            }
         }
         .padding(20)
         .frame(width: width, alignment: .topLeading)
@@ -302,7 +315,9 @@ struct DeliveryOptionsPreview: View {
 ///     [--size original|4096|2048|moments|xhs|ig|long:N|short:N|box:WxH]
 ///     [--sharpen off|std|high] [--color srgb|keep] [--strip-gps|--keep-gps] [--name '<模板>']
 ///     [--max-mb X] [--quality Q] [--overwrite]
-/// 走界面上同一个 exportJPEGs / exportHighlights（top:N 时 --dest 就是「精华」那一层，里面新建 TopN_日期_时间）。
+///     [--save-preset 名字]（把上面这套设置存成导出预设就退出，不导）
+///     [--sets 名字,名字=尺寸,…]（面板上勾着的几套：存过的预设名，或「名字=尺寸」= 这套设置换个尺寸；每套进 --dest/名字/）
+/// 走界面上同一个 exportJPEGs / exportJPEGSets / exportHighlights（top:N 时 --dest 就是「精华」那一层，里面新建 TopN_日期_时间）。
 /// 没给的选项用界面的出厂默认（不读 UserDefaults：那是全局的，临时数据目录隔离不了）。
 /// 打印写出的每个文件：名字、像素尺寸、方向、字节数。
 enum JPEGExportCLI {
@@ -334,6 +349,14 @@ enum JPEGExportCLI {
         print("设置: 尺寸 \(options.size) · 锐化 \(options.sharpen.rawValue) · 色彩 \(options.effectiveColor.rawValue)"
               + " · 去 GPS \(options.stripGPS ? "是" : "否") · 文件名 \(options.nameTemplate)"
               + " · 质量 \(Int((options.quality * 100).rounded()))" + (options.limitSize ? " · ≤\(options.maxMB) MB" : ""))
+        // 存成导出预设（GP-09）：上面这套设置存进数据目录的 delivery/jpeg_presets.json，不导出。
+        if let name = option("--save-preset") {
+            let presets = JPEGPresetStore(dataDir: appDataDir)
+            presets.save(named: name, options: options)
+            if let problem = presets.problem { print(problem); exit(1) }
+            print("预设「\(name)」已存: \(JPEGPresetStore.summary(options)) → \(presets.path.path)")
+            exit(0)
+        }
         // 面板上「范围」的后几档（UX-03）：--ids = 选中的这几张（按给的顺序），--scope client = 客户选中（网格顺序）。
         var ids: [String]?
         if let list = option("--ids") {
@@ -344,6 +367,9 @@ enum JPEGExportCLI {
             print("范围: 客户选中 \(ids?.count ?? 0) 张")
         }
         let ledgerBefore = store.deliveryRecords.last
+        if let list = option("--sets") {
+            runSets(list, store: store, dest: dest, base: options, scope: scope, ids: ids, overwrite: args.contains("--overwrite"))
+        }
         if let top {
             store.exportHighlights(count: top, into: dest, options: options)
         } else {
@@ -373,6 +399,50 @@ enum JPEGExportCLI {
             print("交付对照里记的失败 \(failed.count) 张: " + failed.map(\.id).joined(separator: " "))
         }
         exit(report.failed.isEmpty && record.files.count == report.written.count ? 0 : 1)
+    }
+
+    /// --sets 名字,名字=尺寸,…（GP-09，面板上勾着的几套）：只写名字 = 数据目录里存的预设（--save-preset 存的）；
+    /// 「名字=尺寸」= 上面这套设置换个尺寸。每套进 --dest 下以名字命名的子文件夹。打印每套写出的文件、交付对照每套一条。
+    @MainActor
+    private static func runSets(_ list: String, store: BatchStore, dest: URL, base: DeliveryOptions, scope: String,
+                                ids: [String]?, overwrite: Bool) -> Never {
+        let presets = JPEGPresetStore(dataDir: appDataDir)
+        var sets: [(name: String, options: DeliveryOptions)] = []
+        for item in list.split(separator: ",").map(String.init) {
+            let parts = item.split(separator: "=", maxSplits: 1).map(String.init)
+            if parts.count == 2 {
+                var o = base
+                o.size = DeliverySize(spec: parts[1]).spec
+                o.color = nil
+                sets.append((parts[0], o))
+            } else if let saved = presets.presets[item] {
+                sets.append((item, saved))
+            } else {
+                print("没有叫「\(item)」的导出预设（先 --save-preset 存，或写成 名字=尺寸）")
+                exit(1)
+            }
+        }
+        for set in sets { print("套「\(set.name)」: \(JPEGPresetStore.summary(set.options))") }
+        let recordsBefore = store.deliveryRecords.count
+        store.exportJPEGSets(to: dest, sets: sets, includeUsable: scope != "picks", overwrite: overwrite, ids: ids)
+        let deadline = Date().addingTimeInterval(600)
+        while store.isRunning && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        print(store.progressText)
+        if let error = store.lastError { print("提醒: " + error) }
+        guard let report = store.lastJPEGExport else { exit(1) }
+        print("文件夹 \(report.folder.path)")
+        for (name, part) in store.lastJPEGSets {
+            print("套「\(name)」 \(part.folder.lastPathComponent)/ · \(part.written.count) 张 · 失败 \(part.failed.count) · 并发 \(part.concurrency)")
+            for url in part.written { print("  " + describe(url)) }
+        }
+        if let revealed = store.lastJPEGRevealed { print("在访达中显示: \(revealed.path)") }
+        let added = Array(store.deliveryRecords.dropFirst(recordsBefore))
+        print("交付对照 \(store.deliveryLedgerPath.path) · 这次记了 \(added.count) 条")
+        for record in added {
+            print("  \(record.kind) \(record.folder) · \(record.files.count) 张")
+        }
+        let ok = report.failed.isEmpty && added.count == store.lastJPEGSets.filter { !$0.report.written.isEmpty }.count
+        exit(ok ? 0 : 1)
     }
 
     private static func apply(_ options: inout DeliveryOptions, option: (String) -> String?, flags: Set<String>) {

@@ -20,6 +20,9 @@ Scripts/selftests.sh 里跑）；这里验它们在命令行出口上确实接�
    全名单（按导出顺序、带原因）记进这一场 exports.json 那一条的 failed。
 7. --export-jpeg --ids（面板上「选中的」那档）只导给的那几张、按给的顺序（不按判决挑），做完在访达里选中导出文件夹；
    --scope client（「客户选中」那档）只导客户选中的、按网格顺序（UX-03）。
+8. --export-jpeg --save-preset 存导出预设（数据目录的 delivery/jpeg_presets.json，不导出）；--sets 一次导出几套（GP-09）：
+   每套进 --dest 下以预设名命名的子文件夹（/ 去掉、只差大小写的另起 -2），每套按自己的尺寸 / 去 GPS，
+   交付对照每套记一条，全部成功在访达里选中外面那层；没存过的预设名退出码 1。
 
 每条命令都带临时 LABELGUI_DATA_DIR、LABELGUI_NO_GUI=1；CI 里放在 MCP 冒烟后面。
 用法: python3 -I Scripts/delivery_regression.py <LabelGUI> [--keep]
@@ -525,6 +528,57 @@ def scope_section():
           f"客户选中按网格顺序导、记（{[f['id'] for f in recs[-1]['files']] if len(recs) == 2 else recs}，要 {order}）")
 
 
+# ---------------------------------------------------------------- 8. 一次导出几套（预设）
+
+def sets_section():
+    print("8. --export-jpeg --save-preset / --sets：一次导出勾选的几套，每套进自己的子文件夹（GP-09）")
+    photos, data, ids = synth_session("sets", 8, gps=(31.2304, 121.4737))
+    v = verdicts(photos, data)
+    keep = [i for i in ids if v.get(i) in ("精选", "可用")]
+    if not check(len(keep) >= 2, f"前提：精选 + 可用至少 2 张（{len(keep)}）"):
+        return
+    dest = os.path.join(WORK, "sets-out")
+    r = run(["--export-jpeg", photos, "--dest", dest, "--size", "long:450", "--strip-gps", "--save-preset", "网/页"], data)
+    store = os.path.join(data, "delivery", "jpeg_presets.json")
+    saved = json.load(open(store, encoding="utf-8")).get("presets", {}) if os.path.exists(store) else {}
+    check(r.returncode == 0 and saved.get("网/页", {}).get("size") == "long:450" and saved["网/页"].get("stripGPS") is True
+          and not os.path.exists(dest),
+          f"--save-preset：存进数据目录的 delivery/jpeg_presets.json、不导出（{saved}）（{r.stdout.strip()[-120:]!r}）")
+    r = run(["--export-jpeg", photos, "--dest", dest, "--scope", "picks+usable", "--sets", "原尺寸=original,小=long:300,网/页"],
+            data, timeout=300)
+    out = r.stdout + r.stderr
+    subs = sorted(os.listdir(dest)) if os.path.isdir(dest) else []
+    check(r.returncode == 0 and subs == sorted(["原尺寸", "小", "网页"]),
+          f"三套各进自己的子文件夹（预设名里的 / 去掉）、外面一层没有散文件（{subs}）（{out.strip()[-200:]!r}）")
+    def dims(sub):
+        return {m.group(1): (int(m.group(2)), int(m.group(3)))
+                for m in re.finditer(r"^  (\S+)\.jpg (\d+)x(\d+) ", out.split("套「" + sub + "」 ")[-1].split("\n套「")[0], re.M)}
+    big, small, web = dims("原尺寸"), dims("小"), dims("网/页")
+    check(sorted(big) == sorted(keep) and sorted(small) == sorted(keep) and sorted(web) == sorted(keep),
+          f"每套都是精选 + 可用那 {len(keep)} 张（{len(big)} / {len(small)} / {len(web)}）")
+    check(all(max(w, h) == 300 for w, h in small.values()) and all(max(w, h) == 450 for w, h in web.values())
+          and all(max(w, h) == 900 for w, h in big.values()),
+          f"每套按自己的尺寸：原尺寸 900、小 300、存的预设 450（{list(big.values())[:1]} {list(small.values())[:1]} {list(web.values())[:1]}）")
+    web_lines = [l for l in out.split("套「网/页」 ")[-1].split("\n套「")[0].splitlines() if ".jpg " in l]
+    big_lines = [l for l in out.split("套「原尺寸」 ")[-1].split("\n套「")[0].splitlines() if ".jpg " in l]
+    check(web_lines and all("无GPS" in l for l in web_lines) and big_lines and all("有GPS" in l for l in big_lines),
+          f"存的预设连去 GPS 一起带上（原片带 GPS：存的那套去掉，原尺寸那套照面板留着）")
+    recs = ledger_records(data)
+    folders = [os.path.basename(rec.get("folder", "")) for rec in recs]
+    check(len(recs) == 3 and folders == ["原尺寸", "小", "网页"] and all(len(rec["files"]) == len(keep) for rec in recs),
+          f"交付对照每套记一条、文件夹是那一套的子文件夹（{folders}）")
+    check(f"JPG 导出完成: 3 套 × {len(keep)} 张" in out, f"状态栏一句说几套几张（{out.strip()[-160:]!r}）")
+    shown = re.findall(r"^在访达中显示: (.+)$", r.stdout, re.M)
+    check(len(shown) == 1 and os.path.realpath(shown[0]) == os.path.realpath(dest), f"全部成功：在访达里选中外面那层（{shown}）")
+    # 两个预设名只差大小写：子文件夹另起 -2（APFS 默认不分大小写，不然两套写进同一个文件夹）。
+    dest2 = os.path.join(WORK, "sets-case")
+    r = run(["--export-jpeg", photos, "--dest", dest2, "--ids", keep[0], "--sets", "web=long:300,WEB=long:200"], data)
+    subs = sorted(os.listdir(dest2)) if os.path.isdir(dest2) else []
+    check(r.returncode == 0 and subs == sorted(["web", "WEB-2"]), f"只差大小写的两套：web/、WEB-2/（{subs}）")
+    r = run(["--export-jpeg", photos, "--dest", dest2, "--sets", "没存过的"], data)
+    check(r.returncode == 1 and "没有叫「没存过的」的导出预设" in r.stdout, f"没存过的预设名：退出码 1、说清楚（{r.stdout.strip()[-100:]!r}）")
+
+
 try:
     same_file_section()
     batch_section()
@@ -532,6 +586,7 @@ try:
     gps_section()
     failure_list_section()
     scope_section()
+    sets_section()
     if not REAL_BEFORE:
         check(not os.path.exists(REAL_DATA), f"跑之前没有 {REAL_DATA}，跑完也没有（每条命令都走临时数据目录）")
 finally:

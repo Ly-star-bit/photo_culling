@@ -304,8 +304,10 @@ enum BatchUISnapshot {
             let counts = store.verdictCounts
             let scopes = JPEGScopeChoice.choices(picks: counts.pick, usable: counts.usable, selected: 0,
                                                  client: store.clientPickCount, filter: nil)
+            // 下面「预设」一节和按钮（GP-09）：数据目录里存的导出预设（delivery/jpeg_presets.json）。
             return DeliveryOptionsPreview(options: options,
-                                          preview: store.jpegNamePreview(options, includeUsable: true), scopes: scopes)
+                                          preview: store.jpegNamePreview(options, includeUsable: true), scopes: scopes,
+                                          presets: JPEGPresetStore(dataDir: appDataDir))
         }
     }
 }
