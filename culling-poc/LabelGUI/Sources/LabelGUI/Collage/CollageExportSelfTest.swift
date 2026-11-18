@@ -551,7 +551,8 @@ enum CollageExportSelfTest {
         spin(5) { !store.isExporting }
         let written = ((try? fm.contentsOfDirectory(atPath: out.path)) ?? []).filter { !$0.hasPrefix(".") }.sorted()
         let firstTwo = ["取消_跨页_01.jpg", "取消_跨页_02.jpg"]
-        let stoppedOK: Bool = refused == nil && result?.cancelled == true && probe.snapshot.started == [0, 1]
+        // 开过的只认「哪几页」、不认先后：两页的 detached 任务落在不同线程上，谁先进 begin 不一定。
+        let stoppedOK: Bool = refused == nil && result?.cancelled == true && probe.snapshot.started.sorted() == [0, 1]
         check(stoppedOK && result?.files == firstTwo && written == firstTwo && leftovers(out).isEmpty,
               "渲到一半取消：在渲的两页写完照实列出、没开的不开、不出 PDF",
               "files \(result?.files ?? []) · 盘上 \(written) · 开过 \(probe.snapshot.started)")
