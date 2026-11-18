@@ -70,7 +70,7 @@ struct WatermarkView: View {
                 .buttonStyle(.accentProminent)
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(!store.canExport)
-                .help(store.exportBlockedReason ?? "把列表里的照片全部加水印后写到输出目录 (⌘⏎)")
+                .help(exportHelp)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -123,6 +123,27 @@ struct WatermarkView: View {
         return counts.pick + counts.usable
     }
 
+    /// 导出按钮的悬停提示：灰着时把还差的几样全写上（UX-10：以前一次只报第一样）。
+    private var exportHelp: String {
+        if store.isExporting { return "正在导出" }
+        let missing = store.exportMissing
+        return missing.isEmpty ? "把列表里的照片全部加水印后写到输出目录 (⌘⏎)" : "还差：" + missing.joined(separator: "、")
+    }
+
+    /// 状态栏左边常驻的一句「批量导出还差：选输出目录 · 选一张签名 PNG…」（UX-10）。不差了就没有。
+    @ViewBuilder
+    private var missingNotice: some View {
+        let missing = store.exportMissing
+        if !missing.isEmpty {
+            Label("批量导出还差：" + missing.joined(separator: " · "), systemImage: "exclamationmark.circle")
+                .font(.caption)
+                .foregroundStyle(AppPalette.warning)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help("还差：" + missing.joined(separator: "、"))
+        }
+    }
+
     private var statusBar: some View {
         HStack(spacing: 12) {
             if let error = store.lastError {
@@ -138,6 +159,7 @@ struct WatermarkView: View {
                 .controlSize(.small)
                 .help(refusal.safeFolder.path)
             }
+            missingNotice
             Spacer()
             if let notice = store.notice {
                 Text(notice).font(.caption).foregroundStyle(.secondary)
@@ -301,6 +323,13 @@ struct WatermarkView: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                                 .frame(maxWidth: 200)
+                        }
+                        // 导出就差签名图这一样（勾着「签名图水印」却没选 PNG，UX-10）：描一圈提醒色。
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 6)
+                                .strokeBorder(AppPalette.warning, lineWidth: 1.5)
+                                .opacity(store.needsSignatureFile ? 1 : 0)
+                                .allowsHitTesting(false)
                         }
                         .help(store.signatureURL?.path ?? "选择带透明通道的 PNG 签名图")
                         if store.signatureURL != nil {
@@ -533,26 +562,14 @@ struct WatermarkView: View {
                         .disabled(presetName.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
                 ForEach(store.presets.keys.sorted(), id: \.self) { name in
-                    HStack(spacing: 6) {
-                        Image(systemName: "checkmark")
-                            .font(.caption.bold())
-                            .foregroundStyle(AppPalette.accent)
-                            .opacity(store.activePresetName == name ? 1 : 0)
-                            .frame(width: 12)
-                        Button(name) { store.applyPreset(named: name) }
-                            .buttonStyle(.link)
-                            .help(store.activePresetName == name ? "当前参数就是这个预设" : "应用预设「\(name)」")
-                        Spacer()
-                        Button {
-                            presetToDelete = name
-                        } label: { Image(systemName: "trash").font(.caption) }
-                            .buttonStyle(.plain)
-                            .help("删除预设")
-                    }
+                    presetRow(name)
                 }
-                if store.presets.isEmpty {
-                    Text("把当前全部参数存成预设，下次一键套用").hintText()
-                }
+                // 以前写「把当前全部参数存成预设」，可导出设置不在里面（gap 复核补 2）：现在带上了，签名图文件、输出目录照旧不带。
+                Text(store.presets.isEmpty
+                     ? "把水印、相框、画布比例和导出设置（尺寸、锐化、质量、文件名）存成预设，下次一键套用；签名图文件、输出目录不在预设里"
+                     : "预设带着导出设置（尺寸、锐化、质量、文件名）；签名图文件、输出目录不在预设里")
+                    .hintText()
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(6)
         }
@@ -576,6 +593,36 @@ struct WatermarkView: View {
             Button("取消", role: .cancel) {}
         } message: { name in
             Text("预设「\(name)」已存在，保存会用当前参数替换它。")
+        }
+    }
+
+    /// 预设一行：打勾（当前参数就是它）、名字（点了套用）、它带的导出尺寸（老预设写「不含导出设置」）、删除。
+    private func presetRow(_ name: String) -> some View {
+        let active = store.activePresetName == name
+        let summary = store.presetSummary(name)
+        let carriesOptions = store.presetOptions[name] != nil
+        let help = active ? "当前参数就是这个预设"
+            : (carriesOptions ? "应用预设「\(name)」：水印参数和导出设置（\(summary)）一起换"
+                              : "应用预设「\(name)」：只换水印参数（这个预设是以前存的，没带导出设置）")
+        return HStack(spacing: 6) {
+            Image(systemName: "checkmark")
+                .font(.caption.bold())
+                .foregroundStyle(AppPalette.accent)
+                .opacity(active ? 1 : 0)
+                .frame(width: 12)
+            Button(name) { store.applyPreset(named: name) }
+                .buttonStyle(.link)
+                .help(help)
+            Text(summary)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer()
+            Button {
+                presetToDelete = name
+            } label: { Image(systemName: "trash").font(.caption) }
+                .buttonStyle(.plain)
+                .help("删除预设")
         }
     }
 

@@ -44,6 +44,10 @@ final class WatermarkStore: ObservableObject {
     @Published var options = WatermarkEngine.ExportOptions() { didSet { scheduleSave() } }
     @Published var outputDir: URL? { didSet { scheduleSave() } }
     @Published private(set) var presets: [String: WatermarkEngine.Config] = [:]
+    /// 预设里的导出设置（尺寸、锐化、质量、文件名……，优化分析 gap 复核补 2）：和 `presets` 同名一一对应，单独一个字典 ——
+    /// `presets` 的样子不能变（拼图检视器「预设 ▸」、--collage 读 state.json 都按 [名字: Config] 用）。老预设没有这一项 =
+    /// 套用时不动导出设置（以前的行为）；以后存的都带上。
+    @Published private(set) var presetOptions: [String: WatermarkEngine.ExportOptions] = [:]
 
     @Published var previewImage: NSImage?
     /// 切换照片后、新预览渲染完成前为 true：旧图上盖一层转圈，而不是只在
@@ -98,14 +102,18 @@ final class WatermarkStore: ObservableObject {
         var signaturePath: String?
         var outputPath: String?
         var presets: [String: WatermarkEngine.Config] = [:]
+        /// 预设带的导出设置（键 = 预设名）。单独一个键：老版本读新文件照样读得出 presets（只是不认这一项）。
+        var presetOptions: [String: WatermarkEngine.ExportOptions] = [:]
 
         init(config: WatermarkEngine.Config, options: WatermarkEngine.ExportOptions,
-             signaturePath: String?, outputPath: String?, presets: [String: WatermarkEngine.Config]) {
+             signaturePath: String?, outputPath: String?, presets: [String: WatermarkEngine.Config],
+             presetOptions: [String: WatermarkEngine.ExportOptions] = [:]) {
             self.config = config
             self.options = options
             self.signaturePath = signaturePath
             self.outputPath = outputPath
             self.presets = presets
+            self.presetOptions = presetOptions
         }
 
         /// 逐字段容错：任何一个字段坏了只丢它自己，预设不会跟着全没。
@@ -116,6 +124,8 @@ final class WatermarkStore: ObservableObject {
             signaturePath = (try? c.decodeIfPresent(String.self, forKey: .signaturePath)) ?? nil
             outputPath = (try? c.decodeIfPresent(String.self, forKey: .outputPath)) ?? nil
             presets = (try? c.decodeIfPresent([String: WatermarkEngine.Config].self, forKey: .presets)) ?? nil ?? presets
+            presetOptions = (try? c.decodeIfPresent([String: WatermarkEngine.ExportOptions].self, forKey: .presetOptions))
+                ?? nil ?? presetOptions
         }
     }
 
@@ -149,14 +159,67 @@ final class WatermarkStore: ObservableObject {
 
     var canExport: Bool { exportBlockedReason == nil }
 
-    /// 当前参数与哪个预设完全一致（有就打勾）。
-    var activePresetName: String? {
-        Self.presetName(matching: config, in: presets)
+    /// 「批量导出」还差的几样，一样一句，全列（优化分析 UX-10）：以前只在按钮的悬停提示里、一次只报第一样，补了一样还是灰的。
+    /// 状态栏常驻显示；空 = 不差（正在导出也是空：那时按钮灰着是因为在导）。
+    var exportMissing: [String] {
+        guard !isExporting else { return [] }
+        var missing: [String] = []
+        if photos.isEmpty { missing.append("导入照片") }
+        if outputDir == nil { missing.append("选输出目录") }
+        if !hasWatermarkContent {
+            // 「签名图水印」默认勾着，可没选 PNG 不算有内容 —— 这一样最不好猜（UX-10）。
+            if needsSignatureFile {
+                missing.append(signatureURL == nil ? "选一张签名 PNG（或开 EXIF 文字 / 相框）"
+                               : "签名图读不出来，换一张 PNG（或开 EXIF 文字 / 相框）")
+            } else {
+                missing.append("水印内容（签名图、EXIF 文字、相框至少开一样）")
+            }
+        }
+        return missing
     }
 
+    /// 签名图水印开着、签名图没选（或读不出来）、别的水印也没开：导出就差这一样，「选择 PNG 签名…」按钮描一圈提醒色（UX-10）。
+    var needsSignatureFile: Bool {
+        config.signatureEnabled && signatureImage == nil && !hasWatermarkContent
+    }
+
+    /// 当前参数与哪个预设完全一致（有就打勾）。带导出设置的预设要水印参数和导出设置都一样（以前只比水印参数：两个只差
+    /// 导出尺寸的预设在它眼里是同一个，勾永远打在名字排前面的那个上）；老预设没带导出设置的只比水印参数。
+    var activePresetName: String? {
+        Self.presetName(matching: config, options: options, in: presets, presetOptions: presetOptions)
+    }
+
+    /// 只比水印参数（拼图那边只用水印参数，--collage 读 state.json 时用它）。
     static func presetName(matching config: WatermarkEngine.Config,
                            in presets: [String: WatermarkEngine.Config]) -> String? {
         presets.keys.sorted().first { presets[$0] == config }
+    }
+
+    static func presetName(matching config: WatermarkEngine.Config, options: WatermarkEngine.ExportOptions,
+                           in presets: [String: WatermarkEngine.Config],
+                           presetOptions: [String: WatermarkEngine.ExportOptions]) -> String? {
+        presets.keys.sorted().first { name in
+            presets[name] == config && (presetOptions[name].map { $0 == options } ?? true)
+        }
+    }
+
+    /// 预设那一行的小字：带了导出设置就写尺寸（「小红书 3:4」「原尺寸」），老预设写「不含导出设置」。
+    func presetSummary(_ name: String) -> String {
+        guard let opts = presetOptions[name] else { return "不含导出设置" }
+        return Self.sizeLabel(opts.sizeValue)
+    }
+
+    /// 尺寸的说法：规格表里有的用表里的名字（去掉括号里的那截），自定义的写「长边 3000」「短边 1200」「1000×1000 以内」。
+    nonisolated static func sizeLabel(_ size: DeliverySize) -> String {
+        if let preset = DeliverySize.presets.first(where: { $0.size == size }) {
+            return preset.label.components(separatedBy: "（").first ?? preset.label
+        }
+        switch size {
+        case .original: return "原尺寸"
+        case .long(let n): return "长边 \(n)"
+        case .short(let n): return "短边 \(n)"
+        case .box(let w, let h): return "\(w)×\(h) 以内"
+        }
     }
 
     /// 能不能带进拼图：拼图只收签名和文字（相框、画布比例会改画布尺寸，进不了）。
@@ -659,24 +722,30 @@ final class WatermarkStore: ObservableObject {
 
     // MARK: - 预设
 
+    /// 存成预设：水印参数 + 导出设置（尺寸、锐化、质量、体积上限、去 GPS、文件名）。签名图文件、输出目录不在预设里。
     func savePreset(named name: String) {
         let name = name.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return }
         presets[name] = config
+        presetOptions[name] = options
         lastError = nil
-        setNotice("预设「\(name)」已保存")
+        setNotice("预设「\(name)」已保存（含导出设置：\(Self.sizeLabel(options.sizeValue))）")
         flushSave()   // 预设是用户主动存的，不走 1 秒防抖
     }
 
+    /// 套用：水印参数照旧；预设带了导出设置就连导出设置一起换（老预设没带 = 不动现在的导出设置）。
     func applyPreset(named name: String) {
         guard let preset = presets[name] else { return }
         config = preset
+        if let opts = presetOptions[name] { options = opts }
         lastError = nil
-        setNotice("已应用预设「\(name)」")
+        let tail = presetOptions[name].map { "（导出：\(Self.sizeLabel($0.sizeValue))）" } ?? "（这个预设没存导出设置，导出设置没动）"
+        setNotice("已应用预设「\(name)」" + tail)
     }
 
     func deletePreset(named name: String) {
         guard presets.removeValue(forKey: name) != nil else { return }
+        presetOptions.removeValue(forKey: name)
         setNotice("预设「\(name)」已删除")
         flushSave()
     }
@@ -726,6 +795,8 @@ final class WatermarkStore: ObservableObject {
         config = state.config
         options = state.options
         presets = state.presets
+        // 只留还在的预设的那份（手改 state.json 删了预设、没删这边的）。
+        presetOptions = state.presetOptions.filter { state.presets[$0.key] != nil }
         if let path = state.signaturePath, FileManager.default.fileExists(atPath: path) {
             signatureURL = URL(fileURLWithPath: path)
         }
@@ -755,7 +826,7 @@ final class WatermarkStore: ObservableObject {
         let state = PersistState(config: config, options: options,
                                  signaturePath: signatureURL?.path,
                                  outputPath: outputDir?.path,
-                                 presets: presets)
+                                 presets: presets, presetOptions: presetOptions)
         do {
             let data = try JSONEncoder().encode(state)
             try data.write(to: statePath, options: .atomic)

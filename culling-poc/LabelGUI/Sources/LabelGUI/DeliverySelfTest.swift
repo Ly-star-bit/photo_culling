@@ -57,6 +57,8 @@ enum DeliverySelfTest {
         DeliveryScopeSelfTest.run { t.check($0, $1, $2) }
         print("== 交付的解码（见 DeliveryDecodeSelfTest.swift）")
         DeliveryDecodeSelfTest.run { t.check($0, $1, $2) }
+        print("== 交付的预设（见 DeliveryPresetSelfTest.swift）")
+        DeliveryPresetSelfTest.run(work.appendingPathComponent("presets")) { t.check($0, $1, $2) }
         try? fm.removeItem(at: work)
         print(t.failures == 0 ? "== 全部通过" : "== \(t.failures) 条没过")
         exit(t.failures == 0 ? 0 : 1)

@@ -94,6 +94,9 @@ enum WatermarkUISnapshot {
         print("水印页快照 \(Int(size.width))x\(Int(size.height)) · 照片 \(store.photos.count) 张 · 签名 \(signature)"
               + " · 能带进拼图 \(store.canSendToCollage ? "是" : "否") · 预览 \(store.previewImage == nil ? "没出来" : "有")"
               + " · \(out.path)")
+        // 导出按钮亮不亮、还差什么（UX-10：状态栏上常驻的那一句）。
+        let missing = store.exportMissing
+        print("导出按钮: " + (store.canExport ? "亮" : "灰") + (missing.isEmpty ? "" : " · 还差: " + missing.joined(separator: " · ")))
         exit(0)
     }
 }
