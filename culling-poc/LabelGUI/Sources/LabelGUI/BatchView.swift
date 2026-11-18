@@ -1170,6 +1170,8 @@ struct BatchView: View {
                     }
                 })
                 }
+                // 按住一张拖出去（GP-07）：垫在底下、点击穿过去，只在真的拖起来时开 AppKit 的拖放会话（GridDragOut.swift）。
+                .background(GridDragOutAnchor(files: { id in dragFiles(id) }))
             }
             .background(AppPalette.canvas)
             // 预览图被清掉的场次（掉出最近 15 场、或者「移除历史记录」里移除过）：整屏灰格子，在格子区正中说一句、给「重新分析」
@@ -2810,6 +2812,14 @@ struct BatchView: View {
         ids.compactMap { store.item(withID: $0) }.flatMap { GridHandoff.originals(rawPath: $0.rawPath, decodePath: $0.decodePath) }
     }
 
+    /// 按在这一张上拖出去（GridDragOut.swift）：和右键菜单同一个范围（在选中里 = 选中的全部），每个原片文件带上这张的
+    /// 预览路径（拖影用缓存里现成的缩略图）。鼠标监听里调，在 body 外面：读的是现在的选中。
+    private func dragFiles(_ id: String) -> [(url: URL, preview: String)] {
+        menuScope(id).ids.compactMap { store.item(withID: $0) }.flatMap { item in
+            GridHandoff.originals(rawPath: item.rawPath, decodePath: item.decodePath).map { (url: $0, preview: item.previewPath) }
+        }
+    }
+
     /// 右键一格弹出来的：改判、看单张、从这张开始审片、挑这一场、在访达中显示、用…打开、复制文件名、拼图。
     /// 右键的这张在选中里 = 对选中的全部（头一行写张数）；不在 = 只对它，选中不动（GridSelectionRules.menuTargets）。
     /// 菜单弹出时才建（CellMenu），这里不改焦点、不改选中 —— 只有点了哪一项才动。
@@ -3630,7 +3640,10 @@ private struct GridCell: View, Equatable {
         .contextMenu { CellMenu(id: item.id, state: actions.menuState) }
         // 时间轴的「你在这」：只记出现/消失，不在这里读任何会触发重绘的状态。
         .onAppear { viewport.appeared(item.id, chapter: BatchStore.timelineChapter(of: item)) }
-        .onDisappear { viewport.disappeared(item.id) }
+        .onDisappear {
+            viewport.disappeared(item.id)
+            GridHover.gone(item.id)  // 滚出去的格子不一定先报「指针离开」：别让拖出认成它
+        }
         .onChange(of: BatchStore.timelineChapter(of: item)) { _, chapter in viewport.update(item.id, chapter: chapter) }
         // gesture + simultaneousGesture instead of two onTapGestures: the latter
         // makes SwiftUI hold every single click ~300ms to rule out a double —
@@ -3683,7 +3696,10 @@ private struct CellHoverBar<Content: View>: View {
                         .padding(.bottom, 22)
                 }
             }
-            .onHover { hovering = $0 }
+            .onHover { inside in
+                hovering = inside
+                GridHover.hover(id, inside)  // 拖出靠它认按下去的是哪一格（GridDragOut.swift）
+            }
     }
 
     @ViewBuilder private var bar: some View {

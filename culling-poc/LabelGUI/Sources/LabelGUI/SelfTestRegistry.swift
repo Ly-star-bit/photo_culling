@@ -90,7 +90,7 @@ enum SelfTestRegistry {
               minArgs: 1, ci: .selftests(["{fixture}"])) { i in PersistSelfTest.run(flagIndex: i) },
         .init("--cull-mcp-selftest", "选片 MCP 在真的 BatchStore 上：XMP 待更新、导入客户选择、AI 改判的出处、一次定一场（<Fixtures/photot-session>，要空的数据目录）",
               ci: .selftests(["{fixture}"])) { i in CullMCPSelfTest.run(flagIndex: i) },
-        .init("--events-selftest", "离屏假事件（--events）实测送不送得到：最小 SwiftUI 视图上的点击 / 双击 / 悬停 / 滚轮 / 右键菜单；给了 fixture 再验批量页网格点一下格子焦点变到那张、悬停一格悬停条出现、格子的右键菜单（选中几张、只动这一张、改判点下去改对了几张）（[<Fixtures/photot-session>]，窗口从不上屏）",
+        .init("--events-selftest", "离屏假事件（--events）实测送不送得到：最小 SwiftUI 视图上的点击 / 双击 / 悬停 / 滚轮 / 右键菜单；给了 fixture 再验批量页网格点一下格子焦点变到那张、悬停一格悬停条出现、格子的右键菜单（选中几张、只动这一张、改判点下去改对了几张）、拖出的锚点（不挡点击、按下拖过 5pt 认对哪一格）（[<Fixtures/photot-session>]，窗口从不上屏）",
               ci: .selftests(["{fixture}"])) { i in SnapshotEventsSelfTest.run(flagIndex: i) },
         .init("--view-prefs-selftest", "无头拨控件不碰设置域：视图设置（@AppStorage）无头时只落一份临时的、读不到设置域里存过的；给了 fixture 再把自己拷成新名字（新的设置域），在拷贝里真点批量页的「按分组」、缩略图滑杆、跑 --perf grid，跑完那个域还不存在（[<Fixtures/photot-session>]，窗口从不上屏）",
               ci: .selftests(["{fixture}"])) { i in ViewPrefsSelfTest.run(flagIndex: i) },

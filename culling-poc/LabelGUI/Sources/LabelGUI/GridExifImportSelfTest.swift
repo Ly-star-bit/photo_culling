@@ -581,6 +581,9 @@ enum GridExifImportSelfTest {
         t.check(apps.filter(\.isDefault).count <= 1 && (apps.firstIndex { $0.isDefault } ?? 0) == 0,
                 "用…打开 默认的 app 排第一、最多一个", "得到 \(names)")
         t.check(Set(apps.map(\.id)).count == apps.count, "用…打开 同一个 app 不列两遍", "得到 \(names)")
+        // 拖出去只给复制：给了移动，拖到同一块盘上的访达文件夹，原片就被挪出拍摄文件夹了；拖回本程序不收。
+        t.check(GridDragOut.operations(for: .outsideApplication) == .copy, "拖出 拖到别的 app / 访达：只给复制（没有移动）")
+        t.check(GridDragOut.operations(for: .withinApplication).isEmpty, "拖出 拖回本程序（网格收文件 = 打开文件夹）：不收")
         let mixed = GridHandoff.apps(toOpen: [solo, raw])
         t.check(Set(mixed.map(\.id)).isSubset(of: Set(apps.map(\.id))), "用…打开 JPG 和 RAW 混着：只列两种都能开的",
                 "JPG \(apps.count) 个、混着 \(mixed.count) 个")

@@ -6,7 +6,8 @@ import AppKit
 // 离屏假事件（SnapshotEvents.swift）到底送不送得到，每次实测：
 //   甲. 一个最小的 SwiftUI 视图（系统按钮、plain 按钮、单击 / 双击手势、onHover、滚动区、右键菜单），挨个发、数回调。
 //   乙. 给了 fixture：真的批量页网格 —— 点一下格子焦点变到那张；悬停一格悬停条出现、挪开消失；格子的右键菜单
-//       （没选中 / 选着别的 / 全选三种头一行，改判那几项用 performActionForItem 点下去，改对了几张）。
+//       （没选中 / 选着别的 / 全选三种头一行，改判那几项用 performActionForItem 点下去，改对了几张）；拖出的锚点
+//       （不挡点击、GridHover 记的是指针下那一格、造的左键事件直接喂给它：挪 3pt 不拖、过 5pt 拖起按下的那一格）。
 // 窗口从不上屏（NeverShownWindow + 挪到屏幕外 + 全透明）。
 
 /// 最小实验的计数（视图回调往里记）。
@@ -328,7 +329,10 @@ enum SnapshotEventsSelfTest {
         } else {
             print("跳过「点一下格子焦点变到那张」的断言（\(firstOK && secondOK ? "这次送到了" : "没送到")：\(detail)）")
         }
-        cellMenu(store: store, mouse: mouse, at: tiles[0].point, order: order, clickedID: first.0, tally)
+        // 第一格是哪张：点击送得到、两次点的落在同一张才算知道（26 SDK 的构建上点不到，推出来的是出发的那张）。
+        let tileID: String? = SnapshotEvents.clicksReachSwiftUI && firstOK ? first.0 : nil
+        dragAnchor(host: host, mouse: mouse, at: tiles[0].point, clickedID: tileID, tally)
+        cellMenu(store: store, mouse: mouse, at: tiles[0].point, order: order, clickedID: tileID, tally)
         check(!window.isVisible && NSApp.windows.allSatisfy { !$0.isVisible }, "批量页这一段也没有窗口上过屏")
     }
 
@@ -397,6 +401,56 @@ enum SnapshotEventsSelfTest {
             let after = mouse.run(.rclick(point))
             check(after.menu?.first == "精选", "点完选中清掉（和批量栏一样）：再右键没有「选中的」那一行", after.line)
         }
+    }
+
+    /// 拖出去（GP-07，GridDragOut.swift）离屏验得了的那一半：网格底下垫着拖出的锚点、它不挡点击（落点还是格子）；
+    /// 指针停在哪一格 GridHover 就记哪一格（按下去拖的是它），挪开就清。拖放会话本身离屏开不了，只能真机手点。
+    @MainActor
+    private static func dragAnchor(host: NSView, mouse: SnapshotEvents.Mouse, at point: CGPoint, clickedID: String?,
+                                   _ tally: Tally) {
+        func check(_ ok: Bool, _ name: String, _ detail: @autoclosure () -> String = "") { tally.check(ok, name, detail()) }
+        func anchors(_ view: NSView) -> [NSView] {
+            (view is GridDragOutAnchor.AnchorView ? [view] : []) + view.subviews.flatMap(anchors)
+        }
+        let found = anchors(host)
+        let hit = mouse.hitView(point)
+        check(found.count == 1 && !(hit is GridDragOutAnchor.AnchorView),
+              "拖出的锚点垫在网格底下（一个），点击落点还是格子", "锚点 \(found.count) 个 · 落点 \(SnapshotEvents.Mouse.className(hit))")
+        mouse.run(.move(point))
+        let hovered = GridHover.id
+        if let clickedID {
+            check(hovered == clickedID, "指针停在一格上 → GridHover 记的是这一格（拖出按它认）", "记的 \(hovered ?? "无")、应为 \(clickedID)")
+        } else {
+            check(hovered != nil, "指针停在一格上 → GridHover 记下了一格（拖出按它认）")
+        }
+        mouse.run(.move(CGPoint(x: 2, y: 2)))
+        check(GridHover.id == nil, "指针挪出网格 → GridHover 清掉（按在空白处不会拖起哪一张）", "还记着 \(GridHover.id ?? "")")
+
+        // 监听的判断：拿造的左键事件直接喂给锚点（离屏窗口上监听收不到假事件），拖放会话换成记一笔（startProbe）。
+        guard let anchor = found.first as? GridDragOutAnchor.AnchorView else { return }
+        var started: [String] = []
+        anchor.startProbe = { started.append($0) }
+        defer { anchor.startProbe = nil }
+        func feed(_ type: NSEvent.EventType, _ p: CGPoint) {
+            guard let event = NSEvent.mouseEvent(with: type, location: mouse.windowPoint(p), modifierFlags: [],
+                                                 timestamp: ProcessInfo.processInfo.systemUptime,
+                                                 windowNumber: mouse.window.windowNumber, context: nil, eventNumber: 0,
+                                                 clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1) else { return }
+            anchor.handle(event)
+        }
+        func shifted(_ dx: CGFloat) -> CGPoint { CGPoint(x: point.x + dx, y: point.y) }
+        mouse.run(.move(point))
+        let under = GridHover.id
+        feed(.leftMouseDown, point); feed(.leftMouseDragged, shifted(3)); feed(.leftMouseUp, shifted(3))
+        check(started.isEmpty, "按住一格挪 3pt 就松手：还是单击，不拖", "拖起了 \(started)")
+        feed(.leftMouseDown, point); feed(.leftMouseDragged, shifted(3)); feed(.leftMouseDragged, shifted(12))
+        check(under != nil && started == [under!], "按住一格挪过 5pt：拖起的是按下去的那一格",
+              "拖起了 \(started)、指针下是 \(under ?? "无")")
+        feed(.leftMouseDragged, shifted(40)); feed(.leftMouseUp, shifted(40))
+        check(started.count == 1, "拖起来以后接着挪：不再开第二次", "拖起了 \(started)")
+        mouse.run(.move(CGPoint(x: 2, y: 2)))
+        feed(.leftMouseDown, CGPoint(x: 2, y: 2)); feed(.leftMouseDragged, CGPoint(x: 40, y: 2)); feed(.leftMouseUp, CGPoint(x: 40, y: 2))
+        check(started.count == 1, "按在网格外面（顶栏）拖：不拖照片", "拖起了 \(started)")
     }
 
     /// 拿到这一点的右键菜单，点标题是 `title` 的那一项（performActionForItem：菜单不弹）。
