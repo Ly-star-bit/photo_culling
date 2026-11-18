@@ -29,6 +29,26 @@
    "id": "A29-multi",
    "reason": "合成夹具",
    "reject_recommended": true
+  },
+  {
+   "closed_eyes": false,
+   "composition_issues": [],
+   "confidence": 0.9,
+   "error": null,
+   "expression_score": 3,
+   "id": "H01-sharp80-expr3",
+   "reason": "合成夹具",
+   "reject_recommended": false
+  },
+  {
+   "closed_eyes": false,
+   "composition_issues": [],
+   "confidence": 0.9,
+   "error": null,
+   "expression_score": 4,
+   "id": "H02-soft72-expr4",
+   "reason": "合成夹具",
+   "reject_recommended": false
   }
  ]
 }

@@ -68,6 +68,11 @@ def vlm_row(pid, error=None):
                    "reject_recommended": True, "confidence": 0.9, "reason": "合成夹具", "error": error})
 
 
+def expr_row(pid, score):
+    layer2.append({"id": pid, "closed_eyes": False, "composition_issues": [], "expression_score": score,
+                   "reject_recommended": False, "confidence": 0.9, "reason": "合成夹具", "error": None})
+
+
 t = T0
 step = timedelta(seconds=20)
 NOFACE = {"faces": [], "face_found": False, "face_count": 0, "face_quality": None, "face_area_pct": None,
@@ -195,6 +200,39 @@ add("X01-ear007-floor", t, "组内最好 0.07 < 地板 0.08：闭眼（相对线
     patch={"faces": [face(0.07, 0.004)]})
 add("X02-ear005-floor", t + timedelta(seconds=1), "组内 0.05 ≥ 相对线 0.049，< 地板 0.08：闭眼（只有地板判）", "废片 闭眼",
     patch={"faces": [face(0.05, 0.004)]}, new_group=False)
+
+# G–L：近似重复组里的锐度门（VQ-03）：比同组最清楚的那张低 8% 以上的，挑精选、去重时排到后面（BatchStore.softerInBurst）。
+# 各自一场（隔 30 s），还在第一章里。
+# G：没有表情分。G02 人脸质量最高，但比 G01 糊 10% → 不提名；G03 只低 5%（真片近似重复的自然差 ≤ 3.7%）→ 照旧比人脸质量。
+t = T0 + timedelta(minutes=15, seconds=30)
+add("G01-sharp80", t, "近似重复组里最清楚（80），人脸质量最低 0.60", "可用 -", dedupe="废片 连拍重复", accept="废片 -",
+    patch={"sharpness": 80.0, "face_quality": 0.60})
+add("G02-soft72-q068", t + timedelta(seconds=1), "比 G01 糊 10%（72 < 80×0.92）：人脸质量 0.68 最高也不提名、去重不留它",
+    "可用 -", dedupe="废片 连拍重复", accept="废片 -", patch={"sharpness": 72.0, "face_quality": 0.68}, new_group=False)
+add("G03-noise76-q064", t + timedelta(seconds=2), "只低 5%（76）：不算糊，人脸质量 0.64 赢 G01 → 精选（去重后场里只剩它一张，不提名）",
+    "精选 -", dedupe="可用 -", patch={"sharpness": 76.0, "face_quality": 0.64}, new_group=False)
+# H：有表情分时表情分先说话：糊 10% 的那张表情 4 分，照样赢表情 3 分的清楚那张（锐度门排在表情分后面）。
+t = T0 + timedelta(minutes=16)
+add("H01-sharp80-expr3", t, "清楚（80）、表情 3 分", "可用 -", dedupe="废片 连拍重复", accept="废片 -",
+    patch={"sharpness": 80.0, "face_quality": 0.60})
+add("H02-soft72-expr4", t + timedelta(seconds=1), "糊 10%（72）但表情 4 分：表情分压过锐度门 → 精选（去重后只剩它一张，不提名）",
+    "精选 -", dedupe="可用 -", patch={"sharpness": 72.0, "face_quality": 0.55}, new_group=False)
+expr_row("H01-sharp80-expr3", 3)
+expr_row("H02-soft72-expr4", 4)
+# K：锐度口径不同不比：K02 只量了整张脸（scope face，landmark 没读出来），数值天生比眼眉带低，不算糊 → 人脸质量高的赢。
+t = T0 + timedelta(minutes=16, seconds=30)
+add("K01-eyes80", t, "眼眉带 80、人脸质量 0.60", "可用 -", dedupe="废片 连拍重复", accept="废片 -",
+    patch={"sharpness": 80.0, "face_quality": 0.60})
+add("K02-face50-q065", t + timedelta(seconds=1), "量的是整张脸（50）：和眼眉带不比，人脸质量 0.65 → 精选（去重后只剩它一张，不提名）",
+    "精选 -", dedupe="可用 -", patch={"sharpness": 50.0, "sharpness_scope": "face", "face_quality": 0.65}, new_group=False)
+# L：同组最清楚的那张闭眼被判废，不算对手：L02 是这一组剩下的最清楚的，不糊；和同一场另一组的 L03 比人脸质量。
+t = T0 + timedelta(minutes=17)
+add("L01-sharp80-closed", t, "同组最清楚（80）但闭眼（组内 0.05 < 0.36×0.7）", "废片 闭眼",
+    patch={"sharpness": 80.0, "face_quality": 0.70, "faces": [face(0.05, 0.004)]})
+add("L02-soft72-q060", t + timedelta(seconds=1), "比闭眼的 L01 糊 10%，但 L01 已判废、不算对手 → 人脸质量 0.60 赢 L03 → 精选",
+    "精选 -", patch={"sharpness": 72.0, "face_quality": 0.60, "faces": [face(0.36, 0.004)]}, new_group=False)
+add("L03-other-q058", t + timedelta(seconds=4), "同一场、另一个近似重复组：不和 L01 / L02 比锐度", "可用 -", accept="废片 -",
+    patch={"sharpness": 60.0, "face_quality": 0.58})
 
 # Z：第二章（隔 1 小时 45 分），全是废片 → 章节警告。Z03 的 layer1 带 error：不进网格。
 t = T0 + timedelta(hours=2)

@@ -3,18 +3,23 @@
 // 人脸质量请求「有时用 landmarks 的框、有时用自己检测的」那条线上 —— 分析版本 3 以前，同一张图两次分析的 face_quality
 // 经常不一样（VQ-04）。仓库里不放照片（个人照片、也不放 emoji 的渲染图），所以跑测试时现场画。
 //
-//   synth_face <out.jpg> <emoji> [字号 pt，默认 600]
+//   synth_face <out.jpg> <emoji> [字号 pt，默认 600] [eyes|mouth]
+//
+// 第 4 个参数（第 6 段「锐度只看眼眉带」用）：画完在图上跑一遍 landmarks，按 app 的口径（FaceAnalyzer.featureRects：两眼 + 两眉 /
+// 外唇）找到那一块，四周再放出半块，只把这块高斯糊掉 —— 模拟前焦（眼睛糊、嘴清楚）和反过来。没认出脸退出码 3。
 //
 // 编译：swiftc Scripts/synth_face.swift -o <某处>/synth_face（smoke 脚本自己编进它的临时目录）。
 import CoreGraphics
+import CoreImage
 import CoreText
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
+import Vision
 
 let args = CommandLine.arguments
 guard args.count >= 3 else {
-    print("用法: synth_face <out.jpg> <emoji> [字号 pt]")
+    print("用法: synth_face <out.jpg> <emoji> [字号 pt] [eyes|mouth]")
     exit(2)
 }
 let size = args.count > 3 ? CGFloat(Double(args[3]) ?? 600) : 600
@@ -35,8 +40,39 @@ let y = (CGFloat(height) - bounds.height) / 2 - bounds.minY
 ctx.textPosition = CGPoint(x: x, y: y)
 CTLineDraw(line, ctx)
 
-guard let image = ctx.makeImage(),
-      let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: args[1]) as CFURL,
+guard var image = ctx.makeImage() else { exit(1) }
+
+if args.count > 4 {
+    let request = VNDetectFaceLandmarksRequest()
+    try? VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+    func area(_ f: VNFaceObservation) -> CGFloat { f.boundingBox.width * f.boundingBox.height }
+    guard let face = request.results?.max(by: { area($0) < area($1) }), let lm = face.landmarks else {
+        print("没认出脸")
+        exit(3)
+    }
+    let regions: [VNFaceLandmarkRegion2D?]
+    if args[4] == "eyes" {
+        regions = [lm.leftEye, lm.rightEye, lm.leftEyebrow, lm.rightEyebrow]
+    } else {
+        regions = [lm.outerLips]
+    }
+    // pointsInImage 和 Core Image 一样是左下原点。
+    let imageSize = CGSize(width: width, height: height)
+    var points: [CGPoint] = []
+    for region in regions {
+        if let region { points += region.pointsInImage(imageSize: imageSize) }
+    }
+    guard points.count >= 4 else { exit(3) }
+    let xs = points.map(\.x), ys = points.map(\.y)
+    let tight = CGRect(x: xs.min()!, y: ys.min()!, width: xs.max()! - xs.min()!, height: ys.max()! - ys.min()!)
+    let blurRect = tight.insetBy(dx: -tight.width * 0.5, dy: -tight.height * 0.5)
+    let source = CIImage(cgImage: image)
+    let blurred = source.clampedToExtent().applyingGaussianBlur(sigma: 8).cropped(to: blurRect)
+    guard let out = CIContext().createCGImage(blurred.composited(over: source), from: source.extent) else { exit(1) }
+    image = out
+}
+
+guard let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: args[1]) as CFURL,
                                                  UTType.jpeg.identifier as CFString, 1, nil) else { exit(1) }
 CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
 exit(CGImageDestinationFinalize(dest) ? 0 : 1)

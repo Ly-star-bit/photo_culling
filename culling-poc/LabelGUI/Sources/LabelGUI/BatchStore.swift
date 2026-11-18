@@ -133,6 +133,9 @@ struct BatchItem: Identifiable, Equatable {
     var frameLumaP99: Double?
     /// 拍摄时间的小数秒（layer1 的 capture_subsec）：captureTime 只到整秒，同一秒连拍的先后看它。没有 = nil。
     var captureSubsec: Double?
+    /// 锐度量的哪块（layer1 的 sharpness_scope：eyes / mouth / face / subject / whole，老结果 features 或 nil）。
+    /// 近似重复组里只在同一种口径之间比谁更清楚（BatchStore.softerInBurst）。
+    var sharpnessScope: String?
 
     /// Below the safety-shutter rule — motion blur likely; info badge, not a reject.
     var slowShutter: Bool { exif?.slowShutter ?? false }
@@ -716,7 +719,11 @@ final class BatchStore: ObservableObject {
         }
         s.pending = alive.count >= 2 && alive.contains { overrides[items[$0].id] == nil }
         if alive.count > 1 {
-            let ranked = alive.sorted { Self.scoreKey(items[$0]) > Self.scoreKey(items[$1]) }
+            // 和提名同一道锐度门（bestIndex）：近似重复组里糊一截的那张不标 #1。
+            let soft = Self.softerInBurst(alive, in: items)
+            let ranked = alive.sorted {
+                Self.rankKey(items[$0], soft: soft.contains($0)) > Self.rankKey(items[$1], soft: soft.contains($1))
+            }
             s.ranks = ranked.prefix(3).map { items[$0].id }
         }
         if alive.contains(where: { items[$0].verdict == .pick }) {
@@ -3055,7 +3062,8 @@ final class BatchStore: ObservableObject {
             faceLuma: a.faceLuma,
             frameLuma: a.frameLuma,
             frameLumaP99: a.frameLumaP99,
-            captureSubsec: a.captureSubsec
+            captureSubsec: a.captureSubsec,
+            sharpnessScope: a.sharpnessScope
         )
     }
 
@@ -3540,6 +3548,7 @@ final class BatchStore: ObservableObject {
             item.frameLuma = l1.frameLuma
             item.frameLumaP99 = l1.frameLumaP99
             item.captureSubsec = l1.captureSubsec
+            item.sharpnessScope = l1.sharpnessScope
             return item
         }
         Self.applyBodyClock(&loaded, offsets: bodyOffsets)
@@ -4258,15 +4267,55 @@ final class BatchStore: ObservableObject {
 
     /// 组/场内排名：先看 VLM 表情分，再看 Apple 的 FaceCaptureQuality（它被设计出来
     /// 就是干这个的——给同一个主体的多张抓拍排序），锐度只作最后的抢七 / 无人脸时的
-    /// 兜底。返回 nil = 没有候选。
+    /// 兜底。近似重复组里明显更糊的（softerInBurst）排在表情分之后、人脸质量之前。返回 nil = 没有候选。
     private static func bestIndex(_ indices: [Int], in items: [BatchItem]) -> Int? {
-        indices.max { scoreKey(items[$0]) < scoreKey(items[$1]) }
+        let soft = softerInBurst(indices, in: items)
+        return indices.max { rankKey(items[$0], soft: soft.contains($0)) < rankKey(items[$1], soft: soft.contains($1)) }
     }
 
     /// 同一把尺子给三处用：场内自动提名、「按评分」排序、缩略图上的 #1 #2 #3。
     /// 三处用的不是同一个排序的话，标着 #1 的那张不是精选，用户会怀疑软件。
+    /// 提名、去重和 #1 #2 #3 在它上面还多一道近似重复组里的锐度门（rankKey）；它要看同组的候选，一张照片自己算不出来。
     static func scoreKey(_ item: BatchItem) -> (Int, Double, Double) {
         (item.expressionScore ?? -1, item.faceQuality ?? -1, item.sharpness)
+    }
+
+    /// scoreKey 加上锐度门：`soft` = 这张在候选里比自己近似重复组里最清楚的那张糊一截（softerInBurst）。
+    /// 门排在表情分后面：VLM 看过、说这张表情更好的，不因为锐度差几个百分点被压下去（复核员的意见）；没有表情分时
+    /// （平常都没有）就是「先剔掉糊一截的，剩下的照旧按人脸质量 → 锐度」。
+    static func rankKey(_ item: BatchItem, soft: Bool) -> (Int, Int, Double, Double) {
+        (item.expressionScore ?? -1, soft ? 0 : 1, item.faceQuality ?? -1, item.sharpness)
+    }
+
+    /// 近似重复组里比最清楚的那张低这么多（比例）就算「糊一截」，挑精选、「只留最佳」时排到后面（优化分析 2026-11-18 VQ-03）。
+    /// 人脸质量几乎从不相等，锐度以前只管抢七：一组连拍里对焦飘了一下的那张，只要人脸质量高一点就拿精选，开了去重还把
+    /// 清楚的那张扔进废片。数（眼眉带，photot 拷贝 + 8 组合成三连拍）：同一组里真片的自然差最多 3.7%（7211 / 7212），
+    /// 只平移 0.5% 的 ≤ 0.8%；整张 σ2（4000 万像素上）的那帧低 9.5–12.6%、只糊眼眉 σ3 的低 17–22%，都抓得到；
+    /// σ1.5 低 5.9–7.7%（肉眼几乎看不出）有意放过。分析员原来提的 4% 贴着真片的自然差，复核员建议放到 8% 左右。
+    static let burstSoftMargin = 0.08
+
+    /// `indices` 里哪几张「比自己近似重复组里最清楚的那张低 burstSoftMargin 以上」。只在同一个 burstGroup（2 秒内、
+    /// 构图几乎一样，量的区域一样大，绝对数可比）、同一种锐度口径（sharpness_scope：眼眉带和整张的数没法比）里比，
+    /// 不跨组、不跨场 —— 换个姿势锐度能差 25%。最清楚的那张只在 `indices` 里找：闭了眼被判废的、人工改判过的不算对手，
+    /// 候选里每组总有一张不糊（最清楚的那张自己）。
+    static func softerInBurst(_ indices: [Int], in items: [BatchItem]) -> Set<Int> {
+        guard indices.count >= 2 else { return [] }
+        struct Key: Hashable {
+            let group: Int
+            let scope: String?
+        }
+        var sharpest: [Key: Double] = [:]
+        for idx in indices {
+            let key = Key(group: items[idx].burstGroup, scope: items[idx].sharpnessScope)
+            sharpest[key] = max(sharpest[key] ?? 0, items[idx].sharpness)
+        }
+        guard sharpest.count < indices.count else { return [] }  // 每组只有一张：没得比
+        var soft = Set<Int>()
+        for idx in indices {
+            let key = Key(group: items[idx].burstGroup, scope: items[idx].sharpnessScope)
+            if let best = sharpest[key], items[idx].sharpness < best * (1 - burstSoftMargin) { soft.insert(idx) }
+        }
+        return soft
     }
 
     func applyThresholds() {

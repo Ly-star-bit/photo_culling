@@ -73,6 +73,8 @@ enum AnalysisEngine {
     /// 2：曝光裁切改按主体区域算，加了欠曝 / 过曝要的亮度、合影小脸的原图 EAR。
     /// 3：人脸质量改成喂 landmarks 的脸框单独算（FaceAnalyzer.analyze）—— 以前同一张图每次分析出两种分，
     ///    新分落在哪一种不固定，和老结果混在一场里组内比较就不公平。
+    ///    同一版（还没发出去）里锐度也改了口径：只量眼眉带（裁回脸框），不再和嘴那块取大；sharpness_scope
+    ///    从 "features" 变成 "eyes" / "mouth"。两样一起升这一次，用户整场重分析一回。
     static let analysisVersion = 3
 
     struct Summary {
@@ -362,11 +364,15 @@ enum AnalysisEngine {
         // 会被冤成「文件损坏」，还叫人别格式化卡（审查发现）。截断的那些 EOI 检查已经全认得出。
         let fileCorrupt = ImageLoader.jpegTruncated(file.decodeURL)
 
-        // Sharpness ladder: facial-feature rects (eyes/brows/mouth — where focus
-        // is judged, hair and background excluded) → face bbox → foreground
-        // subject (ring/bouquet/detail shots with no face) → whole frame.
-        // Max across feature rects: shallow DOF legitimately blurs the mouth
-        // while the eyes are tack sharp, and that photo is IN focus.
+        // Sharpness ladder: eye+brow band (where focus is judged, hair and
+        // background excluded) → mouth (only when the eyes' landmarks are
+        // unreadable) → face bbox → foreground subject (ring/bouquet/detail shots
+        // with no face) → whole frame.
+        // 以前取眼眉带和嘴两块里大的那个（怕景深浅、眼睛清楚嘴糊的被冤）。可嘴清楚眼睛糊（前焦、焦点落在嘴唇鼻尖，
+        // f/1.2–2 近景人像最常见的失焦）也靠嘴过关：photot 21 张里 18 张是嘴那块大（汉服妆红唇轮廓对比强），
+        // 只糊眼眉 σ8 锐度纹丝不动、三档全放过（优化分析 2026-11-18 复核 M1、11-04 A03-a）。现在只看眼眉带：
+        // 眼睛清楚嘴糊的照样清楚；只糊眼眉和整张糊一样掉到 36–48。眼眉带在 photot 上 64–91，和以前的 68–93
+        // 差不多，三档的线不用动（严格 60 离最低的 64 近了些）。
         let sharpness: Double
         let scope: String
         func pixelRect(_ r: [Double]) -> (x0: Int, y0: Int, x1: Int, y1: Int) {
@@ -379,10 +385,12 @@ enum AnalysisEngine {
             return Metrics.tenengrad(gray: gray, width: width, height: height,
                                      x0: p.x0, y0: p.y0, x1: p.x1, y1: p.y1)
         }
-        let featureScores = (face?.featureRects ?? []).compactMap(regionScore)
-        if let best = featureScores.max() {
-            sharpness = best
-            scope = "features"
+        if let s = face?.eyeBandRect.flatMap(regionScore) {
+            sharpness = s
+            scope = "eyes"
+        } else if let s = face?.mouthRect.flatMap(regionScore) {
+            sharpness = s
+            scope = "mouth"
         } else if let face,
                   let s = regionScore([face.bbox.x0, face.bbox.y0, face.bbox.x1, face.bbox.y1]) {
             sharpness = s

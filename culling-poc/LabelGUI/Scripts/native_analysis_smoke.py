@@ -20,6 +20,8 @@ sips 出的图没有拍摄时间（没有时间的每张单独成组），所以
 同一个文件夹在两个全新数据目录各 `--analyze` 一次：layer1 的 results 去掉 elapsed_sec（每次的耗时）以后逐字节相同，
 `--verdicts --per-photo`（带不带 --dedupe）逐字相同；认出脸的每张都有人脸质量分。manifest 不比（preview_path 带着数据目录）。
 
+锐度只看眼眉带（第 6 段，复核 M1）：同一个 emoji 原样 / 只糊眼眉 / 只糊嘴各画一张，只糊眼眉的锐度要掉、只糊嘴的不动。
+
 最后是规模守护：把 photot-session 的 21 行克隆成 2000 / 8000 行（只有 JSON，不要图），给 `--verdicts` 计时；
 共享 runner 计时抖得厉害，只卡很宽的上限和「8000 比 2000 的耗时比」（线性 ≈ 4，O(n²) ≈ 16），各取几次里最快的。
 
@@ -416,11 +418,54 @@ def repeat_section():
     check(va == vb and da == db, "两次的 --verdicts --per-photo（带不带 --dedupe）逐字相同")
 
 
+# ---------------------------------------------------------------- 6. 锐度只看眼眉带（带人脸）
+
+def eyes_section():
+    """以前锐度取眼眉带和嘴两块里大的，嘴清楚、眼睛糊的（前焦）靠嘴过关（优化分析 2026-11-18 复核 M1）。同一个 emoji 画三张：
+    原样、只糊眼眉、只糊嘴（synth_face 的第 4 个参数，按 landmarks 找那块）。Vision 在 emoji 上的 landmarks 不总靠谱（有的把眼睛
+    和嘴上下认反、糊了眼睛干脆认不出脸），所以不要求每个都对：三张都按眼眉带量（scope eyes）、只糊眼眉掉到原样的 6 成以下、
+    只糊嘴不低于原样的 9 成 —— 这样的 ≥ 2 个就算过。老的取大口径在本机只有 1 个过得了（只糊眼眉的那张靠嘴撑着）。"""
+    print("6. 只糊眼眉 → 锐度掉；只糊嘴 → 锐度不动（锐度只看眼眉带）")
+    tool = os.path.join(WORK, "synth_face")
+    if not check(os.path.isfile(tool), "第 5 段编好的 synth_face 还在"):
+        return
+    folder = os.path.join(WORK, "eyes")
+    os.makedirs(folder)
+    for i, emoji in enumerate(FACE_EMOJI):
+        for mode in ("", "eyes", "mouth"):
+            out = os.path.join(folder, f"face_{i + 1:02d}{'_' + mode if mode else ''}.jpg")
+            # 没认出脸（退出码 3）就少这一张，下面按凑齐三张的算。
+            subprocess.run([tool, out, emoji] + (["600", mode] if mode else []), capture_output=True, text=True,
+                           timeout=60, stdin=subprocess.DEVNULL)
+    count = len(os.listdir(folder))
+    data = os.path.join(WORK, "eyes-data")
+    os.makedirs(data)
+    r, dt = run(["--analyze", folder], data)
+    if not check(r.returncode == 0 and f"Done: {count} analyzed" in r.stdout, f"{count} 张都分析了（{dt:.1f}s）"):
+        return
+    rows = {x.get("id"): x for x in json.load(open(os.path.join(data, "sessions", session_key(folder),
+                                                                "layer1_results.json")))["results"]}
+    good, seen = [], []
+    for i in range(len(FACE_EMOJI)):
+        name = f"face_{i + 1:02d}"
+        base, eyes, mouth = rows.get(name), rows.get(name + "_eyes"), rows.get(name + "_mouth")
+        if not (base and eyes and mouth) or any(x.get("sharpness_scope") != "eyes" for x in (base, eyes, mouth)):
+            continue
+        s0, se, sm = base["sharpness"], eyes["sharpness"], mouth["sharpness"]
+        seen.append(f"{name} {s0:.0f}/{se:.0f}/{sm:.0f}")
+        if se < 0.6 * s0 and sm >= 0.9 * s0:
+            good.append(name)
+    scopes = sorted({x.get("sharpness_scope") for x in rows.values() if x.get("face_found")})
+    check("features" not in scopes, f"认出脸的按眼眉带量（scope eyes，没有眼睛关键点才退到 mouth），不再是 features：{scopes}")
+    check(len(good) >= 2, f"≥ 2 个 emoji 只糊眼眉锐度掉到 6 成以下、只糊嘴不动（原样/糊眼眉/糊嘴：{'；'.join(seen) or '一个都没凑齐'}）")
+
+
 try:
     native_section()
     if SCALE:
         scale_section()
     repeat_section()
+    eyes_section()
     if not REAL_BEFORE:
         check(not os.path.exists(REAL_DATA), f"跑之前没有 {REAL_DATA}，跑完也没有（每条命令都走临时数据目录）")
 finally:

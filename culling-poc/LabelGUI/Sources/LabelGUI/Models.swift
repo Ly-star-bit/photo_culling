@@ -127,6 +127,9 @@ struct Layer1Result: Codable {
     let faces: [FaceInfo]?
     let horizonDeg: Double?
     let sharpness: Double?
+    /// 锐度量的哪块：eyes（眼眉带）/ mouth / face / subject / whole；analysis_version 3 以前的是 features（眼眉带和嘴取大）。
+    /// 近似重复组里比谁更清楚只在同一种口径之间比（BatchStore.softerInBurst）。老结果没有 = nil，自成一种。
+    let sharpnessScope: String?
     let highlightClipPct: Double?
     let shadowClipPct: Double?
     /// 主体区域（脸 → 头 + 上半身）的裁切占比、脸 / 整张的亮度。analysis_version 2 起才有；
@@ -157,6 +160,7 @@ struct Layer1Result: Codable {
         case faces
         case horizonDeg = "horizon_deg"
         case sharpness
+        case sharpnessScope = "sharpness_scope"
         case highlightClipPct = "highlight_clip_pct"
         case shadowClipPct = "shadow_clip_pct"
         case subjectHighlightClipPct = "subject_highlight_clip_pct"

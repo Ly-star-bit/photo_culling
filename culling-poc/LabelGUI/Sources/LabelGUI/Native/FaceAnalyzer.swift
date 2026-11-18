@@ -66,11 +66,12 @@ enum FaceAnalyzer {
         /// Primary face's UNPADDED area fraction of the frame — drives the
         /// 景别 (framing-scale) compensation curve for quality thresholds.
         let faceAreaPct: Double
-        /// Facial-feature rects of the primary face (eye+brow band, mouth),
-        /// normalized top-left [x0,y0,x1,y1]. Sharpness measured here instead of
-        /// the whole face box keeps hair texture and background (花窗) out of the
-        /// focus metric. Empty when landmarks are unreadable.
-        let featureRects: [[Double]]
+        /// Facial-feature rects of the primary face, normalized top-left [x0,y0,x1,y1]:
+        /// the eye+brow band and the mouth. Sharpness measured here instead of the whole
+        /// face box keeps hair texture and background (花窗) out of the focus metric.
+        /// nil when that part's landmarks are unreadable. 锐度只看眼眉带，嘴只在没有眼眉带时兜底（AnalysisEngine）。
+        let eyeBandRect: [Double]?
+        let mouthRect: [Double]?
         var subjectFaceCount: Int { subjectFaces.count }
     }
 
@@ -159,6 +160,7 @@ enum FaceAnalyzer {
         let scoredPrimary = scored.first { $0.uuid == primary.uuid } ?? scored.max { area($0) < area($1) }
         let quality = scoredPrimary?.faceCaptureQuality.map(Double.init)
 
+        let features = featureRects(for: primary)
         return FaceResult(
             bbox: padded,
             eyeClosed: worstEar.map { $0 < earClosedThreshold },
@@ -166,7 +168,8 @@ enum FaceAnalyzer {
             captureQuality: quality,
             subjectFaces: subjectFaces,
             faceAreaPct: Double(bb.width * bb.height),
-            featureRects: featureRects(for: primary)
+            eyeBandRect: features.eyeBand,
+            mouthRect: features.mouth
         )
     }
 
@@ -271,8 +274,13 @@ enum FaceAnalyzer {
     /// origin. Landmark points come in face-bbox space (bottom-left); each rect
     /// is padded by 25% of its own size so the edge gradients that carry the
     /// focus signal (lash line, lip contour) stay inside the crop.
-    private static func featureRects(for face: VNFaceObservation) -> [[Double]] {
-        guard let landmarks = face.landmarks else { return [] }
+    ///
+    /// 眼眉带再裁回（不带 padding 的）脸框里：两眼两眉连起来很宽，按它自己宽度放的 25% 每边要多出去小半只眼，
+    /// 越过太阳穴落到头发、发饰和背景上。同一组近似重复的两张，脸边那一条背景不一样（7212 那条是发丝衬着蓝天，
+    /// 7211 是发丝衬着暗处），眼睛一样清楚，眼眉带的锐度却差 8.5%；裁回脸框以后 photot 四对近似重复最多差 3.7%，
+    /// 数值范围基本不变（photot 64–91，不裁是 64–93）。嘴那块窄，放出去碰不到脸边，不用裁。
+    private static func featureRects(for face: VNFaceObservation) -> (eyeBand: [Double]?, mouth: [Double]?) {
+        guard let landmarks = face.landmarks else { return (nil, nil) }
         let bb = face.boundingBox
 
         func rect(from regions: [VNFaceLandmarkRegion2D?]) -> [Double]? {
@@ -299,15 +307,14 @@ enum FaceAnalyzer {
             return [Double(x0), Double(y0), Double(x1), Double(y1)]
         }
 
-        var rects: [[Double]] = []
-        if let eyes = rect(from: [landmarks.leftEye, landmarks.rightEye,
-                                  landmarks.leftEyebrow, landmarks.rightEyebrow]) {
-            rects.append(eyes)
+        var eyeBand = rect(from: [landmarks.leftEye, landmarks.rightEye,
+                                  landmarks.leftEyebrow, landmarks.rightEyebrow])
+        if let band = eyeBand {
+            let x0 = max(band[0], Double(bb.minX)), x1 = min(band[2], Double(bb.maxX))
+            let y0 = max(band[1], Double(1.0 - bb.maxY)), y1 = min(band[3], Double(1.0 - bb.minY))
+            eyeBand = x1 > x0 && y1 > y0 ? [x0, y0, x1, y1] : nil
         }
-        if let mouth = rect(from: [landmarks.outerLips]) {
-            rects.append(mouth)
-        }
-        return rects
+        return (eyeBand, rect(from: [landmarks.outerLips]))
     }
 
     /// Normalized top-left bbox of the photo's foreground subject (ring shot,

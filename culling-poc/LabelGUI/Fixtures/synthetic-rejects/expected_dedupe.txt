@@ -1,10 +1,10 @@
 连拍去重: 开
-照片 54 · 精选 3 · 可用 22 · 废片 29
-近似重复 4 组 / 12 张 (phash 层，自动规则作用范围)
-场 (间隔≤8s) 6 个多张场 / 16 张 · 待处理 3
+照片 64 · 精选 4 · 可用 26 · 废片 34
+近似重复 8 组 / 21 张 (phash 层，自动规则作用范围)
+场 (间隔≤8s) 10 个多张场 / 26 张 · 待处理 4
   理由 文件损坏: 2
-  理由 连拍重复: 3
-  理由 闭眼: 8
+  理由 连拍重复: 7
+  理由 闭眼: 9
   理由 虚焦: 6
   理由 曝光裁切: 6
   理由 欠曝: 2
@@ -19,6 +19,10 @@
   场 38 (2 张): E01-take-best=精选#1 E02-take-other=可用#2
   场 39 (2 张): F01-take-auto=可用#1 F02-manual-pick=精选#2
   场 42 (2 张): X01-ear007-floor=废片 X02-ear005-floor=废片
+  场 43 (3 张): G01-sharp80=废片 G02-soft72-q068=废片 G03-noise76-q064=可用
+  场 44 (2 张): H01-sharp80-expr3=废片 H02-soft72-expr4=可用
+  场 45 (2 张): K01-eyes80=废片 K02-face50-q065=可用
+  场 46 (3 张): L01-sharp80-closed=废片 L02-soft72-q060=精选#1 L03-other-q058=可用#2
 阈值: 锐度 45.0 · 曝光裁切 0.15 · 人脸质量 0.3 · 预设 标准
   A01-ok 可用 -
   A02-sharp44 废片 虚焦
@@ -68,6 +72,16 @@
   E02-take-other 可用 -
   F01-take-auto 可用 -
   F02-manual-pick 精选 -
+  G01-sharp80 废片 连拍重复
+  G02-soft72-q068 废片 连拍重复
+  G03-noise76-q064 可用 -
+  H01-sharp80-expr3 废片 连拍重复
+  H02-soft72-expr4 可用 -
+  K01-eyes80 废片 连拍重复
+  K02-face50-q065 可用 -
+  L01-sharp80-closed 废片 闭眼
+  L02-soft72-q060 精选 -
+  L03-other-q058 可用 -
   M01-manual-keep-blur 可用 虚焦
   M02-manual-reject 废片 -
   X01-ear007-floor 废片 闭眼
