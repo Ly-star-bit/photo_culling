@@ -8,9 +8,11 @@ import Observation
 // 系统默认的材质和系统蓝，和暗房不像一个产品；蓝色还同时表示「可用」这个判决和「选中」。这里把暗房那几个灰和那个琥珀色
 // 提出来给全 app 用：
 //   - 顶栏、状态栏 = bar，两边的栏 = panel，栏里的卡片 = card，放照片的那一块 = canvas；
-//   - 点缀色只有一个（accent）：选中、现在套着的、这一页的下一步。判决的颜色（绿 / 蓝 / 红）、客户的紫只表示它们自己。
+//   - 点缀色只有一个（accent）：选中、现在套着的、这一页的下一步。判决的颜色（绿 / 蓝 / 红）、客户的紫、提醒的黄只表示它们自己。
 //   - 主按钮是琥珀底深色字（系统的 borderedProminent 是白字，琥珀底上白字只有 1.9:1）。
 //   - 「待处理 / 警告」另有一个偏红的橙（warning），不用系统橙：系统橙和琥珀几乎同色。
+//   - 界面底色上的字、判决色、提醒黄、客户紫都从这里取（跟主题，浅色主题压深过）；压在照片上的从 OnPhotoPalette 取（不跟主题）。
+//     SwiftUI 的 `.secondary` / `.red` / `.yellow` / `.purple` 不跟主题：相纸下系统的二级字 3.8:1、系统黄 1.1:1（优化分析 2026-11-18）。
 //
 // 只管界面的颜色：导出的图一个像素不碰。
 
@@ -31,23 +33,65 @@ enum AppPalette {
     static var onAccent: Color { c.onAccent }
     /// 「待处理 / 警告」：偏红的橙（石墨主题 #FF7A38）。不用系统橙：系统橙（深色下 #FF9F0A，色相 37°）和琥珀（#FFB340，36°）
     /// 几乎同色，分不出哪个是「该做的下一步 / 选中」、哪个是「还没处理」（优化分析 2026-11-10 R6）。这个色相 20°，夹在琥珀和
-    /// 废片的系统红（3°）正中间；亮度也在中间，色弱时靠明暗也分得开。只表示「待处理 / 警告」，不当点缀色用。
+    /// 废片的系统红（macOS 15 是 3°、26 是 359°）中间；亮度也在中间，色弱时靠明暗也分得开。自检逐套拿这一套自己的废片红核对：
+    /// 色相差 ≥ 15°、亮度比 ≥ 1.2（以前比的是写死的 3°、不查亮度，相纸的橙和红 1.05:1 也过了）。只表示「待处理 / 警告」，
+    /// 不当点缀色用；也当字用（状态栏、ISO），所以在栏、卡片、画布上都 ≥ 4.5:1。
     static var warning: Color { c.warning }
+    /// 待处理色上面的字（实心的「待处理」胶囊）：就是点缀色上的那个字色，六套在待处理色上都 ≥ 4.5:1（自检核对）。
+    static var onWarning: Color { c.onAccent }
+    /// 提醒黄：眯眼、慢门、歪了 ——「看一眼，不一定要处理」。深色主题是系统黄；相纸压深成芥末色（系统黄在相纸上只有 1.1:1，
+    /// 连拍挑选里的「眯眼」等于看不见）。压在照片上的用 `OnPhotoPalette.caution`。
+    static var caution: Color { c.caution }
+    /// 客户紫：客户在确认表里点的（和 XMP 的紫色标同一个意思）。深色主题是系统紫，相纸压深一档。
+    static var client: Color { c.client }
+    /// 字：正文、二级（说明字、分段标题、文件名）、三级。界面上的说明字用这里的 `secondary`，别用 SwiftUI 的 `.secondary`：
+    /// 系统的二级字是白 55% / 黑 50% 叠在底上，相纸下只有 3.8:1，自检核对的这个颜色以前除了暗房没人用（优化分析 2026-11-18 V-01）。
+    /// 自检逐套核对：二级字在 bar / panel / card / canvas 上 ≥ 4.5:1；三级字只在 bar / panel 上 ≥ 3:1 —— 卡片上（石墨 2.9:1）
+    /// 别用三级字写要读的话。压在照片上的字用 `OnPhotoPalette`。
+    static var text: Color { c.text }
+    static var secondary: Color { c.secondary }
+    static var tertiary: Color { c.tertiary }
     /// 界面底色上叠的一层淡淡的亮 / 暗（卡片描边、未选中的胶囊底、悬停）：深色主题是白，浅色主题是黑，用的时候带 opacity。
     /// 只给界面底色上的东西用；压在照片上的字和黑底胶囊照旧写死黑白（照片不跟主题变）。
     static var ink: Color { c.dark ? .white : .black }
     /// 凹下去的槽（分段控件的底、九宫格的底）：深色主题压暗一档，浅色主题只压一点。
     static var well: Color { c.dark ? Color.black.opacity(0.35) : Color.black.opacity(0.07) }
     /// 判决的三个颜色：精选绿、可用蓝、废片红（摄影师的习惯色，每个主题都是这三个色相）。深色主题就是系统的绿 / 蓝 / 红；
-    /// 浅色主题压深一档 —— 系统绿的小字在浅底上只有 2.2:1。
+    /// 浅色主题压深一档 —— 系统绿的小字在浅底上只有 2.2:1。只给界面底色上的东西用：压深过的色压到照片上的黑底里就看不见了
+    /// （相纸的精选绿在人脸小图的黑圆上 1.5:1），那里用 `OnPhotoPalette`。
     static var pick: Color { c.pick }
     static var usable: Color { c.usable }
     static var reject: Color { c.reject }
+
+    /// 焦点框（数字键在没有选中时判的那一张、审片胶片条的当前张）：深色主题是白、浅色主题是黑（以前写死白，相纸的浅底上
+    /// 1.3:1，TA-03）。石墨下和以前的 `Color.white.opacity(0.95)` 一模一样。纯黑 / 灰卡的点缀色本身就是白，焦点和选中靠位置分：
+    /// 焦点画在照片外面一圈，选中框（`SelectionRing`）贴着照片边、带 keyline。
+    static var focus: Color { ink.opacity(0.95) }
+    /// 选中框两侧的细线（keyline）：和点缀色配对的 onAccent（主按钮上的字也是它，和点缀色 ≥ 4.5:1）。点缀色是白（纯黑、灰卡）
+    /// 压在纸白的成品、白衣服上时外圈看不见，靠这一圈（TB-01 / TA-05）；相纸的赭石外圈本身就看得见。
+    static var selectionKeyline: Color { onAccent.opacity(selectionKeylineOpacity) }
+    /// 自检按这个不透明度算 keyline 叠在纸白 / 纯白 / 墨黑 / 纯黑上的颜色。
+    static let selectionKeylineOpacity = 0.7
+}
+
+/// 压在照片上的（黑底胶囊里的星、心、淘汰理由，人脸小图的睁闭眼记号，审片照片区的提示条）：照片不跟主题变，这里一律是系统的
+/// 亮绿 / 蓝 / 红 / 黄 / 紫和白字，不读主题（BatchStore 的 `Verdict.onPhotoColor` 是同一组）。相纸下环境是浅色外观，系统色取的是
+/// 浅色那一档，和深色那一档差得很少，压在黑底上一样亮。界面底色上的别用这一套：系统黄在相纸上 1.1:1。
+enum OnPhotoPalette {
+    static var pick: Color { .green }
+    static var usable: Color { .blue }
+    static var reject: Color { .red }
+    /// 眯眼、慢门、歪了。
+    static var caution: Color { .yellow }
+    static var client: Color { .purple }
+    static var text: Color { .white }
+    /// 名次、×N、「+N」这一类次要的字（`PickView` 的手判小手也是这个）。
+    static var secondaryText: Color { Color.white.opacity(0.7) }
 }
 
 // MARK: - 主题
 
-/// 一套主题的颜色。只管界面：导出的图、照片本身、判决的绿 / 蓝 / 红、客户的紫都不跟着变。
+/// 一套主题的颜色。只管界面：导出的图、照片本身不跟着变；判决的绿 / 蓝 / 红、客户的紫、提醒的黄色相不变，浅色主题只压深一档。
 struct ThemeColors: Equatable {
     var dark: Bool
     var bar, panel, card, hairline, canvas: Color
@@ -55,7 +99,9 @@ struct ThemeColors: Equatable {
     var surround, track: Color
     var text, secondary, tertiary: Color
     var accent, onAccent, warning: Color
+    /// 判决色、提醒黄、客户紫：不给值就是系统色（深色主题），`hex` 里也没有这几个键 —— 自检按系统色在 macOS 15 / 26 上的值核对。
     var pick = Color.green, usable = Color.blue, reject = Color.red
+    var caution = Color.yellow, client = Color.purple
     /// 自检算对比度用的原始值（0xRRGGBB），和上面的 Color 一一对应。
     var hex: [String: UInt32]
 
@@ -65,7 +111,8 @@ struct ThemeColors: Equatable {
 
     init(dark: Bool, bar: UInt32, panel: UInt32, card: UInt32, hairline: UInt32, canvas: UInt32, surround: UInt32, track: UInt32,
          text: UInt32, secondary: UInt32, tertiary: UInt32, accent: UInt32, onAccent: UInt32, warning: UInt32,
-         verdicts: (pick: UInt32, usable: UInt32, reject: UInt32)? = nil) {
+         verdicts: (pick: UInt32, usable: UInt32, reject: UInt32)? = nil,
+         marks: (caution: UInt32, client: UInt32)? = nil) {
         let color = Self.color
         self.dark = dark
         self.bar = color(bar); self.panel = color(panel); self.card = color(card); self.hairline = color(hairline)
@@ -79,16 +126,23 @@ struct ThemeColors: Equatable {
             pick = color(verdicts.pick); usable = color(verdicts.usable); reject = color(verdicts.reject)
             hex["pick"] = verdicts.pick; hex["usable"] = verdicts.usable; hex["reject"] = verdicts.reject
         }
+        if let marks {
+            caution = color(marks.caution); client = color(marks.client)
+            hex["caution"] = marks.caution; hex["client"] = marks.client
+        }
     }
 }
 
 /// 能选的主题。rawValue 存进 UserDefaults（`ui.theme`），别改。
 ///
 /// 怎么定的颜色：
-///   - 每套只有一个点缀色。色相环上判决和状态已经占了红 3°、待处理 20°、绿 135°、蓝 211°、紫 280°，点缀色只落在空位上
-///     （琥珀 / 黄铜 36°–40°、冰青 190°），或者干脆不带色（灰卡、纯黑是白）。
-///   - 外壳可以带一点冷暖，放照片的那一块（canvas）只带外壳一半的色偏：四周的颜色会带偏人眼对照片冷暖的判断。
+///   - 每套只有一个点缀色。色相环上判决和状态已经占了红（系统红 macOS 15 是 3°、26 是 359°）、待处理 20°、提醒黄 50°、
+///     绿 129°–135°、蓝 206°–211°、紫 280°–293°，点缀色只落在空位上（琥珀 / 黄铜 36°–40°、冰青 185°），离判决色、客户紫
+///     都 ≥ 20°；或者干脆不带色（灰卡、纯黑是白）。
+///   - 外壳可以带一点冷暖，放照片的那一块（canvas）带的色比外壳少（CIELAB 的 C* 不超过外壳的 3/4，午夜、相纸差不多就是 3/4）；
+///     暗房里照片四周（surround）一律是不带色的灰：那一页是看色调的，四周的颜色会带偏人眼对照片冷暖的判断（ISO 3664 的中性灰）。
 ///   - 壳 → 栏 → 卡片一级比一级亮（浅色主题一样：卡片最白），每级差得不多，靠发丝线分开。
+///   - 上面这些都在 `--theme-selftest`（ThemeSelfTest.swift）里逐套核对。
 enum AppThemeID: String, CaseIterable, Identifiable {
     case graphite, neutral, walnut, midnight, black, paper
 
@@ -130,14 +184,17 @@ enum AppThemeID: String, CaseIterable, Identifiable {
                                accent: 0xF4F4F4, onAccent: 0x1C1C1C, warning: 0xFF8A4C)
         case .walnut:
             // 胡桃：带棕的深灰 + 黄铜，老暗房的木头和铜件。点缀色没用红铜：红铜（色相 17°）和「待处理」的橙（20°）撞色。
+            // 暗房四周是同亮度的中性灰（v1.32.0 是 #2E2B29，带棕；优化分析 2026-11-18 TB-07）。
             return ThemeColors(dark: true, bar: 0x15110E, panel: 0x1F1A16, card: 0x2B2520, hairline: 0x362E28, canvas: 0x24211F,
-                               surround: 0x2E2B29, track: 0x483E36, text: 0xF2EBE3, secondary: 0xB5A99D, tertiary: 0x7D7065,
+                               surround: 0x2C2C2C, track: 0x483E36, text: 0xF2EBE3, secondary: 0xB5A99D, tertiary: 0x7D7065,
                                accent: 0xE6BC74, onAccent: 0x1C150C, warning: 0xFF7A38)
         case .midnight:
-            // 午夜：带蓝的深灰 + 冰青。青（色相 190°）落在「精选」的绿和「可用」的蓝中间，比两者都亮、都淡，不会认成判决。
+            // 午夜：带蓝的深灰 + 冰青。青（色相 185°）落在「精选」的绿和「可用」的蓝中间，比两者都亮、都淡，不会认成判决。
+            // 冰青比 v1.32.0（#86DFEA，187°）往绿挪了 2°：macOS 26 的系统蓝是 206°，以前只差 19°。暗房四周是同亮度的中性灰
+            // （v1.32.0 是 #282B30，带蓝）。
             return ThemeColors(dark: true, bar: 0x0D1117, panel: 0x151A22, card: 0x1E2530, hairline: 0x28313D, canvas: 0x1B1E24,
-                               surround: 0x282B30, track: 0x384250, text: 0xE6ECF2, secondary: 0x9AA7B5, tertiary: 0x66737F,
-                               accent: 0x86DFEA, onAccent: 0x08181D, warning: 0xFF7A38)
+                               surround: 0x2B2B2B, track: 0x384250, text: 0xE6ECF2, secondary: 0x9AA7B5, tertiary: 0x66737F,
+                               accent: 0x88E0E8, onAccent: 0x08181D, warning: 0xFF7A38)
         case .black:
             // 纯黑：关了灯在 OLED / XDR 上看片，屏幕上只剩照片。栏比底只亮一点，点缀色是白。
             return ThemeColors(dark: true, bar: 0x000000, panel: 0x0B0B0B, card: 0x171717, hairline: 0x232323, canvas: 0x000000,
@@ -145,11 +202,15 @@ enum AppThemeID: String, CaseIterable, Identifiable {
                                accent: 0xFFFFFF, onAccent: 0x000000, warning: 0xFF7A38)
         case .paper:
             // 相纸：纤维相纸的暖白、白卡片、墨色的字，点缀色是赭石。琥珀在浅底上读不出来（#FFB340 在白底上只有 1.8:1），压深了
-            // 就是赭石；判决的绿 / 蓝 / 红、待处理的橙也各压深一档。
+            // 就是赭石；判决的绿 / 蓝 / 红、待处理的橙、提醒的黄、客户的紫也各压深，小字在顶栏、栏、卡片、画布上都 ≥ 4.5:1。
+            // 比 v1.32.0 压得更深（那时只核对了栏，画布上 4:1；待处理橙 #C8380A 和废片红 #C92A1E 亮度比 1.05、色相差 10°，看着是
+            // 一个颜色）：废片红往深、往正红挪，待处理橙夹在废片红和赭石中间。暗房四周是同亮度的中性灰（v1.32.0 是 #D5D2CB，偏黄，
+            // 比栏还带色）。优化分析 2026-11-18 TA-02 / TA-06 / TB-07。
             return ThemeColors(dark: false, bar: 0xE8E4DB, panel: 0xF2EFE8, card: 0xFDFCF9, hairline: 0xD9D4C9, canvas: 0xDEDCD7,
-                               surround: 0xD5D2CB, track: 0xC3BEB4, text: 0x22201C, secondary: 0x5E5A53, tertiary: 0x858078,
-                               accent: 0xA65C10, onAccent: 0xFFFFFF, warning: 0xC8380A,
-                               verdicts: (pick: 0x187A3A, usable: 0x0B63CE, reject: 0xC92A1E))
+                               surround: 0xD2D2D2, track: 0xC3BEB4, text: 0x22201C, secondary: 0x5E5A53, tertiary: 0x858078,
+                               accent: 0xA65C10, onAccent: 0xFFFFFF, warning: 0xA6360A,
+                               verdicts: (pick: 0x136836, usable: 0x0A58B8, reject: 0x9A1A1C),
+                               marks: (caution: 0x6E5400, client: 0x8E2AA6))
         }
     }
 }
@@ -361,6 +422,46 @@ struct ThemeSwatch: View {
         }
         .frame(width: Self.size.width, height: Self.size.height)
         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+}
+
+// MARK: - 选中框、选中的勾、分隔线（批量和拼图共用一个，别各写一个）
+
+/// 选中框：中间一圈点缀色，两侧各一圈 1pt 的 keyline（`AppPalette.selectionKeyline`）。和压字范围的黑白双线一个思路：
+/// 点缀色是白（纯黑、灰卡）、底下是纸白的成品或白衣服时点缀色看不见，keyline 看得见；底下是深色照片时反过来。
+/// 整圈画在 `shape` 里面（宽 lineWidth + 2）；要画在照片外面一圈就在外面 `.padding(-n)`。
+/// 自检核对「点缀色和 keyline 至少有一个」在纸白 / 纯白 / 墨黑 / 纯黑 / 画布 / 卡片上 ≥ 3:1。
+struct SelectionRing<S: InsettableShape>: View {
+    var shape: S
+    var lineWidth: CGFloat = 2.5
+
+    var body: some View {
+        ZStack {
+            shape.strokeBorder(AppPalette.selectionKeyline, lineWidth: lineWidth + 2)
+            shape.inset(by: 1).strokeBorder(AppPalette.accent, lineWidth: lineWidth)
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// 选中的勾：点缀色的圆、onAccent 的勾（石墨是琥珀圆深色勾，纯黑是白圆黑勾）。以前是点缀色的勾压在白圆上 ——
+/// 符号的勾是镂空的，点缀色是白的时候只剩一个白圆、没有勾（TA-05）。
+struct SelectionCheckmark: View {
+    var body: some View {
+        Image(systemName: "checkmark.circle.fill")
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(AppPalette.onAccent, AppPalette.accent)
+    }
+}
+
+/// 主题的分隔线（代替系统的 `Divider()`：系统线五套深色都是同一个中性灰 #464646，纯黑下扎眼，午夜 / 胡桃到线就断了色）。
+/// 石墨的 hairline 是 #2A2A2A，比系统线暗：换上以后石墨的样子会变（TA-12 / TB-04）。
+struct ThemedDivider: View {
+    var vertical = false
+
+    var body: some View {
+        Rectangle().fill(AppPalette.hairline)
+            .frame(width: vertical ? 1 : nil, height: vertical ? nil : 1)
     }
 }
 
