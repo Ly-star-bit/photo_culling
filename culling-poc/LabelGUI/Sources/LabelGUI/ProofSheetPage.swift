@@ -74,9 +74,13 @@ enum ProofSheetPage {
     /// 文字角标（带半透明底条）124,558 —— 按大的那个估。
     static let watermarkedBytesPerPhoto: Int64 = 125_000
 
+    /// 脸部特写（GP-03，ProofFaceCrops）每张照片多多少：photot 21 张（每张一张小脸）360px / q0.7 实测每张特写平均 29.3 KB、base64 后 39.1 KB，整份 2.58 → 3.41 MB（+32%）。
+    /// 脸在小样上本来就看得清的、没有脸的照片不加；估的时候按每张都有算（宁可估大）。
+    static let faceBytesPerPhoto: Int64 = 40_000
+
     /// 导出前的体积估计（菜单上显示）。
     static func estimate(_ count: Int, watermark: Bool = false) -> String {
-        "约 " + BatchStore.sizeText(Int64(count) * (watermark ? watermarkedBytesPerPhoto : bytesPerPhoto))
+        "约 " + BatchStore.sizeText(Int64(count) * ((watermark ? watermarkedBytesPerPhoto : bytesPerPhoto) + faceBytesPerPhoto))
     }
 
     /// 导出后太大时的提醒。
@@ -93,18 +97,34 @@ enum ProofSheetPage {
             .replacingOccurrences(of: "'", with: "&#39;")
     }
 
-    /// 一格：大图、右上角的选中标记（脚本跑起来才显示），下面文件名大字、编号小字；选中以后文件名旁边出来
-    /// 「写备注」，备注写在下面一行（都是脚本跑起来才有）。按钮、备注行的 id 带编号（nb12 / nt12），脚本按 data-n 找。
-    static func cell(number: Int, id: String, pick: Bool, jpeg: Data) -> String {
+    /// 一格：大图、右上角的选中标记（脚本跑起来才显示），下面文件名大字、编号小字、「放大」；选中以后文件名旁边出来
+    /// 「写备注」，备注写在下面一行（都是脚本跑起来才有）。按钮、备注行的 id 带编号（im12 / zb12 / nb12 / nt12 / fc12），
+    /// 脚本按 data-n 找。开头 `<div class="cell" data-name=… data-n=…><img src="data:…` 这一截的样子不能变（导入客户选择、
+    /// proof_sheet_regression.py 都按它认）。
+    /// `faces` = 从原片裁的脸部特写（GP-03，ProofFaceCrops）：放进这一格的 .fc，脚本跑起来时藏着、「放大」层里显示；
+    /// 脚本跑不起来（微信里直接预览 HTML）时直接排在照片下面。
+    static func cell(number: Int, id: String, pick: Bool, jpeg: Data, faces: [Data] = []) -> String {
         let name = escape(id)
         let star = pick ? " ★" : ""
         // 拆成几段：一长串 + 在 CI 的 Xcode 16 上类型检查会慢。
         let open = "<div class=\"cell\" data-name=\"\(name)\" data-n=\"\(number)\"><img src=\"data:image/jpeg;base64,"
-        let image = jpeg.base64EncodedString() + "\" alt=\"\(name)\"><span class=\"mark\">♥</span>"
-        let caption = "<div class=\"cap\"><b>\(name)</b> · #\(number)\(star)"
+        let image = jpeg.base64EncodedString() + "\" alt=\"\(name)\" id=\"im\(number)\"><span class=\"mark\">♥</span>"
+        let zoom = "<button class=\"zb\" id=\"zb\(number)\" type=\"button\">放大</button>"
+        let caption = "<div class=\"cap\"><b>\(name)</b> · #\(number)\(star)" + zoom
             + "<button class=\"nb\" id=\"nb\(number)\" type=\"button\">写备注</button></div>"
-        let note = "<div class=\"nt\" id=\"nt\(number)\"></div></div>\n"
-        return open + image + caption + note
+        let note = "<div class=\"nt\" id=\"nt\(number)\"></div>"
+        return open + image + caption + note + faceStrip(number: number, name: name, faces: faces) + "</div>\n"
+    }
+
+    /// 一格的脸部特写（没有就是空串）。`name` 已经转义过。
+    static func faceStrip(number: Int, name: String, faces: [Data]) -> String {
+        guard !faces.isEmpty else { return "" }
+        var out = "<div class=\"fc\" id=\"fc\(number)\" data-count=\"\(faces.count)\">"
+        for (i, face) in faces.enumerated() {
+            out += "<img src=\"data:image/jpeg;base64," + face.base64EncodedString()
+            out += "\" alt=\"\(name) 脸部特写 \(i + 1)\">"
+        }
+        return out + "</div>"
     }
 
     /// 备注最长多少字（页面上的输入框按它限）。
@@ -116,6 +136,7 @@ enum ProofSheetPage {
         let t = escape(title)
         let limit = quota.map { max(0, $0) } ?? 0
         var tip = "点照片选中（右上角 ♥ 变紫），再点一下取消；选好后点底部「复制我的选择」，到微信里粘贴发给摄影师。"
+            + "看不清脸就点照片下面的「放大」：先是从原片裁的脸部特写，下面是整张，左右滑换一张。"
         if limit > 0 {
             tip += "套餐含 \(limit) 张：可以多选，超出的张数摄影师会和你确认。"
         }
@@ -139,12 +160,39 @@ enum ProofSheetPage {
         <div id="note"><p>给 <b id="note-name"></b> 写备注（修图要求，不写就清空）</p>
         <textarea id="note-text" maxlength="\(noteMaxLength)" placeholder="\(notePlaceholder)"></textarea>
         <p><button id="note-save" type="button">保存</button> <button id="note-cancel" type="button" class="ghost">取消</button></p></div>
+        \(zoomLayer)
         <script>\(script(sheetID: sheetID, quota: limit))</script>
         </body></html>
         """
     }
 
-    private static let style = """
+    /// 「放大」层（GP-03）：整屏黑底、能上下滚；最上面是哪张、关闭，接着脸部特写（客户点放大就是要看脸：手机竖屏上放在
+    /// 整张下面要先往下滚才看得到），再下面这张的小样（和格子里同一张图），底栏上一张 / 选这张 / 下一张。脚本跑起来才会打开。
+    private static let zoomLayer = """
+    <div id="zoom"><div class="zt"><span id="zoom-name"></span><button id="zoom-close" type="button" class="ghost">关闭</button></div>
+    <div id="zoom-faces"></div><img id="zoom-img" alt="">
+    <div class="zn"><button id="zoom-prev" type="button" class="ghost">‹ 上一张</button><button id="zoom-pick" type="button" class="ghost">♡ 选这张</button><button id="zoom-next" type="button" class="ghost">下一张 ›</button></div></div>
+    """
+
+    private static let style = baseStyle + zoomStyle
+
+    /// 放大层、脸部特写的样式。脸部特写在脚本跑不起来时直接排在照片下面（.fc），脚本跑起来就藏着、只在放大层里出。
+    private static let zoomStyle = """
+    .zb{display:none;margin-left:8px;font-size:.8rem;padding:.25rem .7rem;background:#3a3a3a;color:#ddd}
+    .js .zb{display:inline-block}
+    .fc{display:flex;flex-wrap:wrap;padding:2px 0 6px} .fc img{width:48%;margin:0 2% 2% 0;border-radius:4px}
+    .js .fc{display:none}
+    #zoom{display:none;position:fixed;left:0;right:0;top:0;bottom:0;z-index:10;background:#000;overflow-y:auto;
+    -webkit-overflow-scrolling:touch;padding:.6rem .6rem 5.5rem;box-sizing:border-box}
+    .zt{display:flex;align-items:center;justify-content:space-between;color:#ccc;font-size:.9rem;margin-bottom:.5rem}
+    #zoom-img{display:block;max-width:100%;max-height:72vh;margin:0 auto;border-radius:4px}
+    #zoom-faces{display:flex;flex-wrap:wrap;justify-content:center;margin-bottom:.6rem}
+    #zoom-faces img{width:48%;max-width:400px;margin:1%;border-radius:6px} #zoom-faces.n1 img{width:100%}
+    .zn{position:fixed;left:0;right:0;bottom:0;display:flex;justify-content:space-between;padding:.7rem 1rem;
+    background:rgba(24,24,24,.96);border-top:1px solid #333} button:disabled{opacity:.35} #toast{z-index:11}
+    """
+
+    private static let baseStyle = """
     body{font-family:-apple-system,sans-serif;background:#111;color:#eee;margin:1rem;padding-bottom:5rem}
     h1{font-size:1.1rem} .tip{color:#999;font-size:.85rem;line-height:1.5}
     .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
@@ -172,6 +220,109 @@ enum ProofSheetPage {
     #note textarea{width:100%;height:30%;box-sizing:border-box;font-size:1rem;background:#fff;color:#000;
     border-radius:6px;padding:.5rem} button.ghost{background:#444}
     """
+
+    /// 「放大」层的脚本（GP-03），拼进 script() 那个函数里（用它的 cells / picked / toggle / stop / toastEl）。仍是 ES5：
+    /// 只用 getElementById、onclick / ontouchstart / ontouchend / onkeydown 属性、innerHTML、window.history（有才用，包在 try 里）。
+    /// - 打开：这一格的小样（同一个 data: 地址，不多存一份）+ 这一格 .fc 里的脸部特写；底栏「♡ 选这张」点了和点格子一样
+    ///   （选中、底栏计数、存 localStorage、超套餐提示都走 toggle）。
+    /// - 上一张 / 下一张：按钮、左右滑（双指缩放着的时候不算）、电脑上 ← →；Esc 关。
+    /// - 手机的返回键：打开时往历史里压一条，按返回 = 关放大层，不离开页面；点「关闭」时把压的那条退掉。
+    static let zoomScript = #"""
+          var zoomEl = document.getElementById("zoom");
+          var zoomImg = document.getElementById("zoom-img");
+          var zoomFaces = document.getElementById("zoom-faces");
+          var zoomName = document.getElementById("zoom-name");
+          var zoomPick = document.getElementById("zoom-pick");
+          var zoomPrev = document.getElementById("zoom-prev");
+          var zoomNext = document.getElementById("zoom-next");
+          var zoomAt = -1, pushed = false, skipPop = false, touchX = null, touchY = null;
+          function paintZoom() {
+            if (zoomAt < 0) return;
+            var on = picked[cells[zoomAt].getAttribute("data-name")] === true;
+            zoomPick.textContent = on ? "♥ 已选" : "♡ 选这张";
+            zoomPick.className = on ? "" : "ghost";
+          }
+          function showZoom(i) {
+            var cell = cells[i], n = cell.getAttribute("data-n");
+            var img = document.getElementById("im" + n), fc = document.getElementById("fc" + n);
+            zoomAt = i;
+            zoomImg.src = img ? img.src : "";
+            zoomFaces.innerHTML = fc ? fc.innerHTML : "";
+            zoomFaces.className = fc ? "n" + fc.getAttribute("data-count") : "";
+            zoomName.textContent = cell.getAttribute("data-name") + " · #" + n + "（" + (i + 1) + " / " + cells.length + "）";
+            zoomPrev.disabled = i === 0;
+            zoomNext.disabled = i === cells.length - 1;
+            paintZoom();
+            try { zoomEl.scrollTop = 0; } catch (e) {}
+          }
+          function openZoom(i) {
+            if (i < 0 || i >= cells.length) return;
+            toastEl.style.display = "none";
+            showZoom(i);
+            zoomEl.style.display = "block";
+            document.body.style.overflow = "hidden";
+            if (!pushed) {
+              try {
+                if (window.history && window.history.pushState) { window.history.pushState({ zoom: 1 }, ""); pushed = true; }
+              } catch (e) { pushed = false; }
+            }
+          }
+          function hideZoom() {
+            zoomEl.style.display = "none";
+            document.body.style.overflow = "";
+            zoomAt = -1;
+          }
+          function closeZoom() {
+            hideZoom();
+            if (pushed) {
+              pushed = false;
+              skipPop = true;
+              try { window.history.back(); } catch (e) { skipPop = false; }
+            }
+          }
+          function step(d) {
+            var i = zoomAt + d;
+            if (zoomAt >= 0 && i >= 0 && i < cells.length) showZoom(i);
+          }
+          function pinched() {
+            try { return !!(window.visualViewport && window.visualViewport.scale > 1.01); } catch (e) { return false; }
+          }
+          function wireZoom() {
+            document.getElementById("zoom-close").onclick = closeZoom;
+            zoomPrev.onclick = function () { step(-1); };
+            zoomNext.onclick = function () { step(1); };
+            zoomPick.onclick = function () {
+              if (zoomAt < 0) return;
+              toggle(cells[zoomAt]);
+              paintZoom();
+            };
+            zoomEl.ontouchstart = function (e) {
+              e = e || window.event;
+              var t = e && e.touches && e.touches.length === 1 ? e.touches[0] : null;
+              touchX = t ? t.clientX : null;
+              touchY = t ? t.clientY : null;
+            };
+            zoomEl.ontouchend = function (e) {
+              e = e || window.event;
+              var t = e && e.changedTouches && e.changedTouches.length > 0 ? e.changedTouches[0] : null;
+              if (touchX === null || !t || pinched()) { touchX = null; return; }
+              var dx = t.clientX - touchX, dy = t.clientY - touchY;
+              touchX = null;
+              if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) step(dx < 0 ? 1 : -1);
+            };
+            document.onkeydown = function (e) {
+              e = e || window.event;
+              if (zoomAt < 0 || !e) return;
+              if (e.keyCode === 27) closeZoom();
+              else if (e.keyCode === 37) step(-1);
+              else if (e.keyCode === 39) step(1);
+            };
+            window.onpopstate = function () {
+              if (skipPop) { skipPop = false; return; }
+              if (zoomAt >= 0) { pushed = false; hideZoom(); }
+            };
+          }
+    """#
 
     /// 复制出来的文字里，文件名和备注之间的记号（「DSCF7207 备注：去路人」）。导入时认它：记号后面整段原样
     /// 算备注，里面再出现文件名、数字也不拿来认（ClientReply）。老版本 app 导入时会把它当聊天的字跳过。
@@ -371,18 +522,22 @@ enum ProofSheetPage {
             }
             done(legacyCopy(t));
           }
+        \#(zoomScript)
           load();
           for (var i = 0; i < cells.length; i++) {
             paint(cells[i]);
             cells[i].onclick = (function (c) { return function () { toggle(c); }; })(cells[i]);
-            // 「写备注」在格子里面：点它不能顺带把这张取消选中。
+            // 「写备注」「放大」在格子里面：点它们不能顺带把这张取消选中。
             var nb = document.getElementById("nb" + cells[i].getAttribute("data-n"));
             if (nb) nb.onclick = (function (c) { return function (e) { stop(e); openNote(c); }; })(cells[i]);
+            var zb = document.getElementById("zb" + cells[i].getAttribute("data-n"));
+            if (zb) zb.onclick = (function (k) { return function (e) { stop(e); openZoom(k); }; })(i);
           }
           document.getElementById("copy").onclick = copy;
           document.getElementById("close").onclick = function () { panel.style.display = "none"; };
           document.getElementById("note-save").onclick = saveNote;
           document.getElementById("note-cancel").onclick = closeNote;
+          wireZoom();
           document.body.className = "js";
           refresh();
         })();

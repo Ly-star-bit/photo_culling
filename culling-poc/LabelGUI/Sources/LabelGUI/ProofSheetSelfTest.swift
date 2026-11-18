@@ -43,6 +43,184 @@ enum ProofSheetSelfTest {
         numberedNoteChecks()
         dashAndRangeChecks()
         edgeNameChecks()
+        zoomChecks()
+        faceCropChecks()
+    }
+
+    // MARK: 「放大」层（优化分析 GP-03：客户看不清脸，点图只能选中不能放大）
+
+    private static func zoomChecks() {
+        var cells = ""
+        for (i, name) in names.enumerated() {
+            // 第 2、5 张带脸部特写（2 张、1 张），别的没有。
+            let faces: [Data] = i == 1 ? [Data([1]), Data([2])] : (i == 4 ? [Data([3])] : [])
+            cells += ProofSheetPage.cell(number: i + 1, id: name, pick: false, jpeg: Data([0]), faces: faces)
+        }
+        let html = ProofSheetPage.html(title: "自检", sheetID: sheetID, count: names.count, date: "2026-11-18", cells: cells)
+        check(html.contains("id=\"zb1\"") && html.contains("id=\"fc2\" data-count=\"2\"") && !html.contains("id=\"fc1\"")
+              && html.contains("id=\"fc5\" data-count=\"1\""),
+              "放大：每格有「放大」，带特写的格子才有 .fc（写着几张）")
+        check(html.contains("<div class=\"cell\" data-name=\"DSCF7208\" data-n=\"2\"><img src=\"data:image/jpeg;base64,"),
+              "放大：格子开头那一截的样子没变（导入、回归脚本按它认）")
+        let code = script(in: html)
+        let es6 = ["=>", "`", "let ", "const ", "class ", "...", "?."].filter { code.contains($0) }
+        check(es6.isEmpty, "页面脚本还是 ES5（没有箭头函数、let / const、模板字符串、class、展开、?.）", es6.joined(separator: " "))
+        guard let ctx = context(html: html) else { return }
+        // 假 DOM 不认 HTML 里的 src / innerHTML：给格子里的图、特写容器按真页面的样子填上。
+        ctx.evaluateScript("""
+            for (var i = 1; i <= 5; i++) __byId['im' + i].src = 'data:x' + i;
+            __byId['fc2'].innerHTML = 'FACES2'; __byId['fc2'].attrs['data-count'] = '2';
+            __byId['fc5'].innerHTML = 'FACES5'; __byId['fc5'].attrs['data-count'] = '1';
+            var __pushed = 0, __backs = 0;
+            """)
+        check(eval(ctx, "__byId['zoom'].style.display") != "block", "放大层一开始关着")
+        check(eval(ctx, "__click('zb2')") == "true", "点「放大」不往格子上冒（不顺带选中）")
+        check(eval(ctx, "__cells[1].className") == "cell", "点「放大」不改选中")
+        check(eval(ctx, "__byId['zoom'].style.display") == "block" && eval(ctx, "document.body.style.overflow") == "hidden",
+              "放大层打开、底下的页面不跟着滚")
+        check(eval(ctx, "__byId['zoom-img'].src") == "data:x2", "放大层的大图是这一格的小样（同一个 data: 地址）",
+              eval(ctx, "__byId['zoom-img'].src"))
+        check(eval(ctx, "__byId['zoom-faces'].innerHTML") == "FACES2" && eval(ctx, "__byId['zoom-faces'].className") == "n2",
+              "放大层下面是这一格的脸部特写", eval(ctx, "__byId['zoom-faces'].className"))
+        check(eval(ctx, "__byId['zoom-name'].textContent") == "DSCF7208 · #2（2 / 5）", "放大层写着是哪张、第几张",
+              eval(ctx, "__byId['zoom-name'].textContent"))
+        check(eval(ctx, "__byId['zoom-pick'].textContent") == "♡ 选这张", "放大层：没选的写「♡ 选这张」")
+        ctx.evaluateScript("__byId['zoom-pick'].onclick();")
+        check(eval(ctx, "__cells[1].className") == "cell on" && eval(ctx, "__byId['count'].textContent") == "已选 1 张"
+              && eval(ctx, "__byId['zoom-pick'].textContent") == "♥ 已选",
+              "放大层里点「选这张」= 点格子：格子选上、底栏计数、按钮变「♥ 已选」")
+        check(eval(ctx, "__store['xuanpian-sheet-\(sheetID)']").contains(names[1]), "放大层里选的也存进 localStorage")
+        ctx.evaluateScript("__byId['zoom-next'].onclick();")
+        check(eval(ctx, "__byId['zoom-name'].textContent") == "DSCF7209 · #3（3 / 5）"
+              && eval(ctx, "__byId['zoom-faces'].innerHTML") == "" && eval(ctx, "__byId['zoom-faces'].className") == "",
+              "下一张：换到第 3 张，它没有特写就空着（不留着上一张的脸）", eval(ctx, "__byId['zoom-faces'].innerHTML"))
+        // 左右滑：横着滑 60 以上才算，竖着滑（上下看特写）不换。
+        ctx.evaluateScript("__byId['zoom'].ontouchstart({ touches: [{ clientX: 300, clientY: 100 }] }); __byId['zoom'].ontouchend({ changedTouches: [{ clientX: 120, clientY: 130 }] });")
+        check(eval(ctx, "__byId['zoom-name'].textContent").hasPrefix("DSCF7210 "), "往左滑 = 下一张",
+              eval(ctx, "__byId['zoom-name'].textContent"))
+        ctx.evaluateScript("__byId['zoom'].ontouchstart({ touches: [{ clientX: 200, clientY: 100 }] }); __byId['zoom'].ontouchend({ changedTouches: [{ clientX: 150, clientY: 400 }] });")
+        check(eval(ctx, "__byId['zoom-name'].textContent").hasPrefix("DSCF7210 "), "竖着滑（看下面的特写）不换张")
+        ctx.evaluateScript("__byId['zoom'].ontouchstart({ touches: [{ clientX: 100, clientY: 100 }, { clientX: 300, clientY: 100 }] }); __byId['zoom'].ontouchend({ changedTouches: [{ clientX: 400, clientY: 100 }] });")
+        check(eval(ctx, "__byId['zoom-name'].textContent").hasPrefix("DSCF7210 "), "两指（捏合缩放）不算滑")
+        ctx.evaluateScript("document.onkeydown({ keyCode: 39 });")
+        check(eval(ctx, "__byId['zoom-name'].textContent") == "DSCF7211 · #5（5 / 5）"
+              && eval(ctx, "__byId['zoom-next'].disabled") == "true" && eval(ctx, "__byId['zoom-prev'].disabled") == "false",
+              "电脑上 → 下一张；到最后一张「下一张」灰掉")
+        ctx.evaluateScript("__byId['zoom-next'].onclick();")
+        check(eval(ctx, "__byId['zoom-name'].textContent").hasPrefix("DSCF7211 "), "最后一张再点下一张不动")
+        ctx.evaluateScript("document.onkeydown({ keyCode: 27 });")
+        check(eval(ctx, "__byId['zoom'].style.display") == "none" && eval(ctx, "document.body.style.overflow") == "",
+              "Esc 关放大层，页面恢复滚动")
+        ctx.evaluateScript("__click('zb1');")
+        check(eval(ctx, "__byId['zoom-prev'].disabled") == "true", "第一张「上一张」灰掉")
+        ctx.evaluateScript("__byId['zoom-close'].onclick(); __byId['copy'].onclick();")
+        check(eval(ctx, "__byId['out'].value") == "\(ProofSheetPage.header) \(sheetID)\n\(names[1])\n",
+              "关了以后复制的文字里有放大层里选的那张", eval(ctx, "__byId['out'].value").debugDescription)
+
+        // 手机的返回键：打开时压一条历史，按返回关放大层（不离开页面）；点「关闭」把压的那条退掉，退的那一下不当成返回键。
+        ctx.evaluateScript("""
+            window.history = { pushState: function () { __pushed++; }, back: function () { __backs++; window.onpopstate(); } };
+            __click('zb5');
+            """)
+        check(eval(ctx, "__pushed") == "1" && eval(ctx, "__byId['zoom-faces'].className") == "n1", "打开放大层往历史里压一条")
+        ctx.evaluateScript("window.onpopstate();")
+        check(eval(ctx, "__byId['zoom'].style.display") == "none", "手机返回键 = 关放大层")
+        ctx.evaluateScript("__click('zb3'); __byId['zoom-close'].onclick();")
+        check(eval(ctx, "__pushed") == "2" && eval(ctx, "__backs") == "1" && eval(ctx, "__byId['zoom'].style.display") == "none",
+              "点「关闭」：关掉并退掉压的那条（只退一次）", "pushed \(eval(ctx, "__pushed")) backs \(eval(ctx, "__backs"))")
+        ctx.evaluateScript("__click('zb3'); window.history.pushState = function () { throw new Error('SecurityError'); };")
+        ctx.evaluateScript("__byId['zoom-close'].onclick(); __click('zb4');")
+        check(eval(ctx, "__byId['zoom'].style.display") == "block" && eval(ctx, "__byId['zoom-name'].textContent").hasPrefix("DSCF7210 "),
+              "压历史抛错（file:// 下有的浏览器不让）也照样打开")
+        ctx.evaluateScript("__byId['zoom-close'].onclick();")
+        check(eval(ctx, "__backs") == "2" && eval(ctx, "__byId['zoom'].style.display") == "none",
+              "没压成的那次关的时候不去退历史（不然就退出页面了）", "backs \(eval(ctx, "__backs"))")
+    }
+
+    // MARK: 脸部特写从原片裁（ProofFaceCrops）
+
+    /// 原片存成横的 3000×2000 + 方向 6（转正后 2000×3000 竖的），转正后的某个位置画一块红：按 ImageIO 转正后的位置给人脸框，
+    /// 裁出来的特写中间要是红的（没转正就裁到别处去了）。
+    private static func faceCropChecks() {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("proof-face-\(ProcessInfo.processInfo.processIdentifier)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("rot6.jpg")
+        guard let stored = rgbaContext(3000, 2000) else { return check(false, "特写：造得出原片") }
+        stored.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 0.9, alpha: 1))
+        stored.fill(CGRect(x: 0, y: 0, width: 3000, height: 2000))
+        stored.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        // CG 是左下原点：存的图里靠左上的一块（转正以后到了别处）。
+        stored.fill(CGRect(x: 400, y: 2000 - 300 - 200, width: 200, height: 200))
+        // 先照常编码，再只改方向标签（AddImage 带的方向标签 JPEG 不写；DeliveryDecodeSelfTest 也是这么造的）。
+        let plain = NSMutableData(), tagged = NSMutableData()
+        guard let image = stored.makeImage(),
+              let first = CGImageDestinationCreateWithData(plain, UTType.jpeg.identifier as CFString, 1, nil)
+        else { return check(false, "特写：造得出原片") }
+        CGImageDestinationAddImage(first, image, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
+        guard CGImageDestinationFinalize(first), let encoded = CGImageSourceCreateWithData(plain, nil),
+              let dest = CGImageDestinationCreateWithData(tagged, UTType.jpeg.identifier as CFString, 1, nil),
+              CGImageDestinationCopyImageSource(dest, encoded, [kCGImageDestinationOrientation: 6] as CFDictionary, nil),
+              (try? (tagged as Data).write(to: url)) != nil
+        else { return check(false, "特写：造得出方向 6 的原片") }
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let upright = CGImageSourceCreateThumbnailAtIndex(src, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 3000,
+                  kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary)
+        else { return check(false, "特写：读得回原片") }
+        // 在 ImageIO 转正后的图里找红块的框（左上原点、归一化）。
+        let px = pixels(upright), w = upright.width, h = upright.height
+        var minX = w, minY = h, maxX = -1, maxY = -1
+        for y in stride(from: 0, to: h, by: 4) {
+            for x in stride(from: 0, to: w, by: 4) {
+                let i = (y * w + x) * 4
+                if px[i] > 200 && px[i + 1] < 60 && px[i + 2] < 60 {
+                    minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
+                }
+            }
+        }
+        check(w == 2000 && h == 3000 && maxX > minX, "特写：方向 6 的原片转正后是 2000×3000 竖的、找得到红块", "\(w)×\(h)")
+        let box = [Double(minX) / Double(w), Double(minY) / Double(h), Double(maxX + 4) / Double(w), Double(maxY + 4) / Double(h)]
+        let made = ProofFaceCrops.make(original: url.path, faces: [box], watermark: nil)
+        let crop = made.crops.first.flatMap { CGImageSourceCreateWithData($0 as CFData, nil) }
+            .flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) }
+        if let crop {
+            let p = pixels(crop), c = (crop.height / 2 * crop.width + crop.width / 2) * 4
+            check(p[c] > 200 && p[c + 1] < 80 && p[c + 2] < 80, "特写：按转正后的人脸框裁，中间是那块红（转正对了）",
+                  "中心 \(p[c]),\(p[c + 1]),\(p[c + 2])")
+            check(crop.width == crop.height && crop.width >= 270 && crop.width <= ProofFaceCrops.outputEdge,
+                  "特写：正方形、边长在 270…360 之间", "\(crop.width)×\(crop.height)")
+        } else {
+            check(false, "特写：小脸裁得出一张", "\(made.crops.count) 张")
+        }
+        // 脸在小样上本来就看得清（宽 ≥ 160px）：不加。
+        let big = ProofFaceCrops.make(original: url.path, faces: [[0.2, 0.2, 0.7, 0.5]], watermark: nil)
+        check(big.crops.isEmpty && !big.originalMissing, "特写：小样上脸已经够大（250px）就不加")
+        // 一张里 6 张小脸（越往右越大）：取最大的 4 张，按从左到右。
+        let six = (0..<6).map { i -> [Double] in
+            [0.05 + Double(i) * 0.15, 0.4, 0.11 + Double(i) * 0.16, 0.45 + Double(i) * 0.01]
+        }
+        check(ProofFaceCrops.pick(six.reversed(), width: 2000, height: 3000).map { $0[0] } == six.suffix(4).map { $0[0] },
+              "特写：一张最多 4 张脸（取面积大的 4 张），按从左到右排")
+        check(ProofFaceCrops.make(original: url.path, faces: six, watermark: nil).crops.count == 4, "特写：6 张小脸只出 4 张")
+        // 原片读不到（外接盘没插）：不加、标出来，不出错。
+        let gone = ProofFaceCrops.make(original: dir.appendingPathComponent("没有.jpg").path, faces: [box], watermark: nil)
+        check(gone.crops.isEmpty && gone.originalMissing, "特写：原片读不到 → 不加、记一笔「原片读不到」")
+        // 带水印的确认表：特写上也画角标（和不带的不一样），张数不变。
+        var config = WatermarkEngine.Config()
+        config.signatureEnabled = false
+        config.exifText.enabled = true
+        config.exifText.customText = "© 自检"
+        if let mark = ProofWatermark.make(config: config, signature: nil) {
+            let marked = ProofFaceCrops.make(original: url.path, faces: [box], watermark: mark)
+            check(marked.crops.count == 1 && marked.crops != made.crops, "特写：带水印的确认表，特写上也画了角标")
+        }
+        // 解原片挑 DCT 档：够 360 × 3/4 的最小一档，40MP 竖拍里小脸多半是一半。
+        let r = CGRect(x: 0, y: 0, width: 1043, height: 1043)
+        let quarter = CGRect(x: 0, y: 0, width: 1200, height: 1200), tiny = CGRect(x: 0, y: 0, width: 500, height: 500)
+        check(ProofFaceCrops.decodeEdge(for: [r], long: 7728) == 3864 && ProofFaceCrops.decodeEdge(for: [quarter], long: 7728) == 1932
+              && ProofFaceCrops.decodeEdge(for: [tiny], long: 7728) == 7728 && ProofFaceCrops.decodeEdge(for: [r, tiny], long: 7728) == 7728,
+              "特写：解原片的档位（1043 的块解一半、1200 的解 1/4、500 的整幅，几块按最小的那块）")
     }
 
     // MARK: 文件名首尾带空格 / 句点（优化分析 EC-05：确认表回复导回时静默漏认，「没认出」还是空）

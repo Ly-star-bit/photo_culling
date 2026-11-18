@@ -13,7 +13,9 @@
    预览说带备注、超出套餐；--apply 存 client_notes.json，--undo 选中和备注一起回去；--clear 连备注一起清、能撤销。
 3. --copy-originals：目标里写「精修要求.csv」（BOM、表头、转义）；再复制一次一模一样不再写；备注改了另存
    「精修要求-2.csv」，原来那份不动；CSV 按实际复制结果写（同名不同内容另存 -2 的写 -2 的名字，没复制成的不写）。
-4. --proof-sheet --with-watermark --signature：每张图都变了、张数和顺序不变、预览文件一个字节没动；
+3b. 脸部特写（GP-03）：每格有「放大」，5 张精选每张一张从原片裁的特写（正方形、≤360）、两次导出逐字节一样、脚本还是 ES5；
+   原片挪开的那张不加特写、照常导出，状态栏说「1 张原片读不到」。
+4. --proof-sheet --with-watermark --signature：每张图都变了（脸部特写也画了角标）、张数和顺序不变、预览文件一个字节没动；
    没签名也没文字时不导（不悄悄导出不带水印的）；打印每张平均体积（bytesPerPhoto 的依据）。
 5. 水印页只开了 EXIF 参数文字（默认模板）：原片没有 EXIF、外接盘没插时一张都画不上 → 不导、不记表、不报「带水印」；
    写一句自定义文字照样导。
@@ -246,12 +248,76 @@ def run(binary, work):
     check("客户备注: -" in mid and "已清除客户选中 4 张、备注 3 条" in r.stdout, "清除客户选中连备注一起清", r.stdout)
     check("客户备注: " + picks[0] + "=换成调亮一点" in r.stdout.split("撤销后")[-1], "清除也能 ⌘Z 回来")
 
+    face_crops(lg, work, photos, picks, page_a, page_b)
     watermark(lg, work, photos, session, ids, picks, preview_hash, page_a)
     blank_watermark(lg, work, data, photos, session)
     edge_names(binary, work)
 
     print("确认表回归: " + ("全部通过" if not failures else "{} 条没过: {}".format(len(failures), "；".join(failures))))
     return 0 if not failures else 1
+
+
+def face_strips(html):
+    """{照片 id: [特写 base64, …]}（没有特写的格子不在里面）。"""
+    out = {}
+    for chunk in html.split('<div class="cell" data-name="')[1:]:
+        name = chunk.split('"', 1)[0]
+        m = re.search(r'<div class="fc" id="fc[0-9]+" data-count="([0-9]+)">(.*?)</div>', chunk)
+        if m:
+            out[name] = re.findall(r'<img src="data:image/jpeg;base64,([^"]+)"', m.group(2))
+            if int(m.group(1)) != len(out[name]):
+                out[name] = ["data-count 对不上"]
+    return out
+
+
+def jpeg_size(b64):
+    """JPEG 的宽高（读 SOF）。"""
+    d = base64.b64decode(b64)
+    i = 2
+    while i + 9 < len(d):
+        if d[i] != 0xFF:
+            i += 1
+            continue
+        marker = d[i + 1]
+        if marker in (0xC0, 0xC1, 0xC2):
+            h, w = struct.unpack(">HH", d[i + 5:i + 9])
+            return w, h
+        i += 2 + struct.unpack(">H", d[i + 2:i + 4])[0]
+    return 0, 0
+
+
+def face_crops(lg, work, photos, picks, page_a, page_b):
+    """GP-03：确认表里每张加「放大」层，带从原片裁的脸部特写。fixture 的 5 张精选每张一张小脸（小样里 78–155px），
+    原片是造的 3000×2000：每格都有一张特写、正方形、不超过 360；两次导出逐字节一样；原片读不到的那张不加、照常导出。"""
+    strips = face_strips(page_a)
+    check(sorted(strips) == sorted(picks) and all(len(v) == 1 for v in strips.values()),
+          "特写：5 张精选每张一张脸部特写", repr({k: len(v) for k, v in strips.items()}))
+    sizes = [jpeg_size(b) for v in strips.values() for b in v]
+    check(sizes and all(w == h and 100 <= w <= 360 for w, h in sizes), "特写：正方形、边长不超过 360", repr(sizes))
+    check(face_strips(page_b) == strips, "特写：同样的原片两次导出逐字节一样")
+    check(page_a.count('class="zb"') == len(picks) and 'id="zoom"' in page_a and "看不清脸就点照片下面的「放大」" in page_a,
+          "每格有「放大」，页面里有放大层，提示里说了")
+    code = page_a.split("<script>", 1)[-1].split("</script>", 1)[0]
+    es6 = [t for t in ("=>", "`", "let ", "const ") if t in code]
+    check(not es6, "页面脚本还是 ES5", repr(es6))
+    per = [len(b) for v in strips.values() for b in v]
+    print("体积: 特写每张平均 base64 {} 字节（造的图，真实照片的数见 ProofSheetPage.faceBytesPerPhoto）".format(sum(per) // max(1, len(per))))
+
+    # 原片读不到（外接盘没插、挪走了）：这张不加特写、照常导出，状态栏说一声。
+    original = os.path.join(photos, picks[0] + ".JPG")
+    aside = os.path.join(work, picks[0] + ".face-aside")
+    os.rename(original, aside)
+    try:
+        time.sleep(1.1)
+        h_html = os.path.join(work, "out", "h.html")
+        p = lg("--proof-sheet", photos, "--out", h_html, "--ids", ",".join(picks[:2]))
+    finally:
+        os.rename(aside, original)
+    page_h = open(h_html, encoding="utf-8").read() if os.path.exists(h_html) else ""
+    got = face_strips(page_h)
+    check(p.returncode == 0 and [c[0] for c in cells(page_h)] == picks[:2] and list(got) == [picks[1]],
+          "特写：原片读不到的那张不加、另一张照加，两张都导出", p.stdout[-300:] + repr(list(got)))
+    check("脸部特写 1 张（1 张原片读不到，没加特写）" in p.stdout, "特写：状态栏说几张原片读不到", p.stdout[-300:])
 
 
 def watermark(lg, work, photos, session, ids, picks, preview_hash, page_a):
@@ -278,6 +344,10 @@ def watermark(lg, work, photos, session, ids, picks, preview_hash, page_a):
     plain, marked = cells(page_a), cells(page_c)
     check([c[0] for c in marked] == picks, "带水印：照片和顺序不变")
     check(len(marked) == len(plain) and all(a[1] != b[1] for a, b in zip(plain, marked)), "带水印：每张图都变了")
+    plain_faces, marked_faces = face_strips(page_a), face_strips(page_c)
+    check(plain_faces and sorted(marked_faces) == sorted(plain_faces)
+          and all(marked_faces[k] != plain_faces[k] for k in plain_faces),
+          "带水印：脸部特写上也画了角标（张数不变、每张都变了）")
     sheets = json.load(open(sheets_path, encoding="utf-8"))
     check(sheets[-1]["ids"] == picks and "lists" not in sheets[-1], "带水印：表上记的照片顺序一样（水印不进 proof_sheets.json）")
     now = {pid: sha(os.path.join(session, "previews", pid + ".jpg")) for pid in ids}

@@ -4047,7 +4047,8 @@ final class BatchStore: ObservableObject {
         let chosen = items.filter { item in
             if let wanted { return wanted.contains(item.id) }
             return item.verdict == .pick || (includeUsable && item.verdict == .usable)
-        }.map { (id: $0.id, previewPath: $0.previewPath, pick: $0.verdict == .pick, original: $0.decodePath) }
+        }.map { (id: $0.id, previewPath: $0.previewPath, pick: $0.verdict == .pick, original: $0.decodePath,
+                 faces: Self.proofFaceBoxes($0)) }
         guard !chosen.isEmpty else {
             lastError = "没有可导出的照片"
             return
@@ -4070,23 +4071,52 @@ final class BatchStore: ObservableObject {
         // previews took seconds of beachball. The 1024px previews are
         // re-encoded at 800px/q0.72 so a 300-photo sheet stays WeChat-sized.
         Task.detached(priority: .userInitiated) { [weak self] in
+            // 每张：800px 小样 + 从原片裁的脸部特写（GP-03，要解原片：4 路并行，完了按原来的顺序拼）。
+            var results = [(sample: Data, faces: ProofFaceCrops.Result)?](repeating: nil, count: total)
+            await withTaskGroup(of: (Int, Data?, ProofFaceCrops.Result).self) { group in
+                var next = 0
+                func addNext() {
+                    guard next < total, !flag.isSet else { return }
+                    let index = next
+                    let item = chosen[index]
+                    next += 1
+                    group.addTask {
+                        guard let data = Self.contactSheetJPEG(path: item.previewPath, watermark: watermark,
+                                                               original: item.original)
+                        else { return (index, nil, ProofFaceCrops.Result()) }
+                        return (index, data, ProofFaceCrops.make(original: item.original, faces: item.faces,
+                                                                 watermark: watermark))
+                    }
+                }
+                for _ in 0..<Self.proofSheetWorkers { addNext() }
+                var done = 0
+                for await (index, data, faces) in group {
+                    if let data { results[index] = (data, faces) }
+                    done += 1
+                    let doneNow = done
+                    if doneNow % 20 == 0 || doneNow == total {
+                        await MainActor.run { [weak self] in
+                            self?.progressText = "生成选片确认表 \(doneNow)/\(total)..."
+                            self?.progressFraction = Double(doneNow) / Double(total)
+                        }
+                    }
+                    addNext()
+                }
+            }
             var cells = ""
             // 真正放进表里的（预览读不出来的跳过）：编号 #n 就是这里的第 n 张，记进 proof_sheets.json。
             var shown: [String] = []
+            var withFaces = 0
+            var originalsMissing = 0
             for (index, item) in chosen.enumerated() {
-                if flag.isSet { break }
-                guard let data = Self.contactSheetJPEG(path: item.previewPath, watermark: watermark,
-                                                       original: item.original) else { continue }
+                guard let result = results[index] else { continue }
                 shown.append(item.id)
-                cells += ProofSheetPage.cell(number: shown.count, id: item.id, pick: item.pick, jpeg: data)
-                let done = index + 1
-                if done % 20 == 0 || done == total {
-                    await MainActor.run { [weak self] in
-                        self?.progressText = "生成选片确认表 \(done)/\(total)..."
-                        self?.progressFraction = Double(done) / Double(total)
-                    }
-                }
+                if !result.faces.crops.isEmpty { withFaces += 1 }
+                if result.faces.originalMissing { originalsMissing += 1 }
+                cells += ProofSheetPage.cell(number: shown.count, id: item.id, pick: item.pick, jpeg: result.sample,
+                                             faces: result.faces.crops)
             }
+            results.removeAll()
             let dateString = DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .none)
             let html = ProofSheetPage.html(title: title, sheetID: sheetID, count: shown.count,
                                            date: dateString, cells: cells, quota: quota)
@@ -4103,6 +4133,9 @@ final class BatchStore: ObservableObject {
             let sheet = ProofSheet(id: sheetID, date: Date(), scope: scope, ids: shown,
                                    lists: ProofSheet.lists(quota: quota))
             let skipReason = watermark?.skipReason ?? ""
+            // 「· 脸部特写 18 张」；原片读不到的（外接盘没插）没加特写，照常导出，说一句。
+            let faceNote = (withFaces > 0 ? " · 脸部特写 \(withFaces) 张" : "")
+                + (originalsMissing > 0 ? "（\(originalsMissing) 张原片读不到，没加特写）" : "")
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.progressFraction = nil
@@ -4118,6 +4151,7 @@ final class BatchStore: ObservableObject {
                     self.recordProofSheet(sheet)
                     let marked = watermark == nil ? "" : "（带水印）"
                     self.progressText = "选片确认表已导出\(marked): \(sheet.ids.count) 张 · \(Self.sizeText(bytes)) → \(url.lastPathComponent)"
+                        + faceNote
                     if bytes > ProofSheetPage.largeBytes { self.lastError = ProofSheetPage.largeNote(bytes) }
                     // 带水印时少了的（预览读不出来、水印画不上）说出来：不悄悄少几张。
                     if watermark != nil, sheet.ids.count < total {
@@ -4127,6 +4161,16 @@ final class BatchStore: ObservableObject {
                 }
             }
         }
+    }
+
+    /// 确认表并行做几张（脸部特写要解原片，多半解一半：4 路，和交付导出「一半以内」那档一样）。
+    nonisolated static let proofSheetWorkers = 4
+
+    /// 确认表裁脸部特写用的人脸框（归一化、左上原点、转正后的图）：每张主体脸；老结果没有 faces 的用主脸那一个。
+    nonisolated static func proofFaceBoxes(_ item: BatchItem) -> [[Double]] {
+        let all = item.faces.map(\.bbox).filter { $0.count == 4 }
+        if !all.isEmpty { return all }
+        return item.faceBbox.map { $0.count == 4 ? [$0] : [] } ?? []
     }
 
     /// 确认表里的一张：预览缩到 800px、q0.72。`watermark` 给了就在这张内存里的小样上画（`original` = 原片，水印按它换算
