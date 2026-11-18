@@ -1175,11 +1175,17 @@ private struct CollageSnapshotHost: View {
     var body: some View {
         // 离屏没有窗口底色：不垫一层，透明处存成 PNG 是黑的，黑字就看不见了。
         Group {
+            // 单截的两样垫的底和真窗口一样（颜色在这个 body 里读，换主题跟着变）：以前露的是下面那层窗口的系统灰，
+            // 五套深色一个样、相纸是冷灰，和真 app 对不上。
             if whatsNew {
+                // 真 sheet 挂的是 themedSheet（ContentView）。它里面自己带一层 appTheme()，和外面那层套着，无妨。
                 WhatsNewSheet(notes: WhatsNew.notes, onGo: { _ in }, onClose: {})
                     .frame(maxHeight: .infinity, alignment: .top)
+                    .themedSheet()
             } else if inspectorWidth != nil {
+                // 真窗口里检视器这一栏的底是 CollageSplit 垫的 panel（CollageWorkspace）。
                 CollageInspector(store: store, watermarkStore: watermarkStore)
+                    .background(AppPalette.panel)
             } else {
                 CollageView(store: store, batchStore: batchStore, watermarkStore: watermarkStore)
             }

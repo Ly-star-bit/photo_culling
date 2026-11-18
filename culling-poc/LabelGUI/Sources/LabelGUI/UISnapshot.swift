@@ -145,7 +145,8 @@ enum BatchUISnapshot {
                 print("--shortcuts-page 只认 \(ShortcutsPage.allCases.map(\.rawValue).joined(separator: "|"))：\(name)")
                 exit(2)
             }
-            root = AnyView(ShortcutsPanel(page: page).background(ThemedFill(\.card)))
+            // 底是 ShortcutsPanel 自己垫的（和真窗口、弹出框同一个），这里不另垫。
+            root = AnyView(ShortcutsPanel(page: page))
         } else if let kind = option("--delivery-ui") {
             // 导出设置是 sheet 里的那一段：底和真 sheet 一样（themedSheet，TA-04；以前垫的是 card，看着像跟了主题）。
             root = AnyView(deliveryPreview(kind, store: store, json: option("--delivery-json") ?? "")
