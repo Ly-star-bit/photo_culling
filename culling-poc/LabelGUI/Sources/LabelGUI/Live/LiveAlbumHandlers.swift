@@ -133,6 +133,9 @@ extension LiveHandlers {
         var out: [String: Any] = ["exists": true, "editing": collage.editingCover]
         out["spine_mm"] = MCPReadModel.r3(cover.spineWidthMM(spreads: collage.project.pages.count))
         out["spine_estimated"] = cover.spineMM == nil
+        // 同 collage_cover 的 cover（优化分析 MC-06 第 2 条：album.cover 以前看不出书脊宽过期了）
+        out["spine_pages"] = cover.spinePages ?? NSNull()
+        out["spine_stale"] = cover.spineStaleNote(spreads: collage.project.pages.count) != nil
         return out
     }
 

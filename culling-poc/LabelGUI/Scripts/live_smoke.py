@@ -1138,6 +1138,9 @@ def album_section():
             check(cands.get("photo") == cell["photo_id"] and isinstance(rows, list) and len(rows) <= 5
                   and all(r_.get("reason") in ("burst", "take", "similar") and "score" in r_ and "page" in r_ for r_ in rows),
                   f"candidates_for：理由 burst / take / similar、分数、在第几个跨页（{len(rows or [])} 个）")
+            # 优化分析 MC-06 第 3 条：候选带这张自己所在的跨页和格子，照填给 collage_replace_photo
+            check(cands.get("page") == here_page["page"] and cands.get("path") == cell["path"],
+                  f"candidates 带这张所在的 page / path（{cands.get('page')} / {cands.get('path')}，应为 {here_page['page']} / {cell['path']}）")
             other_page = next((s_ for s_ in spreads(g5) if s_["page"] != here_page["page"] and s_.get("photos")), None)
             if other_page:
                 newcomer = other_page["photos"][0]
@@ -1245,6 +1248,10 @@ def album_section():
               and info.get("spine_pages") == 2 * (get().get("pages") or 0) and info.get("spine_stale") is False
               and cv.get("preview_kind") == "cover" and len(blocks_c) == 1 and (prev.get("width") or 0) > 1.5 * (prev.get("height") or 1),
               f"做封面 + 书脊 12.5mm：一步撤销，预览是整张封面（{prev.get('width')}×{prev.get('height')}）")
+        # 优化分析 MC-06 第 2 条：collage_get_state 的 album.cover 也报 spine_pages / spine_stale（同 collage_cover）
+        sc = ((get().get("album") or {}).get("cover") or {})
+        check(sc.get("spine_pages") == info.get("spine_pages") and sc.get("spine_stale") is False,
+              f"album.cover 带 spine_pages / spine_stale（{sc.get('spine_pages')} / {sc.get('spine_stale')}）")
         _, cv_again = w("collage_cover", {"action": "make"})
         _, cv_auto = w("collage_cover", {"spine_auto": True})
         check(err_code(cv_again) == "invalid_state" and (cv_auto.get("cover") or {}).get("spine_estimated") is True,

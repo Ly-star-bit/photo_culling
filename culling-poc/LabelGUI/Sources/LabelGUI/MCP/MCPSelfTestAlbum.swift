@@ -167,6 +167,14 @@ extension MCPSelfTest {
         check(description("collage_get_state").contains("tray_offset") && description("collage_get_state").contains("tray_unused")
               && description("cull_session_overview").contains("chapters_truncated"),
               "collage_get_state 的说明写了 tray_offset、tray_unused；overview 的说明写了 chapters_truncated")
+        // 优化分析 MC-06：说明和实际对得上的几处
+        check(description("collage_cover").contains("spine_stale") && description("collage_cover").contains("spine_pages"),
+              "collage_cover 的说明写了 spine_pages / spine_stale 和怎么消")
+        check(description("collage_get_state").contains("export") && description("collage_get_state").contains("page、path"),
+              "collage_get_state 的说明写了导出设置 export、候选带 page / path")
+        check(description("collage_preflight").contains("null = 不会问") && description("cull_get_photos").contains("truncated_ids")
+              && description("cull_preview_photos").contains("inline:false 能拿到全部"),
+              "export_would_ask 的 null、cull_get_photos 的 truncated_ids、预览超预算的退路写在说明里")
         let instructions = MCPToolDefs.instructions(live: true)
         check(album.allSatisfy(instructions.contains), "instructions 提到了相册整本的 6 个工具")
         // 优化分析 MC-01：空托盘时的报错指的路（排版工具的 photos 顺带进托盘）两个工具的说明里真的写着；instructions 说了托盘

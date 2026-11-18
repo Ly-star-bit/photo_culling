@@ -45,6 +45,11 @@ extension MCPSelfTest {
             ("cull_list_photos", ["session": k, "chapter": -1], false),
             ("cull_list_photos", ["session": k, "manual_only": 1], false),
             ("cull_list_photos", ["session": k, "reason": String(repeating: "闭", count: 41)], false),
+            // 优化分析 MC-06 第 1 条：理由取值固定，写错回 invalid_argument（以前 "blurry" 静默回 0 张）
+            ("cull_list_photos", ["session": k, "reason": "虚焦"], true),
+            ("cull_list_photos", ["session": k, "reason": "VLM建议淘汰"], true),
+            ("cull_list_photos", ["session": k, "reason": "blurry"], false),
+            ("cull_list_photos", ["session": k, "reason": "本地模型建议淘汰"], false),
             ("cull_list_photos", ["session": k, "cursor": NSNull()], true),
             ("cull_get_photos", ["session": k, "ids": ["a"]], true),
             ("cull_get_photos", ["session": k], false),
@@ -86,6 +91,14 @@ extension MCPSelfTest {
         check(MCPArgs.check("cull_preview_photos", ["ids": ["a"], "deadline_seconds": 60], deadlineCap: 50) != nil,
               "deadline_seconds 超过 LABELGUI_MCP_DEADLINE_SEC 要拦")
         check(MCPArgs.uniqueStrings(["b", "a", "b", 3, "a"]) == ["b", "a"], "ids 去重保持顺序、不是字符串的丢掉")
+        // 理由的取值：MCPArgs 里那份 = 批量页的 BatchStore.reasonOrder = schema 的 enum；写错的报错把取值列出来
+        let order = MainActor.assumeIsolated { BatchStore.reasonOrder }
+        let photosDef = defs.first { $0["name"] as? String == "cull_list_photos" } ?? [:]
+        let photosProps = (photosDef["inputSchema"] as? [String: Any])?["properties"] as? [String: Any] ?? [:]
+        let reasonEnum = (photosProps["reason"] as? [String: Any])?["enum"] as? [String] ?? []
+        check(MCPArgs.reasonValues == order && reasonEnum == order, "废片理由的取值和 BatchStore.reasonOrder、schema 的 enum 一致：\(reasonEnum)")
+        let blurry = MCPArgs.check("cull_list_photos", ["reason": "blurry"])
+        check(blurry?.message.contains("虚焦") == true && blurry?.message.contains("VLM建议淘汰") == true, "reason 写错：报错列出全部取值")
     }
 
     private static func cursorChecks(_ check: Check) {

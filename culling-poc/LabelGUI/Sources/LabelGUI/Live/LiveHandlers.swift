@@ -224,6 +224,7 @@ enum LiveHandlers {
             out["candidates"] = candidateRows(collage, for: target, limit: limit)
         }
         if want("variants") { out["variants"] = variantsList(collage) }
+        out["export"] = exportInfo(collage)
         out["selection"] = collage.selection.map { path in path.map(String.init).joined() } ?? NSNull()
         var undo: [String: Any] = ["collage_depth": collage.undoDepth, "can_undo": collage.canUndo]
         undo["can_redo"] = collage.canRedo
@@ -335,6 +336,22 @@ enum LiveHandlers {
         }
     }
 
+    /// 「导出 ▾」里的设置（优化分析 MC-06 第 7 条：以前只有导出完才在结果里看到，AI 没法事先告诉用户会写到哪、出不出 PDF）。
+    /// scale 是这张画布上实际用的倍数（同 CollageStore.exportScale）；印刷 PDF、裁切线只有相册出（界面上非相册是灰的）；
+    /// watermark = 设了水印（每张照片 / 整页那一层）又开着「导出带水印」。
+    static func exportInfo(_ collage: CollageStore) -> [String: Any] {
+        let options = collage.exportOptions
+        let pdf = collage.isAlbum && options.pdf
+        var out: [String: Any] = ["folder": collage.outputFolder?.path ?? NSNull(), "folder_is_default": options.outputPath == nil]
+        out["format"] = options.format.rawValue
+        out["scale"] = CollageStore.exportScale(canvas: collage.project.canvas, options: options)
+        out["print_pdf"] = pdf
+        out["crop_marks"] = pdf && options.cropMarks
+        let mark = collage.project.watermark
+        out["watermark"] = mark.map { ($0.photos != nil || $0.page != nil) && $0.exportEnabled } ?? false
+        return out
+    }
+
     static func canvasInfo(_ canvas: CollageCanvas) -> [String: Any] {
         ["name": canvas.name, "width": canvas.width, "height": canvas.height, "fold": canvas.seams == .fold]
     }
@@ -384,9 +401,13 @@ enum LiveHandlers {
             return row
         }
         var out: [String: Any] = ["photo": id, "rows": rows]
-        // 这张自己在第几个跨页（换的时候 path 指它所在的那一格）
+        // 这张自己在第几个跨页、哪一格（优化分析 MC-06 第 3 条：以前只给跨页号，cells 又只有当前页的，换别的跨页上的照片
+        // 要先翻过去再读一次状态）：page + path 照填给 collage_replace_photo。散落版、印样上的（没有切分树的格子）path 是 null。
         let pages = collage.project.pages
-        out["page"] = pages.indices.first { pages[$0].photoIDs.contains(id) }.map { $0 + 1 } ?? NSNull()
+        let at = pages.indices.first { pages[$0].photoIDs.contains(id) }
+        out["page"] = at.map { $0 + 1 } ?? NSNull()
+        let path = at.flatMap { i in pages[i].root.leafPaths().first { pages[i].root.node(at: $0)?.cell?.photoID == id } }
+        out["path"] = path.map { $0.map(String.init).joined() } ?? NSNull()
         return out
     }
 

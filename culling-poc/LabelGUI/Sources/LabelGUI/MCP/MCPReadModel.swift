@@ -696,7 +696,8 @@ enum MCPArgs {
     static let photosSpec: ToolSpec = {
         var p: [String: Spec] = ["session": session, "cursor": cursor, "limit": limit, "manual_only": .bool]
         p["verdict"] = .strings(count: 0...3, maxLength: 16, oneOf: ["pick", "usable", "reject"])
-        p["reason"] = .string(maxLength: 40)
+        // 取值固定（优化分析 MC-06 第 1 条）：以前写错（"blurry"）静默回 0 张，AI 会说「没有虚焦的」
+        p["reason"] = .oneOf(reasonValues)
         p["chapter"] = .int(0...1_000_000)
         p["scene"] = .int(0...1_000_000_000)
         p["near_duplicate"] = .int(0...1_000_000_000)
@@ -705,6 +706,8 @@ enum MCPArgs {
         p["client_pick"] = .bool
         return ToolSpec(props: p, required: [])
     }()
+    /// 废片理由的固定取值 = BatchStore.reasonOrder（那个在 @MainActor 的 store 上，这里是 nonisolated 的校验；自检对过两份一样）。
+    static let reasonValues = ["文件损坏", "连拍重复", "闭眼", "虚焦", "曝光裁切", "欠曝", "过曝", "人脸质量低", "VLM建议淘汰"]
     static let getSpec = ToolSpec(props: ["session": session, "ids": .strings(count: 1...20, maxLength: 128, oneOf: nil)],
                                   required: ["ids"])
     static let groupsSpec: ToolSpec = {
