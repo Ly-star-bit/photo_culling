@@ -1875,8 +1875,10 @@ try:
         st_on, _ = status(env)
         check((st_off.get("live") or {}).get("state") == "bridge_off" and err_code(cs_off) == "bridge_off" and err_code(rd_off) == "bridge_off"
               and err_code(wr_off) == "bridge_off"
+              and st_off.get("next") == "请用户在选片工具菜单里打开「允许 AI 实时操作（MCP）」"
               and lock_line.get("bridge") == "off" and sock_gone and (st_on.get("live") or {}).get("state") == "live",
-              "桥关着：bridge_off（读写都是），socket 删了、锁文件写 bridge:off；3 s 后自己开回来 → live")
+              f"桥关着：bridge_off（读写都是），app_status.next 指菜单那一项（「{st_off.get('next')}」，以前叫用户打开 app），"
+              "socket 删了、锁文件写 bridge:off；3 s 后自己开回来 → live")
         # socket 被删（R6 T15）：立刻 unreachable；自检（500 ms）以后恢复
         just_after_selfcheck(h)
         t_un = time.monotonic()
@@ -2616,6 +2618,14 @@ __attribute__((constructor)) static void init(void) {
               and all(i.get("truncated") and i.get("file") is None for i in imgs if i not in given)
               and "budget_truncated" in [w.get("code") for w in body.get("warnings") or []],
               f"LABELGUI_MCP_INLINE_KB=150：前 {len(given)} 张给图，后面的标 truncated、没有字节和文件，warning budget_truncated")
+        # 优化分析 MC-10：hint 只写 AI 做得到的（inline:false），不再叫它改环境变量；照着带 inline:false 再调，4 张都有文件
+        bt_hint = next((w.get("hint") or "" for w in (body or {}).get("warnings") or [] if w.get("code") == "budget_truncated"), "")
+        res, body_nf, _ = mcp_full(hs.env(LABELGUI_MCP_OUT=out, LABELGUI_MCP_INLINE_KB="150"), "cull_preview_photos",
+                                   {"session": sk, "ids": syn["ids"][:4], "inline": False})
+        nf_imgs = (body_nf or {}).get("images") or []
+        check("inline:false" in bt_hint and "LABELGUI_MCP_INLINE_KB" not in bt_hint and (body_nf or {}).get("truncated") is False
+              and len(nf_imgs) == 4 and all(os.path.isfile(i.get("file") or "") for i in nf_imgs) and not image_blocks(res),
+              f"budget_truncated 的 hint 指 inline:false（「{bt_hint}」），照着再调：4 张都存成文件、不截（{(body_nf or {}).get('truncated')}）")
         _, nf, _ = mcp_call(env, "cull_preview_photos", {"session": sk, "ids": ["NOPE"]})
         check(err_code(nf) == "photo_not_found", "预览：id 都不存在 → photo_not_found")
         # 预览文件没有（掉出最近 15 场被清掉）→ 从原图现解，带 warning
@@ -2919,8 +2929,9 @@ __attribute__((constructor)) static void init(void) {
         _, u, _ = w("app_undo", {"target": "verdicts"})
         s3 = st()
         check(u.get("ids") == [vid] and s3["verdict_digest"] == s0["verdict_digest"] and s3["overrides"] == s0["overrides"]
-              and s3["verdict_undo"]["depth"] == s0["verdict_undo"]["depth"] and steps(s2, s3) == (0, 0),
-              "app_undo target=verdicts：判决逐字节回到改判之前（verdict_digest），撤销不压栈")
+              and s3["verdict_undo"]["depth"] == s0["verdict_undo"]["depth"] and steps(s2, s3) == (0, 0)
+              and (u.get("live") or {}).get("notice") == "AI：撤销了刚才的改判（1 张）",
+              f"app_undo target=verdicts：判决逐字节回到改判之前（verdict_digest），撤销不压栈；提示「{(u.get('live') or {}).get('notice')}」")
         _, u2, _ = w("app_undo", {"target": "verdicts"})
         check(err_code(u2) == "nothing_to_undo" and edata(u2).get("reason") == "already_undone", f"再撤 → nothing_to_undo（{edata(u2)}）")
 
@@ -3056,6 +3067,8 @@ __attribute__((constructor)) static void init(void) {
         id2 = (v2.get("variant") or {}).get("id")
         check(v1.get("changed") is True and steps(s0, s1) == (0, 0) and s1["edit_digest"] == s0["edit_digest"]
               and v1.get("digest_after") == v1.get("digest_before") and v1.get("undo", {}).get("steps_added") == 0
+              and v1["undo"].get("target") is None and "方案栏" in (v1["undo"].get("how") or "")
+              and "app_undo target" not in (v1["undo"].get("how") or "")
               and v1b.get("changed") is False and v1b.get("same_as_existing") is True
               and (v1b.get("variant") or {}).get("id") == id1 and steps(s1, s1b) == (0, 0)
               and len(vs) == n0 + 2 and [v.get("id") for v in vs][-2:] == [id1, id2]
@@ -3555,8 +3568,11 @@ __attribute__((constructor)) static void init(void) {
         ov_m3 = m_ov()
         check(set(un_m.get("ids") or []) == {mid, mid2} and (un_m.get("undone") or {}).get("tool") == "cull_import_client_picks"
               and (un_m["undone"].get("op_id") == op_m) and cp_disk() == disk0 and ov_m3.get("client_pick_count") == picks0
-              and (ov_m3.get("xmp") or {}).get("stale_count") == n_m - 1 and sm5["verdict_undo"]["depth"] == sm1["verdict_undo"]["depth"],
-              f"app_undo target=verdicts 撤掉 AI 的导入：动到的是 {mid}、{mid2}，client_picks.json、客户选中数、XMP 过期都回到导入之前")
+              and (ov_m3.get("xmp") or {}).get("stale_count") == n_m - 1 and sm5["verdict_undo"]["depth"] == sm1["verdict_undo"]["depth"]
+              and (un_m.get("live") or {}).get("notice") == "AI：撤销了刚才导入的客户选择（2 张）"
+              and sm5.get("external_notice") == "AI：撤销了刚才导入的客户选择（2 张）",
+              f"app_undo target=verdicts 撤掉 AI 的导入：动到的是 {mid}、{mid2}，client_picks.json、客户选中数、XMP 过期都回到导入之前；"
+              f"状态栏说的是撤了导入的客户选择、不是改判（优化分析 MC-10：「{sm5.get('external_notice')}」）")
         # 带修图要求的回复（审查：桥上以前丢客户备注）：文件名后面的话存成客户备注（client_notes.json，复制原片时写成精修要求.csv），
         # 结果里 notes / new_notes；照片已经是客户选中、只补了备注也算改了（和导入框同一条路）；app_undo 连备注一起撤
         cn_path = os.path.join(msess, "client_notes.json")
@@ -3955,6 +3971,7 @@ __attribute__((constructor)) static void init(void) {
               f"关之前就连上的连接：之后发的读、写都 bridge_off（{(rr.get('error') or {}).get('code')}、{(rw.get('error') or {}).get('code')}），"
               f"test.state 照常回（bridge {rs.get('bridge')}、菜单的勾 {rs.get('bridge_enabled')}、副标题「{rs.get('indicator')}」）")
         check(live_off.get("state") == "bridge_off" and "菜单" in json.dumps(st_off, ensure_ascii=False)
+              and "允许 AI 实时操作（MCP）" in (st_off.get("next") or "")
               and KEY in sess_off and len((lt_off or {}).get("templates") or []) > 0
               and [err_code(x) for x in (rd_off, pv_off, wr_off, un_off)] == ["bridge_off"] * 4,
               f"8 关着：app_status 是 bridge_off（不是 not_running，说明里提到菜单），列场次 / 模板照常，"

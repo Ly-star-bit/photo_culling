@@ -86,10 +86,13 @@ enum MCPStatus {
         // next 跟着 live.state 走（§10.1）：live → cull_session_overview（STEP 2 起才会有）；disabled（LABELGUI_MCP_LIVE=0）
         // 时开 app 也没用，指向这时能用的 cull_list_sessions；宿主的沙箱挡着（LiveClient.isSandboxDenied）时开 app 也没用
         // （app 可能本来就开着），指向放行 —— 这两条有意偏离 §10.1 字面上的「否则」；其余让用户自己开 app。
+        // bridge_off（用户在菜单里关了实时桥）：app 明明开着，以前落进「其余」叫用户打开选片工具，和同一个结果的 warning
+        // 对不上（优化分析 MC-10）；指向菜单那一项。
         let next: String
         switch state {
         case "live": next = "cull_session_overview"
         case "disabled": next = "cull_list_sessions"
+        case "bridge_off": next = "请用户在选片工具菜单里打开「\(LiveBridgeNotice.menuTitle)」"
         default: next = LiveClient.isSandboxDenied(probe) ? sandboxNext : "请用户自己打开选片工具"
         }
         out["next"] = next

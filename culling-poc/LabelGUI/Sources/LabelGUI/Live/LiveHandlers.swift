@@ -417,9 +417,11 @@ struct PreviewJob: @unchecked Sendable {
             }
         }
         if truncated {
+            // hint 只写 AI 自己做得到的（优化分析 MC-10）：以前叫它把 LABELGUI_MCP_INLINE_KB 调大，那是用户配 MCP 时的环境变量。
+            // inline:false 时 --mcp 给的预算是 4 张 × 单张上限（MCPLiveTools 的 cull.preview），4 张都存成文件
             let message = "这几张加起来超过了这一次的图片预算 \(budget / 1024) KB：后面的没有给图。"
             warnings.append(MCPReadModel.warning("budget_truncated", message,
-                                                 hint: "少看几张、调小 max_edge 再调；或者 LABELGUI_MCP_INLINE_KB 调大"))
+                                                 hint: "少看几张、调小 max_edge 再调；或者带 inline:false 再调一次：不内联图片，每张都存成文件、结果里给路径"))
         }
         var out: [String: Any] = ["images": images, "failed": failed, "truncated": truncated, "warnings": warnings]
         out["total_bytes"] = used
@@ -1445,7 +1447,10 @@ extension LiveHandlers {
         model.aiLog.recordNoop(.collage, before: pushes, after: collage.undoPushes)
         if req.params["reveal"] as? Bool == true { model.tab = .collage }
         body["variants"] = variantsList(collage)
-        let undo = undoInfo(.collage, added: 0, model: model)
+        // 方案栏不进撤销：以前这里照抄写工具的「在拼图页按 ⌘Z，或调 app_undo target=collage」，AI 照着去「撤掉刚存的方案」，
+        // 撤掉的是上一步（比如刚加的跨页），方案还在（优化分析 MC-10）。和别的不进撤销的一样 target 是 null，how 照工具说明
+        let undo: [String: Any] = ["target": NSNull(), "steps_added": 0,
+                                   "how": "存方案不进撤销（方案栏不跟着 ⌘Z 走，app_undo 也撤不掉）：存错了请用户在方案栏里右键删掉"]
         return await collageReply(req, live: live, model: model, body: body, digestBefore: before, undo: undo,
                                   notice: notice, warnings: [])
     }
@@ -1972,7 +1977,9 @@ extension LiveHandlers {
             // = 批量页顶栏 / 检视器的 ⌘Z；拼图托盘里的判决跟着刷
             let ids = batch.undoLastOverride()
             model.collage.refreshFromBatch()
-            let text = "AI：撤销了刚才的改判（\(ids.count) 张）"
+            // 判决这条栈上还有导入客户选择（客户选中、备注，不改判决）：撤的是哪个就说哪个（优化分析 MC-10，用户在状态栏上看得到）
+            let what = entry.tool == "cull_import_client_picks" ? "导入的客户选择" : "的改判"
+            let text = "AI：撤销了刚才\(what)（\(ids.count) 张）"
             batchNotice(batch, text)
             let counts = batch.verdictCounts
             var out: [String: Any] = ["target": "verdicts", "undone": undone, "ids": ids]
