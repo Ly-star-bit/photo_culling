@@ -243,11 +243,8 @@ struct BatchView: View {
         // 实时桥（§9.6b）：这几样开着时 AI 的改判 / 切场次 / 定位照片要等或者不做。只往 store 上记，界面不变
         .onChange(of: liveFlags, initial: true) { store.liveUI = liveFlags }
         // 菜单栏「文件」里的打开文件夹 ⌘O、开始 / 重新分析 ⌘R、导出 JPG… ⇧⌘E（UX-08，FileMenuCommands.swift）：
-        // 能不能点在这里算好、变了才同步过去；点了发通知回来。
-        .onChange(of: menuFlags, initial: true) { BatchMenuState.shared.update(menuFlags) }
-        .onReceive(NotificationCenter.default.publisher(for: .batchMenuCommand)) { note in
-            if let command = BatchMenuState.command(of: note) { runMenuCommand(command) }
-        }
+        // 能不能点在这里算好、变了才同步过去；点了发通知回来。挂在一个按值比的小视图上（BatchMenuBridge）。
+        .background { BatchMenuBridge(flags: menuFlags, run: runMenuCommand).equatable() }
         // 重新分析原地覆盖了预览图时，缩略图缓存在 BatchStore.runAnalysis 收尾就作废了（只作废重写了预览的那几张）：
         // 以前在这里收通知再清，用户不在批量页时这个视图不在树里、收不到，回来是旧图。
         // 废片进废纸篓后这些 id 就没了，留着同样会写到不存在的照片上。

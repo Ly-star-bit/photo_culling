@@ -130,6 +130,25 @@ struct FileMenuItems: View {
     }
 }
 
+/// 批量页那一头：能不能点同步给菜单、收菜单发来的命令。单独一个只按 flags 比的视图（批量页那边 `.equatable()`）：
+/// 批量页每重算一次（方向键一下就是一次）不跟着重比、重订通知 —— 直接挂在批量页上时 release 量出来方向键每下多约
+/// 0.5 百万条指令。run 是建它那一刻的批量页的方法：点下去时（不在 body 里）读的 @State、store 都是现在的。
+struct BatchMenuBridge: View, Equatable {
+    let flags: BatchMenuState.Flags
+    let run: (BatchMenuCommand) -> Void
+
+    static func == (a: BatchMenuBridge, b: BatchMenuBridge) -> Bool { a.flags == b.flags }
+
+    var body: some View {
+        Color.clear
+            .onChange(of: flags, initial: true) { BatchMenuState.shared.update(flags) }
+            .onReceive(NotificationCenter.default.publisher(for: .batchMenuCommand)) { note in
+                if let command = BatchMenuState.command(of: note) { run(command) }
+            }
+            .accessibilityHidden(true)
+    }
+}
+
 // MARK: - 自检
 
 /// --ux-selftest 的「文件」菜单部分（菜单本身无头看不到）：能不能点的判断表、各页出不出、键和快捷键一览一致、不和别处的键撞。
