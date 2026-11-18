@@ -9,11 +9,58 @@ import UniformTypeIdentifiers
 ///   1/2、1/4、1/8 这几档和 ImageIO 带变换的结果逐字节比，还要核对真的走了新路。要重采样的尺寸、灰度 JPEG、PNG
 ///   要退回老路（结果当然也一样）。一张小图（816×544，所有档位）+ 一张相机大小的（4032×3024，整幅和一半：
 ///   大图 ImageIO 可能换硬件解码器）。
+/// - 交付并发路数（DeliveryConcurrency，PP-01）：各个尺寸 / 锐化 / 色彩落到哪一档（含 Core Image 那档），16 核 128 GB、10 核 16 GB、
+///   8 核 8 GB 各开几路；缩到一半以内和 RAW 跟以前一样。真导出的路数在 --export-jpeg / --watermark-batch 打的「并发:」。
 enum DeliveryDecodeSelfTest {
     typealias Check = (Bool, String, String) -> Void
 
     static func run(check: Check) {
         upright(check: check)
+        concurrency(check: check)
+    }
+
+    // MARK: - 并发路数
+
+    private static func concurrency(check: Check) {
+        typealias C = DeliveryConcurrency
+        let gb: UInt64 = 1 << 30
+        let fuji = 7728 * 5152  // 4000 万像素
+        // 7728×5152 横拍 / 5152×7728 竖拍：尺寸、锐化、色彩 → 哪一档。
+        func lane(_ w: Int, _ h: Int, _ size: DeliverySize, _ sharpen: DeliverySharpen = .standard,
+                  streams: Bool = true, raw: Bool = false) -> C.Path {
+            C.path(width: w, height: h, raw: raw, longEdge: size.longEdgeCap(width: Double(w), height: Double(h)),
+                   sharpen: sharpen, streamsOriginal: streams)
+        }
+        let lanes: [(C.Path, C.Path, String)] = [
+            (lane(7728, 5152, .original), .streaming, "原尺寸保留色彩 → 边解边编"),
+            (lane(7728, 5152, .original, streams: false), .fullDecode(pixels: fuji), "原尺寸转 sRGB / 水印 → 整幅"),
+            (lane(5152, 7728, .long(4096)), .coreImage(pixels: fuji), "长边 4096 + 锐化（先解到 6144 > 一半）→ 整幅 + Core Image"),
+            (lane(5152, 7728, .long(4096), .off), .fullDecode(pixels: fuji), "长边 4096 不锐化（4096 > 3864）→ 整幅"),
+            (lane(5152, 7728, .long(2048)), .hardwareBound, "长边 2048 + 锐化（3072）→ 硬件解码器"),
+            (lane(5152, 7728, .long(2576)), .hardwareBound, "长边 2576 + 锐化（正好 3864 = 一半）→ 硬件解码器"),
+            (lane(5152, 7728, .box(1080, 1440)), .hardwareBound, "小红书 → 硬件解码器"),
+            (lane(5152, 7728, .long(9000)), .fullDecode(pixels: fuji), "长边比原图大（不缩，整幅解）→ 整幅"),
+            (lane(7728, 5152, .original, raw: true), .raw, "RAW → 照旧"),
+        ]
+        let wrongLanes = lanes.filter { $0.0 != $0.1 }.map { "\($0.2)：\($0.0.label)" }
+        check(wrongLanes.isEmpty, "并发：尺寸 / 锐化 / 色彩落到哪一档（\(lanes.count) 种）", wrongLanes.joined(separator: "；"))
+
+        let counts: [(Int, Int, String)] = [
+            (C.workers(.streaming, cores: 16, memory: 128 * gb), 14, "16 核 原尺寸：核数 − 2"),
+            (C.workers(.fullDecode(pixels: fuji), cores: 16, memory: 128 * gb), 14, "16 核 128 GB 整幅 40 MP：核数 − 2"),
+            (C.workers(.fullDecode(pixels: 102_000_000), cores: 16, memory: 128 * gb), 14, "16 核 128 GB 整幅 1 亿像素"),
+            (C.workers(.fullDecode(pixels: fuji), cores: 10, memory: 16 * gb), 5, "10 核 16 GB 整幅 40 MP：按内存 5 路"),
+            (C.workers(.fullDecode(pixels: fuji), cores: 8, memory: 8 * gb), 2, "8 核 8 GB 整幅 40 MP：2 路"),
+            (C.workers(.streaming, cores: 8, memory: 8 * gb), 6, "8 核 原尺寸：6 路"),
+            (C.workers(.coreImage(pixels: fuji), cores: 16, memory: 128 * gb), 6, "16 核 128 GB 整幅 + Core Image：最多 6 路"),
+            (C.workers(.coreImage(pixels: fuji), cores: 10, memory: 16 * gb), 5, "10 核 16 GB 整幅 + Core Image：按内存 5 路"),
+            (C.workers(.hardwareBound, cores: 16, memory: 128 * gb), 4, "16 核 缩到一半以内：照旧 4 路"),
+            (C.workers(.raw, cores: 16, memory: 128 * gb), 4, "16 核 RAW：照旧 4 路"),
+            (C.workers(.hardwareBound, cores: 8, memory: 8 * gb), 2, "8 核 缩到一半以内：照旧 2 路"),
+            (C.workers(.streaming, cores: 4, memory: 8 * gb), 2, "4 核 原尺寸：不少于 2 路"),
+        ]
+        let wrongCounts = counts.filter { $0.0 != $0.1 }.map { "\($0.2) 开了 \($0.0)" }
+        check(wrongCounts.isEmpty, "并发：路数按核数和内存（\(counts.count) 种机器 / 路子）", wrongCounts.joined(separator: "；"))
     }
 
     // MARK: - 转正解码

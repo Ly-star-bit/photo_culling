@@ -139,6 +139,7 @@ enum WatermarkBatchCLI {
         let error = store.lastError
         print(store.progressText)
         if let error { print(error) }
+        if let concurrency = store.lastConcurrency { print("并发: " + concurrency) }
         // 分清「没对上这一场」（照常退出 0）和「对上了却没写进去」（原因在上面那行 lastError 里，退出码 1，和 --export-jpeg 一样）。
         switch store.lastDelivery {
         case .recorded(let record)? where batch.deliveryRecords.last == record && record != ledgerBefore:

@@ -356,6 +356,7 @@ enum JPEGExportCLI {
         if let error = store.lastError { print("提醒: " + error) }
         guard let report = store.lastJPEGExport else { exit(1) }
         print("文件夹 \(report.folder.path)")
+        print("并发: " + report.concurrency)
         for url in report.written { print("  " + describe(url)) }
         // 界面上做完会在访达里选中它（UX-04）；无头不弹，打出来给脚本断言。
         if let revealed = store.lastJPEGRevealed { print("在访达中显示: \(revealed.path)") }

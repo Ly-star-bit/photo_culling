@@ -408,6 +408,8 @@ final class WatermarkStore: ObservableObject {
     /// 上一次导出记交付对照的结果（nil = 一张都没写出去、或者没接批量页）。没记进去的那一句也并进 lastError，
     /// 水印页的状态栏看得到（批量页的 lastError 在别的页面上，还会被切场次清掉）。无头 --watermark-batch 按它分「没对上」和「写失败」。
     private(set) var lastDelivery: DeliveryLedger.Outcome?
+    /// 上一次导出开了几路、按哪一档定的（DeliveryConcurrency.Plan.label，PP-01；无头 --watermark-batch 打印）。
+    private(set) var lastConcurrency: String?
 
     /// 输出目录在拍摄文件夹里面被拦下时（审查 S11，ExportFolderGuard）：那句提示、建议改用的「<拍摄文件夹>/水印导出/」
     /// （分析时跳过）、是不是点导出时拦下的（是的话「导出到 水印导出/」点了接着导）。状态栏只在 lastError 还是这一句时
@@ -528,7 +530,12 @@ final class WatermarkStore: ObservableObject {
         let renamedCount = renamed
 
         Task.detached { [weak self] in
-            let workers = min(4, max(2, ProcessInfo.processInfo.activeProcessorCount / 4))
+            // 路数按这一批走哪条路、每路要多少内存定（优化分析 PP-01，见 DeliveryConcurrency）：原尺寸要整幅解，
+            // 按物理内存封顶、最多核数 − 2；缩到原图一半以内的、RAW 照旧 4 路。
+            let plan = DeliveryConcurrency.watermark(sources: jobs.map(\.src), config: cfg, options: opts)
+            let workers = plan.workers
+            AppLog.info("delivery", "水印导出 \(total) 张：并发 \(plan.label)")
+            await MainActor.run { [weak self] in self?.lastConcurrency = plan.label }
             var failures: [(name: String, reason: String)] = []
             var overLimit: [String] = []
             /// 写出去了的（含压不到上限的）在 jobs 里的位置：收尾时记交付对照。

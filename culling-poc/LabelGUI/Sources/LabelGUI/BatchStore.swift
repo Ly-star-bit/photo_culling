@@ -4936,6 +4936,8 @@ final class BatchStore: ObservableObject {
         let written: [URL]
         let overLimit: [String]
         let failed: [String]
+        /// 这次开了几路、按哪一档定的（DeliveryConcurrency.Plan.label，PP-01）。
+        var concurrency = ""
     }
     private(set) var lastJPEGExport: JPEGExportReport?
     /// 上一次 JPG / 精华导出完在访达里选中了什么（无头不弹访达，--export-jpeg 打印它；优化分析 UX-04）。
@@ -5050,10 +5052,12 @@ final class BatchStore: ObservableObject {
                 return
             }
             await MainActor.run { [weak self] in self?.progressText = "导出 JPG 0/\(total)..." }
-            // Full-res decodes are big (a 60MP RAW is ~160MB unpacked), so cap
-            // concurrency lower than the analysis pass. Width-limited TaskGroup:
-            // seed `workers` tasks, add one more as each finishes.
-            let workers = min(4, max(2, ProcessInfo.processInfo.activeProcessorCount / 4))
+            // 路数按这一批走哪条路、每路要多少内存定（优化分析 PP-01，见 DeliveryConcurrency）：原尺寸边解边编、
+            // 整幅解放开到核数 − 2（整幅的按物理内存封顶），缩到原图一半以内的卡在硬件解码器上、RAW 没量过，照旧 4 路。
+            // Width-limited TaskGroup: seed `workers` tasks, add one more as each finishes.
+            let plan = DeliveryConcurrency.jpegExport(sources: jobs.map(\.source), options: options)
+            let workers = plan.workers
+            AppLog.info("delivery", "\(isHighlights ? "精华" : "JPG") 导出 \(total) 张：并发 \(plan.label)")
             var failed: [String] = []
             var failureReasons: [String: String] = [:]
             var overLimit: [String] = []
@@ -5101,7 +5105,7 @@ final class BatchStore: ObservableObject {
                 self.progressFraction = nil
                 self.isRunning = false
                 self.lastJPEGExport = JPEGExportReport(folder: folder, written: writtenFiles, overLimit: overIds,
-                                                       failed: failedIds)
+                                                       failed: failedIds, concurrency: plan.label)
                 let count = writtenFiles.count
                 let kept = renamed > 0 ? "（\(renamed) 张目标里已有同名，另存为 -2、-3…，旧文件没动）" : ""
                 // 逐张失败的原因（盘满了、没有权限、原片不在了……）跟在张数后面，几种不同的分开数（审查 D03）。
