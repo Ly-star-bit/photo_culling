@@ -390,11 +390,8 @@ enum WatermarkEngine {
     }
 
     static func decodeUpright(_ source: CGImageSource, maxPixel: Int) -> DecodedBase? {
-        guard let thumb = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixel),
-            kCGImageSourceCreateThumbnailWithTransform: true,
-        ] as CFDictionary) else { return nil }
+        // 竖拍整幅（水印原尺寸、deliveryDownscale 的整幅那档）走 vImage 转正，和 ImageIO 带变换逐字节一样、CPU 少一半（PP-02）。
+        guard let thumb = UprightDecode.thumbnail(source, maxPixel: max(1, maxPixel)) else { return nil }
         // kCGImagePropertyPixelWidth 是编码宽度（方向变换之前）；缩略图已经转正。
         // 竖拍（存 6000×4000 + 方向 6）若不交换，scale 会是 1067/6000 而不是
         // 1067/4000，预览的边距和字号全小三分之一。

@@ -5178,12 +5178,8 @@ final class BatchStore: ObservableObject {
             rendered = sharpened != nil
             // Resized path: thumbnail WITH transform bakes the rotation into the
             // pixels, so the orientation tag must be stripped — keeping it would
-            // double-rotate in every viewer.
-            image = sharpened ?? CGImageSourceCreateThumbnailAtIndex(src, 0, [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceThumbnailMaxPixelSize: maxPixel,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-            ] as CFDictionary)
+            // double-rotate in every viewer. 和 ImageIO 带变换逐字节一样（整幅 / 正好一半等才走 vImage，PP-02）。
+            image = sharpened ?? UprightDecode.thumbnail(src, maxPixel: maxPixel)
             props.removeValue(forKey: kCGImagePropertyOrientation)
             if var tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
                 tiff.removeValue(forKey: kCGImagePropertyTIFFOrientation)
