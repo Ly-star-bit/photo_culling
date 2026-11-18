@@ -269,6 +269,10 @@ enum JPEGExportCLI {
         }
         print("交付对照 \(store.deliveryLedgerPath.path) · \(record.kind) · 共 \(records.count) 次 · 这次 \(record.files.count) 张")
         for file in record.files { print("  对照 \(file.file) → \(file.id)") }
+        // 没写出去的全名单（EC-08：状态栏只列前 3 张）。
+        if let failed = record.failed {
+            print("交付对照里记的失败 \(failed.count) 张: " + failed.map(\.id).joined(separator: " "))
+        }
         exit(report.failed.isEmpty && record.files.count == report.written.count ? 0 : 1)
     }
 

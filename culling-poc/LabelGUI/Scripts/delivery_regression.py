@@ -16,6 +16,8 @@ Scripts/selftests.sh 里跑）；这里验它们在命令行出口上确实接�
 4. --export-jpeg --scope top:N（精华，出厂默认去 GPS）：原片 EXIF 带 GPS → 输出没有 GPS（命令行自己说的「无GPS」和
    这里自己读 EXIF / XMP 两边都看）；--keep-gps 的对照组 GPS 还在。
 5. --watermark --config '{"stripGPS":true}' → 输出没有 GPS；false 的对照组 GPS 还在。
+6. --export-jpeg 失败多于 3 张（4 张原片挪开）：状态栏那句列前 3 张、写「等 4 张」（EC-08，以前只列 3 张不写「等」），
+   全名单（按导出顺序、带原因）记进这一场 exports.json 那一条的 failed。
 
 每条命令都带临时 LABELGUI_DATA_DIR、LABELGUI_NO_GUI=1；CI 里放在 MCP 冒烟后面。
 用法: python3 -I Scripts/delivery_regression.py <LabelGUI> [--keep]
@@ -429,11 +431,54 @@ def gps_section():
                                          f"（退出码 {r.returncode}，GPS {has}）")
 
 
+# ---------------------------------------------------------------- 6. 失败名单
+
+def ledger_records(data):
+    """这个数据目录里唯一一场的 exports.json（没有 = []）。"""
+    found = [os.path.join(dp, "exports.json") for dp, _, ns in os.walk(os.path.join(data, "sessions")) if "exports.json" in ns]
+    return json.load(open(found[0], encoding="utf-8")) if len(found) == 1 else []
+
+
+def failure_list_section():
+    print("6. --export-jpeg 失败多于 3 张：列前 3 张、写「等 4 张」，全名单进交付对照")
+    photos, data, ids = synth_session("fails", 21)
+    v = verdicts(photos, data)
+    keep = [i for i in ids if v.get(i) in ("精选", "可用")]
+    if not check(len(keep) >= 5, f"前提：精选 + 可用至少 5 张（{len(keep)}）"):
+        return
+    gone = keep[:4]
+    for i in gone:
+        os.rename(os.path.join(photos, i + ".JPG"), os.path.join(WORK, i + ".aside"))
+    dest = os.path.join(WORK, "fails-out")
+    try:
+        r = run(["--export-jpeg", photos, "--dest", dest, "--scope", "picks+usable"], data)
+    finally:
+        for i in gone:
+            os.rename(os.path.join(WORK, i + ".aside"), os.path.join(photos, i + ".JPG"))
+    out = r.stdout + r.stderr
+    m = re.search(r"JPG 导出: (\d+) 成功, 4 失败 \(([^)]*)\)", out)
+    listed = m.group(2) if m else ""
+    shown = listed.split(" 等 ")[0].split(", ") if listed else []
+    check(r.returncode == 1 and m is not None and int(m.group(1)) == len(keep) - 4,
+          f"退出码 1、「{len(keep) - 4} 成功, 4 失败」（{r.returncode}，{out.strip()[-200:]!r}）")
+    check(listed.endswith(" 等 4 张") and len(shown) == 3 and set(shown) <= set(gone),
+          f"括号里列前 3 张、写「等 4 张」：({listed})")
+    recs = ledger_records(data)
+    failed = recs[-1].get("failed", []) if recs else []
+    check(len(recs) == 1 and sorted(f["id"] for f in failed) == sorted(gone)
+          and all("reason" in f for f in failed) and len(recs[-1].get("files", [])) == len(keep) - 4,
+          f"exports.json 这一条：写出的 {len(keep) - 4} 张照记，failed 是 4 张全名单"
+          f"（{[f['id'] for f in failed]}，要 {gone}）")
+    check(shown == [f["id"] for f in failed][:3], f"状态栏列的就是全名单的前 3 张、同一个顺序（{shown}）")
+    check("交付对照里记的失败 4 张: " in r.stdout, "命令行把记下的失败全名单打出来")
+
+
 try:
     same_file_section()
     batch_section()
     xmp_section()
     gps_section()
+    failure_list_section()
     if not REAL_BEFORE:
         check(not os.path.exists(REAL_DATA), f"跑之前没有 {REAL_DATA}，跑完也没有（每条命令都走临时数据目录）")
 finally:

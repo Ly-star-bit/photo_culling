@@ -5081,7 +5081,10 @@ final class BatchStore: ObservableObject {
                 }
             }
 
-            let failedIds = failed
+            // 按导出顺序（几个 worker 谁先失败不一定，状态栏那句每次一样）。
+            let failedSet = Set(failed)
+            let failedIds = jobs.map(\.id).filter(failedSet.contains)
+            let failures = failedIds.map { DeliveryRecord.Failure(id: $0, reason: failureReasons[$0] ?? "") }
             let reasonText = Diagnostics.reasonSummary(failed.compactMap { failureReasons[$0] })
             let overIds = overLimit
             let writtenFiles = written.sorted { $0.lastPathComponent < $1.lastPathComponent }
@@ -5099,8 +5102,14 @@ final class BatchStore: ObservableObject {
                 let count = writtenFiles.count
                 let kept = renamed > 0 ? "（\(renamed) 张目标里已有同名，另存为 -2、-3…，旧文件没动）" : ""
                 // 逐张失败的原因（盘满了、没有权限、原片不在了……）跟在张数后面，几种不同的分开数（审查 D03）。
-                let failedNote = "JPG 导出: \(count) 成功, \(failedIds.count) 失败 (\(failedIds.prefix(3).joined(separator: ", ")))"
+                // 名单只列前 3 张、多了写「等 N 张」（EC-08）；全名单进交付对照（有写出去的那次）和日志。
+                let failedNote = "JPG 导出: \(count) 成功, \(failedIds.count) 失败 (\(FailureNames.list(failedIds, unit: "张")))"
                     + reasonText
+                if !failures.isEmpty {
+                    let all = failures.map { $0.reason.isEmpty ? $0.id : "\($0.id)（\($0.reason)）" }
+                    AppLog.warning("delivery", "\(isHighlights ? "精华" : "JPG") 导出失败 \(failures.count) 张 → "
+                                   + "\(folder.path)：" + all.joined(separator: ", "))
+                }
                 if flag.isSet {
                     self.progressText = "导出已取消: 已写出 \(count) 张 → \(folderLabel)"
                     if !failedIds.isEmpty { self.lastError = failedNote }
@@ -5111,7 +5120,8 @@ final class BatchStore: ObservableObject {
                 } else {
                     self.lastError = failedNote
                 }
-                self.recordDelivery(isHighlights ? .highlights : .jpeg, folder: folder, files: delivered, into: ledger)
+                self.recordDelivery(isHighlights ? .highlights : .jpeg, folder: folder, files: delivered, into: ledger,
+                                    failed: failures)
             }
         }
     }
@@ -5319,7 +5329,7 @@ final class BatchStore: ObservableObject {
                 var parts = [(flag.isSet ? "已取消: 已复制 " : "已复制 ") + "\(copiedCount) 个 RAW → \(ImageLoader.denoiseSubfolder)/"]
                 if existedCount > 0 { parts.append("\(existedCount) 个已存在跳过") }
                 if !renamedNames.isEmpty {
-                    let shown = renamedNames.prefix(3).joined(separator: ", ") + (renamedNames.count > 3 ? "…" : "")
+                    let shown = FailureNames.list(renamedNames, unit: "个")
                     parts.append("\(renamedNames.count) 个和文件夹里的同名文件内容不一样，另存为 \(shown)" +
                                  "（多半是不同子文件夹里同名的 RAW）")
                 }
@@ -5327,16 +5337,21 @@ final class BatchStore: ObservableObject {
                     parts.append("其中 \(partialCount) 个原名的文件是旧版复制中断留下的半截，没删，核对后可以删掉")
                 }
                 if jpegOnly > 0 { parts.append("\(jpegOnly) 张只有 JPG 未复制") }
+                // 名单只列前 3 个、多了写「等 N 个」（EC-08）；全名单写进日志。
+                if !notCopied.isEmpty || !summaryFailed.isEmpty {
+                    let all = (notCopied.map { $0 + "：没复制（盘满了）" } + summaryFailed).joined(separator: ", ")
+                    AppLog.warning("delivery", "高ISO RAW 没复制成 \(notCopied.count + summaryFailed.count) 个 → \(destDir.path)：" + all)
+                }
                 if !notCopied.isEmpty {
-                    let shown = notCopied.prefix(3).joined(separator: ", ") + (notCopied.count > 3 ? "…" : "")
-                    let others = summaryFailed.isEmpty ? "" : "，另 \(summaryFailed.count) 个失败 (\(summaryFailed.prefix(3).joined(separator: ", ")))"
+                    let shown = FailureNames.list(notCopied, unit: "个")
+                    let others = summaryFailed.isEmpty ? "" : "，另 \(summaryFailed.count) 个失败 (\(FailureNames.list(summaryFailed, unit: "个")))"
                     self.lastError = "高ISO RAW: 目标盘满了，停下了 —— 已复制 \(copiedCount) 个，\(notCopied.count) 个没复制 (\(shown))"
                         + others + "。腾出空间后再点一次，复制好的会跳过"
                 } else if summaryFailed.isEmpty {
                     self.progressText = parts.joined(separator: " · ")
                     AppRuntime.revealInFinder([destDir])
                 } else {
-                    self.lastError = "高ISO RAW: \(copiedCount) 成功, \(summaryFailed.count) 失败 (\(summaryFailed.prefix(3).joined(separator: ", ")))"
+                    self.lastError = "高ISO RAW: \(copiedCount) 成功, \(summaryFailed.count) 失败 (\(FailureNames.list(summaryFailed, unit: "个")))"
                 }
             }
         }
@@ -5512,14 +5527,14 @@ final class BatchStore: ObservableObject {
                 // 没写进去的要说出来，不能混在「完成」里、也不能被写失败的提示盖掉：这几张在 LR/C1 里还是旧星级。
                 var keptNote: String?
                 if !preservedIds.isEmpty {
-                    let names = preservedIds.prefix(3).joined(separator: ", ") + (preservedIds.count > 3 ? "…" : "")
+                    let names = FailureNames.list(preservedIds, unit: "张")
                     keptNote = "\(preservedIds.count) 张没写星级 (\(names))：旁边已有其它软件的 XMP，" +
                         "格式读不全、合并怕写丢调色，原样保留了 —— 这几张请在 LR/C1 里自己标"
                 }
                 // 同名冲突单独一条，不混进「没写星级」「失败」：原因和办法都不一样。
                 var sharedNote: String?
                 if sharedPhotoCount > 0 {
-                    let shown = sharedNames.prefix(3).joined(separator: "、") + (sharedNames.count > 3 ? "…" : "")
+                    let shown = FailureNames.list(sharedNames, unit: "组", separator: "、")
                     sharedNote = "同名冲突 \(sharedPhotoCount) 张没写 XMP (\(shown))：同一个文件夹里同名不同格式的照片共用一个 .xmp，" +
                         "写哪张的星级色标都会盖掉另一张 —— 这几张请在 LR/C1 里自己标，或者把其中一张挪到别的文件夹再重新分析"
                 }
@@ -5554,7 +5569,9 @@ final class BatchStore: ObservableObject {
                     self.progressText = summary
                     self.lastError = warning.isEmpty ? nil : warning
                 } else {
-                    let failedNames = failedIds.prefix(3).joined(separator: ", ")
+                    // 名单只列前 3 个、多了写「等 N 个」（EC-08）；全名单写进日志。
+                    let failedNames = FailureNames.list(failedIds, unit: "个")
+                    AppLog.warning("delivery", "XMP 写入失败 \(failedIds.count) 个：" + failedIds.joined(separator: ", "))
                     // 逐个失败的原因（只读盘、没有权限、盘满了……）紧跟在个数后面（审查 D03）。
                     var message = "XMP: \(done) 个成功, \(failedIds.count) 个失败 (\(failedNames))" + reasonText
                     for note in notes { message += "；" + note }

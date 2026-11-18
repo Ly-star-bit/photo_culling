@@ -336,6 +336,18 @@ enum DeliveryNaming {
     }
 }
 
+// MARK: - 失败名单的写法（导出 JPG / 精华 / 写 XMP / 高 ISO RAW）
+
+/// 状态栏里「N 失败 (…)」括号里那一截（优化分析 EC-08）：不超过 `limit` 个全列；多了列前 `limit` 个、后面写「等 M 张」
+/// （M 是总数）。以前这几处只列前 3 个、不写「等」，4 张失败读起来像只失败了 3 张；同一个文件里另几处写「…」，两种混着。
+/// 全名单另外记：导出 JPG / 精华写进这一场的交付对照（exports.json 的 failed），四样都写进日志（AppLog）。
+enum FailureNames {
+    static func list(_ names: [String], unit: String, limit: Int = 3, separator: String = ", ") -> String {
+        let shown = names.prefix(limit).joined(separator: separator)
+        return names.count > limit ? shown + " 等 \(names.count) \(unit)" : shown
+    }
+}
+
 // MARK: - 编码（体积上限）
 
 enum DeliveryEncoder {

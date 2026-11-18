@@ -24,21 +24,33 @@ struct DeliveryRecord: Codable, Equatable {
         var original: String
     }
 
+    /// 这次没写出去的一张（优化分析 EC-08：状态栏只列前 3 张，全名单在这里）。
+    struct Failure: Codable, Equatable {
+        /// 照片 id。
+        var id: String
+        /// 给人看的原因（盘满了、没有权限……；说不出来 = 空）。
+        var reason: String
+    }
+
     var id: String
     var at: Date
     /// jpeg = 导出 JPG，highlights = 精华 Top N，watermark = 水印页。
     var kind: String
     /// 导出到的文件夹。
     var folder: String
-    /// 按导出顺序（精华按名次）。只有真写出去的；失败的不记。
+    /// 按导出顺序（精华按名次）。只有真写出去的；失败的不记在这里。
     var files: [File]
+    /// 这次导出失败的那几张，按导出顺序（导出 JPG / 精华）；没有失败 = nil，不写这个键（老版本读得了，老记录读进来也是 nil）。
+    /// 一张都没写出去的那次整条不记（见 recordDelivery），全名单在日志里。
+    var failed: [Failure]?
 
-    init(kind: Kind, folder: URL, files: [File], at: Date = Date()) {
+    init(kind: Kind, folder: URL, files: [File], failed: [Failure] = [], at: Date = Date()) {
         id = UUID().uuidString
         self.at = at
         self.kind = kind.rawValue
         self.folder = folder.path
         self.files = files
+        self.failed = failed.isEmpty ? nil : failed
     }
 }
 
@@ -242,14 +254,14 @@ extension BatchStore {
     var deliveryRecords: [DeliveryRecord] { DeliveryLedger.load(deliveryLedgerPath) }
 
     /// 导出 JPG / 精华写完以后记一笔。`ledger` 是开工时这一场的 exports.json（导出途中不让切场次，开工时拿住更稳）。
-    /// 一张都没写出去不记。原来那份解不开、挪开了的提醒一句（dataNotice）；读不出来、写不进去的报 lastError，
-    /// 那一句也放在返回的 .failed 里（水印页拿它报在自己的状态栏上）。
+    /// 一张都没写出去不记（`failed` 也不记：全名单在日志里）。原来那份解不开、挪开了的提醒一句（dataNotice）；读不出来、写不进去的报 lastError，
+    /// 那一句也放在返回的 .failed 里（水印页拿它报在自己的状态栏上）。`failed` = 这次没写出去的那几张（EC-08，全名单）。
     @discardableResult
     func recordDelivery(_ kind: DeliveryRecord.Kind, folder: URL, files: [DeliveryRecord.File],
-                        into ledger: URL, session: String? = nil) -> DeliveryLedger.Outcome {
+                        into ledger: URL, session: String? = nil, failed: [DeliveryRecord.Failure] = []) -> DeliveryLedger.Outcome {
         guard !files.isEmpty else { return .nothingMatched }
         let name = session ?? photoDir.map { "「\($0.lastPathComponent)」" } ?? ""
-        let record = DeliveryRecord(kind: kind, folder: folder, files: files)
+        let record = DeliveryRecord(kind: kind, folder: folder, files: files, failed: failed)
         let problem: String
         switch DeliveryLedger.append(record, to: ledger) {
         case .written(let moved):
