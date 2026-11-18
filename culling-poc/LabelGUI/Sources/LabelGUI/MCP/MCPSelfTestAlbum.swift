@@ -161,6 +161,8 @@ extension MCPSelfTest {
         check(instructions.contains("托盘空着") && instructions.contains("collage_auto_layout 的 photos"),
               "instructions 说了托盘是什么、空着怎么进")
         check(description("collage_apply_template").contains("empty_slots"), "collage_apply_template 的说明写了空照片格报 empty_slots")
+        // 优化分析 MC-03：整本婚礼相册对 AI 不问就重排（11-09 相册设计定的），说明里写明先锁住要保留的跨页
+        check(description("collage_run_kit").contains("collage_pages action=lock"), "collage_run_kit 的说明写了重排前先锁住要保留的跨页")
         // 路由：导出前检查是读（不排进写的 FIFO）；翻页 / 改跨页、挪照片在后台排，50 s
         check(MCPLiveTools.routes["collage_preflight"]?.write == false && MCPLiveTools.routes["collage_pages"]?.write == true,
               "collage_preflight 走读，collage_pages 走写")

@@ -816,6 +816,8 @@ check((lp_def["inputSchema"]["properties"].get("client_pick") or {}).get("type")
 check("托盘空着" in INSTRUCTIONS and "collage_auto_layout 的 photos" in INSTRUCTIONS
       and "empty_slots" in by_name["collage_apply_template"]["description"],
       "instructions 说了托盘空着用 collage_auto_layout 的 photos 进托盘；collage_apply_template 的说明写了 empty_slots")
+# 优化分析 MC-03：整本婚礼相册对 AI 不问就重排（相册设计定的），说明里写明先锁住要保留的跨页
+check("collage_pages action=lock" in by_name["collage_run_kit"]["description"], "collage_run_kit 的说明写了重排前先锁住要保留的跨页")
 
 # 错误码（§1.2）
 s.send_raw(b'{"jsonrpc":"2.0","id":10,"method":\n')
