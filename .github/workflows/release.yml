@@ -5,7 +5,7 @@
 #   （比如直接往 main 推了没测过的提交）照旧完整跑。
 # - push v* tag：绿过、而且那次的 DMG 还在 → 不重编、不重测，restamp job 下载那份 DMG、版本号换成 tag 的（feature 上打的
 #   包版本号是 0.1，见 build_app.sh）、重签，release job 照旧发 Release（附 release-notes/<tag>.md）；没绿过 / 产物过期了
-#   → 照旧完整跑再发。
+#   → 照旧完整跑再发。tag 上另有发版门禁（release-gate）：release-notes/<tag>.md 不在、WhatsNew 的表和 tag 对不上就红、不发。
 # 发版流程：feature 推上去等绿 → 合进 main 推上去（秒过）→ 打 tag（直接用 feature 那次的包）。
 # 符号文件（OP-04）：完整跑那次把 .build/release/LabelGUI.dSYM 压成 zip 传成 PhotoCulling-dSYM（和 DMG 同样留 14 天），restamp
 # 跟着 DMG 一起下载、再传；Release 上挂 PhotoCulling-<tag>.dmg、PhotoCulling.dmg（同一个 DMG，固定名字，给 releases/latest/download
@@ -50,6 +50,25 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -I culling-poc/LabelGUI/Scripts/ci_green_run.py --sha "$(git rev-parse HEAD)"
+
+  # 发版门禁（优化分析 2026-11-18，ops 复核漏 3）：只在 tag 上跑（推 v* tag，或者对 tag 手动 Run workflow）。
+  # release-notes/<tag>.md 不在 / 是空的、WhatsNew.swift 那张表和 tag 的主次版本号对不上 / 比 tag 新 → 红，restamp 不做、
+  # release 不发。规则、为什么是红不是告警、红了怎么办见脚本开头；打 tag 之前本机先跑一遍同一句（把 tag 换成要打的）。
+  # 单独一个 job、不放进 check：check 红了 build 照样当 full 跑（见 build 的 if），release 又只看 build / restamp 的结果，
+  # 放在 check 里挡不住发版。build 不等它：tag 上完整跑那条路的编译和测试照跑，结果照样有用，只是不发。
+  release-gate:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            release-notes
+            culling-poc/LabelGUI/Sources/LabelGUI/WhatsNew.swift
+            culling-poc/LabelGUI/Scripts/release_gate.py
+          sparse-checkout-cone-mode: false
+      - name: 发布说明在不在、「这一版新增」的表对不对
+        run: python3 -I culling-poc/LabelGUI/Scripts/release_gate.py "$GITHUB_REF_NAME"
 
   build:
     needs: check
@@ -292,6 +311,11 @@ jobs:
         timeout-minutes: 10
         run: python3 -I culling-poc/LabelGUI/Scripts/diag_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
 
+      # 发版门禁的规则自测（门禁本身只在 tag 上跑，脚本改坏了要等打 tag 才知道）：造假的仓库根逐条核对，再看仓库里那张
+      # WhatsNew 表认得出。不起 LabelGUI。
+      - name: 发版门禁自测 (release_gate.py)
+        run: python3 -I culling-poc/LabelGUI/Scripts/release_gate.py --self-test
+
       # 留 14 天：推 tag 时沿用的就是它（check 只认没过期的）。
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
@@ -316,8 +340,9 @@ jobs:
   # 测过的一样；访达排版（.DS_Store、背景图）跟着 DMG 原样留着。传成这次 run 的 PhotoCulling-dmg，release 照旧下载；那次的
 # PhotoCulling-dSYM 原样一起下载、再传（UUID 不变）。
   # 这一步红了不会自动退回完整跑：重跑这个 run，或者在网页上对这个 tag 手动 Run workflow（手动跑一律完整跑，照样发 Release）。
+  # 等发版门禁：门禁红了（if 里没写状态函数，等于 success() &&）就不做，省得白重签。
   restamp:
-    needs: check
+    needs: [check, release-gate]
     if: needs.check.outputs.mode == 'reuse'
     runs-on: macos-15
     permissions:
@@ -375,10 +400,10 @@ jobs:
           overwrite: true
 
   # 只认 tag。DMG 从这次 run 里下载：完整跑的是 build 传的，沿用的是 restamp 传的（两个只会跑一个）。build 跳过时 release
-  # 默认也会跟着跳过，所以要 !cancelled()。
+  # 默认也会跟着跳过，所以要 !cancelled()。发版门禁（release-gate）必须绿。
   release:
-    needs: [check, build, restamp]
-    if: ${{ !cancelled() && github.ref_type == 'tag' && (needs.build.result == 'success' || needs.restamp.result == 'success') }}
+    needs: [check, release-gate, build, restamp]
+    if: ${{ !cancelled() && github.ref_type == 'tag' && needs.release-gate.result == 'success' && (needs.build.result == 'success' || needs.restamp.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -411,8 +436,8 @@ jobs:
           # 符号文件：翻诊断包里崩溃报告用的（atos -o …/DWARF/LabelGUI），和 DMG 里的二进制同一个 UUID。
           cp LabelGUI.dSYM.zip "PhotoCulling-${GITHUB_REF_NAME}.dSYM.zip"
           ASSETS=("PhotoCulling-${GITHUB_REF_NAME}.dmg" PhotoCulling.dmg "PhotoCulling-${GITHUB_REF_NAME}.dSYM.zip")
-          # 发布说明：有 release-notes/<tag>.md 就放在正文最前面（这一版新增 / 修改了什么），
-          # 后面接 GitHub 自动生成的提交对比；没有就只有自动生成的。
+          # 发布说明：release-notes/<tag>.md 放在正文最前面（这一版新增 / 修改了什么），后面接 GitHub 自动生成的提交对比。
+          # 它一定在（release-gate 查过，不在就走不到这里）；下面「没有就只有自动生成的」那条退路留着不碍事。
           NOTES="release-notes/${GITHUB_REF_NAME}.md"
           NOTES_ARGS=()
           if [ -f "$NOTES" ]; then NOTES_ARGS=(--notes-file "$NOTES"); fi
