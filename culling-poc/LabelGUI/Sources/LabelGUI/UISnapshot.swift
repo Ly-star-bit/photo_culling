@@ -25,7 +25,8 @@ import AppKit
 /// 和 --collage-ui 同一套：用 app 里一模一样的视图在一个从不显示的无边框窗口里布局、
 /// 渲染成 PNG。界面不能开，排布有没有挤、时间轴会不会压到别的区域，只能这样看。
 /// 视图偏好（@AppStorage）用命令行参数域传，比如 `-batch.gridMode 按分组` —— 参数域只活在
-/// 这个进程里，不会写进任何人的设置。
+/// 这个进程里，不会写进任何人的设置。不传就是代码里的默认（按判决、缩略图 140）：无头时视图设置是一份临时的
+/// （AppRuntime.viewDefaults），读不到设置域里以前存的，--events 拨控件也只写那份临时的。
 /// 离屏快照里假装鼠标停在这张上（离屏窗口收不到鼠标，悬停才出现的按钮只能这样看）。界面运行时永远是 nil。
 enum SnapshotPreview {
     @MainActor static var hoverID: String?

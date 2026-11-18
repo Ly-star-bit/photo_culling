@@ -15,13 +15,13 @@ struct BatchView: View {
     // View preferences persist across launches (they reset to defaults every
     // start before, so the thumbnail size and export settings were re-done
     // every session).
-    @AppStorage("batch.thumbSize") private var thumbSize: Double = 140
+    @AppStorage("batch.thumbSize", store: AppRuntime.viewDefaults) private var thumbSize: Double = 140
     @State private var showTrashConfirm = false
     @State private var showClearRecentsConfirm = false
     /// JPG 交付导出设置。质量（60–100）是旧版存的：新的导出设置还没存过时拿它起默认。
-    @AppStorage("batch.jpegQuality") private var jpegQuality: Double = 90
-    @AppStorage("batch.jpegIncludeUsable") private var jpegIncludeUsable = true
-    @AppStorage("batch.jpegOverwrite") private var jpegOverwrite = false
+    @AppStorage("batch.jpegQuality", store: AppRuntime.viewDefaults) private var jpegQuality: Double = 90
+    @AppStorage("batch.jpegIncludeUsable", store: AppRuntime.viewDefaults) private var jpegIncludeUsable = true
+    @AppStorage("batch.jpegOverwrite", store: AppRuntime.viewDefaults) private var jpegOverwrite = false
     @State private var showJPEGSheet = false
     /// 高ISO RAW 导出 (降噪流程)。
     @State private var showISOSheet = false
@@ -29,17 +29,17 @@ struct BatchView: View {
     @State private var showHighlightsSheet = false
     /// 「导入客户选择…」对话框。
     @State private var showClientImport = false
-    @AppStorage("batch.highlightsCount") private var highlightsCount = 20
+    @AppStorage("batch.highlightsCount", store: AppRuntime.viewDefaults) private var highlightsCount = 20
     /// 旧版存的精华长边 / JPG 导出长边 (0 = 原尺寸)：新的导出设置还没存过时拿它们起默认，老用户的选择不丢。
-    @AppStorage("batch.highlightsMaxPixel") private var highlightsMaxPixel = 2048
-    @AppStorage("batch.isoThreshold") private var isoThreshold = 3200
-    @AppStorage("batch.isoKeepersOnly") private var isoKeepersOnly = true
-    @AppStorage("batch.jpegMaxPixel") private var jpegMaxPixel = 0
+    @AppStorage("batch.highlightsMaxPixel", store: AppRuntime.viewDefaults) private var highlightsMaxPixel = 2048
+    @AppStorage("batch.isoThreshold", store: AppRuntime.viewDefaults) private var isoThreshold = 3200
+    @AppStorage("batch.isoKeepersOnly", store: AppRuntime.viewDefaults) private var isoKeepersOnly = true
+    @AppStorage("batch.jpegMaxPixel", store: AppRuntime.viewDefaults) private var jpegMaxPixel = 0
     /// 导出 JPG / 精华 Top N 各自的交付设置（DeliveryOptions 的 JSON；空 = 还没改过，用默认）。
-    @AppStorage("batch.jpegDelivery") private var jpegDeliveryRaw = ""
-    @AppStorage("batch.highlightsDelivery") private var highlightsDeliveryRaw = ""
+    @AppStorage("batch.jpegDelivery", store: AppRuntime.viewDefaults) private var jpegDeliveryRaw = ""
+    @AppStorage("batch.highlightsDelivery", store: AppRuntime.viewDefaults) private var highlightsDeliveryRaw = ""
     /// 「导出选片确认表」菜单里的「带水印（用水印页的签名）」：记住，默认关。
-    @AppStorage("batch.proofWatermark") private var proofWatermarkOn = false
+    @AppStorage("batch.proofWatermark", store: AppRuntime.viewDefaults) private var proofWatermarkOn = false
     /// 水印页的只读快照（ContentView 给：它同时拿着水印页）；nil = 没有水印页（离屏快照），菜单里不出这一项。
     private let proofWatermark: (@MainActor () -> ProofWatermark?)?
     /// 连拍挑选（全窗口，占审片模式的位置）。nil = 在网格。
@@ -72,22 +72,22 @@ struct BatchView: View {
         case byGroup = "按分组"
     }
     /// 按分组 = 每个多张场一行（Aftershoot 的重复组视图）；一组一组细挑按 C 进连拍挑选。
-    @AppStorage("batch.gridMode") private var gridMode: GridMode = .byVerdict
+    @AppStorage("batch.gridMode", store: AppRuntime.viewDefaults) private var gridMode: GridMode = .byVerdict
     /// 分组模式下单张照片（没有连拍、不用挑）收在最后的折叠区里，默认收起 ——
     /// 以前每张单张也占一整行，真正要挑的连拍被冲散，得一直往下滚着找。
-    @AppStorage("batch.showSingles") private var showSingles = false
+    @AppStorage("batch.showSingles", store: AppRuntime.viewDefaults) private var showSingles = false
     /// 右侧「筛选严格度」面板。调完阈值基本不再碰，小屏上收起来给网格让地方（⌥⌘S）。
-    @AppStorage("batch.showControls") private var showControls = true
+    @AppStorage("batch.showControls", store: AppRuntime.viewDefaults) private var showControls = true
     /// 已定的场默认叠起来（Aftershoot 的叠放）：只显示留下的，被废的收成一个按钮。这里记的是
     /// 手动展开了的场。换场次清空。
     @State private var expandedTakes: Set<Int> = []
     /// 只看待处理的场 —— 3000 张的婚礼里绝大多数场只有 1 张，真正要取舍的堆栈
     /// 本来全被它们淹掉。「待处理」= 还留着 2 张以上没淘汰的场；已经定成
     /// 1 张精选、其余废片的，活儿干完了就自动从视野里消失。
-    @AppStorage("batch.pendingTakesOnly") private var pendingTakesOnly = false
+    @AppStorage("batch.pendingTakesOnly", store: AppRuntime.viewDefaults) private var pendingTakesOnly = false
     /// 场内按评分排（Aftershoot 的重复组里 AI 选中的排第一）。默认按拍摄顺序，
     /// 因为连拍的时间线本身就是信息（哪张是最后按的）。
-    @AppStorage("batch.takeSortByScore") private var takeSortByScore = false
+    @AppStorage("batch.takeSortByScore", store: AppRuntime.viewDefaults) private var takeSortByScore = false
     /// D 键上一次落在哪一场 —— 焦点丢了（比如废纸篓清掉了那张）时的回退。
     @State private var lastVisitedTake: Int?
     @State private var showAcceptAllConfirm = false
@@ -5227,7 +5227,7 @@ struct ReviewView: View {
     @State private var focusPeak = false
     @State private var focusMask: (key: String, image: CGImage)?
     /// 最后一遍过「留下的」时不走进废片区（默认开）。本来就只看废片（筛选了废片再进来审）时不起作用。
-    @AppStorage("review.skipRejects") private var skipRejects = true
+    @AppStorage("review.skipRejects", store: AppRuntime.viewDefaults) private var skipRejects = true
     /// 按完 1/2/3/0 自动翻到下一张时，屏幕上方闪一下刚才那张判成了什么（Lightroom 的「已设为留用」那种）。
     @State private var toast: (text: String, symbol: String, color: Color, token: Int)?
 

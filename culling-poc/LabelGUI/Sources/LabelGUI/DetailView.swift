@@ -3,7 +3,7 @@ import SwiftUI
 struct DetailView: View {
     @ObservedObject var store: LabelStore
     let photo: Photo
-    @AppStorage("labelAutoAdvanceAfterScore") private var autoAdvance = true
+    @AppStorage("labelAutoAdvanceAfterScore", store: AppRuntime.viewDefaults) private var autoAdvance = true
 
     private enum Focus: Hashable { case pane, groupId, composition }
     @FocusState private var focus: Focus?

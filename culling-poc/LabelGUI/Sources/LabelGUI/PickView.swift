@@ -12,7 +12,7 @@ struct PickView: View {
     let onExit: (String?) -> Void
 
     /// 数字键选完直接下一组（见 PickSession.autoAdvance）。默认关。
-    @AppStorage("pick.autoAdvance") private var autoAdvance = false
+    @AppStorage("pick.autoAdvance", store: AppRuntime.viewDefaults) private var autoAdvance = false
     @State private var zoomed = false
     /// 放大时以哪个人的脸居中（FaceAlignment 里的下标）；nil = 各格自己的主脸。合影 / 情侣连拍里
     /// 一个人一个人地比（Narrative 的「锁定一个人」）：[ ] 或顶栏 ‹ › 切换。

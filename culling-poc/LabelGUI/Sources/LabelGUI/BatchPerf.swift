@@ -46,6 +46,7 @@ enum BatchPerf {
         let idle = idleCost(spin: spin)
         print(String(format: "perf grid：%d 张 · 挂着的格子 %d 个 · 空转 0.3 秒 进程 %.2f 百万条指令、主线程 %.2f ms（下面的都已减掉）",
                      store.items.count, viewport.mountedCells, idle.instr, idle.ms))
+        print("perf 视图：" + viewSettings())
         // 第一下 → 从「没有焦点」落到第一张；之后每下挪一格。← 再走回来。
         let keyStep: (String) -> () -> Void = { key in { keys.send(key) } }
         if scenario == "set" {
@@ -82,6 +83,16 @@ enum BatchPerf {
             measure("直接改判 不带动画", (12..<24).map { setStep($0, animated: false) }, idle: idle, spin: spin)
         }
         print("perf grid：完了以后 \(store.manualOverrideCount) 张人工改判 · 挂着的格子 \(viewport.mountedCells) 个")
+    }
+
+    /// 量的时候网格是什么样（数跟着它走：按分组比按判决贵、缩略图越小一屏格子越多）。读的是视图设置（AppRuntime.viewDefaults）：
+    /// 无头时只有命令行 `-batch.gridMode` / `-batch.thumbSize` 和这一次 --events 拨过的，不会是以前哪次留在设置域里的。
+    static func viewSettings() -> String {
+        let defaults = AppRuntime.viewDefaults
+        let mode = defaults.string(forKey: "batch.gridMode") ?? (BatchView.GridMode.byVerdict.rawValue + "（默认）")
+        let thumb: String = defaults.object(forKey: "batch.thumbSize") == nil
+            ? "140（默认）" : String(format: "%.1f", defaults.double(forKey: "batch.thumbSize"))
+        return mode + " · 缩略图 " + thumb
     }
 
     /// `--copies N`：这一场的 manifest、layer1 每张复制成 N 份再读一遍（量刷新要几百张，测试数据只有几十张）。id 加 `_cNN`
