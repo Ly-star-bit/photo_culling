@@ -49,6 +49,10 @@ enum WhatsNew {
     /// 记「上次见过哪一版」的键（app 自己的 UserDefaults 域；自检写进参数域，不碰这里）。
     static let defaultsKey = "whatsNew.lastSeenVersion"
 
+    /// 弹框底下「更早的版本说明」打开的地方（优化分析 2026-11-18 OP-05）：表每版整张换，跳着升级的人（1.27 直接到 1.32）
+    /// 只看得到最新这一版的几条，中间几版的在 GitHub Releases 上（每版的 release-notes/<tag>.md）。点了才开浏览器。
+    static let releasesURL = URL(string: "https://github.com/Ly-star-bit/photo_culling/releases")!
+
     /// 这个程序的版本号（打包时写进 Info.plist；裸二进制是 dev）。
     static var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
@@ -198,8 +202,15 @@ struct WhatsNewSheet: View {
             }
             Divider()
             HStack {
-                Text("以后在「帮助 › 这一版新增」里还能再看")
-                    .font(.caption).foregroundStyle(.tertiary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("以后在「帮助 › 这一版新增」里还能再看")
+                        .font(.caption).foregroundStyle(.tertiary)
+                    // 跳着升级的人看不到中间几版的表（OP-05）：去 GitHub Releases 看。Link 走 openURL，无头时点不到。
+                    // 字用次要灰、不用系统链接的蓝：蓝是「可用」的判决色，琥珀只表示选中 / 下一步（AppTheme 开头）。
+                    Link("更早的版本说明 ↗", destination: WhatsNew.releasesURL)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button("知道了", action: onClose)
                     .keyboardShortcut(.defaultAction)
@@ -321,6 +332,11 @@ enum WhatsNewSelfTest {
               && Set(ids).count == ids.count,
               "数据表：版本号认得、1–6 条、id 不重", "\(notes.version) \(ids)")
         check(notes.entries.allSatisfy { !$0.title.isEmpty && !$0.detail.isEmpty }, "每条都有标题和一句话")
+        // 「更早的版本说明」：这个仓库的 Releases 页（跳着升级的人看中间几版的说明）
+        let releases = WhatsNew.releasesURL
+        check(releases.scheme == "https" && releases.host == "github.com"
+              && releases.path == "/Ly-star-bit/photo_culling/releases",
+              "「更早的版本说明」打开这个仓库的 Releases 页", releases.absoluteString)
         return failed
     }
 }
