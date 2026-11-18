@@ -148,7 +148,7 @@ strip -x "$APP/Contents/MacOS/LabelGUI"
 # 精简 Python 运行时进 Resources:只放 layer2.py 及其 import (common.py、
 # prompts/),外加 runtime/ 里的精简 pyproject + 锁文件 —— 改名放到 layer2.py
 # 旁边,因为 app 在 App Support/runtime/culling-poc 里执行 `uv run python layer2.py`,
-# uv 只认脚本旁边的 pyproject。prepare.py/layer1.py/evaluate.py 是开发工具,
+# uv 只认脚本旁边的 pyproject。prepare.py/layer1.py 是开发工具(留作对照),
 # 不进 bundle。
 RES="$APP/Contents/Resources/culling-poc"
 mkdir -p "$RES"

@@ -72,7 +72,6 @@ culling-poc/
 │       └── BatchView.swift    # 批量选片界面
 ├── layer1.py            # Python 版一阶段 (YuNet+MediaPipe, 已被原生引擎取代, 留作对照)
 ├── layer2.py            # VLM 语义复核 (--backend ollama / openai)，app 里唯一会跑的 Python
-├── evaluate.py          # 阈值扫描·与人工标注对比校准
 ├── prompts/             # VLM 提示词
 ├── runtime/             # 打进 app 的精简运行时 (pyproject + uv.lock: 只有 requests/tqdm/pillow)
 └── pyproject.toml       # 开发环境 (含 layer1 的 mediapipe/opencv/rawpy，不进 app)
@@ -127,6 +126,7 @@ swift build -c release
 # 无头命令不读也不写界面里的「近似重复只留最佳」「每章节最少保留」「排序」设置：每章节最少保留按 0、按拍摄时间排，
 #   去重按这一场存的开关（没存过的老场次 = 关）；--live-host 按 LABELGUI_LIVE_TEST_SETTINGS
 # 判决统计(测试用): LABELGUI_DATA_DIR=/tmp/lg LabelGUI --verdicts <照片文件夹> [--dedupe 去重钉成开，只在内存里、不写进这一场] [--per-photo 逐张列出判决和理由]
+# 人工标注 × 自动判决（「标注校准」页的同一份对比，只读；接替了以前的 evaluate.py）: LabelGUI --accuracy <照片文件夹> [--json]
 # 连拍挑选按键脚本(测试用，会写判决，用临时数据目录): LABELGUI_DATA_DIR=/tmp/lg LabelGUI --compare <照片文件夹> --take 7 --keys "2,cmd:DSCF7223,enter,undo" [--auto]
 #   审片里按 C 的「只挑这一场」: --only 7
 # 存储卡导入(测试用，必须给 --dest、不往真的「图片」里写): LABELGUI_DATA_DIR=/tmp/lg LabelGUI --ingest <假卡目录> --dest <目标> [--reimport] [--plan-only] [--cancel-after N|--cancel-at-bytes B] [--via-store]
