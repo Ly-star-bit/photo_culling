@@ -17,6 +17,9 @@
    没签名也没文字时不导（不悄悄导出不带水印的）；打印每张平均体积（bytesPerPhoto 的依据）。
 5. 水印页只开了 EXIF 参数文字（默认模板）：原片没有 EXIF、外接盘没插时一张都画不上 → 不导、不记表、不报「带水印」；
    写一句自定义文字照样导。
+6. 文件名首尾带空格 / 句点（另一场：fixture 里三张改名成「 前空格」「后空格 」「点结尾.」，EC-05）：--proof-sheet --ids 导出，
+   照页面复制的格式（data-name 原样一行一个，带备注的「名字 备注：…」）拼回复，--client-import 三张都认、备注都在、
+   没认出是空的；认不出的行（「谢谢」）在带表号的回复里列进没认出，不悄悄丢。
 
 只写临时目录，跑完删掉。
 """
@@ -245,6 +248,7 @@ def run(binary, work):
 
     watermark(lg, work, photos, session, ids, picks, preview_hash, page_a)
     blank_watermark(lg, work, data, photos, session)
+    edge_names(binary, work)
 
     print("确认表回归: " + ("全部通过" if not failures else "{} 条没过: {}".format(len(failures), "；".join(failures))))
     return 0 if not failures else 1
@@ -363,6 +367,71 @@ def blank_watermark(lg, work, data, photos, session):
         check(p.returncode == 0 and "选片确认表已导出（带水印）: 5 张" in p.stdout, "写了自定义文字：照样导 5 张", p.stdout + p.stderr)
     finally:
         os.remove(state)
+
+
+def edge_names(binary, work):
+    """EC-05：照片 id 首尾带空格 / 句点（摄影师自己改的名）。确认表页面复制出来是 data-name 原样，以前导回时整行先 trim、
+    对不上，又被当成聊天的字丢掉，「没认出」还是空 —— 客户选了 3 张、导进来 0 张看不出来。另起一场，不碰上面那一场的判决。"""
+    data = os.path.join(work, "edge-data")
+    photos = os.path.join(work, "edge-photos")
+    os.makedirs(photos)
+    env = dict(os.environ)
+    env.update({"LABELGUI_DATA_DIR": data, "LABELGUI_NO_GUI": "1",
+                "LABELGUI_LIVE_SOCK_ROOT": os.path.join(work, "edge-sock"), "LABELGUI_MCP_OUT": os.path.join(work, "mcp-out")})
+    os.makedirs(env["LABELGUI_LIVE_SOCK_ROOT"])
+
+    def lg(*args):
+        return subprocess.run([binary, *args], env=env, capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL)
+
+    session = os.path.join(data, "sessions", lg("--session-key", photos).stdout.strip())
+    os.makedirs(os.path.join(session, "previews"))
+    with open(os.path.join(FIX, "manifest.json"), encoding="utf-8") as f:
+        manifest = json.load(f)
+    with open(os.path.join(FIX, "layer1_results.json"), encoding="utf-8") as f:
+        layer1 = json.load(f)
+    odd = [" 前空格", "后空格 ", "点结尾."]
+    rename = dict(zip([p["id"] for p in manifest["photos"][-3:]], odd))
+    manifest["photo_dir"] = photos
+    for p in manifest["photos"]:
+        pid = rename.get(p["id"], p["id"])
+        p.update(id=pid, raw_path=os.path.join(photos, pid + ".JPG"), decode_path=os.path.join(photos, pid + ".JPG"),
+                 preview_path="previews/" + pid + ".jpg")
+    for r in layer1["results"]:
+        r["id"] = rename.get(r["id"], r["id"])
+    with open(os.path.join(session, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False)
+    with open(os.path.join(session, "layer1_results.json"), "w", encoding="utf-8") as f:
+        json.dump(layer1, f, ensure_ascii=False)
+    for i, p in enumerate(manifest["photos"]):
+        src = os.path.join(work, "edge-%d.bmp" % i)
+        bmp(src, 320, 213, i)
+        jpeg(src, os.path.join(session, "previews", p["id"] + ".jpg"))
+        jpeg(src, os.path.join(photos, p["id"] + ".JPG"))
+        os.remove(src)
+
+    html = os.path.join(work, "out", "edge.html")
+    p = lg("--proof-sheet", photos, "--out", html, "--ids", ",".join(odd))
+    m = re.search(r"表号 (\S+) · ", p.stdout)
+    with open(html, encoding="utf-8") if os.path.exists(html) else open(os.devnull) as f:
+        names = [c[0] for c in cells(f.read())]
+    check(p.returncode == 0 and m is not None and names == odd, "EC-05：名字首尾带空格 / 句点的三张导出确认表，data-name 原样",
+          repr(names) + p.stdout[-200:] + p.stderr[-200:])
+    head = "选片工具确认表 " + (m.group(1) if m else "")
+    reply = os.path.join(work, "edge-reply.txt")
+
+    # 照页面「复制我的选择」的格式：一行一个 data-name，写了备注的是「名字 备注：…」（中间正好一个空格）。
+    with open(reply, "w", encoding="utf-8") as f:
+        f.write("\n".join([head, odd[0], odd[1] + " 备注：调亮一点", odd[2]]) + "\n")
+    r = lg("--client-import", photos, "--text", reply)
+    check("预览: 认出 3 张" in r.stdout and "没认出: -" in r.stdout, "EC-05：三张都认出，没认出是空的", r.stdout[-500:])
+    check("备注: " + odd[1] + "=调亮一点" in r.stdout, "EC-05：「后空格  备注：调亮一点」的备注记在「后空格 」上", r.stdout[-300:])
+
+    # 带表号的回复里认不出的行（客户顺手写的「谢谢」、这一场没有的名字）：整行列进没认出。
+    with open(reply, "w", encoding="utf-8") as f:
+        f.write("\n".join([head, odd[0], "汉服-正面", "谢谢"]) + "\n")
+    r = lg("--client-import", photos, "--text", reply)
+    check("预览: 认出 1 张" in r.stdout and "没认出: 汉服-正面 | 谢谢" in r.stdout,
+          "EC-05：带表号的回复里认不出的行整行列进没认出（以前当聊天的字丢掉）", r.stdout[-500:])
 
 
 if __name__ == "__main__":

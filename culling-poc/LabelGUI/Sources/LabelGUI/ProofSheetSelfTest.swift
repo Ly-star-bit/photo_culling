@@ -42,6 +42,51 @@ enum ProofSheetSelfTest {
         retouchLandedChecks()
         numberedNoteChecks()
         dashAndRangeChecks()
+        edgeNameChecks()
+    }
+
+    // MARK: 文件名首尾带空格 / 句点（优化分析 EC-05：确认表回复导回时静默漏认，「没认出」还是空）
+
+    private static func edgeNameChecks() {
+        let odd = [" 前空格", "后空格 ", "点结尾.", "DSCF7207"]
+        let all = items() + odd.dropLast().map(item)
+        let header = "\(ProofSheetPage.header) \(bigSheet.id)\n"
+        func detail(_ r: ClientReply.Resolution) -> String {
+            "认出 \(r.ids.map { "「\($0)」" }.joined(separator: " ")) · 备注 \(r.notes) · 没认出 \(r.unknown)"
+        }
+        let plain = ClientReply.resolve(header + odd.joined(separator: "\n") + "\n", items: all, sheets: [bigSheet])
+        check(plain.ids == odd && plain.unknown.isEmpty, "确认表复制格式、一行一个：首尾带空格 / 句点的名字整行原样认", detail(plain))
+        let noted = ClientReply.resolve(header + "后空格  \(ProofSheetPage.noteMarker)调亮一点\n点结尾. \(ProofSheetPage.noteMarker)放大头像\n"
+                                        + " 前空格 \(ProofSheetPage.noteMarker)去路人\n", items: all, sheets: [bigSheet])
+        check(noted.ids == ["后空格 ", "点结尾.", " 前空格"]
+              && noted.notes == ["后空格 ": "调亮一点", "点结尾.": "放大头像", " 前空格": "去路人"] && noted.unknown.isEmpty,
+              "带备注的那种（「名字 备注：…」）：名字原样认、备注各归各", detail(noted))
+
+        // 认不出的行（这一场没有这张了、名字被改过）：带表号的回复里整行进「没认出」，不当聊天的字悄悄丢。
+        let gone = ClientReply.resolve(header + "后空格 \n汉服-正面\n谢谢！\n", items: items(), sheets: [bigSheet])
+        check(gone.ids.isEmpty && gone.unknown == ["后空格", "汉服-正面", "谢谢！"],
+              "确认表回复里认不出的行（不带数字的名字、客户顺手写的话）整行列进没认出", detail(gone))
+        let chat = ClientReply.resolve("你好，选好了\n" + header + "DSCF7207\n", items: items(), sheets: [bigSheet])
+        check(chat.ids == ["DSCF7207"] && chat.unknown.isEmpty, "表号前面的寒暄照旧当聊天、不进没认出", detail(chat))
+        let wechat = ClientReply.resolve("后空格\n谢谢\nDSCF7207\n", items: items(), sheets: [bigSheet])
+        check(wechat.ids == ["DSCF7207"] && wechat.unknown.isEmpty, "没有表号的微信回复照旧：不带数字的字当聊天", detail(wechat))
+
+        // 来回一趟：页面上点这几张、给两张写备注，复制出来原样导入。
+        var cells = ""
+        for (i, name) in odd.enumerated() {
+            cells += ProofSheetPage.cell(number: i + 1, id: name, pick: false, jpeg: Data([0]))
+        }
+        let html = ProofSheetPage.html(title: "自检", sheetID: bigSheet.id, count: odd.count, date: "2026-11-18", cells: cells)
+        guard let ctx = context(html: html) else { return }
+        ctx.evaluateScript("for (var i = 0; i < __cells.length; i++) __cells[i].onclick();"
+                           + "__click('nb2'); __byId['note-text'].value = '调亮一点'; __byId['note-save'].onclick();"
+                           + "__click('nb3'); __byId['note-text'].value = '放大头像'; __byId['note-save'].onclick();"
+                           + "__byId['copy'].onclick();")
+        let copied = eval(ctx, "__byId['out'].value")
+        let r = ClientReply.resolve(copied, items: all, sheets: [bigSheet])
+        check(r.ids == odd && r.notes == ["后空格 ": "调亮一点", "点结尾.": "放大头像"] && r.unknown.isEmpty,
+              "页面上点 4 张（名字首尾带空格 / 句点）、两张写备注，复制再导入：4 张都认、备注都在",
+              copied.debugDescription + " → " + detail(r))
     }
 
     // MARK: 编号开头的修图要求（优化分析 NR2：「12 去路人」「12 备注：去路人」以前备注丢了）
