@@ -53,7 +53,7 @@ struct SidebarView: View {
             if let error = store.saveError {
                 Text(error)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(AppPalette.reject)
                     .textSelection(.enabled)
             }
         }

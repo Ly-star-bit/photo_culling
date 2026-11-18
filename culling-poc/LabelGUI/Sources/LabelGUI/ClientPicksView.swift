@@ -74,7 +74,7 @@ struct ClientImportSheet: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.purple.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
+        .background(AppPalette.client.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
     }
 
     private func openFile() {

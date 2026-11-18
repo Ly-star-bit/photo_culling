@@ -55,7 +55,7 @@ struct BodyClockSheet: View {
             }
             Spacer()
             if let problem {
-                Text(problem).font(.caption).foregroundStyle(.red)
+                Text(problem).font(.caption).foregroundStyle(AppPalette.reject)
             }
             TextField("0", text: text)
                 .frame(width: 90)

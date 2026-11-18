@@ -491,13 +491,13 @@ struct CardImportSheet: View {
                 }
                 if !plan.backupEnoughSpace, let backup = plan.backup {
                     Label(backupSpaceText(backup), systemImage: "externaldrive.badge.exclamationmark")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(AppPalette.reject)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if !plan.copies.isEmpty && !plan.primaryEnoughSpace {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Label(spaceText(plan), systemImage: "externaldrive.badge.exclamationmark")
-                            .foregroundStyle(.red)
+                            .foregroundStyle(AppPalette.reject)
                             .fixedSize(horizontal: false, vertical: true)
                         Spacer(minLength: 4)
                         // 内置盘放不下：换到外接盘（选完重新出计划）。

@@ -12,7 +12,7 @@ extension BatchView {
         VStack(spacing: 0) {
             if let error = store.persistError {
                 HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "exclamationmark.octagon.fill").foregroundStyle(.red)
+                    Image(systemName: "exclamationmark.octagon.fill").foregroundStyle(AppPalette.reject)
                     Text(error).font(.callout)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
@@ -24,7 +24,7 @@ extension BatchView {
                     }
                 }
                 .padding(.horizontal, 12).padding(.vertical, 6)
-                .background(Color.red.opacity(0.18))
+                .background(AppPalette.reject.opacity(0.18))
             }
             if let notice = store.dataNotice {
                 HStack(alignment: .top, spacing: 10) {

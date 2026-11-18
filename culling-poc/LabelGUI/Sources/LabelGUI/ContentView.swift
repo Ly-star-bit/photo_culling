@@ -101,7 +101,7 @@ struct ContentView: View {
             SidebarView(store: store)
         } detail: {
             if let error = store.loadError {
-                Text(error).foregroundStyle(.red).padding()
+                Text(error).foregroundStyle(AppPalette.reject).padding()
             } else if let photo = store.currentPhoto {
                 DetailView(store: store, photo: photo)
                     .id(photo.id)

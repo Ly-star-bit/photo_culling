@@ -752,7 +752,7 @@ struct BatchView: View {
                 } icon: {
                     // 菜单按钮上的图默认按模板画（统统一个颜色）：开着时用调色板画成紫色的实心，关着是空心 —— 看得出筛选开没开。
                     if store.clientPickFilter {
-                        Image(systemName: "heart.fill").symbolRenderingMode(.palette).foregroundStyle(Color.purple)
+                        Image(systemName: "heart.fill").symbolRenderingMode(.palette).foregroundStyle(AppPalette.client)
                     } else {
                         Image(systemName: "heart")
                     }
@@ -804,7 +804,7 @@ struct BatchView: View {
                 }
                 if store.clientPickCount > 0 {
                     Label("客户选中 \(store.clientPickCount)", systemImage: "heart.fill")
-                        .font(.caption).foregroundStyle(.purple)
+                        .font(.caption).foregroundStyle(AppPalette.client)
                         .help("导入的客户选择（紫心）。点顶栏「客户选中」只看这些，它的 ▾ 里复制文件名、复制原片到精修文件夹")
                 }
                 if store.bodies.count >= 2 { bodyClockHint }
@@ -842,7 +842,7 @@ struct BatchView: View {
                     ? "\(wiped) 个章节全部被淘汰" + (thin > 0 ? "，\(thin) 个留得太少" : "")
                     : "\(all.count) 个章节留得太少（时间轴上标了三角）"
                 Label(all.count == 1 ? first : summary, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(wiped > 0 ? .red : AppPalette.warning).lineLimit(1)
+                    .font(.caption).foregroundStyle(wiped > 0 ? AppPalette.reject : AppPalette.warning).lineLimit(1)
                     .help(all.joined(separator: "\n"))
             }
             if let error = store.lastError {
@@ -1693,7 +1693,7 @@ struct BatchView: View {
                 // The status-bar error is easy to miss; an empty grid is exactly
                 // when the user is staring at the middle of the window.
                 Text(error)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(AppPalette.reject)
                     .frame(maxWidth: 480)
                     .multilineTextAlignment(.center)
                     .textSelection(.enabled)
@@ -2750,8 +2750,8 @@ struct BatchView: View {
                         Text("\(BatchStore.reasonLabel(reason)) \(counts[reason]!)").font(.caption)
                     }
                     .padding(.horizontal, 7).padding(.vertical, 2)
-                    .background(active ? Color.red.opacity(0.35) : AppPalette.ink.opacity(0.08), in: Capsule())
-                    .overlay(Capsule().stroke(active ? Color.red : .clear, lineWidth: 1))
+                    .background(active ? AppPalette.reject.opacity(0.35) : AppPalette.ink.opacity(0.08), in: Capsule())
+                    .overlay(Capsule().stroke(active ? AppPalette.reject : .clear, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
                 .help(active ? "点击取消筛选" : "只看因「\(BatchStore.reasonLabel(reason))」被标记的照片")
@@ -3303,7 +3303,7 @@ private struct BatchControlPanel: View {
                 Spacer()
                 if killCount > 0 {
                     Text("淘汰 \(killCount)").font(.caption).monospacedDigit()
-                        .foregroundStyle(.red)
+                        .foregroundStyle(AppPalette.reject)
                 }
                 Text(value).font(.callout).monospacedDigit().foregroundStyle(.secondary)
             }
@@ -3393,7 +3393,7 @@ private struct GridCell: View, Equatable {
                     }
                     if isFocused {
                         RoundedRectangle(cornerRadius: 4).inset(by: isSelected ? 3 : 0)
-                            .stroke(Color.white.opacity(0.95), lineWidth: 2)
+                            .stroke(AppPalette.focus, lineWidth: 2)
                     }
                 }
                 // 右上一条：状态（场内名次 · 手判 · 客户 · 精选）。名次和同场张数并成「1/10」一样东西（以前是「#1 ★ ×10」
@@ -3411,7 +3411,7 @@ private struct GridCell: View, Equatable {
                             }
                             if manual { Image(systemName: "hand.raised.fill").font(.caption2) }
                             // 客户选中：紫心（和确认表上客户点的那颗、XMP 的紫色标同一个颜色）。
-                            if client { Image(systemName: "heart.fill").font(.caption2).foregroundStyle(.purple) }
+                            if client { Image(systemName: "heart.fill").font(.caption2).foregroundStyle(OnPhotoPalette.client) }
                             if star {
                                 Image(systemName: "star.fill").font(.caption2).foregroundStyle(Verdict.pick.onPhotoColor)
                             }
@@ -3431,19 +3431,20 @@ private struct GridCell: View, Equatable {
                     if hasInfo {
                         HStack(spacing: 4) {
                             ForEach(item.rejectReasons, id: \.self) { reason in
-                                Image(systemName: BatchView.reasonIcon(reason)).font(.caption2).foregroundStyle(.red)
+                                Image(systemName: BatchView.reasonIcon(reason)).font(.caption2).foregroundStyle(OnPhotoPalette.reject)
                             }
+                            // 黑底胶囊压在照片上：用 OnPhotoPalette（相纸压深过的 AppPalette.pick 在黑底上看不清）。
                             if !item.vlmRescued.isEmpty {
-                                Image(systemName: "checkmark.seal.fill").font(.caption2).foregroundStyle(AppPalette.pick)
+                                Image(systemName: "checkmark.seal.fill").font(.caption2).foregroundStyle(OnPhotoPalette.pick)
                             }
-                            if item.slowShutter { Image(systemName: "tortoise.fill").font(.caption2).foregroundStyle(.yellow) }
-                            if item.tilted { Image(systemName: "level").font(.caption2).foregroundStyle(.yellow) }
+                            if item.slowShutter { Image(systemName: "tortoise.fill").font(.caption2).foregroundStyle(OnPhotoPalette.caution) }
+                            if item.tilted { Image(systemName: "level").font(.caption2).foregroundStyle(OnPhotoPalette.caution) }
                             if closed >= 0 {
                                 HStack(spacing: 1) {
                                     Image(systemName: closed > 0 ? "eye.slash" : "eye").font(.caption2)
                                     Text("\(item.faces.count - closed)/\(item.faces.count)").font(.caption2).monospacedDigit()
                                 }
-                                .foregroundStyle(closed > 0 ? .red : AppPalette.pick)
+                                .foregroundStyle(closed > 0 ? OnPhotoPalette.reject : OnPhotoPalette.pick)
                             }
                         }
                         .padding(.horizontal, 5).padding(.vertical, 3)
@@ -4532,19 +4533,43 @@ struct FaceCropView: View {
 
     @State private var crop: NSImage?
 
-    private var ringColor: Color {
+    /// 睁 / 眯 / 闭 / 看不出。
+    private enum EyeLook { case open, squint, closed, unknown }
+
+    private var eyeLook: EyeLook {
         if let eye {
             switch eye {
-            case .open: return AppPalette.pick
-            case .squint: return .yellow
-            case .closed: return .red
-            case .unknown: return .gray
+            case .open: return .open
+            case .squint: return .squint
+            case .closed: return .closed
+            case .unknown: return .unknown
             }
         }
         switch face.eyeClosed {
-        case .some(true): return .red
-        case .some(false): return AppPalette.pick
-        case .none: return .gray
+        case .some(true): return .closed
+        case .some(false): return .open
+        case .none: return .unknown
+        }
+    }
+
+    /// 圈：一半压在界面底色上（检视器、连拍挑选的栏），用主题的判决色 / 提醒黄（相纸压深过）。
+    private var ringColor: Color {
+        switch eyeLook {
+        case .open: return AppPalette.pick
+        case .squint: return AppPalette.caution
+        case .closed: return AppPalette.reject
+        case .unknown: return .gray
+        }
+    }
+
+    /// 右下角的眼睛记号画在黑圆上（压在照片上）：一律系统亮色。以前跟圈同色，相纸压深过的绿在黑圆上只有 1.5:1（优化分析
+    /// 2026-11-18 复核补充 1）。
+    private var badgeColor: Color {
+        switch eyeLook {
+        case .open: return OnPhotoPalette.pick
+        case .squint: return OnPhotoPalette.caution
+        case .closed: return OnPhotoPalette.reject
+        case .unknown: return .gray
         }
     }
 
@@ -4569,7 +4594,7 @@ struct FaceCropView: View {
                 .font(.caption2)
                 .padding(2)
                 .background(.black.opacity(0.6), in: Circle())
-                .foregroundStyle(ringColor)
+                .foregroundStyle(badgeColor)
                 .padding(2)
         }
         .overlay(alignment: .topTrailing) {
@@ -4821,12 +4846,12 @@ struct PhotoInspector: View {
 
                 Rectangle()
                     .path(in: rect)
-                    .stroke(item.dynamicEyeClosed == true ? Color.red : Color.yellow, lineWidth: 2)
+                    .stroke(item.dynamicEyeClosed == true ? OnPhotoPalette.reject : OnPhotoPalette.caution, lineWidth: 2)
                 Text(info)
                     .font(.caption2.bold())
                     .padding(.horizontal, 5).padding(.vertical, 2)
                     .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 4))
-                    .foregroundStyle(item.dynamicEyeClosed == true ? .red : .yellow)
+                    .foregroundStyle(item.dynamicEyeClosed == true ? OnPhotoPalette.reject : OnPhotoPalette.caution)
                     .offset(x: rect.minX, y: max(2, rect.minY - 20))
             }
             .allowsHitTesting(false)
@@ -4916,7 +4941,7 @@ struct PhotoInspector: View {
         VStack(alignment: .leading, spacing: 8) {
             if !item.rejectReasons.isEmpty {
                 Text(item.rejectReasons.map(BatchStore.reasonLabel).joined(separator: "、"))
-                    .font(.callout).foregroundStyle(.red)
+                    .font(.callout).foregroundStyle(AppPalette.reject)
                     .fixedSize(horizontal: false, vertical: true)
             }
             LazyVGrid(columns: Self.signalColumns, alignment: .leading, spacing: 10) {
@@ -4955,7 +4980,7 @@ struct PhotoInspector: View {
                 }
                 if exif.slowShutter {
                     Label("低于安全快门", systemImage: "tortoise.fill")
-                        .font(.caption).foregroundStyle(.yellow)
+                        .font(.caption).foregroundStyle(AppPalette.caution)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -5037,11 +5062,11 @@ struct PhotoInspector: View {
                 .keyboardShortcut("1", modifiers: [])
             Button("可用") { store.setOverride(item.id, .usable) }
                 .buttonStyle(.bordered)
-                .tint(override == .usable ? .blue : nil)
+                .tint(override == .usable ? AppPalette.usable : nil)
                 .keyboardShortcut("2", modifiers: [])
             Button("废片") { store.setOverride(item.id, .reject) }
                 .buttonStyle(.bordered)
-                .tint(override == .reject ? .red : nil)
+                .tint(override == .reject ? AppPalette.reject : nil)
                 .keyboardShortcut("3", modifiers: [])
             Button("恢复自动") { store.setOverride(item.id, nil) }
                 .buttonStyle(.bordered)
@@ -5127,7 +5152,7 @@ struct MetricHistogram: View {
     var sqrtScale: Bool = false
     /// 被线选中那一侧的颜色。阈值滑杆是"会被淘汰"所以用红；「同一场最大间隔」
     /// 选中的是"会并进同一场"，不是淘汰，用绿色，别让人误以为要删照片。
-    var markColor: Color = .red
+    var markColor: Color = AppPalette.reject
 
     private func position(_ v: Double) -> Double {
         let span = range.upperBound - range.lowerBound
@@ -5268,7 +5293,7 @@ struct ReviewView: View {
                         .background(color(item.verdict).opacity(0.25), in: Capsule())
                         .foregroundStyle(color(item.verdict))
                     if !item.rejectReasons.isEmpty {
-                        Text(item.rejectReasons.map(BatchStore.reasonLabel).joined(separator: ", ")).font(.caption).foregroundStyle(.red)
+                        Text(item.rejectReasons.map(BatchStore.reasonLabel).joined(separator: ", ")).font(.caption).foregroundStyle(AppPalette.reject)
                     }
                     if let exif = item.exif {
                         Text(exif.summary).font(.caption).monospacedDigit().foregroundStyle(.secondary)
@@ -5345,8 +5370,9 @@ struct ReviewView: View {
                         LazyHStack(spacing: 6) {
                             ForEach(order, id: \.self) { memberID in
                                 if let member = store.item(withID: memberID) {
-                                // 边框永远是判决色，当前这张另加一圈白的 —— 以前当前张是 accent 蓝框，
-                                // 和「可用」的蓝框分不清，也看不出当前这张是什么判决。
+                                // 边框永远是判决色，当前这张外面另加一圈 —— 以前当前张是 accent 蓝框，
+                                // 和「可用」的蓝框分不清，也看不出当前这张是什么判决。这一圈画在胶片条的底上：
+                                // 深色主题白、相纸墨色（以前写死白，相纸的浅栏上看不见，TA-03）。
                                 ThumbnailView(path: member.previewPath, maxPixel: 256, fit: true)
                                     .frame(width: 72, height: 72)
                                     .background(Color(white: 0.10))
@@ -5355,7 +5381,7 @@ struct ReviewView: View {
                                     .overlay {
                                         if member.id == item.id {
                                             RoundedRectangle(cornerRadius: 6).inset(by: -3)
-                                                .stroke(Color.white, lineWidth: 2.5)
+                                                .stroke(AppPalette.ink, lineWidth: 2.5)
                                         }
                                     }
                                     .padding(.vertical, 3)
@@ -5452,8 +5478,9 @@ struct ReviewView: View {
     private func apply(_ verdict: Verdict?, to item: BatchItem) {
         store.setOverride(item.id, verdict)
         if let now = store.item(withID: item.id) {
+            // 提示条是黑胶囊压在照片上：字用照片上的亮色（相纸压深过的判决色在黑底上 1.8:1，TA-08）。
             showToast(verdict != nil ? "\(now.verdict.rawValue) · \(item.id)" : "恢复自动 → \(now.verdict.rawValue) · \(item.id)",
-                      symbol: now.verdict.symbol, color: now.verdict.color)
+                      symbol: now.verdict.symbol, color: now.verdict.onPhotoColor)
         }
         if verdict != nil { step(1, from: item.id) }  // tag-and-advance
     }

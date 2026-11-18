@@ -361,10 +361,10 @@ struct PickView: View {
         return VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 10) {
                 Image(systemName: wholeGroupOut ? "trash.fill" : "checkmark.circle.fill")
-                    .foregroundStyle(wholeGroupOut ? Color.red : Verdict.pick.color)
+                    .foregroundStyle(wholeGroupOut ? AppPalette.reject : Verdict.pick.color)
                 Text(PickSession.outcomeText(outcome))
                     .font(.callout)
-                    .foregroundStyle(wholeGroupOut ? Color.red : Color.primary)
+                    .foregroundStyle(wholeGroupOut ? AppPalette.reject : Color.primary)
                     .lineLimit(1).truncationMode(.middle)
                 if outcome.changes == 0 {
                     Text("（和现在一样）").font(.caption).foregroundStyle(.tertiary)
@@ -741,7 +741,7 @@ private struct PickTile: View {
                 .font(.caption2.bold())
                 .padding(.horizontal, 6).padding(.vertical, 2)
                 .background(.black.opacity(0.6), in: Capsule())
-                .foregroundStyle(.red)
+                .foregroundStyle(OnPhotoPalette.reject)
                 .lineLimit(1)
                 .padding(6)
         }
@@ -819,9 +819,10 @@ private struct PickTile: View {
             let total = max(eyes.known, faceSlots.count)
             Group {
                 if eyes.closed > 0 {
-                    Label("闭眼 \(eyes.closed)/\(total)", systemImage: "eye.slash").foregroundStyle(Color.red)
+                    Label("闭眼 \(eyes.closed)/\(total)", systemImage: "eye.slash").foregroundStyle(AppPalette.reject)
                 } else if eyes.squint > 0 {
-                    Label("眯眼 \(eyes.squint)/\(total)", systemImage: "eye").foregroundStyle(Color.yellow)
+                    // 界面底色上的提醒黄：相纸下压深成芥末色（系统黄在相纸上 1.04:1，等于看不见，TA-02）。
+                    Label("眯眼 \(eyes.squint)/\(total)", systemImage: "eye").foregroundStyle(AppPalette.caution)
                 } else {
                     Label("睁眼 \(eyes.known)/\(total)", systemImage: "eye").foregroundStyle(AppPalette.pick)
                 }
