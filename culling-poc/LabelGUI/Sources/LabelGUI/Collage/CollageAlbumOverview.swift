@@ -37,9 +37,9 @@ struct CollageAlbumOverview: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
+            ThemedDivider()
             selectionBar
-            Divider()
+            ThemedDivider()
             GeometryReader { geo in
                 ScrollView(.vertical) {
                     grid(width: geo.size.width)

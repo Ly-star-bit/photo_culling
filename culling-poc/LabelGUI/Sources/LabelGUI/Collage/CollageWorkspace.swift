@@ -326,11 +326,13 @@ private struct CollageSplitHandle: View {
     @State private var start: CGFloat?
     @State private var hovering = false
 
+    /// 底是栏色、线是主题的发丝线（以前 Color.clear + 系统的 separatorColor：透出窗口的系统灰，纯黑主题里栏和画布中间
+    /// 一根 7px 的灰柱，TB-04）。
     var body: some View {
         ZStack {
-            Color.clear
+            AppPalette.panel
             Rectangle()
-                .fill(start != nil || hovering ? AppPalette.accent.opacity(0.7) : Color(nsColor: .separatorColor))
+                .fill(start != nil || hovering ? AppPalette.accent.opacity(0.7) : AppPalette.hairline)
                 .frame(width: start != nil || hovering ? 2 : 1)
         }
         .frame(width: CollageWorkspace.handleWidth)

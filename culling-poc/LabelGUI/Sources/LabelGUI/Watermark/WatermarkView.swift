@@ -18,7 +18,7 @@ struct WatermarkView: View {
     var body: some View {
         VStack(spacing: 0) {
             topBar
-            Divider()
+            ThemedDivider()
             HSplitView {
                 photoList
                     .frame(minWidth: 200, maxWidth: 280)
@@ -27,7 +27,7 @@ struct WatermarkView: View {
                 settingsPanel
                     .frame(width: 330)
             }
-            Divider()
+            ThemedDivider()
             statusBar
         }
         .shortcutsHotkey(isPresented: $showShortcuts)
@@ -200,11 +200,15 @@ struct WatermarkView: View {
                     .tag(url)
                 }
                 .listStyle(.sidebar)
+                // 列表自己的底（离屏是系统的 #282828、真窗口是侧栏材质）不跟主题：藏掉，露下面的栏色（TB-04）。
+                .scrollContentBackground(.hidden)
                 .onDeleteCommand {
                     if let selected = store.selectedPhoto { store.removePhoto(selected) }
                 }
             }
         }
+        // 空的时候、有照片的时候都铺栏色（以前没有底，透出窗口的系统灰）。
+        .background(AppPalette.panel)
         .overlay {
             RoundedRectangle(cornerRadius: 6)
                 .strokeBorder(AppPalette.accent, lineWidth: 2)
@@ -265,7 +269,8 @@ struct WatermarkView: View {
                     .padding(.bottom, 14)
             }
         }
-        .environment(\.colorScheme, .dark)
+        // 以前这里强制 .dark（水印页初版整个 app 是深色）：底早就跟主题走了（canvas），相纸下强制深色只剩副作用 ——
+        // 「导入照片后在这里实时预览」按深色取成浅灰白字，压在浅底上 1.19:1（TB-03）。现在跟主题的深浅。
     }
 
     // MARK: - 右: 参数面板

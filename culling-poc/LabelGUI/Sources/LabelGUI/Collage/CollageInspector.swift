@@ -43,7 +43,7 @@ struct CollageInspector: View {
                 CollagePaneToggle(edge: .trailing, shown: true) { store.workspace.inspectorHidden = true }
             }
             .padding(8)
-            Divider()
+            ThemedDivider()
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
@@ -175,10 +175,10 @@ struct CollageCanvasBox: View {
                 } else if store.project.canvas.seams == .fold {
                     foldControls
                     // 印厂规格里像素装不下的那几样：页数、首尾单页、中缝带、色彩、JPEG（CollagePrintPanels）。
-                    Divider()
+                    ThemedDivider()
                     CollagePrintRulesBox(store: store)
                     // 目标跨页数、每跨页张数（CollageAlbumBudget.swift）。
-                    Divider()
+                    ThemedDivider()
                     CollageAlbumBudgetControls(store: store)
                 }
                 if store.isAlbum || store.project.canvas.bleed > 0 {

@@ -810,9 +810,9 @@ struct CollageContactBox: View {
         GroupBox("印样") {
             VStack(alignment: .leading, spacing: 8) {
                 formatControls
-                Divider()
+                ThemedDivider()
                 markControls
-                Divider()
+                ThemedDivider()
                 edgeControls
                 Text(frameSummary)
                     .collageHint()

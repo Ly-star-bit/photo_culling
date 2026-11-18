@@ -431,9 +431,9 @@ struct CollagePageBox: View {
                     if store.isAlbum {
                         CollageSpreadActions(store: store)
                     }
-                    Divider()
+                    ThemedDivider()
                     lookRows
-                    Divider()
+                    ThemedDivider()
                     templateRow
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

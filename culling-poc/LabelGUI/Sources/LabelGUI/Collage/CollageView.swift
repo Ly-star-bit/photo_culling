@@ -53,7 +53,7 @@ struct CollageView: View {
     private var editor: some View {
         VStack(spacing: 0) {
             topBar
-            Divider()
+            ThemedDivider()
             // 两栏的宽度、收起在 store.workspace（CollageWorkspace.swift）：默认 250 / 330，拖分隔条改；窗口窄了两栏往回收。
             // 模板格最小 86pt：两列要 230 左右。230 + 画布 420 + 检视器 300 + 两条分隔 = 964。
             // 选中画布上的照片、文字、贴纸：右栏切到「格式」（NU3）；双击文字 / 照片上的字：切过去并滚到编辑器。
@@ -63,9 +63,9 @@ struct CollageView: View {
                          center: CollageCanvasArea(store: store, isAlbum: store.isAlbum,
                                                    onAutoLayout: { runAutoLayout() }),
                          right: CollageInspector(store: store, watermarkStore: watermarkStore))
-            Divider()
+            ThemedDivider()
             bottomStrips
-            Divider()
+            ThemedDivider()
             statusBar
         }
         // 离屏快照截不到弹出框（单独一个窗口）：--collage-ui 把「导出 ▾」的内容画在顶栏下面。
@@ -175,7 +175,7 @@ struct CollageView: View {
                 singleControls
             }
 
-            Divider().frame(height: 18)
+            ThemedDivider(vertical: true).frame(height: 18)
             editButtons
             Spacer(minLength: 8)
             trailingButtons(compact: compact)
@@ -293,12 +293,14 @@ struct CollageView: View {
 
     // MARK: - 底部：跨页条 + 备选版式
 
+    /// 三条（方案栏、跨页条、备选条）一起铺栏色：以前没有底，露的是窗口的系统灰（五套深色都是 #323232，纯黑主题里黑画布和
+    /// 黑状态栏中间一整条灰带；胡桃 / 午夜到这里断了色），分隔线也是系统的 #464646（TB-04）。
     private var bottomStrips: some View {
         VStack(spacing: 0) {
             // 方案栏常驻（NU6）：以前存过才出现，没存过的人不知道有；空的时候是矮矮一条「+ 存成方案（⇧⌘S）」。
             CollageVariantStrip(store: store, thumbs: store.thumbs)
                 .collageSpot(.variants, store.nav)
-            Divider()
+            ThemedDivider()
             // 相册的跨页条；单张拼图有好几页（一键成套的一期杂志、小红书轮播组图）时也显示（页条）。
             // 整本概览开着时不摆：概览里就是这几个跨页（大的），这一条的高度让给它。
             if store.isAlbum || store.project.pages.count > 1 {
@@ -306,6 +308,7 @@ struct CollageView: View {
             }
             CollageAlternativeStrip(store: store)
         }
+        .background(AppPalette.bar)
     }
 
     private var statusBar: some View {
@@ -405,7 +408,7 @@ private struct CollagePageStripSlot: View {
     var body: some View {
         if !(ui.overviewShown && store.isAlbum) {
             CollagePageStrip(store: store, thumbs: store.thumbs)
-            Divider()
+            ThemedDivider()
         }
     }
 }
@@ -467,7 +470,7 @@ struct CollageTray: View {
                 // 正好跳在鼠标底下，点完像是点错了、卡了一下。
                 selectionBar(selected, order: visibleIDs)
             }
-            Divider()
+            ThemedDivider()
             if store.project.photos.isEmpty {
                 emptyTray
             } else if visible.isEmpty {
@@ -482,7 +485,7 @@ struct CollageTray: View {
                                 placeTarget: placeTarget, pagePhotoIDs: store.page?.photoIDs,
                                 thumb: workspace.trayThumb, sections: sorted != nil)
                     .equatable()
-                Divider()
+                ThemedDivider()
                 viewBar
             }
         }
