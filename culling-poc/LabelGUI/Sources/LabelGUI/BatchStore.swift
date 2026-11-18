@@ -385,7 +385,7 @@ final class BatchStore: ObservableObject {
         }
     }
 
-    static let defaultTakeGapSec: Double = 8
+    nonisolated static let defaultTakeGapSec: Double = 8
     @Published var takeGapSec: Double = defaultTakeGapSec { didSet { onTakeGapEdited() } }
 
     /// 连拍去重：开启后每个连拍组只留下最佳的那张，组内其余**未被人工改判**的照片
@@ -450,6 +450,19 @@ final class BatchStore: ObservableObject {
         var resolvedFocus: Double {
             if let focus, focus.isFinite { return BatchStore.clampFocus(focus) }
             return BatchStore.clampFocus(BatchStore.legacyFocus(fromSharpness: sharpness))
+        }
+
+        /// 另外三条线读进来也夹到滑杆范围（审查 EC-04）：手改成 1e19 的「同一场最大间隔」以前在显示时 Int(...) 崩 ——
+        /// 启动时重开最近一场，就是每次启动都崩；--verdicts 也崩。滑杆、阈值建议写不出范围外的数（范围从第一版起没变过），
+        /// 所以夹住不改任何 app 自己写的值。非有限的（JSONDecoder 本来就拒收 NaN / Infinity，这里只是兜底）给「标准」那一份。
+        var resolvedExposure: Double { BatchStore.clampThreshold(exposure, to: BatchStore.exposureRange, fallback: 0.15) }
+        var resolvedFaceQuality: Double {
+            BatchStore.clampThreshold(faceQuality, to: BatchStore.faceQualityRange, fallback: CullPreset.standard.thresholds.2)
+        }
+        /// 没存这个键 = 默认 8 秒（和以前一样）。
+        var resolvedTakeGap: Double {
+            BatchStore.clampThreshold(takeGap ?? BatchStore.defaultTakeGapSec, to: BatchStore.takeGapRange,
+                                      fallback: BatchStore.defaultTakeGapSec)
         }
 
         init(focus: Double, exposure: Double, faceQuality: Double, takeGap: Double?,
@@ -556,9 +569,9 @@ final class BatchStore: ObservableObject {
         batchingThresholds = true
         // 老文件只有旧刻度的 sharpness：按档迁移成对焦线，只在内存里（打开不算改：这一场的 thresholds.json 下次拖滑杆才写）
         focusThreshold = state.resolvedFocus
-        exposureThreshold = state.exposure
-        faceQualityThreshold = state.faceQuality
-        takeGapSec = state.takeGap ?? Self.defaultTakeGapSec
+        exposureThreshold = state.resolvedExposure
+        faceQualityThreshold = state.resolvedFaceQuality
+        takeGapSec = state.resolvedTakeGap
         // 命令行钉的（--verdicts --dedupe）盖过这一场存的，只在内存里
         rejectBurstDuplicates = AppRuntime.pinnedRejectBurstDuplicates ?? storedDedupe
         batchingThresholds = false
@@ -635,8 +648,18 @@ final class BatchStore: ObservableObject {
 
     /// 读进来的对焦线夹到滑杆范围（手改 thresholds.json 写的 1e19、负数不能让界面 Int(...) 崩，审查 EC-04）。
     nonisolated static func clampFocus(_ v: Double) -> Double {
-        guard v.isFinite else { return CullPreset.standard.thresholds.0 }
-        return min(focusRange.upperBound, max(focusRange.lowerBound, v))
+        clampThreshold(v, to: focusRange, fallback: CullPreset.standard.thresholds.0)
+    }
+
+    /// 另外三根滑杆的范围（BatchView 右栏的 Slider 写的就是这几个数，改一边要改另一边）：thresholds.json 读进来夹到这里（EC-04）。
+    nonisolated static let exposureRange = 0.005...0.5
+    nonisolated static let faceQualityRange = 0.0...1.0
+    nonisolated static let takeGapRange = 1.0...60.0
+
+    /// 夹到范围里；非有限的给 fallback。
+    nonisolated static func clampThreshold(_ v: Double, to range: ClosedRange<Double>, fallback: Double) -> Double {
+        guard v.isFinite else { return fallback }
+        return min(range.upperBound, max(range.lowerBound, v))
     }
 
     /// 旧刻度（锐度）→ 新刻度（对焦）的分段线性映射，锚点 0→0、三档的旧线 → 三档的新线、150→150，两头斜率 1 往外延。

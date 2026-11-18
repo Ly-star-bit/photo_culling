@@ -265,7 +265,9 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
         let stats = store.burstGroupStats
         let takes = store.takeStats
         print("近似重复 \(stats.groups) 组 / \(stats.photos) 张 (phash 层，自动规则作用范围)")
-        print("场 (间隔≤\(Int(store.takeGapSec))s) \(takes.takes) 个多张场 / \(takes.photos) 张 · 待处理 \(store.pendingTakeCount)")
+        // %.0f 不用 Int(...)：--gap 1e19 这种离谱值不崩（EC-04；thresholds.json 里的读入时已经夹过）。
+        let gapText = String(format: "%.0f", store.takeGapSec)
+        print("场 (间隔≤\(gapText)s) \(takes.takes) 个多张场 / \(takes.photos) 张 · 待处理 \(store.pendingTakeCount)")
         for reason in BatchStore.reasonOrder {
             if let n = store.reasonCounts[reason] { print("  理由 \(reason): \(n)") }
         }

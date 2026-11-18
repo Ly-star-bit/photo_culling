@@ -3144,7 +3144,7 @@ private struct BatchControlPanel: View {
                 Spacer()
                 Text("\(stats.takes) 场多张").font(.caption).monospacedDigit()
                     .foregroundStyle(.secondary)
-                Text("\(Int(store.takeGapSec)) 秒").font(.callout).monospacedDigit()
+                Text(String(format: "%.0f 秒", store.takeGapSec)).font(.callout).monospacedDigit()
                     .foregroundStyle(.secondary)
             }
             MetricHistogram(
