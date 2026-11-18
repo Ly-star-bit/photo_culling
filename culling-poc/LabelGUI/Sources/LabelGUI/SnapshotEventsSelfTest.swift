@@ -5,7 +5,8 @@ import AppKit
 //
 // 离屏假事件（SnapshotEvents.swift）到底送不送得到，每次实测：
 //   甲. 一个最小的 SwiftUI 视图（系统按钮、plain 按钮、单击 / 双击手势、onHover、滚动区、右键菜单），挨个发、数回调。
-//   乙. 给了 fixture：真的批量页网格 —— 点一下格子焦点变到那张；悬停一格悬停条出现、挪开消失。
+//   乙. 给了 fixture：真的批量页网格 —— 点一下格子焦点变到那张；悬停一格悬停条出现、挪开消失；格子的右键菜单
+//       （没选中 / 选着别的 / 全选三种头一行，改判那几项用 performActionForItem 点下去，改对了几张）。
 // 窗口从不上屏（NeverShownWindow + 挪到屏幕外 + 全透明）。
 
 /// 最小实验的计数（视图回调往里记）。
@@ -327,6 +328,97 @@ enum SnapshotEventsSelfTest {
         } else {
             print("跳过「点一下格子焦点变到那张」的断言（\(firstOK && secondOK ? "这次送到了" : "没送到")：\(detail)）")
         }
+        cellMenu(store: store, mouse: mouse, at: tiles[0].point, order: order, clickedID: first.0, tally)
         check(!window.isVisible && NSApp.windows.allSatisfy { !$0.isVisible }, "批量页这一段也没有窗口上过屏")
+    }
+
+    /// 格子的右键菜单（GP-07 / UX-02）：
+    ///   - 没选中：这一张的菜单；只是右键（读菜单项）判决一张没动。
+    ///   - 选中别的一张、这一格没重算：再右键，头一行「只这一张（不含选中的 1 张）」—— 弹过的菜单 SwiftUI 留着，
+    ///     没有 GridMenuState 的话还是上次那份没有头的（实测过）。点「废片」只改这一张，选中的那张不动、还选着。
+    ///   - 全选：头一行「选中的 N 张」；点「可用」全部改成可用、选中清掉。
+    /// 「点」= 拿到右键菜单以后 performActionForItem（菜单不弹，SwiftUI 的按钮照样调）；只点改判那几项（别的会开窗口、
+    /// 写剪贴板、拉起别的 app）。
+    @MainActor
+    private static func cellMenu(store: BatchStore, mouse: SnapshotEvents.Mouse, at point: CGPoint, order: [String],
+                                 clickedID: String?, _ tally: Tally) {
+        func check(_ ok: Bool, _ name: String, _ detail: @autoclosure () -> String = "") { tally.check(ok, name, detail()) }
+        func select(_ ids: [String]) {
+            store.viewRequest = BatchStore.ViewRequest(token: UUID(), session: store.sessionDir.lastPathComponent,
+                                                       ids: ids, select: true)
+            mouse.pump(0.6)
+        }
+        /// 选中以后顶上多出批量栏、网格往下挪：在原来那一点往下 0–80pt 里找头一行是 `first` 的格子。
+        func find(_ first: (String?) -> Bool) -> (point: CGPoint, outcome: SnapshotEvents.Outcome)? {
+            var tried: [String] = []
+            for dy in [0.0, 20.0, 40.0, 60.0, 80.0] {
+                let p = CGPoint(x: point.x, y: point.y + dy)
+                let outcome = mouse.run(.rclick(p))
+                if outcome.menu != nil, first(outcome.menu?.first) { return (p, outcome) }
+                tried.append(outcome.line)
+            }
+            print("右键菜单：没找到要的那一格 —— " + tried.joined(separator: " / "))
+            return nil
+        }
+        let overrides = store.overrides
+        let common = ["精选", "可用", "废片", "恢复自动", "看单张", "从这张开始审片", "在访达中显示", "用…打开", "复制文件名"]
+        let single = mouse.run(.rclick(point))
+        let items = single.menu ?? []
+        check(items.first == "精选" && common.allSatisfy(items.contains) && items.contains("拼图 · 放进托盘"),
+              "右键一格（没有选中）→ 改判四项、看单张、从这张开始审片、在访达中显示、用…打开、复制文件名、拼图", single.line)
+        check(store.overrides == overrides, "只右键不点：判决一张没动", "overrides \(overrides.count) → \(store.overrides.count) 条")
+
+        if let other = order.last, other != clickedID {
+            select([other])
+            let header = "只这一张（不含选中的 1 张）"
+            let hit = find { $0 == header }
+            check(hit != nil, "选中了别的一张再右键（这一格没重算）：头一行变成「\(header)」，不是上次弹出时留下的旧菜单")
+            if let hit {
+                let before = store.overrides
+                let done = performMenuItem("废片", at: hit.point, mouse: mouse)
+                let changed = store.overrides.filter { before[$0.key] != $0.value }
+                check(done && changed.count == 1 && changed.values.first == .reject && changed[other] == nil,
+                      "只这一张时点「废片」：只改了右键的这一张，选中的那张没动", "改了 \(changed)")
+                let again = find { $0 == header }
+                check(again != nil, "点完选中还在（只动这一张的时候不清选中）")
+            }
+        }
+
+        select(order)
+        let n = order.count
+        let hitAll = find { $0 == "选中的 \(n) 张" }
+        let many = hitAll?.outcome.menu ?? []
+        check(common.allSatisfy(many.contains) && many.contains("挑选这 \(n) 张 (C)") && many.contains("拼图 · 排一版（\(n) 张）"),
+              "全选以后右键：头一行写「选中的 \(n) 张」，多了挑选这 N 张、拼图排一版", hitAll?.outcome.line ?? "没找到")
+        if let hitAll {
+            let done = performMenuItem("可用", at: hitAll.point, mouse: mouse)
+            let usable = order.filter { store.overrides[$0] == .usable }.count
+            check(done && usable == n, "全选时点「可用」：\(n) 张全改成可用", "可用 \(usable) 张")
+            let after = mouse.run(.rclick(point))
+            check(after.menu?.first == "精选", "点完选中清掉（和批量栏一样）：再右键没有「选中的」那一行", after.line)
+        }
+    }
+
+    /// 拿到这一点的右键菜单，点标题是 `title` 的那一项（performActionForItem：菜单不弹）。
+    @MainActor
+    private static func performMenuItem(_ title: String, at p: CGPoint, mouse: SnapshotEvents.Mouse) -> Bool {
+        mouse.run(.move(p))
+        guard let event = NSEvent.mouseEvent(with: .rightMouseDown, location: mouse.windowPoint(p), modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: mouse.window.windowNumber, context: nil, eventNumber: 0,
+                                             clickCount: 1, pressure: 1) else { return false }
+        var view = mouse.hitView(p)
+        while let v = view {
+            if let menu = v.menu(for: event) {
+                menu.update()
+                menu.delegate?.menuNeedsUpdate?(menu)
+                guard let index = menu.items.firstIndex(where: { $0.title == title }) else { return false }
+                menu.performActionForItem(at: index)
+                mouse.pump(0.6)
+                return true
+            }
+            view = v.superview
+        }
+        return false
     }
 }

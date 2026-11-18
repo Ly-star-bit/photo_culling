@@ -56,6 +56,8 @@ struct BatchView: View {
     @State private var aspectEpoch = 0
     /// 网格的可见顺序、分区、分行结果，按「store 变过几回 + 视图选项」记住（GridMemo）：按一下方向键什么都不用重算。
     @State private var memo = GridMemo()
+    /// 格子右键菜单读的选中和版本（GridMenuState）：body 每次抄一份选中，张数一变加一。@State 存引用、批量页不订阅。
+    @State private var menuState = GridMenuState()
     /// 网格里现在看得见哪些章节（时间轴画「你在这」）。故意用 @State 存引用而不是
     /// @StateObject：批量页不订阅它，滚动时只有时间轴重画。
     @State private var viewport: GridViewport
@@ -120,6 +122,7 @@ struct BatchView: View {
     var body: some View {
         let _ = BatchPerf.body("批量页")
         let _ = memo.attach(store)
+        let _ = menuState.sync(selectedIDs) { id, selected in AnyView(cellMenuItems(id, selected: selected)) }
         Group {
             if reviewMode {
                 ReviewView(store: store, orderIDs: pagingOrder, rejectsSkippable: reviewSkippable,
@@ -251,6 +254,9 @@ struct BatchView: View {
         }
         // 筛选、分组方式、单张区、场的展开收起、换章（含 [ ] 和时间轴）一变，看不见的选中就剪掉。
         .onChange(of: selectionScope) { pruneSelectionToVisible() }
+        // 格子的右键菜单头一行写选中几张：张数变了，弹过的菜单作废（GridMenuState）。比张数不比整个集合（⌘A 以后几千个 id）：
+        // 张数没变、换了几张时，要么右键的这一格自己选上 / 取消了（格子重算，菜单跟着重建），要么标题本来就一样。
+        .onChange(of: selectedIDs.count) { menuState.bump() }
         .sheet(isPresented: $showJPEGSheet) { jpegExportSheet }
         .sheet(isPresented: $showISOSheet) { isoExportSheet }
         .sheet(isPresented: $showHighlightsSheet) { highlightsSheet }
@@ -2788,8 +2794,133 @@ struct BatchView: View {
                 let all = store.members(ofTake: take)
                 withAnimation { keepOnly(id, inTake: all) }
                 focusedID = id
-            })
+            },
+            menuState: menuState)
     }
+
+    // MARK: 格子的右键菜单（优化分析 GP-07 / UX-02）
+
+    /// 右键菜单动哪几张（GridSelectionRules.menuTargets）：按的那一刻现取选中。
+    private func menuScope(_ id: String) -> GridSelectionRules.MenuTargets {
+        GridSelectionRules.menuTargets(clicked: id, selected: selectedIDs, visible: visibleIDs)
+    }
+
+    /// 这几张的原片文件（RAW+JPG 双存两个都给，GridHandoff.originals）。
+    private func originalFiles(_ ids: [String]) -> [URL] {
+        ids.compactMap { store.item(withID: $0) }.flatMap { GridHandoff.originals(rawPath: $0.rawPath, decodePath: $0.decodePath) }
+    }
+
+    /// 右键一格弹出来的：改判、看单张、从这张开始审片、挑这一场、在访达中显示、用…打开、复制文件名、拼图。
+    /// 右键的这张在选中里 = 对选中的全部（头一行写张数）；不在 = 只对它，选中不动（GridSelectionRules.menuTargets）。
+    /// 菜单弹出时才建（CellMenu），这里不改焦点、不改选中 —— 只有点了哪一项才动。
+    /// 这是菜单的 body（CellMenu 里调）：标题、置灰只用传进来的 `selected`（GridMenuState 抄的）和 store，不读批量页的
+    /// @State —— 在别的视图的 body 里经由抓着的旧一份批量页读 @State，读到的可能是旧值（实测过一次：选中 1 张时读出 0）；
+    /// 点下去的动作在 body 外面跑，现取动哪几张（menuScope）。
+    @ViewBuilder
+    private func cellMenuItems(_ id: String, selected: Set<String>) -> some View {
+        let inSelection = selected.contains(id)
+        let count = inSelection ? selected.count : 1
+        let item = store.item(withID: id)
+        if count > 1 {
+            Text(Self.menuSelectedTitle(count))
+        } else if !inSelection, !selected.isEmpty {
+            Text(Self.menuOnlyThisTitle(selected.count))
+        }
+        ForEach(Verdict.allCases.reversed(), id: \.self) { v in
+            Button(v.rawValue) { menuSetVerdict(id, v) }
+        }
+        // 多张时不按「有没有手判过的」置灰：选中的别的照片改了判决，这一格不重算，置灰会是旧的。
+        Button("恢复自动") { menuSetVerdict(id, nil) }
+            .disabled(count <= 1 && !store.isManual(id))
+        Divider()
+        Button("看单张") { openInspector(id) }
+        Button("从这张开始审片") {
+            focusedID = id
+            enterReview()
+        }
+        if count >= 2 {
+            Button(Self.menuPickTitle(count)) { pickSelection() }
+        } else if let take = item?.take, (store.takeSizes[take] ?? 0) >= 2 {
+            Button("挑选这一场 (C)") { pickTake(take, focus: id) }
+        }
+        Divider()
+        // 置灰只看右键的这一张的原片在不在（⌘A 几千张时不在弹菜单时挨个 stat）；点下去对全部，不在的跳过。
+        let here = item.map { GridHandoff.originals(rawPath: $0.rawPath, decodePath: $0.decodePath) } ?? []
+        Button("在访达中显示") { AppRuntime.revealInFinder(originalFiles(menuScope(id).ids)) }
+            .disabled(here.isEmpty)
+        openWithMenu(id, kinds: openKinds(id, inSelection ? selected : []), available: item.flatMap { GridHandoff.primary(rawPath: $0.rawPath) } != nil)
+        Menu("复制文件名") {
+            ForEach(FilenameList.Format.allCases) { format in
+                Button(format.title) { store.copyFilenameList(menuScope(id).ids, format: format) }
+            }
+        }
+        Divider()
+        if count >= 2 {
+            Button(Self.menuCollageTitle(count)) { store.collageRequest = menuScope(id).ids }
+        }
+        Button(count >= 2 ? "拼图 · 只放进托盘" : "拼图 · 放进托盘") { store.collageTrayRequest = menuScope(id).ids }
+    }
+
+    /// 「用…打开」按哪几种文件挑 app：右键这张的原图打头（默认 app 按它），选中里别的扩展名各一个（只看扩展名、不碰文件）。
+    private func openKinds(_ id: String, _ selected: Set<String>) -> [URL] {
+        var urls: [URL] = []
+        var seen = Set<String>()
+        for other in [id] + Array(selected) {
+            guard let path = store.item(withID: other)?.rawPath else { continue }
+            let url = URL(fileURLWithPath: path)
+            if seen.insert(url.pathExtension.lowercased()).inserted { urls.append(url) }
+        }
+        return urls
+    }
+
+    /// 「用…打开 ▸」：能开这几种原片的 app（GridHandoff.apps，弹菜单时现查），点一个 = 把原片（RAW+JPG 只开 RAW）交给它打开。
+    @ViewBuilder
+    private func openWithMenu(_ id: String, kinds: [URL], available: Bool) -> some View {
+        let apps = available ? GridHandoff.apps(toOpen: kinds) : []
+        Menu("用…打开") {
+            if apps.isEmpty {
+                Text(available ? "没有能打开它的 app" : "原片不在了（盘没挂上，或者被挪走了）")
+            }
+            ForEach(apps) { app in
+                Button {
+                    let now = menuScope(id).ids.compactMap { store.item(withID: $0).flatMap { GridHandoff.primary(rawPath: $0.rawPath) } }
+                    GridHandoff.open(now, with: app, store: store)
+                } label: {
+                    Label {
+                        Text(app.isDefault ? app.name + "（默认）" : app.name)
+                    } icon: {
+                        Image(nsImage: GridHandoff.icon(app))
+                    }
+                }
+            }
+        }
+        .disabled(!available)
+    }
+
+    /// 右键菜单的改判：对选中的 = 和批量栏一样（改完清掉选中、焦点落到没改的邻居）；只对这一张 = 和悬停条一样。
+    private func menuSetVerdict(_ id: String, _ verdict: Verdict?) {
+        let scope = menuScope(id)
+        if scope.fromSelection {
+            applyBulk(changing: scope.ids) { store.setOverrideBatch(scope.ids, verdict) }
+            return
+        }
+        if let verdict {
+            setFromHover(id, verdict)
+            return
+        }
+        guard store.isManual(id) else { return }
+        let before = id == focusedID ? visibleIDs : nil
+        withAnimation(.easeInOut(duration: 0.2)) { store.setOverrideBatch([id], nil) }
+        if let before, let next = Self.placeAfterChange(of: id, before: before, after: visibleIDs) {
+            focusedID = next
+        }
+    }
+
+    // 菜单标题单独拼：放在视图构建器里的字符串插值，CI 的 Xcode 16 类型检查会慢。
+    private static func menuSelectedTitle(_ count: Int) -> String { "选中的 \(count) 张" }
+    private static func menuOnlyThisTitle(_ selected: Int) -> String { "只这一张（不含选中的 \(selected) 张）" }
+    private static func menuPickTitle(_ count: Int) -> String { "挑选这 \(count) 张 (C)" }
+    private static func menuCollageTitle(_ count: Int) -> String { "拼图 · 排一版（\(count) 张）" }
 
     // MARK: - Right: controls
 
@@ -3328,6 +3459,23 @@ private struct GridCell: View, Equatable {
         let click: (String) -> Void
         let set: (String, Verdict) -> Void
         let keepOnly: (String) -> Void
+        /// 右键菜单（GP-07）：建菜单的闭包、现在的选中都在它里面（批量页 body 每次抄进去），见 GridMenuState。
+        let menuState: GridMenuState
+    }
+
+    /// 右键菜单的壳：.contextMenu 的闭包在格子 body 里当场执行，菜单内容要是直接写在那里，每格每次重算都要把整份菜单
+    /// （选中几张、能打开的 app）现算一遍。包一层视图，里面的 body 只在菜单要画的时候才跑（--perf grid 的「右键菜单」一列）。
+    /// 弹过一次以后 SwiftUI 留着这份内容，格子不重算就不再建 —— 别的照片选上了，这一格的菜单头还写着上次的。
+    /// 所以盯着 GridMenuState：选中的张数一变，弹过的菜单重建；没弹过的格子根本没订阅，不花钱。
+    private struct CellMenu: View {
+        let id: String
+        @ObservedObject var state: GridMenuState
+
+        var body: some View {
+            let _ = BatchPerf.body("右键菜单")
+            let _ = state.version
+            state.build?(id, state.selected) ?? AnyView(EmptyView())
+        }
     }
 
     let item: BatchItem
@@ -3478,6 +3626,8 @@ private struct GridCell: View, Equatable {
             .frame(width: width, alignment: .leading)
         }
         .contentShape(Rectangle())
+        // 右键：改判、看单张、审片、访达、用…打开、复制文件名、拼图（GP-07 / UX-02）。在选中里就对选中的全部。
+        .contextMenu { CellMenu(id: item.id, state: actions.menuState) }
         // 时间轴的「你在这」：只记出现/消失，不在这里读任何会触发重绘的状态。
         .onAppear { viewport.appeared(item.id, chapter: BatchStore.timelineChapter(of: item)) }
         .onDisappear { viewport.disappeared(item.id) }

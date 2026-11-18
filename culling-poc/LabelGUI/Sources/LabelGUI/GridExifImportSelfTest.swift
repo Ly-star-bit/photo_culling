@@ -24,6 +24,7 @@ enum GridExifImportSelfTest {
         let tally = Tally()
         exifCases(tally)
         gridSelectionCases(tally)
+        handoffCases(tally)
         justifiedRowCases(tally)
         watermarkCases(tally)
         trayMarkCases(tally)
@@ -551,6 +552,40 @@ enum GridExifImportSelfTest {
         t.check(TakeShelves.pack(takes: [], width: 1000, target: 100).isEmpty, "并排：没有多张的场 = 没有块")
     }
 
+    // MARK: - 网格照片交给别的 app（GP-07：右键「在访达中显示」「用…打开」、拖出）
+
+    private static func handoffCases(_ t: Tally) {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("labelgui-handoff-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: dir) }
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let raw = dir.appendingPathComponent("A.ARW"), jpg = dir.appendingPathComponent("A.JPG")
+        let solo = dir.appendingPathComponent("B.JPG"), xmp = dir.appendingPathComponent("A.xmp")
+        for url in [raw, jpg, solo, xmp] { fm.createFile(atPath: url.path, contents: Data([0])) }
+        let pair = GridHandoff.originals(rawPath: raw.path, decodePath: jpg.path).map(\.lastPathComponent)
+        t.check(pair == ["A.ARW", "A.JPG"], "交给别的 app RAW+JPG 双存：RAW、JPG 两个都给（和复制原片同一个规则），旁边的 .xmp 不给",
+                "得到 \(pair)")
+        let single = GridHandoff.originals(rawPath: solo.path, decodePath: solo.path).map(\.lastPathComponent)
+        t.check(single == ["B.JPG"], "交给别的 app 只有 JPG：给它一个", "得到 \(single)")
+        let gone = dir.appendingPathComponent("C.ARW").path
+        let missing = GridHandoff.originals(rawPath: gone, decodePath: jpg.path).map(\.lastPathComponent)
+        t.check(missing == ["A.JPG"] && GridHandoff.primary(rawPath: gone) == nil,
+                "交给别的 app 磁盘上没有的不给（盘没挂、文件被挪走）", "得到 \(missing)")
+        t.check(GridHandoff.primary(rawPath: raw.path)?.lastPathComponent == "A.ARW", "用…打开 RAW+JPG 只开 RAW")
+
+        // 能打开 JPG 的 app：问 LaunchServices，系统自带的「预览」总在；默认的排第一；本程序自己不在里面。
+        let apps = GridHandoff.apps(toOpen: [solo])
+        let names = apps.map(\.name)
+        t.check(apps.contains { Bundle(url: $0.url)?.bundleIdentifier == "com.apple.Preview" },
+                "用…打开 JPG：列得出预览", "得到 \(names)")
+        t.check(apps.filter(\.isDefault).count <= 1 && (apps.firstIndex { $0.isDefault } ?? 0) == 0,
+                "用…打开 默认的 app 排第一、最多一个", "得到 \(names)")
+        t.check(Set(apps.map(\.id)).count == apps.count, "用…打开 同一个 app 不列两遍", "得到 \(names)")
+        let mixed = GridHandoff.apps(toOpen: [solo, raw])
+        t.check(Set(mixed.map(\.id)).isSubset(of: Set(apps.map(\.id))), "用…打开 JPG 和 RAW 混着：只列两种都能开的",
+                "JPG \(apps.count) 个、混着 \(mixed.count) 个")
+    }
+
     // MARK: - 网格多选（S21）
 
     private static func gridSelectionCases(_ t: Tally) {
@@ -593,6 +628,22 @@ enum GridExifImportSelfTest {
         for (name, selected, visible, want) in pruneRows {
             let got = GridSelectionRules.pruned(selected, visible: visible)
             t.check(got == want, "多选 剪选中 " + name, "得到 \(got.sorted())")
+        }
+
+        // 右键菜单 / 拖出动哪几张（GP-07）
+        typealias M = GridSelectionRules.MenuTargets
+        let menuRows: [(String, String, Set<String>, [String], M)] = [
+            ("没有选中：只动右键的这张", "b", [], ["a", "b", "c"], M(ids: ["b"], fromSelection: false, otherSelected: 0)),
+            ("右键的在选中里：按网格顺序动选中的全部", "c", ["c", "a"], ["a", "b", "c"],
+             M(ids: ["a", "c"], fromSelection: true, otherSelected: 0)),
+            ("右键的在选中里、选中有一张被筛掉了：只动看得见的", "a", ["a", "x"], ["a", "b"],
+             M(ids: ["a"], fromSelection: true, otherSelected: 0)),
+            ("右键的不在选中里：只动它，选中的 2 张不动（菜单头上说）", "b", ["a", "c"], ["a", "b", "c"],
+             M(ids: ["b"], fromSelection: false, otherSelected: 2)),
+        ]
+        for (name, clicked, selected, visible, want) in menuRows {
+            let got = GridSelectionRules.menuTargets(clicked: clicked, selected: selected, visible: visible)
+            t.check(got == want, "右键 / 拖出 " + name, "得到 \(got)")
         }
 
         let many = GridSelectionRules.changedNotice(count: 3, verdict: .reject) ?? "nil"

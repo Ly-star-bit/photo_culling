@@ -54,6 +54,26 @@ enum GridSelectionRules {
         return selected.intersection(visible)
     }
 
+    struct MenuTargets: Equatable {
+        /// 这一下（右键菜单的一项、拖出去）要动的照片，按网格顺序。
+        let ids: [String]
+        /// true = 动的是选中的那几张（改判走批量栏那条路：改完清掉选中）；false = 只动右键 / 按下的那一张。
+        let fromSelection: Bool
+        /// 只动这一张、可旁边还选着别的：选着几张（菜单头一行说清楚「不含选中的 N 张」，免得以为改的是选中的）。
+        let otherSelected: Int
+    }
+
+    /// 网格格子的右键菜单、拖出去（GP-07 / UX-02）动哪几张：右键 / 按下的那张在选中里，就是选中里还看得见的全部
+    /// （按网格顺序）；不在选中里就只是它自己，选中不动 —— 访达也是这样认的（访达还会把选中换成这一张，SwiftUI 的
+    /// 右键菜单弹出前不给回调，这里不换）。
+    static func menuTargets(clicked: String, selected: Set<String>, visible: [String]) -> MenuTargets {
+        if selected.contains(clicked) {
+            let shown = visible.filter { selected.contains($0) }
+            return MenuTargets(ids: shown.isEmpty ? [clicked] : shown, fromSelection: true, otherSelected: 0)
+        }
+        return MenuTargets(ids: [clicked], fromSelection: false, otherSelected: selected.count)
+    }
+
     /// 数字键一次改了多张时的提示；一张不提示（网格上看得见它变了）。
     static func changedNotice(count: Int, verdict: Verdict?) -> String? {
         guard count >= 2 else { return nil }
