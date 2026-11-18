@@ -78,7 +78,7 @@ struct BatchView: View {
     /// 分组模式下单张照片（没有连拍、不用挑）收在最后的折叠区里，默认收起 ——
     /// 以前每张单张也占一整行，真正要挑的连拍被冲散，得一直往下滚着找。
     @AppStorage("batch.showSingles", store: AppRuntime.viewDefaults) private var showSingles = false
-    /// 右侧「筛选严格度」面板。调完阈值基本不再碰，小屏上收起来给网格让地方（⌥⌘S）。
+    /// 右侧筛选面板（判废线 / 分组 / 视图与提醒）。调完阈值基本不再碰，小屏上收起来给网格让地方（⌥⌘S）。
     @AppStorage("batch.showControls", store: AppRuntime.viewDefaults) private var showControls = true
     /// 已定的场默认叠起来（Aftershoot 的叠放）：只显示留下的，被废的收成一个按钮。这里记的是
     /// 手动展开了的场。换场次清空。
@@ -2964,7 +2964,7 @@ struct BatchView: View {
     // MARK: - Right panel: thresholds + VLM only. Everything else lives in the
     // top bar / export menu; explanations live in .help tooltips, not captions.
 
-    // 右栏（筛选严格度 + VLM）在下面的 BatchControlPanel 里。
+    // 右栏（判废线 / 分组 / 视图与提醒 + VLM）在下面的 BatchControlPanel 里。
 
     /// 拖进来的东西：文件夹就打开它，照片文件就打开它所在的文件夹。新文件夹直接开始分析；
     /// 分析过的就打开缓存的结果（要重新分析点顶栏「重新分析」）。
@@ -3290,7 +3290,7 @@ final class GridMemo {
     }
 }
 
-// MARK: - 右栏：筛选严格度 + VLM
+// MARK: - 右栏：判废线 / 分组 / 视图与提醒 + VLM
 
 /// 右栏单独一个视图，只看 store（优化分析 NP4）：以前是批量页的一个属性，网格里每挪一下焦点、点选一张照片，三张直方图、
 /// 三根滑杆跟着整页一起重算。Everything else lives in the top bar / export menu; explanations live in .help tooltips.
@@ -3361,7 +3361,9 @@ private struct BatchControlPanel: View {
         BatchPerf.body("右栏")
         return ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                GroupBox("筛选严格度") {
+                // 以前一张「筛选严格度」卡里混着判废线、分堆间隔、近似重复、只看临界、每章最少保留五类东西，一半不是严格度
+                // （UX-09）：拆成三张，只改分组和标题、不加说明字（说明照旧在悬停提示里，11-10 U7 的方向）。滑杆的先后没动。
+                GroupBox("判废线") {
                     VStack(alignment: .leading, spacing: 12) {
                         Picker("预设", selection: Binding(
                             get: { store.currentPreset },
@@ -3420,8 +3422,25 @@ private struct BatchControlPanel: View {
                                 killBelow: true
                             )
                         )
+                        // 说的是上面三根滑杆：以前隔着分组、筛选、提醒排在整张卡最底下。
+                        Text("拖动实时生效 · 红字 = 该项当前淘汰数")
+                            .hintText()
+                    }
+                    .padding(6)
+                }
+
+                // 只改怎么分堆（和近似重复只留最佳这条规则），不改判废线。
+                GroupBox("分组") {
+                    VStack(alignment: .leading, spacing: 12) {
                         takeGapRow
                         burstDedupeRow
+                    }
+                    .padding(6)
+                }
+
+                // 只改看哪些、提醒什么，不改任何判决。
+                GroupBox("视图与提醒") {
+                    VStack(alignment: .leading, spacing: 12) {
                         Toggle("只看临界照片 (\(store.borderlineCount))", isOn: $store.borderlineFilter)
                             .font(.caption)
                             .help("任一阈值 ±15% 区间内的照片 — 调完滑杆先过一眼刀口上的这些，误杀都藏在这里")
@@ -3430,8 +3449,6 @@ private struct BatchControlPanel: View {
                             .font(.caption)
                             .help("某个章节（仪式/晚宴…）留下的张数低于这个数就在状态栏和时间轴上提醒。0 = 只在整章全灭时提醒。" +
                                   "所有场次通用（只管提醒，不改任何判决）")
-                        Text("拖动实时生效 · 红字 = 该项当前淘汰数")
-                            .hintText()
                     }
                     .padding(6)
                 }
