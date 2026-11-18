@@ -226,11 +226,12 @@ struct PickView: View {
                 if let range = BatchView.timeRange(frames) {
                     Text(range).font(.caption2).monospacedDigit().foregroundStyle(.secondary)
                 }
+                // 待处理 = 实心胶囊（和批量页组头同一个写法，TA-06），已定 = 淡底。
                 Text(pending ? "待处理" : "已定")
                     .font(.caption2.bold())
                     .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background((pending ? AppPalette.warning : AppPalette.pick).opacity(0.22), in: Capsule())
-                    .foregroundStyle(pending ? AppPalette.warning : AppPalette.pick)
+                    .background(pending ? AppPalette.warning : AppPalette.pick.opacity(0.22), in: Capsule())
+                    .foregroundStyle(pending ? AppPalette.onWarning : AppPalette.pick)
             }
             .lineLimit(1)
         } else {

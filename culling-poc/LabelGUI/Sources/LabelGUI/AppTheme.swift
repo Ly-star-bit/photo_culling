@@ -72,6 +72,18 @@ enum AppPalette {
     static var selectionKeyline: Color { onAccent.opacity(selectionKeylineOpacity) }
     /// 自检按这个不透明度算 keyline 叠在纸白 / 纯白 / 墨黑 / 纯黑上的颜色。
     static let selectionKeylineOpacity = 0.7
+
+    /// 浮在网格上的提示条（「已改 N 张 → 废片」）的底。深色主题照旧是黑 0.7 的胶囊（字是系统亮色，石墨 6:1）；浅色主题换成
+    /// 卡片色 —— 黑 0.7 压在相纸的浅底上只到 #424240，压深过的判决色在上面 1.8:1（TA-08）。审片的提示条压在照片上，不用这个。
+    static var toastFill: Color { c.dark ? Color.black.opacity(0.7) : c.card }
+
+    /// 直方图（右栏筛选严格度）的槽和留下的柱子。深色主题照旧（石墨不变）；浅色主题以前也是黑 0.25 的槽、灰 0.55 的柱、
+    /// 白线，相纸下柱子对槽 1.3:1、阈值线 1.7:1（TA-09）：槽只压一点（同 well），柱子墨色 0.45（对槽 ≥ 3:1），线用 ink。
+    static var histogramTrough: Color { c.dark ? Color.black.opacity(0.25) : Color.black.opacity(0.07) }
+    static var histogramBar: Color { c.dark ? Color.gray.opacity(0.55) : Color.black.opacity(0.45) }
+    /// 检视器的亮度直方图：深色主题照旧是黑 0.5 的槽、白柱；浅色主题浅槽、墨色柱（以前是浅栏里一块深灰板）。
+    static var lumaTrough: Color { c.dark ? Color.black.opacity(0.5) : Color.black.opacity(0.07) }
+    static var lumaBar: Color { c.dark ? Color.white.opacity(0.85) : Color.black.opacity(0.5) }
 }
 
 /// 压在照片上的（黑底胶囊里的星、心、淘汰理由，人脸小图的睁闭眼记号，审片照片区的提示条）：照片不跟主题变，这里一律是系统的
@@ -537,6 +549,12 @@ extension View {
     /// 一页的根上挂一次：点缀色、卡片样式、深 / 浅。弹出框、sheet 跟着环境走。
     func appTheme() -> some View { modifier(AppThemeModifier()) }
 
+    /// 每个 sheet 的内容上挂一次（`.sheet { X().themedSheet() }`）：sheet 的底是主题的 panel。以前 sheet 视图自己没有底色，
+    /// 露的是 sheet 窗口的系统灰 —— 五套深色一个样（#323232），相纸是冷灰（TA-04）。`presentationBackground` 管真 sheet 的窗口，
+    /// `.background` 管内容这一块（离屏快照里没有真 sheet，只画得出这一层）；颜色在 body 里读，换主题跟着重画。
+    /// 快照工具（UISnapshot / CardImportSnapshot）画 sheet 的根上挂的也是它，快照和真 sheet 同一个底。
+    func themedSheet() -> some View { modifier(ThemedSheetModifier()) }
+
     /// 窗口的根上挂一次（只有真开界面的那几处）：窗口的标题栏、系统控件跟着主题的深 / 浅走，不跟随系统外观。
     func themedWindow() -> some View { modifier(ThemedWindowModifier()) }
 }
@@ -548,6 +566,16 @@ private struct AppThemeModifier: ViewModifier {
             .tint(center.colors.accent)
             .groupBoxStyle(AppCardGroupBoxStyle(card: center.colors.card))
             .environment(\.colorScheme, center.scheme)
+    }
+}
+
+private struct ThemedSheetModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        let panel = ThemeCenter.shared.colors.panel
+        content
+            .background(panel)
+            .presentationBackground(panel)
+            .appTheme()
     }
 }
 

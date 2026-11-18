@@ -188,6 +188,7 @@ struct BatchView: View {
                             .overlay(
                                 Label("松开打开这个文件夹", systemImage: "folder.badge.plus")
                                     .font(.title3.bold())
+                                    .foregroundStyle(OnPhotoPalette.text)
                                     .padding(.horizontal, 18).padding(.vertical, 10)
                                     .background(.black.opacity(0.7), in: Capsule())
                             )
@@ -219,6 +220,7 @@ struct BatchView: View {
                         pickTake(item.take, focus: currentID)
                     }
                 }
+                .themedSheet()
             }
         }
         // 换了一场拍摄就把选择/焦点全部丢掉。留着的话批量改判栏还显示"已选 3 张"，
@@ -251,11 +253,12 @@ struct BatchView: View {
         }
         // 筛选、分组方式、单张区、场的展开收起、换章（含 [ ] 和时间轴）一变，看不见的选中就剪掉。
         .onChange(of: selectionScope) { pruneSelectionToVisible() }
-        .sheet(isPresented: $showJPEGSheet) { jpegExportSheet }
-        .sheet(isPresented: $showISOSheet) { isoExportSheet }
-        .sheet(isPresented: $showHighlightsSheet) { highlightsSheet }
-        .sheet(isPresented: $showClientImport) { ClientImportSheet(store: store, isPresented: $showClientImport) }
-        .sheet(isPresented: $showBodyClock) { BodyClockSheet(store: store, isPresented: $showBodyClock) }
+        // sheet 的底跟主题（themedSheet，TA-04）：以前露的是 sheet 窗口的系统灰。
+        .sheet(isPresented: $showJPEGSheet) { jpegExportSheet.themedSheet() }
+        .sheet(isPresented: $showISOSheet) { isoExportSheet.themedSheet() }
+        .sheet(isPresented: $showHighlightsSheet) { highlightsSheet.themedSheet() }
+        .sheet(isPresented: $showClientImport) { ClientImportSheet(store: store, isPresented: $showClientImport).themedSheet() }
+        .sheet(isPresented: $showBodyClock) { BodyClockSheet(store: store, isPresented: $showBodyClock).themedSheet() }
         .confirmationDialog(acceptTitle, isPresented: $showAcceptAllConfirm) {
             Button("定案 · \(acceptPreview.rejects) 张设为废片") {
                 let scope = acceptScope
@@ -1285,7 +1288,8 @@ struct BatchView: View {
             Label(toast.text, systemImage: toast.symbol)
                 .font(.callout.bold())
                 .padding(.horizontal, 14).padding(.vertical, 7)
-                .background(Color.black.opacity(0.7), in: Capsule())
+                // 字是界面的判决色（相纸压深过）：底跟主题（深色照旧黑 0.7，浅色是卡片色，TA-08）。
+                .background(AppPalette.toastFill, in: Capsule())
                 .overlay(Capsule().stroke(toast.color.opacity(0.8), lineWidth: 1.5))
                 .foregroundStyle(toast.color)
                 .padding(.bottom, 16)
@@ -1297,7 +1301,7 @@ struct BatchView: View {
     private func showGridToast(_ text: String, verdict: Verdict?) {
         let token = (gridToast?.token ?? 0) + 1
         let symbol: String = verdict?.symbol ?? "arrow.uturn.backward"
-        let color: Color = verdict?.color ?? .white
+        let color: Color = verdict?.color ?? AppPalette.ink
         withAnimation(.easeOut(duration: 0.12)) { gridToast = (text, symbol, color, token) }
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(1600))
@@ -1711,8 +1715,9 @@ struct BatchView: View {
                 Button("选择照片文件夹...") { pickFolder() }
             }
             // 以前这里是一整行密密麻麻的快捷键；现在有快捷键表了，只留两条最有用的入口。
+            // 新用户最需要的这行指路：以前是 .caption + 系统三级灰，2.26:1（UX-12）。11pt + 主题的二级字（每套 ≥ 4.5:1，自检核对）。
             Text("也可以把照片文件夹从访达直接拖进窗口 · 插上相机存储卡会问要不要导入 · 按 ? 看全部快捷键")
-                .font(.caption).foregroundStyle(.tertiary)
+                .font(.system(size: 11)).foregroundStyle(AppPalette.secondary)
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 120)
@@ -2468,8 +2473,11 @@ struct BatchView: View {
         .help(info.allSelected ? "取消选中这一场" : "选中这一场的全部 \(info.members.count) 张")
     }
 
+    /// 待处理是实心胶囊（待处理色底、onWarning 字），已定是淡底胶囊：靠「实心 vs 淡底」和底下文件名前的废片 ✕ 分开。
+    /// 以前待处理也是淡底 + 同色字，石墨 3.7:1、相纸 2.5:1，而相纸的待处理橙和废片红看着是一个颜色（TA-06）。
     private func takePill(_ info: TakeInfo, short: Bool) -> some View {
-        let color: Color = info.pending ? AppPalette.warning : AppPalette.pick
+        let fill: Color = info.pending ? AppPalette.warning : AppPalette.pick.opacity(0.2)
+        let ink: Color = info.pending ? AppPalette.onWarning : AppPalette.pick
         let text = short ? Self.takeStatusShort(pending: info.pending, picks: info.picks.count)
                          : Self.takeStatusText(pending: info.pending, alive: info.alive, picks: info.picks.count)
         return Text(text)
@@ -2477,8 +2485,8 @@ struct BatchView: View {
             .lineLimit(1)
             .fixedSize()
             .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(color.opacity(info.pending ? 0.25 : 0.2), in: Capsule())
-            .foregroundStyle(color)
+            .background(fill, in: Capsule())
+            .foregroundStyle(ink)
             .help(Self.takeStatusText(pending: info.pending, alive: info.alive, picks: info.picks.count))
     }
 
@@ -3385,14 +3393,16 @@ private struct GridCell: View, Equatable {
                 .background(Color(white: 0.10))
                 .clipShape(RoundedRectangle(cornerRadius: 4))
                 // 焦点和选中分开：以前都是 3px accent，⌘多选之后分不清焦点在哪，
-                // 而数字键在没有选中时判的正是焦点那张。选中 = accent 粗框 + 左上 ✓，
-                // 焦点 = 白色细框，两者可以同时出现。
+                // 而数字键在没有选中时判的正是焦点那张。选中 = 贴着照片边的选中框（点缀色 + 两侧 keyline）+ 左上 ✓，
+                // 焦点 = 照片外面一圈细框（画在放照片的底上，主题保证 ≥ 3:1），两者可以同时出现。
+                // 以前焦点也贴着照片边、写死白：纯黑 / 灰卡的点缀色本身是白，选中和焦点同色同位置分不开（TA-05）；
+                // 相纸的浅底上白框看不见（TA-03）。
                 .overlay {
                     if isSelected {
-                        RoundedRectangle(cornerRadius: 4).stroke(AppPalette.accent, lineWidth: 3)
+                        SelectionRing(shape: RoundedRectangle(cornerRadius: 4))
                     }
                     if isFocused {
-                        RoundedRectangle(cornerRadius: 4).inset(by: isSelected ? 3 : 0)
+                        RoundedRectangle(cornerRadius: 5.5).inset(by: -2.5)
                             .stroke(AppPalette.focus, lineWidth: 2)
                     }
                 }
@@ -3409,7 +3419,10 @@ private struct GridCell: View, Equatable {
                             } else if groupSize > 1 {
                                 Text("×\(groupSize)").font(.caption2).bold().foregroundStyle(Color.white.opacity(0.6))
                             }
-                            if manual { Image(systemName: "hand.raised.fill").font(.caption2) }
+                            // 黑胶囊里的字和图标都要写颜色：不写就跟着外观走，相纸下是黑手压在黑胶囊上（TA-07）。
+                            if manual {
+                                Image(systemName: "hand.raised.fill").font(.caption2).foregroundStyle(OnPhotoPalette.secondaryText)
+                            }
                             // 客户选中：紫心（和确认表上客户点的那颗、XMP 的紫色标同一个颜色）。
                             if client { Image(systemName: "heart.fill").font(.caption2).foregroundStyle(OnPhotoPalette.client) }
                             if star {
@@ -3455,9 +3468,7 @@ private struct GridCell: View, Equatable {
                 }
                 .overlay(alignment: .topLeading) {
                     if isSelected {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(AppPalette.accent)
-                            .background(Circle().fill(.white))
+                        SelectionCheckmark()
                             .padding(4)
                     }
                 }
@@ -5173,16 +5184,17 @@ struct MetricHistogram: View {
                 let killed = killBelow ? (x + barW / 2) < tx : (x + barW / 2) >= tx
                 context.fill(
                     Path(CGRect(x: x, y: size.height - h, width: max(1, barW - 1), height: h)),
-                    with: .color(killed ? markColor.opacity(0.8) : .gray.opacity(0.55))
+                    with: .color(killed ? markColor.opacity(0.8) : AppPalette.histogramBar)
                 )
             }
             var line = Path()
             line.move(to: CGPoint(x: tx, y: 0))
             line.addLine(to: CGPoint(x: tx, y: size.height))
-            context.stroke(line, with: .color(.white.opacity(0.9)), lineWidth: 1)
+            context.stroke(line, with: .color(AppPalette.ink.opacity(0.9)), lineWidth: 1)
         }
         .frame(height: 26)
-        .background(.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 3))
+        // 槽、柱子、线跟主题的深浅走（深色主题照旧；相纸下以前柱子对槽 1.3:1、白线看不见，TA-09）。
+        .background(AppPalette.histogramTrough, in: RoundedRectangle(cornerRadius: 3))
     }
 }
 
@@ -5202,10 +5214,10 @@ struct HistogramView: View {
                 let h = CGFloat(value / maxValue) * size.height
                 let rect = CGRect(x: CGFloat(i) * barWidth, y: size.height - h,
                                   width: barWidth, height: h)
-                context.fill(Path(rect), with: .color(.white.opacity(0.85)))
+                context.fill(Path(rect), with: .color(AppPalette.lumaBar))
             }
         }
-        .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 4))
+        .background(AppPalette.lumaTrough, in: RoundedRectangle(cornerRadius: 4))
         .task(id: path) {
             let p = path
             let computed = await Task.detached(priority: .utility) { () -> [Float]? in
@@ -5337,6 +5349,9 @@ struct ReviewView: View {
                     .keyboardShortcut(.escape, modifiers: [])
                 }
                 .padding(8)
+                // 顶栏、判决行、胶片条是主题的栏（和检视器同一级）。以前三条都没有底色，露的是窗口的系统灰：
+                // 五套深色一模一样（#383838），纯黑下是两道灰框（TA-01）。照片区照旧是黑的。
+                .background(AppPalette.bar)
 
                 if zoomed, let full = zoomImage {
                     ZoomPane(image: full, entry: .hundred,
@@ -5393,6 +5408,7 @@ struct ReviewView: View {
                         .padding(6)
                     }
                     .frame(height: 92)
+                    .background(AppPalette.bar)
                     .onAppear {
                         // 从网格中间进来 / 接着上次的位置：胶片条一开始就停在这张上。
                         if let id = focusedID { DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) } }
@@ -5517,6 +5533,7 @@ struct ReviewView: View {
         }
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity)
+        .background(AppPalette.bar)
     }
 
     private func refreshFocusMask() {
@@ -5605,7 +5622,8 @@ struct ReviewView: View {
                         .id("\(item.id)#\(offset)")
                 }
                 if faces.count > 4 {
-                    Text("+\(faces.count - 4)").font(.caption).foregroundStyle(.secondary)
+                    // 压在照片区的黑底上：不跟外观走（相纸下 .secondary 是黑字，黑上加黑，复核补充 2）。
+                    Text("+\(faces.count - 4)").font(.caption).foregroundStyle(OnPhotoPalette.secondaryText)
                 }
             }
             .padding(6)

@@ -138,25 +138,26 @@ enum BatchUISnapshot {
             }
             root = AnyView(ShortcutsPanel(page: page).background(AppPalette.card))
         } else if let kind = option("--delivery-ui") {
+            // 导出设置是 sheet 里的那一段：底和真 sheet 一样（themedSheet，TA-04；以前垫的是 card，看着像跟了主题）。
             root = AnyView(deliveryPreview(kind, store: store, json: option("--delivery-json") ?? "")
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .background(AppPalette.card))
+                .themedSheet())
         } else if let path = option("--client-import-ui") {
             // 导入客户选择对话框（sheet 在离屏窗口里画不出来，单独当根视图画），框里预先放好这段回复。
             let text = (try? Data(contentsOf: URL(fileURLWithPath: path))).flatMap(ClientReply.decode) ?? ""
             root = AnyView(ClientImportSheet(store: store, isPresented: .constant(true), text: text)
-                .background(AppPalette.card))
+                .themedSheet())
         } else if args.contains("--body-clock-ui") {
             // 按机身对时面板（sheet 在离屏窗口里画不出来，单独当根视图画）。
             root = AnyView(BodyClockSheet(store: store, isPresented: .constant(true))
-                .background(AppPalette.card))
+                .themedSheet())
         } else if args.contains("--review-ui") {
             let skippable = order.contains { store.item(withID: $0).map { $0.verdict != .reject } ?? false }
             root = AnyView(ReviewView(store: store, orderIDs: order, rejectsSkippable: skippable,
                                       focusedID: .constant(startID), reviewMode: .constant(true)))
         } else if args.contains("--inspector-ui") {
             root = AnyView(PhotoInspector(store: store, inspectedID: .constant(startID), gridOrder: order,
-                                          initialID: startID, onPickTake: { _ in }))
+                                          initialID: startID, onPickTake: { _ in }).themedSheet())
         } else if args.contains("--timeline-only") {
             // 只画时间轴 + 悬停卡片（--hover N = 第 N 段），下面垫一块网格色看卡片压在网格上的样子。
             let hover = option("--hover").flatMap(Int.init)

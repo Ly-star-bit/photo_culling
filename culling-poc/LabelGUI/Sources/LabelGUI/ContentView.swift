@@ -62,6 +62,7 @@ struct ContentView: View {
         // 插了相机存储卡：问要不要导入（导入的进度在批量页顶栏，点「导入」就切过去）。
         .sheet(item: $cardCenter.offer) { _ in
             CardImportSheet(center: cardCenter, store: batchStore) { model.tab = .batch }
+                .themedSheet()
         }
         .onAppear { cardCenter.start() }
         // 「这一版新增」（升级后第一次打开弹一次、「帮助 › 这一版新增」随时再看）：「带我去」先关弹框再去。
@@ -71,6 +72,7 @@ struct ContentView: View {
                 // 等弹框收起再切页签、描边（不然描边亮在弹框底下）。
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { model.go(destination) }
             }, onClose: { model.whatsNewShown = false })
+            .themedSheet()
             .onAppear { WhatsNew.recordShown() }
         }
         // 插卡的导入框后到（第一次读可移除宗卷要等系统授权）：先收起「这一版新增」让导入框出来 —— 同一个视图上两个 sheet
