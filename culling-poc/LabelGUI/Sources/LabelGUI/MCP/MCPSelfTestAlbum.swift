@@ -102,6 +102,14 @@ extension MCPSelfTest {
             ("collage_get_state", ["candidates_limit": 5], false),
             ("collage_get_state", ["candidates_for": "", "candidates_limit": 5], false),
             ("collage_get_state", ["candidates_for": "a", "candidates_limit": 31], false),
+            // 优化分析 MC-05 + 复核补 2：只要哪几块、托盘从第几张起
+            ("collage_get_state", ["include": ["tray_photos"], "tray_offset": 200], true),
+            ("collage_get_state", ["include": [], "include_preview": false], true),
+            ("collage_get_state", ["include": ["album", "variants", "cells", "layout", "tray_photos"]], true),
+            ("collage_get_state", ["include": ["tray"]], false),
+            ("collage_get_state", ["include": "album"], false),
+            ("collage_get_state", ["tray_offset": -1], false),
+            ("collage_get_state", ["tray_offset": "200"], false),
             ("collage_export", ["session": k, "pages": "1-3, 7"], true),
             ("collage_export", ["session": k, "proof": true, "name": "看版", "variant": "1a2b3c4d"], true),
             ("collage_export", ["session": k, "proof": true, "pages": "1"], false),
@@ -149,6 +157,16 @@ extension MCPSelfTest {
               "collage_cover、collage_replace_photo 的说明写了编辑封面时作用在哪")
         check(props("collage_export").isSuperset(of: ["pages", "proof"]), "collage_export 有 pages、proof")
         check(props("collage_get_state").isSuperset(of: ["candidates_for", "candidates_limit"]), "collage_get_state 有 candidates_for")
+        // 优化分析 MC-05：include 的取值和 app 认的一致；说明里写了 tray_offset 怎么翻、chapters 封顶以后去哪翻
+        let stateSchema = def("collage_get_state")["inputSchema"] as? [String: Any] ?? [:]
+        let stateProps = stateSchema["properties"] as? [String: Any] ?? [:]
+        let includeItems = (stateProps["include"] as? [String: Any])?["items"] as? [String: Any] ?? [:]
+        let stateIncludes = includeItems["enum"] as? [String] ?? []
+        check(stateIncludes == MCPArgs.stateParts && props("collage_get_state").contains("tray_offset"),
+              "collage_get_state 的 include 取值 = MCPArgs.stateParts，有 tray_offset：\(stateIncludes)")
+        check(description("collage_get_state").contains("tray_offset") && description("collage_get_state").contains("tray_unused")
+              && description("cull_session_overview").contains("chapters_truncated"),
+              "collage_get_state 的说明写了 tray_offset、tray_unused；overview 的说明写了 chapters_truncated")
         let instructions = MCPToolDefs.instructions(live: true)
         check(album.allSatisfy(instructions.contains), "instructions 提到了相册整本的 6 个工具")
         // 优化分析 MC-01：空托盘时的报错指的路（排版工具的 photos 顺带进托盘）两个工具的说明里真的写着；instructions 说了托盘
@@ -254,6 +272,38 @@ extension MCPSelfTest {
         check(MCPArgs.coverFields.allSatisfy { LiveHandlers.coverFieldLabel($0) != $0 }, "封面每个字段都有中文名（提示里用）")
         check(LiveHandlers.pageKind(CollagePage(root: .leaf(CollageCell()))) == "grid", "普通页 = grid")
         styleKeyChecks(check)
+        trayPageChecks(check)
+    }
+
+    /// 托盘超过 200 张（复核补 2）和文字上限（MC-05）：没列全时标出从哪接着翻、带一条 tray_truncated；列全了不带。
+    private static func trayPageChecks(_ check: Check) {
+        var head: [String: Any] = [:]
+        let w1 = LiveHandlers.markTray(&head, offset: 0, kept: 200, total: 216)
+        check(head["tray_photos_truncated"] as? Bool == true && head["tray_next_offset"] as? Int == 200
+              && w1?["code"] as? String == "tray_truncated" && (w1?["hint"] as? String ?? "").contains("tray_offset:200"),
+              "216 张列了前 200：truncated、next 200、warning 指 tray_offset:200（\(w1.map(MCPJSON.string) ?? "nil")）")
+        var tail: [String: Any] = ["tray_photos_truncated": true, "tray_next_offset": 1]
+        check(LiveHandlers.markTray(&tail, offset: 200, kept: 16, total: 216) == nil && tail["tray_photos_truncated"] == nil
+              && tail["tray_next_offset"] == nil, "从 200 起列到底：不带 truncated、next、warning")
+        // 文字上限：从 tray_photos 尾部截，warning 跟着换成截到哪；预览图的字节不算进去、原样留着
+        let rows: [[String: Any]] = (0..<216).map { i in ["id": "DSCF\(7000 + i)_copy", "width": 6240, "height": 4160, "used": 0] }
+        var state: [String: Any] = ["tray": 216, "tray_photos": Array(rows.prefix(200)), "page": 1]
+        state["preview_jpeg_b64"] = String(repeating: "A", count: 40_000)
+        var warnings: [[String: Any]] = []
+        if let w = LiveHandlers.markTray(&state, offset: 0, kept: 200, total: 216) { warnings.append(w) }
+        state["warnings"] = warnings
+        let fitted = LiveHandlers.fitState(state, textMax: 6_000, offset: 0, total: 216)
+        let kept = (fitted["tray_photos"] as? [Any])?.count ?? 0
+        let fw = (fitted["warnings"] as? [[String: Any]] ?? []).filter { $0["code"] as? String == "tray_truncated" }
+        var measured = fitted
+        measured.removeValue(forKey: "preview_jpeg_b64")
+        check(kept > 10 && kept < 200 && fitted["tray_next_offset"] as? Int == kept && fw.count == 1
+              && (fw.first?["hint"] as? String ?? "").contains("tray_offset:\(kept)")
+              && MCPJSON.string(measured).count <= 6_000 - LiveHandlers.stateTextReserve
+              && (fitted["preview_jpeg_b64"] as? String)?.count == 40_000,
+              "文字上限 6000：tray_photos 截到 \(kept) 行、next_offset 跟着、只有一条 tray_truncated、预览原样留着")
+        let roomy = LiveHandlers.fitState(state, textMax: 1_000_000, offset: 0, total: 216)
+        check((roomy["tray_photos"] as? [Any])?.count == 200, "放得下就不截")
     }
 
     /// 婚礼两套样式按这本册子重算过边距（MC-09）：跨页画布上读回来也是 weddingFineArt / weddingCanon，不是 null；

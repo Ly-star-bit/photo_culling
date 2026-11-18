@@ -155,10 +155,13 @@ enum LiveHandlers {
 
     // MARK: - collage.state（§9.3 + §10.4）
 
-    /// params {"session"?,"include_preview","max_edge"}。不带 session = app 当前那一场（没打开任何场次时 session:null）。
+    /// params {"session"?,"include_preview","max_edge","candidates_for","candidates_limit","include","tray_offset","text_max"}。
+    /// 不带 session = app 当前那一场（没打开任何场次时 session:null）。text_max 是 `--mcp` 的文字上限（MC-05）：只有它给了才截。
     static func collageState(_ req: LiveServer.Request, live: LiveServer, model: AppModel) async -> LiveServer.Reply {
         var args: [String: Any] = [:]
-        for name in ["include_preview", "max_edge", "candidates_for", "candidates_limit"] { if let v = req.params[name] { args[name] = v } }
+        for name in ["include_preview", "max_edge", "candidates_for", "candidates_limit", "include", "tray_offset"] {
+            if let v = req.params[name] { args[name] = v }
+        }
         if let p = MCPArgs.check("collage_get_state", args) { return invalid(p.message, hint: p.hint) }
         if let raw = req.params["session"], !(raw is NSNull), !(raw is String) { return invalid("session 要是字符串") }
         // §9.4.3 第 5 步在第 7 步之前：场次不对就不去碰拼图工程（挂的时候会按批量页刷托盘，可能写 collage.json）
@@ -191,22 +194,36 @@ enum LiveHandlers {
         if let b = project.albumBudget { out["album_target"] = CollageBudgetChange.targetInfo(b) }
         out["canvas"] = canvasInfo(project.canvas)
         out["style_fields"] = styleFields(project.style)
-        let (rows, cut) = trayRows(collage)
-        out["tray_photos"] = rows
-        if cut { out["tray_photos_truncated"] = true }
+        // include 点名的几块（优化分析 MC-05）：不给 = 全给（和以前一样）
+        let parts = (req.params["include"] as? [Any]).map { Set($0.compactMap { $0 as? String }) }
+        func want(_ part: String) -> Bool { parts?.contains(part) ?? true }
+        let usage = collage.photoUsage
+        // 托盘里还没上版的张数（复核补 2：托盘一大，先看这个数再决定要不要翻 tray_photos）
+        out["tray_unused"] = project.photos.reduce(0) { n, p in (usage[p.id] ?? 0) == 0 ? n + 1 : n }
+        let trayOffset = LiveWire.int(req.params["tray_offset"]) ?? 0
+        var trayWarning: [String: Any]?
+        if want("tray_photos") {
+            let rows = trayRows(collage, offset: trayOffset, usage: usage)
+            out["tray_photos"] = rows
+            if trayOffset > 0 { out["tray_offset"] = trayOffset }
+            trayWarning = markTray(&out, offset: trayOffset, kept: rows.count, total: project.photos.count)
+        }
         // 页码、格子、版式（编辑封面时是封面那一块，editing_cover: true，见 LiveAlbumHandlers 的文件头）
         out.merge(pageFields(collage)) { _, new in new }
+        if !want("cells") { out.removeValue(forKey: "cells") }
+        if !want("layout") { out.removeValue(forKey: "layout") }
         // 相册整本的摘要（相册 A + B · M）：每个跨页的照片、锁、印厂规格的页数、封面
-        if collage.isAlbum { out["album"] = albumInfo(collage) }
+        if collage.isAlbum && want("album") { out["album"] = albumInfo(collage) }
         // 换照片的候选（S6，同「格式 › 换一张」）
         if let target = req.params["candidates_for"] as? String {
             guard collage.photoMap[target] != nil else {
-                return invalid("托盘里没有「\(target)」，拿不了换它的候选。", hint: "照片 id 见 tray_photos 或 cells[].photo_id")
+                return invalid("托盘里没有「\(target)」，拿不了换它的候选。",
+                               hint: "照片 id 见 tray_photos（超过 \(trayRowLimit) 张用 tray_offset 往后翻）或 cells[].photo_id")
             }
             let limit = LiveWire.int(req.params["candidates_limit"]) ?? 12
             out["candidates"] = candidateRows(collage, for: target, limit: limit)
         }
-        out["variants"] = variantsList(collage)
+        if want("variants") { out["variants"] = variantsList(collage) }
         out["selection"] = collage.selection.map { path in path.map(String.init).joined() } ?? NSNull()
         var undo: [String: Any] = ["collage_depth": collage.undoDepth, "can_undo": collage.canUndo]
         undo["can_redo"] = collage.canRedo
@@ -252,9 +269,46 @@ enum LiveHandlers {
                 ? "先 collage_apply_template 或 collage_run_kit 排一版"
                 : "过一秒再调 collage_get_state"))
         }
+        if let w = trayWarning { warnings.append(w) }
         out["warnings"] = warnings
-        return .result(out)
+        guard let textMax = LiveWire.int(req.params["text_max"]) else { return .result(out) }
+        return .result(fitState(out, textMax: textMax, offset: trayOffset, total: project.photos.count))
     }
+
+    /// 托盘这一页没列全（第 200 张以后、或文字上限截掉的）：补 tray_photos_truncated、tray_next_offset，回一条 warning
+    /// 说怎么接着翻（复核补 2：以前截了也是 warnings 空的，后面的照片 AI 拿不到）。列全了把这几个键拿掉、回 nil。
+    nonisolated static func markTray(_ o: inout [String: Any], offset: Int, kept: Int, total: Int) -> [String: Any]? {
+        let next = offset + kept
+        guard next < total else {
+            o.removeValue(forKey: "tray_photos_truncated")
+            o.removeValue(forKey: "tray_next_offset")
+            return nil
+        }
+        o["tray_photos_truncated"] = true
+        o["tray_next_offset"] = next
+        let shown = kept == 0 ? "一张都没列" : "只列了第 \(offset + 1)–\(next) 张"
+        return MCPReadModel.warning("tray_truncated", "托盘 \(total) 张，tray_photos \(shown)。",
+                                    hint: "后面的带 tray_offset:\(next) 再调（只要托盘这一块加 include:[\"tray_photos\"]）")
+    }
+
+    /// 文字上限（优化分析 MC-05）：以前 collage_get_state 不受 LABELGUI_MCP_TEXT_MAX 管。预览图不算（`--mcp` 换成图片块），
+    /// 给 `--mcp` 补的 preview 对象留 stateTextReserve 个字；超了从 tray_photos 尾部截（同 cull.read 的截法），warning 跟着改。
+    nonisolated static func fitState(_ out: [String: Any], textMax: Int, offset: Int, total: Int) -> [String: Any] {
+        guard let rows = out["tray_photos"] as? [Any], rows.count > 1 else { return out }
+        let previewKeys = ["preview_jpeg_b64", "preview_width", "preview_height", "preview_bytes"]
+        var text = out
+        for k in previewKeys { text.removeValue(forKey: k) }
+        var fitted = MCPJSON.fittingObject(text, list: "tray_photos", limit: max(1_000, textMax - stateTextReserve)) { o, kept in
+            var warnings = (o["warnings"] as? [[String: Any]] ?? []).filter { $0["code"] as? String != "tray_truncated" }
+            if let w = markTray(&o, offset: offset, kept: kept, total: total) { warnings.append(w) }
+            o["warnings"] = warnings
+        }
+        for k in previewKeys { if let v = out[k] { fitted[k] = v } }
+        return fitted
+    }
+
+    /// `--mcp` 在 collage_get_state 的文字里补的 preview 对象（文件路径、尺寸）和可能的一条 warning 大约这么长。
+    nonisolated static let stateTextReserve = 500
 
     /// 当前页的格子（切分树的叶子，按阅读顺序）：path 是孩子下标连起来（"01"），overlays 是压在照片上的字块数，
     /// rect 是这一格在画布上的位置（[x, y, 宽, 高]，相对画布宽高；散落版、印样没有）。canvas：这一页的画布（编辑封面时是
@@ -301,12 +355,12 @@ enum LiveHandlers {
         return out
     }
 
-    /// 托盘里的照片（设计版式要看比例）：最多 trayRowLimit 行（大场次的托盘可能上千张）。
-    static let trayRowLimit = 200
+    /// 托盘里的照片（设计版式要看比例）：一次最多 trayRowLimit 行（大场次的托盘可能上千张），从第 offset 张起（tray_offset，
+    /// 复核补 2：以前固定前 200 张，后面的读不到）。
+    nonisolated static let trayRowLimit = 200
 
-    static func trayRows(_ collage: CollageStore) -> (rows: [[String: Any]], truncated: Bool) {
-        let usage = collage.photoUsage
-        let rows = collage.project.photos.prefix(trayRowLimit).map { p -> [String: Any] in
+    static func trayRows(_ collage: CollageStore, offset: Int, usage: [String: Int]) -> [[String: Any]] {
+        let rows = collage.project.photos.dropFirst(offset).prefix(trayRowLimit).map { p -> [String: Any] in
             var row: [String: Any] = ["id": p.id, "width": p.width, "height": p.height, "faces": p.faces.count]
             row["pick"] = p.isPick
             // 客户选中才报（没导入过客户选择的场次，行和以前一样）
@@ -314,7 +368,7 @@ enum LiveHandlers {
             row["used"] = usage[p.id] ?? 0
             return row
         }
-        return (Array(rows), collage.project.photos.count > trayRowLimit)
+        return Array(rows)
     }
 
     /// 换这张照片的候选（S6 CollageStore.replacementCandidates，同「格式 › 换一张」）：理由（同连拍 / 同场 / 相似）、分数、

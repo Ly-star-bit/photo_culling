@@ -959,7 +959,8 @@ extension LiveHandlers {
             break
         }
         if let back = req.params["back_photo"] as? String, !back.isEmpty, collage.photoMap[back] == nil {
-            return invalid("托盘里没有「\(back)」：封底只能放托盘里的照片。", hint: "照片 id 见 collage_get_state 的 tray_photos")
+            return invalid("托盘里没有「\(back)」：封底只能放托盘里的照片。",
+                           hint: "照片 id 见 collage_get_state 的 tray_photos（超过 \(trayRowLimit) 张用 tray_offset 往后翻）")
         }
         let pushes = collage.undoPushes
         var made = true

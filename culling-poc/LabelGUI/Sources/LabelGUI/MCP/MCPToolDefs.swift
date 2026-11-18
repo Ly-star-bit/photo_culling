@@ -147,7 +147,7 @@ enum MCPToolDefs {
      "annotations":"$READ"},
 
     {"name":"cull_session_overview","title":"场次概览",
-     "description":"app 当前打开的那一场的选片概览：精选/可用/废片（pick/usable/reject）各多少张、废片理由计数、当前阈值和放宽建议、章节列表和每章的计数、场（scene，按快门间隔切开的一串连拍）和近似重复组（near_duplicate）的统计、还没处理的场、多机身和对时偏移、XMP 过期了几张（xmp.stale_count：上次写 XMP 之后判决、星级或客户选中变了的，Lightroom / C1 里还是旧的，改完判决要提醒用户在 app 里重写；xmp.written 为 false 是这一场还没写过 XMP；xmp.last_written 是上次写进 XMP 的时间，旧版本写的没记就没有这个键；上次写 XMP 的记录读不进来时 written、stale_count、shared_sidecar_count 都是 null、xmp.unknown 写原因，带 xmp_state_unknown 警告 —— 这时说不清过期了几张，不是没写过）、警告、app 是否正在分析。读的是 app 内存里的状态（含还没存盘的改动），和窗口里看到的一致。要看具体照片用 cull_list_photos。",
+     "description":"app 当前打开的那一场的选片概览：精选/可用/废片（pick/usable/reject）各多少张、废片理由计数、当前阈值和放宽建议、章节列表和每章的计数（最多 60 章，多了标 chapters_truncated，后面的用 cull_list_groups kind=chapter 翻）、场（scene，按快门间隔切开的一串连拍）和近似重复组（near_duplicate）的统计、还没处理的场、多机身和对时偏移、XMP 过期了几张（xmp.stale_count：上次写 XMP 之后判决、星级或客户选中变了的，Lightroom / C1 里还是旧的，改完判决要提醒用户在 app 里重写；xmp.written 为 false 是这一场还没写过 XMP；xmp.last_written 是上次写进 XMP 的时间，旧版本写的没记就没有这个键；上次写 XMP 的记录读不进来时 written、stale_count、shared_sidecar_count 都是 null、xmp.unknown 写原因，带 xmp_state_unknown 警告 —— 这时说不清过期了几张，不是没写过）、警告、app 是否正在分析。读的是 app 内存里的状态（含还没存盘的改动），和窗口里看到的一致。要看具体照片用 cull_list_photos。",
      "inputSchema":{"type":"object","properties":{"session":"$SESSION"},"required":["session"],"additionalProperties":false},
      "annotations":"$READ"},
 
@@ -202,13 +202,15 @@ enum MCPToolDefs {
      "annotations":"$READ"},
 
     {"name":"collage_get_state","title":"看 app 里的拼图",
-     "description":"看 app 里当前拼图工程的状态（读的是 app 内存，含还没存盘的改动）：模式、页码和页数、画布尺寸 canvas、模板、样式、单独调过的样式项 style_fields、色调、标题/副标题/刊头/期号、托盘张数和每张照片的 id、像素尺寸 tray_photos（客户选中的照片带 client_pick:true，批量页导入的客户选择）、相册设了目标跨页数时的 album_target（spreads、min_per_spread、max_per_spread）、每个格子（path、照片 id、文字块数、在画布上的位置 rect）、这一页版式的语法 layout（可以改了发给 collage_set_layout）、选中的格子、撤销深度（最上面那一步是不是 AI 做的）、存过的方案（variants：id、名字、current = 就是现在这一版）、是否还在算、digest（拼图写工具的 if_digest 就填它；存方案不改它），后面跟一张 app 当前画面的预览图。相册另有 album：spreads（每个跨页的号 page、照片 id、锁没锁、哪种页）、印厂规格的页数合不合规（print）、封面（cover）。editing_cover 为 true 是用户（或 AI）正在编辑封面：这时 page_kind 是 cover，cells、layout 是封面那一块（page 还是回去的那个跨页）。candidates_for 填一张照片的 id，结果里多一份 candidates：能换它的照片（同连拍 / 同场 / 画面相似，带分数、用在第几个跨页、是不是废片、客户选中），换用 collage_replace_photo。session 不填就是 app 当前打开的那一场；填了别的场次回 session_not_open。和用户切到拼图页一样，会先把这一场的拼图工程接上（托盘里照片的判决等信息按批量页刷新），所以可能顺带存一次 collage.json。",
+     "description":"看 app 里当前拼图工程的状态（读的是 app 内存，含还没存盘的改动）：模式、页码和页数、画布尺寸 canvas、模板、样式、单独调过的样式项 style_fields、色调、标题/副标题/刊头/期号、托盘张数 tray、没上版的张数 tray_unused、每张照片的 id 和像素尺寸 tray_photos（客户选中的带 client_pick:true；一次最多 200 张，文字超上限也从尾部截，没列全时 warnings 的 tray_truncated 写明 tray_offset 从哪接着翻）、相册设了目标跨页数时的 album_target（spreads、min_per_spread、max_per_spread）、每个格子（path、照片 id、文字块数、在画布上的位置 rect）、这一页版式的语法 layout（可以改了发给 collage_set_layout）、选中的格子、撤销深度（最上面那一步是不是 AI 做的）、存过的方案（variants：id、名字、current = 就是现在这一版）、是否还在算、digest（拼图写工具的 if_digest 就填它；存方案不改它），后面跟一张 app 当前画面的预览图。相册另有 album：spreads（每个跨页的号 page、照片 id、锁没锁、哪种页）、印厂规格的页数合不合规（print）、封面（cover）。editing_cover 为 true 是用户（或 AI）正在编辑封面：这时 page_kind 是 cover，cells、layout 是封面那一块（page 还是回去的那个跨页）。candidates_for 填一张照片的 id，结果里多一份 candidates：能换它的照片（同连拍 / 同场 / 画面相似，带分数、用在第几个跨页、是不是废片、客户选中），换用 collage_replace_photo。include 只要点名的几块（默认全给，托盘大时省字）。session 不填就是 app 当前打开的那一场；填了别的场次回 session_not_open。和用户切到拼图页一样，会先把这一场的拼图工程接上（托盘里照片的判决等信息按批量页刷新），所以可能顺带存一次 collage.json。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "include_preview":{"type":"boolean","default":true,"description":"要不要带 app 当前画面的预览图"},
        "max_edge":{"type":"integer","minimum":256,"maximum":1024,"default":768,"description":"预览图长边像素"},
        "candidates_for":{"type":"string","minLength":1,"maxLength":256,"description":"要换掉的那张照片的 id（托盘里的）：结果里带换它的候选"},
        "candidates_limit":{"type":"integer","minimum":1,"maximum":30,"default":12,"description":"候选最多几张（和 candidates_for 一起给）"},
+       "include":{"type":"array","items":{"type":"string","enum":["tray_photos","cells","layout","album","variants"]},"uniqueItems":true,"description":"只要这几块；页码、样式、tray、digest 这些总给"},
+       "tray_offset":{"type":"integer","minimum":0,"default":0,"description":"tray_photos 从第几张起（从 0 起）"},
        "inline":"$INLINE"},
       "additionalProperties":false},
      "annotations":"$READ"},
