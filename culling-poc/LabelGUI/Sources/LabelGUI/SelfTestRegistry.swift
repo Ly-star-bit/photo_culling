@@ -62,7 +62,7 @@ enum SelfTestRegistry {
     static let all: [Entry] = [
         .init("--ux-selftest", "网格改判后焦点落在哪（BatchView.placeAfterChange）；另挂 EXIF 快门 0、网格多选规则、水印页 RAW+JPG 配对、拼图检视器的去那儿、这一版新增、快捷键一览（? 键的判断表、每页列了绑着的键）",
               ci: .selftests()) { _ in UXSelfTest.run() },
-        .init("--viewer-zoom-selftest", "看单张 / 审片的放大（ViewerZoom）：翻页保持放大、预解下一张、翻到预解好的当场就有、连着翻过去的不解、换方向放掉预解的、解不出不卡、同一张只解一份、落在主脸中心（自己造几张 JPEG，不开界面）",
+        .init("--viewer-zoom-selftest", "看单张 / 审片的放大（ViewerZoom）：翻页保持放大、预解下一张、翻到预解好的当场就有、连着翻过去的不解、换方向放掉预解的、解不出不卡、同一张只解一份、落在主脸中心；审片 / 看单张的人脸特写多大（自己造几张 JPEG，不开界面）",
               ci: .selftests()) { _ in ViewerZoomSelfTest.run() },
         .init("--timeline-selftest", "时间轴 3000 组随机章节不出界、不重叠；随机数按 seed 播种（--seed N 或 LABELGUI_SELFTEST_SEED，--trial K 只重跑那一组），CI 跑三个 seed（三批互不相同的 3000 组，自检开头核对）",
               ci: .selftests(["--seed", "{seed}"])) { _ in ChapterTimelineSelfTest.runFromCommandLine() },

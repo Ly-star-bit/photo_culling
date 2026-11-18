@@ -13,6 +13,8 @@ import UniformTypeIdentifiers
 //   6. 解不出的文件不卡在「解码中」；退出放大清干净。
 //   7. 同一张同时要两次（预解还没完就翻到了）：只解一份，两边拿到的是同一张图。
 //   8. 落在脸上：主脸中心；没脸 = nil（图中心）。
+//   9. 人脸特写多大（GP-02）：审片竖片放进右边黑边、260pt；张数多按高度压；横片黑边够宽也放进去；放不下照旧角上 76pt；
+//      看单张右栏一张脸占满栏宽。
 enum ViewerZoomSelfTest {
     @MainActor
     static func run() -> Never {
@@ -124,6 +126,23 @@ enum ViewerZoomSelfTest {
         let anchor = ViewerZoom.faceAnchor([0.2, 0.1, 0.4, 0.3])
         check(anchor.map { abs($0.x - 0.3) < 1e-9 && abs($0.y - 0.2) < 1e-9 } == true, "进放大落在主脸中心", "\(String(describing: anchor))")
         check(ViewerZoom.faceAnchor(nil) == nil && ViewerZoom.faceAnchor([0.1, 0.2]) == nil, "没脸（或框不对）就是图中心（nil）")
+
+        // 9. 人脸特写多大（GP-02）
+        let tall = ReviewView.closeupLayout(pane: CGSize(width: 1440, height: 730), aspect: 2.0 / 3, faces: 1)
+        check(tall.inSideBar && tall.size == 260, "审片 1440 宽的竖片：一张脸放进右边黑边、260pt", "\(tall)")
+        let four = ReviewView.closeupLayout(pane: CGSize(width: 1440, height: 730), aspect: 2.0 / 3, faces: 6)
+        let fourHeight: CGFloat = four.size * 4 + 3 * 6 + 12 + 10 + 16
+        check(four.inSideBar && four.size >= 140 && fourHeight <= 730, "竖片六张脸（画四张）：按高度压、放得下",
+              "\(four)，四张占高 \(fourHeight)")
+        let wide = ReviewView.closeupLayout(pane: CGSize(width: 1440, height: 730), aspect: 1.5, faces: 1)
+        check(wide.inSideBar && wide.size >= 110 && wide.size + 12 <= wide.side, "横片 1440 宽：黑边约 170pt，特写放进黑边、不盖照片",
+              "\(wide)")
+        let narrow = ReviewView.closeupLayout(pane: CGSize(width: 900, height: 450), aspect: 1.5, faces: 2)
+        check(!narrow.inSideBar && narrow.size == 76, "窄窗口的横片：照旧盖在右上角、76pt", "\(narrow)")
+        let square = ReviewView.closeupLayout(pane: CGSize(width: 800, height: 800), aspect: 1, faces: 1)
+        check(!square.inSideBar && square.size == 76, "照片占满宽度（没有黑边）：照旧 76pt", "\(square)")
+        let sizes = [1, 2, 4, 5, 9].map { PhotoInspector.faceTileSize(count: $0, width: 292) }
+        check(sizes == [292, 142, 142, 92, 92], "看单张右栏：一张脸占满栏宽、2–4 张一排两张、再多一排三张", "\(sizes)")
 
         FullResCache.cache.removeAllObjects()
         print(failed == 0 ? "放大：\(total) 条都过" : "放大：\(failed)/\(total) 条没过")

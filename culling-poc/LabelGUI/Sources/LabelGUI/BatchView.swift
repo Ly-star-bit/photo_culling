@@ -4673,10 +4673,16 @@ enum FaceStripCache {
     /// preview (already cached for the grid) is the source, no original decode.
     static let previewFaceMinWidth = 110.0
 
-    static func source(previewPath: String, decodePath: String, bbox: [Double]) async -> NSImage? {
+    /// 特写边长（设备像素）到这么大就算「大特写」（审片黑边里、看单张右栏一张脸占满栏宽，GP-02）：脸要从大图里裁。
+    static let largeCropPixels = 300.0
+
+    /// `pixels` = 特写要显示的设备像素边长；`display` = 大图的长边档位（FitCache.expectedEdge，主线程上取好传进来）。
+    static func source(previewPath: String, decodePath: String, bbox: [Double],
+                       pixels: Double = 0, display: Int = 0) async -> NSImage? {
         guard bbox.count == 4 else { return nil }
         let widthOnPreview = (bbox[2] - bbox[0]) * Double(ImageLoader.previewMaxPixel)
-        if widthOnPreview >= previewFaceMinWidth,
+        // 预览上的脸够宽才用预览。大特写按要显示的像素算（放大超过 1.25 倍就糊了）。
+        if widthOnPreview >= max(previewFaceMinWidth, pixels * 0.8),
            let preview = ThumbCache.load(path: previewPath, maxPixel: ImageLoader.previewMaxPixel) {
             return preview
         }
@@ -4687,6 +4693,15 @@ enum FaceStripCache {
         let aspect = previewAspect(previewPath)
         if let fit = FitCache.cachedDecode(path: decodePath), sameAspect(fit.size, aspect) {
             return fit
+        }
+        // 大特写：等大图那一张（和 SharpImageView 同一个尺寸、同一个键，正在解就等那一份，不另解）。2048 的那张里 40 MP 竖片
+        // 的脸只有约 180 像素，放到 260pt（520 像素）是糊的；大图（一半 = 3864）里约 350 像素（优化分析 GP-02 复核）。
+        // 只给大特写：连拍挑选每格底下那排 60–96pt 的小脸照旧走 2048，不然一组十张一出来就排十张大图解码（NP5）。
+        if pixels >= largeCropPixels {
+            let size = FitCache.decodeSize(header: FitCache.header(path: decodePath), display: display)
+            if let fit = await FitCache.load(path: decodePath, maxPixel: size).value, sameAspect(fit.size, aspect) {
+                return fit
+            }
         }
         return await decode(path: decodePath, aspect: aspect)
     }
@@ -4724,8 +4739,10 @@ struct FaceCropView: View {
     let previewPath: String
     let decodePath: String
     let face: FaceInfo
-    /// 边长（点）。检视器 84，连拍挑选每格底下 60–96（按格子大小）。
+    /// 边长（点）。检视器 84（一张脸时占满右栏），审片 76（竖片放进黑边时 220–260，GP-02），连拍挑选每格底下 60–96（按格子大小）。
     var size: CGFloat = 84
+    /// 到这么大（点）算大特写：从大图里裁（FaceStripCache.largeCropPixels 按 2 倍屏算的那一档），换档要重裁。
+    static let largeSize: CGFloat = 150
     /// 连拍挑选按人对齐后的睁眼档（多了黄色「眯眼」）；nil = 只看这张脸自己的睁闭眼。
     var eye: FaceAlignment.Eye? = nil
     /// 这个人在本组里眼睛最好的那张：右上角一颗绿星。
@@ -4784,7 +4801,7 @@ struct FaceCropView: View {
                     .help("这个人在本组里眼睛睁得最好的一张")
             }
         }
-        .task(id: decodePath + face.bbox.description) {
+        .task(id: decodePath + face.bbox.description + (size >= Self.largeSize ? "#L" : "")) {
             // 换了照片 / 换了脸：先清掉，别让上一张的脸挂在新照片的睁闭眼圈底下。
             crop = nil
             // 翻得快时先等一拍：被翻过去的格子在这里就取消了，不会去排原图解码。
@@ -4793,9 +4810,13 @@ struct FaceCropView: View {
             let path = decodePath
             let preview = previewPath
             let bbox = face.bbox
+            // 要显示多少设备像素：大特写（GP-02）从大图里裁，见 FaceStripCache.source。
+            let pixels = Double(size * (NSScreen.main?.backingScaleFactor ?? 2))
+            let display = FitCache.expectedEdge
             let work = Task.detached(priority: .userInitiated) { () -> LiveBox<NSImage?> in
                 guard bbox.count == 4,
-                      let decoded = await FaceStripCache.source(previewPath: preview, decodePath: path, bbox: bbox),
+                      let decoded = await FaceStripCache.source(previewPath: preview, decodePath: path, bbox: bbox,
+                                                                pixels: pixels, display: display),
                       let cg = decoded.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return LiveBox(nil) }
                 let w = CGFloat(cg.width), h = CGFloat(cg.height)
                 let rect = CGRect(x: bbox[0] * w, y: bbox[1] * h,
@@ -5089,7 +5110,7 @@ struct PhotoInspector: View {
     // MARK: 右栏
 
     static let sidebarWidth: CGFloat = 320
-    /// 右栏里小图一排排的列：人脸 84（一排 3 张）、同场 68（一排 4 张），折行。
+    /// 右栏里小图一排排的列：场内表情 84（一排 3 张）、同场 68（一排 4 张），折行。「人脸」那一节按张数放大（faceTileSize）。
     private static let faceColumns = [GridItem(.adaptive(minimum: 84, maximum: 84), spacing: 8, alignment: .leading)]
     private static let memberColumns = [GridItem(.adaptive(minimum: 68, maximum: 68), spacing: 6, alignment: .top)]
     private static let signalColumns = Array(repeating: GridItem(.flexible(), spacing: 8, alignment: .leading), count: 3)
@@ -5117,15 +5138,24 @@ struct PhotoInspector: View {
     }
 
     /// Face close-ups with eye-state rings — scan this instead of zooming.
+    /// 放大到栏宽（GP-02：以前固定 84pt、一排 3 张，一张脸时下面空着一大块，76–84pt 只看得出睁没睁眼）。
     private func faceSection(_ item: BatchItem) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let size = Self.faceTileSize(count: item.faces.count, width: Self.sidebarWidth - 28)
+        return VStack(alignment: .leading, spacing: 6) {
             sectionTitle("人脸 \(item.faces.count)")
-            LazyVGrid(columns: Self.faceColumns, alignment: .leading, spacing: 8) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: size, maximum: size), spacing: 8, alignment: .leading)],
+                      alignment: .leading, spacing: 8) {
                 ForEach(Array(item.faces.enumerated()), id: \.offset) { _, face in
-                    FaceCropView(previewPath: item.previewPath, decodePath: item.decodePath, face: face)
+                    FaceCropView(previewPath: item.previewPath, decodePath: item.decodePath, face: face, size: size)
                 }
             }
         }
+    }
+
+    /// 看单张右栏的人脸特写边长（纯函数，--viewer-zoom-selftest 测）：一张脸占满栏宽，2–4 张一排两张，再多一排三张。
+    nonisolated static func faceTileSize(count: Int, width: CGFloat) -> CGFloat {
+        let perRow: CGFloat = count <= 1 ? 1 : (count <= 4 ? 2 : 3)
+        return ((width - (perRow - 1) * 8) / perRow).rounded(.down)
     }
 
     /// 同一场的全部照片；点击切换，当前那张高亮。场内取舍（留哪张、其余废片）在
@@ -5846,27 +5876,54 @@ struct ReviewView: View {
         return "场 \(item.take) · 第 \(idx + 1)/\(members.count) 张"
     }
 
-    /// 右上角一列人脸（从左到右排），带睁闭眼圈；没脸不画。
+    /// 一列人脸（从左到右排），带睁闭眼圈；没脸不画。照片两侧的黑边够宽（竖片）就放进右边黑边、放大到 220–260pt，
+    /// 不然（横片、窄窗口）照旧盖在右上角、76pt（GP-02，尺寸见 closeupLayout）。
     @ViewBuilder
     private func faceColumn(_ item: BatchItem) -> some View {
         let faces = item.faces.filter { $0.bbox.count == 4 }
             .sorted { ($0.bbox[0] + $0.bbox[2]) < ($1.bbox[0] + $1.bbox[2]) }
         if !faces.isEmpty {
-            VStack(spacing: 6) {
-                // 按「这张照片 + 第几张脸」认格子：只按下标的话翻页时复用同一个格子，新照片底下先挂着上一张的脸。
-                ForEach(Array(faces.prefix(4).enumerated()), id: \.offset) { offset, face in
-                    FaceCropView(previewPath: item.previewPath, decodePath: item.decodePath, face: face, size: 76)
-                        .id("\(item.id)#\(offset)")
+            GeometryReader { geo in
+                let layout = Self.closeupLayout(pane: geo.size, aspect: PreviewAspect.ratio(item.previewPath),
+                                                faces: faces.count)
+                VStack(spacing: 6) {
+                    // 按「这张照片 + 第几张脸」认格子：只按下标的话翻页时复用同一个格子，新照片底下先挂着上一张的脸。
+                    ForEach(Array(faces.prefix(4).enumerated()), id: \.offset) { offset, face in
+                        FaceCropView(previewPath: item.previewPath, decodePath: item.decodePath, face: face,
+                                     size: layout.size)
+                            .id("\(item.id)#\(offset)")
+                    }
+                    if faces.count > 4 {
+                        Text("+\(faces.count - 4)").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
-                if faces.count > 4 {
-                    Text("+\(faces.count - 4)").font(.caption).foregroundStyle(.secondary)
-                }
+                .padding(6)
+                .background(Color.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
+                // 黑边里：在右边黑边里横着居中；角上：离边 10pt。
+                .frame(width: layout.inSideBar ? layout.side : nil)
+                .padding(.top, 10)
+                .padding(.trailing, layout.inSideBar ? 0 : 10)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             }
-            .padding(6)
-            .background(Color.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
-            .padding(10)
             .allowsHitTesting(false)
         }
+    }
+
+    /// 审片的人脸特写多大、放哪（纯函数，--viewer-zoom-selftest 测）。`pane` = 大图那一块（点），`aspect` = 照片宽 / 高。
+    /// 照片按比例放在中间，两侧各留 `side` 宽的黑边。黑边放得下一列 ≥ 110pt 的特写就放进右边黑边（不再盖着照片），边长取
+    /// 黑边宽、按张数分的高度、260 三者最小；放不下（横片、窄窗口）就是以前的样子：盖在右上角、76pt。
+    /// 1440×900 的竖片：黑边约 476pt，一张脸 260、两张 260、四张约 165；横片黑边约 170 → 约 126pt。
+    nonisolated static func closeupLayout(pane: CGSize, aspect: CGFloat, faces: Int) -> (size: CGFloat, side: CGFloat, inSideBar: Bool) {
+        let n = CGFloat(max(1, min(4, faces)))
+        let photoWidth: CGFloat = min(pane.width, pane.height * max(0.1, aspect))
+        let side: CGFloat = max(0, (pane.width - photoWidth) / 2)
+        // 一列的四周：外边 16、底衬 6 × 2；四张之外的「+N」一行另留 20。
+        let byWidth: CGFloat = side - 16 * 2 - 12
+        let rows: CGFloat = n + (faces > 4 ? 0.15 : 0)
+        let byHeight: CGFloat = (pane.height - 10 - 16 - 12 - (n - 1) * 6) / rows
+        let size: CGFloat = min(260, byWidth, byHeight).rounded(.down)
+        guard size >= 110 else { return (76, side, false) }
+        return (size, side, true)
     }
 
     @ViewBuilder
