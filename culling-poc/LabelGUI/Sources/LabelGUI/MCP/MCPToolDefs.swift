@@ -152,7 +152,7 @@ enum MCPToolDefs {
      "annotations":"$READ"},
 
     {"name":"cull_list_photos","title":"列照片",
-     "description":"按条件列出 app 当前打开的那一场里的照片，每张一行精简数据：id、判决、废片理由、拍摄时间（已加机身对时偏移）、章节、场和场内名次、近似重复组、锐度、曝光裁切、人脸质量、人脸数和闭眼数、是否人工改判（manual；changed_by 是 ai = AI 用 cull_set_verdicts 改的、user = 用户亲手改的）。条件之间是 AND。分页：结果里有 next_cursor，原样传回 cursor 就是下一页；翻页中间判决变了会带 session_changed:true。要完整细节（EXIF、每张脸）用 cull_get_photos；要看图用 cull_preview_photos。",
+     "description":"按条件列出 app 当前打开的那一场里的照片，每张一行精简数据：id、判决、废片理由、拍摄时间（已加机身对时偏移）、章节、场和场内名次、近似重复组、锐度、曝光裁切、人脸质量、人脸数和闭眼数、是否人工改判（manual；changed_by 是 ai = AI 用 cull_set_verdicts 改的、user = 用户亲手改的）、客户选中（client_pick:true）和客户备注（client_note：导入客户选择时文件名后面的话，比如「去路人」；有才给）。条件之间是 AND。分页：结果里有 next_cursor，原样传回 cursor 就是下一页；翻页中间判决变了会带 session_changed:true。要完整细节（EXIF、每张脸）用 cull_get_photos；要看图用 cull_preview_photos。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "verdict":{"type":"array","items":{"type":"string","enum":["pick","usable","reject"]},"uniqueItems":true,"description":"只列这些判决"},
@@ -162,6 +162,7 @@ enum MCPToolDefs {
        "near_duplicate":{"type":"integer","minimum":0,"description":"只列这一个近似重复组"},
        "body":{"type":"string","maxLength":120,"description":"只列这台机身（型号或序列号）"},
        "manual_only":{"type":"boolean","default":false,"description":"只列人工改判过的"},
+       "client_pick":{"type":"boolean","description":"true = 只列客户选中的（cull_import_client_picks 导入、或用户在 app 里导入的），false = 只列没选中的；不给 = 不筛"},
        "sort":{"type":"string","enum":["time","id","sharpness"],"default":"time"},
        "limit":{"type":"integer","minimum":1,"maximum":100,"default":50},
        "cursor":{"type":"string","maxLength":512,"description":"上一页结果里的 next_cursor，原样传回"}},
@@ -169,7 +170,7 @@ enum MCPToolDefs {
      "annotations":"$READ"},
 
     {"name":"cull_get_photos","title":"照片详情",
-     "description":"app 当前打开的那一场里 1–20 张照片的完整分析：判决和理由；原图路径；相机、机身、序列号；拍摄时间（原始的和对时后的）；EXIF（快门、光圈、ISO、等效焦距、镜头）；锐度、曝光裁切、人脸质量；每张脸的位置（bbox = [x0,y0,x1,y1]，0–1 归一化，左上角为原点，按 EXIF 转正后的画面，四边各外扩了 15%）、是否闭眼、眼睛开合度、面积占比；章节、场、名次、近似重复组；VLM 复审和申诉结果（有的话）；人工改判（AI 改的另有 ai_override：哪一次 op_id、哪个工具、什么时候、AI 改之前是什么）和客户选片标记。不存在的 id 列在 missing_ids。",
+     "description":"app 当前打开的那一场里 1–20 张照片的完整分析：判决和理由；原图路径；相机、机身、序列号；拍摄时间（原始的和对时后的）；EXIF（快门、光圈、ISO、等效焦距、镜头）；锐度、曝光裁切、人脸质量；每张脸的位置（bbox = [x0,y0,x1,y1]，0–1 归一化，左上角为原点，按 EXIF 转正后的画面，四边各外扩了 15%）、是否闭眼、眼睛开合度、面积占比；章节、场、名次、近似重复组；VLM 复审和申诉结果（有的话）；人工改判（AI 改的另有 ai_override：哪一次 op_id、哪个工具、什么时候、AI 改之前是什么）、客户选片标记 client_pick 和客户备注 client_note（客户回复里文件名后面的修图要求，比如「去路人」；有才给）。不存在的 id 列在 missing_ids。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "ids":{"type":"array","items":{"type":"string","minLength":1,"maxLength":128},"minItems":1,"maxItems":20,"uniqueItems":true,"description":"照片 id（文件名去掉扩展名，比如 DSCF7208）"}},
@@ -177,11 +178,12 @@ enum MCPToolDefs {
      "annotations":"$READ"},
 
     {"name":"cull_list_groups","title":"分组",
-     "description":"列出 app 当前打开的那一场里的分组和成员。chapter：章节，按时间断档分出来的大段落。scene：场，相邻间隔不超过 scene_gap 秒的一串连拍，也就是 app 里的「场」；组内有名次，#1 是推荐保留的那张。near_duplicate：近似重复，画面几乎一样的照片（phash）。每组给出成员 id、判决、名次、推荐的那张，以及这一场是否还没处理。审连拍时先用它找组，再用 cull_preview_photos 看（一次最多 4 张）。",
+     "description":"列出 app 当前打开的那一场里的分组和成员。chapter：章节，按时间断档分出来的大段落。scene：场，相邻间隔不超过 scene_gap 秒的一串连拍，也就是 app 里的「场」；组内有名次，#1 是推荐保留的那张。near_duplicate：近似重复，画面几乎一样的照片（phash）。每组给出成员 id、判决、名次、推荐的那张，以及这一场是否还没处理（pending；pending_only=true 只列这些场）。审连拍时先用它找组，再用 cull_preview_photos 看（一次最多 4 张）。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "kind":{"type":"string","enum":["chapter","scene","near_duplicate"]},
        "min_size":{"type":"integer","minimum":1,"maximum":100,"default":2,"description":"只列至少这么多张的组"},
+       "pending_only":{"type":"boolean","default":false,"description":"只对 kind=scene：true = 只列还要人取舍的场（pending:true）"},
        "limit":{"type":"integer","minimum":1,"maximum":100,"default":30},
        "cursor":{"type":"string","maxLength":512,"description":"上一页结果里的 next_cursor，原样传回"}},
       "required":["session","kind"],"additionalProperties":false},

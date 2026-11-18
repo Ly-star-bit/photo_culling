@@ -2476,6 +2476,14 @@ __attribute__((constructor)) static void init(void) {
         got_scenes = [(x["key"], [(m["id"], m["verdict"], m.get("rank")) for m in x["members"]]) for x in groups]
         check(ref is not None and got_scenes == ref["scene_lines"],
               f"cull_list_groups kind=scene（每页 2 组、{pages} 页）= 「场 N」那几行（id、判决、名次）：{len(got_scenes)} 组")
+        # 优化分析 MC-02：pending_only 只列还要人取舍的场（= 上面每组 pending:true 的那几组）；别的 kind 带它不收
+        _, gpo, _ = mcp_call(env, "cull_list_groups", {"session": KEY, "kind": "scene", "pending_only": True, "limit": 100})
+        _, gpc, _ = mcp_call(env, "cull_list_groups", {"session": KEY, "kind": "chapter", "pending_only": True})
+        want_p = [x["key"] for x in groups if x.get("pending")]
+        got_p = (gpo or {}).get("groups") or []
+        check([x["key"] for x in got_p] == want_p and all(x.get("pending") is True for x in got_p)
+              and (gpo or {}).get("total") == len(want_p) and err_code(gpc) == "invalid_argument",
+              f"pending_only=true：只列 pending 的 {len(want_p)} 场（{want_p}）；kind=chapter 带 pending_only → invalid_argument（{err_code(gpc)}）")
         if ref and ref.get("per_photo"):
             rows = []
             _, p_, _ = mcp_call(env, "cull_list_photos", {"session": KEY, "sort": "id", "limit": 100})
@@ -3596,6 +3604,20 @@ __attribute__((constructor)) static void init(void) {
               and nd.get("collage_tray_refreshed") is False and na.get("collage_tray_refreshed") is True,
               f"带备注导入：dry_run 回 notes / new_notes、不写；dry_run:false 客户选中和 client_notes.json 一起写上、一步撤销、"
               f"拼图托盘跟着刷（{cn_disk()}）")
+        # 优化分析 MC-02：备注读得回来（cull_get_photos / cull_list_photos 的行带 client_note，有才给）；按客户选中筛
+        _, cp_t, _ = mcp_call(envm, "cull_list_photos", {"session": KEY, "client_pick": True, "limit": 100})
+        _, cp_f, _ = mcp_call(envm, "cull_list_photos", {"session": KEY, "client_pick": False, "limit": 100})
+        rows_t = {r["id"]: r for r in (cp_t or {}).get("rows") or []}
+        rows_f = (cp_f or {}).get("rows") or []
+        g_mid, g_mid2 = m_row(mid), m_row(mid2)
+        check(g_mid.get("client_note") == "去路人" and g_mid2.get("client_note") == "瘦脸"
+              and {mid, mid2} <= set(rows_t) and all(r.get("client_pick") is True for r in rows_t.values())
+              and rows_t[mid].get("client_note") == "去路人" and rows_t[mid2].get("client_note") == "瘦脸"
+              and all("client_note" not in r for i, r in rows_t.items() if i not in (mid, mid2))
+              and not any(r.get("client_pick") or r["id"] in (mid, mid2) for r in rows_f)
+              and (cp_t or {}).get("total", 0) + (cp_f or {}).get("total", 0) == n_m,
+              f"客户备注读得回来：cull_get_photos {mid}「{g_mid.get('client_note')}」、{mid2}「{g_mid2.get('client_note')}」；"
+              f"client_pick=true 列 {(cp_t or {}).get('total')} 张、false 列 {(cp_f or {}).get('total')} 张，加起来 = {n_m}")
         nb = mw("cull_import_client_picks", {"text": f"{mid} 去路人，黑白", "dry_run": False})
         sn2 = mst()
         nc = mw("cull_import_client_picks", {"text": f"{mid} 去路人，黑白", "dry_run": False})
@@ -3620,6 +3642,7 @@ __attribute__((constructor)) static void init(void) {
               and cp_disk() == disk0 and m_ov().get("client_pick_count") == picks0
               and sn4["verdict_undo"]["depth"] == sn0["verdict_undo"]["depth"],
               f"app_undo 两下：备注、客户选中都回到导入之前，client_notes.json 删掉（{[err_code(u) for u in un_n]}）")
+        check("client_note" not in m_row(mid) and "client_note" not in m_row(mid2), "撤销以后行里不再带 client_note")
 
         # ---------- AI 改判的出处（ai_overrides.json，overrides.json 格式不动）：照样 manual:true，另有 changed_by ai、ai_override；
         # 用户亲手按一下就算用户的；app_undo 连出处一起撤；重开宿主读回来，overrides.json 对不上的丢掉
