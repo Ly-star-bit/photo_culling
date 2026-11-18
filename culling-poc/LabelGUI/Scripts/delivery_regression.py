@@ -18,6 +18,8 @@ Scripts/selftests.sh 里跑）；这里验它们在命令行出口上确实接�
 5. --watermark --config '{"stripGPS":true}' → 输出没有 GPS；false 的对照组 GPS 还在。
 6. --export-jpeg 失败多于 3 张（4 张原片挪开）：状态栏那句列前 3 张、写「等 4 张」（EC-08，以前只列 3 张不写「等」），
    全名单（按导出顺序、带原因）记进这一场 exports.json 那一条的 failed。
+7. --export-jpeg --ids（面板上「选中的」那档）只导给的那几张、按给的顺序（不按判决挑），做完在访达里选中导出文件夹；
+   --scope client（「客户选中」那档）只导客户选中的、按网格顺序（UX-03）。
 
 每条命令都带临时 LABELGUI_DATA_DIR、LABELGUI_NO_GUI=1；CI 里放在 MCP 冒烟后面。
 用法: python3 -I Scripts/delivery_regression.py <LabelGUI> [--keep]
@@ -480,12 +482,56 @@ def failure_list_section():
     check("在访达中显示" not in r.stdout, "有失败的那次不在访达里弹（和高 ISO、水印一样只在全部成功时弹，UX-04）")
 
 
+# ---------------------------------------------------------------- 7. 导出 JPG 的范围
+
+def scope_section():
+    print("7. --export-jpeg --ids / --scope client：只导选中的 / 客户选中的（UX-03）")
+    photos, data, ids = synth_session("scope", 8)
+    v = verdicts(photos, data)
+    usable = [i for i in ids if v.get(i) == "可用"]
+    picks = [i for i in ids if v.get(i) == "精选"]
+    if not check(usable and picks, f"前提：8 张里有精选、有可用（{v}）"):
+        return
+    # 选中的一张可用、一张精选，倒着网格顺序给（选中的就导，不按判决挑）：按给的顺序导，交付对照也按这个顺序记。
+    chosen = sorted([usable[-1], picks[0]], key=ids.index, reverse=True)
+    dest = os.path.join(WORK, "scope-ids")
+    r = run(["--export-jpeg", photos, "--dest", dest, "--ids", ",".join(chosen), "--name", "{序号:2}_{原名}"], data)
+    got = sorted(os.listdir(dest)) if os.path.isdir(dest) else []
+    want = [f"{n + 1:02d}_{i}.jpg" for n, i in enumerate(chosen)]
+    check(r.returncode == 0 and got == sorted(want) and f"范围: 选中的 {len(chosen)} 张" in r.stdout,
+          f"--ids 给 2 张（一张可用、一张精选，倒着给）：只导这几张、序号按给的顺序（{got}，要 {want}）"
+          f"（{(r.stdout + r.stderr).strip()[-160:]!r}）")
+    recs = ledger_records(data)
+    check(len(recs) == 1 and [f["id"] for f in recs[-1]["files"]] == chosen,
+          f"交付对照按给的顺序记（{[f['id'] for f in recs[-1]['files']] if recs else []}）")
+    shown = re.findall(r"^在访达中显示: (.+)$", r.stdout, re.M)
+    check(len(shown) == 1 and os.path.realpath(shown[0]) == os.path.realpath(dest),
+          f"全部成功：在访达里选中导出的文件夹（{shown}，UX-04）")
+
+    reply = os.path.join(WORK, "scope-reply.txt")
+    picked = [ids[5], ids[2]]
+    with open(reply, "w", encoding="utf-8") as f:
+        f.write("\n".join(picked) + "\n")
+    r = run(["--client-import", photos, "--text", reply, "--apply"], data)
+    check(r.returncode == 0 and "客户选中 2 张" in r.stdout, f"前提：导入客户选择 2 张（{r.stdout.strip()[-120:]!r}）")
+    dest = os.path.join(WORK, "scope-client")
+    r = run(["--export-jpeg", photos, "--dest", dest, "--scope", "client"], data)
+    got = sorted(os.listdir(dest)) if os.path.isdir(dest) else []
+    order = [i for i in ids if i in picked]
+    check(r.returncode == 0 and got == sorted(i + ".jpg" for i in picked) and "范围: 客户选中 2 张" in r.stdout,
+          f"--scope client：只导客户选中的 2 张（{got}）（{(r.stdout + r.stderr).strip()[-160:]!r}）")
+    recs = ledger_records(data)
+    check(len(recs) == 2 and [f["id"] for f in recs[-1]["files"]] == order,
+          f"客户选中按网格顺序导、记（{[f['id'] for f in recs[-1]['files']] if len(recs) == 2 else recs}，要 {order}）")
+
+
 try:
     same_file_section()
     batch_section()
     xmp_section()
     gps_section()
     failure_list_section()
+    scope_section()
     if not REAL_BEFORE:
         check(not os.path.exists(REAL_DATA), f"跑之前没有 {REAL_DATA}，跑完也没有（每条命令都走临时数据目录）")
 finally:

@@ -3,6 +3,8 @@ import Foundation
 /// 交付出口的小规则，跑在 --delivery-selftest 里（CI 的「自检」步骤；端到端在 Scripts/delivery_regression.py）：
 /// - 失败名单（FailureNames，优化分析 EC-08）：不超过 3 个全列；多了列前 3 个、写「等 M 张」，单位跟着那一句。
 /// - 交付对照里的失败全名单（DeliveryRecord.failed）：没有失败不写这个键，老记录（没有这个键）照样读得进来。
+/// - 导出 JPG 的范围（JPEGScopeChoice，优化分析 UX-03）：列哪几档、默认哪档、选中的被清掉了退回哪档。
+///   按 id 真导出（--ids、--scope client）在 delivery_regression.py 第 7 段。
 @MainActor
 enum DeliveryScopeSelfTest {
     typealias Check = (Bool, String, String) -> Void
@@ -10,6 +12,35 @@ enum DeliveryScopeSelfTest {
     static func run(check: Check) {
         failureNames(check: check)
         recordFailures(check: check)
+        jpegScopes(check: check)
+    }
+
+    // MARK: - 导出 JPG 的范围
+
+    private static func jpegScopes(check: Check) {
+        func list(_ c: [JPEGScopeChoice]) -> String { c.map(\.title).joined(separator: " | ") }
+        let plain = JPEGScopeChoice.choices(picks: 5, usable: 7, selected: 0, client: 0, filter: nil)
+        check(plain.map(\.scope) == [.picks, .picksUsable] && plain.map(\.count) == [5, 12],
+              "范围：没选中、没客户选中、没开筛选 → 只有精选 / 精选 + 可用（和以前那个开关一样）", list(plain))
+        let chapter = JPEGScopeChoice.Filter(label: "本章·精选 4 张", count: 4, onlyClient: false)
+        let full = JPEGScopeChoice.choices(picks: 5, usable: 7, selected: 3, client: 30, filter: chapter)
+        check(full.map(\.scope) == [.picks, .picksUsable, .selected, .client, .filtered]
+              && full.map(\.count) == [5, 12, 3, 30, 4]
+              && list(full) == "精选 (5 张) | 精选 + 可用 (12 张) | 选中的 3 张 | 客户选中 30 张 | 当前筛选：本章·精选 4 张",
+              "范围：选了 3 张、客户选了 30 张、开着只看这一章 → 五档都列、张数对", list(full))
+        let onlyClient = JPEGScopeChoice.choices(picks: 5, usable: 7, selected: 0, client: 30,
+                                                 filter: JPEGScopeChoice.Filter(label: "客户选中 30 张", count: 30, onlyClient: true))
+        check(onlyClient.map(\.scope) == [.picks, .picksUsable, .client],
+              "范围：只开了「只看客户选中」→ 当前筛选和客户选中那档一样，不重复列", list(onlyClient))
+
+        check(JPEGScopeChoice.defaultScope(selected: 3, includeUsable: false) == .selected,
+              "范围：选了照片再打开面板，默认「选中的」", "")
+        check(JPEGScopeChoice.defaultScope(selected: 0, includeUsable: true) == .picksUsable
+              && JPEGScopeChoice.defaultScope(selected: 0, includeUsable: false) == .picks,
+              "范围：没选照片 → 上次的精选 / 精选 + 可用（不默认当前筛选：开着废片筛选时会悄悄导出废片）", "")
+        check(JPEGScopeChoice.resolve(.selected, in: plain, includeUsable: false) == .picks
+              && JPEGScopeChoice.resolve(.client, in: full, includeUsable: true) == .client,
+              "范围：选的那档没了（选中被清掉）退回精选 / 精选 + 可用；还在就照用", "")
     }
 
     // MARK: - 失败名单的写法

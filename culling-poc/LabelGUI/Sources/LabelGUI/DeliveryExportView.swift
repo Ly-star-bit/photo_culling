@@ -193,6 +193,86 @@ private struct DeliveryNameRow: View {
     }
 }
 
+// MARK: - 导出 JPG 的范围（优化分析 UX-03）
+
+/// 导出 JPG 导哪几张。以前面板上只有「包含可用」一个开关（整场精选 / 精选 + 可用）：选中的、客户选中的、只看这一章的
+/// 都导不了，只能绕水印页（还必须带水印）。选中的、当前筛选两档和「复制原片 / 复制文件名」同一套（BatchView.deliveryScopeIDs）。
+/// 精华 Top N 不走这里。
+enum JPEGExportScope: String, CaseIterable, Sendable {
+    /// 整场精选 / 精选 + 可用（引擎按判决挑，以前那个开关；这两档记住上次的）。
+    case picks, picksUsable
+    /// 网格里选中的，按网格顺序。
+    case selected
+    /// 客户选中的（导入过客户选择才有），按网格顺序。
+    case client
+    /// 当前筛选（判决、只看客户选中、只看这一章、临界、废片理由）下的全部，和复制原片没选中照片时一样。
+    case filtered
+}
+
+/// 面板上的一档：名字里带张数（预先拼好，不在 ViewBuilder 里拼：CI 的 Xcode 16 类型检查慢）。
+struct JPEGScopeChoice: Identifiable, Equatable {
+    let scope: JPEGExportScope
+    let title: String
+    let count: Int
+    var id: JPEGExportScope { scope }
+
+    /// 开着的筛选：`label` 是「复制原片」菜单上那一截（「本章·精选 12 张」），`onlyClient` = 只开了「只看客户选中」。
+    struct Filter: Equatable {
+        let label: String
+        let count: Int
+        let onlyClient: Bool
+    }
+
+    /// 列哪几档：精选、精选 + 可用一直有；选中的（选了才有）、客户选中（有客户选中才有）、当前筛选（开着筛选才有；
+    /// 只开了「只看客户选中」时和客户选中那档一模一样，不重复列）。
+    static func choices(picks: Int, usable: Int, selected: Int, client: Int, filter: Filter?) -> [JPEGScopeChoice] {
+        var out = [JPEGScopeChoice(scope: .picks, title: "精选 (\(picks) 张)", count: picks),
+                   JPEGScopeChoice(scope: .picksUsable, title: "精选 + 可用 (\(picks + usable) 张)", count: picks + usable)]
+        if selected > 0 {
+            out.append(JPEGScopeChoice(scope: .selected, title: "选中的 \(selected) 张", count: selected))
+        }
+        if client > 0 {
+            out.append(JPEGScopeChoice(scope: .client, title: "客户选中 \(client) 张", count: client))
+        }
+        if let filter, !filter.onlyClient {
+            out.append(JPEGScopeChoice(scope: .filtered, title: "当前筛选：" + filter.label, count: filter.count))
+        }
+        return out
+    }
+
+    /// 打开面板时默认哪档：选了照片 = 选中的（UX-03 的建议）；否则上次的精选 / 精选 + 可用。不默认当前筛选：
+    /// 开着「废片」筛选时会悄悄导出一堆废片。
+    static func defaultScope(selected: Int, includeUsable: Bool) -> JPEGExportScope {
+        selected > 0 ? .selected : (includeUsable ? .picksUsable : .picks)
+    }
+
+    /// `scope` 不在这几档里（选中的被清掉了……）就退回默认那档。
+    static func resolve(_ scope: JPEGExportScope, in choices: [JPEGScopeChoice], includeUsable: Bool) -> JPEGExportScope {
+        if choices.contains(where: { $0.scope == scope }) { return scope }
+        return includeUsable ? .picksUsable : .picks
+    }
+}
+
+/// 导出 JPG 面板最上面的「范围」一行（离屏快照 --delivery-ui jpeg 也画它）。
+struct JPEGScopeRow: View {
+    let choices: [JPEGScopeChoice]
+    @Binding var selection: JPEGExportScope
+
+    var body: some View {
+        Picker("范围", selection: $selection) {
+            ForEach(choices) { choice in
+                Text(choice.title).tag(choice.scope)
+            }
+        }
+        .help("选中的、客户选中的、当前筛选（只看这一章、按判决筛……）和「复制原片」是同一套范围；精选 / 精选 + 可用是整场")
+    }
+}
+
+extension BatchStore {
+    /// 客户选中的照片 id，按网格顺序（clientPicks 是 Set）。
+    var clientPickIDsInOrder: [String] { items.map(\.id).filter(clientPicks.contains) }
+}
+
 /// 离屏快照用（--batch-ui <dir> <out.png> --delivery-ui jpeg|highlights|watermark [--delivery-json '{…}']）：
 /// sheet 在离屏窗口里画不出来，按那个出口的默认（盖上 JSON 里的字段）单独画这一段，宽度和面板一样。
 struct DeliveryOptionsPreview: View {
@@ -201,18 +281,25 @@ struct DeliveryOptionsPreview: View {
     var showsColor = true
     var tokensHint = DeliveryNaming.tokensHint
     var width: CGFloat = 460
+    /// 导出 JPG 面板上面那行「范围」（空 = 不画；精华、水印页没有）。
+    var scopes: [JPEGScopeChoice] = []
+    @State var scope: JPEGExportScope = .picksUsable
 
     var body: some View {
-        DeliveryOptionsSection(options: $options, namePreview: preview, showsColor: showsColor, tokensHint: tokensHint)
-            .padding(20)
-            .frame(width: width, alignment: .topLeading)
+        VStack(alignment: .leading, spacing: 14) {
+            if !scopes.isEmpty { JPEGScopeRow(choices: scopes, selection: $scope) }
+            DeliveryOptionsSection(options: $options, namePreview: preview, showsColor: showsColor, tokensHint: tokensHint)
+        }
+        .padding(20)
+        .frame(width: width, alignment: .topLeading)
     }
 }
 
 // MARK: - 导出 JPG / 精华 Top N（无头）
 
 /// LABELGUI_DATA_DIR=<临时目录> LabelGUI --export-jpeg <photo_dir> --dest <dir>
-///     [--scope picks|picks+usable|top:N] [--size original|4096|2048|moments|xhs|ig|long:N|short:N|box:WxH]
+///     [--scope picks|picks+usable|client|top:N] [--ids a,b]（--ids = 面板上「选中的」那档，按给的顺序；client = 客户选中）
+///     [--size original|4096|2048|moments|xhs|ig|long:N|short:N|box:WxH]
 ///     [--sharpen off|std|high] [--color srgb|keep] [--strip-gps|--keep-gps] [--name '<模板>']
 ///     [--max-mb X] [--quality Q] [--overwrite]
 /// 走界面上同一个 exportJPEGs / exportHighlights（top:N 时 --dest 就是「精华」那一层，里面新建 TopN_日期_时间）。
@@ -247,12 +334,21 @@ enum JPEGExportCLI {
         print("设置: 尺寸 \(options.size) · 锐化 \(options.sharpen.rawValue) · 色彩 \(options.effectiveColor.rawValue)"
               + " · 去 GPS \(options.stripGPS ? "是" : "否") · 文件名 \(options.nameTemplate)"
               + " · 质量 \(Int((options.quality * 100).rounded()))" + (options.limitSize ? " · ≤\(options.maxMB) MB" : ""))
+        // 面板上「范围」的后几档（UX-03）：--ids = 选中的这几张（按给的顺序），--scope client = 客户选中（网格顺序）。
+        var ids: [String]?
+        if let list = option("--ids") {
+            ids = list.split(separator: ",").map(String.init)
+            print("范围: 选中的 \(ids?.count ?? 0) 张")
+        } else if scope == "client" {
+            ids = store.clientPickIDsInOrder
+            print("范围: 客户选中 \(ids?.count ?? 0) 张")
+        }
         let ledgerBefore = store.deliveryRecords.last
         if let top {
             store.exportHighlights(count: top, into: dest, options: options)
         } else {
             store.exportJPEGs(to: dest, includeUsable: scope != "picks", options: options,
-                              overwrite: args.contains("--overwrite"))
+                              overwrite: args.contains("--overwrite"), ids: ids)
         }
         let deadline = Date().addingTimeInterval(600)
         while store.isRunning && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }

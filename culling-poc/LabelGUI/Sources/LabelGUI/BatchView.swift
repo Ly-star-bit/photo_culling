@@ -23,6 +23,8 @@ struct BatchView: View {
     @AppStorage("batch.jpegIncludeUsable") private var jpegIncludeUsable = true
     @AppStorage("batch.jpegOverwrite") private var jpegOverwrite = false
     @State private var showJPEGSheet = false
+    /// 导出 JPG 面板上的「范围」（UX-03）：每次打开面板时定（选了照片 = 选中的，否则上次的精选 / 精选 + 可用）。
+    @State private var jpegScope: JPEGExportScope = .picksUsable
     /// 高ISO RAW 导出 (降噪流程)。
     @State private var showISOSheet = false
     /// 精华 Top N（Aftershoot 的 Sneak Peek）：当天发朋友圈用的那二十张。
@@ -703,8 +705,9 @@ struct BatchView: View {
             Button("只更新改了的 \(store.xmpStaleCount) 张 XMP") { store.exportXMP(.changed) }
                 .disabled(store.isRunning)
         }
+        // 没有精选也能导选中的、客户选中的（面板上选范围，UX-03）：只在一张照片都没有时灰掉。
         Button("导出 JPG...") { showJPEGSheet = true }
-            .disabled(jpegExportCount == 0 || store.isRunning)
+            .disabled(store.items.isEmpty || store.isRunning)
         Button("精华 Top N (JPG)...") { showHighlightsSheet = true }
             .disabled(store.items.isEmpty || store.isRunning)
         Button("导出高 ISO RAW (降噪)...") { showISOSheet = true }
@@ -907,14 +910,17 @@ struct BatchView: View {
 
     private var jpegExportSheet: some View {
         let options = jpegOptions
-        let preview = store.jpegNamePreview(options.wrappedValue, includeUsable: jpegIncludeUsable)
+        let choices = jpegScopeChoices
+        let scope = JPEGScopeChoice.resolve(jpegScope, in: choices, includeUsable: jpegIncludeUsable)
+        let count = choices.first { $0.scope == scope }?.count ?? 0
+        let preview = store.jpegNamePreview(options.wrappedValue, includeUsable: jpegIncludeUsable, ids: jpegScopeIDs(scope))
         return VStack(alignment: .leading, spacing: 14) {
             Text("导出 JPG").font(.headline)
-            Toggle("包含可用 (关闭则仅导出精选)", isOn: $jpegIncludeUsable)
+            JPEGScopeRow(choices: choices, selection: jpegScopeBinding)
             DeliveryOptionsSection(options: options, namePreview: preview)
             Toggle("覆盖已存在的同名文件", isOn: $jpegOverwrite)
                 .help("关闭时目标里已有同名文件就另存为 -2、-3，旧文件不动 (防止覆盖客户已精修的文件)")
-            Text("共 \(jpegExportCount) 张 · 重编码，保留 EXIF · 默认导出到 拍摄文件夹/\(ImageLoader.jpegExportSubfolder)/ (不参与分析)")
+            Text("共 \(count) 张 · 重编码，保留 EXIF · 默认导出到 拍摄文件夹/\(ImageLoader.jpegExportSubfolder)/ (不参与分析)")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Spacer()
@@ -923,17 +929,55 @@ struct BatchView: View {
                     showJPEGSheet = false
                     exportJPEGs(to: nil)
                 }
-                .disabled(jpegExportCount == 0)
+                .disabled(count == 0)
                 Button("导出到 \(ImageLoader.jpegExportSubfolder)/") {
                     showJPEGSheet = false
                     exportJPEGs(to: store.defaultJPEGExportFolder)
                 }
                 .buttonStyle(.accentProminent)
-                .disabled(jpegExportCount == 0 || store.defaultJPEGExportFolder == nil)
+                .disabled(count == 0 || store.defaultJPEGExportFolder == nil)
             }
         }
         .padding(20)
         .frame(width: 460)
+        .onAppear {
+            jpegScope = JPEGScopeChoice.defaultScope(selected: selectedIDs.count, includeUsable: jpegIncludeUsable)
+        }
+    }
+
+    /// 「范围」那一行的选择：选精选 / 精选 + 可用时顺手记住（以前那个「包含可用」开关存的就是它）。
+    private var jpegScopeBinding: Binding<JPEGExportScope> {
+        Binding(get: {
+            JPEGScopeChoice.resolve(jpegScope, in: jpegScopeChoices, includeUsable: jpegIncludeUsable)
+        }, set: { scope in
+            jpegScope = scope
+            if scope == .picks || scope == .picksUsable { jpegIncludeUsable = scope == .picksUsable }
+        })
+    }
+
+    /// 面板上列哪几档、各几张（UX-03）。当前筛选的张数和「客户」菜单共用一个记着的数（8000 张扫一遍是一整页重绘里最贵的）。
+    private var jpegScopeChoices: [JPEGScopeChoice] {
+        let counts = store.verdictCounts
+        let chapter = store.activeChapterFilter != nil
+        let others = chapter || store.verdictFilter != nil || store.borderlineFilter || store.reasonFilter != nil
+        var filter: JPEGScopeChoice.Filter?
+        if others || store.clientPickFilter {
+            let n = memo.value("filteredCount") { store.filteredCount }
+            filter = JPEGScopeChoice.Filter(label: Self.scopeLabel(store: store, selected: 0, count: n), count: n,
+                                            onlyClient: store.clientPickFilter && !others)
+        }
+        return JPEGScopeChoice.choices(picks: counts.pick, usable: counts.usable, selected: selectedIDs.count,
+                                       client: store.clientPickCount, filter: filter)
+    }
+
+    /// 这一档导哪几张：nil = 按判决（精选 / 精选 + 可用，引擎自己挑）。后三档和复制原片同一套（deliveryScopeIDs）。
+    private func jpegScopeIDs(_ scope: JPEGExportScope) -> [String]? {
+        switch scope {
+        case .picks, .picksUsable: return nil
+        case .selected: return selectedInGridOrder
+        case .client: return store.clientPickIDsInOrder
+        case .filtered: return store.filteredItems().map(\.id)
+        }
     }
 
     // MARK: - 精华 Top N sheet
@@ -2984,13 +3028,11 @@ struct BatchView: View {
         store.copyOriginals(ids, to: url)
     }
 
-    private var jpegExportCount: Int {
-        let counts = store.verdictCounts
-        return counts.pick + (jpegIncludeUsable ? counts.usable : 0)
-    }
-
     /// nil = ask for a folder; otherwise export straight into it.
     private func exportJPEGs(to target: URL?) {
+        // 范围在点按钮这一下定（面板关了以后选中不会再变，先取出来）。
+        let scope = JPEGScopeChoice.resolve(jpegScope, in: jpegScopeChoices, includeUsable: jpegIncludeUsable)
+        let ids = jpegScopeIDs(scope)
         modalPanelOpen = true      // 存储卡导完别在保存面板开着时切场次（导出的会变成新场次的）
         defer { modalPanelOpen = false }
         var folder = target
@@ -3009,7 +3051,7 @@ struct BatchView: View {
         }
         guard let folder else { return }
         store.exportJPEGs(to: folder, includeUsable: jpegIncludeUsable, options: jpegOptions.wrappedValue,
-                          overwrite: jpegOverwrite)
+                          overwrite: jpegOverwrite, ids: ids)
     }
 }
 
