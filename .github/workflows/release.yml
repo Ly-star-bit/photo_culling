@@ -8,7 +8,8 @@
 #   → 照旧完整跑再发。
 # 发版流程：feature 推上去等绿 → 合进 main 推上去（秒过）→ 打 tag（直接用 feature 那次的包）。
 # 符号文件（OP-04）：完整跑那次把 .build/release/LabelGUI.dSYM 压成 zip 传成 PhotoCulling-dSYM（和 DMG 同样留 14 天），restamp
-# 跟着 DMG 一起下载、再传；Release 上挂 PhotoCulling-<tag>.dmg 和 PhotoCulling-<tag>.dSYM.zip 两个文件。
+# 跟着 DMG 一起下载、再传；Release 上挂 PhotoCulling-<tag>.dmg、PhotoCulling.dmg（同一个 DMG，固定名字，给 releases/latest/download
+# 和 install.sh 用）和 PhotoCulling-<tag>.dSYM.zip 三个文件。
 name: Release
 
 on:
@@ -404,9 +405,12 @@ jobs:
           # 资产名必须 ASCII — GitHub 会把非 ASCII 字符从文件名里剥掉
           # (选片工具-v1.1.2.dmg 上传后变成 -v1.1.2.dmg)。
           cp 选片工具.dmg "PhotoCulling-${GITHUB_REF_NAME}.dmg"
+          # 同一个 DMG 再挂一份固定名字的（ops 复核漏 2）：releases/latest/download/PhotoCulling.dmg 永远是最新版，README 的
+          # 下载链接写得死；仓库根的 install.sh 认带版本号的那个，这个只当后备。
+          cp 选片工具.dmg PhotoCulling.dmg
           # 符号文件：翻诊断包里崩溃报告用的（atos -o …/DWARF/LabelGUI），和 DMG 里的二进制同一个 UUID。
           cp LabelGUI.dSYM.zip "PhotoCulling-${GITHUB_REF_NAME}.dSYM.zip"
-          ASSETS=("PhotoCulling-${GITHUB_REF_NAME}.dmg" "PhotoCulling-${GITHUB_REF_NAME}.dSYM.zip")
+          ASSETS=("PhotoCulling-${GITHUB_REF_NAME}.dmg" PhotoCulling.dmg "PhotoCulling-${GITHUB_REF_NAME}.dSYM.zip")
           # 发布说明：有 release-notes/<tag>.md 就放在正文最前面（这一版新增 / 修改了什么），
           # 后面接 GitHub 自动生成的提交对比；没有就只有自动生成的。
           NOTES="release-notes/${GITHUB_REF_NAME}.md"

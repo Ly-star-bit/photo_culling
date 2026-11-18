@@ -93,9 +93,19 @@ mediapipe/opencv 的 `.venv` 会被 uv 自动裁剪到同样的精简集合。
 
 ### 安装
 
-1. 从 [Releases](../../releases) 下载 `PhotoCulling-vX.Y.Z.dmg`，打开后把 **选片工具** 拖到 **Applications**
-2. app 没有 Apple 开发者签名，首次打开会被 Gatekeeper 拦下。macOS 15 起「右键 → 打开」已不再绕过拦截，改走：
-   先双击一次让系统弹出拦截提示 → **系统设置 → 隐私与安全性** → 页面底部找到「已阻止使用"选片工具"」→ **仍要打开**（只需一次）
+**一条命令安装 / 升级**（推荐，以后每次升级也跑这一条）：在「终端」里执行
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Ly-star-bit/photo_culling/main/install.sh | bash
+```
+
+它下载最新版的 DMG、装进「应用程序」（有旧版就换掉；设置和数据不动），不弹访达窗口、不打开 app，已经是最新版就什么都不做。用它装的**不用去系统设置放行**：命令行下载的文件不带浏览器加的隔离属性，Gatekeeper 不拦。装指定的一版（也能退回旧版）：`… | bash -s -- --version v1.32.0`；其它参数见 [install.sh](install.sh) 开头。
+
+**手动装**：
+
+1. 从 [Releases](../../releases/latest) 下载 `PhotoCulling-vX.Y.Z.dmg`（v1.32.0 之后发的版本另带一个固定名字的 `PhotoCulling.dmg`，[这个地址](../../releases/latest/download/PhotoCulling.dmg)永远指向最新版），打开后把 **选片工具** 拖到 **Applications**
+2. app 没有 Apple 开发者签名，**每个新版本**第一次打开都会被 Gatekeeper 拦一次（临时签名，每一版的签名都不一样，系统当它是新 app；升级以后要再放行一次）。macOS 15 起「右键 → 打开」已不再绕过拦截，改走：
+   先双击一次让系统弹出拦截提示 → **系统设置 → 隐私与安全性** → 页面底部找到「已阻止使用"选片工具"」→ **仍要打开**
    - macOS 14 仍可右键 app → 打开
 3. 之后从启动台 / Applications 正常打开即可
 
@@ -381,7 +391,7 @@ app 没开时也能用的只有前 3 个；其余 27 个要 app 开着、而且 
 
 ### 配置
 
-前提：app 已经装在「应用程序」里，而且正常打开过一次。从 Release 下载的 app 带隔离属性，没打开过就让 AI 客户端直接起里面的程序，系统可能拦下来（按 Gatekeeper 的机制推断，没验证过）：先照「安装」第 2 步打开一次，或者 `xattr -dr com.apple.quarantine /Applications/选片工具.app`。
+前提：app 已经装在「应用程序」里，而且正常打开过一次。从 Release 页用浏览器下载的 app 带隔离属性，没打开过就让 AI 客户端直接起里面的程序，系统可能拦下来（按 Gatekeeper 的机制推断，没验证过）：先照「手动装」第 2 步打开一次，或者 `xattr -dr com.apple.quarantine /Applications/选片工具.app`。用「安装」里那条命令装的没有隔离属性，不用这一步。
 
 **Claude Code**（在终端里执行一次，之后每个项目都能用）：
 
