@@ -32,6 +32,11 @@ env:
   # 拆分等 CI 适配都是针对 Xcode 16 做的。升级时改这一行并重新跑 main 看绿。
   DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
 
+# Actions 版本（优化分析 2026-11-18 CH-06；v4 / v6 那一批是 Node 20 的，runner 已经强制跑在 Node 24 上、每次一条弃用警告）：
+# checkout v7、cache v6、upload-artifact v7、download-artifact v8 用大版本标签；setup-uv 从 v8 起不再发 @v8 这种大版本标签，
+# 只能写完整版本号（v10.3.3）。要留意的两处：download-artifact v8 起产物哈希对不上默认就红（以前只警告），restamp 跨 run
+# 下载的是之前那次 run 传的 DMG / dSYM；setup-uv v10 的 enable-cache: auto 在推 tag 时不开缓存（tag 上完整跑那次的
+# build 少一个 uv 缓存，慢几秒，不影响结果）。upload-artifact 用默认的 archive: true（打 zip、name 照用）。
 jobs:
   # 这次 run 干什么（Scripts/ci_green_run.py）：mode = full（完整跑）/ skip（推 main、绿过了）/ reuse（推 tag、沿用
   # run_id 那一次的 DMG）。查不了（网络、权限、限流）一律 full；脚本退出码总是 0。摘要页上有一条 notice 说为什么。
@@ -44,7 +49,7 @@ jobs:
       mode: ${{ steps.green.outputs.mode }}
       run_id: ${{ steps.green.outputs.run_id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           sparse-checkout: culling-poc/LabelGUI/Scripts/ci_green_run.py
           sparse-checkout-cone-mode: false
@@ -64,7 +69,7 @@ jobs:
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           sparse-checkout: |
             release-notes
@@ -80,12 +85,12 @@ jobs:
     if: ${{ !cancelled() && needs.check.outputs.mode != 'skip' && needs.check.outputs.mode != 'reuse' }}
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # build_app.sh 用 git rev-list --count 生成 CFBundleVersion,浅克隆会数成 1。
           fetch-depth: 0
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.3.3
 
       - name: Swift 版本 (进缓存键)
         id: swift
@@ -94,7 +99,7 @@ jobs:
       # LabelGUI 目前没有外部包 (Package.resolved 不存在,hashFiles 对缺失文件给空串),
       # 缓存的是增量编译产物;键里带 Package.swift 和 swift 版本,换编译器就作废。
       - name: 缓存 SwiftPM 构建
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: culling-poc/LabelGUI/.build
           key: swiftpm-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles('culling-poc/LabelGUI/Package.resolved', 'culling-poc/LabelGUI/Package.swift') }}
@@ -239,7 +244,7 @@ jobs:
       # 给 test-bridge / test-selftests 的裸二进制（strip 之前那份，和以前同一个 job 里测的是同一个文件）。只在这次 run 里用，
       # 留 1 天；overwrite：「Re-run all jobs」时这个 job 重跑、同名产物照传。
       - name: 上传裸二进制（给测试 job）
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: LabelGUI-bin
           path: culling-poc/LabelGUI/.build/release/LabelGUI
@@ -249,7 +254,7 @@ jobs:
 
       # 留 14 天：推 tag 时沿用的就是它（check 只认没过期的）。测试 job 红了整个 run 不算绿过，tag 不会沿用它。
       - name: 上传构建产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: PhotoCulling-dmg
           path: 选片工具.dmg
@@ -258,7 +263,7 @@ jobs:
 
       # 和 DMG 同一次构建的 dSYM（「符号文件 (dSYM)」那一步压的），留得一样久：推 tag 沿用这次的 DMG 时 restamp 一起下载。
       - name: 上传符号文件
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: PhotoCulling-dSYM
           path: LabelGUI.dSYM.zip
@@ -276,11 +281,11 @@ jobs:
     steps:
       # 完整检出（不用 fetch-depth 0：只有 build_app.sh 数提交）：自检的「CI 登记」读 Sources/ 和这个文件，各脚本读 Fixtures/、
       # Scripts/，二进制往上找仓库里的胶片表、.github/ISSUE_TEMPLATE。
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # build 传的裸二进制放回原路径（culling-poc/LabelGUI/.build/release/LabelGUI）：往上找胶片表、Fixtures 靠的就是这个位置。
       # 产物是 zip，不留可执行位，要自己 chmod。
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: LabelGUI-bin
           path: culling-poc/LabelGUI/.build/release
@@ -352,11 +357,11 @@ jobs:
     steps:
       # 完整检出（不用 fetch-depth 0：只有 build_app.sh 数提交）：自检的「CI 登记」读 Sources/ 和这个文件，各脚本读 Fixtures/、
       # Scripts/，二进制往上找仓库里的胶片表、.github/ISSUE_TEMPLATE。
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # build 传的裸二进制放回原路径（culling-poc/LabelGUI/.build/release/LabelGUI）：往上找胶片表、Fixtures 靠的就是这个位置。
       # 产物是 zip，不留可执行位，要自己 chmod。
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: LabelGUI-bin
           path: culling-poc/LabelGUI/.build/release
@@ -415,12 +420,12 @@ jobs:
       contents: read
     steps:
       # 只取那个脚本。要在下载产物之前：checkout 会清空工作目录，放后面会把 DMG 删掉。
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           sparse-checkout: culling-poc/LabelGUI/Scripts/restamp_dmg.sh
           sparse-checkout-cone-mode: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: PhotoCulling-dmg
           run-id: ${{ needs.check.outputs.run_id }}
@@ -428,7 +433,7 @@ jobs:
 
       # 那次构建的 dSYM：restamp 只改 Info.plist、重签，二进制的 UUID 不变，那次的 dSYM 照样对得上。同一个提交跑的是同一份
       # workflow，那次有 DMG 就有它（同一个 job 里紧挨着传的、留得一样久）。
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: PhotoCulling-dSYM
           run-id: ${{ needs.check.outputs.run_id }}
@@ -447,7 +452,7 @@ jobs:
           echo "::notice title=沿用 run ${FROM_RUN} 的安装包::${MSG%%；*}；那次编译、测过的包原样发"
 
       - name: 上传构建产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: PhotoCulling-dmg
           path: 选片工具.dmg
@@ -456,7 +461,7 @@ jobs:
           overwrite: true
 
       - name: 上传符号文件
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: PhotoCulling-dSYM
           path: LabelGUI.dSYM.zip
@@ -475,16 +480,16 @@ jobs:
       contents: write
     steps:
       # 只取 release-notes/（发布说明）。要在下载产物之前：checkout 会清空工作目录，放后面会把 DMG 删掉。
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           sparse-checkout: release-notes
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: PhotoCulling-dmg
 
       # 同一次构建的 dSYM（完整跑是 build 传的，沿用的是 restamp 跟着 DMG 一起传的）。
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: PhotoCulling-dSYM
 
