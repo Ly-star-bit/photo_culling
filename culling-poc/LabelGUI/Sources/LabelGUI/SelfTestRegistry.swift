@@ -60,7 +60,7 @@ enum SelfTestRegistry {
 
     /// 先后 = selftests.sh 跑的先后；同一段里命令行同时带两条自检时，排在前面的那条先跑（跑完就退出）。
     static let all: [Entry] = [
-        .init("--ux-selftest", "网格改判后焦点落在哪（BatchView.placeAfterChange）；另挂 EXIF 快门 0、网格多选规则、水印页 RAW+JPG 配对、拼图检视器的去那儿、这一版新增、快捷键一览（? 键的判断表、每页列了绑着的键）",
+        .init("--ux-selftest", "网格改判后焦点落在哪（BatchView.placeAfterChange）；另挂 EXIF 快门 0、网格多选规则、水印页 RAW+JPG 配对、拼图检视器的去那儿、这一版新增、快捷键一览（? 键的判断表、每页列了绑着的键）、连拍挑选单行每张的框、时间轴跨年份带年、「文件」菜单三项",
               ci: .selftests()) { _ in UXSelfTest.run() },
         .init("--viewer-zoom-selftest", "看单张 / 审片的放大（ViewerZoom）：翻页保持放大、预解下一张、翻到预解好的当场就有、连着翻过去的不解、换方向放掉预解的、解不出不卡、同一张只解一份、落在主脸中心；审片 / 看单张的人脸特写多大（自己造几张 JPEG，不开界面）",
               ci: .selftests()) { _ in ViewerZoomSelfTest.run() },
@@ -190,7 +190,7 @@ enum UXSelfTest {
         failed += CollageNavSelfTest.run()      // 拼图检视器重排：去那儿（页签、滚动请求）、--tab 新老名字、色调两节
         failed += WhatsNewSelfTest.run()        // 这一版新增：版本号、弹不弹、记账只写独立的 suite、数据表
         failed += ShortcutsSelfTest.run()       // 快捷键一览：? 键的判断表、每页的表、拼图 / 暗房 / 水印绑着的键都列了
-        failed += SmallUXSelfTest.run()         // 连拍挑选单行每张的框
+        failed += SmallUXSelfTest.run()         // 连拍挑选单行每张的框、时间轴跨年份带年、「文件」菜单三项
         exit(failed == 0 ? 0 : 1)
     }
 }

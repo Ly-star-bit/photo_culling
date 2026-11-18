@@ -4,6 +4,7 @@ import CoreGraphics
 /// --ux-selftest 里批量页几件小事的纯函数部分（优化分析 2026-11-18 L4 第 4 步）：
 ///   1. 连拍挑选单行滚动时每张按自己的比例算框（ux 复核漏网 1）：对着 `--compare` 排布表里已知的数。
 ///   2. 时间轴跨年份才带年（EC-07）。
+///   3. 菜单栏「文件」的三条命令（UX-08，FileMenuSelfTest 在 FileMenuCommands.swift）。
 /// 返回没过的条数。
 @MainActor
 enum SmallUXSelfTest {
@@ -42,6 +43,7 @@ enum SmallUXSelfTest {
         check(pano.width <= mixed.stripMaxWidth + 0.5 && pano.height >= 60, "全景图不超宽度上限、不矮过 60", text(pano))
 
         failed += timelineYears()
+        failed += FileMenuSelfTest.run()
         return failed
     }
 

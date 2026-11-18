@@ -253,6 +253,12 @@ enum SnapshotEventsSelfTest {
         let mouse = SnapshotEvents.Mouse(window: window, host: host)
         mouse.pump(1.5)
 
+        // 菜单栏「文件」三项（UX-08）：批量页一出来就把能不能点同步给菜单（菜单本身无头看不到）。fixture 分析过、有精选。
+        let menu = BatchMenuState.shared.flags
+        let counts = store.verdictCounts
+        check(menu.canOpen && menu.canAnalyze && menu.analyzeTitle == "重新分析" && menu.canExport == (counts.pick > 0),
+              "批量页把「文件」菜单三项能不能点同步过去（打开、重新分析、导出 JPG 都能点）", "\(menu) · 精选 \(counts.pick)")
+
         // 悬停：指针挪到一格上，格子下沿冒出悬停条（★ ● ✕）；挪开就没了。左上那一片里撒点，截图比前后 ——
         // 指针下面不远多出一小条（比整个网格小得多）就是悬停条。找到的这个点下面点击也用。
         mouse.run(.move(CGPoint(x: 2, y: 2)))

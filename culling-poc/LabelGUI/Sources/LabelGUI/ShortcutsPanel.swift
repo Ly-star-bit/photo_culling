@@ -106,6 +106,10 @@ enum ShortcutsTable {
         Row("⇧Esc", "显示全部章节"),
     ])
     static let batchOther = ShortcutsSection("其他", [
+        // 菜单栏「文件」里那三项（FileMenuCommands.swift 的 FileMenuTable，键改了两边一起改，--ux-selftest 核对）。
+        Row("⌘O", "打开文件夹（水印页：导入照片）"),
+        Row("⌘R", "开始分析 / 重新分析"),
+        Row("⇧⌘E", "导出 JPG…"),
         Row("拖文件夹进窗口", "打开这场拍摄（拖照片 = 打开它所在的文件夹）"),
         Row("插相机存储卡", "问要不要导入到「图片 › 今天日期」，导完直接分析"),
         Row("?", "这张表"),
@@ -448,7 +452,7 @@ enum ShortcutsSelfTest {
                         "⌃⌘S  ⌥⌘S", "⌘=  ⌘-  ⌘0  ⌘1", "捏合  ⌘滚轮"]),
             (.darkroom, ["← →", "↑ ↓", "⏎  点样张", "按住空格", "拖竖线", "⌘←  ⌘→", "⌘Z  ⇧⌘Z", "Esc"]),
             (.watermark, ["⌘O", "⌘⏎", "Esc", "⌫"]),
-            (.batch, ["C  D  F", "⌥⌘S", "⇧Esc", "Z  P", "Z  [ ]  P"]),
+            (.batch, ["C  D  F", "⌥⌘S", "⇧Esc", "Z  P", "Z  [ ]  P", "⌘O", "⌘R", "⇧⌘E"]),
         ]
         for (page, keys) in expected {
             let columns = ShortcutsTable.columns(page)
