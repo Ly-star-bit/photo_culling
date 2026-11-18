@@ -535,12 +535,13 @@ enum CollageExportSelfTest {
         let same = bytes[3] != nil && bytes[3] == bytes[1] && bytes[1]?.allSatisfy { $0 != nil } == true
         check(same, "3 页一起渲和一页一页渲：每个跨页图逐字节一样")
 
-        // 渲到一半取消：前两页在渲（各睡 0.8 秒）时点取消 —— 这两页写完、列进 files，后两页不开，不出 PDF。
+        // 渲到一半取消：前两页在渲（各睡 1.5 秒：CI 的机器慢、主线程转一圈慢时取消也落在它们睡着的时候）时点取消 ——
+        // 这两页写完、列进 files，后两页不开，不出 PDF。
         let out = dir.appendingPathComponent("cancel")
         options.outputPath = out.path
         store.exportOptions = options
         store.exportLanesOverride = 2
-        let probe = CollageExportProbe(delays: [0: 0.8, 1: 0.8])
+        let probe = CollageExportProbe(delays: [0: 1.5, 1: 1.5])
         store.testExportProbe = probe
         var result: CollageStore.ExportOutcome?
         let refused = store.startExport(project: project, options: options, name: "取消", reveal: false) { result = $0 }
