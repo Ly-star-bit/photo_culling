@@ -20,6 +20,7 @@ import AppKit
 /// 都可以加 --ax-dump：截图前打印辅助功能树（输入框、滑杆这类 AppKit 控件带着值），按文字断言。
 /// LabelGUI --batch-ui <photo_dir> <out.png> --perf grid [--copies 15] [--size 2560x1440 -batch.thumbSize 90]
 ///     （截完图接着在网格里按 → ← 和数字键，打印每一下哪些视图 body 重算了几次、主线程 CPU、进程指令数：BatchPerf；
+///     带改判动画的两行（数字键、直接改判 带动画）头一个数是估计 = 首圈 + 每帧 × 24 帧，见 BatchPerf.measure；
 ///     --copies N 先把这一场复制成 N 倍的照片）
 ///
 /// 和 --collage-ui 同一套：用 app 里一模一样的视图在一个从不显示的无边框窗口里布局、
