@@ -3402,6 +3402,8 @@ final class CollageStore: ObservableObject {
         var locks: CollageNode?
         var fallback: CollageNode
         var carry: CollageNode?
+        /// 手调的格子比例按哪棵树量（nil = carry 自己）：加照片时是插之前那一页（M-01，见 carryAdjustments 的 aspects）。
+        var carryAspects: CollageNode? = nil
 
         /// F3 新跨页同步那一步搜几次（主线程上）。命令行 landbench 在 photot 上量（2–4 张的跨页）：中位 1 ms 上下，最慢 8 ms
         /// （撞上求解器放宽范围、再搜 2000 次的那一支）；精排还是 16000 次，后台 35–65 ms。插照片、拿照片不搜，0.01 ms。
@@ -3428,9 +3430,15 @@ final class CollageStore: ObservableObject {
             if let carry {
                 root = CollageLayout.carryOverlays(from: carry, into: root)
                 // 这一页其余照片的手调（裁切、景别、完整显示、形状、抠图）按照片 id 带回去（优化分析 A5）。
-                root = CollageLayout.carryAdjustments(from: carry, into: root, canvas: ctx.canvas, style: ctx.style)
+                root = CollageLayout.carryAdjustments(from: carry, into: root, canvas: ctx.canvas, style: ctx.style,
+                                                      aspects: carryAspects)
             }
             return root
+        }
+
+        /// 落下的这一版里哪几张的裁切没带过去（格子比例差太多）：挪 / 加照片的提示点名用（CR-01）。没有 carry = 不带手调的页。
+        func droppedCrops(in root: CollageNode) -> [String] {
+            carry.map { CollageLayout.droppedCrops(from: $0, to: root) } ?? []
         }
 
         /// 同步落下的那一版（主线程）：定的就是求解结果本身；有现成的树（S1：插进去 / 拿掉以后收拢的，同旧
@@ -3465,8 +3473,11 @@ final class CollageStore: ObservableObject {
     /// （精排落下之前镜像过的页也就不会被盖掉，R1#4）。不另记撤销：落地之后压的那几步快照里也换上（⌘Z 一步回到操作之前）。
     /// 种子、次数、Context 和以前的后台求解一模一样，最后的版式也一样（门禁）。
     /// 返回精排的号；这几页都是定的（没照片、只有一张，同步那一步就是结果）= nil。
+    /// `amend`：精排落下的页上有裁切没带过去（格子比例差太多）时，提示换成哪一句（参数是那几张的 id）。只在状态栏
+    /// 还是这次操作那句时换，不盖后来的提示（CR-01：以前精排丢了裁切，提示照样说「裁切留着」）。
     @discardableResult
-    private func refinePages(_ jobs: [RefineJob], context ctx: CollageLayout.Context) -> Int? {
+    private func refinePages(_ jobs: [RefineJob], context ctx: CollageLayout.Context,
+                             amend: (@Sendable ([String]) -> String)? = nil) -> Int? {
         let work = jobs.filter { !$0.job.isFixed }
         guard !work.isEmpty else { return nil }
         refineSerial += 1
@@ -3474,6 +3485,7 @@ final class CollageStore: ObservableObject {
         pendingRefines.insert(ticket)
         let session = sessionToken
         let epoch = refineEpoch
+        let shown = notice
         // 同步落地压的那一步之后又压了几步，回来时只往那几步的快照里补。
         let pushes = undoPushes
         var locked: [UUID: Bool] = [:]
@@ -3486,7 +3498,8 @@ final class CollageStore: ObservableObject {
             guard let self, self.refineEpoch == epoch else { return }
             self.pendingRefines.remove(ticket)
             guard self.sessionToken == session else { return }
-            self.landRefined(Array(zip(work, roots)), locked: locked, since: pushes, basis: basis)
+            let lost = self.landRefined(Array(zip(work, roots)), locked: locked, since: pushes, basis: basis)
+            if let amend, !lost.isEmpty, self.notice == shown { self.setNotice(amend(lost)) }
         }
         return ticket
     }
@@ -3502,13 +3515,15 @@ final class CollageStore: ObservableObject {
         init(_ p: CollageProject) { canvas = p.canvas; style = p.style; mode = p.mode }
     }
 
-    /// 精排回来：逐页核对（见 refinePages），对得上的换成精排的。
+    /// 精排回来：逐页核对（见 refinePages），对得上的换成精排的。返回落下了的页上哪几张的裁切没带过去（提示点名用）。
+    @discardableResult
     private func landRefined(_ done: [(RefineJob, CollageNode)], locked: [UUID: Bool], since pushes: Int,
-                             basis: RefineBasis) {
+                             basis: RefineBasis) -> [String] {
         let onCanvas = page?.id
         let keep = selectedCell?.photoID
         let refined = done.filter { $0.1 != $0.0.landed }.map { RefinedPage(id: $0.0.pageID, from: $0.0.landed, to: $0.1) }
-        guard !refined.isEmpty else { return }
+        guard !refined.isEmpty else { return [] }
+        var lost: [String] = []
         var landed: [RefinedPage] = []
         // 工程里不在了的页（删掉了、撤销到操作之前、清空了托盘）：快照里的照样补（之后撤销 / 重做回来就是精排的）。
         var absent: [RefinedPage] = []
@@ -3526,6 +3541,7 @@ final class CollageStore: ObservableObject {
             if now.id == onCanvas, cropEditing || continuousEditDepth > 0 { continue }
             project.pages[i].root = r.to
             landed.append(r)
+            if let job = done.first(where: { $0.0.pageID == r.id })?.0.job { lost += job.droppedCrops(in: r.to) }
         }
         // 落地之后又压的几步（改别的跨页、改标题……）：快照里这一页还是同步那一版的也换上精排的 —— 撤销那一步只退那一步，
         // 不连精排一起退。只补落下了的页和工程里不在了的页：用户动过的页（镜像了、拖了缝），撤销回去应该是他看到过的那一版。
@@ -3534,7 +3550,7 @@ final class CollageStore: ObservableObject {
         for s in undoStack.indices.suffix(later) { undoStack[s] = Self.patched(undoStack[s], landed + absent, basis: basis) }
         // 重做栈（精排回来之前撤销了：工程里是操作之前的版，这一页对不上）：重做回来的那一版里还是同步那一版的，换上精排的。
         for s in redoStack.indices { redoStack[s] = Self.patched(redoStack[s], refined, basis: basis) }
-        guard !landed.isEmpty else { return }
+        guard !landed.isEmpty else { return [] }
         if let onCanvas, landed.contains(where: { $0.id == onCanvas }) {
             // 画布上这一页换了树：选中跟着那张照片走（找不到就清掉）；备选作废（画布上已经不是其中的任何一版）。
             let root = page?.root
@@ -3542,6 +3558,7 @@ final class CollageStore: ObservableObject {
             clearAlternatives()
         }
         commitEdit()
+        return lost
     }
 
     private struct RefinedPage {
@@ -3594,12 +3611,14 @@ final class CollageStore: ObservableObject {
     }
 
     /// 一页加上这几格照片以后要怎么排（S1）：同「加进现在的版式（重排）」—— 照片 + 这一页的文字格重新求解，有锁定格的保住锁定格。
+    /// 手调从插过的树带（挪过来的照片带着自己的字、景别、形状），可格子比例按插之前那一页量：插过的树上最大那格已经
+    /// 劈成两半，量它的话那张（多半是精心裁过的主图）的裁切总被比例门挡掉（M-01）。
     private func joinJob(_ page: CollagePage, adding cells: [CollageCell]) -> PageSolve {
         let map = photoMap
         let joined = inserting(cells, into: page.root)
         let photos = Self.unique(page.root.photoIDs + cells.compactMap(\.photoID)).compactMap { map[$0] }
         return PageSolve(photos: photos, texts: page.root.leaves.filter { $0.kind == .text }, locks: joined,
-                         fallback: joined, carry: joined)
+                         fallback: joined, carry: joined, carryAspects: page.root)
     }
 
     /// 散落版目标：放一张相纸（散落版不画切分树，插进树里就看不见了），放在相纸少的那半页正中（跨页正中是中缝）。
@@ -3665,12 +3684,26 @@ final class CollageStore: ObservableObject {
         clearAlternatives()
         commitEdit()
         let what = ids.count == 1 ? "" : " \(ids.count) 张"
-        // 两页其余照片的裁切、景别、形状照旧（PageSolve.run 按照片 id 带回去；格子比例差太多的那几张裁切回到自动）。
-        setNotice("已移到第 \(target + 1) 个\(pageUnit)\(what)（两页重排了，其余照片的裁切、景别留着；⌘Z 撤回这次挪动）"
-                  + (destination.freeform ? "：放在照片少的那半页，拖到想要的位置" : ""))
+        // 两页其余照片的裁切、景别、形状照旧（PageSolve.run 按照片 id 带回去；格子比例差太多的那几张裁切回到自动，
+        // 提示里点名：定的页同步这一步就知道，要精排的页落下时再换那一句）。
+        let head = "已移到第 \(target + 1) 个\(pageUnit)\(what)（两页重排了，"
+        let tail = "；⌘Z 撤回这次挪动）" + (destination.freeform ? "：放在照片少的那半页，拖到想要的位置" : "")
+        let now = zip(jobs, landed).flatMap { $0.droppedCrops(in: $1) }
+        setNotice(head + Self.keptNote("其余照片", lost: now) + tail)
         let pageIDs = [source.id, destination.id]
         return refinePages(jobs.indices.map { RefineJob(pageID: pageIDs[$0], job: jobs[$0], seed: seeds[$0], landed: landed[$0]) },
-                           context: ctx)
+                           context: ctx, amend: { head + Self.keptNote("其余照片", lost: now + $0) + tail })
+    }
+
+    /// 挪 / 加照片提示里「手调留着」那半句（CR-01）：裁切都带过去了 = 「裁切、景别留着」；格子比例变了太多、裁切回到
+    /// 自动的点名（多了只点前三张）。
+    nonisolated static func keptNote(_ who: String, lost: [String]) -> String {
+        let kept = who + "的裁切、景别留着"
+        let names = unique(lost)
+        guard !names.isEmpty else { return kept }
+        let shown = names.count > 3 ? names.prefix(3).joined(separator: "、") + " 等 \(names.count) 张"
+                                    : names.joined(separator: "、") + " "
+        return kept + "，只有 \(shown)的格子形状变了太多、裁切回到自动"
     }
 
     /// S1：托盘里的几张放进第 target 个跨页（从 0 起），同「加进现在的版式（重排）」：当场插进去（有空照片格先放空格、
@@ -3722,8 +3755,11 @@ final class CollageStore: ObservableObject {
             clearAlternatives()
         }
         commitEdit()
-        setNotice("第 \(target + 1) 个\(pageUnit)加了 \(fresh.count) 张，重排了（原有照片的裁切、景别留着）" + skipped)
-        return refinePages([RefineJob(pageID: destination.id, job: job, seed: seed, landed: landed)], context: ctx)
+        let head = "第 \(target + 1) 个\(pageUnit)加了 \(fresh.count) 张，重排了（"
+        let now = job.droppedCrops(in: landed)
+        setNotice(head + Self.keptNote("原有照片", lost: now) + "）" + skipped)
+        return refinePages([RefineJob(pageID: destination.id, job: job, seed: seed, landed: landed)], context: ctx,
+                           amend: { head + Self.keptNote("原有照片", lost: now + $0) + "）" + skipped })
     }
 
     /// 命令行 landbench（审查 R1#2 的修法要量的）：同步落地那一步在每个网格跨页上的主线程耗时（毫秒）——

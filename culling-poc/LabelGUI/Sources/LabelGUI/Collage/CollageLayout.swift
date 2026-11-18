@@ -901,16 +901,30 @@ enum CollageLayout {
     /// - 景别（连同 coverAuto）、形状、抠图：新格子上还是默认值的才带（求解器、锁定格自己定的不盖）。
     /// - 裁切、完整显示（连同模糊铺底）：格子比例差在 carryAspectTolerance 以内才带。完整显示很多是求解器自己给的
     ///   （一页只放一张、比例和页面差得多）：那张换到多图页的小格子里比例变了，不带，照常铺满。
+    /// - 比例在容差内、旧格子有裁切、新格子是求解器给的完整显示：裁切赢（CR-01，优化分析 2026-11-18）。新树是刚解出来的，
+    ///   上面的完整显示是求解器给的（锁定格自己带着裁切、走不到这里）；用户在一页一张的竖图上双击拖满是常见的第一步，
+    ///   以前同跨页挪走别的照片，它就悄悄回到四周留白，提示还说「裁切留着」。旧格子不会裁切、完整显示两样都有
+    ///   （setCrop 清完整显示，setContain 清裁切）。
+    /// - `aspects`：旧格子的比例按哪棵树量（nil = old 自己）。加照片（joinJob）带手调用的是插过新格的树（新照片的压字、
+    ///   景别从那里来），可那棵树上最大那格已经被劈成两半、比例差两倍，量它就把那张的裁切挡掉了（M-01）；原有照片要按
+    ///   插之前那一页量。aspects 里没有的照片（挪过来、加进来的）照旧按 old 量。
     /// 挪过去的那几张在 moveCells 里已经把裁切、锁定、完整显示清掉了（old 里就是清过的），这里只会带它们的景别、形状。
     static func carryAdjustments(from old: CollageNode, into new: CollageNode, canvas: CollageCanvas,
-                                 style: CollageStyle) -> CollageNode {
+                                 style: CollageStyle, aspects: CollageNode? = nil) -> CollageNode {
+        var measured: [String: Double] = [:]
+        if let aspects {
+            for f in pageGeometry(aspects, canvas: canvas, style: style).frames where f.cell.kind == .photo {
+                guard let id = f.cell.photoID, measured[id] == nil else { continue }
+                measured[id] = Double(CollageCrop.aspect(of: CollageCrop.photoArea(cell: f.cell, rect: f.rect.cgRect, style: style)))
+            }
+        }
         var before: [String: (cell: CollageCell, aspect: Double)] = [:]
         for f in pageGeometry(old, canvas: canvas, style: style).frames where f.cell.kind == .photo {
             guard let id = f.cell.photoID, before[id] == nil else { continue }
             let c = f.cell
             guard c.crop != nil || c.contain || c.framing != .auto || c.shape != nil || c.cutout != nil else { continue }
             let area = CollageCrop.photoArea(cell: c, rect: f.rect.cgRect, style: style)
-            before[id] = (c, Double(CollageCrop.aspect(of: area)))
+            before[id] = (c, measured[id] ?? Double(CollageCrop.aspect(of: area)))
         }
         guard !before.isEmpty else { return new }
         var out = new
@@ -927,16 +941,34 @@ enum CollageLayout {
             let area = CollageCrop.photoArea(cell: cell, rect: f.rect.cgRect, style: style)
             let now = Double(CollageCrop.aspect(of: area))
             let ratio = now > 0 && was.aspect > 0 ? max(now / was.aspect, was.aspect / now) : .infinity
-            if ratio <= carryAspectTolerance, cell.crop == nil, !cell.contain {
-                if was.cell.contain {
+            if ratio <= carryAspectTolerance, cell.crop == nil {
+                if let crop = was.cell.crop {
+                    // 用户的裁切盖过求解器给的完整显示（见上）。
+                    cell.contain = false
+                    cell.containBlur = false
+                    cell.crop = crop
+                } else if was.cell.contain, !cell.contain {
                     cell.contain = true
                     cell.containBlur = was.cell.containBlur
-                } else if let crop = was.cell.crop {
-                    cell.crop = crop
                 }
             }
             guard cell != f.cell else { continue }
             out.update(at: f.path) { $0.cell = cell }
+        }
+        return out
+    }
+
+    /// 重排以后哪几张的裁切没带过去：before 里裁过、after 里还在却没有裁切了（格子比例差太多，carryAdjustments 不带）。
+    /// 挪 / 加照片的提示按它点名（以前一律说「裁切留着」）。按 before 里的阅读顺序，不重复。
+    static func droppedCrops(from before: CollageNode, to after: CollageNode) -> [String] {
+        var now: [String: Bool] = [:]
+        for cell in after.leaves where cell.kind == .photo {
+            if let id = cell.photoID { now[id] = (now[id] ?? false) || cell.crop != nil }
+        }
+        var out: [String] = []
+        for cell in before.leaves where cell.kind == .photo && cell.crop != nil {
+            guard let id = cell.photoID, now[id] == false, !out.contains(id) else { continue }
+            out.append(id)
         }
         return out
     }
