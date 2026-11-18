@@ -108,6 +108,8 @@ enum SelfTestRegistry {
               stage: .beforeDataDir, ci: .selftests()) { _ in ThemeSelfTest.run() },
         .init("--accuracy-selftest", "标注校准页「和自动判决对比」：虚焦 / 闭眼 / 曝光各抓到、漏掉、误杀几张，高分被判废 / 低分进精选，样本太少不给百分比，labels.csv 解析；纯函数，不读写任何文件",
               stage: .beforeDataDir, ci: .selftests()) { _ in AccuracySelfTest.run() },
+        .init("--ear-selftest", "闭眼 EAR 按两眼连线转平：合成的眼睛轮廓转 -30°…270°（含横躺、倒着）读数不变，歪 20° 的闭眼转平后低于地板（老量法读过 0.22）；纯几何，不读写任何文件（Vision 那一半在 native_analysis_smoke.py 第 7 段）",
+              stage: .beforeDataDir, ci: .selftests()) { _ in EyeLevelSelfTest.run() },
         .init("--mcp-selftest", "MCP 这一层的纯函数（含不开界面那道闸的判断表）：不起服务器、不读写任何文件（[--json]）",
               stage: .beforeDataDir, ci: .elsewhere("mcp_smoke.py")) { _ in MCPSelfTest.run() },
         .init("--card-queue-selftest", "存储卡排队：两张假卡走确认 / 排队 / 停下分析，看都导全了、分析在最后跑一次（<cardA> <cardB> --dest <dir>）",

@@ -102,12 +102,14 @@ enum FaceAnalyzer {
             // 质量这一趟失败只丢质量分（nil），脸、闭眼、锐度照旧。
             if (try? handler.perform([q])) != nil { qualityRequest = q }
         }
-        return Analysis(face: faceResult(from: request, quality: qualityRequest),
+        return Analysis(face: faceResult(from: request, quality: qualityRequest,
+                                         imageSize: CGSize(width: image.width, height: image.height)),
                         horizonDeg: horizonDeg)
     }
 
     private static func faceResult(from request: VNDetectFaceLandmarksRequest,
-                                   quality qualityRequest: VNDetectFaceCaptureQualityRequest?) -> FaceResult? {
+                                   quality qualityRequest: VNDetectFaceCaptureQualityRequest?,
+                                   imageSize: CGSize) -> FaceResult? {
         guard let faces = request.results, !faces.isEmpty else {
             return nil
         }
@@ -137,7 +139,7 @@ enum FaceAnalyzer {
         var worstEar: Double?
         var subjectFaces: [SubjectFace] = []
         for face in subjects.sorted(by: { area($0) > area($1) }) {
-            let ear = eyeAspectRatio(of: face)
+            let ear = eyeAspectRatio(of: face, imageSize: imageSize)
             if let ear {
                 worstEar = min(worstEar ?? .infinity, ear)
             }
@@ -267,7 +269,8 @@ enum FaceAnalyzer {
         func distance(_ f: VNFaceObservation) -> Double {
             hypot(Double(f.boundingBox.midX) - cx, Double(f.boundingBox.midY) - cy)
         }
-        return near.min { distance($0) < distance($1) }.flatMap(eyeAspectRatio(of:))
+        let cropSize = CGSize(width: crop.width, height: crop.height)
+        return near.min { distance($0) < distance($1) }.flatMap { eyeAspectRatio(of: $0, imageSize: cropSize) }
     }
 
     /// Eye+brow band and mouth rects of one face, image-normalized top-left
@@ -359,30 +362,72 @@ enum FaceAnalyzer {
     }
 
     /// Both eyes' aspect ratios averaged (one when only one is readable); nil
-    /// when the landmarks have no eyes.
-    private static func eyeAspectRatio(of face: VNFaceObservation) -> Double? {
+    /// when the landmarks have no eyes. `imageSize` = 跑这次 landmarks 的那张图（分析图或原图裁块）的像素尺寸。
+    private static func eyeAspectRatio(of face: VNFaceObservation, imageSize: CGSize) -> Double? {
         guard let landmarks = face.landmarks,
               let left = landmarks.leftEye, let right = landmarks.rightEye else { return nil }
-        let leftRatio = aspectRatio(of: left)
-        let rightRatio = aspectRatio(of: right)
+        // normalizedPoints 是相对脸框的 0–1（x 按框宽、y 按框高），先换成像素一样大的单位再转：框不是正方形时，
+        // 在归一化坐标里转角度会歪。Vision 的脸框实测都是正方形（photot 21 张、合成 emoji 宽高比 1.000），所以正着的脸
+        // 读数和以前一样；乘上去只是不依赖这一点。
+        let sx = face.boundingBox.width * imageSize.width
+        let sy = face.boundingBox.height * imageSize.height
+        guard sx > 0, sy > 0 else { return nil }
+        func pixels(_ region: VNFaceLandmarkRegion2D) -> [CGPoint] {
+            var out: [CGPoint] = []
+            for p in region.normalizedPoints { out.append(CGPoint(x: p.x * sx, y: p.y * sy)) }
+            return out
+        }
+        return levelledEyeAspectRatio(left: pixels(left), right: pixels(right))
+    }
+
+    /// 两只眼（各自的轮廓点，单位一样大的坐标）按两眼质心连线转平以后的高宽比，两只取平均（只有一只量得出就用那一只）。
+    ///
+    /// 以前直接在图像坐标轴上取外接框：脸一歪，眼睛这条细长的轮廓斜着放，外接框的高被斜边撑起来，读数约等于
+    /// tan(倾角) 往上加 —— 闭着的眼歪 12–13° 就读过 0.22（判决层一律算睁眼），歪 8–9° 单张就过 0.15。photot 21 张
+    /// 两眼连线倾角中位 9.7°，7225–7230 歪 21–23°（读数 0.51–0.55，转平 0.30–0.35）；EXIF 方向写错、脸横躺时读成
+    /// 2–3.5（优化分析 2026-11-18 VQ-05 / VQ-08）。转平后 photot 整张转 ±30° 每张只变 0.02–0.07（以前 0.33–1.16），
+    /// 转 90° 和正着放差 ≤ 0.03。轴用两眼质心连线，不用 face.roll：roll 是按 30° 一档量化的（photot 7213 整张转 10° 读 0、转 20° 读 30°）。
+    /// 连线朝左朝右（转 θ 还是 θ+180°）外接框一样，所以左右眼认反、脸倒着都不影响。
+    /// 只有一只眼有点时没有连线，照旧在原坐标轴上量（实际不会碰到：Vision 的眼睛轮廓总是成对、点数固定）。
+    static func levelledEyeAspectRatio(left: [CGPoint], right: [CGPoint]) -> Double? {
+        var angle = 0.0
+        if !left.isEmpty, !right.isEmpty {
+            let cl = centroid(left), cr = centroid(right)
+            angle = atan2(Double(cr.y - cl.y), Double(cr.x - cl.x))
+        }
+        let leftRatio = extentAspectRatio(left, rotatedBy: -angle)
+        let rightRatio = extentAspectRatio(right, rotatedBy: -angle)
         if let l = leftRatio, let r = rightRatio { return (l + r) / 2 }
         return leftRatio ?? rightRatio
     }
 
-    /// Height/width of the eye outline's bounding extent. Point order in Vision's
-    /// eye region isn't documented, so extent-based ratio is safer than assuming
-    /// dlib-style indexing.
-    private static func aspectRatio(of region: VNFaceLandmarkRegion2D) -> Double? {
-        let points = region.normalizedPoints
-        guard points.count >= 4 else { return nil }
-        var minX = CGFloat.greatestFiniteMagnitude, maxX = -CGFloat.greatestFiniteMagnitude
-        var minY = CGFloat.greatestFiniteMagnitude, maxY = -CGFloat.greatestFiniteMagnitude
+    private static func centroid(_ points: [CGPoint]) -> CGPoint {
+        var x = 0.0, y = 0.0
         for p in points {
-            minX = min(minX, p.x); maxX = max(maxX, p.x)
-            minY = min(minY, p.y); maxY = max(maxY, p.y)
+            x += Double(p.x)
+            y += Double(p.y)
+        }
+        let n = Double(points.count)
+        return CGPoint(x: x / n, y: y / n)
+    }
+
+    /// Height/width of the eye outline's bounding extent after rotating the points
+    /// by `angle` (radians). Point order in Vision's eye region isn't documented,
+    /// so extent-based ratio is safer than assuming dlib-style indexing.
+    private static func extentAspectRatio(_ points: [CGPoint], rotatedBy angle: Double) -> Double? {
+        guard points.count >= 4 else { return nil }
+        let c = cos(angle), s = sin(angle)
+        var minX = Double.greatestFiniteMagnitude, maxX = -Double.greatestFiniteMagnitude
+        var minY = Double.greatestFiniteMagnitude, maxY = -Double.greatestFiniteMagnitude
+        for p in points {
+            let px = Double(p.x), py = Double(p.y)
+            let x = px * c - py * s
+            let y = px * s + py * c
+            minX = min(minX, x); maxX = max(maxX, x)
+            minY = min(minY, y); maxY = max(maxY, y)
         }
         let width = maxX - minX
         guard width > 0 else { return nil }
-        return Double((maxY - minY) / width)
+        return (maxY - minY) / width
     }
 }

@@ -4170,7 +4170,13 @@ final class BatchStore: ObservableObject {
     static let earAbsoluteFloor = 0.08
     /// Unconditionally open above this — guards the opposite blind spot, where a
     /// wide-open group best (0.4+) drags the 70% line up into open-eye territory.
-    static let earOpenGuard = 0.22
+    /// 0.22 → 0.20（优化分析 2026-11-18 VQ-05）：EAR 改成按两眼连线转平再量以后，photot 21 张睁眼读数从 0.262–0.553
+    /// 变成 0.217–0.440，最低的是 DSCF7214（0.217，眼睛往下看、眼皮压低，和 7211–7216 同一组姿势，不是眨眼）。
+    /// 0.22 落进了睁眼的范围里：7214 这样的一帧要是和一张看镜头的（0.36–0.44，线 0.25–0.31）连拍成组，会被判闭眼。
+    /// 同一姿势相邻两帧的读数差 0.005–0.02（7211/7212、7215/7216、7222/7223），0.20 给最低的睁眼留约 8% 的余量
+    /// （以前 0.22 对转平前最低的 0.262 留 16%）。代价：连拍组里 0.20–0.22 的半眨眼不再判闭眼 —— 往下看和半眨眼
+    /// 在这一段分不开，两边都没有真片。全闭的眼（FaceAnalyzer 注释：0.12 以下）不经过这条线，地板、单张线、组内相对线照样抓。
+    static let earOpenGuard = 0.20
     /// Absolute fallback when the group has no siblings to compare against
     /// (same value the engine bakes into its legacy boolean).
     static let earSingleThreshold = 0.15

@@ -995,6 +995,86 @@
   },
   {
    "camera": "X-T50",
+   "capture_time": "2026-03-21T10:17:30",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/N01-ear040.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "N01-ear040",
+   "orientation": null,
+   "preview_path": "previews/N01-ear040.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/N01-ear040.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:17:31",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/N02-ear0205-guard.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "N02-ear0205-guard",
+   "orientation": null,
+   "preview_path": "previews/N02-ear0205-guard.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/N02-ear0205-guard.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:17:32",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/N03-ear0195.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "N03-ear0195",
+   "orientation": null,
+   "preview_path": "previews/N03-ear0195.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/N03-ear0195.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:18:00",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/R01-ear026.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "R01-ear026",
+   "orientation": null,
+   "preview_path": "previews/R01-ear026.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/R01-ear026.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:18:01",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/R02-ear019-rel.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "R02-ear019-rel",
+   "orientation": null,
+   "preview_path": "previews/R02-ear019-rel.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/R02-ear019-rel.JPG"
+  },
+  {
+   "camera": "X-T50",
    "capture_time": "2026-03-21T12:00:00",
    "decode_path": "/tmp/labelgui-fixture-synthetic/Z01-corrupt.JPG",
    "exif": {

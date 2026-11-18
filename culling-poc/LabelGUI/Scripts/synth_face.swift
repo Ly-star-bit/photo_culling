@@ -3,10 +3,11 @@
 // 人脸质量请求「有时用 landmarks 的框、有时用自己检测的」那条线上 —— 分析版本 3 以前，同一张图两次分析的 face_quality
 // 经常不一样（VQ-04）。仓库里不放照片（个人照片、也不放 emoji 的渲染图），所以跑测试时现场画。
 //
-//   synth_face <out.jpg> <emoji> [字号 pt，默认 600] [eyes|mouth]
+//   synth_face <out.jpg> <emoji> [字号 pt，默认 600] [eyes|mouth|none] [转多少度]
 //
 // 第 4 个参数（第 6 段「锐度只看眼眉带」用）：画完在图上跑一遍 landmarks，按 app 的口径（FaceAnalyzer.featureRects：两眼 + 两眉 /
-// 外唇）找到那一块，四周再放出半块，只把这块高斯糊掉 —— 模拟前焦（眼睛糊、嘴清楚）和反过来。没认出脸退出码 3。
+// 外唇）找到那一块，四周再放出半块，只把这块高斯糊掉 —— 模拟前焦（眼睛糊、嘴清楚）和反过来。没认出脸退出码 3。none = 不糊。
+// 第 5 个参数（第 7 段「歪头的 EAR」用）：emoji 绕画面中心逆时针转这么多度再画（歪头）。
 //
 // 编译：swiftc Scripts/synth_face.swift -o <某处>/synth_face（smoke 脚本自己编进它的临时目录）。
 import CoreGraphics
@@ -19,7 +20,7 @@ import Vision
 
 let args = CommandLine.arguments
 guard args.count >= 3 else {
-    print("用法: synth_face <out.jpg> <emoji> [字号 pt] [eyes|mouth]")
+    print("用法: synth_face <out.jpg> <emoji> [字号 pt] [eyes|mouth|none] [转多少度]")
     exit(2)
 }
 let size = args.count > 3 ? CGFloat(Double(args[3]) ?? 600) : 600
@@ -35,14 +36,16 @@ let attrs: [NSAttributedString.Key: Any] = [NSAttributedString.Key(kCTFontAttrib
 let line = CTLineCreateWithAttributedString(NSAttributedString(string: args[2], attributes: attrs))
 // 按字形的实际外框居中（emoji 的 ascent / descent 和画出来的图不一样大）。
 let bounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
-let x = (CGFloat(width) - bounds.width) / 2 - bounds.minX
-let y = (CGFloat(height) - bounds.height) / 2 - bounds.minY
-ctx.textPosition = CGPoint(x: x, y: y)
+// 转的时候绕画面中心：先把原点挪到中心、转，再按字形外框居中画。
+let degrees = args.count > 5 ? Double(args[5]) ?? 0 : 0
+ctx.translateBy(x: CGFloat(width) / 2, y: CGFloat(height) / 2)
+ctx.rotate(by: CGFloat(degrees * .pi / 180))
+ctx.textPosition = CGPoint(x: -bounds.width / 2 - bounds.minX, y: -bounds.height / 2 - bounds.minY)
 CTLineDraw(line, ctx)
 
 guard var image = ctx.makeImage() else { exit(1) }
 
-if args.count > 4 {
+if args.count > 4, args[4] == "eyes" || args[4] == "mouth" {
     let request = VNDetectFaceLandmarksRequest()
     try? VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
     func area(_ f: VNFaceObservation) -> CGFloat { f.boundingBox.width * f.boundingBox.height }

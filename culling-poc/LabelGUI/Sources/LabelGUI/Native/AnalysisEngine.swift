@@ -74,7 +74,9 @@ enum AnalysisEngine {
     /// 3：人脸质量改成喂 landmarks 的脸框单独算（FaceAnalyzer.analyze）—— 以前同一张图每次分析出两种分，
     ///    新分落在哪一种不固定，和老结果混在一场里组内比较就不公平。
     ///    同一版（还没发出去）里锐度也改了口径：只量眼眉带（裁回脸框），不再和嘴那块取大；sharpness_scope
-    ///    从 "features" 变成 "eyes" / "mouth"。两样一起升这一次，用户整场重分析一回。
+    ///    从 "features" 变成 "eyes" / "mouth"。闭眼的 EAR（blink_score、faces[].ear）也改了：按两眼连线转平再量
+    ///    （FaceAnalyzer.levelledEyeAspectRatio），歪着的脸读数变小（photot 歪 21–23° 的 0.51–0.55 → 0.30–0.35）。
+    ///    三样一起升这一次，用户整场重分析一回。
     static let analysisVersion = 3
 
     struct Summary {

@@ -22,6 +22,9 @@ sips 出的图没有拍摄时间（没有时间的每张单独成组），所以
 
 锐度只看眼眉带（第 6 段，复核 M1）：同一个 emoji 原样 / 只糊眼眉 / 只糊嘴各画一张，只糊眼眉的锐度要掉、只糊嘴的不动。
 
+歪头的 EAR（第 7 段，VQ-05 / VQ-08）：同一个 emoji 正着、转 20° 各画一张，再把正着那张改成 EXIF 方向 6（脸横躺），
+三张的 EAR 要差不多（以前歪 20° 多 0.1–0.2，横躺读成 2–3.5）。
+
 最后是规模守护：把 photot-session 的 21 行克隆成 2000 / 8000 行（只有 JSON，不要图），给 `--verdicts` 计时；
 共享 runner 计时抖得厉害，只卡很宽的上限和「8000 比 2000 的耗时比」（线性 ≈ 4，O(n²) ≈ 16），各取几次里最快的。
 
@@ -460,12 +463,68 @@ def eyes_section():
     check(len(good) >= 2, f"≥ 2 个 emoji 只糊眼眉锐度掉到 6 成以下、只糊嘴不动（原样/糊眼眉/糊嘴：{'；'.join(seen) or '一个都没凑齐'}）")
 
 
+# ---------------------------------------------------------------- 7. 歪头 / 方向写错时的 EAR（带人脸）
+
+def tilt_section():
+    """EAR 以前在图像坐标轴上量眼睛的外接框，脸一歪读数就被斜边撑大（闭着的眼歪 12° 以上读过 0.22，一律算睁眼），
+    EXIF 方向写错、脸横躺时读成 2–3.5（优化分析 2026-11-18 VQ-05 / VQ-08）。现在按两眼连线转平再量。同一个 emoji 画三张：
+    正着、绕画面中心转 20°（歪头），再把正着那张的字节原样拷一份、只把 EXIF 方向改成 6（解码时转 90°，脸横躺 —— 像素一模一样）。
+    断言：转 20° 的读数和正着的差（各 emoji 取中位数）≤ 0.06；方向 6 的那份 ≥ 2 个和正着的差 ≤ 0.06；整个文件夹没有 > 1 的读数。
+    老量法在本机：转 20° 差的中位数 0.125（8 个里只有 1 个 ≤ 0.06），方向 6 读成 1.7–5.7。转 -20° 这边 Vision 在 emoji 上的眼睛轮廓
+    普遍胖 0.07（真片 photot 转 ±20° 都在 0.035 以内），所以只用 +20°。👳‍♂️ 正着放会被认成倒着的脸（眼睛读成 0.08），不靠它凑数。"""
+    print("7. 歪头 20°、EXIF 方向写错：EAR 和正着的一样")
+    tool = os.path.join(WORK, "synth_face")
+    if not check(os.path.isfile(tool), "第 5 段编好的 synth_face 还在"):
+        return
+    folder = os.path.join(WORK, "tilt")
+    os.makedirs(folder)
+    for i, emoji in enumerate(FACE_EMOJI):
+        name = os.path.join(folder, f"face_{i + 1:02d}")
+        for deg in ("0", "20"):
+            subprocess.run([tool, f"{name}_r{deg}.jpg", emoji, "600", "none", deg], capture_output=True, text=True,
+                           timeout=60, stdin=subprocess.DEVNULL)
+        if os.path.isfile(f"{name}_r0.jpg"):
+            data = sj.with_exif(open(f"{name}_r0.jpg", "rb").read(), orientation=6)
+            with open(f"{name}_o6.jpg", "wb") as f:
+                f.write(data)
+    count = len(os.listdir(folder))
+    data = os.path.join(WORK, "tilt-data")
+    os.makedirs(data)
+    r, dt = run(["--analyze", folder], data)
+    if not check(r.returncode == 0 and f"Done: {count} analyzed" in r.stdout, f"{count} 张都分析了（{dt:.1f}s）"):
+        return
+    rows = {x.get("id"): x for x in json.load(open(os.path.join(data, "sessions", session_key(folder),
+                                                                "layer1_results.json")))["results"]}
+
+    def ear(pid):
+        return (rows.get(pid) or {}).get("blink_score")
+    tilt, side, seen = [], [], []
+    for i in range(len(FACE_EMOJI)):
+        name = f"face_{i + 1:02d}"
+        e0, e20, e6 = ear(name + "_r0"), ear(name + "_r20"), ear(name + "_o6")
+        seen.append(f"{name} " + "/".join("-" if v is None else f"{v:.3f}" for v in (e0, e20, e6)))
+        if e0 is not None and e20 is not None:
+            tilt.append(abs(e20 - e0))
+        if e0 is not None and e6 is not None and abs(e6 - e0) <= 0.06:
+            side.append(name)
+    tilt.sort()
+    median = (tilt[(len(tilt) - 1) // 2] + tilt[len(tilt) // 2]) / 2 if tilt else None
+    detail = "正着/转 20°/方向 6：" + "；".join(seen)
+    check(len(tilt) >= 2 and median <= 0.06,
+          f"转 20° 和正着的 EAR 差（{len(tilt)} 个 emoji 都认出了脸）中位数 "
+          f"{'-' if median is None else f'{median:.3f}'} ≤ 0.06（{detail}）")
+    check(len(side) >= 2, f"EXIF 方向 6（脸横躺）≥ 2 个和正着的差 ≤ 0.06：{side}（{detail}）")
+    big = sorted(k for k, v in rows.items() if (v.get("blink_score") or 0) > 1)
+    check(not big, f"没有 > 1 的 EAR（人眼的高不会比宽大）：{big}")
+
+
 try:
     native_section()
     if SCALE:
         scale_section()
     repeat_section()
     eyes_section()
+    tilt_section()
     if not REAL_BEFORE:
         check(not os.path.exists(REAL_DATA), f"跑之前没有 {REAL_DATA}，跑完也没有（每条命令都走临时数据目录）")
 finally:

@@ -150,7 +150,8 @@ add("B01-ear030", t, "组内相对 EAR：最好的一张 0.30（去重后场里�
     patch={"faces": [face(0.30, 0.004)], "face_quality": 0.62})
 add("B02-ear018-rel", t + timedelta(seconds=1), "组内 0.18 < 0.30×0.7=0.21：闭眼（单张就不判，见 A14）", "废片 闭眼",
     patch={"faces": [face(0.18, 0.004)], "face_quality": 0.61}, new_group=False)
-add("B03-ear0215", t + timedelta(seconds=2), "组内 0.215 ≥ 0.21：睁眼", "可用 -", dedupe="废片 连拍重复", accept="废片 -",
+add("B03-ear0215", t + timedelta(seconds=2), "组内 0.215 ≥ 0.21：睁眼（也 ≥ 睁眼保护线 0.20；保护线以下的相对线见 R 组）", "可用 -",
+    dedupe="废片 连拍重复", accept="废片 -",
     patch={"faces": [face(0.215, 0.004)], "face_quality": 0.60}, new_group=False)
 
 # C：组内人脸质量（同一 burst_group，比最好的低 0.15 以上才判）。
@@ -233,6 +234,22 @@ add("L02-soft72-q060", t + timedelta(seconds=1), "比闭眼的 L01 糊 10%，但
     "精选 -", patch={"sharpness": 72.0, "face_quality": 0.60, "faces": [face(0.36, 0.004)]}, new_group=False)
 add("L03-other-q058", t + timedelta(seconds=4), "同一场、另一个近似重复组：不和 L01 / L02 比锐度", "可用 -", accept="废片 -",
     patch={"sharpness": 60.0, "face_quality": 0.58})
+
+# N：睁眼保护线 0.20（BatchStore.earOpenGuard，VQ-05 从 0.22 降下来）。组里最好 0.40 → 相对线 0.28：保护线以上的一律睁眼
+# （像 DSCF7214 那种往下看、眼皮压低的，转平后 0.217），保护线以下才走相对线。各自一场（隔 30 s），还在第一章里。
+t = T0 + timedelta(minutes=17, seconds=30)
+add("N01-ear040", t, "睁眼保护线：组里最好 0.40（相对线 0.28；去重后场里只剩它一张，不提名）", "精选 -", dedupe="可用 -",
+    patch={"faces": [face(0.40, 0.004)], "face_quality": 0.62})
+add("N02-ear0205-guard", t + timedelta(seconds=1), "组内 0.205 < 相对线 0.28，但 ≥ 保护线 0.20：睁眼", "可用 -",
+    dedupe="废片 连拍重复", accept="废片 -", patch={"faces": [face(0.205, 0.004)], "face_quality": 0.60}, new_group=False)
+add("N03-ear0195", t + timedelta(seconds=2), "组内 0.195 < 保护线 0.20，又 < 相对线 0.28：闭眼", "废片 闭眼",
+    patch={"faces": [face(0.195, 0.004)], "face_quality": 0.61}, new_group=False)
+# R：保护线以下照样按组内相对线：眼睛天生窄的人组里最好 0.26 → 线 0.182，0.19 算睁眼（相对规则就是为这种人设的）。
+t = T0 + timedelta(minutes=18)
+add("R01-ear026", t, "窄眼：组里最好 0.26（相对线 0.182；去重后场里只剩它一张，不提名）", "精选 -", dedupe="可用 -",
+    patch={"faces": [face(0.26, 0.004)], "face_quality": 0.62})
+add("R02-ear019-rel", t + timedelta(seconds=1), "组内 0.19 < 保护线 0.20，但 ≥ 相对线 0.182：睁眼", "可用 -",
+    dedupe="废片 连拍重复", accept="废片 -", patch={"faces": [face(0.19, 0.004)], "face_quality": 0.60}, new_group=False)
 
 # Z：第二章（隔 1 小时 45 分），全是废片 → 章节警告。Z03 的 layer1 带 error：不进网格。
 t = T0 + timedelta(hours=2)
