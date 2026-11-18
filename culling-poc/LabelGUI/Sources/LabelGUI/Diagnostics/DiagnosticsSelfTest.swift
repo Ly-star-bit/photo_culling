@@ -16,6 +16,8 @@ import UniformTypeIdentifiers
 ///     写不进去报「没有权限」；writeJPEG 原片不在 / 解不开；水印页拿到真原因
 ///   E 文件夹权限：chmod 000 的照片文件夹分析时报「没有权限读这个文件夹 … 系统设置 › 隐私与安全性 › 文件与文件夹」，
 ///     不报「没有支持的图片文件」；空文件夹照旧；读不了的子文件夹跳过；开关按位置点名
+///   F 帮助菜单的网址和诊断信息的两行：反馈问题（Issue 表、版本号预先填好）、使用说明（这一版 tag 上的 README）、
+///     本地模型要的三样在不在、界面语言
 /// 只写 LABELGUI_DATA_DIR 下面（照片文件夹参数只读：拿第一张 JPG 再核对一次逐字节）。--out 给定时把展开的提示面板拍成 PNG。
 enum DiagnosticsSelfTest {
     @MainActor
@@ -883,6 +885,19 @@ enum DiagnosticsSelfTest {
         check(masked == elsewhere, "本地模型那一行打码以后一个字不变（没有要换的路径）", masked)
         let language = DiagnosticsBundle.languageLine()
         check(language.hasPrefix("界面语言：") && language.contains("系统首选："), "界面语言那一行", language)
+
+        // 「使用说明（网页）」：tag 构建（x.y.z）打这一版 tag 上的 README；0.1（feature / main 的包）、dev（裸二进制）、别的写法 → 首页
+        let repo = "https://github.com/Ly-star-bit/photo_culling"
+        let tagged = Diagnostics.manualURL(version: "1.33.0").absoluteString
+        check(tagged == repo + "/blob/v1.33.0/README.md", "使用说明：1.33.0 的包打开 v1.33.0 那个 tag 上的 README", tagged)
+        let notTags: [String] = ["0.1", "dev", "1.33", "1.33.0-rc1", " 1.33.0", "1.33.0.1", ""]
+        let fallback = notTags.map { Diagnostics.manualURL(version: $0).absoluteString }
+        check(fallback.allSatisfy { $0 == repo + "#readme" }, "使用说明：0.1 / dev / 不是 x.y.z 的 → 仓库首页的 README",
+              "\(fallback)")
+        // 菜单那一项用的是这个程序自己的版本号：裸二进制（自检、CI 跑的都是它）是 dev → 首页；打包的 app 按自己的版本号
+        let menu = Diagnostics.manualURL.absoluteString
+        let own = WhatsNew.appVersion == "dev" ? repo + "#readme" : Diagnostics.manualURL(version: WhatsNew.appVersion).absoluteString
+        check(menu == own, "使用说明：菜单用的是这个程序自己的版本号（\(WhatsNew.appVersion)）", menu)
     }
 
     // MARK: 面板快照（看样子，不进 CI）

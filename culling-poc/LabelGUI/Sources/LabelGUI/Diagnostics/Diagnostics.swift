@@ -16,7 +16,19 @@ import UniformTypeIdentifiers
 
 enum Diagnostics {
     static let privacySettingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders")!
-    static let manualURL = URL(string: "https://github.com/Ly-star-bit/photo_culling#readme")!
+    /// 「帮助 › 使用说明（网页）」打开的：这一版 tag 上的 README（优化分析 2026-11-18 OP-03 复核补充）。以前一律指仓库首页，
+    /// 也就是 main 上的 README —— 装着旧版的人看到的是后来才有的功能。
+    static var manualURL: URL { manualURL(version: WhatsNew.appVersion) }
+
+    /// 版本号是 x.y.z（只有 tag 构建才写进去：build_app.sh 只在 tag 上用 tag 的版本号，restamp 同样）→ blob/v<x.y.z>/README.md；
+    /// feature / main 打的包是 0.1、裸二进制是 dev、别的写法 → 仓库首页的 README。README 里的相对链接（../../releases）
+    /// 在 blob/<tag>/README.md 上照样指到仓库的 Releases。
+    static func manualURL(version: String) -> URL {
+        let home = URL(string: "https://github.com/Ly-star-bit/photo_culling#readme")!
+        let digits: Set<Character> = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "."]
+        guard WhatsNew.parse(version)?.count == 3, version.allSatisfy({ digits.contains($0) }) else { return home }
+        return URL(string: "https://github.com/Ly-star-bit/photo_culling/blob/v\(version)/README.md") ?? home
+    }
 
     /// 「帮助 › 反馈问题…」（优化分析 2026-11-18 OP-07）：以前诊断包说「发给开发者就行」，哪里都没说发到哪。打开仓库的新建
     /// Issue 页，用 .github/ISSUE_TEMPLATE/bug.yml 那张表，版本号、系统版本按字段 id（version、macos）预先填好（GitHub 的
