@@ -152,7 +152,7 @@ enum MCPToolDefs {
      "annotations":"$READ"},
 
     {"name":"cull_list_photos","title":"列照片",
-     "description":"按条件列出 app 当前打开的那一场里的照片，每张一行精简数据：id、判决、废片理由、拍摄时间（已加机身对时偏移）、章节、场和场内名次、近似重复组、锐度、曝光裁切、人脸质量、人脸数和闭眼数、是否人工改判（manual；changed_by 是 ai = AI 用 cull_set_verdicts 改的、user = 用户亲手改的）。条件之间是 AND。分页：结果里有 next_cursor，原样传回 cursor 就是下一页；翻页中间判决变了会带 session_changed:true。要完整细节（EXIF、每张脸）用 cull_get_photos；要看图用 cull_preview_photos。",
+     "description":"按条件列出 app 当前打开的那一场里的照片，每张一行精简数据：id、判决、废片理由、拍摄时间（已加机身对时偏移）、章节、场和场内名次、近似重复组、锐度（排序用）、对焦（focus：判虚焦用，低于 thresholds.focus 判虚焦）、曝光裁切、人脸质量、人脸数和闭眼数、是否人工改判（manual；changed_by 是 ai = AI 用 cull_set_verdicts 改的、user = 用户亲手改的）。条件之间是 AND。分页：结果里有 next_cursor，原样传回 cursor 就是下一页；翻页中间判决变了会带 session_changed:true。要完整细节（EXIF、每张脸）用 cull_get_photos；要看图用 cull_preview_photos。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "verdict":{"type":"array","items":{"type":"string","enum":["pick","usable","reject"]},"uniqueItems":true,"description":"只列这些判决"},

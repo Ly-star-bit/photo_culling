@@ -127,6 +127,139 @@ enum Metrics {
         return (sum / count).squareRoot()
     }
 
+    // MARK: - Focus ratio（判虚焦用的清晰比）
+
+    /// 判「虚焦」用的清晰比：同一块区域（锐度阶梯选中的那块，平常是眼眉带）上「二阶导 ÷ 一阶导」，横竖各算一个，
+    /// 原尺度和 2×2 缩一半各算一遍，取四个里最小的（优化分析 2026-11-18 VQ-02）。
+    ///
+    /// 为什么不用 tenengrad：它量的是梯度的绝对大小，跟亮度、景别、分辨率走的幅度和跟模糊一样大 —— 暗一档掉 26%，
+    /// σ3 模糊才掉 17%；长边 2048 的小图涨 25%；特写掉 13–32%。同一条线分不开「清楚但暗 / 特写 / 小图」和「糊」。
+    /// 比值把反差约掉了（亮度、反差乘多少分子分母一起乘），自然图像的频谱近似 1/f，换尺度也基本不动；模糊先砍
+    /// 高频，二阶导掉得比一阶导快，比值随模糊单调往下走。合成集（photot 8 张 × 40 多种变体，4000 万像素上做退化，
+    /// 走 app 同一套解码 / ROI）上：清楚的 81–115（×1000，含 -1/-2EV、长边 2048 / 1024 / 768、裁到 40%、噪声），
+    /// σ2 63–74、σ3 51–61、σ5 35–43、σ8 24–27，只糊眼眉 σ4 42–50。
+    /// - 横竖分开取最小：只有一个方向的运动模糊（手抖、人在动）把那个方向的比值压下去，各向同性的比值几乎不动
+    ///   （横向运动 40 各向同性 58–71、分开取最小 24–32）。
+    /// - 缩一半再算一遍取最小：噪点是高频，糊片加了噪点比值会被抬上去（σ8 + 逐像素噪声 σ20 原尺度 53–86），
+    ///   缩一半把噪点平均掉、模糊还在（同一组 47–54）。成团噪声更重（σ8 + 先糊 1px 的噪声 σ20）时仍然分不开
+    ///   （62–88），比 X-T50 机内降噪后的高感重得多，这一块是已知的弱点。
+    /// - 预模糊、Sobel、边界和 tenengrad 同一套口径；拉普拉斯也在预模糊之后的图上算（原图上算对单像素噪点太敏感）。
+    /// 某个方向几乎没有梯度（Sobel 的 RMS < 3，平的）那个方向不算；全都平的 = 0（和以前 tenengrad ≈ 0 一样判糊）。
+    /// 3 ≈ 每像素 0.4 个灰阶的坡：再缓就只剩 8 位量化和 JPEG 的台阶了，台阶的二阶导会把比值抬到「清楚」（平滑渐变
+    /// 1500 像素走 190 级，Sobel 1.7、比值 112）。合成集 480 张（含 σ48、-4EV 再 σ24）最平的方向 2.5，取不取它对焦都不变。
+    /// 返回比值本身（清楚的约 0.08–0.12）；界面上乘 1000 显示（BatchStore.focusScale）。
+    static func focusRatio(gray: [Float], width: Int, height: Int,
+                           x0: Int = 0, y0: Int = 0, x1: Int? = nil, y1: Int? = nil) -> Double {
+        let xEnd = min(width, x1 ?? width)
+        let yEnd = min(height, y1 ?? height)
+        // 区域外带 4 像素：缩一半以后还剩 2 像素，预模糊和 3×3 的抽头读的都是真像素。
+        let apron = 4
+        let rx0 = max(0, x0 - apron), ry0 = max(0, y0 - apron)
+        let rx1 = min(width, xEnd + apron), ry1 = min(height, yEnd + apron)
+        let rw = rx1 - rx0, rh = ry1 - ry0
+        guard rw >= 5, rh >= 5 else { return 0 }
+        var buf = [Float](repeating: 0, count: rw * rh)
+        gray.withUnsafeBufferPointer { src in
+            buf.withUnsafeMutableBufferPointer { dst in
+                for y in 0..<rh {
+                    let srcRow = (ry0 + y) * width + rx0
+                    let dstRow = y * rw
+                    for x in 0..<rw { dst[dstRow + x] = src[srcRow + x] }
+                }
+            }
+        }
+        var best: Double? = focusDirectionalRatio(buf, rw, rh, max(1, x0 - rx0), max(1, y0 - ry0),
+                                                  min(rw - 1, xEnd - rx0), min(rh - 1, yEnd - ry0))
+        // 缩一半：2×2 平均（不预先低通 —— 区域小，混叠落在被比的最高频上，和原尺度那一遍是一样的口径）
+        let hw = rw / 2, hh = rh / 2
+        if hw >= 5, hh >= 5 {
+            var half = [Float](repeating: 0, count: hw * hh)
+            buf.withUnsafeBufferPointer { src in
+                half.withUnsafeMutableBufferPointer { dst in
+                    for y in 0..<hh {
+                        for x in 0..<hw {
+                            let i = 2 * y * rw + 2 * x
+                            let a: Float = src[i] + src[i + 1]
+                            let b: Float = a + src[i + rw]
+                            dst[y * hw + x] = (b + src[i + rw + 1]) * 0.25
+                        }
+                    }
+                }
+            }
+            let hx0 = max(1, (x0 - rx0) / 2), hy0 = max(1, (y0 - ry0) / 2)
+            let hx1 = min(hw - 1, (xEnd - rx0) / 2), hy1 = min(hh - 1, (yEnd - ry0) / 2)
+            if hx1 > hx0, hy1 > hy0, let h = focusDirectionalRatio(half, hw, hh, hx0, hy0, hx1, hy1) {
+                best = min(best ?? h, h)
+            }
+        }
+        return best ?? 0
+    }
+
+    /// focusRatio 的一个尺度：`buf`（rw × rh，带边）先 3×3 高斯预模糊，再在 [sx0, sx1) × [sy0, sy1) 上求
+    /// RMS(∂²/∂x²) ÷ RMS(Sobel x) 和 RMS(∂²/∂y²) ÷ RMS(Sobel y)，取小的。两个方向都平 = nil。
+    private static func focusDirectionalRatio(_ buf: [Float], _ rw: Int, _ rh: Int,
+                                              _ sx0: Int, _ sy0: Int, _ sx1: Int, _ sy1: Int) -> Double? {
+        guard sx1 > sx0, sy1 > sy0 else { return nil }
+        var smooth = [Float](repeating: 0, count: rw * rh)
+        buf.withUnsafeBufferPointer { src in
+            smooth.withUnsafeMutableBufferPointer { dst in
+                for y in 0..<rh {
+                    let row = y * rw
+                    dst[row] = src[row]
+                    dst[row + rw - 1] = src[row + rw - 1]
+                    for x in 1..<(rw - 1) {
+                        dst[row + x] = (src[row + x - 1] + 2 * src[row + x] + src[row + x + 1]) * 0.25
+                    }
+                }
+            }
+        }
+        var final = [Float](repeating: 0, count: rw * rh)
+        smooth.withUnsafeBufferPointer { src in
+            final.withUnsafeMutableBufferPointer { dst in
+                for x in 0..<rw {
+                    dst[x] = src[x]
+                    dst[(rh - 1) * rw + x] = src[(rh - 1) * rw + x]
+                }
+                for y in 1..<(rh - 1) {
+                    let row = y * rw
+                    for x in 0..<rw {
+                        dst[row + x] = (src[row - rw + x] + 2 * src[row + x] + src[row + rw + x]) * 0.25
+                    }
+                }
+            }
+        }
+        var gxSum = 0.0, gySum = 0.0, lxxSum = 0.0, lyySum = 0.0
+        var count = 0.0
+        final.withUnsafeBufferPointer { g in
+            for y in sy0..<sy1 {
+                let row = y * rw
+                for x in sx0..<sx1 {
+                    let i = row + x
+                    // 抽头分开起名（和 tenengrad 一样）：串成一长条的表达式 CI 的 Swift 6.1.2 类型检查会超时。
+                    let tl = g[i - rw - 1], tc = g[i - rw], tr = g[i - rw + 1]
+                    let ml = g[i - 1], mc = g[i], mr = g[i + 1]
+                    let bl = g[i + rw - 1], bc = g[i + rw], br = g[i + rw + 1]
+                    let gx: Float = tr + 2 * mr + br - tl - 2 * ml - bl
+                    let gy: Float = bl + 2 * bc + br - tl - 2 * tc - tr
+                    let lxx: Float = ml + mr - 2 * mc
+                    let lyy: Float = tc + bc - 2 * mc
+                    gxSum += Double(gx * gx)
+                    gySum += Double(gy * gy)
+                    lxxSum += Double(lxx * lxx)
+                    lyySum += Double(lyy * lyy)
+                    count += 1
+                }
+            }
+        }
+        guard count > 0 else { return nil }
+        // 平的那个方向（Sobel 的 RMS 不到 3）：比值是噪点和量化台阶凑出来的，不算。
+        let flat = 9 * count  // RMS < 3 ⟺ 平方和 < 9 × 像素数
+        var ratios: [Double] = []
+        if gxSum >= flat { ratios.append((lxxSum / gxSum).squareRoot()) }
+        if gySum >= flat { ratios.append((lyySum / gySum).squareRoot()) }
+        return ratios.min()
+    }
+
     /// 对焦高亮用的每像素梯度幅值（Gaussian 3×3 预模糊 + Sobel，和 tenengrad 同一套
     /// 口径，只是不求均值）。边界一圈为 0。阈值由调用方按分位数定 —— 绝对阈值
     /// 换一张曝光就失效。

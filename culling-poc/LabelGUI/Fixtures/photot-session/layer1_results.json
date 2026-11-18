@@ -1,5 +1,5 @@
 {
-  "analysis_version" : 3,
+  "analysis_version" : 4,
   "engine" : "native",
   "hash_threshold" : 10,
   "results" : [
@@ -36,6 +36,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.094671764841298786,
       "frame_luma" : 142,
       "frame_luma_p99" : 217,
       "highlight_clip_pct" : 7.9472859700520837e-07,
@@ -83,6 +84,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.087195574261238834,
       "frame_luma" : 136,
       "frame_luma_p99" : 217,
       "highlight_clip_pct" : 1.5894571940104166e-07,
@@ -130,6 +132,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.095733600847670214,
       "frame_luma" : 133,
       "frame_luma_p99" : 216,
       "highlight_clip_pct" : 0,
@@ -177,6 +180,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.083562531387929975,
       "frame_luma" : 135,
       "frame_luma_p99" : 215,
       "highlight_clip_pct" : 3.1789143880208332e-07,
@@ -224,6 +228,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.084689135373946442,
       "frame_luma" : 134,
       "frame_luma_p99" : 215,
       "highlight_clip_pct" : 1.5894571940104166e-07,
@@ -271,6 +276,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.086045208861049161,
       "frame_luma" : 75,
       "frame_luma_p99" : 211,
       "highlight_clip_pct" : 1.5894571940104166e-07,
@@ -318,6 +324,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.080957619721230945,
       "frame_luma" : 81,
       "frame_luma_p99" : 213,
       "highlight_clip_pct" : 0,
@@ -365,6 +372,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.081625902828024052,
       "frame_luma" : 110,
       "frame_luma_p99" : 211,
       "highlight_clip_pct" : 3.1789143880208332e-07,
@@ -412,6 +420,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.082086385703073722,
       "frame_luma" : 112,
       "frame_luma_p99" : 211,
       "highlight_clip_pct" : 0,
@@ -459,6 +468,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.090796506060609919,
       "frame_luma" : 46,
       "frame_luma_p99" : 220,
       "highlight_clip_pct" : 4.76837158203125e-07,
@@ -506,6 +516,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.092732044022166601,
       "frame_luma" : 123,
       "frame_luma_p99" : 229,
       "highlight_clip_pct" : 2.0662943522135415e-06,
@@ -553,6 +564,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.091369532550049093,
       "frame_luma" : 127,
       "frame_luma_p99" : 229,
       "highlight_clip_pct" : 7.9472859700520837e-07,
@@ -600,6 +612,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.082081261320955889,
       "frame_luma" : 123,
       "frame_luma_p99" : 229,
       "highlight_clip_pct" : 4.76837158203125e-07,
@@ -647,6 +660,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.08965896982979929,
       "frame_luma" : 147,
       "frame_luma_p99" : 224,
       "highlight_clip_pct" : 9.5367431640625e-07,
@@ -694,6 +708,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.08510659875894247,
       "frame_luma" : 146,
       "frame_luma_p99" : 224,
       "highlight_clip_pct" : 1.5894571940104167e-06,
@@ -741,6 +756,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.094052953857471741,
       "frame_luma" : 130,
       "frame_luma_p99" : 223,
       "highlight_clip_pct" : 4.76837158203125e-07,
@@ -788,6 +804,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.093021084275416152,
       "frame_luma" : 143,
       "frame_luma_p99" : 223,
       "highlight_clip_pct" : 4.76837158203125e-07,
@@ -835,6 +852,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.088886127112373842,
       "frame_luma" : 70,
       "frame_luma_p99" : 228,
       "highlight_clip_pct" : 9.5367431640625e-07,
@@ -882,6 +900,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.088077720131331194,
       "frame_luma" : 127,
       "frame_luma_p99" : 228,
       "highlight_clip_pct" : 1.2715657552083333e-06,
@@ -929,6 +948,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.085541309968155635,
       "frame_luma" : 170,
       "frame_luma_p99" : 228,
       "highlight_clip_pct" : 4.76837158203125e-07,
@@ -976,6 +996,7 @@
         }
       ],
       "file_corrupt" : false,
+      "focus_ratio" : 0.090340280813472187,
       "frame_luma" : 176,
       "frame_luma_p99" : 228,
       "highlight_clip_pct" : 4.76837158203125e-07,

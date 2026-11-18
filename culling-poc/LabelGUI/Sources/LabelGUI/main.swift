@@ -284,7 +284,7 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
         }
         if CommandLine.arguments.contains("--per-photo") {
             let preset = store.currentPreset?.rawValue ?? "自定义"
-            print("阈值: 锐度 \(store.sharpnessThreshold) · 曝光裁切 \(store.exposureThreshold) · 人脸质量 \(store.faceQualityThreshold) · 预设 \(preset)")
+            print("阈值: 对焦 \(store.focusThreshold) · 曝光裁切 \(store.exposureThreshold) · 人脸质量 \(store.faceQualityThreshold) · 预设 \(preset)")
             let multiBody = store.bodies.count >= 2
             for item in store.items.sorted(by: { $0.id < $1.id }) {
                 let reasons = item.rejectReasons.isEmpty ? "-" : item.rejectReasons.joined(separator: ",")

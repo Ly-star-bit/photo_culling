@@ -136,6 +136,9 @@ struct BatchItem: Identifiable, Equatable {
     /// 锐度量的哪块（layer1 的 sharpness_scope：eyes / mouth / face / subject / whole，老结果 features 或 nil）。
     /// 近似重复组里只在同一种口径之间比谁更清楚（BatchStore.softerInBurst）。
     var sharpnessScope: String?
+    /// 对焦（判「虚焦」用）：layer1 的 focus_ratio × BatchStore.focusScale，清楚的约 80–110，和「对焦下限」滑杆同一把尺。
+    /// 老版本分析的没有 = nil，判决和直方图按锐度折算（BatchStore.focusValue）。sharpness 照旧管排序、近似重复组里比谁更清楚。
+    var focus: Double? = nil
 
     /// Below the safety-shutter rule — motion blur likely; info badge, not a reject.
     var slowShutter: Bool { exif?.slowShutter ?? false }
@@ -356,12 +359,11 @@ final class BatchStore: ObservableObject {
     /// 同一步 ⌘Z；存 client_notes.json。复制原片时写成「精修要求.csv」。不写进 XMP（dc:description 放的是判决理由）。
     @Published private(set) var clientNotes: [String: String] = [:]
 
-    // Slider thresholds. Sharpness below → reject; worst clip pct above → reject;
+    // Slider thresholds. Focus below → reject (虚焦); worst clip pct above → reject;
     // face quality below → reject (0 disables; only applies to photos with a face).
-    // Sharpness is the Tenengrad RMS-gradient metric (feature-ROI, Gaussian
-    // pre-blur) — measured 68-93 on the all-sharp test set; the old Laplacian
-    // numbers (253-647) do NOT transfer.
-    @Published var sharpnessThreshold: Double = 45 { didSet { onThresholdEdited() } }
+    // 对焦下限量的是清晰比（focus_ratio × focusScale，Metrics.focusRatio），不是锐度（Tenengrad）：锐度跟亮度、景别、
+    // 分辨率走，绝对线分不开糊和清楚（优化分析 2026-11-18 VQ-02）。锐度照旧管排序和近似重复组里比谁更清楚。
+    @Published var focusThreshold: Double = 60 { didSet { onThresholdEdited() } }
     @Published var exposureThreshold: Double = 0.15 { didSet { onThresholdEdited() } }
     @Published var faceQualityThreshold: Double = 0 { didSet { onThresholdEdited() } }
 
@@ -428,7 +430,11 @@ final class BatchStore: ObservableObject {
     /// come back with it. They used to reset to the defaults on every launch:
     /// yesterday's 废片 count was different this morning and nobody knew why.
     struct ThresholdState: Codable {
+        /// 旧刻度（锐度 Tenengrad）的虚焦线。新版本照样写（= 对焦线按 legacySharpness 折回去），给退回旧版本的人用；
+        /// 读的时候只有没有 focus 键的老文件才看它（按档迁移，见 resolvedFocus）。
         var sharpness: Double
+        /// 对焦下限（新刻度，focus_ratio × focusScale）。老的 thresholds.json 没有这个键。
+        var focus: Double? = nil
         var exposure: Double
         var faceQuality: Double
         /// 可选：老的 thresholds.json 没有这个键，解码后回落到默认值。
@@ -436,6 +442,25 @@ final class BatchStore: ObservableObject {
         /// 「近似重复只留最佳」（按场次存，审查 S20a）。可选：老的 thresholds.json 没有这个键，打开时回落到升级前的全局开关并写回
         /// 这一场（loadThresholds）。只保得住升级那天看到的判决，保不住当初写 XMP 时用的那个值。
         var rejectBurstDuplicates: Bool?
+
+        /// 这一份的对焦下限：有 focus 键就用它（夹进滑杆范围）；只有旧的 sharpness（升级前存的）就按档迁移 ——
+        /// 旧值正好是某一档（宽松 25 / 标准 45 / 严格 60）→ 新刻度的那一档（45 / 60 / 70），落在两档之间 → 新刻度两档之间
+        /// 同样的位置（legacyFocus，分段线性、严格单调）。旧数不直接当新刻度用；手改出来的离谱值（1e19、负数）夹到滑杆两头，
+        /// 不崩（审查 EC-04）。同一个映射也用在老结果的每张照片上（focusValue），所以没重新分析的老场次虚焦判决逐张不变。
+        var resolvedFocus: Double {
+            if let focus, focus.isFinite { return BatchStore.clampFocus(focus) }
+            return BatchStore.clampFocus(BatchStore.legacyFocus(fromSharpness: sharpness))
+        }
+
+        init(focus: Double, exposure: Double, faceQuality: Double, takeGap: Double?,
+             rejectBurstDuplicates: Bool? = nil) {
+            self.sharpness = BatchStore.legacySharpness(fromFocus: focus)
+            self.focus = focus
+            self.exposure = exposure
+            self.faceQuality = faceQuality
+            self.takeGap = takeGap
+            self.rejectBurstDuplicates = rejectBurstDuplicates
+        }
     }
 
     private var thresholdSaveTask: Task<Void, Never>?
@@ -452,9 +477,11 @@ final class BatchStore: ObservableObject {
 
     /// 什么都没设过时的默认 = 「标准」预设（以前是 45/0.15/0，不属于任何预设：第一次打开就显示「自定义」，
     /// 连拍组内的人脸质量比较也不跑）。
-    nonisolated static let freshThresholds = ThresholdState(sharpness: 45, exposure: 0.15, faceQuality: 0.30, takeGap: nil)
-    /// 升级前的默认值。已经分析过、但从没存过阈值的老场次按它来，判决不因为升级悄悄变。
-    nonisolated static let legacyThresholds = ThresholdState(sharpness: 45, exposure: 0.15, faceQuality: 0, takeGap: nil)
+    nonisolated static let freshThresholds = ThresholdState(focus: CullPreset.standard.thresholds.0, exposure: 0.15,
+                                                            faceQuality: 0.30, takeGap: nil)
+    /// 升级前的默认值（锐度 45 / 0.15 / 0；锐度 45 按档迁移 = 对焦 60）。已经分析过、但从没存过阈值的老场次按它来，判决不因为升级悄悄变。
+    nonisolated static let legacyThresholds = ThresholdState(focus: CullPreset.standard.thresholds.0, exposure: 0.15,
+                                                             faceQuality: 0, takeGap: nil)
 
     /// 这一场的阈值。场次目录里还没有 thresholds.json 时当场定一份写进去，以后就按它（不再每次猜）：
     /// 上次用的那份（数据目录里的）优先，和以前一样给新场次打底；没有的话，已经有分析结果的老场次用升级前
@@ -527,7 +554,8 @@ final class BatchStore: ObservableObject {
         }
         let storedDedupe: Bool = sessionRejectBurstDuplicates ?? globalDedupe
         batchingThresholds = true
-        sharpnessThreshold = state.sharpness
+        // 老文件只有旧刻度的 sharpness：按档迁移成对焦线，只在内存里（打开不算改：这一场的 thresholds.json 下次拖滑杆才写）
+        focusThreshold = state.resolvedFocus
         exposureThreshold = state.exposure
         faceQualityThreshold = state.faceQuality
         takeGapSec = state.takeGap ?? Self.defaultTakeGapSec
@@ -541,7 +569,7 @@ final class BatchStore: ObservableObject {
     /// 去重开关写的是这一场存的那个（sessionRejectBurstDuplicates）：命令行钉的值不落盘，老场次没回落写回时照样不写这个键。
     private func scheduleThresholdSave() {
         thresholdSaveTask?.cancel()
-        let state = ThresholdState(sharpness: sharpnessThreshold, exposure: exposureThreshold,
+        let state = ThresholdState(focus: focusThreshold, exposure: exposureThreshold,
                                    faceQuality: faceQualityThreshold, takeGap: takeGapSec,
                                    rejectBurstDuplicates: sessionRejectBurstDuplicates)
         let targets = [thresholdsPath(in: dataDir)] + (photoDir != nil ? [thresholdsPath(in: sessionDir)] : [])
@@ -562,33 +590,108 @@ final class BatchStore: ObservableObject {
         case standard = "标准"
         case strict = "严格"
 
-        /// (sharpness, exposureClipPct, minFaceQuality). Sharpness values are in
-        /// the NEW Tenengrad scale, provisionally set from the all-sharp test
-        /// set's 68-93 spread (no true blur samples yet — tighten against real
-        /// bad frames when a shoot provides them). minFaceQuality is the
+        /// (focus, exposureClipPct, minFaceQuality). minFaceQuality is the
         /// CLOSE-UP threshold; the 景别 curve relaxes it for small faces, and
         /// burst groups use intra-group comparison instead.
+        ///
+        /// 对焦线按「等效模糊」定（VQ-02 / VQ-06；σ = 4000 万像素原图上的高斯模糊，合成集 photot 8 张，走 app 同一套解码和 ROI）：
+        /// - 宽松 45：σ5（缩到屏幕上一看就糊）8/8 判，σ3 0/8 —— 明显跑焦才判；
+        /// - 标准 60：σ3（放大到 100% 看得出软）7/8 判，σ2 0/8；
+        /// - 严格 70：σ2 7/8 判，σ1.5（肉眼几乎看不出）0/8 —— 轻微糊也判。
+        /// 清楚的（含 -1/-2EV、长边 2048 / 1024 / 768、裁到 40% 的特写、噪声）最低 81，严格档离它还有 14%。
+        /// 都只在一台 X-T50、一位模特、合成模糊上量过：拿到真的跑焦片用「标注校准」的准确率报告重标。
+        /// 以前是锐度 25 / 45 / 60：宽松档 σ8 都不判，严格档把暗一档、特写的清楚片判虚焦。
         var thresholds: (Double, Double, Double) {
             switch self {
-            case .loose: return (25, 0.30, 0)
-            case .standard: return (45, 0.15, 0.30)
-            case .strict: return (60, 0.08, 0.45)
+            case .loose: return (45, 0.30, 0)
+            case .standard: return (60, 0.15, 0.30)
+            case .strict: return (70, 0.08, 0.45)
             }
         }
+
+        /// 升级前这一档的锐度线（旧刻度）：按档迁移的锚点（BatchStore.legacyFocus）。
+        var legacySharpness: Double {
+            switch self {
+            case .loose: return 25
+            case .standard: return 45
+            case .strict: return 60
+            }
+        }
+
+        /// 预设的悬停说明：这一档大概抓多糊的（等效模糊），一句话（11-10 U7：不常驻长说明）。
+        var focusHelp: String {
+            switch self {
+            case .loose: return "宽松：明显跑焦才判虚焦（缩到屏幕上一眼看得出糊）"
+            case .standard: return "标准：放大到 100% 看得出发软就判虚焦"
+            case .strict: return "严格：轻微发软也判虚焦，偶尔会冤枉清楚的"
+            }
+        }
+    }
+
+    /// 对焦的显示刻度：layer1 存 focus_ratio 本身（清楚的约 0.08–0.12），界面、滑杆、thresholds.json 用它乘 1000。
+    nonisolated static let focusScale = 1000.0
+    /// 「对焦下限」滑杆、直方图的范围。
+    nonisolated static let focusRange = 0.0...150.0
+
+    /// 读进来的对焦线夹到滑杆范围（手改 thresholds.json 写的 1e19、负数不能让界面 Int(...) 崩，审查 EC-04）。
+    nonisolated static func clampFocus(_ v: Double) -> Double {
+        guard v.isFinite else { return CullPreset.standard.thresholds.0 }
+        return min(focusRange.upperBound, max(focusRange.lowerBound, v))
+    }
+
+    /// 旧刻度（锐度）→ 新刻度（对焦）的分段线性映射，锚点 0→0、三档的旧线 → 三档的新线、150→150，两头斜率 1 往外延。
+    /// 严格单调：老结果的每张照片（没有 focus_ratio）用 legacyFocus(锐度) 和 legacyFocus(旧线) 比，等价于锐度和旧线比 ——
+    /// 没重新分析的老场次，虚焦判决逐张和升级前一样（含「正好等于线不判」）。
+    nonisolated static func legacyFocus(fromSharpness x: Double) -> Double {
+        piecewise(x, sharpnessToFocus)
+    }
+
+    /// legacyFocus 的反函数：写 thresholds.json 时顺手把对焦线折回旧刻度存进 sharpness，退回旧版本时还能用。
+    nonisolated static func legacySharpness(fromFocus y: Double) -> Double {
+        piecewise(y, focusToSharpness)
+    }
+
+    /// 锚点只算一次：老场次每拖一下滑杆，每张照片都要折算一遍（判决、直方图、临界）。
+    nonisolated private static let sharpnessToFocus: [(Double, Double)] =
+        [(0, 0)] + CullPreset.allCases.map { ($0.legacySharpness, $0.thresholds.0) } + [(150, 150)]
+    nonisolated private static let focusToSharpness: [(Double, Double)] = sharpnessToFocus.map { ($0.1, $0.0) }
+
+    /// 过锚点的分段线性，两头斜率 1 往外延（锚点按 x 升序；正好落在锚点上直接给锚点的 y，三档的线来回折不走样）。
+    nonisolated private static func piecewise(_ x: Double, _ anchors: [(Double, Double)]) -> Double {
+        guard x.isFinite, let first = anchors.first, let last = anchors.last else { return x }
+        if x <= first.0 { return first.1 + (x - first.0) }
+        if x >= last.0 { return last.1 + (x - last.0) }
+        for k in 1..<anchors.count {
+            let (x0, y0) = anchors[k - 1], (x1, y1) = anchors[k]
+            if x == x1 { return y1 }
+            if x < x1 { return y0 + (x - x0) * (y1 - y0) / (x1 - x0) }
+        }
+        return last.1
+    }
+
+    /// 判虚焦、直方图、临界、阈值建议用的对焦值：新分析的是 focus_ratio × focusScale；老结果没有就按锐度折算（legacyFocus）。
+    nonisolated static func focusValue(_ item: BatchItem) -> Double {
+        item.focus ?? legacyFocus(fromSharpness: item.sharpness)
+    }
+
+    /// 界面上写的对焦：整数；老结果是按锐度折算的，前面带「≈」（重新分析以后才是量出来的）。
+    nonisolated static func focusText(_ item: BatchItem) -> String {
+        let text = String(format: "%.0f", focusValue(item))
+        return item.focus == nil ? "≈" + text : text
     }
 
     /// Derived from the slider values (nil = 自定义) instead of stored: a stored
     /// flag started every launch at 自定义 even when the numbers matched 标准.
     var currentPreset: CullPreset? {
         CullPreset.allCases.first {
-            $0.thresholds == (sharpnessThreshold, exposureThreshold, faceQualityThreshold)
+            $0.thresholds == (focusThreshold, exposureThreshold, faceQualityThreshold)
         }
     }
 
     func applyPreset(_ preset: CullPreset) {
         batchingThresholds = true
-        let (sharp, exposure, quality) = preset.thresholds
-        sharpnessThreshold = sharp
+        let (focus, exposure, quality) = preset.thresholds
+        focusThreshold = focus
         exposureThreshold = exposure
         faceQualityThreshold = quality
         batchingThresholds = false
@@ -648,7 +751,7 @@ final class BatchStore: ObservableObject {
         var byVerdict: [Verdict: [Int]] = [:]
         /// 控制面板四张直方图的分箱。以前每次重绘 `store.items.map(\.sharpness)` 出
         /// 3000 元素数组再进 Canvas 分箱 —— 按一下方向键就是 4 次。
-        var sharpnessBins: [Int] = []
+        var focusBins: [Int] = []
         var exposureBins: [Int] = []
         var faceQualityBins: [Int] = []
         /// Rejects with no manual override — the appeal court's docket.
@@ -836,13 +939,13 @@ final class BatchStore: ObservableObject {
     var thresholdSuggestions: [ThresholdSuggestion] { derived.thresholdSuggestions }
     var takeRows: [(take: Int, indices: [Int])] { derived.takeRows }
     var byVerdict: [Verdict: [Int]] { derived.byVerdict }
-    var sharpnessBins: [Int] { derived.sharpnessBins }
+    var focusBins: [Int] { derived.focusBins }
     var exposureBins: [Int] { derived.exposureBins }
     var faceQualityBins: [Int] { derived.faceQualityBins }
 
     // 直方图的坐标轴。视图和分箱必须用同一组，否则线画错位置。
     static let histogramBinCount = 40
-    static let sharpnessHistRange = 0.0...150.0
+    static let focusHistRange = focusRange
     static let exposureHistRange = 0.005...0.5
     static let faceQualityHistRange = 0.0...1.0
     static let captureGapHistRange = 0.0...60.0
@@ -1166,7 +1269,7 @@ final class BatchStore: ObservableObject {
             d.takeChapter[item.take] = chapter
             d.chapterMembers[chapter, default: []].append(idx)
         }
-        d.sharpnessBins = Self.histogramBins(items.map(\.sharpness), range: Self.sharpnessHistRange, sqrtScale: false)
+        d.focusBins = Self.histogramBins(items.map(Self.focusValue), range: Self.focusHistRange, sqrtScale: false)
         d.exposureBins = Self.histogramBins(items.map(\.worstClipPct), range: Self.exposureHistRange, sqrtScale: true)
         d.faceQualityBins = Self.histogramBins(d.faceQualityAbsoluteValues, range: Self.faceQualityHistRange, sqrtScale: false)
         let order = items.indices.sorted { a, b in
@@ -1195,14 +1298,14 @@ final class BatchStore: ObservableObject {
     /// derived 是照哪一份 items、哪一组线算的。对不上 = 中间有东西变了还没整场重算，改判就不走局部重算。
     private struct DerivedStamp: Equatable {
         var itemsRevision = -1
-        var sharpness = 0.0, exposure = 0.0, faceQuality = 0.0
+        var focus = 0.0, exposure = 0.0, faceQuality = 0.0
         var dedupe = false
         var minKeepers = 0
         var clientPicks = 0
     }
     private var derivedStamp = DerivedStamp()
     private var currentStamp: DerivedStamp {
-        DerivedStamp(itemsRevision: itemsRevision, sharpness: sharpnessThreshold, exposure: exposureThreshold,
+        DerivedStamp(itemsRevision: itemsRevision, focus: focusThreshold, exposure: exposureThreshold,
                      faceQuality: faceQualityThreshold, dedupe: rejectBurstDuplicates,
                      minKeepers: minKeepersPerChapter, clientPicks: clientPicks.count)
     }
@@ -2967,8 +3070,8 @@ final class BatchStore: ObservableObject {
     /// Within ±15% of any ACTIVE threshold — the photos a small slider nudge
     /// would flip either way.
     func isBorderline(_ item: BatchItem) -> Bool {
-        let sharp = sharpnessThreshold
-        if sharp > 0, abs(item.sharpness - sharp) <= sharp * 0.15 { return true }
+        let focus = focusThreshold
+        if focus > 0, abs(Self.focusValue(item) - focus) <= focus * 0.15 { return true }
         let clip = exposureThreshold
         if abs(item.worstClipPct - clip) <= clip * 0.15 { return true }
         if faceQualityThreshold > 0, let quality = item.faceQuality {
@@ -3063,7 +3166,8 @@ final class BatchStore: ObservableObject {
             frameLuma: a.frameLuma,
             frameLumaP99: a.frameLumaP99,
             captureSubsec: a.captureSubsec,
-            sharpnessScope: a.sharpnessScope
+            sharpnessScope: a.sharpnessScope,
+            focus: a.focusRatio * focusScale
         )
     }
 
@@ -3549,6 +3653,7 @@ final class BatchStore: ObservableObject {
             item.frameLumaP99 = l1.frameLumaP99
             item.captureSubsec = l1.captureSubsec
             item.sharpnessScope = l1.sharpnessScope
+            item.focus = l1.focusRatio.map { $0 * Self.focusScale }
             return item
         }
         Self.applyBodyClock(&loaded, offsets: bodyOffsets)
@@ -4382,7 +4487,7 @@ final class BatchStore: ObservableObject {
             var reasons: [String] = []
             if updated[i].fileCorrupt { reasons.append("文件损坏") }
             if eyeClosed == true { reasons.append("闭眼") }
-            if updated[i].sharpness < sharpnessThreshold { reasons.append("虚焦") }
+            if Self.focusValue(updated[i]) < focusThreshold { reasons.append("虚焦") }
             if updated[i].worstClipPct >= exposureThreshold { reasons.append("曝光裁切") }
             if let tone = Self.toneReason(updated[i]) { reasons.append(tone) }
             if faceQualityThreshold > 0, let q = updated[i].faceQuality {
@@ -4655,7 +4760,7 @@ final class BatchStore: ObservableObject {
 
     /// 只做三个有滑杆的理由。闭眼是组内相对 EAR、VLM 没有滑杆 —— 那两个不编建议。
     struct ThresholdSuggestion: Identifiable {
-        enum Kind: String { case sharpness = "锐度下限", exposure = "曝光裁切上限", faceQuality = "人脸质量下限" }
+        enum Kind: String { case focus = "对焦下限", exposure = "曝光裁切上限", faceQuality = "人脸质量下限" }
         let kind: Kind
         /// 被这条线判死、又被你放行的张数（放行 = 有人工改判且不是废片）。
         let released: Int
@@ -4668,7 +4773,7 @@ final class BatchStore: ObservableObject {
         var suggestedText: String { Self.format(kind, suggested) }
         static func format(_ kind: Kind, _ v: Double) -> String {
             switch kind {
-            case .sharpness: return "\(Int(v))"
+            case .focus: return String(format: "%.0f", v)
             case .exposure: return String(format: "%.1f%%", v * 100)
             case .faceQuality: return String(format: "%.2f", v)
             }
@@ -4677,7 +4782,7 @@ final class BatchStore: ObservableObject {
 
     /// 至少 3 张样本才开口。建议值 = 能救回 ≥75% 放行张的那条线（再退一格滑杆
     /// 步长），不是"救回全部"—— 第一版用放行里最差的那张，你放行的 4 张虚焦里
-    /// 有一张锐度 20 的纪念照，建议就变成"降到 15"，按这个拧全场虚焦全放进来。
+    /// 有一张对焦 20 的纪念照，建议就变成"降到 15"，按这个拧全场虚焦全放进来。
     /// AI 经实时桥放行的（aiOverrides）也不算：那是模型的判断，不是你在纠正滑杆。
     private func computeThresholdSuggestions() -> [ThresholdSuggestion] {
         // 整场只扫一遍、就地读（每次改判都会走到这）：先挑出「带着理由、又被你亲手放行」的那几张，再按理由分。
@@ -4702,12 +4807,12 @@ final class BatchStore: ObservableObject {
         var out: [ThresholdSuggestion] = []
         let blur = released("虚焦")
         if blur.count >= 3 {
-            let values = blur.map(\.sharpness)
+            let values = blur.map(Self.focusValue)
             let suggested = max(0, (robust(values, lineIsMinimum: true) / 5).rounded(.down) * 5 - 5)
-            if suggested < sharpnessThreshold {
-                out.append(.init(kind: .sharpness, released: blur.count,
+            if suggested < focusThreshold {
+                out.append(.init(kind: .focus, released: blur.count,
                                  rescued: values.filter { $0 >= suggested }.count,
-                                 current: sharpnessThreshold, suggested: suggested))
+                                 current: focusThreshold, suggested: suggested))
             }
         }
         let clip = released("曝光裁切")
@@ -4738,7 +4843,7 @@ final class BatchStore: ObservableObject {
     /// 「应用」：把滑杆拧到建议值。走 didSet → applyThresholds + 保存 + 预设变自定义。
     func applySuggestion(_ s: ThresholdSuggestion) {
         switch s.kind {
-        case .sharpness: sharpnessThreshold = s.suggested
+        case .focus: focusThreshold = s.suggested
         case .exposure: exposureThreshold = s.suggested
         case .faceQuality: faceQualityThreshold = s.suggested
         }

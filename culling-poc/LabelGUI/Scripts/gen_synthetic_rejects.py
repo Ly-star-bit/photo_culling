@@ -1,6 +1,8 @@
 """生成 Fixtures/synthetic-rejects/（判决回归的合成坏片场次）：从 photot-session 抄 DSCF7207 那一行 manifest / layer1，
 改成边界值 —— 判废的八条理由各自的边界两侧、组内相对 EAR、合影小脸、复审撤罪名（和撤不了的）、老结果的退路、
 连拍去重、场内提名、人工改判、整章全灭。不要照片，不跑分析。
+虚焦看 focus_ratio（对焦 = × 1000，标准线 60）；sharpness（锐度）只管近似重复组里比谁更清楚（G–L 组）。
+thresholds.json 故意写旧刻度（只有 sharpness 45）：跑一遍按档迁移（锐度 45 → 对焦 60，「预设 标准」）。
 
 cases.tsv 是每张的设计（测什么、三种跑法下期望的判决和理由），Scripts/verdict_regression.sh 拿它逐张核对
 --per-photo 的输出，再和 expected_*.txt 逐字比对。改夹具：改这个脚本，跑
@@ -80,8 +82,8 @@ NOFACE = {"faces": [], "face_found": False, "face_count": 0, "face_quality": Non
 
 single = [
     ("A01-ok", "对照：原样抄 DSCF7207", "可用 -", {}),
-    ("A02-sharp44", "锐度 44 < 线 45", "废片 虚焦", {"sharpness": 44.0}),
-    ("A03-sharp45", "锐度正好 45：不判（< 才判）", "可用 -", {"sharpness": 45.0}),
+    ("A02-focus59", "对焦 59 < 线 60（thresholds.json 存的旧刻度锐度 45，按档迁移成 60）", "废片 虚焦", {"focus_ratio": 0.059}),
+    ("A03-focus60", "对焦正好 60：不判（< 才判）", "可用 -", {"focus_ratio": 0.06}),
     ("A04-under-face70-p99-90", "欠曝：脸 70 < 80 且整张 p99 90 < 100", "废片 欠曝", {"face_luma": 70, "frame_luma_p99": 90}),
     ("A05-under-p99-100", "脸 70 但 p99 正好 100：不判（画面里有亮的）", "可用 -", {"face_luma": 70, "frame_luma_p99": 100}),
     ("A06-under-face80", "脸正好 80、p99 90：不判（< 80 才判）", "可用 -", {"face_luma": 80, "frame_luma_p99": 90}),
@@ -100,12 +102,13 @@ single = [
      {"faces": [face(0.05, 0.001, full_res=True)]}),
     ("A17-fullres-tiny", "原图量的脸 0.04% < 0.05%：免检", "可用 -", {"faces": [face(0.05, 0.0004, full_res=True)]}),
     ("A18-appeal-eyes", "EAR 0.05 闭眼 + 复审 closed_eyes=false：撤掉", "可用 -", {"faces": [face(0.05, 0.004)]}),
-    ("A19-appeal-sharp", "锐度 30 + 复审 subject_sharp=true：撤掉", "可用 -", {"sharpness": 30.0}),
-    ("A20-appeal-partial", "锐度 30 + 主体裁切 0.2，复审只撤虚焦：剩曝光裁切", "废片 曝光裁切",
-     {"sharpness": 30.0, "subject_highlight_clip_pct": 0.2}),
+    ("A19-appeal-sharp", "对焦 30 + 复审 subject_sharp=true：撤掉", "可用 -", {"sharpness": 30.0, "focus_ratio": 0.03}),
+    ("A20-appeal-partial", "对焦 30 + 主体裁切 0.2，复审只撤虚焦：剩曝光裁切", "废片 曝光裁切",
+     {"sharpness": 30.0, "focus_ratio": 0.03, "subject_highlight_clip_pct": 0.2}),
     ("A21-appeal-lowkey", "欠曝 + 复审 intentional_exposure=true：撤掉", "可用 -", {"face_luma": 70, "frame_luma_p99": 90}),
     ("A22-appeal-highkey", "过曝 + 复审 intentional_exposure=true：撤掉", "可用 -", {"face_luma": 245}),
-    ("A23-appeal-error", "锐度 30 + 复审 subject_sharp=true 但 error 不为空：这条复审不算", "废片 虚焦", {"sharpness": 30.0}),
+    ("A23-appeal-error", "对焦 30 + 复审 subject_sharp=true 但 error 不为空：这条复审不算", "废片 虚焦",
+     {"sharpness": 30.0, "focus_ratio": 0.03}),
     ("A24-q-single-low", "单张人脸质量 0.10，脸 0.84%（景别放宽后线约 0.139）", "废片 人脸质量低", {"face_quality": 0.10}),
     ("A25-q-closeup", "特写（脸 12%）人脸质量 0.25 < 0.30", "废片 人脸质量低",
      {"face_quality": 0.25, "faces": [face(0.36, 0.12)]}),
@@ -114,8 +117,8 @@ single = [
     ("A27-vlm", "layer2 reject_recommended=true", "废片 VLM建议淘汰", {}),
     ("A28-vlm-error", "layer2 reject_recommended=true 但 error 不为空：不算", "可用 -", {}),
     ("A29-multi", "七条理由一起，看顺序", "废片 文件损坏,闭眼,虚焦,曝光裁切,过曝,人脸质量低,VLM建议淘汰",
-     {"file_corrupt": True, "faces": [face(0.05, 0.004)], "sharpness": 30.0, "subject_highlight_clip_pct": 0.2,
-      "face_luma": 245, "face_quality": 0.05}),
+     {"file_corrupt": True, "faces": [face(0.05, 0.004)], "sharpness": 30.0, "focus_ratio": 0.03,
+      "subject_highlight_clip_pct": 0.2, "face_luma": 245, "face_quality": 0.05}),
     ("A30-noface-dark", "没有脸：整张中位数 30 < 40 且 p99 90 < 100", "废片 欠曝",
      dict(NOFACE, frame_luma=30, frame_luma_p99=90)),
     ("A31-noface-dark-p99", "没有脸：整张 30 但 p99 115（有亮的）", "可用 -", dict(NOFACE, frame_luma=30, frame_luma_p99=115)),
@@ -171,7 +174,7 @@ add("D02-q068", t + timedelta(seconds=1), "近似重复组里人脸质量最好�
 add("D03-manual-usable", t + timedelta(seconds=2), "人工标可用：去重、接受推荐都不动", "可用 -",
     patch={"face_quality": 0.64}, new_group=False)
 add("D04-blur", t + timedelta(seconds=3), "同组虚焦的：已经是废片，去重不再加「连拍重复」", "废片 虚焦",
-    patch={"face_quality": 0.65, "sharpness": 30.0}, new_group=False)
+    patch={"face_quality": 0.65, "sharpness": 30.0, "focus_ratio": 0.03}, new_group=False)
 overrides["D03-manual-usable"] = "可用"
 
 # E：同一场、不同近似重复组：去重不动（去重只看 burst_group），接受推荐照样动。
@@ -188,7 +191,8 @@ overrides["F02-manual-pick"] = "精选"
 
 # M：人工改判压过阈值。
 t = T0 + timedelta(minutes=14, seconds=30)
-add("M01-manual-keep-blur", t, "锐度 30 但人工标可用：判决可用，理由照记", "可用 虚焦", patch={"sharpness": 30.0})
+add("M01-manual-keep-blur", t, "对焦 30 但人工标可用：判决可用，理由照记", "可用 虚焦",
+    patch={"sharpness": 30.0, "focus_ratio": 0.03})
 add("M02-manual-reject", t + timedelta(seconds=20), "没有理由、人工标废片：「滑杆漏掉」数到它", "废片 -")
 overrides["M01-manual-keep-blur"] = "可用"
 overrides["M02-manual-reject"] = "废片"
@@ -251,10 +255,23 @@ add("R01-ear026", t, "窄眼：组里最好 0.26（相对线 0.182；去重后�
 add("R02-ear019-rel", t + timedelta(seconds=1), "组内 0.19 < 保护线 0.20，但 ≥ 相对线 0.182：睁眼", "可用 -",
     dedupe="废片 连拍重复", accept="废片 -", patch={"faces": [face(0.19, 0.004)], "face_quality": 0.60}, new_group=False)
 
+# S：虚焦看对焦（focus_ratio），不看锐度（VQ-02）；老结果没有 focus_ratio 时按锐度折算（BatchStore.legacyFocus，三档的旧线
+# 正好折到新线：锐度 45 ↔ 对焦 60），老场次判决逐张不变。各自一场（隔 20 s），还在第一章里。
+t = T0 + timedelta(minutes=19)
+add("S01-legacy-sharp44", t, "老结果（没有 focus_ratio）：锐度 44 折算 59.25 < 60 → 虚焦（和升级前锐度 44 < 45 一样）",
+    "废片 虚焦", patch={"sharpness": 44.0}, drop=("focus_ratio",))
+add("S02-legacy-sharp45", t + timedelta(seconds=20), "老结果：锐度正好 45 折算正好 60 → 不判（和升级前一样）", "可用 -",
+    patch={"sharpness": 45.0}, drop=("focus_ratio",))
+add("S03-dark-sharp30", t + timedelta(seconds=40), "锐度只有 30（暗、特写会这样），对焦照样高 → 不判虚焦（升级前判）", "可用 -",
+    patch={"sharpness": 30.0})
+add("S04-sharp85-focus40", t + timedelta(seconds=60), "锐度 85 但对焦 40（眼睛那块糊、反差大）→ 虚焦（升级前不判）", "废片 虚焦",
+    patch={"sharpness": 85.0, "focus_ratio": 0.04})
+
 # Z：第二章（隔 1 小时 45 分），全是废片 → 章节警告。Z03 的 layer1 带 error：不进网格。
 t = T0 + timedelta(hours=2)
 add("Z01-corrupt", t, "file_corrupt=true", "废片 文件损坏", patch={"file_corrupt": True})
-add("Z02-ch2-blur", t + timedelta(seconds=20), "第二章另一张虚焦：这一章全灭", "废片 虚焦", patch={"sharpness": 20.0})
+add("Z02-ch2-blur", t + timedelta(seconds=20), "第二章另一张虚焦：这一章全灭", "废片 虚焦",
+    patch={"sharpness": 20.0, "focus_ratio": 0.02})
 add("Z03-l1-error", t + timedelta(seconds=40), "layer1 这一行带 error：不进网格（照片数不算它）", "不在", patch={"error": "decode failed"})
 
 os.makedirs(OUT, exist_ok=True)

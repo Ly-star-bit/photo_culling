@@ -1,5 +1,5 @@
 {
- "analysis_version": 3,
+ "analysis_version": 4,
  "engine": "native",
  "hash_threshold": 10,
  "results": [
@@ -36,6 +36,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -83,14 +84,15 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.059,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
    "horizon_deg": null,
-   "id": "A02-sharp44",
+   "id": "A02-focus59",
    "phash": "d8a306457e9097ed",
    "shadow_clip_pct": 0.0020658175150553384,
-   "sharpness": 44.0,
+   "sharpness": 88.91187996998173,
    "sharpness_scope": "eyes",
    "src_mtime": 1774101940,
    "src_size": 23649254,
@@ -130,14 +132,15 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.06,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
    "horizon_deg": null,
-   "id": "A03-sharp45",
+   "id": "A03-focus60",
    "phash": "d8a306457e9097ed",
    "shadow_clip_pct": 0.0020658175150553384,
-   "sharpness": 45.0,
+   "sharpness": 88.91187996998173,
    "sharpness_scope": "eyes",
    "src_mtime": 1774101940,
    "src_size": 23649254,
@@ -177,6 +180,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 90,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -224,6 +228,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 100,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -271,6 +276,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 90,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -318,6 +324,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -365,6 +372,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -412,6 +420,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -459,6 +468,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 0.5,
@@ -506,6 +516,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -553,6 +564,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -600,6 +612,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -647,6 +660,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -694,6 +708,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -741,6 +756,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -788,6 +804,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -835,6 +852,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -882,6 +900,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.03,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -929,6 +948,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.03,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -976,6 +996,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 90,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1023,6 +1044,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1070,6 +1092,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.03,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1117,6 +1140,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1164,6 +1188,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1211,6 +1236,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1258,6 +1284,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1305,6 +1332,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1352,6 +1380,7 @@
     }
    ],
    "file_corrupt": true,
+   "focus_ratio": 0.03,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1381,6 +1410,7 @@
    "face_quality": null,
    "faces": [],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 30,
    "frame_luma_p99": 90,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1410,6 +1440,7 @@
    "face_quality": null,
    "faces": [],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 30,
    "frame_luma_p99": 115,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1439,6 +1470,7 @@
    "face_quality": null,
    "faces": [],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 250,
    "frame_luma_p99": 255,
    "highlight_clip_pct": 0.9,
@@ -1486,6 +1518,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "highlight_clip_pct": 0.2,
    "horizon_deg": null,
@@ -1527,6 +1560,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1574,6 +1608,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1621,6 +1656,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1668,6 +1704,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1715,6 +1752,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1762,6 +1800,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1809,6 +1848,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1856,6 +1896,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1903,6 +1944,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1950,6 +1992,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -1997,6 +2040,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.03,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2044,6 +2088,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2091,6 +2136,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2138,6 +2184,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2185,6 +2232,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2232,6 +2280,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.03,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2279,6 +2328,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2326,6 +2376,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2373,6 +2424,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2420,6 +2472,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2467,6 +2520,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2514,6 +2568,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2561,6 +2616,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2608,6 +2664,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2655,6 +2712,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2702,6 +2760,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2749,6 +2808,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2796,6 +2856,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2843,6 +2904,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2890,6 +2952,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2937,6 +3000,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -2984,6 +3048,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -3031,6 +3096,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -3078,6 +3144,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
@@ -3096,54 +3163,7 @@
    "blink_score": 0.35698577370216855,
    "burst_group": 52,
    "capture_subsec": 0.0,
-   "capture_time": "2026-03-21T12:00:00",
-   "elapsed_sec": 0.3550189733505249,
-   "eye_closed": false,
-   "face_area_pct": 0.008398362440315221,
-   "face_bbox": [
-    0.3098121203482151,
-    0.35238868445158006,
-    0.4557225339114666,
-    0.4496622934937477
-   ],
-   "face_count": 1,
-   "face_found": true,
-   "face_luma": 168,
-   "face_quality": 0.63671875,
-   "faces": [
-    {
-     "area_pct": 0.008398362440315221,
-     "bbox": [
-      0.3098121203482151,
-      0.35238868445158006,
-      0.4557225339114666,
-      0.4496622934937477
-     ],
-     "ear": 0.35698577370216855,
-     "ear_full_res": false,
-     "eye_closed": false
-    }
-   ],
-   "file_corrupt": true,
-   "frame_luma": 142,
-   "frame_luma_p99": 217,
-   "highlight_clip_pct": 7.947285970052084e-07,
-   "horizon_deg": null,
-   "id": "Z01-corrupt",
-   "phash": "d8a306457e9097ed",
-   "shadow_clip_pct": 0.0020658175150553384,
-   "sharpness": 88.91187996998173,
-   "sharpness_scope": "eyes",
-   "src_mtime": 1774101940,
-   "src_size": 23649254,
-   "subject_highlight_clip_pct": 1.0811336767734647e-05,
-   "subject_shadow_clip_pct": 0.012935764442594505
-  },
-  {
-   "blink_score": 0.35698577370216855,
-   "burst_group": 53,
-   "capture_subsec": 0.0,
-   "capture_time": "2026-03-21T12:00:20",
+   "capture_time": "2026-03-21T10:19:00",
    "elapsed_sec": 0.3550189733505249,
    "eye_closed": false,
    "face_area_pct": 0.008398362440315221,
@@ -3176,6 +3196,245 @@
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,
    "horizon_deg": null,
+   "id": "S01-legacy-sharp44",
+   "phash": "d8a306457e9097ed",
+   "shadow_clip_pct": 0.0020658175150553384,
+   "sharpness": 44.0,
+   "sharpness_scope": "eyes",
+   "src_mtime": 1774101940,
+   "src_size": 23649254,
+   "subject_highlight_clip_pct": 1.0811336767734647e-05,
+   "subject_shadow_clip_pct": 0.012935764442594505
+  },
+  {
+   "blink_score": 0.35698577370216855,
+   "burst_group": 53,
+   "capture_subsec": 0.0,
+   "capture_time": "2026-03-21T10:19:20",
+   "elapsed_sec": 0.3550189733505249,
+   "eye_closed": false,
+   "face_area_pct": 0.008398362440315221,
+   "face_bbox": [
+    0.3098121203482151,
+    0.35238868445158006,
+    0.4557225339114666,
+    0.4496622934937477
+   ],
+   "face_count": 1,
+   "face_found": true,
+   "face_luma": 168,
+   "face_quality": 0.63671875,
+   "faces": [
+    {
+     "area_pct": 0.008398362440315221,
+     "bbox": [
+      0.3098121203482151,
+      0.35238868445158006,
+      0.4557225339114666,
+      0.4496622934937477
+     ],
+     "ear": 0.35698577370216855,
+     "ear_full_res": false,
+     "eye_closed": false
+    }
+   ],
+   "file_corrupt": false,
+   "frame_luma": 142,
+   "frame_luma_p99": 217,
+   "highlight_clip_pct": 7.947285970052084e-07,
+   "horizon_deg": null,
+   "id": "S02-legacy-sharp45",
+   "phash": "d8a306457e9097ed",
+   "shadow_clip_pct": 0.0020658175150553384,
+   "sharpness": 45.0,
+   "sharpness_scope": "eyes",
+   "src_mtime": 1774101940,
+   "src_size": 23649254,
+   "subject_highlight_clip_pct": 1.0811336767734647e-05,
+   "subject_shadow_clip_pct": 0.012935764442594505
+  },
+  {
+   "blink_score": 0.35698577370216855,
+   "burst_group": 54,
+   "capture_subsec": 0.0,
+   "capture_time": "2026-03-21T10:19:40",
+   "elapsed_sec": 0.3550189733505249,
+   "eye_closed": false,
+   "face_area_pct": 0.008398362440315221,
+   "face_bbox": [
+    0.3098121203482151,
+    0.35238868445158006,
+    0.4557225339114666,
+    0.4496622934937477
+   ],
+   "face_count": 1,
+   "face_found": true,
+   "face_luma": 168,
+   "face_quality": 0.63671875,
+   "faces": [
+    {
+     "area_pct": 0.008398362440315221,
+     "bbox": [
+      0.3098121203482151,
+      0.35238868445158006,
+      0.4557225339114666,
+      0.4496622934937477
+     ],
+     "ear": 0.35698577370216855,
+     "ear_full_res": false,
+     "eye_closed": false
+    }
+   ],
+   "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
+   "frame_luma": 142,
+   "frame_luma_p99": 217,
+   "highlight_clip_pct": 7.947285970052084e-07,
+   "horizon_deg": null,
+   "id": "S03-dark-sharp30",
+   "phash": "d8a306457e9097ed",
+   "shadow_clip_pct": 0.0020658175150553384,
+   "sharpness": 30.0,
+   "sharpness_scope": "eyes",
+   "src_mtime": 1774101940,
+   "src_size": 23649254,
+   "subject_highlight_clip_pct": 1.0811336767734647e-05,
+   "subject_shadow_clip_pct": 0.012935764442594505
+  },
+  {
+   "blink_score": 0.35698577370216855,
+   "burst_group": 55,
+   "capture_subsec": 0.0,
+   "capture_time": "2026-03-21T10:20:00",
+   "elapsed_sec": 0.3550189733505249,
+   "eye_closed": false,
+   "face_area_pct": 0.008398362440315221,
+   "face_bbox": [
+    0.3098121203482151,
+    0.35238868445158006,
+    0.4557225339114666,
+    0.4496622934937477
+   ],
+   "face_count": 1,
+   "face_found": true,
+   "face_luma": 168,
+   "face_quality": 0.63671875,
+   "faces": [
+    {
+     "area_pct": 0.008398362440315221,
+     "bbox": [
+      0.3098121203482151,
+      0.35238868445158006,
+      0.4557225339114666,
+      0.4496622934937477
+     ],
+     "ear": 0.35698577370216855,
+     "ear_full_res": false,
+     "eye_closed": false
+    }
+   ],
+   "file_corrupt": false,
+   "focus_ratio": 0.04,
+   "frame_luma": 142,
+   "frame_luma_p99": 217,
+   "highlight_clip_pct": 7.947285970052084e-07,
+   "horizon_deg": null,
+   "id": "S04-sharp85-focus40",
+   "phash": "d8a306457e9097ed",
+   "shadow_clip_pct": 0.0020658175150553384,
+   "sharpness": 85.0,
+   "sharpness_scope": "eyes",
+   "src_mtime": 1774101940,
+   "src_size": 23649254,
+   "subject_highlight_clip_pct": 1.0811336767734647e-05,
+   "subject_shadow_clip_pct": 0.012935764442594505
+  },
+  {
+   "blink_score": 0.35698577370216855,
+   "burst_group": 56,
+   "capture_subsec": 0.0,
+   "capture_time": "2026-03-21T12:00:00",
+   "elapsed_sec": 0.3550189733505249,
+   "eye_closed": false,
+   "face_area_pct": 0.008398362440315221,
+   "face_bbox": [
+    0.3098121203482151,
+    0.35238868445158006,
+    0.4557225339114666,
+    0.4496622934937477
+   ],
+   "face_count": 1,
+   "face_found": true,
+   "face_luma": 168,
+   "face_quality": 0.63671875,
+   "faces": [
+    {
+     "area_pct": 0.008398362440315221,
+     "bbox": [
+      0.3098121203482151,
+      0.35238868445158006,
+      0.4557225339114666,
+      0.4496622934937477
+     ],
+     "ear": 0.35698577370216855,
+     "ear_full_res": false,
+     "eye_closed": false
+    }
+   ],
+   "file_corrupt": true,
+   "focus_ratio": 0.09467176484129879,
+   "frame_luma": 142,
+   "frame_luma_p99": 217,
+   "highlight_clip_pct": 7.947285970052084e-07,
+   "horizon_deg": null,
+   "id": "Z01-corrupt",
+   "phash": "d8a306457e9097ed",
+   "shadow_clip_pct": 0.0020658175150553384,
+   "sharpness": 88.91187996998173,
+   "sharpness_scope": "eyes",
+   "src_mtime": 1774101940,
+   "src_size": 23649254,
+   "subject_highlight_clip_pct": 1.0811336767734647e-05,
+   "subject_shadow_clip_pct": 0.012935764442594505
+  },
+  {
+   "blink_score": 0.35698577370216855,
+   "burst_group": 57,
+   "capture_subsec": 0.0,
+   "capture_time": "2026-03-21T12:00:20",
+   "elapsed_sec": 0.3550189733505249,
+   "eye_closed": false,
+   "face_area_pct": 0.008398362440315221,
+   "face_bbox": [
+    0.3098121203482151,
+    0.35238868445158006,
+    0.4557225339114666,
+    0.4496622934937477
+   ],
+   "face_count": 1,
+   "face_found": true,
+   "face_luma": 168,
+   "face_quality": 0.63671875,
+   "faces": [
+    {
+     "area_pct": 0.008398362440315221,
+     "bbox": [
+      0.3098121203482151,
+      0.35238868445158006,
+      0.4557225339114666,
+      0.4496622934937477
+     ],
+     "ear": 0.35698577370216855,
+     "ear_full_res": false,
+     "eye_closed": false
+    }
+   ],
+   "file_corrupt": false,
+   "focus_ratio": 0.02,
+   "frame_luma": 142,
+   "frame_luma_p99": 217,
+   "highlight_clip_pct": 7.947285970052084e-07,
+   "horizon_deg": null,
    "id": "Z02-ch2-blur",
    "phash": "d8a306457e9097ed",
    "shadow_clip_pct": 0.0020658175150553384,
@@ -3188,7 +3447,7 @@
   },
   {
    "blink_score": 0.35698577370216855,
-   "burst_group": 54,
+   "burst_group": 58,
    "capture_subsec": 0.0,
    "capture_time": "2026-03-21T12:00:40",
    "elapsed_sec": 0.3550189733505249,
@@ -3220,6 +3479,7 @@
     }
    ],
    "file_corrupt": false,
+   "focus_ratio": 0.09467176484129879,
    "frame_luma": 142,
    "frame_luma_p99": 217,
    "highlight_clip_pct": 7.947285970052084e-07,

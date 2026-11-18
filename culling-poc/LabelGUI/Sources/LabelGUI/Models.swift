@@ -130,6 +130,9 @@ struct Layer1Result: Codable {
     /// 锐度量的哪块：eyes（眼眉带）/ mouth / face / subject / whole；analysis_version 3 以前的是 features（眼眉带和嘴取大）。
     /// 近似重复组里比谁更清楚只在同一种口径之间比（BatchStore.softerInBurst）。老结果没有 = nil，自成一种。
     let sharpnessScope: String?
+    /// 判「虚焦」用的清晰比（Metrics.focusRatio，0.08–0.12 是清楚的），和 sharpness 量同一块。analysis_version 4 起才有；
+    /// 老结果没有 = 判决按锐度折算（BatchStore.legacyFocus），老场次的虚焦判决不因升级变。
+    let focusRatio: Double?
     let highlightClipPct: Double?
     let shadowClipPct: Double?
     /// 主体区域（脸 → 头 + 上半身）的裁切占比、脸 / 整张的亮度。analysis_version 2 起才有；
@@ -161,6 +164,7 @@ struct Layer1Result: Codable {
         case horizonDeg = "horizon_deg"
         case sharpness
         case sharpnessScope = "sharpness_scope"
+        case focusRatio = "focus_ratio"
         case highlightClipPct = "highlight_clip_pct"
         case shadowClipPct = "shadow_clip_pct"
         case subjectHighlightClipPct = "subject_highlight_clip_pct"

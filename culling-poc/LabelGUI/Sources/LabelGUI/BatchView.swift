@@ -3204,18 +3204,20 @@ private struct BatchControlPanel: View {
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
+                        .help(BatchStore.CullPreset.allCases.map(\.focusHelp).joined(separator: "\n"))
 
                         let reasonCounts = store.reasonCounts
                         thresholdSlider(
-                            label: "锐度下限",
-                            value: "\(Int(store.sharpnessThreshold))",
+                            label: "对焦下限",
+                            value: String(format: "%.0f", store.focusThreshold),
                             killCount: reasonCounts["虚焦"] ?? 0,
-                            slider: Slider(value: $store.sharpnessThreshold, in: 0...150, step: 5),
-                            help: "五官区域梯度锐度，低于此值判为虚焦 → 废片。清晰照片约 65-95。直方图 = 本场分布，红色 = 会被此线淘汰",
+                            slider: Slider(value: $store.focusThreshold, in: BatchStore.focusRange, step: 5),
+                            help: "眼睛那一块对没对上焦（清晰比，不受明暗、景别、照片大小影响），低于此值判为虚焦 → 废片。" +
+                                  "清楚的照片约 80–110。直方图 = 本场分布，红色 = 会被此线淘汰",
                             histogram: MetricHistogram(
-                                bins: store.sharpnessBins,
-                                range: BatchStore.sharpnessHistRange,
-                                threshold: store.sharpnessThreshold,
+                                bins: store.focusBins,
+                                range: BatchStore.focusHistRange,
+                                threshold: store.focusThreshold,
                                 killBelow: true
                             )
                         )
@@ -4816,7 +4818,7 @@ struct PhotoInspector: View {
                 )
                 let eyeText = item.dynamicEyeClosed.map { $0 ? "闭眼!" : "睁眼" } ?? ""
                 let qualityText = item.faceQuality.map { String(format: "质量 %.2f", $0) } ?? ""
-                let info = ["锐度 \(Int(item.sharpness))", qualityText, eyeText]
+                let info = ["对焦 \(BatchStore.focusText(item))", qualityText, eyeText]
                     .filter { !$0.isEmpty }.joined(separator: "  ")
 
                 Rectangle()
@@ -4920,7 +4922,10 @@ struct PhotoInspector: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             LazyVGrid(columns: Self.signalColumns, alignment: .leading, spacing: 10) {
+                signal("对焦", BatchStore.focusText(item))
+                    .help("判虚焦看这个数（和右栏「对焦下限」同一把尺）。带 ≈ 的是老版本分析的，按锐度折算，重新分析后才准")
                 signal("锐度", String(format: "%.0f", item.sharpness))
+                    .help("细节多少：同一组连拍里比谁更清楚、排序用；跟明暗、景别走，不拿它判虚焦")
                 signal("人脸质量", item.faceQuality.map { String(format: "%.2f", $0) } ?? "-")
                 signal("曝光裁切", String(format: "%.1f%%", item.worstClipPct * 100))
                 signal("闭眼", item.dynamicEyeClosed.map { $0 ? "是" : "否" } ?? "-")

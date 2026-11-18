@@ -42,6 +42,8 @@ enum AnalysisEngine {
         let subjectFaces: [FaceAnalyzer.SubjectFace]
         let sharpness: Double
         let sharpnessScope: String
+        /// 判「虚焦」用的清晰比（Metrics.focusRatio），和 sharpness 量的是同一块。sharpness 留给排序和近似重复组里比谁更清楚。
+        let focusRatio: Double
         let highlightClipPct: Double
         let shadowClipPct: Double
         /// 同一个裁切口径，只数主体区域（主体脸扩到头 + 上半身的并集）；没有脸、或者人在画面里太小
@@ -78,8 +80,10 @@ enum AnalysisEngine {
     ///    （FaceAnalyzer.levelledEyeAspectRatio），歪着的脸读数变小（photot 歪 21–23° 的 0.51–0.55 → 0.30–0.35）。
     ///    主体曝光裁切（subject_*_clip_pct）也改了：矩形里有 ≥ 0.5% 裁切的，跑人像分割只数人（Metrics.personClipping），
     ///    白底 / 黑底 / 逆光背景不再算进来。
-    ///    四样一起升这一次，用户整场重分析一回。
-    static let analysisVersion = 3
+    /// 4：加了 focus_ratio（判虚焦的清晰比，Metrics.focusRatio，量的还是锐度那块）。3 没发过版，用户手里都是 2，
+    ///    2 → 4 和 2 → 3 一样是整场重分析一回；升这一次是让开发中用 3 分析过的数据目录（没有 focus_ratio）也整场重算，
+    ///    不留在「按锐度折算」的老路上（BatchStore.legacyFocus）。
+    static let analysisVersion = 4
 
     struct Summary {
         let analyzed: Int
@@ -385,36 +389,42 @@ enum AnalysisEngine {
         // f/1.2–2 近景人像最常见的失焦）也靠嘴过关：photot 21 张里 18 张是嘴那块大（汉服妆红唇轮廓对比强），
         // 只糊眼眉 σ8 锐度纹丝不动、三档全放过（优化分析 2026-11-18 复核 M1、11-04 A03-a）。现在只看眼眉带：
         // 眼睛清楚嘴糊的照样清楚；只糊眼眉和整张糊一样掉到 36–48。眼眉带在 photot 上 64–91，和以前的 68–93
-        // 差不多，三档的线不用动（严格 60 离最低的 64 近了些）。
+        // 差不多。
+        // 判虚焦用的清晰比（focusRatio）在同一块上算：锐度跟亮度、景别、分辨率走，判虚焦不再用它（VQ-02）。
         let sharpness: Double
+        let focusRatio: Double
         let scope: String
         func pixelRect(_ r: [Double]) -> (x0: Int, y0: Int, x1: Int, y1: Int) {
             (Int(r[0] * Double(width)), Int(r[1] * Double(height)),
              Int(r[2] * Double(width)), Int(r[3] * Double(height)))
         }
-        func regionScore(_ r: [Double]) -> Double? {
+        func regionScore(_ r: [Double]) -> (sharp: Double, focus: Double)? {
             let p = pixelRect(r)
             guard p.x1 - p.x0 > 4, p.y1 - p.y0 > 4 else { return nil }
-            return Metrics.tenengrad(gray: gray, width: width, height: height,
-                                     x0: p.x0, y0: p.y0, x1: p.x1, y1: p.y1)
+            let sharp = Metrics.tenengrad(gray: gray, width: width, height: height,
+                                          x0: p.x0, y0: p.y0, x1: p.x1, y1: p.y1)
+            let focus = Metrics.focusRatio(gray: gray, width: width, height: height,
+                                           x0: p.x0, y0: p.y0, x1: p.x1, y1: p.y1)
+            return (sharp, focus)
         }
         if let s = face?.eyeBandRect.flatMap(regionScore) {
-            sharpness = s
+            (sharpness, focusRatio) = s
             scope = "eyes"
         } else if let s = face?.mouthRect.flatMap(regionScore) {
-            sharpness = s
+            (sharpness, focusRatio) = s
             scope = "mouth"
         } else if let face,
                   let s = regionScore([face.bbox.x0, face.bbox.y0, face.bbox.x1, face.bbox.y1]) {
-            sharpness = s
+            (sharpness, focusRatio) = s
             scope = "face"
         } else if face == nil,
                   let subject = FaceAnalyzer.subjectRect(in: loaded.image),
                   let s = regionScore([subject.x0, subject.y0, subject.x1, subject.y1]) {
-            sharpness = s
+            (sharpness, focusRatio) = s
             scope = "subject"
         } else {
             sharpness = Metrics.tenengrad(gray: gray, width: width, height: height)
+            focusRatio = Metrics.focusRatio(gray: gray, width: width, height: height)
             scope = "whole"
         }
 
@@ -448,6 +458,7 @@ enum AnalysisEngine {
             subjectFaces: subjectFaces,
             sharpness: sharpness,
             sharpnessScope: scope,
+            focusRatio: focusRatio,
             highlightClipPct: highlightPct,
             shadowClipPct: shadowPct,
             subjectHighlightClipPct: subjectClip?.highlightPct ?? highlightPct,
@@ -579,6 +590,7 @@ enum AnalysisEngine {
             "horizon_deg": p.horizonDeg as Any,
             "sharpness": p.sharpness,
             "sharpness_scope": p.sharpnessScope,
+            "focus_ratio": p.focusRatio,
             // 整张的两个照旧写（evaluate.py / 老工具读它们）；判决用 subject_*。
             "highlight_clip_pct": p.highlightClipPct,
             "shadow_clip_pct": p.shadowClipPct,
