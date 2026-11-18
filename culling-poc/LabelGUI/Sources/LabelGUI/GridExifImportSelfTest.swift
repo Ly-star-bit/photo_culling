@@ -665,6 +665,20 @@ enum GridExifImportSelfTest {
             let got = GridSelectionRules.acceptNotice(take: 2, kept: kept, rejected: rejected)
             t.check(got == want, "接受推荐提示 " + name, "得到 \(got)")
         }
+
+        // 网格一格给读屏软件的名字（UX-12）。
+        let names: [(String, String)] = [
+            (BatchView.cellAccessibilityName(id: "DSCF7208", verdict: .pick, reasons: [], rank: 1, groupSize: 10,
+                                             manual: false, client: false), "DSCF7208，精选，本场第 1 名（共 10 张）"),
+            (BatchView.cellAccessibilityName(id: "DSCF7209", verdict: .reject, reasons: ["虚焦", "闭眼"], rank: nil,
+                                             groupSize: 2, manual: true, client: true),
+             "DSCF7209，废片（虚焦、闭眼），同场 2 张，人工改判，客户选中"),
+            (BatchView.cellAccessibilityName(id: "DSCF7300", verdict: .usable, reasons: [], rank: nil, groupSize: 1,
+                                             manual: false, client: false), "DSCF7300，可用"),
+        ]
+        for (got, want) in names {
+            t.check(got == want, "格子的读屏名字 " + want, "得到 \(got)")
+        }
     }
 
     /// 多选改判以后焦点落在哪（GridSelectionRules.refocus，数字键和批量栏共用）。

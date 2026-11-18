@@ -872,6 +872,7 @@ struct BatchView: View {
             Slider(value: $thumbSize, in: 90...260)
                 .frame(width: 100)
                 .help("缩略图大小 (- / =)")
+                .accessibilityLabel("缩略图大小")  // 读屏软件念得出是哪根（UX-12）
             ThemeButton()
             Button { showShortcuts.toggle() } label: { Image(systemName: "keyboard") }
                 .buttonStyle(.plain)
@@ -2665,6 +2666,21 @@ struct BatchView: View {
         return parts.joined(separator: " · ")
     }
 
+    /// 网格一格给读屏软件念的名字（UX-12）：文件名，判决（废片带理由），本场第几名（共几张），人工改判，客户选中。
+    /// 格子里那些角标（名次、手、紫心、理由图标）是一串没名字的图，读屏软件念不出来，都并进这一句。
+    nonisolated static func cellAccessibilityName(id: String, verdict: Verdict, reasons: [String], rank: Int?,
+                                                  groupSize: Int, manual: Bool, client: Bool) -> String {
+        var parts: [String] = [id, reasons.isEmpty ? verdict.rawValue : verdict.rawValue + "（" + reasons.joined(separator: "、") + "）"]
+        if let rank {
+            parts.append(groupSize > 1 ? "本场第 \(rank) 名（共 \(groupSize) 张）" : "第 \(rank) 名")
+        } else if groupSize > 1 {
+            parts.append("同场 \(groupSize) 张")
+        }
+        if manual { parts.append("人工改判") }
+        if client { parts.append("客户选中") }
+        return parts.joined(separator: "，")
+    }
+
     static func infoHelp(_ item: BatchItem, closed: Int) -> String {
         var parts: [String] = item.rejectReasons.map(BatchStore.reasonLabel)
         if !item.vlmRescued.isEmpty { parts.append("复审平反: " + item.vlmRescued.joined(separator: "、")) }
@@ -3304,6 +3320,8 @@ private struct BatchControlPanel: View {
                 markColor: AppPalette.pick
             )
             Slider(value: $store.takeGapSec, in: 1...60, step: 1)
+                .accessibilityLabel("同一场最大间隔")
+                .accessibilityValue("\(Int(store.takeGapSec)) 秒")
             Text("绿色 = 会并进同一场的间隔。只改怎么分堆，不改任何判决。")
                 .hintText()
         }
@@ -3456,7 +3474,12 @@ private struct BatchControlPanel: View {
                 Text(value).font(.callout).monospacedDigit().foregroundStyle(.secondary)
             }
             histogram
+            // 读屏软件念「锐度下限，45」，不是一根没名字的滑杆（UX-12）。--ax-dump 读的是 AppKit 滑杆的 cell
+            // （CustomMarkedSliderCell），没接辅助功能客户端时看不到 SwiftUI 给的名字，照旧打印没名字 —— 这一条要用 VoiceOver /
+            // 辅助功能检查器在真 app 里看（手点清单）。
             slider
+                .accessibilityLabel(label)
+                .accessibilityValue(killCount > 0 ? "\(value)，淘汰 \(killCount) 张" : value)
         }
         .help(help)
     }
@@ -3646,6 +3669,12 @@ private struct GridCell: View, Equatable {
             .frame(width: width, alignment: .leading)
         }
         .contentShape(Rectangle())
+        // 读屏软件：一格念成一句「DSCF7208，精选，本场第 1 名（共 10 张）」（UX-12），不再是一串没名字的图和角标。
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(BatchView.cellAccessibilityName(id: item.id, verdict: item.verdict,
+                                                            reasons: item.rejectReasons.map(BatchStore.reasonLabel),
+                                                            rank: rank, groupSize: groupSize, manual: manual, client: client))
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
         // 右键：改判、看单张、审片、访达、用…打开、复制文件名、拼图（GP-07 / UX-02）。在选中里就对选中的全部。
         .contextMenu { CellMenu(id: item.id, state: actions.menuState) }
         // 时间轴的「你在这」：只记出现/消失，不在这里读任何会触发重绘的状态。
