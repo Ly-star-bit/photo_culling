@@ -67,14 +67,14 @@ struct PickView: View {
         let faces = FaceAlignment(frames: frames)
         VStack(spacing: 0) {
             header(frames, people: faces.people)
-            Divider()
+            ThemedDivider()
             GeometryReader { geo in
                 stage(frames, draft: draft, faces: faces, size: geo.size)
             }
             .overlay(alignment: .top) {
                 if session.allDone { doneBanner }
             }
-            Divider()
+            ThemedDivider()
             footer
         }
         .background(AppPalette.canvas)
@@ -179,7 +179,7 @@ struct PickView: View {
                 Text("\(unconfirmed) 组未确认").font(.caption).foregroundStyle(AppPalette.warning)
                     .help("这几组点过但没按 ⏎，判决还没写进去。离开时会问你要不要一起确认")
             }
-            Divider().frame(height: 16)
+            ThemedDivider(vertical: true).frame(height: 16)
             groupTitle(frames)
             Spacer(minLength: 8)
             if !session.isSelection {
@@ -190,7 +190,7 @@ struct PickView: View {
                     .disabled(!session.hasNext)
                     .help("下一组 (↓)，这一组先不定")
             }
-            Divider().frame(height: 16)
+            ThemedDivider(vertical: true).frame(height: 16)
             Button(zoomed ? "适应 (Z)" : "放大到脸 (Z)") { toggleZoom() }
                 .help("所有格一起放大到 100%，各自以主脸为中心；拖动、捏合任何一格，其余跟着走。双击照片也行")
             if zoomed && people > 1 {

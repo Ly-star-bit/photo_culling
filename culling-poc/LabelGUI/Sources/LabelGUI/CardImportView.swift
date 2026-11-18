@@ -423,7 +423,7 @@ struct CardImportSheet: View {
             if let offer = center.offer {
                 header(offer)
                 details(offer)
-                Divider()
+                ThemedDivider()
                 footer(offer)
             }
         }

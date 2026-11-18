@@ -151,16 +151,16 @@ struct BatchView: View {
             } else {
                 VStack(spacing: 0) {
                     topBar
-                    Divider()
+                    ThemedDivider()
                     // 分组模式的工具自己一行。顶栏 27 个控件在 1280pt 必然溢出 ——
                     // 长文件夹名把「撤销/审片」挤出窗口的工单已经出过一次。
                     if gridMode == .byGroup && !store.items.isEmpty {
                         groupToolbar
-                        Divider()
+                        ThemedDivider()
                     }
                     if !selectedIDs.isEmpty {
                         bulkActionBar
-                        Divider()
+                        ThemedDivider()
                     }
                     // Plain HStack: the old HSplitView had a fixed-width right
                     // pane, so its divider never moved anyway.
@@ -169,14 +169,14 @@ struct BatchView: View {
                             .frame(minWidth: 500, maxWidth: .infinity)
                         // 第一次打开（还没有分析结果）右栏先不出来：四根滑杆和空直方图没有东西可调（U7）。
                         if showControls, !store.items.isEmpty {
-                            Divider()
+                            ThemedDivider(vertical: true)
                             BatchControlPanel(store: store)
                                 .frame(width: 300)
                                 .transition(.move(edge: .trailing))
                         }
                     }
                     importBanner
-                    Divider()
+                    ThemedDivider()
                     statusBar
                 }
                 // 从访达把文件夹拖进来就打开（Aftershoot / Narrative 都这样）；拖的是照片就打开它所在的文件夹。
@@ -460,7 +460,7 @@ struct BatchView: View {
             folderMenu(live: live)
             analyzeButton(tier: tier)
 
-            Divider().frame(height: 16)
+            ThemedDivider(vertical: true).frame(height: 16)
 
             Picker("视图", selection: $gridMode) {
                 ForEach(GridMode.allCases, id: \.self) { m in
@@ -1894,7 +1894,7 @@ struct BatchView: View {
             } else {
                 Label("没有待处理的连拍", systemImage: "checkmark.circle").font(.caption).foregroundStyle(AppPalette.pick)
             }
-            Divider().frame(height: 14)
+            ThemedDivider(vertical: true).frame(height: 14)
             Toggle("只看待处理", isOn: $pendingTakesOnly)
                 .toggleStyle(.button).controlSize(.small)
                 .help("只显示还留着 2 张以上没淘汰的场 —— 定完一场它就自动消失。这场共 \(stats.takes) 个多张场、\(stats.photos) 张")
@@ -1902,7 +1902,7 @@ struct BatchView: View {
                 .toggleStyle(.button).controlSize(.small)
                 .help("每场里评分高的排前面 (表情 > 人脸质量 > 锐度)；关掉则按拍摄顺序。缩略图上的 #1 #2 #3 是同一把尺子")
             if bursts > 0 {
-                Divider().frame(height: 14)
+                ThemedDivider(vertical: true).frame(height: 14)
                 // 进度：这一轮（全场 / 本章）多张连拍定了几场。
                 ProgressView(value: Double(decided), total: Double(bursts))
                     .frame(width: 70)
@@ -1952,7 +1952,7 @@ struct BatchView: View {
             // 选中的照片可能落在候选集之外 (单张组)，不能拿总数相减。
             let dropCount = groupCandidates.filter { !selectedIDs.contains($0) }.count
             if dropCount > 0 {
-                Divider().frame(height: 16)
+                ThemedDivider(vertical: true).frame(height: 16)
                 Button("保留选中 · 其余 \(dropCount) 张设为废片") {
                     applyBulk(changing: groupCandidates) { store.keepOnly(selectedIDs, among: groupCandidates) }
                 }
@@ -1966,7 +1966,7 @@ struct BatchView: View {
             }
             // 不卡张数：一屏摆不下的，连拍挑选会改成单行左右滚动。
             if selectedIDs.count >= 2 {
-                Divider().frame(height: 16)
+                ThemedDivider(vertical: true).frame(height: 16)
                 Button("挑选这 \(selectedIDs.count) 张 (C)") { pickSelection() }
                     .buttonStyle(.bordered)
                     .help("进连拍挑选。选中的都在同一场 = 整场挑（选中的先留、其余废，⏎ 确认）；" +
@@ -2000,7 +2000,7 @@ struct BatchView: View {
         let ids = Array(selectedIDs)
         if ids.count == 2, let align = store.alignment(ids[0], ids[1]) {
             let shift = BodyClock.formatOffset(align.offset)
-            Divider().frame(height: 16)
+            ThemedDivider(vertical: true).frame(height: 16)
             Button("把这两张对成同一时刻") {
                 withAnimation { store.setBodyOffsets([align.moved.key: align.offset]) }
                 selectedIDs.removeAll()
@@ -4701,15 +4701,15 @@ struct PhotoInspector: View {
         VStack(spacing: 0) {
             if let item {
                 header(item)
-                Divider()
+                ThemedDivider()
                 HStack(spacing: 0) {
                     imagePane(item)
                         .layoutPriority(1)
-                    Divider()
+                    ThemedDivider(vertical: true)
                     sidebar(item)
                         .frame(width: Self.sidebarWidth)
                 }
-                Divider()
+                ThemedDivider()
                 bottomBar(item)
             } else {
                 Text("照片不存在").padding()
