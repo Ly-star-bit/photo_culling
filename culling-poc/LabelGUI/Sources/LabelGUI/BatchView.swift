@@ -2382,10 +2382,16 @@ struct BatchView: View {
     }
 
     /// 一键接受算法的推荐：精选留、你标过可用的留，其余废。快速过场用的。
+    /// 点完在网格底下闪一句留了谁、废了几张、⌘Z 撤销（UX-05：窄的小组头上按钮只剩一个对勾，一点同场其余的就废了、这一场
+    /// 叠成一张，以前什么都不说。不加确认框 —— 整场一次撤销，确认框留给「全部接受推荐」那种一次动几十场的）。
     private func acceptTake(_ info: TakeInfo) {
+        let kept = info.all.filter { (info.recommended[$0.id] ?? .reject) != .reject }.map(\.id)
+        let rejected = info.all.filter { info.recommended[$0.id] == .reject && $0.verdict != .reject }.count
         withAnimation { store.applyOverrides(info.recommended, accepted: true) }
         // 定完这一场会叠起来：焦点落到留下的那张上，别停在被叠掉的照片上（←/→ 会从头开始）。
         if let keep = info.all.first(where: { info.recommended[$0.id] == .pick }) { focusedID = keep.id }
+        showGridToast(GridSelectionRules.acceptNotice(take: info.take, kept: kept, rejected: rejected),
+                      verdict: rejected > 0 ? .reject : .pick)
     }
 
     private func setTakeExpanded(_ take: Int, _ expanded: Bool) {

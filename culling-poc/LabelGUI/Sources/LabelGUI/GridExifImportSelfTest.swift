@@ -654,6 +654,17 @@ enum GridExifImportSelfTest {
         let restore = GridSelectionRules.changedNotice(count: 2, verdict: nil) ?? "nil"
         t.check(restore == "已改 2 张 → 恢复自动 · ⌘Z 撤销", "多选 按 0 恢复自动也提示", "得到 \(restore)")
         t.check(GridSelectionRules.changedNotice(count: 1, verdict: .pick) == nil, "多选 只改一张不提示")
+
+        // 小组头「✓」接受推荐的提示（UX-05）。
+        let accept: [(String, [String], Int, String)] = [
+            ("留一张废一张", ["DSCF7208"], 1, "场 2：留 DSCF7208，废 1 张 · ⌘Z 撤销"),
+            ("留两张", ["DSCF7208", "DSCF7209"], 3, "场 2：留 DSCF7208 等 2 张，废 3 张 · ⌘Z 撤销"),
+            ("没有要废的", ["DSCF7208"], 0, "场 2：留 DSCF7208，没有要废的 · ⌘Z 撤销"),
+        ]
+        for (name, kept, rejected, want) in accept {
+            let got = GridSelectionRules.acceptNotice(take: 2, kept: kept, rejected: rejected)
+            t.check(got == want, "接受推荐提示 " + name, "得到 \(got)")
+        }
     }
 
     /// 多选改判以后焦点落在哪（GridSelectionRules.refocus，数字键和批量栏共用）。

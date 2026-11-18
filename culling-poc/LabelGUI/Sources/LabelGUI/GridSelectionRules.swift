@@ -80,6 +80,19 @@ enum GridSelectionRules {
         let what: String = verdict?.rawValue ?? "恢复自动"
         return "已改 \(count) 张 → \(what) · ⌘Z 撤销"
     }
+
+    /// 按分组小组头的「✓」（接受推荐）点完的提示（UX-05）：小组头窄时按钮只剩一个对勾，一点就废了同场其余的、这一场
+    /// 叠成一张，以前什么都不说。`kept` = 留下的（精选 + 你标过可用的，按网格顺序），`rejected` = 这一下废了几张。
+    static func acceptNotice(take: Int, kept: [String], rejected: Int) -> String {
+        let keep: String
+        switch kept.count {
+        case 0: keep = "一张不留"
+        case 1: keep = "留 \(kept[0])"
+        default: keep = "留 \(kept[0]) 等 \(kept.count) 张"
+        }
+        let rest: String = rejected > 0 ? "，废 \(rejected) 张" : "，没有要废的"
+        return "场 \(take)：" + keep + rest + " · ⌘Z 撤销"
+    }
 }
 
 /// 决定网格里看得见哪些照片的那几样状态。任何一样变了就剪选中（BatchView 里一个 onChange 看它）。
