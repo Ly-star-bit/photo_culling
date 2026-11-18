@@ -74,7 +74,7 @@ struct CollageTemplateGallery: View {
 
     private func section(_ title: String, _ templates: [CollageTemplate]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Text(title).font(.caption.weight(.semibold)).foregroundStyle(AppPalette.secondary)
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 86), spacing: 8)], spacing: 10) {
                 ForEach(templates, id: \.name) { t in
                     CollageTemplateTile(store: store, template: t, thumb: thumbs.templates[t.name],
@@ -297,7 +297,7 @@ struct CollageLookBox: View {
     /// 一节色调样张（胶片 / 滤镜）：小标题 + 一格样张。
     private func swatchSection(_ title: String, looks: [CollageLook]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Text(title).font(.caption.weight(.semibold)).foregroundStyle(AppPalette.secondary)
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 60), spacing: 6)], spacing: 8) {
                 ForEach(looks, id: \.self) { look in
                     swatch(look)
@@ -415,7 +415,8 @@ struct CollageLookBox: View {
                 .clipShape(RoundedRectangle(cornerRadius: 4))
                 .overlay(RoundedRectangle(cornerRadius: 4)
                     .strokeBorder(active ? AppPalette.accent : Color.clear, lineWidth: 2.5))
-                Text(look.label).font(.caption2).foregroundStyle(active ? .primary : .secondary)
+                Text(look.label).font(.caption2)
+                    .foregroundStyle(active ? AnyShapeStyle(HierarchicalShapeStyle.primary) : AnyShapeStyle(AppPalette.secondary))
             }
         }
         .buttonStyle(.plain)
@@ -443,7 +444,7 @@ struct CollageOverlayBox: View {
             VStack(alignment: .leading, spacing: 8) {
                 if overlays.isEmpty {
                     Text("选一个样式压在这张照片上：自动避开脸和身体，深字浅字跟着底下的画面换。")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(AppPalette.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     presetGrid
                 } else {
@@ -538,7 +539,7 @@ struct CollageOverlayBox: View {
                     .disabled(overlay.anchor == .auto)
                     .help("按人脸、身体和画面空处重新挑位置（同一张照片上的别的字块也让开）")
                 Text(overlay.anchor == .custom ? "手动拖过" : "位置：\(overlay.anchor.label)")
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .font(.caption2).foregroundStyle(AppPalette.secondary)
                 Text("画布上可以直接拖字").collageHint()
             }
         }
@@ -651,7 +652,7 @@ struct CollageOverlayBox: View {
     /// 定一条边、沿着它找位置（封面字）：左栏、右栏、底栏。
     private func sideAnchors(_ overlay: CollageOverlay) -> some View {
         HStack(spacing: 4) {
-            Text("沿边").font(.caption).foregroundStyle(.secondary)
+            Text("沿边").font(.caption).foregroundStyle(AppPalette.secondary)
             ForEach(CollageAnchor.sides, id: \.self) { anchor in
                 sideButton(anchor, active: overlay.anchor == anchor)
             }
@@ -738,7 +739,7 @@ struct CollageDecorBox: View {
                                 }
                                 .clipShape(RoundedRectangle(cornerRadius: 3))
                                 .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(Color.gray.opacity(0.25), lineWidth: 0.5))
-                                Text(kind.label).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                Text(kind.label).font(.caption2).foregroundStyle(AppPalette.secondary).lineLimit(1)
                             }
                             .contentShape(Rectangle())
                         }
@@ -1093,7 +1094,7 @@ struct CollageItemBox: View {
     var body: some View {
         GroupBox("选中的图层") {
             VStack(alignment: .leading, spacing: 8) {
-                Text(title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(title).font(.caption).foregroundStyle(AppPalette.secondary).lineLimit(1)
                 kindControls
                 CollageSlider(label: "大小", value: sizeBinding, range: sizeRange, display: percentText(item.width))
                 CollageSlider(label: "角度", value: rotationBinding, range: -45...45,
@@ -1110,7 +1111,7 @@ struct CollageItemBox: View {
                     if item.cutout != nil {
                         Text(CollageMasks.cutoutCaveat)
                             .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(AppPalette.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }

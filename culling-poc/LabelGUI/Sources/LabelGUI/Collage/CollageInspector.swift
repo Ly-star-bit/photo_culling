@@ -158,7 +158,7 @@ struct CollageCanvasBox: View {
                         TextField("宽", text: $customW).frame(width: 64)
                         Text("×")
                         TextField("高", text: $customH).frame(width: 64)
-                        Text("px").font(.caption).foregroundStyle(.secondary)
+                        Text("px").font(.caption).foregroundStyle(AppPalette.secondary)
                         Button("应用") { applyCustomSize() }
                             .disabled(Int(customW) == nil || Int(customH) == nil)
                     }
@@ -168,10 +168,10 @@ struct CollageCanvasBox: View {
                 }
                 if store.project.canvas.seams == .grid9 {
                     Text("导出时另存 3×3 九张（每张 \(store.project.canvas.width / 3)×\(store.project.canvas.height / 3)），发朋友圈按顺序选图；脸不会压在切线上")
-                        .font(.caption2).foregroundStyle(.secondary)
+                        .font(.caption2).foregroundStyle(AppPalette.secondary)
                 } else if store.project.canvas.seams == .carousel {
                     Text("导出时切成 \(store.project.canvas.slides) 张轮播，照片可以跨页连着；脸不会压在页缝上")
-                        .font(.caption2).foregroundStyle(.secondary)
+                        .font(.caption2).foregroundStyle(AppPalette.secondary)
                 } else if store.project.canvas.seams == .fold {
                     foldControls
                     // 印厂规格里像素装不下的那几样：页数、首尾单页、中缝带、色彩、JPEG（CollagePrintPanels）。
@@ -360,7 +360,7 @@ struct CollageStylePanel: View {
                 .frame(maxWidth: .infinity, maxHeight: 72)
                 Text(preset.name)
                     .font(.caption2)
-                    .foregroundStyle(active ? .primary : .secondary)
+                    .foregroundStyle(active ? AnyShapeStyle(HierarchicalShapeStyle.primary) : AnyShapeStyle(AppPalette.secondary))
                     .lineLimit(1)
             }
             .contentShape(Rectangle())
@@ -629,7 +629,7 @@ struct CollageTitleBox: View {
                     Image(systemName: "info.circle")
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(AppPalette.secondary)
                 .help("其他占位符和写法")
                 .popover(isPresented: $helpShown, arrowEdge: .leading) {
                     Text(Self.placeholderHelp)
@@ -748,7 +748,7 @@ struct CollageTextEditor: View {
                     .lineLimit(3...8)
                     if body.text.isEmpty || body.filler {
                         Text(body.text.isEmpty ? "现在画的是灰条：印刷导出会提醒换成自己的字" : "这是占位字：印刷导出会提醒换成自己的字")
-                            .font(.caption2).foregroundStyle(.secondary)
+                            .font(.caption2).foregroundStyle(AppPalette.secondary)
                     }
                     HStack(spacing: 6) {
                         Stepper("\(body.columns) 栏", value: Binding(get: { body.columns }, set: { v in
@@ -1199,7 +1199,7 @@ struct CollageExportPanel: View {
                 Text("\(Int(store.project.canvas.dpi)) dpi · 成品 " + String(format: "%.1f×%.1fcm",
                      Double(store.project.canvas.width) / store.project.canvas.dpi * 2.54,
                      Double(store.project.canvas.height) / store.project.canvas.dpi * 2.54))
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .font(.caption2).foregroundStyle(AppPalette.secondary)
                 // 放大超过 120% 的照片以前在这里汇总一句，现在一条条列在下面的「导出前检查」里（点了跳过去）。
                 if store.isAlbum { CollageProofButton(store: store) }
             }

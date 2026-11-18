@@ -76,15 +76,15 @@ struct CollageAlbumOverview: View {
         return HStack(spacing: 8) {
             Label("整本", systemImage: "square.grid.3x3.fill").font(.headline).fixedSize()
             Text(summary)
-                .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                .font(.caption).foregroundStyle(AppPalette.secondary).monospacedDigit()
                 .lineLimit(1).truncationMode(.tail)
                 .help(summary)
             Spacer(minLength: 4)
-            Image(systemName: "photo").font(.caption2).foregroundStyle(.secondary)
+            Image(systemName: "photo").font(.caption2).foregroundStyle(AppPalette.secondary)
             Slider(value: $ui.overviewCardWidth, in: CollageAlbumUI.cardWidthRange)
                 .frame(minWidth: 56, maxWidth: 120)
                 .help("缩略图大小")
-            Image(systemName: "photo").font(.body).foregroundStyle(.secondary)
+            Image(systemName: "photo").font(.body).foregroundStyle(AppPalette.secondary)
             Button("回到编辑") { ui.overviewShown = false }
                 .fixedSize()
                 .help("回到画布编辑现在这个跨页（Esc、G 也行）")
@@ -104,7 +104,7 @@ struct CollageAlbumOverview: View {
                     .lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 0)
             } else {
-                Text("已选 \(picked.count) 个跨页").font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                Text("已选 \(picked.count) 个跨页").font(.caption).foregroundStyle(AppPalette.secondary).monospacedDigit()
                 Spacer(minLength: 4)
                 actionButtons(picked)
                 Button {
@@ -404,8 +404,8 @@ private struct CollageOverviewCard: View {
     private var caption: some View {
         HStack(spacing: 4) {
             Text("\(number)").fontWeight(.semibold).foregroundStyle(over ? AppPalette.warning : Color.primary)
-            Text("· " + CollageAlbumRules.photoCountLabel(photos)).foregroundStyle(.secondary)
-            if locked { Image(systemName: "lock.fill").foregroundStyle(.secondary) }
+            Text("· " + CollageAlbumRules.photoCountLabel(photos)).foregroundStyle(AppPalette.secondary)
+            if locked { Image(systemName: "lock.fill").foregroundStyle(AppPalette.secondary) }
             if current { Text("· 在编辑").foregroundStyle(.tertiary) }
         }
         .font(.caption2)
@@ -430,7 +430,7 @@ private struct CollageOverviewCoverCard: View {
                 } else {
                     RoundedRectangle(cornerRadius: 4)
                         .strokeBorder(Color.secondary.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
-                    Label("封面", systemImage: "plus").font(.callout).foregroundStyle(.secondary)
+                    Label("封面", systemImage: "plus").font(.callout).foregroundStyle(AppPalette.secondary)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -441,7 +441,7 @@ private struct CollageOverviewCoverCard: View {
             }
             Text(store.project.bookCover == nil ? "还没有封面" : "封面")
                 .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(AppPalette.secondary)
                 .frame(height: captionHeight - 2)
         }
         .contentShape(Rectangle())

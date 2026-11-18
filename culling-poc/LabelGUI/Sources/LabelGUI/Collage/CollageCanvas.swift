@@ -384,9 +384,9 @@ struct CollageCanvasView: View {
         VStack(spacing: 12) {
             Image(systemName: "rectangle.3.offgrid")
                 .font(.system(size: 38))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(AppPalette.secondary)
             if store.project.photos.isEmpty {
-                Text("先带几张照片进来").foregroundStyle(.secondary)
+                Text("先带几张照片进来").foregroundStyle(AppPalette.secondary)
                 if let batch = store.batch {
                     CollageEmptyActions(store: store, batch: batch)
                 } else {
@@ -394,10 +394,10 @@ struct CollageCanvasView: View {
                 }
                 Text("也可以把照片文件直接拖进来 · 批量页多选后点「拼图」也能带过来")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppPalette.secondary)
             } else {
                 // 相册的按钮叫「自动编排」（NU7：以前提示一律说「自动排版」，相册里找不到这个按钮）。
-                Text("托盘里有 \(store.project.photos.count) 张照片").foregroundStyle(.secondary)
+                Text("托盘里有 \(store.project.photos.count) 张照片").foregroundStyle(AppPalette.secondary)
                 Button(action: onAutoLayout) {
                     Label(store.isAlbum ? "自动编排" : "自动排版", systemImage: "wand.and.stars").frame(minWidth: 140)
                 }
@@ -406,7 +406,7 @@ struct CollageCanvasView: View {
                 .disabled(store.isSolving)
                 Text("或者把托盘里的照片拖进来 · 左栏「模板」里套一个")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppPalette.secondary)
             }
         }
     }

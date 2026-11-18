@@ -43,7 +43,7 @@ struct CollageBookCoverBox: View {
         HStack(spacing: 4) {
             Text("书脊").font(.caption).frame(width: 52, alignment: .leading)
             CoverMMField(value: cover.spineMM, placeholder: String(format: "估 %.1f", estimate)) { store.setCoverSpine($0) }
-            Text("mm").font(.caption).foregroundStyle(.secondary)
+            Text("mm").font(.caption).foregroundStyle(AppPalette.secondary)
             if cover.spineMM != nil {
                 Button("用估算") { store.setCoverSpine(nil) }
                     .font(.caption)
@@ -82,16 +82,16 @@ struct CollageBookCoverBox: View {
         HStack(spacing: 4) {
             Text("包边").font(.caption).frame(width: 52, alignment: .leading)
             CoverMMField(value: cover.wrapMM, placeholder: "15") { if let v = $0 { store.setCoverWrap(v) } }
-            Text("mm").font(.caption).foregroundStyle(.secondary)
+            Text("mm").font(.caption).foregroundStyle(AppPalette.secondary)
             Text("板厚").font(.caption).padding(.leading, 6)
             CoverMMField(value: cover.boardMM, placeholder: "2") { if let v = $0 { store.setCoverBoard(v) } }
-            Text("mm").font(.caption).foregroundStyle(.secondary)
+            Text("mm").font(.caption).foregroundStyle(AppPalette.secondary)
         }
         .help("包边：封面纸翻过板边包进去的那一圈（照印厂的模板改）；板厚只用来估书脊")
         HStack(spacing: 4) {
             Text("每张纸").font(.caption).frame(width: 52, alignment: .leading)
             CoverMMField(value: cover.sheetMM, placeholder: "0.15") { if let v = $0 { store.setCoverSheet(v) } }
-            Text("mm（一张 = 2P，只用来估书脊）").font(.caption2).foregroundStyle(.secondary)
+            Text("mm（一张 = 2P，只用来估书脊）").font(.caption2).foregroundStyle(AppPalette.secondary)
         }
         Divider()
         Text("书脊上的字").font(.caption.weight(.semibold))

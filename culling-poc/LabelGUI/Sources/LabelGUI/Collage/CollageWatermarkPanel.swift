@@ -74,7 +74,7 @@ struct CollageSignatureBox: View {
             } else if signature != nil {
                 Image(systemName: "exclamationmark.triangle").foregroundStyle(AppPalette.warning)
             } else {
-                Image(systemName: "signature").foregroundStyle(.secondary)
+                Image(systemName: "signature").foregroundStyle(AppPalette.secondary)
             }
         }
         .frame(width: 96, height: 44)
@@ -237,7 +237,7 @@ struct CollageMarkLayerBox: View {
                 }
             }
             VStack(alignment: .leading, spacing: 4) {
-                Text("签名位置：\(layer.position.label)").font(.caption2).foregroundStyle(.secondary)
+                Text("签名位置：\(layer.position.label)").font(.caption2).foregroundStyle(AppPalette.secondary)
                 if let landscape = layer.landscapePosition, layer.tile == nil {
                     Text("横的区域放「\(landscape.label)」（水印页带来的）；点左边统一成一个")
                         .collageHint()
@@ -285,7 +285,7 @@ struct CollageMarkLayerBox: View {
                 .font(.caption)
             HStack(alignment: .top, spacing: 12) {
                 positionGrid(text.position) { p in update { $0.text?.position = p } }
-                Text("字的位置：\(text.position.label)").font(.caption2).foregroundStyle(.secondary)
+                Text("字的位置：\(text.position.label)").font(.caption2).foregroundStyle(AppPalette.secondary)
             }
             CollageSlider(label: "字号", value: fontSizeBinding,
                           range: Self.range(CollageMarkText.fontSizeRange, including: text.fontSizeRatio),

@@ -300,7 +300,7 @@ struct ThemeButton: View {
     var body: some View {
         Button { shown.toggle() } label: { Image(systemName: "circle.lefthalf.filled") }
             .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(AppPalette.secondary)
             .help("主题：\(ThemeCenter.shared.id.title)")
             .accessibilityLabel("主题")
             .popover(isPresented: $shown, arrowEdge: .top) { ThemePicker().appTheme() }
@@ -315,7 +315,7 @@ struct ThemePicker: View {
             HStack(alignment: .firstTextBaseline) {
                 Text("主题").font(.system(size: 13, weight: .semibold))
                 Spacer()
-                Text("只换界面的颜色，照片和导出的图不变").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("只换界面的颜色，照片和导出的图不变").font(.system(size: 11)).foregroundStyle(AppPalette.secondary)
             }
             LazyVGrid(columns: Array(repeating: GridItem(.fixed(ThemeSwatch.size.width), spacing: 12), count: 3), spacing: 12) {
                 ForEach(AppThemeID.allCases) { theme in
@@ -353,7 +353,7 @@ private struct ThemeSwatchCard: View {
                     Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)).foregroundStyle(AppPalette.accent)
                 }
             }
-            Text(theme.subtitle).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+            Text(theme.subtitle).font(.system(size: 10)).foregroundStyle(AppPalette.secondary).lineLimit(1)
         }
         .contentShape(Rectangle())
         .onHover { hovered = $0 }
@@ -485,11 +485,13 @@ struct ThemedDivider: View {
 /// 批量页「本地模型」只有上面那张的一半宽，右边缘参差。
 struct AppCardGroupBoxStyle: GroupBoxStyle {
     var card: Color = AppPalette.card
+    /// 卡片标题（「选中的格子」「签名图水印」）：主题的二级字，不是系统的 `.secondary`（V-01，同 hintText）。
+    var label: Color = AppPalette.secondary
     func makeBody(configuration: Configuration) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             configuration.label
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(label)
             configuration.content
                 .padding(6)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -543,9 +545,10 @@ extension ButtonStyle where Self == AccentProminentButtonStyle {
 // MARK: - 说明字、整页的主题
 
 extension View {
-    /// 面板里的说明字：11pt 二级灰（以前到处是 10pt 三级灰，深色底上几乎读不出来）。
+    /// 面板里的说明字：11pt 二级灰（以前到处是 10pt 三级灰，深色底上几乎读不出来）。颜色是主题的二级字（自检核对的那一个），
+    /// 不是 SwiftUI 的 `.secondary`：系统的二级字相纸下只有 3.8:1（优化分析 2026-11-18 V-01）；石墨从系统的 #989898 变成 #A3A3A3。
     func hintText() -> some View {
-        font(.system(size: 11)).foregroundStyle(.secondary)
+        font(.system(size: 11)).foregroundStyle(AppPalette.secondary)
     }
 
     /// 一页的根上挂一次：点缀色、卡片样式、深 / 浅。弹出框、sheet 跟着环境走。
@@ -566,7 +569,7 @@ private struct AppThemeModifier: ViewModifier {
         let center = ThemeCenter.shared
         content
             .tint(center.colors.accent)
-            .groupBoxStyle(AppCardGroupBoxStyle(card: center.colors.card))
+            .groupBoxStyle(AppCardGroupBoxStyle(card: center.colors.card, label: center.colors.secondary))
             .environment(\.colorScheme, center.scheme)
     }
 }

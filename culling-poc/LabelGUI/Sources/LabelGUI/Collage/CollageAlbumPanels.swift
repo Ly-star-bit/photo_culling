@@ -76,7 +76,7 @@ struct CollageCoverEditBox: View {
         GroupBox("封面") {
             VStack(alignment: .leading, spacing: 8) {
                 Text("画布上是整张封面（封底 | 书脊 | 封面）。封面那一块照常点格子选中、从托盘拖照片进来换、双击改字。")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(AppPalette.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 CollageJumpText(store: store, lead: "书脊宽、书脊上的字、封底在", spot: .cover, tail: "里改。")
                 ForEach(store.coverNotes, id: \.self) { note in
@@ -117,7 +117,7 @@ struct CollageReplaceBox: View {
             VStack(alignment: .leading, spacing: 6) {
                 if candidates.isEmpty {
                     Text(loadedKey == nil ? "在找…" : "托盘里没有和它同连拍、同一场、画面相似的照片")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(AppPalette.secondary)
                 } else {
                     strip
                 }

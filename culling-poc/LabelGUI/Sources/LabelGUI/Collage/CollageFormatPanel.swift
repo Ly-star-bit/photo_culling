@@ -107,11 +107,11 @@ struct CollageCellBox: View {
     var body: some View {
         GroupBox("选中的格子") {
             VStack(alignment: .leading, spacing: 8) {
-                Text(cellTitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(cellTitle).font(.caption).foregroundStyle(AppPalette.secondary).lineLimit(1)
                 if cell.kind == .photo, cell.photoID == nil {
-                    Text("空格子：从托盘拖一张照片进来").font(.caption).foregroundStyle(.secondary)
+                    Text("空格子：从托盘拖一张照片进来").font(.caption).foregroundStyle(AppPalette.secondary)
                 } else if cell.kind == .empty {
-                    Text("留白格：从托盘拖一张照片进来就变成照片格").font(.caption).foregroundStyle(.secondary)
+                    Text("留白格：从托盘拖一张照片进来就变成照片格").font(.caption).foregroundStyle(AppPalette.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 HStack {
@@ -319,7 +319,7 @@ struct CollagePhotoCellBoxes: View {
             let refused = decided.map { $0.mask == nil || $0.cutoutReason != nil } ?? false
             Text(CollageMasks.cutoutCaveat)
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(AppPalette.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Toggle("人要贴着成品底边", isOn: Binding(get: { cutout.toEdge }, set: { v in
                 var c = cutout
@@ -446,7 +446,7 @@ struct CollagePageBox: View {
     private var emptyBox: some View {
         GroupBox("这一页") {
             VStack(alignment: .leading, spacing: 8) {
-                Text("画布上还没有版式。").font(.caption).foregroundStyle(.secondary)
+                Text("画布上还没有版式。").font(.caption).foregroundStyle(AppPalette.secondary)
                 CollageJumpText(store: store, lead: "到左栏", spot: .templates, tail: "里套一个，")
                 Text(store.isAlbum ? "或者点顶栏的「自动编排」把托盘编成跨页。" : "或者点顶栏的「自动排版」。")
                     .collageHint()
@@ -478,7 +478,7 @@ struct CollagePageBox: View {
                 if !store.alternatives.isEmpty {
                     Text(store.alternativeIndex < 0 ? "备选 \(store.alternatives.count) 个"
                          : "第 \(store.alternativeIndex + 1)/\(store.alternatives.count) 个备选")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(AppPalette.secondary)
                 }
             }
             Text("画布上：拖缝调大小 · ⌥点缝横竖翻转 · 拖格子到另一格中间互换、到边上劈开插入 · 双击调裁切")

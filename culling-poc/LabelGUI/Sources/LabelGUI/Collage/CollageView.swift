@@ -316,16 +316,16 @@ struct CollageView: View {
             }
             if let busy = store.busyText {
                 ProgressView().controlSize(.small)
-                Text(busy).font(.caption).foregroundStyle(.secondary)
+                Text(busy).font(.caption).foregroundStyle(AppPalette.secondary)
             }
             Spacer()
             if let notice = store.notice {
                 // 一行放不下就截掉尾巴（悬停看全文），不把状态栏撑高。
-                Text(notice).font(.caption).foregroundStyle(.secondary)
+                Text(notice).font(.caption).foregroundStyle(AppPalette.secondary)
                     .lineLimit(1).truncationMode(.tail).help(notice)
             }
             if !store.progressText.isEmpty {
-                Text(store.progressText).font(.caption).foregroundStyle(.secondary)
+                Text(store.progressText).font(.caption).foregroundStyle(AppPalette.secondary)
             }
             if let fraction = store.progressFraction {
                 ProgressView(value: fraction).frame(width: 140)
@@ -334,7 +334,7 @@ struct CollageView: View {
             ThemeButton()
             Button { showShortcuts.toggle() } label: { Image(systemName: "keyboard") }
                 .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(AppPalette.secondary)
                 .help("快捷键一览 (?)")
                 .popover(isPresented: $showShortcuts, arrowEdge: .top) { ShortcutsPanel(page: .collage) }
         }
@@ -501,12 +501,12 @@ struct CollageTray: View {
             .controlSize(.small)
             .help("按章节分组（批量页时间轴上的那几章）：一章一段，段里还是带进来的顺序；外部文件排最后。只有一章时不分")
             Spacer(minLength: 4)
-            Image(systemName: "photo").font(.system(size: 9)).foregroundStyle(.secondary)
+            Image(systemName: "photo").font(.system(size: 9)).foregroundStyle(AppPalette.secondary)
             Slider(value: $workspace.trayThumb, in: CollageWorkspace.thumbRange)
                 .controlSize(.small)
                 .frame(maxWidth: 90)
                 .help("缩略图大小")
-            Image(systemName: "photo").font(.system(size: 13)).foregroundStyle(.secondary)
+            Image(systemName: "photo").font(.system(size: 13)).foregroundStyle(AppPalette.secondary)
         }
         .padding(.horizontal, 10)
         .frame(height: 28)
@@ -528,7 +528,7 @@ struct CollageTray: View {
                     .lineLimit(1).minimumScaleFactor(0.8)
                 Spacer(minLength: 0)
             } else {
-                Text("已选 \(n) 张").font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                Text("已选 \(n) 张").font(.caption).foregroundStyle(AppPalette.secondary).monospacedDigit()
                 Spacer()
                 // 多选以后最常见的意图：用这几张排一版（NU8：以前只在右键菜单里）。
                 if n > 1 { relayoutButton(order.filter(selected.contains)) }
@@ -572,7 +572,7 @@ struct CollageTray: View {
                 .foregroundStyle(.tertiary)
             Text("点「带照片」拿精选进来\n或在批量页多选后点「拼图」\n也可以把文件拖到这里")
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(AppPalette.secondary)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -626,7 +626,7 @@ private struct CollageTrayHeader: View {
         let fineArt = store.isAlbum && store.project.albumTheme == .fineArt
         HStack(spacing: 6) {
             Text("托盘").font(.headline)
-            Text("\(store.project.photos.count)").foregroundStyle(.secondary).monospacedDigit()
+            Text("\(store.project.photos.count)").foregroundStyle(AppPalette.secondary).monospacedDigit()
             Spacer()
             Menu {
                 Button("精选 (\(batchStore.verdictCounts.pick))") {
@@ -761,7 +761,7 @@ private struct CollageTrayGrid: View, Equatable {
                         } header: {
                             HStack(spacing: 6) {
                                 Text(chapter.title).font(.caption.weight(.semibold))
-                                Text("\(chapter.photos.count) 张").font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                                Text("\(chapter.photos.count) 张").font(.caption).foregroundStyle(AppPalette.secondary).monospacedDigit()
                                 Spacer(minLength: 0)
                                 Button("全选") {
                                     focused = true
@@ -962,7 +962,7 @@ struct CollageAlternativeStrip: View {
         if store.alternativeThumbs.isEmpty {
             // 没有备选时收成一行（同没存过方案的方案栏）：以前照样占 78pt，只放一句提示 —— 相册里大多数时候是空的。
             HStack(spacing: 8) {
-                Text("备选").font(.caption).foregroundStyle(.secondary)
+                Text("备选").font(.caption).foregroundStyle(AppPalette.secondary)
                     .frame(width: 32)
                 if !fineArtAlbum {
                     arrows
@@ -1016,7 +1016,7 @@ struct CollageAlternativeStrip: View {
     /// （regenerate 只会提示一句）：→ 和「换一批」灰掉，旁边说去哪改。
     private var controls: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("备选").font(.caption).foregroundStyle(.secondary)
+            Text("备选").font(.caption).foregroundStyle(AppPalette.secondary)
             if !fineArtAlbum {
                 arrows
                 regenerateButton
@@ -1151,7 +1151,7 @@ struct CollageVariantStrip: View {
     /// 还没存过方案：一个按钮 + 一句话（不占缩略图那么高，画布少让一点）。
     private var emptyStrip: some View {
         HStack(spacing: 8) {
-            Text("方案").font(.caption).foregroundStyle(.secondary)
+            Text("方案").font(.caption).foregroundStyle(AppPalette.secondary)
                 .frame(width: 32)
             Button {
                 store.saveVariant()
@@ -1174,7 +1174,7 @@ struct CollageVariantStrip: View {
         let current = store.currentVariantIDs
         let modifiedID = store.activeVariantModified ? store.activeVariantID : nil
         return HStack(spacing: 8) {
-            Text("方案").font(.caption).foregroundStyle(.secondary)
+            Text("方案").font(.caption).foregroundStyle(AppPalette.secondary)
                 .frame(width: 32)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
@@ -1257,7 +1257,8 @@ struct CollageVariantStrip: View {
                 .overlay(RoundedRectangle(cornerRadius: 2)
                     .strokeBorder(current ? AppPalette.accent : Color.clear, lineWidth: 2.5))
                 (Text(v.name) + Text(modified ? " · 改过" : "").foregroundColor(AppPalette.warning))
-                    .font(.caption2).foregroundStyle(current ? .primary : .secondary)
+                    .font(.caption2)
+                    .foregroundStyle(current ? AnyShapeStyle(HierarchicalShapeStyle.primary) : AnyShapeStyle(AppPalette.secondary))
                     .lineLimit(1)
                     .frame(maxWidth: 96)
             }
@@ -1355,7 +1356,7 @@ struct CollagePageStrip: View {
     /// 左边：「跨页」、几个（多了、页数不合规标橙）、「整本」。
     private var leftColumn: some View {
         VStack(spacing: 3) {
-            Text(unit).font(.caption).foregroundStyle(.secondary)
+            Text(unit).font(.caption).foregroundStyle(AppPalette.secondary)
             // 相册：几个跨页（指定了跨页数是「现在 / 目标」，多了标橙）。封面不算在里面。
             if store.isAlbum {
                 CollageAlbumSpreadCount(store: store)
@@ -1425,13 +1426,14 @@ struct CollagePageStrip: View {
                 } else {
                     RoundedRectangle(cornerRadius: 4)
                         .strokeBorder(Color.secondary.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-                    Label("封面", systemImage: "plus").font(.caption2).foregroundStyle(.secondary)
+                    Label("封面", systemImage: "plus").font(.caption2).foregroundStyle(AppPalette.secondary)
                 }
             }
             .frame(width: cardWidth, height: Self.thumbHeight)
             .overlay(RoundedRectangle(cornerRadius: 2)
                 .strokeBorder(editing ? AppPalette.accent : Color.clear, lineWidth: 2.5))
-            Text("封面").font(.caption2).foregroundStyle(editing ? .primary : .secondary)
+            Text("封面").font(.caption2)
+                .foregroundStyle(editing ? AnyShapeStyle(HierarchicalShapeStyle.primary) : AnyShapeStyle(AppPalette.secondary))
         }
         .contentShape(Rectangle())
         .onTapGesture { openCover() }
@@ -1586,7 +1588,7 @@ private struct CollageStripCard: View {
 
     private var tint: AnyShapeStyle {
         if over { return AnyShapeStyle(AppPalette.warning) }
-        return selected ? AnyShapeStyle(HierarchicalShapeStyle.primary) : AnyShapeStyle(HierarchicalShapeStyle.secondary)
+        return selected ? AnyShapeStyle(HierarchicalShapeStyle.primary) : AnyShapeStyle(AppPalette.secondary)
     }
 }
 
