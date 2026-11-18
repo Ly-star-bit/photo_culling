@@ -1,13 +1,15 @@
 import Foundation
+import SwiftUI
 
 /// LabelGUI --theme-selftest：六套主题的颜色表（AppTheme.swift）逐套核对 —— 字读不读得清、点缀色认不认得出、会不会和判决色撞、
 /// 选中框压在白纸上看不看得见、放照片的底带不带色。核对的是界面上实际画出来的颜色：深色主题的判决色 / 提醒黄 / 客户紫没有
 /// 自己的值（就是系统色），按系统色在 macOS 15 和 26 上的实际值算（`systemDark`）；相纸用它自己压深过的值。
-/// 纯函数，不读写任何文件，不建窗口。
+/// 不读写任何文件，不建窗口；只有共用的选中框用 ImageRenderer 离屏画一遍、取像素（`renderedRingContrast`），别的都是算数。
 ///
 /// 管不到的（这里通过不等于界面上没问题）：
-///   - 页面到底用没用这些出口：说明字写成 SwiftUI 的 `.secondary`、废片红写成 `.red`、提醒写成 `.yellow`，这里照样通过
-///     （优化分析 2026-11-18 V-01：相纸下系统的二级字只有 3.8:1，自检核对的 `secondary` 那时除了暗房没人用）。
+///   - 页面到底用没用这些出口：说明字写成 SwiftUI 的 `.secondary`、废片红写成 `.red`、提醒写成 `.yellow`、选中框自己画一条
+///     点缀色而不用 SelectionRing，这里照样通过（优化分析 2026-11-18 V-01：相纸下系统的二级字只有 3.8:1，自检核对的
+///     `secondary` 那时除了暗房没人用）。改页面的时候要拍快照量。
 ///   - 深色主题判决色 / 客户紫的对比度：那是系统色，石墨也不许动，这里只核对色相。灰卡的栏和卡片是中灰，系统蓝 / 红 / 紫在上面
 ///     偏暗（卡片上 2.9–3.3:1、栏上 3.4–4.4:1）；其余四套深色在栏上 ≥ 4.7:1、卡片上 ≥ 4.1:1。
 enum ThemeSelfTest {
@@ -83,6 +85,37 @@ enum ThemeSelfTest {
     /// 选中框可能压着的东西：拼图成品的纸白（默认「极简纸白」）、纯白、墨黑（「墨黑」风格）、纯黑（审片四周、深色照片）。
     static let productPapers: [(String, UInt32)] = [("纸白", 0xF4F1EA), ("纯白", 0xFFFFFF), ("墨黑", 0x1D1D1F), ("纯黑", 0x000000)]
 
+    /// 把共用的选中框（SelectionRing）真的画出来（套着现在的主题），压在 `paper` 上，横穿那一圈的像素里和底最大的对比度。
+    /// 颜色表那一条只核对 accent / keyline 的值；这一条核对组件本身画了 keyline、宽度和位置对 —— 拼图画布、备选条、跨页条、
+    /// 概览、风格预设、色块、批量网格的选中框都是它（TB-01 / TA-05）。只画一条点缀色的话，纯黑 / 灰卡压在纸白上 1.0–1.1:1。
+    @MainActor
+    static func renderedRingContrast(on paper: UInt32) -> Double? {
+        let side = 24
+        let view = ZStack {
+            ThemeColors.color(paper)
+            SelectionRing(shape: Rectangle())
+        }
+        .frame(width: CGFloat(side), height: CGFloat(side))
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 1
+        guard let image = renderer.cgImage,
+              let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side * 4, space: space,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let data = ctx.data else { return nil }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
+        let bytes = data.bindMemory(to: UInt8.self, capacity: side * side * 4)
+        let row = side / 2
+        var best = 1.0
+        for x in 0..<8 {   // 圈宽 lineWidth + 2 = 4.5pt，扫外面 8 个像素
+            let i = (row * side + x) * 4
+            let px = (UInt32(bytes[i]) << 16) | (UInt32(bytes[i + 1]) << 8) | UInt32(bytes[i + 2])
+            best = max(best, contrast(px, paper))
+        }
+        return best
+    }
+
+    @MainActor
     static func run() -> Never {
         var failed = 0, checked = 0
         func check(_ ok: Bool, _ what: @autoclosure () -> String) {
@@ -205,6 +238,19 @@ enum ThemeSelfTest {
                 }
             }
             check(!theme.title.isEmpty && !theme.subtitle.isEmpty, "\(name)：没有名字")
+
+            // 选中框画出来（TB-01）：套上这一套，SelectionRing 压在纸白 / 纯白 / 墨黑 / 纯黑上，那一圈里有像素 ≥ 3:1。
+            // 无头时换主题不写设置；查完换回原来的（后面要核对无头默认石墨）。
+            let saved = ThemeCenter.shared.id
+            ThemeCenter.shared.id = theme
+            for (label, paper) in productPapers {
+                if let r = renderedRingContrast(on: paper) {
+                    check(r >= 3, "\(name)：画出来的选中框压在\(label)上 \(fmt(r))")
+                } else {
+                    check(false, "\(name)：选中框画不出来（ImageRenderer）")
+                }
+            }
+            ThemeCenter.shared.id = saved
         }
         // 默认主题的数值不能动：v1.30 起发出去的就是这一套。判决色、提醒黄、客户紫也不能给值（一直是系统色）。
         let g = AppThemeID.graphite.colors.hex

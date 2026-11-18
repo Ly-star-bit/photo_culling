@@ -914,16 +914,18 @@ struct CollageCanvasOverlay: View {
         .offset(x: box.minX, y: box.minY)
     }
 
-    /// 选中图层：旋转后的外框 + 旋转把手（上）+ 缩放把手（右下）。
+    /// 选中图层：旋转后的外框 + 旋转把手（上）+ 缩放把手（右下）。框和把手都垫一圈 keyline（同 SelectionRing）：纯黑 / 灰卡的
+    /// 点缀色是白，压在白衣服、纸白上会断掉（TB-01）。
     private func itemSelection(_ h: CollageItemHandles) -> some View {
-        ZStack(alignment: .topLeading) {
-            Path { path in
-                path.addLines(h.corners)
-                path.closeSubpath()
-                path.move(to: h.topCenter)
-                path.addLine(to: h.rotate)
-            }
-            .stroke(AppPalette.accent, lineWidth: 2)
+        let outline = Path { path in
+            path.addLines(h.corners)
+            path.closeSubpath()
+            path.move(to: h.topCenter)
+            path.addLine(to: h.rotate)
+        }
+        return ZStack(alignment: .topLeading) {
+            outline.stroke(AppPalette.selectionKeyline, lineWidth: 4)
+            outline.stroke(AppPalette.accent, lineWidth: 2)
             handle(at: h.rotate)
             handle(at: h.resize)
         }
@@ -934,6 +936,7 @@ struct CollageCanvasOverlay: View {
             .fill(Color.white)
             .overlay(Circle().stroke(AppPalette.accent, lineWidth: 2))
             .frame(width: 12, height: 12)
+            .background(Circle().fill(AppPalette.selectionKeyline).frame(width: 16, height: 16))
             .offset(x: p.x - 6, y: p.y - 6)
     }
 
@@ -941,12 +944,13 @@ struct CollageCanvasOverlay: View {
         layout.toView(frame.rect.cgRect)
     }
 
+    /// 选中的格子：共用的选中框（点缀色 + 两侧 keyline）。点缀色那一圈还在原来的位置（格子外 2pt 到格子里 0.5pt），两侧各多
+    /// 一圈 1pt keyline —— 纯黑 / 灰卡的点缀色是白，以前压在纸白的留白上看不出选的是哪一格（TB-01）。
     private func selectionOutline(_ frame: CollageLayout.Frame) -> some View {
         let r = viewRect(frame)
-        return Rectangle()
-            .strokeBorder(AppPalette.accent, lineWidth: 2.5)
-            .frame(width: r.width + 4, height: r.height + 4)
-            .offset(x: r.minX - 2, y: r.minY - 2)
+        return SelectionRing(shape: Rectangle())
+            .frame(width: r.width + 6, height: r.height + 6)
+            .offset(x: r.minX - 3, y: r.minY - 3)
     }
 
     private func gutterHighlight(_ g: CollageLayout.Gutter) -> some View {

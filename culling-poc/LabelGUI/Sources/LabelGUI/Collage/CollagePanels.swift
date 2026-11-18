@@ -413,8 +413,9 @@ struct CollageLookBox: View {
                 }
                 .frame(width: 54, height: 54)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
-                .overlay(RoundedRectangle(cornerRadius: 4)
-                    .strokeBorder(active ? AppPalette.accent : Color.clear, lineWidth: 2.5))
+                .overlay {
+                    if active { SelectionRing(shape: RoundedRectangle(cornerRadius: 4)).padding(-1) }
+                }
                 Text(look.label).font(.caption2)
                     .foregroundStyle(active ? AnyShapeStyle(HierarchicalShapeStyle.primary) : AnyShapeStyle(AppPalette.secondary))
             }
@@ -895,8 +896,7 @@ struct CollageContactBox: View {
                 let on = sheet.paper == entry.color
                 Button { store.updateContactSheet { $0.paper = entry.color } } label: {
                     RoundedRectangle(cornerRadius: 3).fill(entry.color.swiftUIColor).frame(width: 22, height: 16)
-                        .overlay(RoundedRectangle(cornerRadius: 3)
-                            .stroke(on ? AppPalette.accent : Color.gray.opacity(0.5), lineWidth: on ? 2 : 1))
+                        .overlay { SwatchRing(on: on, shape: RoundedRectangle(cornerRadius: 3)) }
                 }
                 .buttonStyle(.plain)
                 .help(entry.name)
@@ -1018,7 +1018,7 @@ struct CollageContactBox: View {
                     let on = sheet.markColor == entry.color
                     Button { store.updateContactSheet { $0.markColor = entry.color } } label: {
                         Circle().fill(entry.color.swiftUIColor).frame(width: 18, height: 18)
-                            .overlay(Circle().stroke(on ? AppPalette.accent : Color.gray.opacity(0.5), lineWidth: on ? 2 : 1))
+                            .overlay { SwatchRing(on: on) }
                     }
                     .buttonStyle(.plain)
                     .help("油性笔 · \(entry.name)（圈、叉、手写注记同一支笔）")
@@ -1200,8 +1200,7 @@ struct CollageItemBox: View {
                         let entry = CollagePencilMark.palette[i]
                         Button { update { $0.color = entry.color } } label: {
                             Circle().fill(entry.color.swiftUIColor).frame(width: 18, height: 18)
-                                .overlay(Circle().stroke(item.color == entry.color ? AppPalette.accent
-                                                         : Color.gray.opacity(0.5), lineWidth: item.color == entry.color ? 2 : 1))
+                                .overlay { SwatchRing(on: item.color == entry.color) }
                         }
                         .buttonStyle(.plain)
                         .help("油性笔 · \(entry.name)")

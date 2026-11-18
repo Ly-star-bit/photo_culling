@@ -390,15 +390,16 @@ private struct CollageOverviewCard: View {
             if locked { CollageLockBadge() }
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 2)
-                .strokeBorder(borderColor, lineWidth: selected || targeted ? 3 : 1.5)
-                .padding(-3)
+            // 选中 / 托盘照片拖上来：共用的选中框（TB-01），点缀色还是缩略图外面那 3pt，两侧各一圈 keyline —— 纯黑 / 灰卡的
+            // 点缀色是白，以前贴着纸白的缩略图只像缩略图大了一圈。正在编辑的那个照旧一圈淡淡的 ink。
+            if selected || targeted {
+                SelectionRing(shape: RoundedRectangle(cornerRadius: 2), lineWidth: 3).padding(-4)
+            } else if current {
+                RoundedRectangle(cornerRadius: 2)
+                    .strokeBorder(AppPalette.ink.opacity(0.55), lineWidth: 1.5)
+                    .padding(-3)
+            }
         }
-    }
-
-    private var borderColor: Color {
-        if targeted || selected { return AppPalette.accent }
-        return current ? AppPalette.ink.opacity(0.55) : .clear
     }
 
     private var caption: some View {

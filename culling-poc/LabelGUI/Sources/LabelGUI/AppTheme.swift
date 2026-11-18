@@ -458,6 +458,26 @@ struct SelectionRing<S: InsettableShape>: View {
     }
 }
 
+/// 色块（拼图的底色、印样的纸色和笔色、水印的字色）外面那一圈：选中 = 共用的选中框，点缀色还在原来的位置（色块边上内外
+/// 各 1pt），两侧各一圈 keyline；没选中 = 1pt 灰。纯黑 / 灰卡的点缀色是白：以前选中的纸白、纯白色块只像大了一圈（TB-01）。
+struct SwatchRing<S: InsettableShape>: View {
+    var on: Bool
+    var shape: S
+    var offOpacity = 0.5
+
+    var body: some View {
+        if on {
+            SelectionRing(shape: shape, lineWidth: 2).padding(-2)
+        } else {
+            shape.stroke(Color.gray.opacity(offOpacity), lineWidth: 1)
+        }
+    }
+}
+
+extension SwatchRing where S == Circle {
+    init(on: Bool, offOpacity: Double = 0.5) { self.init(on: on, shape: Circle(), offOpacity: offOpacity) }
+}
+
 /// 选中的勾：点缀色的圆、onAccent 的勾（石墨是琥珀圆深色勾，纯黑是白圆黑勾）。以前是点缀色的勾压在白圆上 ——
 /// 符号的勾是镂空的，点缀色是白的时候只剩一个白圆、没有勾（TA-05）。
 struct SelectionCheckmark: View {

@@ -684,8 +684,7 @@ struct WatermarkView: View {
                 Circle()
                     .fill(rgb.map { Color($0.nsColor) } ?? Color.clear)
                     .frame(width: 20, height: 20)
-                    .overlay(Circle().stroke(isActive ? AppPalette.accent : .gray.opacity(0.4),
-                                             lineWidth: isActive ? 2 : 1))
+                    .overlay { SwatchRing(on: isActive, offOpacity: 0.4) }
                 if rgb == nil {
                     Text(label).font(.system(size: 9)).foregroundStyle(AppPalette.secondary)
                 }

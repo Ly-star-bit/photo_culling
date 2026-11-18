@@ -930,9 +930,11 @@ struct CollageTrayItem: View {
             }
         }
         .overlay {
-            if selected {
-                RoundedRectangle(cornerRadius: 4)
-                    .strokeBorder(active ? AppPalette.accent : Color.gray, lineWidth: 3)
+            // 托盘有焦点时是共用的选中框（TB-01，同批量页的网格）；没焦点时照旧一圈灰。
+            if selected, active {
+                SelectionRing(shape: RoundedRectangle(cornerRadius: 4), lineWidth: 3).padding(-1)
+            } else if selected {
+                RoundedRectangle(cornerRadius: 4).strokeBorder(Color.gray, lineWidth: 3)
             }
         }
         .help(helpText)
@@ -1086,9 +1088,10 @@ private struct CollageAlternativeThumbs: View, Equatable {
                             .resizable()
                             .aspectRatio(contentMode: .fit)
                             .frame(height: 64)
-                            .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(
-                                item.offset == selected ? AppPalette.accent : Color.clear,
-                                lineWidth: 2.5))
+                            .overlay {
+                                // 共用的选中框（TB-01）：点缀色还在缩略图里那 2.5pt，外面、里面各一圈 keyline。
+                                if item.offset == selected { SelectionRing(shape: RoundedRectangle(cornerRadius: 2)).padding(-1) }
+                            }
                     }
                     .buttonStyle(.plain)
                     // 停一下：画布底下浮一张大的（十几张 44pt 宽的缩略图几乎分不出来）。
@@ -1254,8 +1257,9 @@ struct CollageVariantStrip: View {
                     }
                 }
                 .frame(height: 52)
-                .overlay(RoundedRectangle(cornerRadius: 2)
-                    .strokeBorder(current ? AppPalette.accent : Color.clear, lineWidth: 2.5))
+                .overlay {
+                    if current { SelectionRing(shape: RoundedRectangle(cornerRadius: 2)).padding(-1) }
+                }
                 (Text(v.name) + Text(modified ? " · 改过" : "").foregroundColor(AppPalette.warning))
                     .font(.caption2)
                     .foregroundStyle(current ? AnyShapeStyle(HierarchicalShapeStyle.primary) : AnyShapeStyle(AppPalette.secondary))
@@ -1430,8 +1434,9 @@ struct CollagePageStrip: View {
                 }
             }
             .frame(width: cardWidth, height: Self.thumbHeight)
-            .overlay(RoundedRectangle(cornerRadius: 2)
-                .strokeBorder(editing ? AppPalette.accent : Color.clear, lineWidth: 2.5))
+            .overlay {
+                if editing { SelectionRing(shape: RoundedRectangle(cornerRadius: 2)).padding(-1) }
+            }
             Text("封面").font(.caption2)
                 .foregroundStyle(editing ? AnyShapeStyle(HierarchicalShapeStyle.primary) : AnyShapeStyle(AppPalette.secondary))
         }
@@ -1576,9 +1581,12 @@ private struct CollageStripCard: View {
             .overlay(alignment: .topLeading) {
                 if locked { CollageLockBadge() }
             }
-            .overlay(RoundedRectangle(cornerRadius: 2)
-                .strokeBorder(hover || targeted || selected ? AppPalette.accent : Color.clear,
-                              lineWidth: hover || targeted ? 3.5 : 2.5))
+            .overlay {
+                // 共用的选中框（TB-01）：当前跨页 2.5pt，拖着指到它 3.5pt。
+                if hover || targeted || selected {
+                    SelectionRing(shape: RoundedRectangle(cornerRadius: 2), lineWidth: hover || targeted ? 3.5 : 2.5).padding(-1)
+                }
+            }
             Text("\(number)").font(.caption2).foregroundStyle(tint)
         }
         .onDrop(of: [.text], isTargeted: $targeted) { providers in

@@ -355,8 +355,14 @@ struct CollageStylePanel: View {
                             .aspectRatio(store.project.canvas.aspect, contentMode: .fit)
                     }
                 }
-                .overlay(RoundedRectangle(cornerRadius: 2)
-                    .strokeBorder(active ? AppPalette.accent : Color.gray.opacity(0.25), lineWidth: active ? 2.5 : 0.5))
+                .overlay {
+                    // 选中的预设：共用的选中框（TB-01：极简纸白、纯白的缩略图是白的，白点缀色压在上面看不见）。
+                    if active {
+                        SelectionRing(shape: RoundedRectangle(cornerRadius: 2)).padding(-1)
+                    } else {
+                        RoundedRectangle(cornerRadius: 2).strokeBorder(Color.gray.opacity(0.25), lineWidth: 0.5)
+                    }
+                }
                 .frame(maxWidth: .infinity, maxHeight: 72)
                 Text(preset.name)
                     .font(.caption2)
@@ -528,7 +534,7 @@ struct CollageStylePanel: View {
             Circle()
                 .fill(color.swiftUIColor)
                 .frame(width: 20, height: 20)
-                .overlay(Circle().stroke(active ? AppPalette.accent : Color.gray.opacity(0.5), lineWidth: active ? 2 : 1))
+                .overlay { SwatchRing(on: active) }
         }
         .buttonStyle(.plain)
         .help(name)
