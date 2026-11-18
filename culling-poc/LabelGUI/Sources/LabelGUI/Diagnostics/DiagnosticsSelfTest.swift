@@ -32,6 +32,7 @@ enum DiagnosticsSelfTest {
         bundleChecks(work, check)
         reasonChecks(work, check)
         permissionChecks(work, check)
+        feedbackChecks(check)
         if let i = CommandLine.arguments.firstIndex(of: "--out"), CommandLine.arguments.count > i + 1 {
             renderPanel(to: URL(fileURLWithPath: CommandLine.arguments[i + 1], isDirectory: true), check)
         }
@@ -254,6 +255,8 @@ enum DiagnosticsSelfTest {
         let info = files[folder + "/info.txt"] ?? ""
         check(info.contains("macOS：") && info.contains("机型：") && info.contains("当前场次：<场次 1>（key \(key1)）"),
               "诊断信息：系统、机型、界面状态（路径换成代号）", info)
+        check(info.contains("\n界面语言：") && info.contains("\n本地模型（可选）：") && info.contains(BatchStore.ollamaModel),
+              "诊断信息：界面语言、本地模型要的 uv / Ollama / 模型（OP-10）", info)
         targetChecks(work, data: data, check)
         redactorChecks(check)
         quoteChecks(work, check)
@@ -818,6 +821,68 @@ enum DiagnosticsSelfTest {
         check.lock(locked, 0o000)
         let listed = ImageLoader.listPhotos(in: mixed).map(\.stem)
         check(ImageLoader.folderReadProblem(mixed) == nil && listed == ["DSCF0002"], "子文件夹读不了：跳过、照样列出别的", "\(listed)")
+    }
+
+    // MARK: F 反馈问题、本地模型环境
+
+    /// 「帮助 › 反馈问题…」拼的网址（OP-07）：仓库的新建 Issue 页、bug.yml 那张表、版本号和系统版本按字段 id 填好；仓库里的
+    /// 那张表（往上找得到时）真有这两个 id。诊断信息里的本地模型那一行（OP-10）：三样在不在说对、不写家目录下的路径。
+    @MainActor
+    private static func feedbackChecks(_ check: Check) {
+        print("F. 反馈问题、本地模型环境")
+        let url = Diagnostics.feedbackURL(version: "1.33.0（build 470）", macOS: "26.5.1")
+        let parts = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let query = Dictionary((parts?.queryItems ?? []).map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { a, _ in a })
+        check(url.scheme == "https" && url.host == "github.com" && url.path == "/Ly-star-bit/photo_culling/issues/new",
+              "反馈问题：打开仓库的新建 Issue 页", url.absoluteString)
+        check(query == ["template": Diagnostics.feedbackTemplate, "version": "1.33.0（build 470）", "macos": "26.5.1"],
+              "反馈问题：用 bug.yml 那张表，版本号、系统版本填好，别的什么都不带", "\(query)")
+        let versions = Diagnostics.feedbackVersions()
+        check(!versions.version.isEmpty && WhatsNew.parse(versions.macOS) != nil, "反馈问题：本机的版本号、系统版本拿得到",
+              "\(versions)")
+        // 仓库里的表（从可执行文件往上找 .github/ISSUE_TEMPLATE；打包的 app 里没有，跳过）
+        var dir = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().deletingLastPathComponent()
+        var template: String?
+        for _ in 0..<8 {
+            let candidate = dir.appendingPathComponent(".github/ISSUE_TEMPLATE/" + Diagnostics.feedbackTemplate)
+            if let text = try? String(contentsOf: candidate, encoding: .utf8) {
+                template = text
+                break
+            }
+            dir = dir.deletingLastPathComponent()
+        }
+        if let template {
+            check(template.contains("id: version") && template.contains("id: macos") && template.contains("导出诊断信息"),
+                  "仓库里的 \(Diagnostics.feedbackTemplate) 有 version、macos 两个字段，教人附诊断包")
+        } else {
+            print("  skip 往上找不到 .github/ISSUE_TEMPLATE/\(Diagnostics.feedbackTemplate)（打包的 app 里没有）")
+        }
+
+        // 本地模型那一行：假的家目录、假的「在不在」
+        let home = "/Users/someone"
+        let uv = "/opt/homebrew/bin/uv"
+        let manifest = home + "/.ollama/models/manifests/registry.ollama.ai/library/" + BatchStore.ollamaModel + "/latest"
+        let all: Set<String> = [uv, "/Applications/Ollama.app", manifest]
+        let full = DiagnosticsBundle.localModelLine(home: home, uvPath: uv, modelsDir: nil, exists: { all.contains($0) })
+        check(full == "uv \(uv) · Ollama.app 在 · 模型 \(BatchStore.ollamaModel) 在", "本地模型：三样都在", full)
+        let none = DiagnosticsBundle.localModelLine(home: home, uvPath: uv, modelsDir: nil, exists: { _ in false })
+        check(none.hasPrefix("没找到 uv") && none.contains("没装 Ollama") && none.contains("ollama pull \(BatchStore.ollamaModel)"),
+              "本地模型：三样都没有，说缺什么、模型怎么装", none)
+        let elsewhereManifest = "/Volumes/X/models/manifests/registry.ollama.ai/library/" + BatchStore.ollamaModel + "/latest"
+        let odd: Set<String> = [home + "/.local/bin/uv", "/opt/homebrew/bin/ollama", elsewhereManifest]
+        let elsewhere = DiagnosticsBundle.localModelLine(home: home, uvPath: uv, modelsDir: "/Volumes/X/models",
+                                                         exists: { odd.contains($0) })
+        check(elsewhere.contains("uv 装在家目录的 .local/bin/uv，app 只找") && elsewhere.contains("只有命令行 /opt/homebrew/bin/ollama")
+              && elsewhere.contains("模型 \(BatchStore.ollamaModel) 在") && !elsewhere.contains(home),
+              "本地模型：uv 装在 app 不找的地方、只有 ollama 命令行、OLLAMA_MODELS 指到别处；不写家目录", elsewhere)
+        let tagOnly = DiagnosticsBundle.localModelLine(home: home, uvPath: uv, modelsDir: nil, exists: { $0 == uv },
+                                                       listDir: { $0.hasSuffix("/" + BatchStore.ollamaModel) ? ["f16", ".DS_Store"] : [] })
+        check(tagOnly.contains("模型 \(BatchStore.ollamaModel) 只有 f16 标签，app 用的是 latest"),
+              "本地模型：只装了别的标签（f16）时说 app 要的是 latest", tagOnly)
+        let masked = Redactor(home: home, sessions: []).apply(elsewhere)
+        check(masked == elsewhere, "本地模型那一行打码以后一个字不变（没有要换的路径）", masked)
+        let language = DiagnosticsBundle.languageLine()
+        check(language.hasPrefix("界面语言：") && language.contains("系统首选："), "界面语言那一行", language)
     }
 
     // MARK: 面板快照（看样子，不进 CI）

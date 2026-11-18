@@ -12,11 +12,36 @@ import UniformTypeIdentifiers
 //      有哪些文件（只列名字和大小，照片、预览图连名字都不列）、场次概况（几个、几张，不带路径和 bookmark）。场次 JSON、
 //      sessions.json、客户备注一律不放；所有文字里的路径都打码（家目录 ~、盘名 <盘 N>、场次文件夹 <场次 N>、别的文件夹
 //      <文件夹 N>，不只认 sessions.json 里登记的，见 Redactor），「」“”"" 里的文件夹名、盘名同样换掉。
-//   4. 「帮助」菜单（这一版新增、快捷键一览、使用说明、导出 / 复制诊断信息、日志文件夹）。
+//   4. 「帮助」菜单（这一版新增、快捷键一览、使用说明、导出诊断信息、反馈问题、复制诊断摘要、日志文件夹）。
 
 enum Diagnostics {
     static let privacySettingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders")!
     static let manualURL = URL(string: "https://github.com/Ly-star-bit/photo_culling#readme")!
+
+    /// 「帮助 › 反馈问题…」（优化分析 2026-11-18 OP-07）：以前诊断包说「发给开发者就行」，哪里都没说发到哪。打开仓库的新建
+    /// Issue 页，用 .github/ISSUE_TEMPLATE/bug.yml 那张表，版本号、系统版本按字段 id（version、macos）预先填好（GitHub 的
+    /// issue 表单认网址里和字段 id 同名的参数）。只带这两样，别的什么都不带；点了才开浏览器。
+    nonisolated static let feedbackTemplate = "bug.yml"
+
+    nonisolated static func feedbackURL(version: String, macOS: String) -> URL {
+        var parts = URLComponents(string: "https://github.com/Ly-star-bit/photo_culling/issues/new")!
+        parts.queryItems = [
+            URLQueryItem(name: "template", value: feedbackTemplate),
+            URLQueryItem(name: "version", value: version),
+            URLQueryItem(name: "macos", value: macOS),
+        ]
+        return parts.url!
+    }
+
+    /// 这个程序的版本（「1.33.0（build 470）」；裸二进制是 dev）和 macOS 版本（「26.5.1」），给反馈表预先填的。
+    nonisolated static func feedbackVersions() -> (version: String, macOS: String) {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "dev"
+        let build = info?["CFBundleVersion"] as? String
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        let macOS = "\(os.majorVersion).\(os.minorVersion)" + (os.patchVersion > 0 ? ".\(os.patchVersion)" : "")
+        return (build.map { "\(short)（build \($0)）" } ?? short, macOS)
+    }
 
     // MARK: 失败原因
 
@@ -124,7 +149,8 @@ enum Diagnostics {
     }
 
     static let bundleBlurb = "打包版本、系统、最近的日志和提示、数据目录里有哪些文件（只列名字和大小）。"
-        + "不含照片、预览图、客户回复原文和场次记录；所有路径里的用户名、盘名、文件夹名都换成了代号（照片文件名留着）。发给开发者就行。"
+        + "不含照片、预览图、客户回复原文和场次记录；所有路径里的用户名、盘名、文件夹名都换成了代号（照片文件名留着）。"
+        + "发给开发者：「帮助 › 反馈问题…」打开 GitHub 上的问题表，把这个 zip 拖进去。"
 
     nonisolated static func defaultZipName(_ date: Date) -> String {
         "选片工具诊断-\(DiagnosticsBundle.fileStamp(date)).zip"
@@ -197,6 +223,12 @@ struct HelpMenuItems: View {
         }
         Divider()
         Button("导出诊断信息…") { Diagnostics.exportInteractively() }
+        // 打开 GitHub 的新建 Issue 页（版本号、系统版本填好了），诊断包拖进表里最后一格（OP-07）。
+        Button("反馈问题…") {
+            guard !AppRuntime.headless else { return }
+            let v = Diagnostics.feedbackVersions()
+            openURL(Diagnostics.feedbackURL(version: v.version, macOS: v.macOS))
+        }
         Button("复制诊断摘要") { Diagnostics.copySummary() }
         Button("在访达里显示日志文件夹") {
             if let dir = AppLog.logsDir { AppRuntime.revealInFinder([dir]) }
@@ -445,7 +477,7 @@ enum DiagnosticsBundle {
 
     static let readme = """
         选片工具诊断包
-        - info.txt：版本、系统、机型、数据目录所在的盘还剩多少、导出时界面的状态
+        - info.txt：版本、系统、机型、界面语言、本地模型要的 uv / Ollama / 模型在不在、数据目录所在的盘还剩多少、导出时界面的状态
         - recent-messages.txt：这次打开以后状态栏出过的提示（最近 20 条）
         - logs/：app 的日志（最近约 5 MB）
         - sessions.txt、data-dir.txt：有几场、每场几张，数据目录里有哪些文件（只列名字和大小）
@@ -476,9 +508,59 @@ enum DiagnosticsBundle {
             "macOS：\(process.operatingSystemVersionString)",
             "机型：\(model) · 芯片：\(chip) · \(process.activeProcessorCount) 核 · 内存 \(String(format: "%.0f", memoryGB)) GB",
             "地区：\(Locale.current.identifier) · 时区：\(TimeZone.current.identifier)",
+            languageLine(),
+            "本地模型（可选）：" + localModelLine(),
             "数据目录：\(dataDir.path) · 所在的盘还剩 \(free)",
             "导出时间：\(stamp)",
         ]
+    }
+
+    /// 界面语言（优化分析 2026-11-18 OP-10）：系统给的字（菜单、面板、系统报错）按哪种语言取。打包的 app 写了开发语言 zh-Hans
+    /// （build_app.sh，OP-06）是 zh-Hans；裸二进制没有 Info.plist，是 en。后面带系统的首选语言。
+    nonisolated static func languageLine() -> String {
+        let app = Bundle.main.preferredLocalizations.first ?? "-"
+        let system = Locale.preferredLanguages.prefix(3).joined(separator: ", ")
+        return "界面语言：\(app)（系统首选：\(system.isEmpty ? "-" : system)）"
+    }
+
+    /// 本地模型（可选的「本地模型」复审 / 精审，OP-10）要的三样在不在：uv（app 只认 BatchStore.uvExecutable：/opt/homebrew/bin、
+    /// /usr/local/bin 两个位置）、Ollama、模型 BatchStore.ollamaModel。只看文件在不在、不连网：开界面时 startGUILog 也调这里，
+    /// 不能等；Ollama 服务开没开不查。不写家目录下的路径（打码会把 .local、.ollama 换成代号），只写结论。模型按 app 用的名字
+    /// （不带标签 = latest）查；只装了别的标签（比如 f16）时 app 一跑 Ollama 会去下 latest，单说一句。
+    /// `exists`、`listDir`、`home`、`modelsDir`（OLLAMA_MODELS）给自检换成假的。
+    nonisolated static func localModelLine(home: String = NSHomeDirectory(), uvPath: String = BatchStore.uvExecutable,
+                                           modelsDir: String? = ProcessInfo.processInfo.environment["OLLAMA_MODELS"],
+                                           exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+                                           listDir: (String) -> [String] = {
+                                               (try? FileManager.default.contentsOfDirectory(atPath: $0)) ?? []
+                                           }) -> String {
+        var parts: [String] = []
+        if exists(uvPath) {
+            parts.append("uv \(uvPath)")
+        } else if let other = [".local/bin/uv", ".cargo/bin/uv"].first(where: { exists(home + "/" + $0) }) {
+            parts.append("uv 装在家目录的 \(other)，app 只找 /opt/homebrew/bin、/usr/local/bin")
+        } else {
+            parts.append("没找到 uv（app 只找 /opt/homebrew/bin、/usr/local/bin）")
+        }
+        if exists("/Applications/Ollama.app") || exists(home + "/Applications/Ollama.app") {
+            parts.append("Ollama.app 在")
+        } else if let cli = ["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama"].first(where: exists) {
+            parts.append("没有 Ollama.app，只有命令行 \(cli)")
+        } else {
+            parts.append("没装 Ollama")
+        }
+        let model = BatchStore.ollamaModel
+        let models = modelsDir.flatMap { $0.isEmpty ? nil : $0 } ?? home + "/.ollama/models"
+        let tagsDir = models + "/manifests/registry.ollama.ai/library/" + model
+        let others = listDir(tagsDir).filter { !$0.hasPrefix(".") && $0 != "latest" }.sorted()
+        if exists(tagsDir + "/latest") {
+            parts.append("模型 \(model) 在")
+        } else if !others.isEmpty {
+            parts.append("模型 \(model) 只有 \(others.joined(separator: "、")) 标签，app 用的是 latest（ollama pull \(model)）")
+        } else {
+            parts.append("没有模型 \(model)（ollama pull \(model)）")
+        }
+        return parts.joined(separator: " · ")
     }
 
     static func readSessions(_ dataDir: URL) -> [SessionDigest] {

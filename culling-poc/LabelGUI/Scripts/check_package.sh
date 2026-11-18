@@ -8,8 +8,10 @@
 #     File / Edit / View / Window / Help、打开 / 存储面板的按钮、系统报错的原话都是英文。
 #   - 图标（OP-08）：Info.plist 的 CFBundleIconFile 指到 Resources 里一个真的 .icns，iconutil 拆得开、里面有 16 到 1024 的
 #     10 个尺寸（build_app.sh 只在仓库里有 culling-poc/LabelGUI/AppIcon.icns 时才带，文件丢了这里红）。
+#   - 包里的二进制真按 zh-Hans 取系统的字（OP-06 / OP-10）：临时数据目录里跑一次 --diag-export，info.txt 的「界面语言」
+#     是 zh-Hans。bundle id 是真 app 的（local.culling.labelgui）时只在 CI 上跑：本机跑会读真 app 的设置域。
 #
-# 全部只读：不改包、不往包里写。
+# 不改包、不往包里写；--diag-export 只写临时目录。
 set -euo pipefail
 
 if [ $# -ne 1 ] || [ ! -d "$1/Contents" ]; then
@@ -54,6 +56,27 @@ else
         fi
     else
         fail "图标 ${ICNS} iconutil 拆不开"
+    fi
+    rm -rf "$WORK"
+fi
+
+BIN="$APP/Contents/MacOS/$(plist CFBundleExecutable)"
+if [ "$(plist CFBundleIdentifier)" = "local.culling.labelgui" ] && [ "${GITHUB_ACTIONS:-}" != "true" ]; then
+    echo "skip 界面语言：bundle id 是真 app 的，本机不跑（会读真 app 的设置域）；CI 上跑"
+elif [ ! -x "$BIN" ]; then
+    fail "包里没有可执行文件 $BIN"
+else
+    WORK="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/check-lang.XXXXXX")"
+    mkdir -p "$WORK/data" "$WORK/sock" "$WORK/mcp"
+    if LABELGUI_DATA_DIR="$WORK/data" LABELGUI_NO_GUI=1 LABELGUI_LIVE_SOCK_ROOT="$WORK/sock" LABELGUI_MCP_OUT="$WORK/mcp" \
+        "$BIN" --diag-export "$WORK/d.zip" >"$WORK/out.txt" 2>&1 && ditto -x -k "$WORK/d.zip" "$WORK/x" 2>/dev/null; then
+        LANG_LINE="$(cat "$WORK"/x/*/info.txt 2>/dev/null | grep '^界面语言：' || true)"
+        case "$LANG_LINE" in
+            界面语言：zh-Hans*) echo "PASS 包里的二进制按 zh-Hans 取系统的字（诊断包 info.txt：${LANG_LINE}）" ;;
+            *) fail "包里的二进制取系统的字不是 zh-Hans（诊断包 info.txt：「${LANG_LINE}」）" ;;
+        esac
+    else
+        fail "包里的二进制跑 --diag-export 没成：$(tail -3 "$WORK/out.txt" 2>/dev/null)"
     fi
     rm -rf "$WORK"
 fi

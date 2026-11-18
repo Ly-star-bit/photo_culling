@@ -5,7 +5,8 @@
 
 1. --diag-export：造一个数据目录（sessions.json 带客户名的场次文件夹和 bookmark、场次 JSON、客户备注、预览图、带路径的日志）
    和一个崩溃报告目录 → zip 里有说明 / 诊断信息 / 提示 / 场次概况 / 目录结构 / 光谱胶片的表 / 日志 / 最近的崩溃报告；没有图片文件、
-   没有客户原话、bookmark、场次文件夹名、家目录；日志里的路径换成了 <场次 N>。
+   没有客户原话、bookmark、场次文件夹名、家目录；日志里的路径换成了 <场次 N>；info.txt 有界面语言、本地模型（uv / Ollama /
+   模型在不在）两行。
 1b. --diag-export 的目标已经有东西（文件夹、带结尾斜杠、名字以 .zip 结尾的文件夹、数据目录本身、「.」、已有的文件）→ 退出码 2，
    一个字节都不动；不以 .zip 结尾的新名字也拒绝；还没有的 .zip 照常写。
 1c. --diag-export 打码不只认 sessions.json：认回过的场次（manifest 里是新位置、卷名也变了）、掉出最近场次的旧场次、
@@ -182,6 +183,14 @@ def section_export():
     tree = next((t for n, t in texts.items() if n.endswith("data-dir.txt")), "")
     check(f"sessions/{k1}/client_notes.json" in tree and f"sessions/{k1}/previews/  （1 个文件" in tree,
           "目录结构：文件只列名字和大小，预览目录只说个数")
+    # OP-10：界面语言（裸二进制没有 Info.plist，是 en；打包的 app 是 zh-Hans，CI 用 Scripts/check_package.sh 查 DMG 里那份）、
+    # 本地模型要的三样（只说在不在，不写家目录下的路径）
+    info = next((t for n, t in texts.items() if n.endswith("info.txt")), "")
+    lang = re.search(r"^界面语言：(\S+)（系统首选：", info, re.M)
+    model = re.search(r"^本地模型（可选）：(.*)$", info, re.M)
+    check(lang is not None and model is not None and "minicpm-v4.6" in model.group(1)
+          and "uv" in model.group(1) and "Ollama" in model.group(1),
+          f"info.txt 有界面语言、本地模型（uv / Ollama / 模型）两行：{info[:600]!r}")
 
 
 def tree_snapshot(root):
