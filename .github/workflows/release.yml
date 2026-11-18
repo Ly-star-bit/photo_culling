@@ -385,6 +385,7 @@ jobs:
       # 自检登记表（SelfTestRegistry.swift，selftests.sh 用 --list-selftests 拿）里每一条都有人跑、Sources 里没有绕过登记表的
       # --*-selftest、Scripts/ 下每个 *_regression.py / *_smoke.py 在这个文件里都有一步。跑哪些、带什么参数也从登记表来。
       # 在 test-selftests 这台 runner 上跑，和 build 里 MCP 冒烟「runner 上还没有默认数据目录」那条要求不在同一台机器上。
+      # 再对一遍 README：登记表里的自检、AppRuntime.commandFlags 里的命令，README 一次都没提到的出一条 warning（只提醒，不红）。
       - name: 自检 (--*-selftest)
         # 每条自检在 selftests.sh 里单独限时 300 秒（卡住的点名报错、后面照跑）；runner 是虚拟机，Vision 比本机慢得多，整步给足
         timeout-minutes: 30

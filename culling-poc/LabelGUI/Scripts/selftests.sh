@@ -197,6 +197,29 @@ else
     echo "PASS CI 登记: $(printf '%s\n' $flags | wc -l | tr -d ' ') 个 --*-selftest / --*-probe 和 Scripts/ 下的回归脚本都有人跑"
 fi
 
+# ---------------------------------------------------------------- README 跟没跟上（只提醒，不红）
+# README「从源码构建」那一段是命令行参数的说明书。优化分析 2026-11-18 OP-03：README 从 v1.28.0 起五版没动，六条自检和
+# --accuracy、--focus、--session-key 一个字没写。这里把登记表里的每条自检、AppRuntime.commandFlags 里的每个命令和 README 对一遍，
+# README 里一次都没出现的列出来（按整个参数认：写了 --accuracy-selftest 不算写了 --accuracy）。
+# 不红：README 的写法、合并的先后不该让自检红（同 mcp_smoke.py 对 README 工具表的提醒）；CI 上出一条 ::warning，发版前照着补。
+README_FILE="$ROOT/../../README.md"
+if [ -f "$README_FILE" ] && [ -f "$SRC_DIR/AppRuntime.swift" ] && [ -n "${flags:-}" ]; then
+    command_flags="$(awk '/static let commandFlags/ { on = 1 } on { print } on && /\]/ { exit }' "$SRC_DIR/AppRuntime.swift" \
+        | grep -oE -- '"--[a-z0-9-]+"' | tr -d '"' | sort -u)"
+    undocumented=()
+    for f in $flags $command_flags; do
+        grep -qE -- "${f}([^a-z0-9-]|\$)" "$README_FILE" || undocumented+=("$f")
+    done
+    if [ ${#undocumented[@]} -gt 0 ]; then
+        echo "提醒 README：这几个无头参数 README 里一次都没提到，在「从源码构建」里补一行（不红）：${undocumented[*]}"
+        if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+            echo "::warning title=README 没写到的无头参数::${undocumented[*]}（在 README「从源码构建」里补一行）"
+        fi
+    else
+        echo "README：$(printf '%s\n' $flags $command_flags | wc -l | tr -d ' ') 个无头参数（自检 + 命令）都写到了"
+    fi
+fi
+
 if [ $real_before -eq 0 ] && [ -e "$REAL_DATA" ]; then
     failed+=("真实数据目录")
     echo "FAIL 跑之前没有 ${REAL_DATA}，跑完有了：哪条自检没走临时数据目录"
