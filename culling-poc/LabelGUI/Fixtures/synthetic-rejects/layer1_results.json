@@ -1,5 +1,5 @@
 {
- "analysis_version": 2,
+ "analysis_version": 3,
  "engine": "native",
  "hash_threshold": 10,
  "results": [
@@ -20,7 +20,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -67,7 +67,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -114,7 +114,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -161,7 +161,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 70,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -208,7 +208,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 70,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -255,7 +255,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 80,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -302,7 +302,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 240,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -349,7 +349,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 239,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -396,7 +396,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -443,7 +443,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -490,7 +490,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -537,7 +537,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.004,
@@ -584,7 +584,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.002,
@@ -631,7 +631,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.004,
@@ -678,7 +678,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.004,
@@ -725,7 +725,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.001,
@@ -772,7 +772,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.0004,
@@ -819,7 +819,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.004,
@@ -866,7 +866,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -913,7 +913,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -960,7 +960,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 70,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -1007,7 +1007,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 245,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -1054,7 +1054,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -1242,7 +1242,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -1289,7 +1289,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -1470,7 +1470,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 30,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -1514,7 +1514,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "bbox": [
@@ -2216,7 +2216,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -2263,7 +2263,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -2310,7 +2310,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.004,
@@ -2357,7 +2357,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.004,
@@ -2404,7 +2404,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -2451,7 +2451,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,
@@ -2499,7 +2499,7 @@
    "face_count": 1,
    "face_found": true,
    "face_luma": 168,
-   "face_quality": 0.6318359375,
+   "face_quality": 0.63671875,
    "faces": [
     {
      "area_pct": 0.008398362440315221,

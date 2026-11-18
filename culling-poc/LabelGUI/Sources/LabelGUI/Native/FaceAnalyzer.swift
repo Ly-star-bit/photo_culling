@@ -74,28 +74,39 @@ enum FaceAnalyzer {
         var subjectFaceCount: Int { subjectFaces.count }
     }
 
-    /// Face analysis + horizon in ONE handler.perform() — the three requests
-    /// share the handler's image preparation instead of paying it per request.
+    /// Face analysis + horizon on ONE handler — the requests share the handler's
+    /// image preparation instead of paying it per request.
     struct Analysis {
         let face: FaceResult?
         let horizonDeg: Double?
     }
 
+    /// 人脸质量请求单独跑第二趟，喂 landmarks 找到的脸（inputFaceObservations）。以前三个请求一起 perform，
+    /// 质量请求有时用 landmarks 的脸框、有时用自己检测的（框差一点点），同一张图每次分析出两种分（photot 7208：
+    /// 0.6343 / 0.6816），连拍组里精选、去重扔哪张跟着来回翻（优化分析 2026-11-18 VQ-04）。喂了框以后跨进程、
+    /// 并发都只出一个分；也顺带保证质量分和锐度、闭眼量的是同一张脸（按 uuid 对上，11-04 A14）。
+    /// 喂框的分不一定比以前高（7208 取的是低的那个，7230 是高的）—— analysisVersion 因此升到 3。
     static func analyze(in image: CGImage) -> Analysis {
         let request = VNDetectFaceLandmarksRequest()
-        let qualityRequest = VNDetectFaceCaptureQualityRequest()
         let horizonRequest = VNDetectHorizonRequest()
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
-        guard (try? handler.perform([request, qualityRequest, horizonRequest])) != nil else {
+        guard (try? handler.perform([request, horizonRequest])) != nil else {
             return Analysis(face: nil, horizonDeg: nil)
         }
         let horizonDeg = horizonRequest.results?.first.map { Double($0.angle) * 180.0 / .pi }
+        var qualityRequest: VNDetectFaceCaptureQualityRequest?
+        if let faces = request.results, !faces.isEmpty {
+            let q = VNDetectFaceCaptureQualityRequest()
+            q.inputFaceObservations = faces
+            // 质量这一趟失败只丢质量分（nil），脸、闭眼、锐度照旧。
+            if (try? handler.perform([q])) != nil { qualityRequest = q }
+        }
         return Analysis(face: faceResult(from: request, quality: qualityRequest),
                         horizonDeg: horizonDeg)
     }
 
     private static func faceResult(from request: VNDetectFaceLandmarksRequest,
-                                   quality qualityRequest: VNDetectFaceCaptureQualityRequest) -> FaceResult? {
+                                   quality qualityRequest: VNDetectFaceCaptureQualityRequest?) -> FaceResult? {
         guard let faces = request.results, !faces.isEmpty else {
             return nil
         }
@@ -143,12 +154,10 @@ enum FaceAnalyzer {
             ))
         }
 
-        // Quality results are separate observations; match the primary subject
-        // by picking the largest face there too.
-        let quality = qualityRequest.results?
-            .max { area($0) < area($1) }?
-            .faceCaptureQuality
-            .map(Double.init)
+        // 质量结果是喂进去的那几张脸（uuid 不变）：按 uuid 认主脸；万一对不上才退回「取最大的」。
+        let scored: [VNFaceObservation] = qualityRequest?.results ?? []
+        let scoredPrimary = scored.first { $0.uuid == primary.uuid } ?? scored.max { area($0) < area($1) }
+        let quality = scoredPrimary?.faceCaptureQuality.map(Double.init)
 
         return FaceResult(
             bbox: padded,

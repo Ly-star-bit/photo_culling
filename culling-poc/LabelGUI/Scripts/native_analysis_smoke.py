@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """合成图跑原生分析冒烟（CI 的「合成图跑原生分析」步骤）：手写几张能确定结果的合成图，真跑 `--analyze`（ImageIO 解码、
 EXIF 方向和拍摄时间、Vision、锐度 / 裁切、截断 JPEG、pHash 分组），再跑 `--verdicts --per-photo`，按正则断言理由和标志，
-不比具体数值（锐度、人脸质量这些每次有点抖，换了公式也不该在这里红）。
+不比具体数值（换了公式也不该在这里红）。
 
     blur.jpg      横向平滑渐变（30 → 220）：没有边缘 → 虚焦（不用噪声图：噪声会把锐度抬高）
     white.jpg     整张 255：曝光裁切；没有脸 → 不判过曝（过曝只看脸，BatchStore.toneReason）
@@ -14,6 +14,11 @@ EXIF 方向和拍摄时间、Vision、锐度 / 裁切、截断 JPEG、pHash 分�
 sips 出的图没有拍摄时间（没有时间的每张单独成组），所以分组要手写 APP1。
 第二次 --analyze 应该全部复用（0 analyzed），一张预览都不写（Previews written 那行没有：界面分析收尾一张缓存都不清）；
 再把 white 的修改时间往后拨、删掉 control 的预览，第三次只有这两张写预览（重新分析 1 张 + 补回 1 张预览）。
+
+分析可重复（第 5 段，VQ-04）：上面那些图都没有脸，测不到人脸质量。这一段用 Scripts/synth_face.swift（swiftc 现编）在灰底上
+画几个人物 emoji —— Vision 认得出它们的脸，而且分析版本 3 以前人脸质量请求在它们上面每次分出来的不一样（有时还「有脸没分」）。
+同一个文件夹在两个全新数据目录各 `--analyze` 一次：layer1 的 results 去掉 elapsed_sec（每次的耗时）以后逐字节相同，
+`--verdicts --per-photo`（带不带 --dedupe）逐字相同；认出脸的每张都有人脸质量分。manifest 不比（preview_path 带着数据目录）。
 
 最后是规模守护：把 photot-session 的 21 行克隆成 2000 / 8000 行（只有 JSON，不要图），给 `--verdicts` 计时；
 共享 runner 计时抖得厉害，只卡很宽的上限和「8000 比 2000 的耗时比」（线性 ≈ 4，O(n²) ≈ 16），各取几次里最快的。
@@ -346,10 +351,76 @@ def scale_section():
           f"线性 ≈ 4，O(n²) ≈ 16）")
 
 
+# ---------------------------------------------------------------- 5. 分析可重复（带人脸）
+
+# 600pt、1500×1000 上 Vision 认得出脸的人物 emoji（本机 macOS 26 上 15 个里认得出 14 个；😀 这种黄脸认不出）。
+# 多放几个：CI 的 macOS 15 上 emoji 和 Vision 都可能不一样，下面只要求认出 ≥ 2 张。
+FACE_EMOJI = ["🧑", "👨", "👴", "👩🏻", "👩🏼", "🧑🏻", "👳‍♂️", "👲"]
+
+
+def layer1_rows(sdir):
+    """layer1 的 results → {id: 去掉 elapsed_sec（这一张分析了多久）后的规范化 JSON}。"""
+    rows = {}
+    for r in json.load(open(os.path.join(sdir, "layer1_results.json")))["results"]:
+        r = {k: v for k, v in r.items() if k != "elapsed_sec"}
+        rows[r.get("id")] = json.dumps(r, sort_keys=True, ensure_ascii=False)
+    return rows
+
+
+def first_diff(a, b):
+    """两份 layer1 行（规范化 JSON）里不一样的字段，打印用。"""
+    x, y = json.loads(a or "{}"), json.loads(b or "{}")
+    return {k: (x.get(k), y.get(k)) for k in sorted(set(x) | set(y)) if x.get(k) != y.get(k)}
+
+
+def repeat_section():
+    print("5. 带人脸的合成图在两个全新数据目录各分析一次：结果逐字节相同")
+    tool = os.path.join(WORK, "synth_face")
+    r = subprocess.run(["swiftc", os.path.join(HERE, "synth_face.swift"), "-o", tool], capture_output=True, text=True,
+                       timeout=600, stdin=subprocess.DEVNULL, cwd=WORK)
+    if not check(r.returncode == 0, f"编译 Scripts/synth_face.swift{'' if r.returncode == 0 else '：' + r.stderr[-400:]}"):
+        return
+    faces = os.path.join(WORK, "faces")
+    os.makedirs(faces)
+    for i, emoji in enumerate(FACE_EMOJI):
+        out = os.path.join(faces, f"face_{i + 1:02d}.jpg")
+        r = subprocess.run([tool, out, emoji], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        if not check(r.returncode == 0 and os.path.isfile(out), f"画出 face_{i + 1:02d}.jpg（{emoji}）"):
+            return
+    key = session_key(faces)
+    runs = []
+    for n in (1, 2):
+        data = os.path.join(WORK, f"faces-data-{n}")
+        os.makedirs(data)
+        r, dt = run(["--analyze", faces], data)
+        done = (re.search(r"^Done: .*$", r.stdout, re.M) or [r.stderr[-200:]])[0]
+        if not check(r.returncode == 0 and done.startswith(f"Done: {len(FACE_EMOJI)} analyzed, 0 reused"),
+                     f"第 {n} 次（全新数据目录）{len(FACE_EMOJI)} 张都分析了（{dt:.1f}s）：{done}"):
+            return
+        try:
+            rows = layer1_rows(os.path.join(data, "sessions", key))
+        except (OSError, ValueError, KeyError) as e:
+            check(False, f"第 {n} 次读不了 layer1：{e}")
+            return
+        plain, _ = run(["--verdicts", faces, "--per-photo"], data)
+        dedupe, _ = run(["--verdicts", faces, "--per-photo", "--dedupe"], data)
+        runs.append((rows, plain.stdout, dedupe.stdout))
+    (a, va, da), (b, vb, db) = runs
+    found = sorted(i for i, s in a.items() if json.loads(s).get("face_found"))
+    scored = [i for i in found if json.loads(a[i]).get("face_quality") is not None]
+    check(len(found) >= 2, f"前提：Vision 在 ≥ 2 张合成图里认出了脸（{len(found)}/{len(a)}：{found}）—— 认不出就测不到人脸质量")
+    check(scored == found, f"认出脸的每一张都有人脸质量分（质量请求喂的是 landmarks 的脸，不会「有脸没分」）：{len(scored)}/{len(found)}")
+    differ = sorted(i for i in set(a) | set(b) if a.get(i) != b.get(i))
+    check(not differ, "两次分析的 layer1 逐字节相同（去掉 elapsed_sec）" +
+          ("" if not differ else "：" + "；".join(f"{i} {first_diff(a.get(i), b.get(i))}" for i in differ)))
+    check(va == vb and da == db, "两次的 --verdicts --per-photo（带不带 --dedupe）逐字相同")
+
+
 try:
     native_section()
     if SCALE:
         scale_section()
+    repeat_section()
     if not REAL_BEFORE:
         check(not os.path.exists(REAL_DATA), f"跑之前没有 {REAL_DATA}，跑完也没有（每条命令都走临时数据目录）")
 finally:

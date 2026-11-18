@@ -71,7 +71,9 @@ enum AnalysisEngine {
     /// instead of silently mixing two scales under one slider. Files written
     /// before this key existed are treated as version 1.
     /// 2：曝光裁切改按主体区域算，加了欠曝 / 过曝要的亮度、合影小脸的原图 EAR。
-    static let analysisVersion = 2
+    /// 3：人脸质量改成喂 landmarks 的脸框单独算（FaceAnalyzer.analyze）—— 以前同一张图每次分析出两种分，
+    ///    新分落在哪一种不固定，和老结果混在一场里组内比较就不公平。
+    static let analysisVersion = 3
 
     struct Summary {
         let analyzed: Int
@@ -179,8 +181,8 @@ enum AnalysisEngine {
                 todo.append(file)
             }
         }
-        // 分析结果还有效、只是预览图没了（掉出最近 15 场被清掉的）：只重做预览，数值原样复用 ——
-        // 整张重分析的话人脸质量每次有点抖，人工改判以外的判决可能悄悄变掉。重做失败的才整张重分析。
+        // 分析结果还有效、只是预览图没了（掉出最近 15 场被清掉的）：只重做预览，数值原样复用 —— 省时间；
+        // 分析版本 3 以前人脸质量每次有点抖，整张重分析的话人工改判以外的判决可能悄悄变掉。重做失败的才整张重分析。
         let missing = candidates.indices.filter {
             !fm.fileExists(atPath: previewDir.appendingPathComponent("\(candidates[$0].file.stem).jpg").path)
         }
