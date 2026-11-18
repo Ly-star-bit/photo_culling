@@ -7,6 +7,10 @@
 #   包版本号是 0.1，见 build_app.sh）、重签，release job 照旧发 Release（附 release-notes/<tag>.md）；没绿过 / 产物过期了
 #   → 照旧完整跑再发。tag 上另有发版门禁（release-gate）：release-notes/<tag>.md 不在、WhatsNew 的表和 tag 对不上就红、不发。
 # 发版流程：feature 推上去等绿 → 合进 main 推上去（秒过）→ 打 tag（直接用 feature 那次的包）。
+# 完整跑分三个 macOS job（优化分析 2026-11-18 CH-02；以前十几步测试串在编译后面同一个 job 里，23 分钟）：build 编译、打包、
+# 打包后的检查（要 DMG 里那份二进制的都在这里，含 MCP 冒烟）、传产物；build 绿了 test-bridge（实时桥 + 命令行回归）和
+# test-selftests（自检 + 分析类回归）两个并行，各自下载 build 传的裸二进制（LabelGUI-bin）放回原路径跑。哪个测试 job 偶发红，
+# 「Re-run failed jobs」只重跑那一个，不用连编译重来。三个都绿整个 run 才绿（ci_green_run.py 认的是整个 run 的 conclusion）。
 # 符号文件（OP-04）：完整跑那次把 .build/release/LabelGUI.dSYM 压成 zip 传成 PhotoCulling-dSYM（和 DMG 同样留 14 天），restamp
 # 跟着 DMG 一起下载、再传；Release 上挂 PhotoCulling-<tag>.dmg、PhotoCulling.dmg（同一个 DMG，固定名字，给 releases/latest/download
 # 和 install.sh 用）和 PhotoCulling-<tag>.dSYM.zip 三个文件。
@@ -97,8 +101,9 @@ jobs:
           restore-keys: |
             swiftpm-${{ runner.os }}-${{ steps.swift.outputs.version }}-
 
-      # 从这一步到「卸下 DMG」是打包和打包后的检查（构建、DMG 本身、包里的二进制 / 胶片表 / Python 运行时）；再往后是拿
-      # 裸二进制跑的测试。推 tag 沿用 feature 那次的 DMG 时，这些检查不再跑（restamp 只改版本号、重签、验签名）。
+      # 从这一步到「卸下 DMG」是打包和打包后的检查（构建、DMG 本身、包里的二进制 / 胶片表 / Python 运行时）；拿裸二进制跑的
+      # 测试在 test-bridge / test-selftests 两个 job 里（这个 job 最后把裸二进制传成 LabelGUI-bin 给它们）。推 tag 沿用 feature
+      # 那次的 DMG 时，这些检查不再跑（restamp 只改版本号、重签、验签名）。
       # tee 一份 build.log 给下一步出 annotation。pipefail 要自己开：GitHub 默认的 shell 是 bash -e、不带 pipefail，
       # 管道的退出码是 tee 的 —— 不开的话 build_app.sh 失败这一步照样绿。
       - name: 构建 app + DMG
@@ -136,15 +141,11 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$APP"
           echo "APP_BIN=$APP/Contents/MacOS/LabelGUI" >> "$GITHUB_ENV"
 
-      # 判决层回归：Fixtures/photot-session 的分析结果灌进临时目录跑 --verdicts，和期望
-      # 逐字比对。改了分组/判决/提名逻辑而没更新期望值 → 这里红。
-      - name: 判决回归 (--verdicts)
-        run: culling-poc/LabelGUI/Scripts/verdict_regression.sh culling-poc/LabelGUI/.build/release/LabelGUI
-
       # MCP 冒烟（v1）：协议 + 没有 app + 不建目录 + 无界面；不需要照片，不起宿主。
       # mcp_smoke 只在 CI 上跑的「不设 LABELGUI_DATA_DIR 也不建目录」那一条要求 runner 上还没有默认数据目录
-      # ~/Library/Application Support/选片工具：哪一步先建出它，这一条就只能 skip。所以放得靠前（前面的构建、判决回归都不建它），
-      # 往它前面加会起 LabelGUI 的步骤时记着这一条。
+      # ~/Library/Application Support/选片工具：哪一步先建出它，这一条就只能 skip。所以它是这个 job 里第一个起 LabelGUI 的步骤
+      # （前面的构建、挂 DMG 都不起它），往它前面加会起 LabelGUI 的步骤时记着这一条。别的测试在另外两台 runner 上，碰不到这台。
+      # 它留在 build 里、不挪进测试 job：第二行要 DMG 里那份二进制。
       # 第二行是 DMG 里那份 app 的二进制（$APP_BIN，「挂上 DMG」那一步设的）：脚本只在 --ci 且 GITHUB_ACTIONS=true 时收它，
       # 不跑 sandbox 那一组（规则抓到就 SIGKILL）。
       - name: MCP 冒烟 (--mcp)
@@ -235,88 +236,18 @@ jobs:
           culling-poc/LabelGUI/Scripts/restamp_dmg.sh 选片工具.dmg 0.0.0 "$RUNNER_TEMP/restamp-dryrun.dmg"
           rm -f "$RUNNER_TEMP/restamp-dryrun.dmg"
 
-      # 实时桥（v1）：起 --live-host（.prohibited，窗口从不显示；不行就 --no-view），经 --mcp 驱动；临时数据目录 + 测试 socket 根目录。
-      # 带不带视图：第一次分支 CI（run 41158761483，2026-10-30）探针报「CI 用带视图的 --live-host」，所以钉 --view require ——
-      # 以后哪次 runner 上建不了离屏窗口、拍不出快照或标题栏，这一步就红，不会悄悄退到 --no-view 少测 15 条。
-      # 每条 FAIL 在摘要页另有一条 ::error:: annotation（不登录也看得到）。
-      - name: 实时桥冒烟 (--live-host)
-        timeout-minutes: 25
-        run: python3 -I culling-poc/LabelGUI/Scripts/live_smoke.py culling-poc/LabelGUI/.build/release/LabelGUI --ci --view require
+      # 给 test-bridge / test-selftests 的裸二进制（strip 之前那份，和以前同一个 job 里测的是同一个文件）。只在这次 run 里用，
+      # 留 1 天；overwrite：「Re-run all jobs」时这个 job 重跑、同名产物照传。
+      - name: 上传裸二进制（给测试 job）
+        uses: actions/upload-artifact@v4
+        with:
+          name: LabelGUI-bin
+          path: culling-poc/LabelGUI/.build/release/LabelGUI
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
 
-      # 存储卡导入回归：随机字节造一张假卡跑 --ingest 的各种情况 —— 卡上文件前后逐字节不变、目标里
-      # 绝不覆盖（同名不同内容整组改名）、复制后校验、取消不留半截、再插只导新的。
-      - name: 存储卡导入回归 (--ingest)
-        env:
-          CARD_REGRESSION_EXFAT: "1"
-        run: python3 culling-poc/LabelGUI/Scripts/card_import_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
-
-      # 不要照片的进程内自检：网格改判后的焦点、时间轴不出界、五种杂志风和人物挡字的版式规则、场次持久化、选片 MCP、
-      # 文件安全、拼图导出、确认表……每条都在新的临时 LABELGUI_DATA_DIR 里跑（要 fixture 的传 Fixtures/photot-session）；
-      # 时间轴自检的随机数按 seed 播种，固定跑 3 个 seed（三批互不相同的 3000 组；FAIL 行带 seed 和 trial，原样能复现）。最后核对「CI 登记」：
-      # 自检登记表（SelfTestRegistry.swift，selftests.sh 用 --list-selftests 拿）里每一条都有人跑、Sources 里没有绕过登记表的
-      # --*-selftest、Scripts/ 下每个 *_regression.py / *_smoke.py 在这个文件里都有一步。跑哪些、带什么参数也从登记表来。
-      # 和下面几步一样放在 MCP 冒烟后面（见 MCP 冒烟那段注释）。
-      - name: 自检 (--*-selftest)
-        # 每条自检在 selftests.sh 里单独限时 300 秒（卡住的点名报错、后面照跑）；runner 是虚拟机，Vision 比本机慢得多，整步给足
-        timeout-minutes: 30
-        run: culling-poc/LabelGUI/Scripts/selftests.sh culling-poc/LabelGUI/.build/release/LabelGUI
-
-      # 合成图跑原生分析：手写几张结果确定的图（平滑渐变、整张死白、截断的 .jpg、带动态照片尾巴的、手写 APP1 拍摄时间 +
-      # Orientation=6 的连拍对）真跑 --analyze，再 --verdicts --per-photo，按正则断言理由和标志（虚焦、曝光裁切不判过曝、
-      # 文件损坏、同组、预览转正），不比数值；最后给 2000 / 8000 行的 --verdicts 计时（很宽的上限 + 耗时比）。临时数据目录。
-      - name: 合成图跑原生分析 (--analyze)
-        timeout-minutes: 15
-        run: python3 -I culling-poc/LabelGUI/Scripts/native_analysis_smoke.py culling-poc/LabelGUI/.build/release/LabelGUI
-
-      # 交付回归（端到端，纯函数那一半是上面「自检」里的 --delivery-selftest）：水印输出路径就是原片（同路径 / 大小写 / 硬链接）
-      # 被拒、原片不变；水印批量输出到拍摄文件夹里面（照片目录本身、里面还没建的子目录、--session 那一场里面）退出码 1、
-      # 一个文件不多，导进「水印导出/」照常、再导一次全是 -2；写 XMP 时 LR 的 sidecar 只改星级色标、调色关键字按字段不变，
-      # 自己的整份重写，读不全 / 读不了的不碰；精华 Top N 和水印去 GPS（对照组 GPS 还在）。合成图、临时数据目录。
-      - name: 交付回归 (--export-xmp / --export-jpeg / --watermark)
-        timeout-minutes: 10
-        run: python3 -I culling-poc/LabelGUI/Scripts/delivery_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
-
-      # 无头护栏（审查 S13、S36）：会写数据目录的命令不设 LABELGUI_DATA_DIR、或者指到真实数据目录（原样 / 符号链接 / 大小写 /
-      # 结尾斜杠）都退出码 2、什么都不写；batch.* 钉在内存里，跑完 LabelGUI 设置域逐字节不变；GUI 启动门控对一个真的
-      # --live-host --no-view 探锁认人（--launch-gate-probe，只打印不弹框）；main.swift 顶层分派和 AppRuntime.commandFlags 两边对得上、
-      # 自检只登在登记表里（--list-selftests）、两处按表分派都在建数据目录 / 开界面之前。
-      # 「真实数据目录」用 CFFIXED_USER_HOME 换成假的家目录下那个，但 A 段 --session-key 不设 LABELGUI_DATA_DIR、E 段用真的
-      # 家目录比 defaults export：必须放在 MCP 冒烟后面（见那段注释），万一假家目录失灵也不会抢先建出默认数据目录。
-      - name: 无头护栏回归 (数据目录闸 / 启动门控)
-        timeout-minutes: 10
-        run: python3 -I culling-poc/LabelGUI/Scripts/cli_guard_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
-
-      # 照片 id 稳定：后加 / 移走同名文件、两个子文件夹同名、这一次解不开的那张，没动过的照片 id 不变、改判和客户选中还对得上
-      # （sips 合成小图真跑 --analyze）。工作目录用脚本默认的 culling-poc/LabelGUI/.build 底下：经过符号链接的临时目录里带路径的
-      # id 会多带一段（脚本 H 组专门测那种），前几组要的是平常路径；脚本出异常也在 finally 里删，不会进上面的 SwiftPM 缓存。
-      - name: 照片 id 稳定回归 (--analyze)
-        timeout-minutes: 10
-        run: python3 -I culling-poc/LabelGUI/Scripts/photo_id_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
-
-      # 交付对照：导出 JPG / 精华 Top N / 水印写出去的文件名记进这一场的 exports.json，「导入客户选择」按交付文件名
-      # （01_DSCF7208、DSCF7207_wm、20260321_002）认回原片，重名、不在这一场的照实列出、不猜。合成图 + Fixtures/photot-session。
-      - name: 交付对照回归 (exports.json / --client-import)
-        timeout-minutes: 10
-        run: python3 -I culling-poc/LabelGUI/Scripts/delivery_ledger_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
-
-      # 选片确认表端到端：套餐张数、每张备注读回来、精修要求.csv（BOM、转义、改了另存 -2）、可选水印不动预览文件。
-      # Fixtures/photot-session 的分析结果 + 现造的图，不要真照片。
-      - name: 选片确认表回归 (--proof-sheet / --client-import / --copy-originals)
-        timeout-minutes: 10
-        run: python3 -I culling-poc/LabelGUI/Scripts/proof_sheet_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
-
-      # 诊断端到端（进程内那一半是「自检」里的 --diag-selftest）：--diag-export 的包里没有照片、客户原话、bookmark、家目录；
-      # chmod 000 的照片文件夹分析说「没有权限」并点名隐私设置；写 XMP / 导出 JPG 写不进时说原因、一个文件不多写。
-      - name: 诊断回归 (--diag-export / 没权限)
-        timeout-minutes: 10
-        run: python3 -I culling-poc/LabelGUI/Scripts/diag_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
-
-      # 发版门禁的规则自测（门禁本身只在 tag 上跑，脚本改坏了要等打 tag 才知道）：造假的仓库根逐条核对，再看仓库里那张
-      # WhatsNew 表认得出。不起 LabelGUI。
-      - name: 发版门禁自测 (release_gate.py)
-        run: python3 -I culling-poc/LabelGUI/Scripts/release_gate.py --self-test
-
-      # 留 14 天：推 tag 时沿用的就是它（check 只认没过期的）。
+      # 留 14 天：推 tag 时沿用的就是它（check 只认没过期的）。测试 job 红了整个 run 不算绿过，tag 不会沿用它。
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
@@ -333,6 +264,140 @@ jobs:
           path: LabelGUI.dSYM.zip
           if-no-files-found: error
           retention-days: 14
+
+  # 拿 build 传的裸二进制跑的测试（CH-02）：两个 job 并行，各在一台新的 macos-15 上。按 CI 上量过的用时分两半（run 121：实时桥
+  # 258 秒 + 命令行回归约 35 秒；自检 171 + 卡导入 38 + 照片 id 39 + 合成图 11），两边各约 4.5–5 分钟。build 跳过（推 main 绿过、
+  # 推 tag 沿用）时它们跟着跳过；build 红了也跳过。每步的临时目录脚本自己建，互不依赖，搬到哪个 job 都行 —— 加新的测试步骤时
+  # 往短的那边放。
+  test-bridge:
+    name: 测试：实时桥 + 命令行回归
+    needs: build
+    runs-on: macos-15
+    steps:
+      # 完整检出（不用 fetch-depth 0：只有 build_app.sh 数提交）：自检的「CI 登记」读 Sources/ 和这个文件，各脚本读 Fixtures/、
+      # Scripts/，二进制往上找仓库里的胶片表、.github/ISSUE_TEMPLATE。
+      - uses: actions/checkout@v4
+
+      # build 传的裸二进制放回原路径（culling-poc/LabelGUI/.build/release/LabelGUI）：往上找胶片表、Fixtures 靠的就是这个位置。
+      # 产物是 zip，不留可执行位，要自己 chmod。
+      - uses: actions/download-artifact@v4
+        with:
+          name: LabelGUI-bin
+          path: culling-poc/LabelGUI/.build/release
+
+      - name: 裸二进制可执行
+        run: |
+          chmod +x culling-poc/LabelGUI/.build/release/LabelGUI
+          ls -l culling-poc/LabelGUI/.build/release/LabelGUI
+
+      # 实时桥（v1）：起 --live-host（.prohibited，窗口从不显示；不行就 --no-view），经 --mcp 驱动；临时数据目录 + 测试 socket 根目录。
+      # 带不带视图：第一次分支 CI（run 41158761483，2026-10-30）探针报「CI 用带视图的 --live-host」，所以钉 --view require ——
+      # 以后哪次 runner 上建不了离屏窗口、拍不出快照或标题栏，这一步就红，不会悄悄退到 --no-view 少测 15 条。
+      # 每条 FAIL 在摘要页另有一条 ::error:: annotation（不登录也看得到）。
+      - name: 实时桥冒烟 (--live-host)
+        timeout-minutes: 25
+        run: python3 -I culling-poc/LabelGUI/Scripts/live_smoke.py culling-poc/LabelGUI/.build/release/LabelGUI --ci --view require
+
+      # 判决层回归：Fixtures/photot-session 的分析结果灌进临时目录跑 --verdicts，和期望
+      # 逐字比对。改了分组/判决/提名逻辑而没更新期望值 → 这里红。
+      - name: 判决回归 (--verdicts)
+        run: culling-poc/LabelGUI/Scripts/verdict_regression.sh culling-poc/LabelGUI/.build/release/LabelGUI
+
+      # 交付回归（端到端，纯函数那一半是 test-selftests「自检」里的 --delivery-selftest）：水印输出路径就是原片（同路径 / 大小写 / 硬链接）
+      # 被拒、原片不变；水印批量输出到拍摄文件夹里面（照片目录本身、里面还没建的子目录、--session 那一场里面）退出码 1、
+      # 一个文件不多，导进「水印导出/」照常、再导一次全是 -2；写 XMP 时 LR 的 sidecar 只改星级色标、调色关键字按字段不变，
+      # 自己的整份重写，读不全 / 读不了的不碰；精华 Top N 和水印去 GPS（对照组 GPS 还在）。合成图、临时数据目录。
+      - name: 交付回归 (--export-xmp / --export-jpeg / --watermark)
+        timeout-minutes: 10
+        run: python3 -I culling-poc/LabelGUI/Scripts/delivery_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
+
+      # 无头护栏（审查 S13、S36）：会写数据目录的命令不设 LABELGUI_DATA_DIR、或者指到真实数据目录（原样 / 符号链接 / 大小写 /
+      # 结尾斜杠）都退出码 2、什么都不写；batch.* 钉在内存里，跑完 LabelGUI 设置域逐字节不变；GUI 启动门控对一个真的
+      # --live-host --no-view 探锁认人（--launch-gate-probe，只打印不弹框）；main.swift 顶层分派和 AppRuntime.commandFlags 两边对得上、
+      # 自检只登在登记表里（--list-selftests）、两处按表分派都在建数据目录 / 开界面之前。
+      # 「真实数据目录」用 CFFIXED_USER_HOME 换成假的家目录下那个，但 A 段 --session-key 不设 LABELGUI_DATA_DIR、E 段用真的
+      # 家目录比 defaults export。MCP 冒烟在 build 那台 runner 上，这里万一假家目录失灵、建出了默认数据目录也碍不着它
+      # （以前同一个 job 里时必须排在 MCP 冒烟后面）。
+      - name: 无头护栏回归 (数据目录闸 / 启动门控)
+        timeout-minutes: 10
+        run: python3 -I culling-poc/LabelGUI/Scripts/cli_guard_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
+
+      # 交付对照：导出 JPG / 精华 Top N / 水印写出去的文件名记进这一场的 exports.json，「导入客户选择」按交付文件名
+      # （01_DSCF7208、DSCF7207_wm、20260321_002）认回原片，重名、不在这一场的照实列出、不猜。合成图 + Fixtures/photot-session。
+      - name: 交付对照回归 (exports.json / --client-import)
+        timeout-minutes: 10
+        run: python3 -I culling-poc/LabelGUI/Scripts/delivery_ledger_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
+
+      # 选片确认表端到端：套餐张数、每张备注读回来、精修要求.csv（BOM、转义、改了另存 -2）、可选水印不动预览文件。
+      # Fixtures/photot-session 的分析结果 + 现造的图，不要真照片。
+      - name: 选片确认表回归 (--proof-sheet / --client-import / --copy-originals)
+        timeout-minutes: 10
+        run: python3 -I culling-poc/LabelGUI/Scripts/proof_sheet_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
+
+      # 诊断端到端（进程内那一半是 test-selftests「自检」里的 --diag-selftest）：--diag-export 的包里没有照片、客户原话、bookmark、家目录；
+      # chmod 000 的照片文件夹分析说「没有权限」并点名隐私设置；写 XMP / 导出 JPG 写不进时说原因、一个文件不多写。
+      - name: 诊断回归 (--diag-export / 没权限)
+        timeout-minutes: 10
+        run: python3 -I culling-poc/LabelGUI/Scripts/diag_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
+
+      # 发版门禁的规则自测（门禁本身只在 tag 上跑，脚本改坏了要等打 tag 才知道）：造假的仓库根逐条核对，再看仓库里那张
+      # WhatsNew 表认得出。不起 LabelGUI。
+      - name: 发版门禁自测 (release_gate.py)
+        run: python3 -I culling-poc/LabelGUI/Scripts/release_gate.py --self-test
+
+  test-selftests:
+    name: 测试：自检 + 分析类回归
+    needs: build
+    runs-on: macos-15
+    steps:
+      # 完整检出（不用 fetch-depth 0：只有 build_app.sh 数提交）：自检的「CI 登记」读 Sources/ 和这个文件，各脚本读 Fixtures/、
+      # Scripts/，二进制往上找仓库里的胶片表、.github/ISSUE_TEMPLATE。
+      - uses: actions/checkout@v4
+
+      # build 传的裸二进制放回原路径（culling-poc/LabelGUI/.build/release/LabelGUI）：往上找胶片表、Fixtures 靠的就是这个位置。
+      # 产物是 zip，不留可执行位，要自己 chmod。
+      - uses: actions/download-artifact@v4
+        with:
+          name: LabelGUI-bin
+          path: culling-poc/LabelGUI/.build/release
+
+      - name: 裸二进制可执行
+        run: |
+          chmod +x culling-poc/LabelGUI/.build/release/LabelGUI
+          ls -l culling-poc/LabelGUI/.build/release/LabelGUI
+
+      # 存储卡导入回归：随机字节造一张假卡跑 --ingest 的各种情况 —— 卡上文件前后逐字节不变、目标里
+      # 绝不覆盖（同名不同内容整组改名）、复制后校验、取消不留半截、再插只导新的。
+      - name: 存储卡导入回归 (--ingest)
+        env:
+          CARD_REGRESSION_EXFAT: "1"
+        run: python3 culling-poc/LabelGUI/Scripts/card_import_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
+
+      # 不要照片的进程内自检：网格改判后的焦点、时间轴不出界、五种杂志风和人物挡字的版式规则、场次持久化、选片 MCP、
+      # 文件安全、拼图导出、确认表……每条都在新的临时 LABELGUI_DATA_DIR 里跑（要 fixture 的传 Fixtures/photot-session）；
+      # 时间轴自检的随机数按 seed 播种，固定跑 3 个 seed（三批互不相同的 3000 组；FAIL 行带 seed 和 trial，原样能复现）。最后核对「CI 登记」：
+      # 自检登记表（SelfTestRegistry.swift，selftests.sh 用 --list-selftests 拿）里每一条都有人跑、Sources 里没有绕过登记表的
+      # --*-selftest、Scripts/ 下每个 *_regression.py / *_smoke.py 在这个文件里都有一步。跑哪些、带什么参数也从登记表来。
+      # 在 test-selftests 这台 runner 上跑，和 build 里 MCP 冒烟「runner 上还没有默认数据目录」那条要求不在同一台机器上。
+      - name: 自检 (--*-selftest)
+        # 每条自检在 selftests.sh 里单独限时 300 秒（卡住的点名报错、后面照跑）；runner 是虚拟机，Vision 比本机慢得多，整步给足
+        timeout-minutes: 30
+        run: culling-poc/LabelGUI/Scripts/selftests.sh culling-poc/LabelGUI/.build/release/LabelGUI
+
+      # 合成图跑原生分析：手写几张结果确定的图（平滑渐变、整张死白、截断的 .jpg、带动态照片尾巴的、手写 APP1 拍摄时间 +
+      # Orientation=6 的连拍对）真跑 --analyze，再 --verdicts --per-photo，按正则断言理由和标志（虚焦、曝光裁切不判过曝、
+      # 文件损坏、同组、预览转正），不比数值；最后给 2000 / 8000 行的 --verdicts 计时（很宽的上限 + 耗时比）。临时数据目录。
+      - name: 合成图跑原生分析 (--analyze)
+        timeout-minutes: 15
+        run: python3 -I culling-poc/LabelGUI/Scripts/native_analysis_smoke.py culling-poc/LabelGUI/.build/release/LabelGUI
+
+      # 照片 id 稳定：后加 / 移走同名文件、两个子文件夹同名、这一次解不开的那张，没动过的照片 id 不变、改判和客户选中还对得上
+      # （sips 合成小图真跑 --analyze）。工作目录用脚本默认的 culling-poc/LabelGUI/.build 底下：经过符号链接的临时目录里带路径的
+      # id 会多带一段（脚本 H 组专门测那种），前几组要的是平常路径；脚本出异常也在 finally 里删
+      # （测试 job 不存 SwiftPM 缓存，这台机器上的 .build 只有下载来的那个二进制）。
+      - name: 照片 id 稳定回归 (--analyze)
+        timeout-minutes: 10
+        run: python3 -I culling-poc/LabelGUI/Scripts/photo_id_regression.py culling-poc/LabelGUI/.build/release/LabelGUI
 
   # 推 tag、这个提交绿过：拿那一次的 DMG，只把版本号换成 tag 的（feature / main 上打的包 CFBundleShortVersionString 是
   # 0.1：build_app.sh 只从 tag 带版本号；它会出现在「关于」、诊断包、MCP 的 serverInfo 里）。CFBundleVersion 是提交数，
@@ -400,10 +465,11 @@ jobs:
           overwrite: true
 
   # 只认 tag。DMG 从这次 run 里下载：完整跑的是 build 传的，沿用的是 restamp 传的（两个只会跑一个）。build 跳过时 release
-  # 默认也会跟着跳过，所以要 !cancelled()。发版门禁（release-gate）必须绿。
+  # 默认也会跟着跳过，所以要 !cancelled()。发版门禁（release-gate）必须绿。完整跑那条路 build 和两个测试 job 都要绿（只看 build
+  # 的话测试还没跑完就发了）；沿用那条路测试 job 跟着 build 跳过，只看 restamp —— 所以测试 job 的条件和 build 绑在同一个括号里。
   release:
-    needs: [check, release-gate, build, restamp]
-    if: ${{ !cancelled() && github.ref_type == 'tag' && needs.release-gate.result == 'success' && (needs.build.result == 'success' || needs.restamp.result == 'success') }}
+    needs: [check, release-gate, build, test-bridge, test-selftests, restamp]
+    if: ${{ !cancelled() && github.ref_type == 'tag' && needs.release-gate.result == 'success' && ((needs.build.result == 'success' && needs.test-bridge.result == 'success' && needs.test-selftests.result == 'success') || needs.restamp.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

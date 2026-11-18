@@ -10,7 +10,8 @@
 #
 # 为什么每条都要临时数据目录：main.swift 在分派之前就建数据目录、往里写内置字体；ux / timeline / swiss 不查
 # LABELGUI_DATA_DIR，不设就会在 runner 上建出 ~/Library/Application Support/选片工具，MCP 冒烟里「不建目录」那一条就测不了
-# （所以 CI 里这一步也放在 MCP 冒烟后面，两层防护）。跑完再看一眼：跑之前没有真实数据目录的，跑完也不能有。
+# （CI 里这一步在 test-selftests 那台 runner 上，和 build 里的 MCP 冒烟不在同一台机器上，两层防护）。跑完再看一眼：跑之前没有
+# 真实数据目录的，跑完也不能有。
 #
 # 用法: Scripts/selftests.sh <LabelGUI 可执行文件>
 #       SELFTEST_SEEDS="1 2 3" Scripts/selftests.sh <bin>     # 换时间轴自检的 seed
@@ -182,7 +183,7 @@ else
         [ -e "$script" ] || continue
         name="$(basename "$script")"
         printf '%s\n' "$workflow_steps" | grep -qF -- "culling-poc/LabelGUI/Scripts/$name" \
-            || ci_bad+=("Scripts/$name 不在 release.yml 里：加一步（放在 MCP 冒烟后面）")
+            || ci_bad+=("Scripts/$name 不在 release.yml 里：在 test-bridge 或 test-selftests 里加一步（哪边短放哪边）")
     done
 fi
 if [ ${#ci_bad[@]} -gt 0 ]; then
