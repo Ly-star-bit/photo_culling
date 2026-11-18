@@ -44,7 +44,24 @@ trap phase_report EXIT
 
 phase "swift build"
 cd "$POC/LabelGUI"
-swift build -c release
+# 编译分阶段用时和内存峰值（优化分析 2026-11-18 CH-03：CI 上编译 727 秒、本机 212 秒，时间花在哪个阶段、内存顶没顶到 runner 的
+# 7 GB，以前日志里都没有）。只加日志、不改构建：/usr/bin/time -l 包一层（只读 rusage，退出码就是 swift build 的，失败照样退出）；
+# CI 上（或者 BUILD_STATS=1）再让编译前端把各阶段计时写进 -stats-output-dir。这个参数只在 CI 上加：编译参数一变 SwiftPM 就整份
+# 重编，本机平时 swift build -c release 和 build_app.sh 交替着用会来回重编。编完 Scripts/swift_build_stats.py 打一行
+# 「编译分阶段：…」（CI 上另打一条 ::notice，「构建日志 → annotation」那一步抄进摘要页），读不到什么就照实说，不影响构建。
+STATS_DIR=""
+STATS_ARGS=()
+if [ "${GITHUB_ACTIONS:-}" = "true" ] || [ "${BUILD_STATS:-}" = "1" ]; then
+    STATS_DIR="$(mktemp -d)"
+    STATS_ARGS=(-Xswiftc -stats-output-dir -Xswiftc "$STATS_DIR")
+fi
+TIME_OUT="$(mktemp)"
+BUILD_RC=0
+# ${arr[@]+…}：macOS 自带的 bash 3.2 在 set -u 下展开空数组会报 unbound variable。
+/usr/bin/time -l -o "$TIME_OUT" swift build -c release ${STATS_ARGS[@]+"${STATS_ARGS[@]}"} || BUILD_RC=$?
+python3 -I "$POC/LabelGUI/Scripts/swift_build_stats.py" "$TIME_OUT" ${STATS_DIR:+"$STATS_DIR"} || true
+rm -rf "$TIME_OUT" ${STATS_DIR:+"$STATS_DIR"}
+[ "$BUILD_RC" -eq 0 ] || exit "$BUILD_RC"
 
 phase "装配 app bundle"
 # 从零装配:叠在旧 bundle 上会把已删掉的文件 (旧 Python 脚本、旧 plist 键) 一起带走。
