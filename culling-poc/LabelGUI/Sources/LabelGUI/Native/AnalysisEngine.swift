@@ -76,7 +76,9 @@ enum AnalysisEngine {
     ///    同一版（还没发出去）里锐度也改了口径：只量眼眉带（裁回脸框），不再和嘴那块取大；sharpness_scope
     ///    从 "features" 变成 "eyes" / "mouth"。闭眼的 EAR（blink_score、faces[].ear）也改了：按两眼连线转平再量
     ///    （FaceAnalyzer.levelledEyeAspectRatio），歪着的脸读数变小（photot 歪 21–23° 的 0.51–0.55 → 0.30–0.35）。
-    ///    三样一起升这一次，用户整场重分析一回。
+    ///    主体曝光裁切（subject_*_clip_pct）也改了：矩形里有 ≥ 0.5% 裁切的，跑人像分割只数人（Metrics.personClipping），
+    ///    白底 / 黑底 / 逆光背景不再算进来。
+    ///    四样一起升这一次，用户整场重分析一回。
     static let analysisVersion = 3
 
     struct Summary {
@@ -354,7 +356,16 @@ enum AnalysisEngine {
             // 人在画面里太小（远景、旅拍里的小人）：画面本身才是主体，照旧按整张算 —— 不然一张碰巧认出来的
             // 小脸就把一大片死白天空排除在外，认没认出来脸，判决就翻。
             let bigEnough = Double(bodyPixels) >= FaceAnalyzer.minSubjectRegionShare * Double(w * h)
-            subjectClip = bigEnough ? Metrics.exposureClipping(rgba: rgba, width: w, spans: bodySpans) : nil
+            var clip = bigEnough ? Metrics.exposureClipping(rgba: rgba, width: w, spans: bodySpans) : nil
+            // 矩形里有背景：白底、黑底、逆光打爆的背景会把曝光正常的人判成「曝光裁切」（VQ-01）。矩形里有点裁切的，
+            // 再跑一次人像分割、只数人（Metrics.personClipping 写了怎么判、为什么不直接取交集）；分割失败照旧用矩形。
+            if let rect = clip, max(rect.highlightPct, rect.shadowPct) >= Metrics.personClipGate,
+               let mask = FaceAnalyzer.personMask(in: loaded.image),
+               let person = Metrics.personClipping(rgba: rgba, width: w, height: h, bodies: bodySpans,
+                                                   faces: regions.faces, mask: mask) {
+                clip = person
+            }
+            subjectClip = clip
             gray = Metrics.grayscale(rgba: rgba, width: w, height: h)
         }
         // 欠曝 / 过曝的依据：脸的亮度中位数（没有脸 = nil），整张的中位数和 p99（「画面里有没有亮的东西」）。

@@ -268,6 +268,163 @@ enum Metrics {
         return (Double(blown) / Double(n), Double(crushed) / Double(n))
     }
 
+    // MARK: - 主体裁切只数人（优化分析 2026-11-18 VQ-01）
+
+    /// 人像分割蒙版（FaceAnalyzer.personMask：Vision 的 .balanced，3:4 的图出 384×512），左上原点，0–255，越大越像人。
+    struct PersonMask: Sendable {
+        let width: Int
+        let height: Int
+        let values: [UInt8]
+    }
+
+    /// 矩形里高光、暗部裁切都不到这么多，就不跑分割、照旧用矩形的数（AnalysisEngine）：滑杆最低 0.5%，这些照片判决和以前一样，
+    /// 也省下分割的开销（一张 ~7000 万条指令，进程里第一次还要 ~6 亿条载模型）。
+    static let personClipGate = 0.005
+    /// 一块死白（8 连通）外面一圈没裁切的像素，分割说「是人」的平均（0–1）低于它 = 这块死白是从背景连进来的，整块不算人。
+    static let backgroundBlobVote = 0.25
+    /// 脸芯里（人脸框四边各收 faceCoreInset）分割认作人的像素，有这么多死白 = 脸本身打爆了。
+    static let blownFaceShare = 0.02
+    static let faceCoreInset = 0.15
+    /// 矩形里分割认作人的像素不到矩形的这么多 = 分割基本没认出人（戏服、面具、雕像上的脸……），不信它，照旧用矩形。
+    /// 合成集（184 张）最少 47%，photot 21 张最少 63%。
+    static let minPersonShare = 0.2
+
+    /// 主体区域的曝光裁切，只数人（VQ-01）。`bodies` = 现在的主体矩形（头 + 上半身并集）的像素段，`faces` = 不带 padding 的脸框
+    /// （FaceAnalyzer.exposureRegions）。矩形里分割认作人的像素不到 minPersonShare = nil（调用方照旧用矩形的数）。
+    ///
+    /// 为什么不直接用「矩形 ∩ 分割」（分析员的修法 B）：分割对纯色背景很准（白底 / 黑底 / 高调 / 低调都修好），但对死白区域靠不住，
+    /// 两头都错 —— 逆光时打爆的栏杆和白汉服袖子连成一片，分割把整片并进了人（7231 背景 +3EV：矩形 28.0% → B 31.5%）；
+    /// 整体过曝时打爆的白袖子贴着亮墙，分割又把袖子划出去了（7225 +1.5EV：36.0% → 8.0%）。死白没有纹理，分割只能猜。
+    /// 所以没裁切的像素信分割，死白按「块」判：
+    ///   - 暗部裁切照旧按分割数（黑底、低调、剪影上分割都准：黑底 0 中位 17.2% → 1.7%，剪影照抓）。
+    ///   - 高光裁切：每个和「矩形 ∩ 人」相交的死白连通块（8 连通，整张图上找），看它外面一圈没裁切的像素分割投票 ——
+    ///     < backgroundBlobVote（四周大多是背景）就整块不算（连进来的背景）；否则只数块里「矩形 ∩ 人」的那部分。
+    ///     合成集（脸没爆的那些）里被扔掉的是 7231 背景 +2 / +3EV 连进来的那片（0.12 / 0.20）和 +1EV 时袖子和背景连成的一片
+    ///     （0.12，真值里 22% 是人）；人身上的死白 0.35 以上，只有一个例外 0.23（下面说的 7225 +1EV）。
+    ///   - 脸本身打爆了（脸芯里人的像素 ≥ blownFaceShare 是死白）：整张过曝，死白到处连成一片，上面的块判法会把人身上的也扔掉
+    ///     （不这样的话 +1.5EV 有 2 张、+2EV 有 1 张掉到 15% 以下）。这时取 max(矩形, 矩形 ∩ 人)，不比以前松。合成集里只有整体 / 人 +1.5EV 及以上
+    ///     会到这条（最少 1.2%），白底、逆光、高调的脸芯都是 0（脸框角上的背景不在分割里，不算）。
+    /// 分母 = 矩形 ∩ 人里没裁切的 + 算进来的死白 + 暗部裁切（扔掉的块也从分母里拿掉）。
+    /// 代价（只在 +1EV 这一档，分析员归「看用途」）：脸还没爆、白衣服已经爆了而且和亮墙连成一片的，会被当背景扔掉 ——
+    /// 合成集整体 +1EV 宽松 / 标准 / 严格 2/6/8 → 1/5/7（7225 31.8% → 0.3%、7231 30.9% → 9.9%）；+1.5EV 起脸开始爆，照旧抓。
+    /// 前后对照表在这次提交的说明里。
+    static func personClipping(rgba: [UInt8], width: Int, height: Int, bodies: [Span], faces: [[Double]],
+                               mask: PersonMask) -> (highlightPct: Double, shadowPct: Double)? {
+        let mw = mask.width, mh = mask.height
+        guard width > 0, height > 0, mw > 0, mh > 0, mask.values.count == mw * mh,
+              rgba.count >= width * height * 4, !bodies.isEmpty else { return nil }
+        // 蒙版按像素中心取最近邻对到分析图上：列号 maskX[x]，行起点 maskRow[y]。
+        var maskX = [Int](repeating: 0, count: width)
+        for x in 0..<width {
+            maskX[x] = min(mw - 1, Int((Double(x) + 0.5) * Double(mw) / Double(width)))
+        }
+        var maskRow = [Int](repeating: 0, count: height)
+        for y in 0..<height {
+            maskRow[y] = min(mh - 1, Int((Double(y) + 0.5) * Double(mh) / Double(height))) * mw
+        }
+        let personValue: UInt8 = 128  // 分割 ≥ 0.5 算人
+        let hiBit: UInt8 = 1, loBit: UInt8 = 2, rectBit: UInt8 = 4, seenBit: UInt8 = 8, ringBit: UInt8 = 16
+        var state = [UInt8](repeating: 0, count: width * height)
+        var rectN = 0, rectHi = 0, rectLo = 0, personN = 0, personHi = 0, personLo = 0
+        var coreN = 0, coreHi = 0
+        var counted = 0
+        var cores: [[Double]] = []
+        for f in faces where f.count == 4 {
+            let fw = f[2] - f[0], fh = f[3] - f[1]
+            cores.append([f[0] + faceCoreInset * fw, f[1] + faceCoreInset * fh,
+                          f[2] - faceCoreInset * fw, f[3] - faceCoreInset * fh])
+        }
+        let coreSpans = spans(of: cores, width: width, height: height)
+
+        rgba.withUnsafeBufferPointer { src in
+            mask.values.withUnsafeBufferPointer { seg in
+                state.withUnsafeMutableBufferPointer { st in
+                    for i in 0..<(width * height) {
+                        let r = src[i * 4], g = src[i * 4 + 1], b = src[i * 4 + 2]
+                        if min(r, min(g, b)) >= highlightClipValue {
+                            st[i] = hiBit
+                        } else if max(r, max(g, b)) <= shadowClipValue {
+                            st[i] = loBit
+                        }
+                    }
+                    for s in bodies {
+                        for x in s.x0..<s.x1 {
+                            let i = s.y * width + x
+                            let v = st[i]
+                            st[i] = v | rectBit
+                            rectN += 1
+                            if v & hiBit != 0 { rectHi += 1 }
+                            if v & loBit != 0 { rectLo += 1 }
+                            guard seg[maskRow[s.y] + maskX[x]] >= personValue else { continue }
+                            personN += 1
+                            if v & hiBit != 0 { personHi += 1 }
+                            if v & loBit != 0 { personLo += 1 }
+                        }
+                    }
+                    for s in coreSpans {
+                        for x in s.x0..<s.x1 where seg[maskRow[s.y] + maskX[x]] >= personValue {
+                            coreN += 1
+                            if st[s.y * width + x] & hiBit != 0 { coreHi += 1 }
+                        }
+                    }
+                    guard personN > 0, Double(personN) >= minPersonShare * Double(rectN),
+                          coreN == 0 || Double(coreHi) < blownFaceShare * Double(coreN) else { return }
+
+                    // 高光裁切的连通块：从「矩形 ∩ 人」里的死白像素出发，整张图上 8 连通地找完一整块，
+                    // 顺手数块里「矩形 ∩ 人」的像素、外面一圈（没裁切的 8 邻域，每个像素只数一次）的分割投票。
+                    var stack: [Int32] = []
+                    var ring: [Int32] = []
+                    for s in bodies {
+                        for x in s.x0..<s.x1 {
+                            let start = s.y * width + x
+                            guard st[start] & (hiBit | seenBit) == hiBit,
+                                  seg[maskRow[s.y] + maskX[x]] >= personValue else { continue }
+                            var inPerson = 0, voteSum = 0, voteN = 0
+                            st[start] |= seenBit
+                            stack.append(Int32(start))
+                            while let top = stack.popLast() {
+                                let p = Int(top)
+                                let py = p / width, px = p - py * width
+                                if st[p] & rectBit != 0, seg[maskRow[py] + maskX[px]] >= personValue { inPerson += 1 }
+                                for ny in max(0, py - 1)...min(height - 1, py + 1) {
+                                    for nx in max(0, px - 1)...min(width - 1, px + 1) {
+                                        let q = ny * width + nx
+                                        let v = st[q]
+                                        if v & hiBit != 0 {
+                                            if v & seenBit == 0 {
+                                                st[q] = v | seenBit
+                                                stack.append(Int32(q))
+                                            }
+                                        } else if v & ringBit == 0 {
+                                            st[q] = v | ringBit
+                                            ring.append(Int32(q))
+                                            voteSum += Int(seg[maskRow[ny] + maskX[nx]])
+                                            voteN += 1
+                                        }
+                                    }
+                                }
+                            }
+                            for q in ring { st[Int(q)] &= ~ringBit }
+                            ring.removeAll(keepingCapacity: true)
+                            if voteN > 0, Double(voteSum) >= backgroundBlobVote * 255 * Double(voteN) {
+                                counted += inPerson
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        guard personN > 0, rectN > 0, Double(personN) >= minPersonShare * Double(rectN) else { return nil }
+        if coreN > 0, Double(coreHi) >= blownFaceShare * Double(coreN) {
+            let rect = (Double(rectHi) / Double(rectN), Double(rectLo) / Double(rectN))
+            let person = (Double(personHi) / Double(personN), Double(personLo) / Double(personN))
+            return (max(rect.0, person.0), max(rect.1, person.1))
+        }
+        let total = personN - personHi + counted  // 人里没裁切的 + 暗部裁切 + 算进来的死白
+        guard total > 0 else { return nil }
+        return (Double(counted) / Double(total), Double(personLo) / Double(total))
+    }
+
     /// 亮度（grayscale 的 0–255 口径）直方图，256 格。spans 为 nil = 整张。
     static func lumaHistogram(gray: [Float], width: Int, height: Int, spans: [Span]? = nil) -> [Int] {
         var hist = [Int](repeating: 0, count: 256)

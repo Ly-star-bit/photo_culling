@@ -47,8 +47,8 @@
       "sharpness_scope" : "eyes",
       "src_mtime" : 1774101940,
       "src_size" : 23649254,
-      "subject_highlight_clip_pct" : 8.8204422569747641e-06,
-      "subject_shadow_clip_pct" : 0.010555864271034549
+      "subject_highlight_clip_pct" : 1.0811336767734647e-05,
+      "subject_shadow_clip_pct" : 0.012935764442594505
     },
     {
       "blink_score" : 0.44040836586564625,
@@ -95,7 +95,7 @@
       "src_mtime" : 1774101940,
       "src_size" : 23938276,
       "subject_highlight_clip_pct" : 0,
-      "subject_shadow_clip_pct" : 0.019931705431351074
+      "subject_shadow_clip_pct" : 0.024452905926177628
     },
     {
       "blink_score" : 0.40997703033548699,
@@ -142,7 +142,7 @@
       "src_mtime" : 1774101940,
       "src_size" : 24129465,
       "subject_highlight_clip_pct" : 0,
-      "subject_shadow_clip_pct" : 0.012989299742652038
+      "subject_shadow_clip_pct" : 0.01615511606751794
     },
     {
       "blink_score" : 0.26400302228045258,
@@ -188,8 +188,8 @@
       "sharpness_scope" : "eyes",
       "src_mtime" : 1785409523.779475,
       "src_size" : 23959042,
-      "subject_highlight_clip_pct" : 7.6730660037137632e-06,
-      "subject_shadow_clip_pct" : 0.0092805733314917978
+      "subject_highlight_clip_pct" : 9.3533120077819562e-06,
+      "subject_shadow_clip_pct" : 0.011312830873412276
     },
     {
       "blink_score" : 0.27415597334342523,
@@ -235,8 +235,8 @@
       "sharpness_scope" : "eyes",
       "src_mtime" : 1774101939,
       "src_size" : 23754612,
-      "subject_highlight_clip_pct" : 3.7735137072885416e-06,
-      "subject_shadow_clip_pct" : 0.010109243221826004
+      "subject_highlight_clip_pct" : 4.5608994093635267e-06,
+      "subject_shadow_clip_pct" : 0.012209527718866161
     },
     {
       "blink_score" : 0.26666032893549868,
@@ -330,7 +330,7 @@
       "src_mtime" : 1774101938,
       "src_size" : 23773037,
       "subject_highlight_clip_pct" : 0,
-      "subject_shadow_clip_pct" : 0.0059132720105124839
+      "subject_shadow_clip_pct" : 0.0070275897969807391
     },
     {
       "blink_score" : 0.26644143733529424,
@@ -470,8 +470,8 @@
       "sharpness_scope" : "eyes",
       "src_mtime" : 1774101934,
       "src_size" : 21609342,
-      "subject_highlight_clip_pct" : 3.7603880720490355e-06,
-      "subject_shadow_clip_pct" : 0.024337231602301359
+      "subject_highlight_clip_pct" : 4.8371649054011786e-06,
+      "subject_shadow_clip_pct" : 0.026227108117085188
     },
     {
       "blink_score" : 0.36020109831644831,
@@ -517,8 +517,8 @@
       "sharpness_scope" : "eyes",
       "src_mtime" : 1774101933,
       "src_size" : 22220862,
-      "subject_highlight_clip_pct" : 1.7686934822037277e-05,
-      "subject_shadow_clip_pct" : 0.0050086183609678288
+      "subject_highlight_clip_pct" : 2.6975329834714796e-05,
+      "subject_shadow_clip_pct" : 0.0066187650203541129
     },
     {
       "blink_score" : 0.37776060036380582,
@@ -658,8 +658,8 @@
       "sharpness_scope" : "eyes",
       "src_mtime" : 1774101932,
       "src_size" : 22203588,
-      "subject_highlight_clip_pct" : 8.5665578713816998e-06,
-      "subject_shadow_clip_pct" : 0.010680356026145135
+      "subject_highlight_clip_pct" : 1.0583970576561797e-05,
+      "subject_shadow_clip_pct" : 0.012097478369010135
     },
     {
       "blink_score" : 0.3273789512475852,
@@ -705,8 +705,8 @@
       "sharpness_scope" : "eyes",
       "src_mtime" : 1774101932,
       "src_size" : 22096770,
-      "subject_highlight_clip_pct" : 1.3078562927505526e-05,
-      "subject_shadow_clip_pct" : 0.012139086157213045
+      "subject_highlight_clip_pct" : 1.4347751229124023e-05,
+      "subject_shadow_clip_pct" : 0.011765156007881698
     },
     {
       "blink_score" : 0.33828317886565101,
@@ -752,8 +752,8 @@
       "sharpness_scope" : "eyes",
       "src_mtime" : 1774101932,
       "src_size" : 22281660,
-      "subject_highlight_clip_pct" : 5.0737211685794594e-06,
-      "subject_shadow_clip_pct" : 0.01426730392604544
+      "subject_highlight_clip_pct" : 6.9802911479437811e-06,
+      "subject_shadow_clip_pct" : 0.016794580501952736
     },
     {
       "blink_score" : 0.33623608385852677,
@@ -799,8 +799,8 @@
       "sharpness_scope" : "eyes",
       "src_mtime" : 1774101932,
       "src_size" : 22179160,
-      "subject_highlight_clip_pct" : 2.865345933214517e-06,
-      "subject_shadow_clip_pct" : 0.014352517779471516
+      "subject_highlight_clip_pct" : 4.0075502246231903e-06,
+      "subject_shadow_clip_pct" : 0.016911861947909862
     },
     {
       "blink_score" : 0.30255930844177226,
@@ -846,8 +846,8 @@
       "sharpness_scope" : "eyes",
       "src_mtime" : 1774101932,
       "src_size" : 22449918,
-      "subject_highlight_clip_pct" : 6.6078567416658403e-06,
-      "subject_shadow_clip_pct" : 0.010848448805629895
+      "subject_highlight_clip_pct" : 6.0665868573462321e-06,
+      "subject_shadow_clip_pct" : 0.010737858737502831
     },
     {
       "blink_score" : 0.34773697687379557,
@@ -893,8 +893,8 @@
       "sharpness_scope" : "eyes",
       "src_mtime" : 1774101932,
       "src_size" : 22958039,
-      "subject_highlight_clip_pct" : 8.5370267926048861e-06,
-      "subject_shadow_clip_pct" : 0.013119702774875189
+      "subject_highlight_clip_pct" : 1.0447617734204247e-05,
+      "subject_shadow_clip_pct" : 0.011197756687520112
     },
     {
       "blink_score" : 0.30507063060334955,
@@ -940,8 +940,8 @@
       "sharpness_scope" : "eyes",
       "src_mtime" : 1774101932,
       "src_size" : 21332504,
-      "subject_highlight_clip_pct" : 4.0374677002583976e-06,
-      "subject_shadow_clip_pct" : 0.021572189922480622
+      "subject_highlight_clip_pct" : 6.3222714656921942e-06,
+      "subject_shadow_clip_pct" : 0.033527005582565703
     },
     {
       "blink_score" : 0.31363637784113374,
@@ -987,8 +987,8 @@
       "sharpness_scope" : "eyes",
       "src_mtime" : 1774101932,
       "src_size" : 21705253,
-      "subject_highlight_clip_pct" : 4.0051907271824282e-06,
-      "subject_shadow_clip_pct" : 0.021840305035325781
+      "subject_highlight_clip_pct" : 6.3658991514256428e-06,
+      "subject_shadow_clip_pct" : 0.034356757720244199
     }
   ],
   "time_window_sec" : 2

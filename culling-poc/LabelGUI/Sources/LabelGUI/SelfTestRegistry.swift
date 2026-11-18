@@ -110,6 +110,8 @@ enum SelfTestRegistry {
               stage: .beforeDataDir, ci: .selftests()) { _ in AccuracySelfTest.run() },
         .init("--ear-selftest", "闭眼 EAR 按两眼连线转平：合成的眼睛轮廓转 -30°…270°（含横躺、倒着）读数不变，歪 20° 的闭眼转平后低于地板（老量法读过 0.22）；纯几何，不读写任何文件（Vision 那一半在 native_analysis_smoke.py 第 7 段）",
               stage: .beforeDataDir, ci: .selftests()) { _ in EyeLevelSelfTest.run() },
+        .init("--clip-selftest", "主体曝光裁切只数人：合成的白底 / 黑底不算、逆光连进人里的死白整块扔掉（只取交集会算）、人身上被围住的死白照算、脸芯打爆按 max(矩形, 矩形 ∩ 人)、蒙版空或对不上退回矩形；纯数组，不跑 Vision、不读写任何文件",
+              stage: .beforeDataDir, ci: .selftests()) { _ in PersonClipSelfTest.run() },
         .init("--mcp-selftest", "MCP 这一层的纯函数（含不开界面那道闸的判断表）：不起服务器、不读写任何文件（[--json]）",
               stage: .beforeDataDir, ci: .elsewhere("mcp_smoke.py")) { _ in MCPSelfTest.run() },
         .init("--card-queue-selftest", "存储卡排队：两张假卡走确认 / 排队 / 停下分析，看都导全了、分析在最后跑一次（<cardA> <cardB> --dest <dir>）",

@@ -197,6 +197,29 @@ enum FaceAnalyzer {
         return (bodies, boxes)
     }
 
+    /// 人像分割蒙版：曝光裁切只数人用（Metrics.personClipping，VQ-01）。.balanced 和 .accurate 在合成集上结果几乎一样
+    /// （和真值一致 532 / 533 of 552），.balanced 便宜一半（3:4 的图出 384×512，一张 ~7000 万条指令）。同一张图串行、8 线程并发、
+    /// 跨进程都逐字节相同（2026-11-18 实测），layer1 照样能逐字节比。失败 = nil，调用方照旧用矩形的数。
+    static func personMask(in image: CGImage) -> Metrics.PersonMask? {
+        let request = VNGeneratePersonSegmentationRequest()
+        request.qualityLevel = .balanced
+        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+        guard (try? VNImageRequestHandler(cgImage: image, options: [:]).perform([request])) != nil,
+              let buffer = request.results?.first?.pixelBuffer,
+              CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_OneComponent8 else { return nil }
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        let w = CVPixelBufferGetWidth(buffer), h = CVPixelBufferGetHeight(buffer)
+        let stride = CVPixelBufferGetBytesPerRow(buffer)
+        guard w > 0, h > 0, stride >= w, let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
+        let bytes = base.assumingMemoryBound(to: UInt8.self)
+        var values = [UInt8](repeating: 0, count: w * h)
+        for y in 0..<h {
+            for x in 0..<w { values[y * w + x] = bytes[y * stride + x] }
+        }
+        return Metrics.PersonMask(width: w, height: h, values: values)
+    }
+
     // MARK: - 合影小脸：原图分辨率重量 EAR
 
     /// 3072 分析图上小于这个面积的脸 landmark 不可靠 —— 判决层的小脸免检线（BatchStore.minEarFaceAreaPct）。
