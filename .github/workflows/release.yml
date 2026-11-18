@@ -241,15 +241,16 @@ jobs:
           culling-poc/LabelGUI/Scripts/restamp_dmg.sh 选片工具.dmg 0.0.0 "$RUNNER_TEMP/restamp-dryrun.dmg"
           rm -f "$RUNNER_TEMP/restamp-dryrun.dmg"
 
-      # 给 test-bridge / test-selftests 的裸二进制（strip 之前那份，和以前同一个 job 里测的是同一个文件）。只在这次 run 里用，
-      # 留 1 天；overwrite：「Re-run all jobs」时这个 job 重跑、同名产物照传。
+      # 给 test-bridge / test-selftests 的裸二进制（strip 之前那份，和以前同一个 job 里测的是同一个文件）。只在这次 run 里用；
+      # 留 3 天：测试 job 偶发红，第二天再点「Re-run failed jobs」只重跑测试 job，它还要从这次 run 里下这个产物（留 1 天的话
+      # 隔夜就过期，只能连编译一起重来）。overwrite：「Re-run all jobs」时这个 job 重跑、同名产物照传。
       - name: 上传裸二进制（给测试 job）
         uses: actions/upload-artifact@v7
         with:
           name: LabelGUI-bin
           path: culling-poc/LabelGUI/.build/release/LabelGUI
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 3
           overwrite: true
 
       # 留 14 天：推 tag 时沿用的就是它（check 只认没过期的）。测试 job 红了整个 run 不算绿过，tag 不会沿用它。
