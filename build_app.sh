@@ -63,8 +63,9 @@ BUILD_NUMBER="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || true)"
 if [ -z "$BUILD_NUMBER" ] || [ "$BUILD_NUMBER" -le 1 ]; then
     BUILD_NUMBER="$VERSION"
 fi
-# 图标:仓库目前没有 .icns (没有 CFBundleIconFile 时 macOS 用通用 app 图标)。
-# 放一个 culling-poc/LabelGUI/AppIcon.icns 进来就会自动打包并写入 plist。
+# 图标：culling-poc/LabelGUI/AppIcon.icns（石墨圆角方块上一个琥珀色的光圈，Scripts/make_app_icon.py 用代码画的，
+# 优化分析 2026-11-18 OP-08）。有它就打进包、写 CFBundleIconFile；换成自己的图直接覆盖这个文件（或者照那个脚本开头的说明
+# 从一张 1024 的 PNG 生成）。没有它 macOS 用通用 app 图标 —— CI 的 Scripts/check_package.sh 会红。
 ICON_SRC="$POC/LabelGUI/AppIcon.icns"
 ICON_PLIST=""
 if [ -f "$ICON_SRC" ]; then
