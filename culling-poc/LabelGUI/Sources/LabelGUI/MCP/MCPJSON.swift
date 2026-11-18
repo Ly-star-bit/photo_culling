@@ -15,7 +15,8 @@ enum MCPJSON {
         return min(raw, 1_000_000)
     }()
 
-    /// 非有限数 → null，可选值的 nil → null，字典和数组逐层处理；其余原样（不合法的留给 isValidJSONObject 拦）。
+    /// 非有限数 → null，可选值的 nil → null，有限的小数换成最短写法（shortest），字典和数组逐层处理；其余原样
+    /// （不合法的留给 isValidJSONObject 拦）。
     static func sanitize(_ value: Any) -> Any {
         switch value {
         case let s as String:
@@ -23,8 +24,12 @@ enum MCPJSON {
         case let n as NSNumber:
             // Bool 也是 NSNumber（CFBoolean），原样；只有浮点数要查是不是有限。
             if CFGetTypeID(n) == CFBooleanGetTypeID() { return n }
-            if CFNumberIsFloatType(n as CFNumber) && !n.doubleValue.isFinite { return NSNull() }
-            return n
+            // 已经是十进制数（JSON 解析出来的长数、shortest 换过的）：原样写；NaN 照样换 null（不然 JSONSerialization 抛异常）
+            if let d = n as? NSDecimalNumber { return d.decimalValue.isNaN ? NSNull() : d }
+            guard CFNumberIsFloatType(n as CFNumber) else { return n }
+            let x = n.doubleValue
+            guard x.isFinite else { return NSNull() }
+            return shortest(x) ?? n
         case let d as [String: Any]:
             return d.mapValues { sanitize($0) }
         case let a as [Any]:
@@ -37,6 +42,38 @@ enum MCPJSON {
             }
             return value
         }
+    }
+
+    /// 小数的最短写法（优化分析 MC-04）：JSONSerialization 把 Double 按 17 位有效数字写（r3 过的 0.637 写成
+    /// 0.63700000000000001），列表、版式类的结果白多一到两成 token；NSDecimalNumber 它按十进制原样写。Swift 的 "\(x)" 就是
+    /// 能读回同一个 Double 的最短写法，按它的数字建 NSDecimalNumber（尾数 + 小数位数）：写出去的就是这串字，读回来是同一个 Double。
+    /// - 只换「-123.456」这种不到 16 个字的：r3 过的值都是；本来就 15–17 位有效数字的换了也省不了几个字，原样走（还省时间：
+    ///   换一个数多花约 0.7 µs，长的不换几乎不多花）。带指数的（"1e-05"）也不换。
+    /// - 不用 NSDecimalNumber(string:)：Decimal 的指数只到 ±127，"3.14e+300" 建出来是 NaN，JSONSerialization 碰到 NaN 抛
+    ///   ObjC 异常、进程直接退（文件头那条，app 端就是闪退）。这里尾数不到 10^15、小数位数不到 15，建不出 NaN。
+    /// - 也不拿 Decimal 的 doubleValue 回头去比：它自己会差一个 ulp（1.993 就比不上），写出去的字是对的。
+    /// 这个函数也管 CollageStore.editDigest、CollageLayoutSpec 的几处比较：同一个 Double 永远写成同一串字，比较结果不变；
+    /// 指纹的值和以前不同（只在同一个进程里比，不存盘）。
+    static func shortest(_ x: Double) -> NSNumber? {
+        // 整数值（0、1、70.0）JSONSerialization 本来就写成 "70"，不用换
+        if x.rounded(.towardZero) == x && abs(x) < 1e15 { return nil }
+        let text = "\(x)"
+        guard text.utf8.count < 16 else { return nil }
+        var mantissa: UInt64 = 0
+        var places: Int16 = 0
+        var dot = false
+        var negative = false
+        for c in text.utf8 {
+            switch c {
+            case UInt8(ascii: "-"): negative = true
+            case UInt8(ascii: "."): dot = true
+            case UInt8(ascii: "0")...UInt8(ascii: "9"):
+                mantissa = mantissa * 10 + UInt64(c - UInt8(ascii: "0"))
+                if dot { places += 1 }
+            default: return nil  // 指数（e）之类
+            }
+        }
+        return NSDecimalNumber(mantissa: mantissa, exponent: -places, isNegative: negative)
     }
 
     /// 编成一行（不带换行）。编不了（不是对象 / 数组、里面有不认识的类型）回 nil，不抛异常。

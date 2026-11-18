@@ -7,7 +7,7 @@ import Foundation
 ///    反向用例只拿假的 argv / ppid / tty 喂给纯函数，绝不真的起一个可能开界面的进程。
 ///    期望值不是拿同一段代码算的：每一行手写「argv[1] 算不算拼错」「有没有无头参数」，再按 §10.5 的规则推。
 ///    --json 时每一行判断打一行 JSON（mcp_smoke.py 用自己的一份规则再核一遍）。
-/// 2. MCPJSON：NaN / inf → null、不转义斜杠、键排序、编不了不抛异常、超长截断。
+/// 2. MCPJSON：NaN / inf → null、小数写最短（MC-04）、不转义斜杠、键排序、编不了不抛异常、超长截断。
 /// 3. MCPServerMain.mode：只认整个参数相等的 --mcp / --mcp-tools / --mcp-call。
 /// 4. 工具定义：30 个 / 3 个、顺序、schema 规则（§3.0）、enum 和代码里的名单一致、没有漏填的占位；
 ///    collage_get_state 的描述说了会顺带存一次 collage.json。
@@ -121,6 +121,32 @@ enum MCPSelfTest {
               "截断不对：\(cut.count) 字、留 \(kept) 条")
         let oneMore = MCPJSON.string(["rows": Array(rows.prefix(kept + 1)), "total": rows.count, "truncated": true])
         check(oneMore.count > 2_000, "截断留少了：多留一条也放得下")
+        // 小数写最短（优化分析 MC-04）：r3 过的值不再是 17 位；读回来逐个相等；1e300 这类不换（换成 Decimal 是 NaN、会抛异常）
+        var shortIn: [String: Any] = ["a": 0.637, "b": 1.993, "c": 70.845, "d": -12.375]
+        shortIn["e"] = 0.1
+        shortIn["f"] = 70.0
+        shortIn["g"] = [0.045, 0.0001]
+        let short = MCPJSON.string(shortIn)
+        check(short == #"{"a":0.637,"b":1.993,"c":70.845,"d":-12.375,"e":0.1,"f":70,"g":[0.045,0.0001]}"#, "小数没写成最短：\(short)")
+        // 不换的那些（带指数、本来就 16 位以上）照旧 17 位：读回来差不出一个 ulp 以上（JSONSerialization 自己读长数会差一点，
+        // 改之前也一样）；关键是不抛异常、个数对
+        let odd: [Double] = [Double.pi * 1e300, 1e21, 5e-324, 9.99e-5, 1.0 / 3, -0.0, 0.30000000000000004, 123456789.123,
+                             Double.greatestFiniteMagnitude, -1e-7]
+        let oddText = MCPJSON.string(["v": odd])
+        let oddBack = ((try? JSONSerialization.jsonObject(with: Data(oddText.utf8))) as? [String: Any])?["v"] as? [Any] ?? []
+        let oddClose = zip(odd, oddBack).allSatisfy { x, y in
+            guard let v = (y as? NSNumber)?.doubleValue else { return false }
+            return abs(v - x) <= abs(x) * 1e-15
+        }
+        check(oddBack.count == odd.count && oddClose, "怪数编出来读不回原值：\(oddText)")
+        var mismatch = 0
+        for i in 0..<2_000 {
+            let x = MCPReadModel.r3(Double(i) * 0.7071 - 300)
+            let t = MCPJSON.string(["v": x])
+            let digits = t.dropFirst(5).dropLast()
+            if Double(String(digits)) != x || digits.count > 9 { mismatch += 1 }
+        }
+        check(mismatch == 0, "r3 过的数有 \(mismatch) 个写得不对（读不回原值或者没变短）")
 
         // 3. 入口参数
         check(MCPServerMain.mode(["L", "--mcp"]) == .server, "--mcp")

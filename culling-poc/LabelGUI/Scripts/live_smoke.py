@@ -2527,6 +2527,12 @@ __attribute__((constructor)) static void init(void) {
             rows = (p_ or {}).get("rows") or []
             mine = {r["id"]: (r["verdict"], ",".join(r["reasons"]) or "-") for r in rows}
             check(mine == ref["per_photo"], f"cull_list_photos 每张的判决和理由 = --per-photo（{len(mine)} 张）")
+        # 优化分析 MC-04：小数写最短（r3 过的锐度、人脸质量不再是 0.63700000000000001 这种 17 位）
+        out_s, p_s, _ = mcp_full(env, "cull_list_photos", {"session": KEY, "limit": 100})
+        raw_s = (((out_s or {}).get("content") or [{}])[0]).get("text", "")
+        long_s = re.findall(r"\d\.\d{9,}", raw_s)
+        check(bool((p_s or {}).get("rows")) and not long_s,
+              f"cull_list_photos 的小数写最短：{len((p_s or {}).get('rows') or [])} 行里没有 9 位以上的小数（{long_s[:3]}）")
         # 翻页：limit=5，21 个 id 各出现一次；翻到一半在宿主里改判一张 → 下一页带 session_changed:true
         seen, cur, changed_at, n_pages = [], None, None, 0
         while n_pages < 10:
