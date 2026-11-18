@@ -2670,7 +2670,10 @@ struct BatchView: View {
     /// 格子里那些角标（名次、手、紫心、理由图标）是一串没名字的图，读屏软件念不出来，都并进这一句。
     nonisolated static func cellAccessibilityName(id: String, verdict: Verdict, reasons: [String], rank: Int?,
                                                   groupSize: Int, manual: Bool, client: Bool) -> String {
-        var parts: [String] = [id, reasons.isEmpty ? verdict.rawValue : verdict.rawValue + "（" + reasons.joined(separator: "、") + "）"]
+        // 拆开写：数组字面量里套三元和一串 + ，CI 的 Swift 6.1.2 类型检查会慢。
+        var what: String = verdict.rawValue
+        if !reasons.isEmpty { what += "（" + reasons.joined(separator: "、") + "）" }
+        var parts: [String] = [id, what]
         if let rank {
             parts.append(groupSize > 1 ? "本场第 \(rank) 名（共 \(groupSize) 张）" : "第 \(rank) 名")
         } else if groupSize > 1 {
@@ -4724,8 +4727,10 @@ enum FaceStripCache {
                        pixels: Double = 0, display: Int = 0) async -> NSImage? {
         guard bbox.count == 4 else { return nil }
         let widthOnPreview = (bbox[2] - bbox[0]) * Double(ImageLoader.previewMaxPixel)
-        // 预览上的脸够宽才用预览。大特写按要显示的像素算（放大超过 1.25 倍就糊了）。
-        if widthOnPreview >= max(previewFaceMinWidth, pixels * 0.8),
+        // 预览上的脸够宽才用预览。大特写另按要显示的像素算（放大超过 1.25 倍就糊了）；小的（连拍挑选每格、场内表情、
+        // 审片角上 76pt）照旧只看 110：不然预览上 110–150 像素宽的脸改去排 2048 的原图解码，一组十张 RAW 就是十次整幅解（NP5）。
+        let need: Double = pixels >= largeCropPixels ? pixels * 0.8 : 0
+        if widthOnPreview >= max(previewFaceMinWidth, need),
            let preview = ThumbCache.load(path: previewPath, maxPixel: ImageLoader.previewMaxPixel) {
             return preview
         }
@@ -4987,9 +4992,14 @@ struct PhotoInspector: View {
     private func describe() -> (busy: Bool, text: String) {
         let path = item?.decodePath
         let mask = focusMask.map { URL(fileURLWithPath: $0.key).deletingPathExtension().lastPathComponent } ?? "无"
-        let maskPending = focusPeak && path.map { zoom.image(for: $0) != nil } == true && focusMask?.key != path
-        return (!zoom.settled || maskPending, "看单张 \(currentID) · 判决 \(item?.verdict.rawValue ?? "-") · "
-                + zoom.summary(for: path) + " · 对焦高亮 \(focusPeak ? "开" : "关")（遮罩 \(mask)）")
+        // 拆开写（CI 的 Swift 6.1.2 类型检查碰到一长串 ?? / 三元 / + 会慢）。
+        var hasFull = false
+        if let path { hasFull = zoom.image(for: path) != nil }
+        let maskPending: Bool = focusPeak && hasFull && focusMask?.key != path
+        let verdict: String = item?.verdict.rawValue ?? "-"
+        let peak: String = focusPeak ? "开" : "关"
+        let text: String = "看单张 \(currentID) · 判决 \(verdict) · " + zoom.summary(for: path) + " · 对焦高亮 \(peak)（遮罩 \(mask)）"
+        return (!zoom.settled || maskPending, text)
     }
 
     // MARK: header
@@ -5811,9 +5821,15 @@ struct ReviewView: View {
         let item = current
         let path = item?.decodePath
         let mask = focusMask.map { URL(fileURLWithPath: $0.key).deletingPathExtension().lastPathComponent } ?? "无"
-        let maskPending = focusPeak && path.map { zoom.image(for: $0) != nil } == true && focusMask?.key != path
-        return (!zoom.settled || maskPending, "审片 \(focusedID ?? "无") · 判决 \(item?.verdict.rawValue ?? "-") · "
-                + zoom.summary(for: path) + " · 对焦高亮 \(focusPeak ? "开" : "关")（遮罩 \(mask)）")
+        // 拆开写（CI 的 Swift 6.1.2 类型检查碰到一长串 ?? / 三元 / + 会慢）。
+        var hasFull = false
+        if let path { hasFull = zoom.image(for: path) != nil }
+        let maskPending: Bool = focusPeak && hasFull && focusMask?.key != path
+        let shown: String = focusedID ?? "无"
+        let verdict: String = item?.verdict.rawValue ?? "-"
+        let peak: String = focusPeak ? "开" : "关"
+        let text: String = "审片 \(shown) · 判决 \(verdict) · " + zoom.summary(for: path) + " · 对焦高亮 \(peak)（遮罩 \(mask)）"
+        return (!zoom.settled || maskPending, text)
     }
 
     /// 判一张：按键和下面那排按钮走同一条路 —— 写判决、闪提示、判了（不是恢复）就自动下一张。

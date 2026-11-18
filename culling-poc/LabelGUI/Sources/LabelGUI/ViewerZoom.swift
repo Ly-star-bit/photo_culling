@@ -147,8 +147,12 @@ final class ViewerZoom: ObservableObject {
         } else {
             shown = "无"
         }
-        let state = on ? (path.map { loading($0) } == true ? "开（解码中）" : "开") : "关"
-        var text = "放大 \(state) · 原图 \(shown)"
+        var state: String = "关"
+        if on {
+            let decoding: Bool = path.map { loading($0) } ?? false
+            state = decoding ? "开（解码中）" : "开"
+        }
+        var text = "放大 " + state + " · 原图 " + shown
         if on, let next {
             let name = URL(fileURLWithPath: next).deletingPathExtension().lastPathComponent
             text += " · 下一张 \(name) 原图\(ahead?.path == next ? "已解好" : "没解")"

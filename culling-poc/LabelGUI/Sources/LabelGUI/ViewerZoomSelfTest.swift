@@ -85,12 +85,12 @@ enum ViewerZoomSelfTest {
         zoom.show(paths[6], next: paths[7])
         zoom.show(paths[7], next: nil)
         wait(zoom)
-        let skipped = FullResCache.cache.object(forKey: paths[5] as NSString) == nil
-            && FullResCache.cache.object(forKey: paths[6] as NSString) == nil
-        check(skipped && width(zoom.image(for: paths[7])) == 470, "连着翻过去的两张不解，只解停下的那张",
-              "P05 \(FullResCache.cache.object(forKey: paths[5] as NSString) != nil ? "解了" : "没解")，"
-              + "P06 \(FullResCache.cache.object(forKey: paths[6] as NSString) != nil ? "解了" : "没解")，"
-              + zoom.summary(for: paths[7]))
+        let p5Skipped: Bool = FullResCache.cache.object(forKey: paths[5] as NSString) == nil
+        let p6Skipped: Bool = FullResCache.cache.object(forKey: paths[6] as NSString) == nil
+        let p5: String = p5Skipped ? "没解" : "解了"
+        let p6: String = p6Skipped ? "没解" : "解了"
+        check(p5Skipped && p6Skipped && width(zoom.image(for: paths[7])) == 470, "连着翻过去的两张不解，只解停下的那张",
+              "P05 " + p5 + "，P06 " + p6 + "，" + zoom.summary(for: paths[7]))
 
         // 5. 换方向：预解的那张放掉
         zoom.show(paths[2], next: paths[3])
@@ -131,7 +131,7 @@ enum ViewerZoomSelfTest {
         let tall = ReviewView.closeupLayout(pane: CGSize(width: 1440, height: 730), aspect: 2.0 / 3, faces: 1)
         check(tall.inSideBar && tall.size == 260, "审片 1440 宽的竖片：一张脸放进右边黑边、260pt", "\(tall)")
         let four = ReviewView.closeupLayout(pane: CGSize(width: 1440, height: 730), aspect: 2.0 / 3, faces: 6)
-        let fourHeight: CGFloat = four.size * 4 + 3 * 6 + 12 + 10 + 16
+        let fourHeight: CGFloat = four.size * 4 + 56  // 三道 6pt 间距 + 底衬 12 + 上下边 26
         check(four.inSideBar && four.size >= 140 && fourHeight <= 730, "竖片六张脸（画四张）：按高度压、放得下",
               "\(four)，四张占高 \(fourHeight)")
         let wide = ReviewView.closeupLayout(pane: CGSize(width: 1440, height: 730), aspect: 1.5, faces: 1)
