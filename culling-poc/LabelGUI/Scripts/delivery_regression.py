@@ -18,7 +18,8 @@ Scripts/selftests.sh 里跑）；这里验它们在命令行出口上确实接�
 5. --watermark --config '{"stripGPS":true}' → 输出没有 GPS；false 的对照组 GPS 还在。
 6. --export-jpeg 失败多于 3 张（4 张原片挪开）：状态栏那句列前 3 张、写「等 4 张」（EC-08，以前只列 3 张不写「等」），
    全名单（按导出顺序、带原因）记进这一场 exports.json 那一条的 failed。
-7. --export-jpeg --ids（面板上「选中的」那档）只导给的那几张、按给的顺序（不按判决挑），做完在访达里选中导出文件夹；
+   6b. --watermark-batch 失败多于 3 张（4 张 chmod 000）：同一个写法「前 3 张 等 4 张」、按导出顺序（以前写「…」、按完成顺序）。
+7.--export-jpeg --ids（面板上「选中的」那档）只导给的那几张、按给的顺序（不按判决挑），做完在访达里选中导出文件夹；
    --scope client（「客户选中」那档）只导客户选中的、按网格顺序（UX-03）。
 8. --export-jpeg --save-preset 存导出预设（数据目录的 delivery/jpeg_presets.json，不导出）；--sets 一次导出几套（GP-09）：
    每套进 --dest 下以预设名命名的子文件夹（/ 去掉、只差大小写的另起 -2），每套按自己的尺寸 / 去 GPS，
@@ -485,6 +486,34 @@ def failure_list_section():
     check("在访达中显示" not in r.stdout, "有失败的那次不在访达里弹（和高 ISO、水印一样只在全部成功时弹，UX-04）")
 
 
+def watermark_failure_section():
+    print("6b. --watermark-batch 失败多于 3 张：列前 3 张、写「等 4 张」，按导出顺序")
+    d = os.path.join(WORK, "wm-fails")
+    os.makedirs(d)
+    names = [f"w{i}.jpg" for i in range(1, 6)]
+    for i, name in enumerate(names):
+        make_jpeg(os.path.join(d, name), seed=40 + i)
+    data = fresh_data("wm-fails")
+    os.makedirs(os.path.join(data, "watermark"))
+    json.dump({"options": {"nameTemplate": "{原名}", "size": "long:600"}},
+              open(os.path.join(data, "watermark", "state.json"), "w"), ensure_ascii=False)
+    gone = names[1:]    # 读不了的 4 张（chmod 000）；w1 照常导出
+    for n in gone:
+        os.chmod(os.path.join(d, n), 0)
+    try:
+        r = run(["--watermark-batch", d, os.path.join(WORK, "wm-fails-out"), "--exif"], data)
+    finally:
+        for n in gone:
+            os.chmod(os.path.join(d, n), stat.S_IRUSR | stat.S_IWUSR)
+    out = r.stdout + r.stderr
+    m = re.search(r"4 张导出失败 \(([^)]*)\)", out)
+    listed = m.group(1) if m else ""
+    check(r.returncode == 1 and "1 成功, 4 失败" in out and m is not None,
+          f"退出码 1、「1 成功, 4 失败」、「4 张导出失败 (…)」（{r.returncode}，{out.strip()[-200:]!r}）")
+    check(listed == "w2.jpg, w3.jpg, w4.jpg 等 4 张",
+          f"括号里是导出顺序的前 3 张、写「等 4 张」（{listed!r}）")
+
+
 # ---------------------------------------------------------------- 7. 导出 JPG 的范围
 
 def scope_section():
@@ -585,6 +614,7 @@ try:
     xmp_section()
     gps_section()
     failure_list_section()
+    watermark_failure_section()
     scope_section()
     sets_section()
     if not REAL_BEFORE:

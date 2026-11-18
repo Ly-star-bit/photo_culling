@@ -1,7 +1,8 @@
 import Foundation
 
 /// 交付出口的小规则，跑在 --delivery-selftest 里（CI 的「自检」步骤；端到端在 Scripts/delivery_regression.py）：
-/// - 失败名单（FailureNames，优化分析 EC-08）：不超过 3 个全列；多了列前 3 个、写「等 M 张」，单位跟着那一句。
+/// - 失败名单（FailureNames，优化分析 EC-08）：不超过 3 个全列；多了列前 3 个、写「等 M 张」，单位跟着那一句；
+///   压不到体积上限那句（DeliveryEncoder.overLimitNote）同一个写法。水印批量的失败名单在 delivery_regression.py 6b 段。
 /// - 交付对照里的失败全名单（DeliveryRecord.failed）：没有失败不写这个键，老记录（没有这个键）照样读得进来。
 /// - 导出 JPG 的范围（JPEGScopeChoice，优化分析 UX-03）：列哪几档、默认哪档、选中的被清掉了退回哪档。
 ///   按 id 真导出（--ids、--scope client）在 delivery_regression.py 第 7 段。
@@ -56,6 +57,8 @@ enum DeliveryScopeSelfTest {
             (FailureNames.list(four, unit: "个"), "M_0000, M_0002, M_0003 等 4 个", "XMP / 高 ISO 按「个」数"),
             (FailureNames.list(["a + b", "c + d", "e + f", "g + h"], unit: "组", separator: "、"), "a + b、c + d、e + f 等 4 组",
              "同名冲突那句：一组一组、顿号分开"),
+            (DeliveryEncoder.overLimitNote(four, maxMB: 5), "4 张压到最低质量 40 还是超过 5 MB（已按最低质量写出）：M_0000, M_0002, M_0003 等 4 张",
+             "压不到体积上限那句（导出 JPG / 水印共用）：同一个写法（以前写「…」）"),
         ]
         for (got, want, name) in cases {
             check(got == want, "失败名单：" + name, "「\(got)」，要「\(want)」")

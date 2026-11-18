@@ -599,7 +599,7 @@ final class WatermarkStore: ObservableObject {
             let workers = plan.workers
             AppLog.info("delivery", "水印导出 \(total) 张：并发 \(plan.label)")
             await MainActor.run { [weak self] in self?.lastConcurrency = plan.label }
-            var failures: [(name: String, reason: String)] = []
+            var failures: [(index: Int, name: String, reason: String)] = []
             var overLimit: [String] = []
             /// 写出去了的（含压不到上限的）在 jobs 里的位置：收尾时记交付对照。
             var written: [Int] = []
@@ -625,7 +625,7 @@ final class WatermarkStore: ObservableObject {
                 // 取消后不再排新的，但把已经在跑的等完再收尾：这样 done 就是
                 // 真实写出的张数，而不是 break 时丢掉在途结果的近似值。
                 for await (index, name, failure, over) in group {
-                    if let failure { failures.append((name, failure)) } else { written.append(index) }
+                    if let failure { failures.append((index, name, failure)) } else { written.append(index) }
                     if over { overLimit.append(name) }
                     done += 1
                     let doneNow = done
@@ -644,7 +644,12 @@ final class WatermarkStore: ObservableObject {
                     if !stop { addNext() }
                 }
             }
-            let failed = failures
+            // 按导出顺序（几路谁先失败不一定，状态栏那句每次一样）；全名单写进日志（EC-08，和导出 JPG 一样）。
+            let failed = failures.sorted { $0.index < $1.index }
+            if !failed.isEmpty {
+                let all = failed.map { "\($0.name)（\($0.reason)）" }
+                AppLog.warning("delivery", "水印导出失败 \(failed.count) 张 → \(outputDir.path)：" + all.joined(separator: ", "))
+            }
             let completed = done
             let overNames = overLimit
             let delivered = written.sorted().map { (file: jobs[$0].dest, source: jobs[$0].src) }
@@ -674,8 +679,9 @@ final class WatermarkStore: ObservableObject {
                     AppRuntime.revealInFinder([outputDir])
                 } else {
                     self.progressText = "导出结束: \(succeeded) 成功, \(failed.count) 失败"
-                    let names = failed.prefix(3).map(\.name).joined(separator: ", ")
-                    self.lastError = "\(failed.count) 张导出失败 (\(names)\(failed.count > 3 ? "…" : "")) — 首个原因: \(failed[0].reason)"
+                    // 前 3 张、多了写「等 N 张」（EC-08：以前写「…」，和导出 JPG / XMP / 高 ISO 两种写法混着）。
+                    let names = FailureNames.list(failed.map(\.name), unit: "张")
+                    self.lastError = "\(failed.count) 张导出失败 (\(names)) — 首个原因: \(failed[0].reason)"
                 }
                 if case .failed(let why)? = ledger { self.lastError = (self.lastError.map { $0 + "；" } ?? "") + why }
             }

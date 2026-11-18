@@ -357,9 +357,9 @@ enum DeliveryEncoder {
     /// `failed` 带给人看的原因（盘满了、没有权限、只读盘……，审查 D03：以前只有一个 failed，收尾只报张数）。
     enum Outcome: Sendable { case ok, overLimit, failed(String) }
 
-    /// 收尾时点名压不到上限的那几张（文件照最低质量写出去了）。
+    /// 收尾时点名压不到上限的那几张（文件照最低质量写出去了）。名单和失败名单同一个写法（前 3 张、多了写「等 N 张」，EC-08）。
     static func overLimitNote(_ names: [String], maxMB: Double) -> String {
-        let list = names.prefix(3).joined(separator: ", ") + (names.count > 3 ? "…" : "")
+        let list = FailureNames.list(names, unit: "张")
         return "\(names.count) 张压到最低质量 \(Int(floorQuality * 100)) 还是超过 \(String(format: "%g", maxMB)) MB"
             + "（已按最低质量写出）：\(list)"
     }
