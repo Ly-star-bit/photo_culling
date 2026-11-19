@@ -100,6 +100,8 @@ enum AnalysisEngine {
         /// 这一次写了预览图（previews/<id>.jpg）的照片，按文件夹顺序：分析了的（新的、改过的）和分析结果还能用、
         /// 只是预览图没了补回来的。原样复用的不在里面。界面只清这些照片的缓存（BatchStore.runAnalysis 收尾）。
         var previewsWritten: [String] = []
+        /// 改了名（或挪了子文件夹）、按文件大小 + 修改时间认回原来 id 的照片（PhotoIDMemory 第三遍，EC-02），按文件夹顺序。
+        var refound: [String] = []
     }
 
     /// Thread-safe cooperative cancellation flag shared with the UI.
@@ -129,7 +131,7 @@ enum AnalysisEngine {
         let oldManifest = oldManifestData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
         let oldLayer1Data = try? Data(contentsOf: dataDir.appendingPathComponent("layer1_results.json"))
         let oldLayer1 = oldLayer1Data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-        let previousIDs = ImageLoader.PreviousIDs(manifest: oldManifest, photoDir: photoDir)
+        let previousIDs = ImageLoader.PreviousIDs(manifest: oldManifest, layer1: oldLayer1, photoDir: photoDir)
         // 顶层列不出来（多半是系统隐私权限没给）就照实说、点名系统设置的开关，不再报「没有支持的图片文件」（审查 D03）。
         if let problem = ImageLoader.folderReadProblem(photoDir) {
             throw NSError(domain: "AnalysisEngine", code: 3, userInfo: [NSLocalizedDescriptionKey: problem])
@@ -318,7 +320,8 @@ enum AnalysisEngine {
         let written = Set(regeneratedIDs).union(completedIds)
         return Summary(analyzed: completed.count, reused: reusedFinal.count,
                        failed: failed, corrupt: corrupt, cancelled: cancelled,
-                       previewsWritten: orderedIds.filter(written.contains))
+                       previewsWritten: orderedIds.filter(written.contains),
+                       refound: photos.filter(\.refound).map(\.stem))
     }
 
     // MARK: - Per-photo

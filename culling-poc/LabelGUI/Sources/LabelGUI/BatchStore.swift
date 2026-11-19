@@ -885,8 +885,10 @@ final class BatchStore: ObservableObject {
     private func finishDerived(_ d: inout Derived, chapters: Set<Int>? = nil) {
         d.pendingTakes = d.takeRows.compactMap { d.takeStats[$0.take]?.pending == true ? $0.take : nil }
         d.pendingTakeCount = d.pendingTakes.count
-        d.manualOverrideCount = overrides.keys.filter { !acceptedIDs.contains($0) }.count
-        d.aiOverrideCount = aiOverrides.keys.filter { isManual($0) }.count
+        // 只数这一场现有的照片（审查 EC-02）：照片在访达里删了、改了名（认不回来的），改判还挂在旧 id 上，以前照样算进
+        // 「人工改判 N」，网格里却数不出这么多 ✋。键原样留着（照片放回来、认回来还对得上），只是不算。
+        d.manualOverrideCount = overrides.keys.filter { d.indexByID[$0] != nil && !acceptedIDs.contains($0) }.count
+        d.aiOverrideCount = aiOverrides.keys.filter { d.indexByID[$0] != nil && isManual($0) }.count
         // 下面几趟都是整场扫：拿一份本地的（每次读 @Published 的 items 都要过一遍包装），按下标就地读字段，不整张拷出来。
         let items = self.items
         var rejects: [Int] = [], usables: [Int] = [], picks: [Int] = []
@@ -3261,6 +3263,9 @@ final class BatchStore: ObservableObject {
                 guard let self else { return }
                 self.progressFraction = nil
                 self.provisionalBuffer = []
+                // 改了名认回原来 id 的（EC-02）：XMP 写在原片旁边，改名以后新名字旁边没有（访达改名不带 .xmp），
+                // 记下的「写过」不作数了 —— 拿掉，进「XMP 待更新」，点一下写到新名字旁边。取消了也照样认回、照样拿掉。
+                if !summary.refound.isEmpty { self.dropXMPMarks(Set(summary.refound)) }
                 self.loadResults()          // authoritative results (real burst groups)
                 self.applyThresholds()
                 if summary.cancelled {
@@ -3271,7 +3276,10 @@ final class BatchStore: ObservableObject {
                     self.progressText = summary.reused > 0
                         ? "完成: 分析 \(summary.analyzed) 张 · 复用 \(summary.reused) 张未变"
                         : "完成: \(summary.analyzed) 张"
-                        // 拆开拼：一长串插值 + 三元在 CI 的 Xcode 16 上类型检查会慢。
+                    if !summary.refound.isEmpty {
+                        self.progressText += " · 认回 \(summary.refound.count) 张改了名的（改判、客户选中都还在）"
+                    }
+                    // 拆开拼：一长串插值 + 三元在 CI 的 Xcode 16 上类型检查会慢。
                     func names(_ ids: [String]) -> String {
                         ids.prefix(5).joined(separator: ", ") + (ids.count > 5 ? "..." : "")
                     }

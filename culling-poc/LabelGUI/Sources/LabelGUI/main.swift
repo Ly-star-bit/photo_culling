@@ -138,6 +138,10 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--analyze"),
         if !summary.corrupt.isEmpty {
             print("Corrupt (\(summary.corrupt.count)): \(summary.corrupt.joined(separator: ", "))")
         }
+        // 改了名、按文件大小 + 修改时间认回原来 id 的（EC-02）：没有就不打。
+        if !summary.refound.isEmpty {
+            print("Refound by fingerprint (\(summary.refound.count)): \(summary.refound.joined(separator: ", "))")
+        }
         // 写了预览图的（分析了的 + 预览丢了补回来的）：界面分析收尾只清这些照片的缓存。全部复用 = 没有这一行。
         if !summary.previewsWritten.isEmpty {
             print("Previews written (\(summary.previewsWritten.count)): \(summary.previewsWritten.joined(separator: ", "))")

@@ -2,11 +2,12 @@ import Foundation
 
 /// 场次文件里不规矩的输入（优化分析 2026-11-18 edge 维度）：LabelGUI --session-input-selftest。
 /// 纯函数，不读写任何文件；要真文件、真分析的那一半（解不开 / 取消没轮到的照片计数、一行坏了重新分析补回、长文件名、
-/// thresholds.json 离谱值 --verdicts 不崩）在 Scripts/photo_id_regression.py 的 J、L、M 组。
+/// 改名认回 id、thresholds.json 离谱值 --verdicts 不崩）在 Scripts/photo_id_regression.py 的 J–M 组。
 /// - EC-04：thresholds.json 里四条线都夹到滑杆范围，1e19 / -1e30 / 缺键不崩、不越界；正常值一个不改。
 /// - EC-03：manifest / layer1 里一行字段类型不对、缺 id、根本不是对象：只丢这一行，其余照常；分析引擎复用前用的
 ///   decodablePhotoIDs / reusableIDs 和界面同一个解码器（没有锐度的 layer1 行不复用）。
 /// - EC-01：没进网格的照片 = photos 里没结果的 + photos 里解不开的 + photos_without_results（解不开、取消时没轮到），不重复。
+/// - EC-02：改名认回 id 的指纹比对只认一对一；按路径认得出来的（原件还在）不参与，副本拿不走原件的 id。
 /// - PP-05：拍摄时间的手写解析（CaptureTimeParser）和逐张 DateFormatter 逐个相同：十几个时区（夏令时南北半球、
 ///   半小时 / 45 分钟的时差和切换、零点切换、跳过一整天、1883 年地方时换标准时）全年每小时一个时刻、切换日每分钟一个，
 ///   外加格式不对的串。不存在的时刻（拨快那一小时）、重复的时刻（拨慢那一小时）按年月日时分秒直接拼出来测。
@@ -17,6 +18,7 @@ enum SessionInputSelfTest {
         thresholds(c)
         lossyRows(c)
         unparsed(c)
+        fingerprints(c)
         captureTimes(c)
         print(c.failed == 0 ? "场次输入自检通过：\(c.total) 条" : "!! 场次输入自检 \(c.failed) / \(c.total) 条失败")
         exit(c.failed == 0 ? 0 : 1)
@@ -152,6 +154,51 @@ enum SessionInputSelfTest {
                 "没进网格 = 没结果的 b + 解不开的 c 和没 id 的那行 + 解不开 / 没轮到的 bad、late（b 不重复）", "\(names)")
         let none = BatchStore.unparsedNames(manifest: m, loadedIDs: ["a", "b", "c", "bad", "late"])
         c.check(none == ["manifest 里第 2 个解不开的行"], "都进了网格：只剩认不出 id 的那行", "\(none)")
+    }
+
+    // MARK: - EC-02 改名认回 id
+
+    static func fingerprints(_ c: Checker) {
+        typealias Stamp = ImageLoader.FileStamp
+        let old: [String: Stamp] = [
+            "A": Stamp(size: 1000, mtime: 100), "B": Stamp(size: 2000, mtime: 200),
+            "T1": Stamp(size: 5000, mtime: 500), "T2": Stamp(size: 5000, mtime: 500.4),
+        ]
+        let new: [Stamp?] = [
+            Stamp(size: 1000, mtime: 100.9),   // 0 → A（差 0.9 秒，和分析复用同一个口径）
+            Stamp(size: 2000, mtime: 201),     // 1 → 差整 1 秒：不认
+            Stamp(size: 5000, mtime: 500.2),   // 2 → 对上 T1、T2 两个：不猜
+            nil,                               // 3 → stat 不出来
+            Stamp(size: 999, mtime: 100),      // 4 → 大小不一样
+            Stamp(size: 0, mtime: 0),          // 5 → 0 字节不认
+        ]
+        let got = ImageLoader.PreviousIDs.fingerprintMatches(new: new, old: old)
+        c.check(got == [0: "A"], "指纹：只认一对一、大小一样且修改时间差不到 1 秒的", "\(got)")
+        let twice = ImageLoader.PreviousIDs.fingerprintMatches(new: [Stamp(size: 1000, mtime: 100), Stamp(size: 1000, mtime: 100.5)],
+                                                               old: old)
+        c.check(twice.isEmpty, "两个新文件对上同一个旧 id（复制了两份、原件不在）：都不认", "\(twice)")
+
+        // 整个 match：A 改了名、B 原样在、B 的副本（同样的大小和时间）、C 删了、新来的 N。
+        let manifest: [String: Any] = ["photo_dir": "/shoot", "photos": [
+            ["id": "A", "raw_path": "/shoot/A.jpg"], ["id": "B", "raw_path": "/shoot/B.jpg"],
+            ["id": "C", "raw_path": "/shoot/C.jpg"],
+        ]]
+        let layer1: [String: Any] = ["results": [
+            ["id": "A", "src_size": 1000, "src_mtime": 100.0], ["id": "B", "src_size": 2000, "src_mtime": 200.0],
+            ["id": "C", "src_size": 3000, "src_mtime": 300.0],
+        ]]
+        let root = URL(fileURLWithPath: "/shoot")
+        let previous = ImageLoader.PreviousIDs(manifest: manifest, layer1: layer1, photoDir: root)
+        let files = ["新名A.jpg", "B.jpg", "B 副本.jpg", "N.jpg"].map { root.appendingPathComponent($0) }
+        let stamps: [String: Stamp] = ["新名A.jpg": Stamp(size: 1000, mtime: 100), "B.jpg": Stamp(size: 2000, mtime: 200),
+                                       "B 副本.jpg": Stamp(size: 2000, mtime: 200), "N.jpg": Stamp(size: 3001, mtime: 300)]
+        let kept = previous.match(pairs: files.map { [$0] }, extras: [], root: root) { stamps[$0.lastPathComponent] }
+        c.check(kept.pairs == ["A", "B", nil, nil] && kept.refound == ["A"],
+                "改了名的 A 认回、B 按路径、B 的副本不抢 B、大小差一个字节的 N 不认 C",
+                "\(kept.pairs.map { $0 ?? "-" }) refound \(kept.refound.sorted())")
+        let noLayer1 = ImageLoader.PreviousIDs(manifest: manifest, photoDir: root)
+        let plain = noLayer1.match(pairs: files.map { [$0] }, extras: [], root: root) { stamps[$0.lastPathComponent] }
+        c.check(plain.pairs == [nil, "B", nil, nil] && plain.refound.isEmpty, "没有 layer1（老结果没记大小）：只按路径认")
     }
 
     // MARK: - PP-05 拍摄时间的手写解析

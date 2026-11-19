@@ -85,6 +85,8 @@ enum ImageLoader {
         let stem: String
         let primaryURL: URL
         let decodeURL: URL
+        /// 上一次的 id 是按文件大小 + 修改时间认回来的（改了名、挪了子文件夹，PreviousIDs.match 第三遍，EC-02）。
+        var refound = false
     }
 
     /// 照片文件夹的顶层列得出来吗（审查 D03）：列得出来 = nil；列不出来 = 给人看的话 —— 被系统隐私权限（桌面、文稿、下载、
@@ -207,14 +209,14 @@ enum ImageLoader {
             let candidate = stemCounts[bareStem]! > 1 ? pathScopedID(keyURL) : bareStem
             let raw = rawByKey[key]
             let jpeg = jpegByKey[key]
-            return PhotoFile(
-                stem: kept.pairs[i] ?? claim(candidate),
-                primaryURL: raw ?? jpeg!,
-                decodeURL: jpeg ?? raw!
-            )
+            let stem = kept.pairs[i] ?? claim(candidate)
+            return PhotoFile(stem: stem, primaryURL: raw ?? jpeg!, decodeURL: jpeg ?? raw!,
+                             refound: kept.refound.contains(stem))
         }
         let extraFiles = extras.enumerated().map { j, url -> PhotoFile in
-            if let old = kept.extras[j] { return PhotoFile(stem: old, primaryURL: url, decodeURL: url) }
+            if let old = kept.extras[j] {
+                return PhotoFile(stem: old, primaryURL: url, decodeURL: url, refound: kept.refound.contains(old))
+            }
             let ext = url.pathExtension.lowercased()
             let bare = "\(url.deletingPathExtension().lastPathComponent)_\(ext)"
             // Only reach for the path-scoped form when the cheap one is taken —
