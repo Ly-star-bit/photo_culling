@@ -403,9 +403,6 @@ enum CollageStyleFineArt {
         return CollageCrop.aspectFit(aspect, in: inner)
     }
 
-    /// 单张：整个版心（完整显示）。
-    static func platePage(_ node: CollageNode) -> CollageNode { node }
-
     /// 呼吸页：小一号（版心的 72%），四周大留白。
     static let breathShare = 0.72
 

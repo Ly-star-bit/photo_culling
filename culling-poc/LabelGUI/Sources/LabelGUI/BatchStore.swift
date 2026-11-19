@@ -2808,11 +2808,6 @@ final class BatchStore: ObservableObject {
         }
     }
 
-    /// 一个「场」的全部成员 id，按当前网格顺序。
-    func takeMemberIDs(_ take: Int) -> [String] {
-        items.filter { $0.take == take }.map(\.id)
-    }
-
     /// 有 2 张以上的「场」数 / 这些场里的照片总数 —— 回答"这场拍摄到底有多少
     /// 重复要取舍"。滑杆旁边实时显示，用户拧间隔时能立刻看到分堆变化。
     var takeStats: (takes: Int, photos: Int) {

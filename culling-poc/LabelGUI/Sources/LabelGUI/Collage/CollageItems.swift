@@ -73,8 +73,10 @@ enum CollageItems {
         let pts = corners(item, canvas: canvas)
         let xs = pts.map(\.x)
         let ys = pts.map(\.y)
-        return CGRect(x: xs.min() ?? 0, y: ys.min() ?? 0,
-                      width: (xs.max() ?? 0) - (xs.min() ?? 0), height: (ys.max() ?? 0) - (ys.min() ?? 0))
+        // 先取成带类型的局部量：写在一句 CGRect(…) 里，CI 的 Swift 6.1.2 上类型检查两遍各 2 秒（Scripts/typecheck_612.sh）。
+        let minX: CGFloat = xs.min() ?? 0, maxX: CGFloat = xs.max() ?? 0
+        let minY: CGFloat = ys.min() ?? 0, maxY: CGFloat = ys.max() ?? 0
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
     // MARK: - 贴在相纸上

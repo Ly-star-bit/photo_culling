@@ -44,7 +44,24 @@ trap phase_report EXIT
 
 phase "swift build"
 cd "$POC/LabelGUI"
-swift build -c release
+# 编译分阶段用时和内存峰值（优化分析 2026-11-18 CH-03：CI 上编译 727 秒、本机 212 秒，时间花在哪个阶段、内存顶没顶到 runner 的
+# 7 GB，以前日志里都没有）。只加日志、不改构建：/usr/bin/time -l 包一层（只读 rusage，退出码就是 swift build 的，失败照样退出）；
+# CI 上（或者 BUILD_STATS=1）再让编译前端把各阶段计时写进 -stats-output-dir。这个参数只在 CI 上加：编译参数一变 SwiftPM 就整份
+# 重编，本机平时 swift build -c release 和 build_app.sh 交替着用会来回重编。编完 Scripts/swift_build_stats.py 打一行
+# 「编译分阶段：…」（CI 上另打一条 ::notice，「构建日志 → annotation」那一步抄进摘要页），读不到什么就照实说，不影响构建。
+STATS_DIR=""
+STATS_ARGS=()
+if [ "${GITHUB_ACTIONS:-}" = "true" ] || [ "${BUILD_STATS:-}" = "1" ]; then
+    STATS_DIR="$(mktemp -d)"
+    STATS_ARGS=(-Xswiftc -stats-output-dir -Xswiftc "$STATS_DIR")
+fi
+TIME_OUT="$(mktemp)"
+BUILD_RC=0
+# ${arr[@]+…}：macOS 自带的 bash 3.2 在 set -u 下展开空数组会报 unbound variable。
+/usr/bin/time -l -o "$TIME_OUT" swift build -c release ${STATS_ARGS[@]+"${STATS_ARGS[@]}"} || BUILD_RC=$?
+python3 -I "$POC/LabelGUI/Scripts/swift_build_stats.py" "$TIME_OUT" ${STATS_DIR:+"$STATS_DIR"} || true
+rm -rf "$TIME_OUT" ${STATS_DIR:+"$STATS_DIR"}
+[ "$BUILD_RC" -eq 0 ] || exit "$BUILD_RC"
 
 phase "装配 app bundle"
 # 从零装配:叠在旧 bundle 上会把已删掉的文件 (旧 Python 脚本、旧 plist 键) 一起带走。
@@ -63,8 +80,9 @@ BUILD_NUMBER="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || true)"
 if [ -z "$BUILD_NUMBER" ] || [ "$BUILD_NUMBER" -le 1 ]; then
     BUILD_NUMBER="$VERSION"
 fi
-# 图标:仓库目前没有 .icns (没有 CFBundleIconFile 时 macOS 用通用 app 图标)。
-# 放一个 culling-poc/LabelGUI/AppIcon.icns 进来就会自动打包并写入 plist。
+# 图标：culling-poc/LabelGUI/AppIcon.icns（石墨圆角方块上一个琥珀色的光圈，Scripts/make_app_icon.py 用代码画的，
+# 优化分析 2026-11-18 OP-08）。有它就打进包、写 CFBundleIconFile；换成自己的图直接覆盖这个文件（或者照那个脚本开头的说明
+# 从一张 1024 的 PNG 生成）。没有它 macOS 用通用 app 图标 —— CI 的 Scripts/check_package.sh 会红。
 ICON_SRC="$POC/LabelGUI/AppIcon.icns"
 ICON_PLIST=""
 if [ -f "$ICON_SRC" ]; then
@@ -73,11 +91,18 @@ if [ -f "$ICON_SRC" ]; then
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>"
 fi
+# CFBundleDevelopmentRegion = zh-Hans（优化分析 2026-11-18 OP-06）：包里没有任何 .lproj，不写开发语言时系统框架按英文取字 ——
+# 菜单栏是 File / Edit / View / Window / Help（「显示 › 主题」实际叫 View）、打开 / 存储面板的按钮、系统报错的原话都是英文。
+# 写上这一个键就够（不用建空的 zh-Hans.lproj）：app 只有这一种语言，英文系统上系统给的字也是中文，和 app 自己的字一致。
+# 日期写法跟的是地区（Locale.current），不跟这个键（macOS 26.5 上实测，四种包一样）。系统报错一变中文，诊断包的打码要认
+# 中文句式（Diagnostics.swift 的 Redactor，--diag-selftest C2c）。裸二进制没有 Info.plist，永远是英文：CI 用 DMG 里那份核对。
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh-Hans</string>
     <key>CFBundleExecutable</key>
     <string>LabelGUI</string>
     <key>CFBundleIdentifier</key>
@@ -113,14 +138,17 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 plutil -lint "$APP/Contents/Info.plist"
 cp .build/release/LabelGUI "$APP/Contents/MacOS/LabelGUI"
-# 去掉本地符号（-x：只删局部符号，全局符号和 Swift 运行时要的元数据都留着）：28 MB → 14 MB，DMG 小 4 MB 左右。
-# 要在 codesign 之前（签完再改二进制，签名就坏了）。崩溃报告里本地函数名会变成地址，这个工具没有收崩溃报告。
+# 去掉本地符号（-x：只删局部符号，Swift 运行时要的元数据留着）：28 MB → 14 MB，DMG 小 4 MB 左右。要在 codesign 之前
+# （签完再改二进制，签名就坏了）。这个可执行文件是整模块优化的，函数名全是局部符号，-x 等于把函数名全剥了（只剩 _main 等 3 个）。
+# 诊断包会带最近的崩溃报告（Diagnostics.swift 的 recentCrashReports），里面 app 自己的帧只剩地址：翻回函数名和行号要这一次构建的
+# .build/release/LabelGUI.dSYM（strip 不改 UUID，对得上）。CI 把它压成 zip 存下来、推 tag 时和 DMG 一起挂到 Release 上
+# （release.yml「符号文件 (dSYM)」，优化分析 2026-11-18 OP-04）；本机打的包自己留着 .build 就行。
 strip -x "$APP/Contents/MacOS/LabelGUI"
 
 # 精简 Python 运行时进 Resources:只放 layer2.py 及其 import (common.py、
 # prompts/),外加 runtime/ 里的精简 pyproject + 锁文件 —— 改名放到 layer2.py
 # 旁边,因为 app 在 App Support/runtime/culling-poc 里执行 `uv run python layer2.py`,
-# uv 只认脚本旁边的 pyproject。prepare.py/layer1.py/evaluate.py 是开发工具,
+# uv 只认脚本旁边的 pyproject。prepare.py/layer1.py 是开发工具(留作对照),
 # 不进 bundle。
 RES="$APP/Contents/Resources/culling-poc"
 mkdir -p "$RES"

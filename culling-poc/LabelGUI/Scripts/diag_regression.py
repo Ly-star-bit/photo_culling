@@ -5,11 +5,13 @@
 
 1. --diag-export：造一个数据目录（sessions.json 带客户名的场次文件夹和 bookmark、场次 JSON、客户备注、预览图、带路径的日志）
    和一个崩溃报告目录 → zip 里有说明 / 诊断信息 / 提示 / 场次概况 / 目录结构 / 光谱胶片的表 / 日志 / 最近的崩溃报告；没有图片文件、
-   没有客户原话、bookmark、场次文件夹名、家目录；日志里的路径换成了 <场次 N>。
+   没有客户原话、bookmark、场次文件夹名、家目录；日志里的路径换成了 <场次 N>；info.txt 有界面语言、本地模型（uv / Ollama /
+   模型在不在）两行。
 1b. --diag-export 的目标已经有东西（文件夹、带结尾斜杠、名字以 .zip 结尾的文件夹、数据目录本身、「.」、已有的文件）→ 退出码 2，
    一个字节都不动；不以 .zip 结尾的新名字也拒绝；还没有的 .zip 照常写。
 1c. --diag-export 打码不只认 sessions.json：认回过的场次（manifest 里是新位置、卷名也变了）、掉出最近场次的旧场次、
-   只在「」里出现过的没登记文件夹（隐私权限拦下）、日志里只出现过一次的路径、数据目录里带客户名的文件夹 → zip 里哪个文件
+   只在「」里出现过的没登记文件夹（隐私权限拦下）、日志里只出现过一次的路径、数据目录里带客户名的文件夹、中文系统报错里
+   “” 包着的文件夹名和盘名（打包的 app 拿到的是中文报错）→ zip 里哪个文件
    都没有客户名、盘名、家目录；照片文件名、盘的代号还看得出来。
 2. --analyze 一个 chmod 000 的照片文件夹 → 退出码 1，说「没有权限读这个文件夹」并点名「系统设置 › 隐私与安全性 › 文件与文件夹」，
    不说「没有支持的图片文件」；空文件夹的对照组照旧说「没有支持的图片文件」。
@@ -181,6 +183,14 @@ def section_export():
     tree = next((t for n, t in texts.items() if n.endswith("data-dir.txt")), "")
     check(f"sessions/{k1}/client_notes.json" in tree and f"sessions/{k1}/previews/  （1 个文件" in tree,
           "目录结构：文件只列名字和大小，预览目录只说个数")
+    # OP-10：界面语言（裸二进制没有 Info.plist，是 en；打包的 app 是 zh-Hans，CI 用 Scripts/check_package.sh 查 DMG 里那份）、
+    # 本地模型要的三样（只说在不在，不写家目录下的路径）
+    info = next((t for n, t in texts.items() if n.endswith("info.txt")), "")
+    lang = re.search(r"^界面语言：(\S+)（系统首选：", info, re.M)
+    model = re.search(r"^本地模型（可选）：(.*)$", info, re.M)
+    check(lang is not None and model is not None and "minicpm-v4.6" in model.group(1)
+          and "uv" in model.group(1) and "Ollama" in model.group(1),
+          f"info.txt 有界面语言、本地模型（uv / Ollama / 模型）两行：{info[:600]!r}")
 
 
 def tree_snapshot(root):
@@ -262,6 +272,9 @@ def section_export_unregistered():
         "导出到 /Volumes/客户王的移动硬盘/陈十二婚礼/精选：写入「DSCF0003.jpg」失败",
         "「冯十三挑错的」里找不到「周九婚礼-已交付」的照片",
         f"导出诊断信息 → {home}/Desktop/发给开发者/选片工具诊断-20261104-101010.zip（7 个文件）",
+        # 中文的系统报错（打包的 app 写了开发语言 zh-Hans，OP-06）：列不存在的文件夹也说「文件“X”」，盘名在「宗卷」前后
+        "分析失败: 未能打开文件“蒋先生婚礼精修”，因为你没有查看它的权限。",
+        "导出失败: 你不能保存文件“DSCF0004.JPG”，因为“韩老师的移动硬盘”是只读宗卷。",
     ]
     with open(os.path.join(data, "logs", "app.log"), "w") as f:
         for i, line in enumerate(lines):
@@ -273,7 +286,7 @@ def section_export_unregistered():
     with zipfile.ZipFile(out) as z:
         texts = {n: z.read(n).decode("utf-8", "replace") for n in z.namelist() if not n.endswith("/")}
     banned = ["周九", "已交付", "吴十订婚", "郑十一写真", "客户王的移动硬盘", "陈十二婚礼", "冯十三挑错", "锁着的第二机位",
-              "发给开发者", "导出草稿", "T7 1", "/Volumes/T7", home + "/"]
+              "发给开发者", "导出草稿", "T7 1", "/Volumes/T7", home + "/", "蒋先生婚礼精修", "韩老师的移动硬盘"]
     leaks = [f"{n.split('/', 1)[-1]}：{w}" for n, t in texts.items() for w in banned if w in t]
     check(not leaks, f"zip 里哪个文件都没有客户名、盘名、家目录：漏了 {leaks}")
     log = next((t for n, t in texts.items() if n.endswith("logs/app.log")), "")
@@ -281,6 +294,9 @@ def section_export_unregistered():
           and "选片工具诊断-20261104-101010.zip" in log,
           f"打码以后照片文件名、盘的位置（代号）、认回的场次代号还看得出来：{log[-500:]!r}")
     check("~/Desktop/" in log, "桌面这种系统文件夹照原样（只换家目录）")
+    check(re.search(r"未能打开文件“<文件夹 \d+>”，因为你没有查看它的权限", log) is not None
+          and re.search(r"你不能保存文件“DSCF0004\.JPG”，因为“<盘 \d+>”是只读宗卷", log) is not None,
+          "中文系统报错：文件“X”换成 <文件夹 N>、“X”是只读宗卷换成 <盘 N>，照片文件名留着")
     summary = next((t for n, t in texts.items() if n.endswith("sessions.txt")), "")
     check("「数据目录结构」里的 sessions/<key>" in summary and f"<场次 1>  key {k1}" in summary,
           f"自己的说明文字不误伤，认回的场次照样是 <场次 1>：{summary!r}")

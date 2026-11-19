@@ -1,0 +1,46 @@
+# 「帮助 › 反馈问题…」打开的就是这张表（优化分析 2026-11-18 OP-07）：app 拼的网址是
+#   issues/new?template=bug.yml&version=<版本号>&macos=<系统版本>（Diagnostics.feedbackURL）
+# GitHub 按字段的 id 预先填好，所以 version、macos 这两个 id 别改；改了要同时改 Diagnostics.swift，--diag-selftest 的 F 组会对。
+name: 报告问题
+description: 用着不对、崩了、结果和想的不一样 —— 附上诊断包（帮助 › 导出诊断信息…）
+title: "[问题] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        谢谢！先在 app 里点「帮助 › 导出诊断信息…」存一个 zip，拖到最下面那一格。
+        诊断包里没有照片、预览图、客户回复原文；路径里的用户名、盘名、文件夹名都换成了代号。发之前可以解开看一眼。
+  - type: input
+    id: version
+    attributes:
+      label: 选片工具的版本
+      description: 「选片工具 › 关于选片工具」里写的那个（从「帮助 › 反馈问题…」打开的已经填好了）
+      placeholder: "1.33.0"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS 版本
+      placeholder: "26.5"
+  - type: textarea
+    id: steps
+    attributes:
+      label: 做了什么
+      description: 一步一步：在哪一页、点了什么、按了什么键
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 看到了什么，本来应该是什么样
+      description: 状态栏的红字点一下能看全文、能复制，贴在这里
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 诊断包
+      description: 「帮助 › 导出诊断信息…」存下的 zip 直接拖进这一格；截图也可以拖进来
+      placeholder: 把 选片工具诊断-….zip 拖到这里

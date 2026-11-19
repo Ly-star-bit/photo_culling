@@ -70,7 +70,12 @@ enum CollageBookCoverSelfTest {
               "书脊 \(l.spine)px 包边 \(l.wrap)px 出血 \(l.bleed)px")
         let widthMM = Double(l.width) / canvas.dpi * 25.4
         let heightMM = Double(l.height) / canvas.dpi * 25.4
-        check(abs(widthMM - (300 * 2 + 12.5 + 2 * 18)) < 0.5 && abs(heightMM - (300 + 2 * 18)) < 0.5,
+        // 期望值先算成 Double：字面量混算写在一句 abs(…) && abs(…) 里，CI 的 Swift 6.1.2 类型检查要 2.6 秒；
+        // 「2 × 18」也单拿出来，留在一串字面量里还要 0.3–0.6 秒（Scripts/typecheck_612.sh）。
+        let wrapBleed: Double = 2 * 18
+        let wantW: Double = 300 * 2 + 12.5 + wrapBleed
+        let wantH: Double = 300 + wrapBleed
+        check(abs(widthMM - wantW) < 0.5 && abs(heightMM - wantH) < 0.5,
               "整张 = 两页 + 书脊 + 两边包边出血", String(format: "%.1f×%.1f mm", widthMM, heightMM))
         let ordered = l.back.maxX == l.spineRect.minX && l.spineRect.maxX == l.front.minX
             && l.back.minX == l.trim.minX && l.front.maxX == l.trim.maxX

@@ -189,7 +189,7 @@ struct ErrorHistoryPanel: View {
             Divider()
             HStack {
                 Button("导出诊断信息…") { Diagnostics.exportInteractively() }
-                    .help("把版本、系统、最近的日志和这些提示打成一个 zip（不含照片、预览图、客户回复原文），发给开发者")
+                    .help("把版本、系统、最近的日志和这些提示打成一个 zip（不含照片、预览图、客户回复原文）；「帮助 › 反馈问题…」打开 GitHub 上的问题表，把它拖进去")
                 Spacer()
                 Text("「帮助」菜单里也有").font(.caption).foregroundStyle(.tertiary)
             }

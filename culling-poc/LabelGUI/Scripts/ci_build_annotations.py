@@ -10,7 +10,8 @@
 - 编译警告（swift / clang 的「路径:行:列: warning: …」）去重以后转成 ::warning，链到文件和行；GitHub 每一步每种
   annotation 只收 10 条，多出来的只进摘要（摘要里全列，最多 200 条）。build_app.sh 自己的「!! …」（比如 Finder 排版失败、
   CI 常见）也算一条警告。
-- 各阶段用时 build_app.sh 退出时自己打 ::notice（「各阶段用时：…」那一行），这里抄进摘要。
+- 各阶段用时 build_app.sh 退出时自己打 ::notice（「各阶段用时：…」那一行），这里抄进摘要；编译里面的分阶段用时和内存峰值
+  （「编译分阶段：…」那一行，Scripts/swift_build_stats.py 打的）也抄进去。
 - SwiftPM 的缓存命中、源码没变时不重编，那一次就没有编译警告（不是没有警告）。
 退出码总是 0：构建红没红由构建那一步自己定，这一步只负责让人看得见。
 """
@@ -116,9 +117,13 @@ def main():
         lines = fh.readlines()
     warnings, errors = parse(lines, workspace)
     stages = next((ANSI.sub("", l).strip() for l in reversed(lines) if l.startswith("各阶段用时：")), None)
+    # build_app.sh 编完 swift build 那一下 Scripts/swift_build_stats.py 打的（CH-03：编译里各阶段、内存峰值）。
+    compile_stats = next((ANSI.sub("", l).strip() for l in reversed(lines) if l.startswith("编译分阶段：")), None)
 
     summary.append(f"- 结果：{'**失败**' if failed else '成功'}")
     summary.append(f"- {stages}" if stages else "- 各阶段用时：日志里没有（build_app.sh 没走到退出那一下？）")
+    if compile_stats:
+        summary.append(f"- {compile_stats}")
     summary.append(f"- 警告 {len(warnings)} 条（去重后；源码没变、SwiftPM 缓存命中时不重编，就没有编译警告）")
 
     shown = warnings if len(warnings) <= WARN_LIMIT else warnings[:WARN_LIMIT - 1]

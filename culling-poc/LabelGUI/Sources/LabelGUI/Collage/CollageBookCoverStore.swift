@@ -308,8 +308,10 @@ enum CollageBookCoverCLI {
             let tag = cell?.kind == .text ? "文字" : (cell?.photoID ?? (cell?.kind == .empty ? "留白" : "空"))
             return (p.isEmpty ? "r" : p.map(String.init).joined()) + "=" + tag
         }
-        out.append("封面那块：" + leaves.joined(separator: " ")
-                   + " · 封底：" + (cover.back.photoID ?? "无照片") + (cover.back.text.isEmpty ? "" : "「\(cover.back.text)」"))
+        // 封底那两段先取成 String：和前面拼成一句时 CI 的 Swift 6.1.2 上反复解了五遍、合计一秒多（Scripts/typecheck_612.sh）。
+        let backPhoto: String = cover.back.photoID ?? "无照片"
+        let backText: String = cover.back.text.isEmpty ? "" : "「\(cover.back.text)」"
+        out.append("封面那块：" + leaves.joined(separator: " ") + " · 封底：" + backPhoto + backText)
         return out
     }
 

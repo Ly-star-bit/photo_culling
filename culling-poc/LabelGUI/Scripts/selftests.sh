@@ -10,7 +10,8 @@
 #
 # 为什么每条都要临时数据目录：main.swift 在分派之前就建数据目录、往里写内置字体；ux / timeline / swiss 不查
 # LABELGUI_DATA_DIR，不设就会在 runner 上建出 ~/Library/Application Support/选片工具，MCP 冒烟里「不建目录」那一条就测不了
-# （所以 CI 里这一步也放在 MCP 冒烟后面，两层防护）。跑完再看一眼：跑之前没有真实数据目录的，跑完也不能有。
+# （CI 里这一步在 test-selftests 那台 runner 上，和 build 里的 MCP 冒烟不在同一台机器上，两层防护）。跑完再看一眼：跑之前没有
+# 真实数据目录的，跑完也不能有。
 #
 # 用法: Scripts/selftests.sh <LabelGUI 可执行文件>
 #       SELFTEST_SEEDS="1 2 3" Scripts/selftests.sh <bin>     # 换时间轴自检的 seed
@@ -39,7 +40,7 @@ run() {
     sock="$(mktemp -d "$WORK/sock.XXXXXX")"
     local start=$SECONDS
     # stdin 接 /dev/null：自检不该读终端；LABELGUI_NO_GUI=1：万一哪条走到了开界面那一句，最后一道闸直接退出。
-    # 每条自检单独限时（SELFTEST_TIMEOUT 秒，默认 300：CI 的虚拟机上 --quit-selftest 要 170 秒左右）：到点先用 sample 抓一份调用栈（卡在哪），再停掉、点名报出来，后面的照跑。
+    # 每条自检单独限时（SELFTEST_TIMEOUT 秒，默认 300：CI 的虚拟机上 --quit-selftest 以前要 170 秒左右，11 月中量是 37 秒，限时照旧留余量）：到点先用 sample 抓一份调用栈（卡在哪），再停掉、点名报出来，后面的照跑。
     # 以前整步 10 分钟一到被 CI 杀掉，看不出是哪一条。输出写文件（被停掉时 print 的缓冲本来就会丢，调用栈才是线索）。
     local log="$WORK/out.$$.txt" stack="$WORK/sample.$$.txt" timedout=0 pid
     # 3<&-：下面读清单的 fd 3 不传给自检进程（和以前一样，自检只拿到 stdin / stdout / stderr）。
@@ -182,7 +183,7 @@ else
         [ -e "$script" ] || continue
         name="$(basename "$script")"
         printf '%s\n' "$workflow_steps" | grep -qF -- "culling-poc/LabelGUI/Scripts/$name" \
-            || ci_bad+=("Scripts/$name 不在 release.yml 里：加一步（放在 MCP 冒烟后面）")
+            || ci_bad+=("Scripts/$name 不在 release.yml 里：在 test-bridge 或 test-selftests 里加一步（哪边短放哪边）")
     done
 fi
 if [ ${#ci_bad[@]} -gt 0 ]; then
@@ -194,6 +195,29 @@ if [ ${#ci_bad[@]} -gt 0 ]; then
 else
     passed=$((passed + 1))
     echo "PASS CI 登记: $(printf '%s\n' $flags | wc -l | tr -d ' ') 个 --*-selftest / --*-probe 和 Scripts/ 下的回归脚本都有人跑"
+fi
+
+# ---------------------------------------------------------------- README 跟没跟上（只提醒，不红）
+# README「从源码构建」那一段是命令行参数的说明书。优化分析 2026-11-18 OP-03：README 从 v1.28.0 起五版没动，六条自检和
+# --accuracy、--focus、--session-key 一个字没写。这里把登记表里的每条自检、AppRuntime.commandFlags 里的每个命令和 README 对一遍，
+# README 里一次都没出现的列出来（按整个参数认：写了 --accuracy-selftest 不算写了 --accuracy）。
+# 不红：README 的写法、合并的先后不该让自检红（同 mcp_smoke.py 对 README 工具表的提醒）；CI 上出一条 ::warning，发版前照着补。
+README_FILE="$ROOT/../../README.md"
+if [ -f "$README_FILE" ] && [ -f "$SRC_DIR/AppRuntime.swift" ] && [ -n "${flags:-}" ]; then
+    command_flags="$(awk '/static let commandFlags/ { on = 1 } on { print } on && /\]/ { exit }' "$SRC_DIR/AppRuntime.swift" \
+        | grep -oE -- '"--[a-z0-9-]+"' | tr -d '"' | sort -u)"
+    undocumented=()
+    for f in $flags $command_flags; do
+        grep -qE -- "${f}([^a-z0-9-]|\$)" "$README_FILE" || undocumented+=("$f")
+    done
+    if [ ${#undocumented[@]} -gt 0 ]; then
+        echo "提醒 README：这几个无头参数 README 里一次都没提到，在「从源码构建」里补一行（不红）：${undocumented[*]}"
+        if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+            echo "::warning title=README 没写到的无头参数::${undocumented[*]}（在 README「从源码构建」里补一行）"
+        fi
+    else
+        echo "README：$(printf '%s\n' $flags $command_flags | wc -l | tr -d ' ') 个无头参数（自检 + 命令）都写到了"
+    fi
 fi
 
 if [ $real_before -eq 0 ] && [ -e "$REAL_DATA" ]; then
