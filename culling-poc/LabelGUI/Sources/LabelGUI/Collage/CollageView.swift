@@ -295,10 +295,13 @@ struct CollageView: View {
 
     /// 三条（方案栏、跨页条、备选条）一起铺栏色：以前没有底，露的是窗口的系统灰（五套深色都是 #323232，纯黑主题里黑画布和
     /// 黑状态栏中间一整条灰带；胡桃 / 午夜到这里断了色），分隔线也是系统的 #464646（TB-04）。
+    /// 方案栏、备选条不订阅 store：这里（拼图页本来就订阅整个 store）现算它们要的那几样传进去、按值比（.equatable()），
+    /// 拖缝、拖滑杆、裁切里拖照片这些不改它们的，两条都跳过不重算（优化分析 2026-11-18 PI-07）。
     private var bottomStrips: some View {
         VStack(spacing: 0) {
             // 方案栏常驻（NU6）：以前存过才出现，没存过的人不知道有；空的时候是矮矮一条「+ 存成方案（⇧⌘S）」。
             CollageVariantStrip(store: store, thumbs: store.thumbs)
+                .equatable()
                 .collageSpot(.variants, store.nav)
             ThemedDivider()
             // 相册的跨页条；单张拼图有好几页（一键成套的一期杂志、小红书轮播组图）时也显示（页条）。
@@ -307,6 +310,7 @@ struct CollageView: View {
                 CollagePageStripSlot(store: store)
             }
             CollageAlternativeStrip(store: store)
+                .equatable()
         }
         .background(AppPalette.bar)
     }
@@ -956,15 +960,51 @@ struct CollageTrayItem: View {
 
 // MARK: - 备选版式条
 
-struct CollageAlternativeStrip: View {
-    @ObservedObject var store: CollageStore
+/// 不订阅 store（PI-07）：CollageView 每次刷新建一个新的，init 里现取这一条要的几样（Shown），按值比 —— 只有备选、
+/// 选中的那一版、能不能 ← → /「换一批」、提示那一句变了才重算。以前拖缝、拖滑杆每一下都跟着整条重算。
+struct CollageAlternativeStrip: View, Equatable {
+    /// 只用来调方法（不订阅：这一条显示的东西都在 shown 里）。
+    let store: CollageStore
+    /// 备选缩略图（== 不比它，比 shown.thumbIDs：NSImage 不是 Sendable）。
+    let thumbs: [NSImage]
+    let shown: Shown
 
-    /// 婚礼 fine-art 的相册跨页按编排出版式：没有 ← → 和「换一批」（不摆永远灰着的按钮）。
-    private var fineArtAlbum: Bool { store.isAlbum && store.project.albumTheme == .fineArt }
+    /// 这一条显示要用的、从 store 来的全部东西。往 body 里加读 store 的地方，要加进这里（不然不跟着变）。
+    struct Shown: Equatable {
+        /// 每张缩略图是不是同一张（旧的这一条还拿着旧图，比的时候地址不会被新图复用）。
+        var thumbIDs: [ObjectIdentifier]
+        var selected: Int
+        /// 有没有备选版式（← 能不能点；和缩略图不一定一样多：新一批刚出来、缩略图还在渲）。
+        var hasAlternatives: Bool
+        var hasRoot: Bool
+        var contactSheet: Bool
+        var solving: Bool
+        var album: Bool
+        /// 婚礼 fine-art 的相册跨页按编排出版式：没有 ← → 和「换一批」（不摆永远灰着的按钮）。
+        var fineArtAlbum: Bool
+        /// 右键「连画布一起清」的说法（见 CollageAlternativeStrip.clearCanvasLabel(store)）。
+        var clearCanvasLabel: String?
+    }
+
+    init(store: CollageStore) {
+        self.store = store
+        thumbs = store.alternativeThumbs
+        shown = Shown(thumbIDs: thumbs.map(ObjectIdentifier.init), selected: store.alternativeIndex,
+                      hasAlternatives: !store.alternatives.isEmpty, hasRoot: store.root != nil,
+                      contactSheet: store.isContactSheet, solving: store.isSolving, album: store.isAlbum,
+                      fineArtAlbum: store.isAlbum && store.project.albumTheme == .fineArt,
+                      clearCanvasLabel: Self.clearCanvasLabel(store))
+    }
+
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.store === b.store && a.shown == b.shown
+    }
+
+    private var fineArtAlbum: Bool { shown.fineArtAlbum }
 
     var body: some View {
         let _ = CollagePerf.body("备选条")
-        if store.alternativeThumbs.isEmpty {
+        if thumbs.isEmpty {
             // 没有备选时收成一行（同没存过方案的方案栏）：以前照样占 78pt，只放一句提示 —— 相册里大多数时候是空的。
             HStack(spacing: 8) {
                 Text("备选").font(.caption).foregroundStyle(AppPalette.secondary)
@@ -981,8 +1021,8 @@ struct CollageAlternativeStrip: View {
         } else {
             HStack(spacing: 8) {
                 controls
-                CollageAlternativeThumbs(store: store, thumbs: store.alternativeThumbs, selected: store.alternativeIndex,
-                                         clearCanvasLabel: clearCanvasLabel)
+                CollageAlternativeThumbs(store: store, thumbs: thumbs, selected: shown.selected,
+                                         clearCanvasLabel: shown.clearCanvasLabel)
                     .equatable()
                 Button {
                     store.clearAlternativeStrip()
@@ -1000,10 +1040,10 @@ struct CollageAlternativeStrip: View {
     private var arrows: some View {
         HStack(spacing: 4) {
             Button { store.previousAlternative() } label: { Image(systemName: "chevron.left") }
-                .disabled(store.alternatives.isEmpty)
+                .disabled(!shown.hasAlternatives)
                 .help("上一个备选 (←)")
             Button { store.nextAlternative() } label: { Image(systemName: "chevron.right") }
-                .disabled(store.root == nil || store.isContactSheet)
+                .disabled(!shown.hasRoot || shown.contactSheet)
                 .help("下一个备选 (→)")
         }
         .controlSize(.small)
@@ -1012,9 +1052,9 @@ struct CollageAlternativeStrip: View {
     private var regenerateButton: some View {
         Button("换一批") { store.regenerate() }
             .controlSize(.small)
-            .disabled(store.root == nil || store.isSolving || store.isContactSheet)
-            .help(store.isContactSheet ? "印样按拍摄先后排，没有备选：改规格、每条帧数在右栏「格式 › 印样」里"
-                  : store.isAlbum ? "当前跨页重新求解；锁定的格子不动" : "同样的照片重新求解一批备选；锁定的格子不动")
+            .disabled(!shown.hasRoot || shown.solving || shown.contactSheet)
+            .help(shown.contactSheet ? "印样按拍摄先后排，没有备选：改规格、每条帧数在右栏「格式 › 印样」里"
+                  : shown.album ? "当前跨页重新求解；锁定的格子不动" : "同样的照片重新求解一批备选；锁定的格子不动")
     }
 
     /// 「备选」+ ← → +「换一批」：以前在顶栏，挪到管备选的这一条最左边。印样按拍摄先后排，没有备选版式
@@ -1032,15 +1072,15 @@ struct CollageAlternativeStrip: View {
 
     @ViewBuilder
     private var emptyHint: some View {
-        if store.root == nil {
-            Text(store.isAlbum ? "点「自动编排」把托盘编成跨页；每个跨页「换一批」出备选版式，← → 切换"
+        if !shown.hasRoot {
+            Text(shown.album ? "点「自动编排」把托盘编成跨页；每个跨页「换一批」出备选版式，← → 切换"
                  : "自动排版后这里是几十个备选版式，← → 切换")
                 .collageHint()
         } else if fineArtAlbum {
             // 婚礼 fine-art 编排的相册没有「换一批」：别叫人去点它。
             Text("婚礼相册的跨页按编排出版式，没有备选：想重排点「自动编排」")
                 .collageHint()
-        } else if store.isContactSheet {
+        } else if shown.contactSheet {
             CollageJumpText(store: store, lead: "印样按拍摄先后排，没有备选：改规格、每条帧数在右栏", spot: .contact, tail: "里")
         } else {
             Text("点左边的「换一批」或 → 出一批备选版式")
@@ -1050,7 +1090,7 @@ struct CollageAlternativeStrip: View {
 
     /// 右键「连画布一起清」的说法：单张拼图只有一页 = 清空画布（照片还在托盘里）；几页的 / 相册 = 删掉这一页 / 跨页。
     /// 编辑封面时 = nil（不出这一项）：备选是封面的，删的却是封面底下那个看不见的跨页（审查发现）。
-    private var clearCanvasLabel: String? {
+    private static func clearCanvasLabel(_ store: CollageStore) -> String? {
         if store.isAlbum { return store.editingCover ? nil : "删除这个跨页" }
         return store.project.pages.count > 1 ? "删除这一页" : "清空画布（照片还在托盘里）"
     }
@@ -1132,10 +1172,45 @@ private struct CollageAlternativeThumbs: View, Equatable {
 /// 方案栏：存下来的几版（CollageVariant）。点缩略图切过去（一步撤销），右键覆盖 / 改名 / 删除（这三样不进撤销：
 /// 覆盖、删除先问一句），最后一格「+」存现在这一版。和现在一模一样的描蓝边；最近存的 / 切到的那个之后又改过，
 /// 名字后面标「改过」（右键「用现在的样子覆盖它」）。一直显示：没存过时是一条「+ 存成方案（⇧⌘S）」。
-struct CollageVariantStrip: View {
-    @ObservedObject var store: CollageStore
+/// 不订阅 store（PI-07）：CollageView 每次刷新建一个新的，init 里现取这一条要的几样（Shown），按值比 —— 拖缝、拖滑杆
+/// 只有「和哪个方案一样」「改过」变了的那一下重算（拖第一下蓝边去掉、标上「改过」），之后每下都跳过。
+struct CollageVariantStrip: View, Equatable {
+    /// 只用来调方法（不订阅：这一条显示的东西都在 shown 里）。
+    let store: CollageStore
     /// 方案缩略图在 store.thumbs 里。
     @ObservedObject var thumbs: CollageThumbs
+    let shown: Shown
+
+    /// 方案栏上一张卡片要的（不把方案整份工程放进来：每个方案带着一整份工程，比起来贵）。
+    struct Card: Equatable, Identifiable {
+        let id: String
+        let name: String
+        let pages: Int
+    }
+
+    /// 这一条显示要用的、从 store 来的全部东西。往 body 里加读 store 的地方，要加进这里（不然不跟着变）。
+    struct Shown: Equatable {
+        var cards: [Card]
+        /// 和现在一模一样的那几个（描蓝边；不空时「+」和「覆盖」灰着）。
+        var current: Set<String>
+        /// 最近存成 / 切到的那个、之后又改过了（名字后面标「改过」）。
+        var modifiedID: String?
+        /// 有页、不在排版：能存成方案 / 覆盖。
+        var canSave: Bool
+    }
+
+    init(store: CollageStore, thumbs: CollageThumbs) {
+        self.store = store
+        self.thumbs = thumbs
+        shown = Shown(cards: store.variants.map { Card(id: $0.id, name: $0.name, pages: $0.project.pages.count) },
+                      current: store.currentVariantIDs,
+                      modifiedID: store.activeVariantModified ? store.activeVariantID : nil,
+                      canSave: !store.project.pages.isEmpty && !store.isSolving)
+    }
+
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.store === b.store && a.shown == b.shown
+    }
 
     /// 右键菜单点了以后等确认的那一样（覆盖、删除先问；改名弹输入框）。
     private enum Pending: Equatable {
@@ -1148,7 +1223,7 @@ struct CollageVariantStrip: View {
 
     var body: some View {
         let _ = CollagePerf.body("方案条")
-        if store.variants.isEmpty {
+        if shown.cards.isEmpty {
             emptyStrip
         } else {
             strip
@@ -1166,7 +1241,7 @@ struct CollageVariantStrip: View {
                 Label("存成方案（⇧⌘S）", systemImage: "plus")
             }
             .controlSize(.small)
-            .disabled(store.project.pages.isEmpty || store.isSolving)
+            .disabled(!shown.canSave)
             .help("把现在的拼图存成方案：画布、样式、文字、所有页、水印一起存，点缩略图随时切回来")
             Text("存好几个方案并排比着挑，点一下切过去（⌘Z 回到切之前）")
                 .collageHint()
@@ -1178,14 +1253,14 @@ struct CollageVariantStrip: View {
     }
 
     private var strip: some View {
-        let current = store.currentVariantIDs
-        let modifiedID = store.activeVariantModified ? store.activeVariantID : nil
+        let current = shown.current
+        let modifiedID = shown.modifiedID
         return HStack(spacing: 8) {
             Text("方案").font(.caption).foregroundStyle(AppPalette.secondary)
                 .frame(width: 32)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    ForEach(store.variants) { v in
+                    ForEach(shown.cards) { v in
                         card(v, current: current.contains(v.id), modified: v.id == modifiedID, anyCurrent: !current.isEmpty)
                     }
                     Button {
@@ -1196,7 +1271,7 @@ struct CollageVariantStrip: View {
                             .background(Color.gray.opacity(0.15), in: RoundedRectangle(cornerRadius: 4))
                     }
                     .buttonStyle(.plain)
-                    .disabled(!current.isEmpty || store.project.pages.isEmpty || store.isSolving)
+                    .disabled(!current.isEmpty || !shown.canSave)
                     .help(!current.isEmpty ? "现在的拼图已经存过了" : "把现在的拼图存成方案（⇧⌘S）")
                 }
                 .padding(.vertical, 6)
@@ -1228,7 +1303,7 @@ struct CollageVariantStrip: View {
     }
 
     private func name(_ id: String) -> String {
-        store.variants.first { $0.id == id }?.name ?? ""
+        shown.cards.first { $0.id == id }?.name ?? ""
     }
 
     private var confirmTitle: String {
@@ -1248,7 +1323,7 @@ struct CollageVariantStrip: View {
         Binding(get: { pending.map(match) ?? false }, set: { if !$0 { pending = nil } })
     }
 
-    private func card(_ v: CollageVariant, current: Bool, modified: Bool, anyCurrent: Bool) -> some View {
+    private func card(_ v: Card, current: Bool, modified: Bool, anyCurrent: Bool) -> some View {
         Button {
             store.openVariant(v.id)
         } label: {
@@ -1277,7 +1352,7 @@ struct CollageVariantStrip: View {
             Button("切到这个方案") { store.openVariant(v.id) }.disabled(current)
             // 现在这一版已经存成某个方案了就不让覆盖（不然两个方案一模一样）
             Button("用现在的拼图覆盖它…") { pending = .overwrite(v.id) }
-                .disabled(anyCurrent || store.project.pages.isEmpty || store.isSolving)
+                .disabled(anyCurrent || !shown.canSave)
             Button("改名…") {
                 draft = v.name
                 pending = .rename(v.id)
@@ -1285,7 +1360,7 @@ struct CollageVariantStrip: View {
             Divider()
             Button("删除…", role: .destructive) { pending = .delete(v.id) }
         }
-        .help("\(v.name) · \(v.project.pages.count) 页 · 点一下切到这个方案（⌘Z 回来）；右键覆盖、改名、删除")
+        .help("\(v.name) · \(v.pages) 页 · 点一下切到这个方案（⌘Z 回来）；右键覆盖、改名、删除")
     }
 }
 

@@ -776,8 +776,10 @@ enum CollageCLI {
 /// 从 0 起）[--overview-size 140]（概览缩略图宽 pt，110–260）；相册时截完打印「相册界面」一行，选中照片格时再打印「换一张」的候选
 /// [--tray-filter all|unused|used] [--tray-select ID,ID]（托盘的筛选、多选）[--clear-tray]（清空托盘和版式再截）
 /// [--tray-click ID[+cmd][+shift],…]（界面渲出来以后再在托盘里点：走选中变了以后的刷新，和一开始就选好的截图应该一样）
-/// [--perf place|gutter|slider|exposure|title|all|trayclick|darkroom]（截完图接着跑这个场景，打印每个视图 body 重算几次、
-/// store / 预览 / 缩略图各发了几次 objectWillChange、出了几张预览：CollagePerf；darkroom 要和 --darkroom 一起给，
+/// [--perf place|gutter|variant|variants|bigtray|pan|slider|exposure|title|all|trayclick|darkroom]（截完图接着跑这个场景，
+/// 打印每个视图 body 重算几次、store / 预览 / 缩略图各发了几次 objectWillChange、出了几张预览，拖的那几个另报主线程 / 进程的
+/// 指令数：CollagePerf；variant = 先存一个方案再拖缝，variants = 方案栏 8 个再拖缝，bigtray = 托盘 315 张再拖缝，
+/// pan = 进裁切在格子里拖照片；darkroom 要和 --darkroom 一起给，
 /// 报暗房每一类渲染的次数和耗时、松手到全部渲完：CollagePerfDarkroom）
 /// 截图前先改工程（都可选）：--relayout [--count 6]（托盘重新自动排版，几张；工程里还没有版式时也排）、
 /// --layout grid|scatter、--template <模板名>、--title 标题、--subtitle 副标题、--style <样式预设 key>、--wm photos:/sig.png[,page:…]（签名水印）、--look <色调>、
