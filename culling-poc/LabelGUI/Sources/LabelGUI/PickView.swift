@@ -817,7 +817,7 @@ private struct PickTile: View {
         switch state {
         case .pick: return ("★ 留", Verdict.pick.color.opacity(0.9), AppPalette.onVerdict)
         case .usable: return ("留·可用", Verdict.usable.color.opacity(0.9), AppPalette.onVerdict)
-        // 废：红底白字（以前是黑底上一个小红字，深色照片上几乎看不见）。
+        // 废：红底，字用 onVerdict（深色主题白字，灰卡的红提亮了配深色字；以前是黑底上一个小红字，深色照片上几乎看不见）。
         case .reject: return ("✕ 废", Verdict.reject.color.opacity(0.85), AppPalette.onVerdict)
         }
     }
