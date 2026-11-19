@@ -806,6 +806,18 @@ else:
 ov_desc = by_name["cull_session_overview"]["description"]
 check("xmp.unknown" in ov_desc and "xmp_state_unknown" in ov_desc and "null" in ov_desc,
       "cull_session_overview 的说明写了 XMP 记录读不进来时是 null、xmp.unknown、xmp_state_unknown")
+# 优化分析 MC-02：客户备注读得回来、能按客户选中 / 还要人取舍的场筛（schema 里有，说明里写了）
+lp_def, gp_def, lg_def = by_name["cull_list_photos"], by_name["cull_get_photos"], by_name["cull_list_groups"]
+check((lp_def["inputSchema"]["properties"].get("client_pick") or {}).get("type") == "boolean"
+      and (lg_def["inputSchema"]["properties"].get("pending_only") or {}).get("type") == "boolean"
+      and "client_note" in lp_def["description"] and "client_note" in gp_def["description"] and "pending_only" in lg_def["description"],
+      "cull_list_photos 有 client_pick、cull_list_groups 有 pending_only（布尔），两个读照片的说明写了 client_note")
+# 优化分析 MC-01：instructions 说了托盘是什么、空着怎么进（以前一次都没提「托盘」，空托盘时几个报错互相指）
+check("托盘空着" in INSTRUCTIONS and "collage_auto_layout 的 photos" in INSTRUCTIONS
+      and "empty_slots" in by_name["collage_apply_template"]["description"],
+      "instructions 说了托盘空着用 collage_auto_layout 的 photos 进托盘；collage_apply_template 的说明写了 empty_slots")
+# 优化分析 MC-03：整本婚礼相册对 AI 不问就重排（相册设计定的），说明里写明先锁住要保留的跨页
+check("collage_pages action=lock" in by_name["collage_run_kit"]["description"], "collage_run_kit 的说明写了重排前先锁住要保留的跨页")
 
 # 错误码（§1.2）
 s.send_raw(b'{"jsonrpc":"2.0","id":10,"method":\n')

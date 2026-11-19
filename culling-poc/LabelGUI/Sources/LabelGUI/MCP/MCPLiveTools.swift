@@ -147,9 +147,11 @@ enum MCPLiveTools {
             let inline = call.arguments["inline"] as? Bool ?? true
             params["budget_kb"] = inline ? MCPConfig.inlineKB : 4 * MCPConfig.perImageKB
         case "collage.state":
-            for k in ["include_preview", "max_edge", "candidates_for", "candidates_limit"] {
+            for k in ["include_preview", "max_edge", "candidates_for", "candidates_limit", "include", "tray_offset"] {
                 if let v = call.arguments[k] { params[k] = v }
             }
+            // 文字上限（优化分析 MC-05）：超了 app 从 tray_photos 尾部截，同 cull.read
+            params["text_max"] = MCPJSON.textMax
         case "collage.preflight":
             for k in ["texts", "pages"] { if let v = call.arguments[k] { params[k] = v } }
             params["text_max"] = MCPJSON.textMax

@@ -102,6 +102,14 @@ extension MCPSelfTest {
             ("collage_get_state", ["candidates_limit": 5], false),
             ("collage_get_state", ["candidates_for": "", "candidates_limit": 5], false),
             ("collage_get_state", ["candidates_for": "a", "candidates_limit": 31], false),
+            // 优化分析 MC-05 + 复核补 2：只要哪几块、托盘从第几张起
+            ("collage_get_state", ["include": ["tray_photos"], "tray_offset": 200], true),
+            ("collage_get_state", ["include": [], "include_preview": false], true),
+            ("collage_get_state", ["include": ["album", "variants", "cells", "layout", "tray_photos"]], true),
+            ("collage_get_state", ["include": ["tray"]], false),
+            ("collage_get_state", ["include": "album"], false),
+            ("collage_get_state", ["tray_offset": -1], false),
+            ("collage_get_state", ["tray_offset": "200"], false),
             ("collage_export", ["session": k, "pages": "1-3, 7"], true),
             ("collage_export", ["session": k, "proof": true, "name": "看版", "variant": "1a2b3c4d"], true),
             ("collage_export", ["session": k, "proof": true, "pages": "1"], false),
@@ -149,8 +157,38 @@ extension MCPSelfTest {
               "collage_cover、collage_replace_photo 的说明写了编辑封面时作用在哪")
         check(props("collage_export").isSuperset(of: ["pages", "proof"]), "collage_export 有 pages、proof")
         check(props("collage_get_state").isSuperset(of: ["candidates_for", "candidates_limit"]), "collage_get_state 有 candidates_for")
+        // 优化分析 MC-05：include 的取值和 app 认的一致；说明里写了 tray_offset 怎么翻、chapters 封顶以后去哪翻
+        let stateSchema = def("collage_get_state")["inputSchema"] as? [String: Any] ?? [:]
+        let stateProps = stateSchema["properties"] as? [String: Any] ?? [:]
+        let includeItems = (stateProps["include"] as? [String: Any])?["items"] as? [String: Any] ?? [:]
+        let stateIncludes = includeItems["enum"] as? [String] ?? []
+        check(stateIncludes == MCPArgs.stateParts && props("collage_get_state").contains("tray_offset"),
+              "collage_get_state 的 include 取值 = MCPArgs.stateParts，有 tray_offset：\(stateIncludes)")
+        check(description("collage_get_state").contains("tray_offset") && description("collage_get_state").contains("tray_unused")
+              && description("cull_session_overview").contains("chapters_truncated"),
+              "collage_get_state 的说明写了 tray_offset、tray_unused；overview 的说明写了 chapters_truncated")
+        // 优化分析 MC-06：说明和实际对得上的几处
+        check(description("collage_cover").contains("spine_stale") && description("collage_cover").contains("spine_pages"),
+              "collage_cover 的说明写了 spine_pages / spine_stale 和怎么消")
+        check(description("collage_get_state").contains("export") && description("collage_get_state").contains("page、path"),
+              "collage_get_state 的说明写了导出设置 export、候选带 page / path")
+        check(description("collage_preflight").contains("null = 不会问") && description("cull_get_photos").contains("truncated_ids")
+              && description("cull_preview_photos").contains("inline:false 能拿到全部"),
+              "export_would_ask 的 null、cull_get_photos 的 truncated_ids、预览超预算的退路写在说明里")
         let instructions = MCPToolDefs.instructions(live: true)
         check(album.allSatisfy(instructions.contains), "instructions 提到了相册整本的 6 个工具")
+        // 优化分析 MC-01：空托盘时的报错指的路（排版工具的 photos 顺带进托盘）两个工具的说明里真的写着；instructions 说了托盘
+        let tray = LiveHandlers.trayEmptyHint
+        check(tray.contains("collage_auto_layout") && tray.contains("collage_set_layout") && tray.contains("photos")
+              && tray.contains("\(CollageLayoutSpec.maxLeaves) 张"), "空托盘的 hint 指 collage_auto_layout / collage_set_layout 的 photos")
+        check(description("collage_auto_layout").contains("不在托盘的自动进托盘")
+              && description("collage_set_layout").contains("不在托盘的会自动进托盘"),
+              "collage_auto_layout / collage_set_layout 的说明写了 photos 会把不在托盘的照片带进托盘（空托盘的 hint 靠它）")
+        check(instructions.contains("托盘空着") && instructions.contains("collage_auto_layout 的 photos"),
+              "instructions 说了托盘是什么、空着怎么进")
+        check(description("collage_apply_template").contains("empty_slots"), "collage_apply_template 的说明写了空照片格报 empty_slots")
+        // 优化分析 MC-03：整本婚礼相册对 AI 不问就重排（11-09 相册设计定的），说明里写明先锁住要保留的跨页
+        check(description("collage_run_kit").contains("collage_pages action=lock"), "collage_run_kit 的说明写了重排前先锁住要保留的跨页")
         // 路由：导出前检查是读（不排进写的 FIFO）；翻页 / 改跨页、挪照片在后台排，50 s
         check(MCPLiveTools.routes["collage_preflight"]?.write == false && MCPLiveTools.routes["collage_pages"]?.write == true,
               "collage_preflight 走读，collage_pages 走写")
@@ -241,5 +279,73 @@ extension MCPSelfTest {
               && LiveHandlers.candidateReason(.similar) == "similar", "候选的理由：burst / take / similar")
         check(MCPArgs.coverFields.allSatisfy { LiveHandlers.coverFieldLabel($0) != $0 }, "封面每个字段都有中文名（提示里用）")
         check(LiveHandlers.pageKind(CollagePage(root: .leaf(CollageCell()))) == "grid", "普通页 = grid")
+        styleKeyChecks(check)
+        trayPageChecks(check)
+    }
+
+    /// 托盘超过 200 张（复核补 2）和文字上限（MC-05）：没列全时标出从哪接着翻、带一条 tray_truncated；列全了不带。
+    private static func trayPageChecks(_ check: Check) {
+        // 判断都拆成单独的 Bool（6.1.2 的类型检查碰到一长串 && 混着 as? 会超时）
+        var head: [String: Any] = [:]
+        let w1 = LiveHandlers.markTray(&head, offset: 0, kept: 200, total: 216)
+        let headMarked: Bool = head["tray_photos_truncated"] as? Bool == true && head["tray_next_offset"] as? Int == 200
+        let w1Hint: String = w1?["hint"] as? String ?? ""
+        let w1Code: String = w1?["code"] as? String ?? ""
+        check(headMarked && w1Code == "tray_truncated" && w1Hint.contains("tray_offset:200"),
+              "216 张列了前 200：truncated、next 200、warning 指 tray_offset:200（\(w1.map(MCPJSON.string) ?? "nil")）")
+        var tail: [String: Any] = ["tray_photos_truncated": true, "tray_next_offset": 1]
+        let w2 = LiveHandlers.markTray(&tail, offset: 200, kept: 16, total: 216)
+        let tailClean: Bool = tail["tray_photos_truncated"] == nil && tail["tray_next_offset"] == nil
+        check(w2 == nil && tailClean, "从 200 起列到底：不带 truncated、next、warning")
+        // 文字上限：从 tray_photos 尾部截，warning 跟着换成截到哪；预览图的字节不算进去、原样留着
+        let rows: [[String: Any]] = (0..<216).map { i in ["id": "DSCF\(7000 + i)_copy", "width": 6240, "height": 4160, "used": 0] }
+        var state: [String: Any] = ["tray": 216, "tray_photos": Array(rows.prefix(200)), "page": 1]
+        state["preview_jpeg_b64"] = String(repeating: "A", count: 40_000)
+        var warnings: [[String: Any]] = []
+        if let w = LiveHandlers.markTray(&state, offset: 0, kept: 200, total: 216) { warnings.append(w) }
+        state["warnings"] = warnings
+        let fitted = LiveHandlers.fitState(state, textMax: 6_000, offset: 0, total: 216)
+        let kept = (fitted["tray_photos"] as? [Any])?.count ?? 0
+        let fw = (fitted["warnings"] as? [[String: Any]] ?? []).filter { $0["code"] as? String == "tray_truncated" }
+        var measured = fitted
+        measured.removeValue(forKey: "preview_jpeg_b64")
+        let nextOK: Bool = fitted["tray_next_offset"] as? Int == kept
+        let fwHint: String = fw.first?["hint"] as? String ?? ""
+        let oneWarning: Bool = fw.count == 1 && fwHint.contains("tray_offset:\(kept)")
+        let fits: Bool = MCPJSON.string(measured).count <= 6_000 - LiveHandlers.stateTextReserve
+        let previewKept: Bool = (fitted["preview_jpeg_b64"] as? String)?.count == 40_000
+        check(kept > 10 && kept < 200 && nextOK && oneWarning && fits && previewKept,
+              "文字上限 6000：tray_photos 截到 \(kept) 行、next_offset 跟着、只有一条 tray_truncated、预览原样留着")
+        let roomy = LiveHandlers.fitState(state, textMax: 1_000_000, offset: 0, total: 216)
+        check((roomy["tray_photos"] as? [Any])?.count == 200, "放得下就不截")
+    }
+
+    /// 婚礼两套样式按这本册子重算过边距（MC-09）：跨页画布上读回来也是 weddingFineArt / weddingCanon，不是 null；
+    /// 别的预设照旧认得出，改过边距的哪个都不是。
+    private static func styleKeyChecks(_ check: Check) {
+        var canvases: [CollageCanvas] = [CollageStyleFineArt.albumCanvas]
+        canvases += CollagePrintSpec.builtin.map(\.canvas)
+        for canvas in canvases {
+            let fine = CollageStyleFineArt.style(for: canvas, canon: false)
+            let canon = CollageStyleFineArt.style(for: canvas, canon: true)
+            let size = "\(canvas.width)×\(canvas.height)"
+            check(LiveHandlers.styleKey(fine, canvas: canvas) == "weddingFineArt", "跨页画布 \(size) 上的婚礼 · 雅致认得出")
+            check(LiveHandlers.styleKey(canon, canvas: canvas) == "weddingCanon", "跨页画布 \(size) 上的古典版心认得出")
+            var moved = fine
+            moved.margin += 0.01
+            moved.insets = nil
+            check(LiveHandlers.styleKey(moved, canvas: canvas) == nil, "跨页画布 \(size) 上改过边距的不是任何预设")
+        }
+        let album = CollageStyleFineArt.albumCanvas
+        let single = CollageProject().canvas
+        let gallery = CollageStyles.preset("gallery")
+        check(LiveHandlers.styleKey(gallery, canvas: album) == "gallery" && LiveHandlers.styleKey(gallery, canvas: single) == "gallery",
+              "别的预设在跨页、单张画布上都照旧认得出")
+        check(LiveHandlers.styleKey(CollageStyleFineArt.style, canvas: single) == "weddingFineArt",
+              "单张画布上的婚礼 · 雅致（预设原样）认得出")
+        var tinted = CollageStyleFineArt.style(for: album, canon: false)
+        tinted.look = .mono
+        tinted.lookStrength = 0.4
+        check(LiveHandlers.styleKey(tinted, canvas: album) == "weddingFineArt", "换了色调、强度还是那一套样式")
     }
 }

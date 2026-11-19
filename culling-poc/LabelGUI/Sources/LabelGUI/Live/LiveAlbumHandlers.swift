@@ -133,6 +133,9 @@ extension LiveHandlers {
         var out: [String: Any] = ["exists": true, "editing": collage.editingCover]
         out["spine_mm"] = MCPReadModel.r3(cover.spineWidthMM(spreads: collage.project.pages.count))
         out["spine_estimated"] = cover.spineMM == nil
+        // 同 collage_cover 的 cover（优化分析 MC-06 第 2 条：album.cover 以前看不出书脊宽过期了）
+        out["spine_pages"] = cover.spinePages ?? NSNull()
+        out["spine_stale"] = cover.spineStaleNote(spreads: collage.project.pages.count) != nil
         return out
     }
 
@@ -242,12 +245,14 @@ extension LiveHandlers {
         let count = collage.project.pages.count
         let unit = collage.isAlbum ? "个跨页" : "页"
         guard count > 0 else {
+            // 托盘空着时先说怎么进托盘（优化分析 MC-01：以前这里指成套，成套又指回托盘）
             return .failure("invalid_state", "拼图里还没有任何一页。",
-                            notExecuted("先 collage_run_kit kit=weddingAlbum 排一本，或者 collage_apply_template 排一版"))
+                            notExecuted(albumEntryHint(collage, "先 collage_run_kit kit=weddingAlbum 排一本，或者 collage_apply_template 排一版")))
         }
         if ["lock", "unlock", "mirror"].contains(action), !collage.isAlbum {
+            let next = albumEntryHint(collage, "要相册先 collage_run_kit kit=weddingAlbum 排一本（会切到相册）")
             return .failure("invalid_state", "锁住、镜像只对相册的跨页（现在是单张拼图）。",
-                            notExecuted("单张拼图的页只能 go / add / delete / move；要相册先 collage_run_kit kit=weddingAlbum 排一本（会切到相册）"))
+                            notExecuted("单张拼图的页只能 go / add / delete / move；" + next))
         }
         let before = collage.editDigest
         let page = LiveWire.int(req.params["page"])
@@ -340,8 +345,9 @@ extension LiveHandlers {
         func refusal() -> Reply? {
             let count = collage.project.pages.count
             guard collage.isAlbum, collage.project.canvas.seams == .fold else {
+                let next = albumEntryHint(collage, "要相册先 collage_run_kit kit=weddingAlbum 排一本")
                 return .failure("invalid_state", "左页、右页分开换版式只对相册的跨页。",
-                                notExecuted("单张拼图换版式用 collage_auto_layout；要相册先 collage_run_kit kit=weddingAlbum 排一本"))
+                                notExecuted("单张拼图换版式用 collage_auto_layout；" + next))
             }
             let index = (asked ?? collage.pageIndex + 1) - 1
             guard collage.project.pages.indices.contains(index) else {
@@ -822,7 +828,7 @@ extension LiveHandlers {
         model.ensureCollageAttached()
         guard collage.isAlbum else {
             return .failure("invalid_state", "印厂规格只对相册（现在是单张拼图）。",
-                            notExecuted("先 collage_run_kit kit=weddingAlbum 排一本（会切到相册），或者请用户在 app 里切到「相册」"))
+                            notExecuted(albumEntryHint(collage, "先 collage_run_kit kit=weddingAlbum 排一本（会切到相册），或者请用户在 app 里切到「相册」")))
         }
         var spec: CollagePrintSpec?
         if let name = req.params["spec"] as? String {
@@ -924,7 +930,7 @@ extension LiveHandlers {
         model.ensureCollageAttached()
         guard collage.isAlbum else {
             return .failure("invalid_state", "封面只有相册有（现在是单张拼图）。",
-                            notExecuted("先 collage_run_kit kit=weddingAlbum 排一本，或者请用户在 app 里切到「相册」"))
+                            notExecuted(albumEntryHint(collage, "先 collage_run_kit kit=weddingAlbum 排一本，或者请用户在 app 里切到「相册」")))
         }
         let has = collage.project.bookCover != nil
         let before = collage.editDigest
@@ -956,7 +962,8 @@ extension LiveHandlers {
             break
         }
         if let back = req.params["back_photo"] as? String, !back.isEmpty, collage.photoMap[back] == nil {
-            return invalid("托盘里没有「\(back)」：封底只能放托盘里的照片。", hint: "照片 id 见 collage_get_state 的 tray_photos")
+            return invalid("托盘里没有「\(back)」：封底只能放托盘里的照片。",
+                           hint: "照片 id 见 collage_get_state 的 tray_photos（超过 \(trayRowLimit) 张用 tray_offset 往后翻）")
         }
         let pushes = collage.undoPushes
         var made = true
@@ -980,7 +987,8 @@ extension LiveHandlers {
         }
         collage.endCoalescing()
         guard made else {
-            return .failure("invalid_state", (collage.notice ?? "封面没做出来") + "。", notExecuted("先往拼图托盘里带几张照片"))
+            let hint = collage.project.photos.isEmpty ? trayEmptyHint : "先往拼图托盘里带几张照片"
+            return .failure("invalid_state", (collage.notice ?? "封面没做出来") + "。", notExecuted(hint))
         }
         var parts: [String] = []
         switch action {

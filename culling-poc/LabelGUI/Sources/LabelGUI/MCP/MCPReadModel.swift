@@ -33,7 +33,7 @@ enum MCPReadModel {
     static func read(_ kind: Kind, store s: BatchStore, session: String, args: [String: Any],
                      textMax: Int) -> Result<[String: Any], Failure> {
         switch kind {
-        case .overview: return .success(overview(s, session: session))
+        case .overview: return .success(overview(s, session: session, textMax: textMax))
         case .photos: return photos(s, session: session, args: args, textMax: textMax)
         case .get: return getPhotos(s, args: args, textMax: textMax)
         case .groups: return groups(s, session: session, args: args, textMax: textMax)
@@ -76,20 +76,26 @@ enum MCPReadModel {
 
     // MARK: - 内存状态指纹（§10.4：cursor 里的 state）
 
-    /// 当前全部照片按顺序的 (id, 判决, 是否人工改判, 场, 近似重复组) 的 SHA-1 前 12 位。每次现算，2,000 张也是毫秒级。
+    /// 当前全部照片按顺序的 (id, 判决, 是否人工改判, 场, 近似重复组, 是否客户选中) 的 SHA-1 前 12 位。每次现算，2,000 张也是
+    /// 毫秒级。客户选中（优化分析 MC-02）：cull_list_photos 能按它筛了，翻页中间导入了客户选择也要带 session_changed。
     static func stateFingerprint(_ s: BatchStore) -> String {
         var text = ""
         text.reserveCapacity(s.items.count * 32)
+        let picks = s.clientPicks
         for item in s.items {
             let manual = s.isManual(item.id) ? "m" : "a"
-            text += "\(item.id)\t\(verdictName(item.verdict))\t\(manual)\t\(item.take)\t\(item.burstGroup)\n"
+            let client = picks.contains(item.id) ? "\tc" : ""
+            text += "\(item.id)\t\(verdictName(item.verdict))\t\(manual)\t\(item.take)\t\(item.burstGroup)\(client)\n"
         }
         return MCPCursor.sha1(text, length: 12)
     }
 
     // MARK: - cull_session_overview
 
-    static func overview(_ s: BatchStore, session: String) -> [String: Any] {
+    /// chapters 一章一行：最多 chapterRowLimit 行，再按文字上限截（优化分析 MC-05：以前不封顶、不受 text_max 管）。
+    static let chapterRowLimit = 60
+
+    static func overview(_ s: BatchStore, session: String, textMax: Int = MCPJSON.textMax) -> [String: Any] {
         var out: [String: Any] = ["session": session]
         out["folder"] = s.photoDir?.path ?? NSNull()
         out["name"] = s.photoDir?.lastPathComponent ?? NSNull()
@@ -133,7 +139,8 @@ enum MCPReadModel {
             return row
         }
 
-        out["chapters"] = chapterRows(s)
+        let chapters = chapterRows(s)
+        out["chapters"] = Array(chapters.prefix(chapterRowLimit))
         out["chapter_warnings"] = s.chapterWarnings
         let takes = s.takeStats
         out["scenes"] = ["multi_photo_scenes": takes.takes, "photos": takes.photos, "pending": s.pendingTakeCount]
@@ -187,7 +194,17 @@ enum MCPReadModel {
                                     hint: "点重写也写不进去：请用户把其中一张挪到别的文件夹再重新分析，或者在 Lightroom / Capture One 里自己标"))
         }
         out["warnings"] = warnings
-        return out
+        // 章节没列全（多日旅拍上百章）：标 chapters_truncated、总数，warning 指去 cull_list_groups 翻
+        func markChapters(_ o: inout [String: Any], _ kept: Int) {
+            var list = (o["warnings"] as? [[String: Any]] ?? []).filter { $0["code"] as? String != "chapters_truncated" }
+            o["chapters_truncated"] = true
+            o["chapters_total"] = chapters.count
+            list.append(warning("chapters_truncated", "一共 \(chapters.count) 章，chapters 只列了前 \(kept) 章。",
+                                hint: "后面的章用 cull_list_groups kind=chapter 翻页（key 是章节号），或 cull_list_photos 带 chapter"))
+            o["warnings"] = list
+        }
+        if chapters.count > chapterRowLimit { markChapters(&out, chapterRowLimit) }
+        return MCPJSON.fittingObject(out, list: "chapters", limit: textMax, mark: markChapters)
     }
 
     /// 每章一行（§3.2 的 chapters）。只有一章时界面上没有时间轴（chapterSegments 是空的），这里照样给一行。
@@ -244,6 +261,8 @@ enum MCPReadModel {
         let dup = args["near_duplicate"].flatMap(MCPArgs.integer)
         let body = args["body"] as? String
         let manualOnly = args["manual_only"] as? Bool ?? false
+        // 客户选中（优化分析 MC-02，审查 F11-b）：true = 只列客户选中的，false = 只列没选中的，不给 = 不筛
+        let clientPick = args["client_pick"] as? Bool
         let sort = args["sort"] as? String ?? "time"
         let limit = args["limit"].flatMap(MCPArgs.integer) ?? 50
 
@@ -255,6 +274,7 @@ enum MCPReadModel {
         filter["scene"] = scene ?? NSNull()
         filter["near_duplicate"] = dup ?? NSNull()
         filter["body"] = body ?? NSNull()
+        filter["client_pick"] = clientPick ?? NSNull()
         let filterHash = MCPCursor.sha1(MCPJSON.string(filter), length: 12)
         let state = stateFingerprint(s)
         var offset = 0
@@ -276,6 +296,7 @@ enum MCPReadModel {
             if let dup, item.burstGroup != dup { return false }
             if let body, !bodyMatches(item, body, s) { return false }
             if manualOnly && !s.isManual(item.id) { return false }
+            if let clientPick, s.clientPicks.contains(item.id) != clientPick { return false }
             return true
         }
         switch sort {
@@ -331,6 +352,8 @@ enum MCPReadModel {
         r["manual"] = s.isManual(item.id)
         if let by = changedBy(item.id, s) { r["changed_by"] = by }
         if s.clientPicks.contains(item.id) { r["client_pick"] = true }
+        // 客户备注（导入客户选择时文件名后面的话，client_notes.json）：以前写得进、读不回（优化分析 MC-02）。有才给
+        if let note = s.clientNotes[item.id], !note.isEmpty { r["client_note"] = note }
         return r
     }
 
@@ -444,7 +467,9 @@ enum MCPReadModel {
         let kind = args["kind"] as? String ?? "scene"
         let minSize = args["min_size"].flatMap(MCPArgs.integer) ?? 2
         let limit = args["limit"].flatMap(MCPArgs.integer) ?? 30
-        let filter: [String: Any] = ["kind": kind, "min_size": minSize]
+        // 只列还要人取舍的场（优化分析 MC-02，审查 F11-b）：只对 kind=scene（MCPArgs.rules 挡别的）
+        let pendingOnly = args["pending_only"] as? Bool ?? false
+        let filter: [String: Any] = ["kind": kind, "min_size": minSize, "pending_only": pendingOnly]
         let filterHash = MCPCursor.sha1(MCPJSON.string(filter), length: 12)
         let state = stateFingerprint(s)
         var offset = 0
@@ -461,7 +486,7 @@ enum MCPReadModel {
         switch kind {
         case "chapter": all = chapterGroups(s, minSize: minSize)
         case "near_duplicate": all = dupGroups(s, minSize: minSize)
-        default: all = sceneGroups(s, minSize: minSize)
+        default: all = sceneGroups(s, minSize: minSize, pendingOnly: pendingOnly)
         }
         let total = all.count
         let start = min(offset, total)
@@ -485,7 +510,7 @@ enum MCPReadModel {
 
     /// 场（take）：和 `--verdicts` 里「场 N (k 张)」那几行是同一个东西 —— 成员按拍摄时间，名次是场内排名（#1 推荐保留），
     /// pending = 还要人取舍（isPendingTake）。
-    static func sceneGroups(_ s: BatchStore, minSize: Int) -> [[String: Any]] {
+    static func sceneGroups(_ s: BatchStore, minSize: Int, pendingOnly: Bool = false) -> [[String: Any]] {
         let pending = Set(s.pendingTakes)
         var takes: [Int] = []
         var seen = Set<Int>()
@@ -497,7 +522,7 @@ enum MCPReadModel {
         var out: [[String: Any]] = []
         for take in takes {
             let members = s.members(ofTake: take)
-            guard members.count >= minSize else { continue }
+            guard members.count >= minSize, !pendingOnly || pending.contains(take) else { continue }
             var g = groupRow(key: take, members, s) { s.takeRank[$0.id] }
             g["pending"] = pending.contains(take)
             out.append(g)
@@ -675,20 +700,25 @@ enum MCPArgs {
     static let photosSpec: ToolSpec = {
         var p: [String: Spec] = ["session": session, "cursor": cursor, "limit": limit, "manual_only": .bool]
         p["verdict"] = .strings(count: 0...3, maxLength: 16, oneOf: ["pick", "usable", "reject"])
-        p["reason"] = .string(maxLength: 40)
+        // 取值固定（优化分析 MC-06 第 1 条）：以前写错（"blurry"）静默回 0 张，AI 会说「没有虚焦的」
+        p["reason"] = .oneOf(reasonValues)
         p["chapter"] = .int(0...1_000_000)
         p["scene"] = .int(0...1_000_000_000)
         p["near_duplicate"] = .int(0...1_000_000_000)
         p["body"] = .string(maxLength: 120)
         p["sort"] = .oneOf(["time", "id", "sharpness"])
+        p["client_pick"] = .bool
         return ToolSpec(props: p, required: [])
     }()
+    /// 废片理由的固定取值 = BatchStore.reasonOrder（那个在 @MainActor 的 store 上，这里是 nonisolated 的校验；自检对过两份一样）。
+    static let reasonValues = ["文件损坏", "连拍重复", "闭眼", "虚焦", "曝光裁切", "欠曝", "过曝", "人脸质量低", "VLM建议淘汰"]
     static let getSpec = ToolSpec(props: ["session": session, "ids": .strings(count: 1...20, maxLength: 128, oneOf: nil)],
                                   required: ["ids"])
     static let groupsSpec: ToolSpec = {
         var p: [String: Spec] = ["session": session, "cursor": cursor, "limit": limit]
         p["kind"] = .oneOf(["chapter", "scene", "near_duplicate"])
         p["min_size"] = .int(1...100)
+        p["pending_only"] = .bool
         return ToolSpec(props: p, required: ["kind"])
     }()
     static let previewSpec: ToolSpec = {
@@ -704,8 +734,13 @@ enum MCPArgs {
         // 换照片的候选（相册 A + B · M）：要换掉的那张、最多几张
         p["candidates_for"] = .string(maxLength: 256)
         p["candidates_limit"] = .int(1...30)
+        // 只要哪几块、托盘从第几张起列（优化分析 MC-05 + 复核补 2：托盘一大每读一次 7–10 千 token，第 200 张以后读不到）
+        p["include"] = .strings(count: 0...stateParts.count, maxLength: 16, oneOf: stateParts)
+        p["tray_offset"] = .int(0...1_000_000)
         return ToolSpec(props: p, required: [])
     }()
+    /// collage_get_state 的 include 能点名的几块（不给 include = 全给）；页码、样式、托盘张数、digest 这些标量总给。
+    static let stateParts = ["tray_photos", "cells", "layout", "album", "variants"]
     /// 导出前检查（只读，相册 A + B · M）：texts = 查不查字；pages = 要导的跨页（导出按钮会不会问只看这几页）。
     static let preflightSpec: ToolSpec = {
         let p: [String: Spec] = ["session": session, "texts": .bool, "pages": .string(maxLength: 200)]
@@ -953,6 +988,11 @@ enum MCPArgs {
             if given("text") == given("ids") {
                 return Problem(message: "text 和 ids 要给一个、只能给一个：text 是客户回复的原文（app 来认），ids 是你已经认出的照片 id。",
                                hint: "客户在微信里回的那段话原样放进 text")
+            }
+        case "cull_list_groups":
+            if args["pending_only"] as? Bool == true, (args["kind"] as? String ?? "scene") != "scene" {
+                return Problem(message: "pending_only 只对 kind=scene（场）。",
+                               hint: "章节里还有几场没处理看 cull_session_overview 的 chapters[].pending_scenes；近似重复组没有「待处理」")
             }
         case "collage_get_state":
             if given("candidates_limit") && !given("candidates_for") {

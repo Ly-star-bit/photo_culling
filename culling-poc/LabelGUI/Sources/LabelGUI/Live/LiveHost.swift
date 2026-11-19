@@ -441,7 +441,7 @@ enum LiveHost {
         c["tray"] = collage.project.photos.count
         c["cover_id"] = CollageStyleFashion.coverPhotoID(collage.project) ?? NSNull()
         c["look"] = collage.project.style.look.rawValue
-        c["style"] = LiveHandlers.styleKey(collage.project.style) ?? NSNull()
+        c["style"] = LiveHandlers.styleKey(collage.project.style, canvas: collage.project.canvas) ?? NSNull()
         c["notice"] = collage.notice ?? NSNull()
         c["continuous_edit_depth"] = collage.continuousEditDepth
         c["canvas_dragging"] = collage.liveCanvasDragging

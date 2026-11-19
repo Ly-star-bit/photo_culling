@@ -896,7 +896,42 @@ def album_section():
     def undo():
         return mcp_full(env, "app_undo", {"target": "collage"})[1] or {}
 
+    def hint(x):
+        return (x.get("error") or {}).get("hint") or ""
+
     try:
+        # ---------- 优化分析 MC-01：托盘空着时，成套、加跨页、套规格、做封面、引擎排版都挡下来，但都指同一条进托盘的路
+        # （collage_auto_layout / collage_set_layout 的 photos），不再互相指；成套那句和 store 在状态栏上说的一样（以前桥上另写
+        # 「托盘（和这一场）里没有能用的照片」「先改判」）；空托盘套模板带 empty_slots（以前 warnings:[]），撤销回到空工程
+        g_e = get()
+        if g_e.get("tray") != 0 or g_e.get("pages"):
+            skip(f"空托盘的报错：这一场开局托盘不是空的（tray {g_e.get('tray')}、{g_e.get('pages')} 页），测不了")
+        else:
+            _, e_kit = w("collage_run_kit", {"kit": "weddingAlbum"}, timeout=150)
+            notice_e = (st().get("collage") or {}).get("notice") or ""
+            _, e_add = w("collage_pages", {"action": "add"})
+            _, e_spec = w("collage_print_spec", {"spec": "sq25-flat"})
+            _, e_cov = w("collage_cover", {"action": "make"})
+            _, e_al = w("collage_auto_layout", {})
+            codes_e = [err_code(x) for x in (e_kit, e_add, e_spec, e_cov, e_al)]
+            to_tray = [hint(x) for x in (e_kit, e_add, e_spec, e_cov, e_al)]
+            check(codes_e == ["nothing_to_render", "invalid_state", "invalid_state", "invalid_state", "nothing_to_render"]
+                  and (e_kit.get("error") or {}).get("message") == notice_e and "托盘是空的" in notice_e
+                  and all("托盘是空的" in x and "photos" in x for x in to_tray)
+                  and all("collage_auto_layout" in x for x in to_tray[:4])
+                  and all("collage_run_kit kit=weddingAlbum" in x for x in to_tray[1:4])
+                  and get().get("tray") == 0 and not get().get("pages"),
+                  f"空托盘：成套 / 加跨页 / 套规格 / 做封面 / 引擎排版 {codes_e}，hint 都指 photos 进托盘（不再互相指），"
+                  f"成套的话 = 状态栏「{notice_e}」；什么都没改")
+            _, e_tpl = w("collage_apply_template", {"template": "九宫格"})
+            holes = [x for x in e_tpl.get("warnings") or [] if x.get("code") == "empty_slots"]
+            u_tpl = undo()
+            g_u = get()
+            check(e_tpl.get("changed") is True and len(holes) == 1 and (holes[0].get("count") or 0) > 0 and holes[0].get("pages") == [1]
+                  and "collage_auto_layout" in (holes[0].get("hint") or "") and "error" not in u_tpl
+                  and g_u.get("tray") == 0 and not g_u.get("pages"),
+                  f"空托盘套模板：照样套上、warnings 带 empty_slots（{holes}）；app_undo 回到空工程（{g_u.get('pages')} 页）")
+
         # ---------- 还不是相册：跨页类、印厂规格、封面的写都说清楚为什么不行（照片先进托盘）
         w("collage_set_layout", {"layout": {"split": "row", "items": [{"photo": i} for i in ids[:2]]}})
         w("collage_set_layout", {"layout": {"split": "row", "items": [{"photo": i} for i in ids[2:4]]}})
@@ -906,14 +941,26 @@ def album_section():
         _, n2 = w("collage_print_spec", {"spec": "sq25-flat"})
         _, n3 = w("collage_cover", {"action": "make"})
         _, n4 = w("collage_export", {"proof": True})
-        check(all(err_code(x) == "invalid_state" for x in (n1, n2, n3, n4)),
-              f"单张拼图：锁跨页、套印厂规格、做封面、看版 PDF 都回 invalid_state（{err_code(n1)} {err_code(n2)} {err_code(n3)} {err_code(n4)}）")
+        check(all(err_code(x) == "invalid_state" for x in (n1, n2, n3, n4))
+              and all("collage_run_kit kit=weddingAlbum" in hint(x) and "托盘是空的" not in hint(x) for x in (n1, n2, n3)),
+              f"单张拼图：锁跨页、套印厂规格、做封面、看版 PDF 都回 invalid_state（{err_code(n1)} {err_code(n2)} {err_code(n3)} {err_code(n4)}）；"
+              f"托盘里有照片时 hint 照旧指成套")
         _, kit = w("collage_run_kit", {"kit": "weddingAlbum"}, timeout=150)
         g0 = get()
         if g0.get("mode") != "album" or not spreads(g0):
             skip(f"整本婚礼相册没排出来（{err_code(kit)}，{g0.get('mode')}，{len(spreads(g0))} 个跨页）：相册整本那一组跳过")
             return
         settled()
+        # 优化分析 MC-09：婚礼两套样式按这本册子重算过边距，跨页画布上读回来也认得出（以前是 style: null）
+        _, wc = w("collage_set_style", {"style": "weddingCanon"})
+        g_c = get()
+        u_c = undo()
+        g_f = get()
+        check(g0.get("style") == "weddingFineArt" and g0.get("style_name") == "婚礼 · 雅致" and wc.get("style") == "weddingCanon"
+              and g_c.get("style") == "weddingCanon" and "error" not in u_c and g_f.get("style") == "weddingFineArt"
+              and (st().get("collage") or {}).get("style") == "weddingFineArt",
+              f"婚礼相册的样式读得回来：成套后 {g0.get('style')}，换古典版心 {wc.get('style')} / {g_c.get('style')}，"
+              f"撤销后 {g_f.get('style')}（{err_code(wc)} {err_code(u_c)}）")
         # 至少 3 个跨页：不够就在最后补空跨页
         while len(spreads(get())) < 3:
             w("collage_pages", {"action": "add", "page": len(spreads(get()))})
@@ -1091,6 +1138,9 @@ def album_section():
             check(cands.get("photo") == cell["photo_id"] and isinstance(rows, list) and len(rows) <= 5
                   and all(r_.get("reason") in ("burst", "take", "similar") and "score" in r_ and "page" in r_ for r_ in rows),
                   f"candidates_for：理由 burst / take / similar、分数、在第几个跨页（{len(rows or [])} 个）")
+            # 优化分析 MC-06 第 3 条：候选带这张自己所在的跨页和格子，照填给 collage_replace_photo
+            check(cands.get("page") == here_page["page"] and cands.get("path") == cell["path"],
+                  f"candidates 带这张所在的 page / path（{cands.get('page')} / {cands.get('path')}，应为 {here_page['page']} / {cell['path']}）")
             other_page = next((s_ for s_ in spreads(g5) if s_["page"] != here_page["page"] and s_.get("photos")), None)
             if other_page:
                 newcomer = other_page["photos"][0]
@@ -1198,6 +1248,10 @@ def album_section():
               and info.get("spine_pages") == 2 * (get().get("pages") or 0) and info.get("spine_stale") is False
               and cv.get("preview_kind") == "cover" and len(blocks_c) == 1 and (prev.get("width") or 0) > 1.5 * (prev.get("height") or 1),
               f"做封面 + 书脊 12.5mm：一步撤销，预览是整张封面（{prev.get('width')}×{prev.get('height')}）")
+        # 优化分析 MC-06 第 2 条：collage_get_state 的 album.cover 也报 spine_pages / spine_stale（同 collage_cover）
+        sc = ((get().get("album") or {}).get("cover") or {})
+        check(sc.get("spine_pages") == info.get("spine_pages") and sc.get("spine_stale") is False,
+              f"album.cover 带 spine_pages / spine_stale（{sc.get('spine_pages')} / {sc.get('spine_stale')}）")
         _, cv_again = w("collage_cover", {"action": "make"})
         _, cv_auto = w("collage_cover", {"spine_auto": True})
         check(err_code(cv_again) == "invalid_state" and (cv_auto.get("cover") or {}).get("spine_estimated") is True,
@@ -1262,6 +1316,19 @@ def album_section():
         _, e4 = w("collage_export", {"proof": True, "pages": "1"})
         check(err_code(e3) == "invalid_argument" and err_code(e4) == "invalid_argument",
               f"pages 越界、proof 带 pages → invalid_argument（{err_code(e3)} {err_code(e4)}）")
+
+        # ---------- 优化分析 MC-03：锁住第 1 个跨页再成套整本婚礼相册（不问就重排）：锁住的原样留着，结果里报换掉了几个、留着几个
+        g_l0 = get()
+        n_l = g_l0.get("pages") or 0
+        first_l = spreads(g_l0)[0].get("photos") if spreads(g_l0) else None
+        w("collage_pages", {"action": "lock", "pages": "1"})
+        _, kit_l = w("collage_run_kit", {"kit": "weddingAlbum"}, timeout=150)
+        alb_l = kit_l.get("album") or {}
+        kept_l = [s_ for s_ in spreads(get()) if s_.get("locked")]
+        check("error" not in kit_l and alb_l.get("spreads_kept") == 1 and alb_l.get("spreads_replaced") == n_l - 1
+              and len(kept_l) == 1 and kept_l[0].get("photos") == first_l,
+              f"锁住第 1 个跨页再成套：album 报换掉 {alb_l.get('spreads_replaced')} 个（原有 {n_l} 个）、留着 {alb_l.get('spreads_kept')} 个，"
+              f"锁住的那个照片没变（{err_code(kit_l)}）")
     finally:
         h.term()
 
@@ -1865,8 +1932,10 @@ try:
         st_on, _ = status(env)
         check((st_off.get("live") or {}).get("state") == "bridge_off" and err_code(cs_off) == "bridge_off" and err_code(rd_off) == "bridge_off"
               and err_code(wr_off) == "bridge_off"
+              and st_off.get("next") == "请用户在选片工具菜单里打开「允许 AI 实时操作（MCP）」"
               and lock_line.get("bridge") == "off" and sock_gone and (st_on.get("live") or {}).get("state") == "live",
-              "桥关着：bridge_off（读写都是），socket 删了、锁文件写 bridge:off；3 s 后自己开回来 → live")
+              f"桥关着：bridge_off（读写都是），app_status.next 指菜单那一项（「{st_off.get('next')}」，以前叫用户打开 app），"
+              "socket 删了、锁文件写 bridge:off；3 s 后自己开回来 → live")
         # socket 被删（R6 T15）：立刻 unreachable；自检（500 ms）以后恢复
         just_after_selfcheck(h)
         t_un = time.monotonic()
@@ -2464,12 +2533,26 @@ __attribute__((constructor)) static void init(void) {
         got_scenes = [(x["key"], [(m["id"], m["verdict"], m.get("rank")) for m in x["members"]]) for x in groups]
         check(ref is not None and got_scenes == ref["scene_lines"],
               f"cull_list_groups kind=scene（每页 2 组、{pages} 页）= 「场 N」那几行（id、判决、名次）：{len(got_scenes)} 组")
+        # 优化分析 MC-02：pending_only 只列还要人取舍的场（= 上面每组 pending:true 的那几组）；别的 kind 带它不收
+        _, gpo, _ = mcp_call(env, "cull_list_groups", {"session": KEY, "kind": "scene", "pending_only": True, "limit": 100})
+        _, gpc, _ = mcp_call(env, "cull_list_groups", {"session": KEY, "kind": "chapter", "pending_only": True})
+        want_p = [x["key"] for x in groups if x.get("pending")]
+        got_p = (gpo or {}).get("groups") or []
+        check([x["key"] for x in got_p] == want_p and all(x.get("pending") is True for x in got_p)
+              and (gpo or {}).get("total") == len(want_p) and err_code(gpc) == "invalid_argument",
+              f"pending_only=true：只列 pending 的 {len(want_p)} 场（{want_p}）；kind=chapter 带 pending_only → invalid_argument（{err_code(gpc)}）")
         if ref and ref.get("per_photo"):
             rows = []
             _, p_, _ = mcp_call(env, "cull_list_photos", {"session": KEY, "sort": "id", "limit": 100})
             rows = (p_ or {}).get("rows") or []
             mine = {r["id"]: (r["verdict"], ",".join(r["reasons"]) or "-") for r in rows}
             check(mine == ref["per_photo"], f"cull_list_photos 每张的判决和理由 = --per-photo（{len(mine)} 张）")
+        # 优化分析 MC-04：小数写最短（r3 过的锐度、人脸质量不再是 0.63700000000000001 这种 17 位）
+        out_s, p_s, _ = mcp_full(env, "cull_list_photos", {"session": KEY, "limit": 100})
+        raw_s = (((out_s or {}).get("content") or [{}])[0]).get("text", "")
+        long_s = re.findall(r"\d\.\d{9,}", raw_s)
+        check(bool((p_s or {}).get("rows")) and not long_s,
+              f"cull_list_photos 的小数写最短：{len((p_s or {}).get('rows') or [])} 行里没有 9 位以上的小数（{long_s[:3]}）")
         # 翻页：limit=5，21 个 id 各出现一次；翻到一半在宿主里改判一张 → 下一页带 session_changed:true
         seen, cur, changed_at, n_pages = [], None, None, 0
         while n_pages < 10:
@@ -2606,6 +2689,14 @@ __attribute__((constructor)) static void init(void) {
               and all(i.get("truncated") and i.get("file") is None for i in imgs if i not in given)
               and "budget_truncated" in [w.get("code") for w in body.get("warnings") or []],
               f"LABELGUI_MCP_INLINE_KB=150：前 {len(given)} 张给图，后面的标 truncated、没有字节和文件，warning budget_truncated")
+        # 优化分析 MC-10：hint 只写 AI 做得到的（inline:false），不再叫它改环境变量；照着带 inline:false 再调，4 张都有文件
+        bt_hint = next((w.get("hint") or "" for w in (body or {}).get("warnings") or [] if w.get("code") == "budget_truncated"), "")
+        res, body_nf, _ = mcp_full(hs.env(LABELGUI_MCP_OUT=out, LABELGUI_MCP_INLINE_KB="150"), "cull_preview_photos",
+                                   {"session": sk, "ids": syn["ids"][:4], "inline": False})
+        nf_imgs = (body_nf or {}).get("images") or []
+        check("inline:false" in bt_hint and "LABELGUI_MCP_INLINE_KB" not in bt_hint and (body_nf or {}).get("truncated") is False
+              and len(nf_imgs) == 4 and all(os.path.isfile(i.get("file") or "") for i in nf_imgs) and not image_blocks(res),
+              f"budget_truncated 的 hint 指 inline:false（「{bt_hint}」），照着再调：4 张都存成文件、不截（{(body_nf or {}).get('truncated')}）")
         _, nf, _ = mcp_call(env, "cull_preview_photos", {"session": sk, "ids": ["NOPE"]})
         check(err_code(nf) == "photo_not_found", "预览：id 都不存在 → photo_not_found")
         # 预览文件没有（掉出最近 15 场被清掉）→ 从原图现解，带 warning
@@ -2909,8 +3000,9 @@ __attribute__((constructor)) static void init(void) {
         _, u, _ = w("app_undo", {"target": "verdicts"})
         s3 = st()
         check(u.get("ids") == [vid] and s3["verdict_digest"] == s0["verdict_digest"] and s3["overrides"] == s0["overrides"]
-              and s3["verdict_undo"]["depth"] == s0["verdict_undo"]["depth"] and steps(s2, s3) == (0, 0),
-              "app_undo target=verdicts：判决逐字节回到改判之前（verdict_digest），撤销不压栈")
+              and s3["verdict_undo"]["depth"] == s0["verdict_undo"]["depth"] and steps(s2, s3) == (0, 0)
+              and (u.get("live") or {}).get("notice") == "AI：撤销了刚才的改判（1 张）",
+              f"app_undo target=verdicts：判决逐字节回到改判之前（verdict_digest），撤销不压栈；提示「{(u.get('live') or {}).get('notice')}」")
         _, u2, _ = w("app_undo", {"target": "verdicts"})
         check(err_code(u2) == "nothing_to_undo" and edata(u2).get("reason") == "already_undone", f"再撤 → nothing_to_undo（{edata(u2)}）")
 
@@ -3046,6 +3138,8 @@ __attribute__((constructor)) static void init(void) {
         id2 = (v2.get("variant") or {}).get("id")
         check(v1.get("changed") is True and steps(s0, s1) == (0, 0) and s1["edit_digest"] == s0["edit_digest"]
               and v1.get("digest_after") == v1.get("digest_before") and v1.get("undo", {}).get("steps_added") == 0
+              and v1["undo"].get("target") is None and "方案栏" in (v1["undo"].get("how") or "")
+              and "app_undo target" not in (v1["undo"].get("how") or "")
               and v1b.get("changed") is False and v1b.get("same_as_existing") is True
               and (v1b.get("variant") or {}).get("id") == id1 and steps(s1, s1b) == (0, 0)
               and len(vs) == n0 + 2 and [v.get("id") for v in vs][-2:] == [id1, id2]
@@ -3545,8 +3639,11 @@ __attribute__((constructor)) static void init(void) {
         ov_m3 = m_ov()
         check(set(un_m.get("ids") or []) == {mid, mid2} and (un_m.get("undone") or {}).get("tool") == "cull_import_client_picks"
               and (un_m["undone"].get("op_id") == op_m) and cp_disk() == disk0 and ov_m3.get("client_pick_count") == picks0
-              and (ov_m3.get("xmp") or {}).get("stale_count") == n_m - 1 and sm5["verdict_undo"]["depth"] == sm1["verdict_undo"]["depth"],
-              f"app_undo target=verdicts 撤掉 AI 的导入：动到的是 {mid}、{mid2}，client_picks.json、客户选中数、XMP 过期都回到导入之前")
+              and (ov_m3.get("xmp") or {}).get("stale_count") == n_m - 1 and sm5["verdict_undo"]["depth"] == sm1["verdict_undo"]["depth"]
+              and (un_m.get("live") or {}).get("notice") == "AI：撤销了刚才导入的客户选择（2 张）"
+              and sm5.get("external_notice") == "AI：撤销了刚才导入的客户选择（2 张）",
+              f"app_undo target=verdicts 撤掉 AI 的导入：动到的是 {mid}、{mid2}，client_picks.json、客户选中数、XMP 过期都回到导入之前；"
+              f"状态栏说的是撤了导入的客户选择、不是改判（优化分析 MC-10：「{sm5.get('external_notice')}」）")
         # 带修图要求的回复（审查：桥上以前丢客户备注）：文件名后面的话存成客户备注（client_notes.json，复制原片时写成精修要求.csv），
         # 结果里 notes / new_notes；照片已经是客户选中、只补了备注也算改了（和导入框同一条路）；app_undo 连备注一起撤
         cn_path = os.path.join(msess, "client_notes.json")
@@ -3570,6 +3667,20 @@ __attribute__((constructor)) static void init(void) {
               and nd.get("collage_tray_refreshed") is False and na.get("collage_tray_refreshed") is True,
               f"带备注导入：dry_run 回 notes / new_notes、不写；dry_run:false 客户选中和 client_notes.json 一起写上、一步撤销、"
               f"拼图托盘跟着刷（{cn_disk()}）")
+        # 优化分析 MC-02：备注读得回来（cull_get_photos / cull_list_photos 的行带 client_note，有才给）；按客户选中筛
+        _, cp_t, _ = mcp_call(envm, "cull_list_photos", {"session": KEY, "client_pick": True, "limit": 100})
+        _, cp_f, _ = mcp_call(envm, "cull_list_photos", {"session": KEY, "client_pick": False, "limit": 100})
+        rows_t = {r["id"]: r for r in (cp_t or {}).get("rows") or []}
+        rows_f = (cp_f or {}).get("rows") or []
+        g_mid, g_mid2 = m_row(mid), m_row(mid2)
+        check(g_mid.get("client_note") == "去路人" and g_mid2.get("client_note") == "瘦脸"
+              and {mid, mid2} <= set(rows_t) and all(r.get("client_pick") is True for r in rows_t.values())
+              and rows_t[mid].get("client_note") == "去路人" and rows_t[mid2].get("client_note") == "瘦脸"
+              and all("client_note" not in r for i, r in rows_t.items() if i not in (mid, mid2))
+              and not any(r.get("client_pick") or r["id"] in (mid, mid2) for r in rows_f)
+              and (cp_t or {}).get("total", 0) + (cp_f or {}).get("total", 0) == n_m,
+              f"客户备注读得回来：cull_get_photos {mid}「{g_mid.get('client_note')}」、{mid2}「{g_mid2.get('client_note')}」；"
+              f"client_pick=true 列 {(cp_t or {}).get('total')} 张、false 列 {(cp_f or {}).get('total')} 张，加起来 = {n_m}")
         nb = mw("cull_import_client_picks", {"text": f"{mid} 去路人，黑白", "dry_run": False})
         sn2 = mst()
         nc = mw("cull_import_client_picks", {"text": f"{mid} 去路人，黑白", "dry_run": False})
@@ -3594,6 +3705,7 @@ __attribute__((constructor)) static void init(void) {
               and cp_disk() == disk0 and m_ov().get("client_pick_count") == picks0
               and sn4["verdict_undo"]["depth"] == sn0["verdict_undo"]["depth"],
               f"app_undo 两下：备注、客户选中都回到导入之前，client_notes.json 删掉（{[err_code(u) for u in un_n]}）")
+        check("client_note" not in m_row(mid) and "client_note" not in m_row(mid2), "撤销以后行里不再带 client_note")
 
         # ---------- AI 改判的出处（ai_overrides.json，overrides.json 格式不动）：照样 manual:true，另有 changed_by ai、ai_override；
         # 用户亲手按一下就算用户的；app_undo 连出处一起撤；重开宿主读回来，overrides.json 对不上的丢掉
@@ -3945,6 +4057,7 @@ __attribute__((constructor)) static void init(void) {
               f"关之前就连上的连接：之后发的读、写都 bridge_off（{(rr.get('error') or {}).get('code')}、{(rw.get('error') or {}).get('code')}），"
               f"test.state 照常回（bridge {rs.get('bridge')}、菜单的勾 {rs.get('bridge_enabled')}、副标题「{rs.get('indicator')}」）")
         check(live_off.get("state") == "bridge_off" and "菜单" in json.dumps(st_off, ensure_ascii=False)
+              and "允许 AI 实时操作（MCP）" in (st_off.get("next") or "")
               and KEY in sess_off and len((lt_off or {}).get("templates") or []) > 0
               and [err_code(x) for x in (rd_off, pv_off, wr_off, un_off)] == ["bridge_off"] * 4,
               f"8 关着：app_status 是 bridge_off（不是 not_running，说明里提到菜单），列场次 / 模板照常，"
@@ -4532,9 +4645,16 @@ __attribute__((constructor)) static void init(void) {
         _, rk_bad3 = lw("collage_run_kit", {"kit": "weddingAlbum", "max_per_spread": 2})
         check(all(err_code(x) == "invalid_argument" for x in (rk_bad, rk_bad2, rk_bad3)) and lst()["edit_digest"] == sb0["edit_digest"],
               f"成套的 spreads：不是整本婚礼相册、最少比最多大、只给每跨页张数 → invalid_argument，没动（{err_code(rk_bad)} {err_code(rk_bad2)} {err_code(rk_bad3)}）")
+        pages_k2 = lget().get("pages") or 0
         _, rk2 = lw("collage_run_kit", {"kit": "weddingAlbum", "spreads": 2, "max_per_spread": 3}, timeout=120)
         gt = lget()
         alb = rk2.get("album") or {}
+        # 优化分析 MC-03：整本重排不问，结果里报换掉了几个原有跨页（没锁 = 全换）；从出一期（单张拼图）成套时是 0
+        alb_k2 = kit2.get("album") or {}
+        check(alb_k2.get("spreads_replaced") == 0 and alb_k2.get("spreads_kept") == 0
+              and ("error" in rk2 or (alb.get("spreads_replaced") == pages_k2 and alb.get("spreads_kept") == 0)),
+              f"成套报换掉的跨页：出一期之后 {alb_k2.get('spreads_replaced')}/{alb_k2.get('spreads_kept')}；"
+              f"{pages_k2} 个没锁的跨页上再成套 {alb.get('spreads_replaced')}/{alb.get('spreads_kept')}")
         over = max(0, (gt.get("pages") or 0) - 2)
         warned = "over_target" in [w.get("code") for w in rk2.get("warnings") or []]
         check("error" not in rk2 and (gt.get("album_target") or {}).get("spreads") == 2

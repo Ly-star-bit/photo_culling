@@ -36,7 +36,7 @@ enum MCPToolDefs {
 
     static let liveInstructions = """
     xuanpian 是本机「选片工具」（photo culling + collage）的接口，这一版只做实时：用户开着 app 时，读 app 当前打开的那一场（判决 pick/usable/reject、废片理由、章节、场、近似重复、人脸/闭眼/锐度/EXIF、预览图），以及改判、在 app 里定位照片、切场次、套拼图模板、一键成套、换封面、改标题/刊头/期号、换样式色调、存成方案、切方案、导出图片、撤销，都由 app 自己执行，窗口里当场看得到，用户按 ⌘Z 能撤。app 没开时只能看状态、列场次、列模板，其余工具返回 app_not_running：MCP 绝不会启动 app，请用户自己打开。先调 app_status。
-    流程：app_status（live.state 是 live 才能用其余工具；live.open_session 是 app 当前打开的那一场，所有 session 参数都填它）→ cull_session_overview → cull_list_groups / cull_list_photos → cull_get_photos / cull_preview_photos（看眼睛、对焦用 crop=face）。要别的场次：cull_list_sessions 找到它，再 app_open_session（只能打开 app「最近场次」里的；会清掉 app 里这一场的撤销记录，先问用户）。改判用 cull_set_verdicts，给用户看用 cull_show_photos，客户发回来的选择用 cull_import_client_picks（先 dry_run 给用户看认出了哪些）；拼图先 collage_get_state，再 collage_apply_template / collage_run_kit / collage_next_cover / collage_set_text / collage_set_style，结果里有 app 当前画面的预览；模板不合适就自己设计：collage_list_templates（include=["layout_grammar"]）看语法，collage_set_layout 把版式放进当前页（collage_auto_layout 让 app 的引擎先排一版，读回 layout 再改）；要给用户出几版设计挑，每排好一版就 collage_save_variant 存成方案（不会被下一版盖掉），collage_open_variant 切回某一版；相册改整本：collage_get_state 的 album.spreads 看每个跨页放了哪几张，collage_pages 翻页、加删挪锁跨页、镜像、单边换版式，collage_move_photos 把照片挪到别的跨页，collage_replace_photo 换一格照片（候选用 collage_get_state 的 candidates_for 拿），collage_cover 做封面，交印厂前 collage_preflight 导出前检查、collage_print_spec 看和套印厂规格；导出成图片用 collage_export（清晰度 1–3 倍，写到拼图页「导出 ▾」里设的目录；pages 只导几个跨页，proof 出给客户的看版 PDF）；撤销 AI 自己刚做的一步用 app_undo。
+    流程：app_status（live.state 是 live 才能用其余工具；live.open_session 是 app 当前打开的那一场，所有 session 参数都填它）→ cull_session_overview → cull_list_groups / cull_list_photos → cull_get_photos / cull_preview_photos（看眼睛、对焦用 crop=face）。要别的场次：cull_list_sessions 找到它，再 app_open_session（只能打开 app「最近场次」里的；会清掉 app 里这一场的撤销记录，先问用户）。改判用 cull_set_verdicts，给用户看用 cull_show_photos，客户发回来的选择用 cull_import_client_picks（先 dry_run 给用户看认出了哪些）；拼图先 collage_get_state（tray 是托盘里的照片数：模板、整本婚礼相册、封面都只用托盘里的照片；托盘空着就先用 collage_auto_layout 的 photos 填这一场的照片 id，不在托盘的会自动进托盘），再 collage_apply_template / collage_run_kit / collage_next_cover / collage_set_text / collage_set_style，结果里有 app 当前画面的预览；模板不合适就自己设计：collage_list_templates（include=["layout_grammar"]）看语法，collage_set_layout 把版式放进当前页（collage_auto_layout 让 app 的引擎先排一版，读回 layout 再改）；要给用户出几版设计挑，每排好一版就 collage_save_variant 存成方案（不会被下一版盖掉），collage_open_variant 切回某一版；相册改整本：collage_get_state 的 album.spreads 看每个跨页放了哪几张，collage_pages 翻页、加删挪锁跨页、镜像、单边换版式，collage_move_photos 把照片挪到别的跨页，collage_replace_photo 换一格照片（候选用 collage_get_state 的 candidates_for 拿），collage_cover 做封面，交印厂前 collage_preflight 导出前检查、collage_print_spec 看和套印厂规格；导出成图片用 collage_export（清晰度 1–3 倍，写到拼图页「导出 ▾」里设的目录；pages 只导几个跨页，proof 出给客户的看版 PDF）；撤销 AI 自己刚做的一步用 app_undo。
     出错时：user_busy 的 data.transient 为 true 是用户正在拖动或打字，等几秒再调；为 false 是开着对话框、连拍挑选或裁切，请用户先关掉，不要重试。app_outcome_unknown：用结果里的 op_id 原样再调同一个工具，不要换工具。session_not_open：先 app_status 看 open_session。其他错误按 hint 改。读到的是 app 内存里的状态（含还没存盘的改动）。图片是缩小预览，文字结果里有预览文件的路径；不要直接读原图（几十 MB）。session 可以填照片文件夹的绝对路径，也可以填 16 位 session key。
     """
 
@@ -52,7 +52,7 @@ enum MCPToolDefs {
               let snippets = (try? JSONSerialization.jsonObject(with: Data(snippetsJSON.utf8))) as? [String: Any] else {
             fatalError("MCPToolDefs：工具定义的 JSON 坏了")  // 字面量写错是代码 bug，mcp_smoke / --mcp-selftest 第一时间就会红
         }
-        var lists: [String: Any] = ["$STYLES": styleKeys, "$LOOKS": lookKeys, "$KITS": kitIDs]
+        var lists: [String: Any] = ["$STYLES": styleKeys, "$LOOKS": lookKeys, "$KITS": kitIDs, "$REASONS": MCPArgs.reasonValues]
         lists["$DEADLINE_30"] = deadline(defaultSec: 30)
         lists["$DEADLINE_50"] = deadline(defaultSec: 50)
         for (k, v) in snippets { lists["$" + k] = v }
@@ -147,21 +147,22 @@ enum MCPToolDefs {
      "annotations":"$READ"},
 
     {"name":"cull_session_overview","title":"场次概览",
-     "description":"app 当前打开的那一场的选片概览：精选/可用/废片（pick/usable/reject）各多少张、废片理由计数、当前阈值和放宽建议、章节列表和每章的计数、场（scene，按快门间隔切开的一串连拍）和近似重复组（near_duplicate）的统计、还没处理的场、多机身和对时偏移、XMP 过期了几张（xmp.stale_count：上次写 XMP 之后判决、星级或客户选中变了的，Lightroom / C1 里还是旧的，改完判决要提醒用户在 app 里重写；xmp.written 为 false 是这一场还没写过 XMP；xmp.last_written 是上次写进 XMP 的时间，旧版本写的没记就没有这个键；上次写 XMP 的记录读不进来时 written、stale_count、shared_sidecar_count 都是 null、xmp.unknown 写原因，带 xmp_state_unknown 警告 —— 这时说不清过期了几张，不是没写过）、警告、app 是否正在分析。读的是 app 内存里的状态（含还没存盘的改动），和窗口里看到的一致。要看具体照片用 cull_list_photos。",
+     "description":"app 当前打开的那一场的选片概览：精选/可用/废片（pick/usable/reject）各多少张、废片理由计数、当前阈值和放宽建议、章节列表和每章的计数（最多 60 章，多了标 chapters_truncated，余下用 cull_list_groups kind=chapter 翻）、场（scene，按快门间隔切开的一串连拍）和近似重复组（near_duplicate）的统计、还没处理的场、多机身和对时偏移、XMP 过期了几张（xmp.stale_count：上次写 XMP 之后判决、星级或客户选中变了的，Lightroom / C1 里还是旧的，改完判决要提醒用户在 app 里重写；xmp.written 为 false 是这一场还没写过 XMP；xmp.last_written 是上次写进 XMP 的时间，旧版本写的没记就没有这个键；上次写 XMP 的记录读不进来时 written、stale_count、shared_sidecar_count 都是 null、xmp.unknown 写原因，带 xmp_state_unknown 警告 —— 这时说不清过期了几张，不是没写过）、警告、app 是否正在分析。读的是 app 内存里的状态（含还没存盘的改动），和窗口里看到的一致。要看具体照片用 cull_list_photos。",
      "inputSchema":{"type":"object","properties":{"session":"$SESSION"},"required":["session"],"additionalProperties":false},
      "annotations":"$READ"},
 
     {"name":"cull_list_photos","title":"列照片",
-     "description":"按条件列出 app 当前打开的那一场里的照片，每张一行精简数据：id、判决、废片理由、拍摄时间（已加机身对时偏移）、章节、场和场内名次、近似重复组、锐度（排序用）、对焦（focus：判虚焦用，低于 thresholds.focus 判虚焦）、曝光裁切、人脸质量、人脸数和闭眼数、是否人工改判（manual；changed_by 是 ai = AI 用 cull_set_verdicts 改的、user = 用户亲手改的）。条件之间是 AND。分页：结果里有 next_cursor，原样传回 cursor 就是下一页；翻页中间判决变了会带 session_changed:true。要完整细节（EXIF、每张脸）用 cull_get_photos；要看图用 cull_preview_photos。",
+     "description":"按条件列出 app 当前打开的那一场里的照片，每张一行精简数据：id、判决、废片理由、拍摄时间（已加机身对时偏移）、章节、场和场内名次、近似重复组、锐度（排序用）、对焦（focus：判虚焦用，低于 thresholds.focus 判虚焦）、曝光裁切、人脸质量、人脸数和闭眼数、是否人工改判（manual；changed_by 是 ai = AI 用 cull_set_verdicts 改的、user = 用户亲手改的）、客户选中（client_pick:true）和客户备注（client_note：导入客户选择时文件名后面的话，比如「去路人」；有才给）。条件之间是 AND。分页：结果里有 next_cursor，原样传回 cursor 就是下一页（超文字上限时这页少于 limit、标 truncated）；翻页中间判决变了会带 session_changed:true。要完整细节（EXIF、每张脸）用 cull_get_photos；要看图用 cull_preview_photos。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "verdict":{"type":"array","items":{"type":"string","enum":["pick","usable","reject"]},"uniqueItems":true,"description":"只列这些判决"},
-       "reason":{"type":"string","maxLength":40,"description":"废片理由，取值见 cull_session_overview 的 reason_counts 键"},
-       "chapter":{"type":"integer","minimum":0,"description":"只列这一章"},
-       "scene":{"type":"integer","minimum":0,"description":"只列这一场"},
-       "near_duplicate":{"type":"integer","minimum":0,"description":"只列这一个近似重复组"},
+       "reason":{"type":"string","enum":"$REASONS","description":"废片理由"},
+       "chapter":{"type":"integer","minimum":0,"description":"只列这一章（= cull_list_groups kind=chapter 的 key）"},
+       "scene":{"type":"integer","minimum":0,"description":"只列这一个场（一串连拍，不是场次；= kind=scene 的 key）"},
+       "near_duplicate":{"type":"integer","minimum":0,"description":"只列这一个近似重复组（kind=near_duplicate 的 key）"},
        "body":{"type":"string","maxLength":120,"description":"只列这台机身（型号或序列号）"},
        "manual_only":{"type":"boolean","default":false,"description":"只列人工改判过的"},
+       "client_pick":{"type":"boolean","description":"true = 只列客户选中的（cull_import_client_picks 导入、或用户在 app 里导入的），false = 只列没选中的；不给 = 不筛"},
        "sort":{"type":"string","enum":["time","id","sharpness"],"default":"time"},
        "limit":{"type":"integer","minimum":1,"maximum":100,"default":50},
        "cursor":{"type":"string","maxLength":512,"description":"上一页结果里的 next_cursor，原样传回"}},
@@ -169,7 +170,7 @@ enum MCPToolDefs {
      "annotations":"$READ"},
 
     {"name":"cull_get_photos","title":"照片详情",
-     "description":"app 当前打开的那一场里 1–20 张照片的完整分析：判决和理由；原图路径；相机、机身、序列号；拍摄时间（原始的和对时后的）；EXIF（快门、光圈、ISO、等效焦距、镜头）；锐度、曝光裁切、人脸质量；每张脸的位置（bbox = [x0,y0,x1,y1]，0–1 归一化，左上角为原点，按 EXIF 转正后的画面，四边各外扩了 15%）、是否闭眼、眼睛开合度、面积占比；章节、场、名次、近似重复组；VLM 复审和申诉结果（有的话）；人工改判（AI 改的另有 ai_override：哪一次 op_id、哪个工具、什么时候、AI 改之前是什么）和客户选片标记。不存在的 id 列在 missing_ids。",
+     "description":"app 当前打开的那一场里 1–20 张照片的完整分析：判决和理由；原图路径；相机、机身、序列号；拍摄时间（原始的和对时后的）；EXIF（快门、光圈、ISO、等效焦距、镜头）；锐度、曝光裁切、人脸质量；每张脸的位置（bbox = [x0,y0,x1,y1]，0–1 归一化，左上角为原点，按 EXIF 转正后的画面，四边各外扩了 15%）、是否闭眼、眼睛开合度、面积占比；章节、场、名次、近似重复组；VLM 复审和申诉结果（有的话）；人工改判（AI 改的另有 ai_override：哪一次 op_id、哪个工具、什么时候、AI 改之前是什么）、客户选片标记 client_pick 和客户备注 client_note（客户回复里文件名后面的修图要求，比如「去路人」；有才给）。不存在的 id 列在 missing_ids；文字超上限时后面几张没给、列在 truncated_ids，再调一次拿。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "ids":{"type":"array","items":{"type":"string","minLength":1,"maxLength":128},"minItems":1,"maxItems":20,"uniqueItems":true,"description":"照片 id（文件名去掉扩展名，比如 DSCF7208）"}},
@@ -177,18 +178,19 @@ enum MCPToolDefs {
      "annotations":"$READ"},
 
     {"name":"cull_list_groups","title":"分组",
-     "description":"列出 app 当前打开的那一场里的分组和成员。chapter：章节，按时间断档分出来的大段落。scene：场，相邻间隔不超过 scene_gap 秒的一串连拍，也就是 app 里的「场」；组内有名次，#1 是推荐保留的那张。near_duplicate：近似重复，画面几乎一样的照片（phash）。每组给出成员 id、判决、名次、推荐的那张，以及这一场是否还没处理。审连拍时先用它找组，再用 cull_preview_photos 看（一次最多 4 张）。",
+     "description":"列出 app 当前打开的那一场里的分组和成员。chapter：章节，按时间断档分出来的大段落。scene：场，相邻间隔不超过 scene_gap 秒的一串连拍，也就是 app 里的「场」；组内有名次，#1 是推荐保留的那张。near_duplicate：近似重复，画面几乎一样的照片（phash）。每组给出成员 id、判决、名次、推荐的那张，以及这一场是否还没处理（pending；pending_only=true 只列这些场）。审连拍时先用它找组，再用 cull_preview_photos 看（一次最多 4 张）。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "kind":{"type":"string","enum":["chapter","scene","near_duplicate"]},
        "min_size":{"type":"integer","minimum":1,"maximum":100,"default":2,"description":"只列至少这么多张的组"},
+       "pending_only":{"type":"boolean","default":false,"description":"只对 kind=scene：true = 只列还要人取舍的场（pending:true）"},
        "limit":{"type":"integer","minimum":1,"maximum":100,"default":30},
        "cursor":{"type":"string","maxLength":512,"description":"上一页结果里的 next_cursor，原样传回"}},
       "required":["session","kind"],"additionalProperties":false},
      "annotations":"$READ"},
 
     {"name":"cull_preview_photos","title":"看照片",
-     "description":"看 app 当前打开的那一场里 1–4 张照片的缩小预览（内联图片），用来判断表情、闭眼、对焦、构图。图由 app 出：crop=full 是整张；crop=face 是从原图按主脸裁一块放大，和 app 连拍挑选里的放大是同一个算法，看眼睛和对焦用它（照片在受系统隐私保护的位置时只在 1024 预览上裁，细节有限）。一张时长边默认 1024，多张时每张 768，max_edge 可以在 256–1568 之间调。文字结果里有每张预览文件（存在预览输出目录里）和原图的绝对路径；inline:false 只给路径、不内联图片。",
+     "description":"看 app 当前打开的那一场里 1–4 张照片的缩小预览（内联图片），用来判断表情、闭眼、对焦、构图。图由 app 出：crop=full 是整张；crop=face 是从原图按主脸裁一块放大，和 app 连拍挑选里的放大是同一个算法，看眼睛和对焦用它（照片在受系统隐私保护的位置时只在 1024 预览上裁，细节有限）。一张时长边默认 1024，多张时每张 768，max_edge 可以在 256–1568 之间调。文字结果里有每张预览文件（存在预览输出目录里）和原图的绝对路径；inline:false 只给路径、不内联图片；几张大图超过内联预算时后面的标 truncated、不给图，改用 inline:false 能拿到全部文件。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "ids":{"type":"array","items":{"type":"string","minLength":1,"maxLength":128},"minItems":1,"maxItems":4,"uniqueItems":true,"description":"照片 id（文件名去掉扩展名，比如 DSCF7208）"},
@@ -200,13 +202,15 @@ enum MCPToolDefs {
      "annotations":"$READ"},
 
     {"name":"collage_get_state","title":"看 app 里的拼图",
-     "description":"看 app 里当前拼图工程的状态（读的是 app 内存，含还没存盘的改动）：模式、页码和页数、画布尺寸 canvas、模板、样式、单独调过的样式项 style_fields、色调、标题/副标题/刊头/期号、托盘张数和每张照片的 id、像素尺寸 tray_photos（客户选中的照片带 client_pick:true，批量页导入的客户选择）、相册设了目标跨页数时的 album_target（spreads、min_per_spread、max_per_spread）、每个格子（path、照片 id、文字块数、在画布上的位置 rect）、这一页版式的语法 layout（可以改了发给 collage_set_layout）、选中的格子、撤销深度（最上面那一步是不是 AI 做的）、存过的方案（variants：id、名字、current = 就是现在这一版）、是否还在算、digest（拼图写工具的 if_digest 就填它；存方案不改它），后面跟一张 app 当前画面的预览图。相册另有 album：spreads（每个跨页的号 page、照片 id、锁没锁、哪种页）、印厂规格的页数合不合规（print）、封面（cover）。editing_cover 为 true 是用户（或 AI）正在编辑封面：这时 page_kind 是 cover，cells、layout 是封面那一块（page 还是回去的那个跨页）。candidates_for 填一张照片的 id，结果里多一份 candidates：能换它的照片（同连拍 / 同场 / 画面相似，带分数、用在第几个跨页、是不是废片、客户选中），换用 collage_replace_photo。session 不填就是 app 当前打开的那一场；填了别的场次回 session_not_open。和用户切到拼图页一样，会先把这一场的拼图工程接上（托盘里照片的判决等信息按批量页刷新），所以可能顺带存一次 collage.json。",
+     "description":"看 app 里当前拼图工程的状态（读的是 app 内存，含还没存盘的改动）：模式、页码和页数、画布尺寸 canvas、模板、样式、单独调过的样式项 style_fields、色调、标题/副标题/刊头/期号、托盘张数 tray、没上版的张数 tray_unused、每张照片的 id 和像素尺寸 tray_photos（客户选中的带 client_pick:true；一次最多 200 张，没列全时 warnings 的 tray_truncated 写明 tray_offset 从哪翻）、相册设了目标跨页数时的 album_target（spreads、min_per_spread、max_per_spread）、每个格子（path、照片 id、文字块数、在画布上的位置 rect）、这一页版式的语法 layout（可以改了发给 collage_set_layout）、选中的格子、撤销深度（最上面那一步是不是 AI 做的）、存过的方案（variants：id、名字、current = 就是现在这一版）、导出设置 export（输出目录、格式、倍数、印刷 PDF、裁切线、水印）、是否还在算、digest（拼图写工具的 if_digest 就填它；存方案不改它），后面跟一张 app 当前画面的预览图。相册另有 album：spreads（每个跨页的号 page、照片 id、锁没锁、哪种页）、印厂规格的页数合不合规（print）、封面（cover）。editing_cover 为 true 是用户（或 AI）正在编辑封面：这时 page_kind 是 cover，cells、layout 是封面那一块（page 还是回去的那个跨页）。candidates_for 填一张照片的 id，结果里多一份 candidates：能换它的照片（同连拍 / 同场 / 画面相似，带分数、用在第几个跨页、是不是废片、客户选中）和它自己所在的 page、path，照填给 collage_replace_photo。include 只要点名的几块（默认全给，托盘大时省字）。session 不填就是 app 当前打开的那一场；填了别的场次回 session_not_open。和用户切到拼图页一样，会先把这一场的拼图工程接上（托盘里照片的判决等信息按批量页刷新），所以可能顺带存一次 collage.json。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "include_preview":{"type":"boolean","default":true,"description":"要不要带 app 当前画面的预览图"},
        "max_edge":{"type":"integer","minimum":256,"maximum":1024,"default":768,"description":"预览图长边像素"},
        "candidates_for":{"type":"string","minLength":1,"maxLength":256,"description":"要换掉的那张照片的 id（托盘里的）：结果里带换它的候选"},
        "candidates_limit":{"type":"integer","minimum":1,"maximum":30,"default":12,"description":"候选最多几张（和 candidates_for 一起给）"},
+       "include":{"type":"array","items":{"type":"string","enum":["tray_photos","cells","layout","album","variants"]},"uniqueItems":true,"description":"只要这几块（标量总给）"},
+       "tray_offset":{"type":"integer","minimum":0,"description":"tray_photos 从第几张起（从 0 起）"},
        "inline":"$INLINE"},
       "additionalProperties":false},
      "annotations":"$READ"},
@@ -248,7 +252,7 @@ enum MCPToolDefs {
      "annotations":"$WRITE_IDEMPOTENT"},
 
     {"name":"collage_apply_template","title":"套模板",
-     "description":"给 app 里当前的拼图套一个模板（= 拼图页左栏「模板」里点模板），画布当场换版式。template 可以写模板全名、分类名（套这个分类的第一个）或名字里的几个字，取值见 collage_list_templates。一次调用是一步撤销（拼图页 ⌘Z，或 app_undo target=collage）。正在编辑相册封面时回 invalid_state（模板是给跨页的）。结果里有 app 当前画面的预览图。",
+     "description":"给 app 里当前的拼图套一个模板（= 拼图页左栏「模板」里点模板），画布当场换版式。template 可以写模板全名、分类名（套这个分类的第一个）或名字里的几个字，取值见 collage_list_templates。照片从托盘里挑：托盘的照片比模板的照片格少（托盘空着就一张都没有）时照样套上、多出来的格子空着，warnings 报 empty_slots（托盘怎么进见 hint）。一次调用是一步撤销（拼图页 ⌘Z，或 app_undo target=collage）。正在编辑相册封面时回 invalid_state（模板是给跨页的）。结果里有 app 当前画面的预览图。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "template":{"type":"string","minLength":1,"maxLength":80,"description":"模板全名、分类名或名字里的几个字"},
@@ -260,7 +264,7 @@ enum MCPToolDefs {
      "annotations":"$WRITE_IDEMPOTENT"},
 
     {"name":"collage_run_kit","title":"在 app 里一键成套",
-     "description":"在 app 里一键成套（= 拼图页左栏「模板 › 一键成套」）：{{kits}}。替换当前拼图工程，落地时是一步撤销。要等 app 算完（最长约 50 秒）；被用户的新操作作废或用户切了场次回 superseded，托盘里没有能用的照片回 nothing_to_render。结果里有页数、封面和 app 当前画面的预览图。",
+     "description":"在 app 里一键成套（= 拼图页左栏「模板 › 一键成套」）：{{kits}}。替换当前拼图工程，落地时是一步撤销。weddingAlbum 在已经排好的相册上会整本重排、不先问（界面上点会先问）：只换没锁的跨页，要保留的跨页先 collage_pages action=lock 锁住（锁住的原样留着，上面的照片不再参与编排）。要等 app 算完（最长约 50 秒）；被用户的新操作作废或用户切了场次回 superseded，没有能用的照片回 nothing_to_render（整本婚礼相册只编托盘里的照片，托盘空着先用 collage_auto_layout 的 photos 带照片进托盘；出一期托盘空着时从这一场借，按卷出印样用这一场的全部帧）。结果里有页数、封面和 app 当前画面的预览图；weddingAlbum 的 album 里 spreads_replaced 是换掉的原有跨页数、spreads_kept 是原样留着的（锁住的），之前不是相册都是 0。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "kit":{"type":"string","enum":"$KITS"},
@@ -470,7 +474,7 @@ enum MCPToolDefs {
      "annotations":"$WRITE_IDEMPOTENT"},
 
     {"name":"collage_preflight","title":"导出前检查",
-     "description":"导出前检查（= 拼图页「导出 ▾」里的「导出前检查」），整本过一遍，分成 blocks（拦：导出按钮会先问的——空照片格、原图读不了（kind=source：移动硬盘没接、文件挪走了，导出只能用小预览图）、放大超过 150%、套了印厂规格时页数不合规、同一张照片用了两次、胶装时脸压中缝带 / 照片横跨中缝（fold_cross）/ 字压进中缝带、封面上的空照片格 / 放大超过 150% / 原图读不了、封面书脊宽是按别的页数填的（kind=spine：填完以后加减过跨页））和 reminders（提醒：放大 120–150%、没套印厂规格时的页数（按常见的 20–60P 看）、平铺时脸压中缝、字出安全区或平铺时压进中缝带、贴边的照片没铺进出血、首尾单页那半边有东西、印刷画布上正文还是灰条、封面放大 120–150% / 书脊是估的（kind=spine，导整本时导出按钮会另问一次）/ 太窄 / 脸贴着书脊）。每条有种类 kind、第几个跨页 page（整本的事和封面、书脊是 null）、格子 path（kind=cover 时是封面那一块的格子）、照片 id 和一句话；各列前 30 条，总数在 block_count、warn_count（warnings 是这次调用本身的提示，比如 hints_pending，不是那几条提醒）。照着改：换照片 collage_replace_photo，挪照片 collage_move_photos，跨页数不合规 collage_pages 加 / 删，规格 collage_print_spec。pages 写要导的跨页（「1-3, 7」）时 export_would_ask 只看那几页（同「导出 ▾」的范围）。texts=false 只查导出按钮看的那几样（不排字，快）。路人信息还没算完时取景可能还会变（hints_pending）。不改任何东西。",
+     "description":"导出前检查（= 拼图页「导出 ▾」里的「导出前检查」），整本过一遍，分成 blocks（拦：导出按钮会先问的——空照片格、原图读不了（kind=source：移动硬盘没接、文件挪走了，导出只能用小预览图）、放大超过 150%、套了印厂规格时页数不合规、同一张照片用了两次、胶装时脸压中缝带 / 照片横跨中缝（fold_cross）/ 字压进中缝带、封面上的空照片格 / 放大超过 150% / 原图读不了、封面书脊宽是按别的页数填的（kind=spine：填完以后加减过跨页））和 reminders（提醒：放大 120–150%、没套印厂规格时的页数（按常见的 20–60P 看）、平铺时脸压中缝、字出安全区或平铺时压进中缝带、贴边的照片没铺进出血、首尾单页那半边有东西、印刷画布上正文还是灰条、封面放大 120–150% / 书脊是估的（kind=spine，导整本时导出按钮会另问一次）/ 太窄 / 脸贴着书脊）。每条有种类 kind、第几个跨页 page（整本的事和封面、书脊是 null）、格子 path（kind=cover 时是封面那一块的格子）、照片 id 和一句话；各列前 30 条，总数在 block_count、warn_count（warnings 是这次调用本身的提示，比如 hints_pending，不是那几条提醒）。照着改：换照片 collage_replace_photo，挪照片 collage_move_photos，跨页数不合规 collage_pages 加 / 删，规格 collage_print_spec。export_would_ask 是导出按钮会先弹的确认（title、message），null = 不会问；不给 pages 按整本算，pages 写要导的跨页（「1-3, 7」）时只看那几页（同「导出 ▾」的范围）。texts=false 只查导出按钮看的那几样（不排字，快）。路人信息还没算完时取景可能还会变（hints_pending）。不改任何东西。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "texts":{"type":"boolean","default":true,"description":"false = 不查字（字出安全区、占位正文），快"},
@@ -499,7 +503,7 @@ enum MCPToolDefs {
      "annotations":"$WRITE_IDEMPOTENT"},
 
     {"name":"collage_cover","title":"相册封面",
-     "description":"相册的精装封面（一整张 = 封底 | 书脊 | 封面，四周包边和出血；= 「文档 › 封面」）。不给参数 = 只读封面的设置。action=make 做封面（主图用扉页那张，没有就分数最高、有人脸的；标题、日期照扉页）；remake 按现在的扉页重做封面那块（书脊这些设置留着）；remove 去掉；edit / done 进 / 出封面编辑（= 跨页条最前面那张「封面」卡）。编辑封面时：collage_get_state 读的（page_kind 是 cover）、collage_replace_photo 换的是封面那块；collage_set_layout、collage_auto_layout、collage_apply_template 和 collage_set_text 的 cell_text 回 invalid_state；collage_pages、collage_move_photos 先退出封面编辑。字段：spine_mm 书脊宽（照印厂给的数填；spine_auto=true 改回按页数估）、wrap_mm 包边、board_mm 板厚、sheet_mm 每张内页厚（这两样只用来估书脊）、spine_title / spine_date 书脊上的字（可以用 {title}、{date}，空 = 不印）、back_photo 封底照片（托盘里的 id，空 = 不放）、back_text 封底一行字。只对相册。改的一次调用一步撤销（拼图页 ⌘Z，或 app_undo target=collage；进 / 出编辑不进撤销）。整本导出时封面另出「名_封面」图和 PDF，看版 PDF 第一页是它。结果里有封面的尺寸、书脊是不是估的、提示（书脊太窄、脸贴着书脊）；有封面时预览图是整张封面。",
+     "description":"相册的精装封面（一整张 = 封底 | 书脊 | 封面，四周包边和出血；= 「文档 › 封面」）。不给参数 = 只读封面的设置。action=make 做封面（主图用扉页那张，没有就分数最高、有人脸的；标题、日期照扉页）；remake 按现在的扉页重做封面那块（书脊这些设置留着）；remove 去掉；edit / done 进 / 出封面编辑（= 跨页条最前面那张「封面」卡）。编辑封面时：collage_get_state 读的（page_kind 是 cover）、collage_replace_photo 换的是封面那块；collage_set_layout、collage_auto_layout、collage_apply_template 和 collage_set_text 的 cell_text 回 invalid_state；collage_pages、collage_move_photos 先退出封面编辑。字段：spine_mm 书脊宽（照印厂给的数填；spine_auto=true 改回按页数估）、wrap_mm 包边、board_mm 板厚、sheet_mm 每张内页厚（这两样只用来估书脊）、spine_title / spine_date 书脊上的字（可以用 {title}、{date}，空 = 不印）、back_photo 封底照片（托盘里的 id，空 = 不放）、back_text 封底一行字。只对相册。改的一次调用一步撤销（拼图页 ⌘Z，或 app_undo target=collage；进 / 出编辑不进撤销）。整本导出时封面另出「名_封面」图和 PDF，看版 PDF 第一页是它。结果里有封面的尺寸、书脊是不是估的、提示（书脊太窄、脸贴着书脊）；填完书脊宽又加删过跨页时 spine_stale 为 true（spine_pages 是填时的页数，导出前检查会拦）：照印厂给的新数再发 spine_mm（数没变就原样再发）；有封面时预览图是整张封面。",
      "inputSchema":{"type":"object","properties":{
        "session":"$SESSION",
        "action":{"type":"string","enum":["make","remake","remove","edit","done"]},
