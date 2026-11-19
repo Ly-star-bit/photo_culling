@@ -117,7 +117,8 @@ enum MCPReadModel {
         }
         out["xmp"] = xmp
 
-        var thresholds: [String: Any] = ["sharpness": r3(s.sharpnessThreshold)]
+        // 虚焦看的是对焦（focus，和每张照片的 focus 同一把尺），不是锐度（sharpness 只管排序）
+        var thresholds: [String: Any] = ["focus": r3(s.focusThreshold)]
         thresholds["clip_pct"] = r3(s.exposureThreshold * 100)
         thresholds["face_quality"] = r3(s.faceQualityThreshold)
         thresholds["preset"] = s.currentPreset?.rawValue ?? "自定义"
@@ -320,6 +321,9 @@ enum MCPReadModel {
         if let rank = s.takeRank[item.id] { r["scene_rank"] = rank }
         if (groupSizes[item.burstGroup] ?? 0) > 1 { r["near_duplicate"] = item.burstGroup }
         r["sharpness"] = r3(item.sharpness)
+        // 判虚焦用的对焦（和 thresholds.focus 比，低于线判虚焦）；老版本分析的按锐度折算，带 focus_estimated
+        r["focus"] = r3(BatchStore.focusValue(item))
+        if item.focus == nil { r["focus_estimated"] = true }
         r["clip_pct"] = r3(item.worstClipPct * 100)
         if let q = item.faceQuality { r["face_quality"] = r3(q) }
         r["faces"] = item.faceCount

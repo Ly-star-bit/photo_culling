@@ -20,7 +20,7 @@
   {
    "camera": "X-T50",
    "capture_time": "2026-03-21T10:00:20",
-   "decode_path": "/tmp/labelgui-fixture-synthetic/A02-sharp44.JPG",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/A02-focus59.JPG",
    "exif": {
     "aperture": 5,
     "focal_35": 36,
@@ -28,15 +28,15 @@
     "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
     "shutter_sec": 0.0005
    },
-   "id": "A02-sharp44",
+   "id": "A02-focus59",
    "orientation": null,
-   "preview_path": "previews/A02-sharp44.jpg",
-   "raw_path": "/tmp/labelgui-fixture-synthetic/A02-sharp44.JPG"
+   "preview_path": "previews/A02-focus59.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/A02-focus59.JPG"
   },
   {
    "camera": "X-T50",
    "capture_time": "2026-03-21T10:00:40",
-   "decode_path": "/tmp/labelgui-fixture-synthetic/A03-sharp45.JPG",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/A03-focus60.JPG",
    "exif": {
     "aperture": 5,
     "focal_35": 36,
@@ -44,10 +44,10 @@
     "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
     "shutter_sec": 0.0005
    },
-   "id": "A03-sharp45",
+   "id": "A03-focus60",
    "orientation": null,
-   "preview_path": "previews/A03-sharp45.jpg",
-   "raw_path": "/tmp/labelgui-fixture-synthetic/A03-sharp45.JPG"
+   "preview_path": "previews/A03-focus60.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/A03-focus60.JPG"
   },
   {
    "camera": "X-T50",
@@ -832,6 +832,310 @@
    "orientation": null,
    "preview_path": "previews/X02-ear005-floor.jpg",
    "raw_path": "/tmp/labelgui-fixture-synthetic/X02-ear005-floor.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:15:30",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/G01-sharp80.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "G01-sharp80",
+   "orientation": null,
+   "preview_path": "previews/G01-sharp80.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/G01-sharp80.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:15:31",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/G02-soft72-q068.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "G02-soft72-q068",
+   "orientation": null,
+   "preview_path": "previews/G02-soft72-q068.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/G02-soft72-q068.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:15:32",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/G03-noise76-q064.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "G03-noise76-q064",
+   "orientation": null,
+   "preview_path": "previews/G03-noise76-q064.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/G03-noise76-q064.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:16:00",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/H01-sharp80-expr3.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "H01-sharp80-expr3",
+   "orientation": null,
+   "preview_path": "previews/H01-sharp80-expr3.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/H01-sharp80-expr3.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:16:01",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/H02-soft72-expr4.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "H02-soft72-expr4",
+   "orientation": null,
+   "preview_path": "previews/H02-soft72-expr4.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/H02-soft72-expr4.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:16:30",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/K01-eyes80.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "K01-eyes80",
+   "orientation": null,
+   "preview_path": "previews/K01-eyes80.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/K01-eyes80.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:16:31",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/K02-face50-q065.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "K02-face50-q065",
+   "orientation": null,
+   "preview_path": "previews/K02-face50-q065.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/K02-face50-q065.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:17:00",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/L01-sharp80-closed.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "L01-sharp80-closed",
+   "orientation": null,
+   "preview_path": "previews/L01-sharp80-closed.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/L01-sharp80-closed.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:17:01",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/L02-soft72-q060.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "L02-soft72-q060",
+   "orientation": null,
+   "preview_path": "previews/L02-soft72-q060.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/L02-soft72-q060.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:17:04",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/L03-other-q058.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "L03-other-q058",
+   "orientation": null,
+   "preview_path": "previews/L03-other-q058.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/L03-other-q058.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:17:30",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/N01-ear040.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "N01-ear040",
+   "orientation": null,
+   "preview_path": "previews/N01-ear040.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/N01-ear040.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:17:31",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/N02-ear0205-guard.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "N02-ear0205-guard",
+   "orientation": null,
+   "preview_path": "previews/N02-ear0205-guard.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/N02-ear0205-guard.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:17:32",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/N03-ear0195.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "N03-ear0195",
+   "orientation": null,
+   "preview_path": "previews/N03-ear0195.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/N03-ear0195.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:18:00",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/R01-ear026.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "R01-ear026",
+   "orientation": null,
+   "preview_path": "previews/R01-ear026.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/R01-ear026.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:18:01",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/R02-ear019-rel.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "R02-ear019-rel",
+   "orientation": null,
+   "preview_path": "previews/R02-ear019-rel.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/R02-ear019-rel.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:19:00",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/S01-legacy-sharp44.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "S01-legacy-sharp44",
+   "orientation": null,
+   "preview_path": "previews/S01-legacy-sharp44.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/S01-legacy-sharp44.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:19:20",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/S02-legacy-sharp45.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "S02-legacy-sharp45",
+   "orientation": null,
+   "preview_path": "previews/S02-legacy-sharp45.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/S02-legacy-sharp45.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:19:40",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/S03-dark-sharp30.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "S03-dark-sharp30",
+   "orientation": null,
+   "preview_path": "previews/S03-dark-sharp30.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/S03-dark-sharp30.JPG"
+  },
+  {
+   "camera": "X-T50",
+   "capture_time": "2026-03-21T10:20:00",
+   "decode_path": "/tmp/labelgui-fixture-synthetic/S04-sharp85-focus40.JPG",
+   "exif": {
+    "aperture": 5,
+    "focal_35": 36,
+    "iso": 500,
+    "lens": "17-70mm F/2.8 DiIII-A VC RXD B070X",
+    "shutter_sec": 0.0005
+   },
+   "id": "S04-sharp85-focus40",
+   "orientation": null,
+   "preview_path": "previews/S04-sharp85-focus40.jpg",
+   "raw_path": "/tmp/labelgui-fixture-synthetic/S04-sharp85-focus40.JPG"
   },
   {
    "camera": "X-T50",

@@ -106,6 +106,8 @@ struct DetailView: View {
         return Form {
             Section {
                 LabeledContent("锐度", value: l1?.sharpness.map { String(format: "%.1f", $0) } ?? "-")
+                // 判虚焦看的是对焦（和批量页「对焦下限」同一把尺）；老版本分析的没有
+                LabeledContent("对焦", value: l1?.focusRatio.map { String(format: "%.0f", $0 * BatchStore.focusScale) } ?? "-")
                 LabeledContent("闭眼(算法)", value: {
                     guard let l1 else { return "无分析数据" }
                     if l1.faceFound != true { return "未检测到脸" }

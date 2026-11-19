@@ -13,6 +13,9 @@ extension ImageLoader {
         private var byFile: [String: String] = [:]
         /// 相对路径去掉扩展名 → 这个位置上的旧 id。文件整个换了格式（JPG 换成 HEIC）时的退路，只剩一个没人要的才用。
         private var byKey: [String: Set<String>] = [:]
+        /// 旧 id → 上一次分析时解码那个文件的大小 + 修改时间（layer1 的 src_size / src_mtime）：改名认回 id 的第三遍用（EC-02）。
+        /// 只有上一次分析成了的（manifest 的 photos 里有、layer1 记了大小的）才有；老结果没记 src_size 的不认（只凭修改时间太弱）。
+        private var fingerprints: [String: FileStamp] = [:]
 
         var isEmpty: Bool { byFile.isEmpty }
 
@@ -26,11 +29,20 @@ extension ImageLoader {
         /// 从上一次的 manifest 建表 —— 不管哪个引擎、哪个分析版本写的：版本升级整场重分析时 id 也得沿用。
         /// 路径先相对旧 manifest 的 photo_dir 算（拍摄文件夹挪过、外置盘换了挂载点也对得上），套不上再相对这一次的根目录。
         /// photos 先、idOnlyKey 那份后（同一个文件先记下的算）。
-        init(manifest: [String: Any]?, photoDir: URL) {
+        /// layer1：上一次的 layer1_results.json（按字典读的），只拿每张的 src_size / src_mtime 当指纹 —— 不管哪个分析版本写的
+        /// （文件大小、修改时间和分析口径无关，版本升级整场重分析时改了名的照片也认得回来）。
+        init(manifest: [String: Any]?, layer1: [String: Any]? = nil, photoDir: URL) {
             let analyzed = manifest?["photos"] as? [[String: Any]] ?? []
             let idOnly = manifest?[Self.idOnlyKey] as? [[String: Any]] ?? []
             let rows = analyzed + idOnly
             guard !rows.isEmpty else { return }
+            let analyzedIDs = Set(analyzed.compactMap { $0["id"] as? String })
+            for r in layer1?["results"] as? [[String: Any]] ?? [] {
+                guard let id = r["id"] as? String, analyzedIDs.contains(id),
+                      let size = r["src_size"] as? Int, size > 0,
+                      let mtime = r["src_mtime"] as? Double, mtime.isFinite else { continue }
+                fingerprints[id] = FileStamp(size: size, mtime: mtime)
+            }
             var roots: [String] = []
             if let old = manifest?["photo_dir"] as? String, !old.isEmpty { roots.append(old) }
             roots.append(photoDir.path)
@@ -50,10 +62,12 @@ extension ImageLoader {
         /// extras 是同一个文件夹里同名同类多出来的单张（IMG_0001.HEIC 旁边的 IMG_0001.JPG）。一个旧 id 只给一张：
         /// 先按文件认（配对的先、多出来的后），都认不出来的配对照片再按去掉扩展名的位置认（只剩一个没人要的旧 id 才算）。
         /// 认不出来的 = nil，listPhotos 第二遍照老规矩起名。
-        func match(pairs: [[URL]], extras: [URL], root: URL) -> (pairs: [String?], extras: [String?]) {
+        /// 前两遍都没认出来的，第三遍按指纹认（fingerprintMatches）；refound 是这一遍认回来的旧 id。`stamp` 只给自检换掉。
+        func match(pairs: [[URL]], extras: [URL], root: URL,
+                   stamp: (URL) -> FileStamp? = FileStamp.of) -> (pairs: [String?], extras: [String?], refound: Set<String>) {
             var pairIDs = [String?](repeating: nil, count: pairs.count)
             var extraIDs = [String?](repeating: nil, count: extras.count)
-            guard !byFile.isEmpty else { return (pairIDs, extraIDs) }
+            guard !byFile.isEmpty else { return (pairIDs, extraIDs, []) }
             let relativizer = PathRelativizer(roots: [root.path])
             var taken = Set<String>()
             func take(_ rel: String?) -> String? {
@@ -77,7 +91,49 @@ extension ImageLoader {
                 taken.insert(id)
                 pairIDs[i] = id
             }
-            return (pairIDs, extraIDs)
+
+            // 第三遍（审查 EC-02）：分析过以后在访达 / Bridge 里改了名（或挪到别的子文件夹）的照片，以前当新照片重新分析，
+            // 人工改判、客户选中挂在旧 id 上静默丢掉。改名不动文件大小和修改时间：前两遍都没认出来的新文件，拿它和
+            // 「上一次分析过、这一次路径已经不在」（前两遍没人要）的旧 id 比指纹，对上就沿用旧 id —— 改判、客户选中、客户备注、
+            // XMP 记录、拼图都按 id 记，跟着回来；分析结果（同一个 id、同样的大小和修改时间）原样复用，预览图也还是那张。
+            // 复制一份、原件还在的：原件第一遍按路径拿走了旧 id，副本没得对。对不上、对上几个的照旧当新照片（fingerprintMatches）。
+            let oldLeft = fingerprints.filter { !taken.contains($0.key) }
+            guard !oldLeft.isEmpty else { return (pairIDs, extraIDs, []) }
+            // 新文件：没认出来的配对照片（解码用的那个文件在前，指纹就是它的）、多出来的单张。只 stat 这几个。
+            var candidates: [(pair: Int?, extra: Int?, url: URL)] = []
+            for i in pairs.indices where pairIDs[i] == nil {
+                if let url = pairs[i].first { candidates.append((i, nil, url)) }
+            }
+            for j in extras.indices where extraIDs[j] == nil { candidates.append((nil, j, extras[j])) }
+            guard !candidates.isEmpty else { return (pairIDs, extraIDs, []) }
+            let found = Self.fingerprintMatches(new: candidates.map { stamp($0.url) }, old: oldLeft)
+            var refound = Set<String>()
+            for (k, id) in found {
+                if let i = candidates[k].pair { pairIDs[i] = id }
+                if let j = candidates[k].extra { extraIDs[j] = id }
+                refound.insert(id)
+            }
+            return (pairIDs, extraIDs, refound)
+        }
+
+        /// 新文件的指纹（nil = stat 不出来）对旧 id 的指纹：大小一样、修改时间差不到 1 秒（和分析复用同一个口径）算对上。
+        /// 只认一对一 —— 这个新文件只对上这一个旧 id，这个旧 id 也只被这一个新文件对上；同一秒连拍的无损 RAW 大小一样、
+        /// 修改时间也一样，对上几个的不猜。返回 新文件下标 → 旧 id。纯函数（--session-input-selftest 直接测）。
+        static func fingerprintMatches(new: [FileStamp?], old: [String: FileStamp]) -> [Int: String] {
+            var bySize: [Int: [(id: String, mtime: Double)]] = [:]
+            for (id, s) in old { bySize[s.size, default: []].append((id, s.mtime)) }
+            var hits: [Int: [String]] = [:]
+            var claims: [String: Int] = [:]
+            for (k, s) in new.enumerated() {
+                guard let s, s.size > 0 else { continue }
+                let ids = (bySize[s.size] ?? []).filter { abs($0.mtime - s.mtime) < 1.0 }.map(\.id)
+                guard !ids.isEmpty else { continue }
+                hits[k] = ids
+                for id in ids { claims[id, default: 0] += 1 }
+            }
+            var out: [Int: String] = [:]
+            for (k, ids) in hits where ids.count == 1 && claims[ids[0]] == 1 { out[k] = ids[0] }
+            return out
         }
     }
 

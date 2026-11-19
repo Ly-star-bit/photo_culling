@@ -1,11 +1,12 @@
-接受全部推荐: 动了 5 场 · overrides 13 条 · 人工改判 4 条
+接受全部推荐: 动了 11 场 · overrides 26 条 · 人工改判 4 条
 连拍去重: 关
-照片 54 · 精选 5 · 可用 18 · 废片 31
-近似重复 4 组 / 12 张 (phash 层，自动规则作用范围)
-场 (间隔≤8s) 6 个多张场 / 16 张 · 待处理 0
+照片 73 · 精选 11 · 可用 20 · 废片 42
+没进网格 1 张: Z03-l1-error
+近似重复 10 组 / 26 张 (phash 层，自动规则作用范围)
+场 (间隔≤8s) 12 个多张场 / 31 张 · 待处理 0
   理由 文件损坏: 2
-  理由 闭眼: 8
-  理由 虚焦: 6
+  理由 闭眼: 10
+  理由 虚焦: 8
   理由 曝光裁切: 6
   理由 欠曝: 2
   理由 过曝: 2
@@ -19,10 +20,16 @@
   场 38 (2 张): E01-take-best=精选 E02-take-other=废片
   场 39 (2 张): F01-take-auto=废片 F02-manual-pick=精选
   场 42 (2 张): X01-ear007-floor=废片 X02-ear005-floor=废片
-阈值: 锐度 45.0 · 曝光裁切 0.15 · 人脸质量 0.3 · 预设 标准
+  场 43 (3 张): G01-sharp80=废片 G02-soft72-q068=废片 G03-noise76-q064=精选
+  场 44 (2 张): H01-sharp80-expr3=废片 H02-soft72-expr4=精选
+  场 45 (2 张): K01-eyes80=废片 K02-face50-q065=精选
+  场 46 (3 张): L01-sharp80-closed=废片 L02-soft72-q060=精选 L03-other-q058=废片
+  场 47 (3 张): N01-ear040=精选 N02-ear0205-guard=废片 N03-ear0195=废片
+  场 48 (2 张): R01-ear026=精选 R02-ear019-rel=废片
+阈值: 对焦 60.0 · 曝光裁切 0.15 · 人脸质量 0.3 · 预设 标准
   A01-ok 可用 -
-  A02-sharp44 废片 虚焦
-  A03-sharp45 可用 -
+  A02-focus59 废片 虚焦
+  A03-focus60 可用 -
   A04-under-face70-p99-90 废片 欠曝
   A05-under-p99-100 可用 -
   A06-under-face80 可用 -
@@ -68,8 +75,27 @@
   E02-take-other 废片 -
   F01-take-auto 废片 -
   F02-manual-pick 精选 -
+  G01-sharp80 废片 -
+  G02-soft72-q068 废片 -
+  G03-noise76-q064 精选 -
+  H01-sharp80-expr3 废片 -
+  H02-soft72-expr4 精选 -
+  K01-eyes80 废片 -
+  K02-face50-q065 精选 -
+  L01-sharp80-closed 废片 闭眼
+  L02-soft72-q060 精选 -
+  L03-other-q058 废片 -
   M01-manual-keep-blur 可用 虚焦
   M02-manual-reject 废片 -
+  N01-ear040 精选 -
+  N02-ear0205-guard 废片 -
+  N03-ear0195 废片 闭眼
+  R01-ear026 精选 -
+  R02-ear019-rel 废片 -
+  S01-legacy-sharp44 废片 虚焦
+  S02-legacy-sharp45 可用 -
+  S03-dark-sharp30 可用 -
+  S04-sharp85-focus40 废片 虚焦
   X01-ear007-floor 废片 闭眼
   X02-ear005-floor 废片 闭眼
   Z01-corrupt 废片 文件损坏

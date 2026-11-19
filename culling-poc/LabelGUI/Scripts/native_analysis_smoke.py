@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """合成图跑原生分析冒烟（CI 的「合成图跑原生分析」步骤）：手写几张能确定结果的合成图，真跑 `--analyze`（ImageIO 解码、
 EXIF 方向和拍摄时间、Vision、锐度 / 裁切、截断 JPEG、pHash 分组），再跑 `--verdicts --per-photo`，按正则断言理由和标志，
-不比具体数值（锐度、人脸质量这些每次有点抖，换了公式也不该在这里红）。
+不比具体数值（换了公式也不该在这里红）。
 
     blur.jpg      横向平滑渐变（30 → 220）：没有边缘 → 虚焦（不用噪声图：噪声会把锐度抬高）
     white.jpg     整张 255：曝光裁切；没有脸 → 不判过曝（过曝只看脸，BatchStore.toneReason）
@@ -14,6 +14,16 @@ EXIF 方向和拍摄时间、Vision、锐度 / 裁切、截断 JPEG、pHash 分�
 sips 出的图没有拍摄时间（没有时间的每张单独成组），所以分组要手写 APP1。
 第二次 --analyze 应该全部复用（0 analyzed），一张预览都不写（Previews written 那行没有：界面分析收尾一张缓存都不清）；
 再把 white 的修改时间往后拨、删掉 control 的预览，第三次只有这两张写预览（重新分析 1 张 + 补回 1 张预览）。
+
+分析可重复（第 5 段，VQ-04）：上面那些图都没有脸，测不到人脸质量。这一段用 Scripts/synth_face.swift（swiftc 现编）在灰底上
+画几个人物 emoji —— Vision 认得出它们的脸，而且分析版本 3 以前人脸质量请求在它们上面每次分出来的不一样（有时还「有脸没分」）。
+同一个文件夹在两个全新数据目录各 `--analyze` 一次：layer1 的 results 去掉 elapsed_sec（每次的耗时）以后逐字节相同，
+`--verdicts --per-photo`（带不带 --dedupe）逐字相同；认出脸的每张都有人脸质量分。manifest 不比（preview_path 带着数据目录）。
+
+锐度只看眼眉带（第 6 段，复核 M1）：同一个 emoji 原样 / 只糊眼眉 / 只糊嘴各画一张，只糊眼眉的锐度要掉、只糊嘴的不动。
+
+歪头的 EAR（第 7 段，VQ-05 / VQ-08）：同一个 emoji 正着、转 20° 各画一张，再把正着那张改成 EXIF 方向 6（脸横躺），
+三张的 EAR 要差不多（以前歪 20° 多 0.1–0.2，横躺读成 2–3.5）。
 
 最后是规模守护：把 photot-session 的 21 行克隆成 2000 / 8000 行（只有 JSON，不要图），给 `--verdicts` 计时；
 共享 runner 计时抖得厉害，只卡很宽的上限和「8000 比 2000 的耗时比」（线性 ≈ 4，O(n²) ≈ 16），各取几次里最快的。
@@ -346,10 +356,175 @@ def scale_section():
           f"线性 ≈ 4，O(n²) ≈ 16）")
 
 
+# ---------------------------------------------------------------- 5. 分析可重复（带人脸）
+
+# 600pt、1500×1000 上 Vision 认得出脸的人物 emoji（本机 macOS 26 上 15 个里认得出 14 个；😀 这种黄脸认不出）。
+# 多放几个：CI 的 macOS 15 上 emoji 和 Vision 都可能不一样，下面只要求认出 ≥ 2 张。
+FACE_EMOJI = ["🧑", "👨", "👴", "👩🏻", "👩🏼", "🧑🏻", "👳‍♂️", "👲"]
+
+
+def layer1_rows(sdir):
+    """layer1 的 results → {id: 去掉 elapsed_sec（这一张分析了多久）后的规范化 JSON}。"""
+    rows = {}
+    for r in json.load(open(os.path.join(sdir, "layer1_results.json")))["results"]:
+        r = {k: v for k, v in r.items() if k != "elapsed_sec"}
+        rows[r.get("id")] = json.dumps(r, sort_keys=True, ensure_ascii=False)
+    return rows
+
+
+def first_diff(a, b):
+    """两份 layer1 行（规范化 JSON）里不一样的字段，打印用。"""
+    x, y = json.loads(a or "{}"), json.loads(b or "{}")
+    return {k: (x.get(k), y.get(k)) for k in sorted(set(x) | set(y)) if x.get(k) != y.get(k)}
+
+
+def repeat_section():
+    print("5. 带人脸的合成图在两个全新数据目录各分析一次：结果逐字节相同")
+    tool = os.path.join(WORK, "synth_face")
+    r = subprocess.run(["swiftc", os.path.join(HERE, "synth_face.swift"), "-o", tool], capture_output=True, text=True,
+                       timeout=600, stdin=subprocess.DEVNULL, cwd=WORK)
+    if not check(r.returncode == 0, f"编译 Scripts/synth_face.swift{'' if r.returncode == 0 else '：' + r.stderr[-400:]}"):
+        return
+    faces = os.path.join(WORK, "faces")
+    os.makedirs(faces)
+    for i, emoji in enumerate(FACE_EMOJI):
+        out = os.path.join(faces, f"face_{i + 1:02d}.jpg")
+        r = subprocess.run([tool, out, emoji], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        if not check(r.returncode == 0 and os.path.isfile(out), f"画出 face_{i + 1:02d}.jpg（{emoji}）"):
+            return
+    key = session_key(faces)
+    runs = []
+    for n in (1, 2):
+        data = os.path.join(WORK, f"faces-data-{n}")
+        os.makedirs(data)
+        r, dt = run(["--analyze", faces], data)
+        done = (re.search(r"^Done: .*$", r.stdout, re.M) or [r.stderr[-200:]])[0]
+        if not check(r.returncode == 0 and done.startswith(f"Done: {len(FACE_EMOJI)} analyzed, 0 reused"),
+                     f"第 {n} 次（全新数据目录）{len(FACE_EMOJI)} 张都分析了（{dt:.1f}s）：{done}"):
+            return
+        try:
+            rows = layer1_rows(os.path.join(data, "sessions", key))
+        except (OSError, ValueError, KeyError) as e:
+            check(False, f"第 {n} 次读不了 layer1：{e}")
+            return
+        plain, _ = run(["--verdicts", faces, "--per-photo"], data)
+        dedupe, _ = run(["--verdicts", faces, "--per-photo", "--dedupe"], data)
+        runs.append((rows, plain.stdout, dedupe.stdout))
+    (a, va, da), (b, vb, db) = runs
+    found = sorted(i for i, s in a.items() if json.loads(s).get("face_found"))
+    scored = [i for i in found if json.loads(a[i]).get("face_quality") is not None]
+    check(len(found) >= 2, f"前提：Vision 在 ≥ 2 张合成图里认出了脸（{len(found)}/{len(a)}：{found}）—— 认不出就测不到人脸质量")
+    check(scored == found, f"认出脸的每一张都有人脸质量分（质量请求喂的是 landmarks 的脸，不会「有脸没分」）：{len(scored)}/{len(found)}")
+    differ = sorted(i for i in set(a) | set(b) if a.get(i) != b.get(i))
+    check(not differ, "两次分析的 layer1 逐字节相同（去掉 elapsed_sec）" +
+          ("" if not differ else "：" + "；".join(f"{i} {first_diff(a.get(i), b.get(i))}" for i in differ)))
+    check(va == vb and da == db, "两次的 --verdicts --per-photo（带不带 --dedupe）逐字相同")
+
+
+# ---------------------------------------------------------------- 6. 锐度只看眼眉带（带人脸）
+
+def eyes_section():
+    """以前锐度取眼眉带和嘴两块里大的，嘴清楚、眼睛糊的（前焦）靠嘴过关（优化分析 2026-11-18 复核 M1）。同一个 emoji 画三张：
+    原样、只糊眼眉、只糊嘴（synth_face 的第 4 个参数，按 landmarks 找那块）。Vision 在 emoji 上的 landmarks 不总靠谱（有的把眼睛
+    和嘴上下认反、糊了眼睛干脆认不出脸），所以不要求每个都对：三张都按眼眉带量（scope eyes）、只糊眼眉掉到原样的 6 成以下、
+    只糊嘴不低于原样的 9 成 —— 这样的 ≥ 2 个就算过。老的取大口径在本机只有 1 个过得了（只糊眼眉的那张靠嘴撑着）。"""
+    print("6. 只糊眼眉 → 锐度掉；只糊嘴 → 锐度不动（锐度只看眼眉带）")
+    tool = os.path.join(WORK, "synth_face")
+    if not check(os.path.isfile(tool), "第 5 段编好的 synth_face 还在"):
+        return
+    folder = os.path.join(WORK, "eyes")
+    os.makedirs(folder)
+    for i, emoji in enumerate(FACE_EMOJI):
+        for mode in ("", "eyes", "mouth"):
+            out = os.path.join(folder, f"face_{i + 1:02d}{'_' + mode if mode else ''}.jpg")
+            # 没认出脸（退出码 3）就少这一张，下面按凑齐三张的算。
+            subprocess.run([tool, out, emoji] + (["600", mode] if mode else []), capture_output=True, text=True,
+                           timeout=60, stdin=subprocess.DEVNULL)
+    count = len(os.listdir(folder))
+    data = os.path.join(WORK, "eyes-data")
+    os.makedirs(data)
+    r, dt = run(["--analyze", folder], data)
+    if not check(r.returncode == 0 and f"Done: {count} analyzed" in r.stdout, f"{count} 张都分析了（{dt:.1f}s）"):
+        return
+    rows = {x.get("id"): x for x in json.load(open(os.path.join(data, "sessions", session_key(folder),
+                                                                "layer1_results.json")))["results"]}
+    good, seen = [], []
+    for i in range(len(FACE_EMOJI)):
+        name = f"face_{i + 1:02d}"
+        base, eyes, mouth = rows.get(name), rows.get(name + "_eyes"), rows.get(name + "_mouth")
+        if not (base and eyes and mouth) or any(x.get("sharpness_scope") != "eyes" for x in (base, eyes, mouth)):
+            continue
+        s0, se, sm = base["sharpness"], eyes["sharpness"], mouth["sharpness"]
+        seen.append(f"{name} {s0:.0f}/{se:.0f}/{sm:.0f}")
+        if se < 0.6 * s0 and sm >= 0.9 * s0:
+            good.append(name)
+    scopes = sorted({x.get("sharpness_scope") for x in rows.values() if x.get("face_found")})
+    check("features" not in scopes, f"认出脸的按眼眉带量（scope eyes，没有眼睛关键点才退到 mouth），不再是 features：{scopes}")
+    check(len(good) >= 2, f"≥ 2 个 emoji 只糊眼眉锐度掉到 6 成以下、只糊嘴不动（原样/糊眼眉/糊嘴：{'；'.join(seen) or '一个都没凑齐'}）")
+
+
+# ---------------------------------------------------------------- 7. 歪头 / 方向写错时的 EAR（带人脸）
+
+def tilt_section():
+    """EAR 以前在图像坐标轴上量眼睛的外接框，脸一歪读数就被斜边撑大（闭着的眼歪 12° 以上读过 0.22，一律算睁眼），
+    EXIF 方向写错、脸横躺时读成 2–3.5（优化分析 2026-11-18 VQ-05 / VQ-08）。现在按两眼连线转平再量。同一个 emoji 画三张：
+    正着、绕画面中心转 20°（歪头），再把正着那张的字节原样拷一份、只把 EXIF 方向改成 6（解码时转 90°，脸横躺 —— 像素一模一样）。
+    断言：转 20° 的读数和正着的差（各 emoji 取中位数）≤ 0.06；方向 6 的那份 ≥ 2 个和正着的差 ≤ 0.06；整个文件夹没有 > 1 的读数。
+    老量法在本机：转 20° 差的中位数 0.125（8 个里只有 1 个 ≤ 0.06），方向 6 读成 1.7–5.7。转 -20° 这边 Vision 在 emoji 上的眼睛轮廓
+    普遍胖 0.07（真片 photot 转 ±20° 都在 0.035 以内），所以只用 +20°。👳‍♂️ 正着放会被认成倒着的脸（眼睛读成 0.08），不靠它凑数。"""
+    print("7. 歪头 20°、EXIF 方向写错：EAR 和正着的一样")
+    tool = os.path.join(WORK, "synth_face")
+    if not check(os.path.isfile(tool), "第 5 段编好的 synth_face 还在"):
+        return
+    folder = os.path.join(WORK, "tilt")
+    os.makedirs(folder)
+    for i, emoji in enumerate(FACE_EMOJI):
+        name = os.path.join(folder, f"face_{i + 1:02d}")
+        for deg in ("0", "20"):
+            subprocess.run([tool, f"{name}_r{deg}.jpg", emoji, "600", "none", deg], capture_output=True, text=True,
+                           timeout=60, stdin=subprocess.DEVNULL)
+        if os.path.isfile(f"{name}_r0.jpg"):
+            data = sj.with_exif(open(f"{name}_r0.jpg", "rb").read(), orientation=6)
+            with open(f"{name}_o6.jpg", "wb") as f:
+                f.write(data)
+    count = len(os.listdir(folder))
+    data = os.path.join(WORK, "tilt-data")
+    os.makedirs(data)
+    r, dt = run(["--analyze", folder], data)
+    if not check(r.returncode == 0 and f"Done: {count} analyzed" in r.stdout, f"{count} 张都分析了（{dt:.1f}s）"):
+        return
+    rows = {x.get("id"): x for x in json.load(open(os.path.join(data, "sessions", session_key(folder),
+                                                                "layer1_results.json")))["results"]}
+
+    def ear(pid):
+        return (rows.get(pid) or {}).get("blink_score")
+    tilt, side, seen = [], [], []
+    for i in range(len(FACE_EMOJI)):
+        name = f"face_{i + 1:02d}"
+        e0, e20, e6 = ear(name + "_r0"), ear(name + "_r20"), ear(name + "_o6")
+        seen.append(f"{name} " + "/".join("-" if v is None else f"{v:.3f}" for v in (e0, e20, e6)))
+        if e0 is not None and e20 is not None:
+            tilt.append(abs(e20 - e0))
+        if e0 is not None and e6 is not None and abs(e6 - e0) <= 0.06:
+            side.append(name)
+    tilt.sort()
+    median = (tilt[(len(tilt) - 1) // 2] + tilt[len(tilt) // 2]) / 2 if tilt else None
+    detail = "正着/转 20°/方向 6：" + "；".join(seen)
+    check(len(tilt) >= 2 and median <= 0.06,
+          f"转 20° 和正着的 EAR 差（{len(tilt)} 个 emoji 都认出了脸）中位数 "
+          f"{'-' if median is None else f'{median:.3f}'} ≤ 0.06（{detail}）")
+    check(len(side) >= 2, f"EXIF 方向 6（脸横躺）≥ 2 个和正着的差 ≤ 0.06：{side}（{detail}）")
+    big = sorted(k for k, v in rows.items() if (v.get("blink_score") or 0) > 1)
+    check(not big, f"没有 > 1 的 EAR（人眼的高不会比宽大）：{big}")
+
+
 try:
     native_section()
     if SCALE:
         scale_section()
+    repeat_section()
+    eyes_section()
+    tilt_section()
     if not REAL_BEFORE:
         check(not os.path.exists(REAL_DATA), f"跑之前没有 {REAL_DATA}，跑完也没有（每条命令都走临时数据目录）")
 finally:

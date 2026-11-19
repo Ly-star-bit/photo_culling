@@ -822,9 +822,10 @@ struct BatchView: View {
             if store.unparsedCount > 0 {
                 // Photos the engine couldn't read are invisible in the grid;
                 // without this the folder silently has more photos than shown.
-                Label("\(store.unparsedCount) 张未能解析", systemImage: "questionmark.square.dashed")
+                // 解不开的、上次取消分析时还没轮到的都算（EC-01）：「未能解析」只说得通前一种，这里两种都说。
+                Label("\(store.unparsedCount) 张没进网格", systemImage: "questionmark.square.dashed")
                     .font(.caption).foregroundStyle(AppPalette.warning).lineLimit(1)
-                    .help("文件夹里有 \(store.unparsedCount) 张照片无法解码 (文件损坏、格式不支持或分析时还在拷贝)，不在网格中。修复后重新分析即可")
+                    .help(unparsedHelp)
             }
             // 解得出来但文件不完整的：在网格里、已判废片，这条一直挂着 —— 别以为卡上的原片没问题就格式化了。
             if let corrupt = store.reasonCounts["文件损坏"] {
@@ -1811,6 +1812,15 @@ struct BatchView: View {
         return "有 \(n) 张的判决、星级或客户选中和上次写进 XMP 的不一样（或者上次没写进去），Lightroom / Capture One 读到的还是旧的。" +
             "点这里只重写这 \(n) 张，其余的一个字节不动（在 LR / C1 里改过星级、这边没动的照片不会被盖回去；别的软件写的 XMP 只改星级/色标，调色等原样保留）。" +
             "sidecar 被删了、被别的软件整份覆盖了，用「导出 › 全部重写 XMP」"
+    }
+
+    /// 状态栏「N 张没进网格」的提示：两种原因都说、列前 10 个名字（EC-01）。分开拼：一长串 + 在 CI 的 Xcode 16 上类型检查会慢。
+    private var unparsedHelp: String {
+        let names = store.unparsedNames
+        let n = names.count
+        let list = names.prefix(10).joined(separator: "、") + (n > 10 ? " 等" : "")
+        let why = "文件夹里有 \(n) 张照片不在网格里：解不开（文件损坏、格式不支持、分析时还在拷贝），或者上次分析取消时还没轮到。"
+        return why + "点「重新分析」再试一次（没变的照片直接复用）。" + list
     }
 
     /// 文件夹菜单里的「废片移到废纸篓」（优化分析 NU5 以前在「导出」菜单最底下）。
@@ -3144,7 +3154,7 @@ private struct BatchControlPanel: View {
                 Spacer()
                 Text("\(stats.takes) 场多张").font(.caption).monospacedDigit()
                     .foregroundStyle(.secondary)
-                Text("\(Int(store.takeGapSec)) 秒").font(.callout).monospacedDigit()
+                Text(String(format: "%.0f 秒", store.takeGapSec)).font(.callout).monospacedDigit()
                     .foregroundStyle(.secondary)
             }
             MetricHistogram(
@@ -3204,18 +3214,20 @@ private struct BatchControlPanel: View {
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
+                        .help(BatchStore.CullPreset.allCases.map(\.focusHelp).joined(separator: "\n"))
 
                         let reasonCounts = store.reasonCounts
                         thresholdSlider(
-                            label: "锐度下限",
-                            value: "\(Int(store.sharpnessThreshold))",
+                            label: "对焦下限",
+                            value: String(format: "%.0f", store.focusThreshold),
                             killCount: reasonCounts["虚焦"] ?? 0,
-                            slider: Slider(value: $store.sharpnessThreshold, in: 0...150, step: 5),
-                            help: "五官区域梯度锐度，低于此值判为虚焦 → 废片。清晰照片约 65-95。直方图 = 本场分布，红色 = 会被此线淘汰",
+                            slider: Slider(value: $store.focusThreshold, in: BatchStore.focusRange, step: 5),
+                            help: "眼睛那一块对没对上焦（清晰比，不受明暗、景别、照片大小影响），低于此值判为虚焦 → 废片。" +
+                                  "清楚的照片约 80–110。直方图 = 本场分布，红色 = 会被此线淘汰",
                             histogram: MetricHistogram(
-                                bins: store.sharpnessBins,
-                                range: BatchStore.sharpnessHistRange,
-                                threshold: store.sharpnessThreshold,
+                                bins: store.focusBins,
+                                range: BatchStore.focusHistRange,
+                                threshold: store.focusThreshold,
                                 killBelow: true
                             )
                         )
@@ -4816,7 +4828,7 @@ struct PhotoInspector: View {
                 )
                 let eyeText = item.dynamicEyeClosed.map { $0 ? "闭眼!" : "睁眼" } ?? ""
                 let qualityText = item.faceQuality.map { String(format: "质量 %.2f", $0) } ?? ""
-                let info = ["锐度 \(Int(item.sharpness))", qualityText, eyeText]
+                let info = ["对焦 \(BatchStore.focusText(item))", qualityText, eyeText]
                     .filter { !$0.isEmpty }.joined(separator: "  ")
 
                 Rectangle()
@@ -4920,7 +4932,10 @@ struct PhotoInspector: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             LazyVGrid(columns: Self.signalColumns, alignment: .leading, spacing: 10) {
+                signal("对焦", BatchStore.focusText(item))
+                    .help("判虚焦看这个数（和右栏「对焦下限」同一把尺）。带 ≈ 的是老版本分析的，按锐度折算，重新分析后才准")
                 signal("锐度", String(format: "%.0f", item.sharpness))
+                    .help("细节多少：同一组连拍里比谁更清楚、排序用；跟明暗、景别走，不拿它判虚焦")
                 signal("人脸质量", item.faceQuality.map { String(format: "%.2f", $0) } ?? "-")
                 signal("曝光裁切", String(format: "%.1f%%", item.worstClipPct * 100))
                 signal("闭眼", item.dynamicEyeClosed.map { $0 ? "是" : "否" } ?? "-")

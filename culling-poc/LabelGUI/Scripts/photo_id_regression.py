@@ -10,6 +10,14 @@
 读 sessions/<key>/manifest.json 核对「文件 → id」，写 overrides.json 再用 `--verdicts --per-photo` 核对改判还在。
 每次调用都带临时的 LABELGUI_DATA_DIR、LABELGUI_NO_GUI=1、LABELGUI_LIVE_SOCK_ROOT，不碰真实数据目录。
 改 ImageLoader.listPhotos / PhotoIDMemory.swift / AnalysisEngine.analyzeFolder 的复用部分先跑它。
+
+J–M 组是不规矩的输入（优化分析 2026-11-18 edge 维度，纯函数那一半在 `--session-input-selftest`）：
+  J  解不开的、取消分析时没轮到的照片在 `--verdicts` 里有「没进网格 N 张」（EC-01）；manifest / layer1 一行字段类型不对
+     只丢那一行，重新分析只重算那几张、补得回来（EC-03）
+  K  分析后改名 / 挪子文件夹：按文件大小 + 修改时间认回原来的 id，改判、客户选中跟着回来；复制一份的、
+     一模一样的两张都改了名的不认；「人工改判 N」只数现有照片（EC-02）
+  L  文件名主干到 251 个字符照常分析；名字像照片的文件夹不算一张（EC-06）
+  M  thresholds.json 里 1e19 / 负数：--verdicts 不崩、夹到滑杆两头（EC-04）
 """
 import hashlib, json, os, random, re, shutil, subprocess, sys, tempfile
 
@@ -121,6 +129,7 @@ class Shoot:
                            capture_output=True, text=True, timeout=600)
         done = re.search(r"Done: (\d+) analyzed, (\d+) reused", r.stdout)
         failed = re.search(r"Failed \(\d+\): (.*)", r.stdout)
+        refound = re.search(r"Refound by fingerprint \(\d+\): (.*)", r.stdout)
         if r.returncode != 0 or not done:
             print("    [stdout] " + r.stdout.strip()[-600:])
             print("    [stderr] " + r.stderr.strip()[-600:])
@@ -129,6 +138,7 @@ class Shoot:
             "analyzed": int(done.group(1)) if done else -1,
             "reused": int(done.group(2)) if done else -1,
             "failed": failed.group(1).split(", ") if failed else [],
+            "refound": refound.group(1).split(", ") if refound else [],
         }
 
     def ids(self):
@@ -173,6 +183,12 @@ class Shoot:
             if started and len(parts) >= 2 and line.startswith("  "):
                 out[parts[0]] = parts[1]
         return out
+
+    def verdicts_text(self, *extra):
+        """--verdicts 的整段输出（退出码不是 0 时带上 rc=N 和 stderr 的最后一截）。"""
+        r = subprocess.run([BIN, "--verdicts", self.root] + list(extra), env=env_for(self.data),
+                           capture_output=True, text=True, timeout=120)
+        return r.stdout if r.returncode == 0 else f"rc={r.returncode}\n{r.stdout}\n{r.stderr[-400:]}"
 
     def client_import(self, text):
         """--client-import 预览（不带 --apply，不改客户选中）：返回 {"认出": ..., "没认出": ..., "客户选中": ...} 各一行原文。"""
@@ -462,6 +478,139 @@ def run_all():
     with open(os.path.join(s2.session, "overrides.json")) as f:
         got = json.load(f)
     check(got == {"仪式_IMG_0009": "精选"}, f"改判还挂在 仪式_IMG_0009 上，没挪给 IMG_0009_png（实际 {got}）")
+
+    run_edge_groups()
+
+
+def unparsed(text):
+    """--verdicts 里「没进网格 N 张: a, b」那行 → (N, {a, b})；没有这行 = (0, set())。"""
+    m = re.search(r"^没进网格 (\d+) 张: (.*)$", text, re.M)
+    return (int(m.group(1)), set(m.group(2).split(", "))) if m else (0, set())
+
+
+def photo_count(text):
+    m = re.search(r"^照片 (\d+) ", text, re.M)
+    return int(m.group(1)) if m else -1
+
+
+def run_edge_groups():
+    """不规矩的输入（优化分析 2026-11-18 edge 维度）：EC-01 / EC-03 / EC-02 / EC-06 / EC-04。纯函数那一半在 --session-input-selftest。"""
+    print("J. 解不开的、取消时没轮到的照片有痕迹（EC-01）；manifest / layer1 一行字段类型不对只丢那一行，重新分析补得回（EC-03）")
+    j = Shoot("shoot_j")
+    for n in range(5):
+        j.put(f"J_{n}.JPG")
+    put_junk(j.root, "J_bad.JPG")
+    res = j.analyze()
+    check(res["failed"] == ["J_bad"], f"解不开的是 J_bad（实际 {res['failed']}）")
+    out = j.verdicts_text()
+    check(photo_count(out) == 5 and unparsed(out) == (1, {"J_bad"}),
+          f"之后打开也看得到：照片 5、没进网格 1 张 J_bad（实际 照片 {photo_count(out)}、{unparsed(out)}）")
+
+    def cancel_like(m):
+        # 取消分析时引擎写的样子：没轮到的那张不在 photos 里，只在 photos_without_results 里记 id 和路径
+        row = next(p for p in m["photos"] if p["id"] == "J_4")
+        m["photos"] = [p for p in m["photos"] if p["id"] != "J_4"]
+        m.setdefault("photos_without_results", []).append(
+            {k: row[k] for k in ("id", "raw_path", "decode_path")})
+
+    j.edit("manifest.json", cancel_like)
+    j.edit("layer1_results.json", lambda f: f.update(results=[r for r in f["results"] if r["id"] != "J_4"]))
+    out = j.verdicts_text()
+    check(photo_count(out) == 4 and unparsed(out) == (2, {"J_4", "J_bad"}),
+          f"取消时没轮到的也算：照片 4、没进网格 2 张 J_4 J_bad（实际 照片 {photo_count(out)}、{unparsed(out)}）")
+
+    def bad_iso(m):
+        next(p for p in m["photos"] if p["id"] == "J_1")["exif"]["iso"] = "四百"
+
+    def bad_sharpness(f):
+        next(r for r in f["results"] if r["id"] == "J_2")["sharpness"] = "高"
+
+    j.edit("manifest.json", bad_iso)
+    j.edit("layer1_results.json", bad_sharpness)
+    out = j.verdicts_text()
+    check(photo_count(out) == 2 and unparsed(out) == (4, {"J_1", "J_2", "J_4", "J_bad"}),
+          f"manifest 一行 iso 是字符串、layer1 一行锐度是字符串：只丢这两张，不是整场空（实际 照片 {photo_count(out)}、{unparsed(out)}）")
+    res = j.analyze()
+    expect_run(res, 3, 2, "重新分析：坏的两行和没轮到的那张重算，其余复用")
+    out = j.verdicts_text()
+    check(photo_count(out) == 5 and unparsed(out) == (1, {"J_bad"}),
+          f"补回来了：照片 5、没进网格只剩 J_bad（实际 照片 {photo_count(out)}、{unparsed(out)}）")
+    with open(os.path.join(j.session, "manifest.json")) as f:
+        iso = next(p for p in json.load(f)["photos"] if p["id"] == "J_1")["exif"].get("iso")
+    check(iso != "四百", f"重写的 manifest 里 J_1 的 iso 不再是坏的那个（实际 {iso!r}）")
+
+    print("K. 分析后在访达里改名 / 挪子文件夹（EC-02）：按文件大小 + 修改时间认回原来的 id，改判、客户选中跟着回来")
+    k = Shoot("shoot_k")
+    t0 = 1_700_000_000
+    for n in range(7):
+        p = k.put(f"K_{n}.JPG")
+        os.utime(p, (t0 + 10 * n, t0 + 10 * n))   # 修改时间各差 10 秒：随机图碰巧一样大也不会被当成同一张
+    # 一对内容、大小、修改时间都一样的（同一秒连拍的无损 RAW 就是这样）：都改名以后认不出是谁，不猜
+    twin = k.put("K_twin_a.JPG")
+    shutil.copyfile(twin, os.path.join(k.root, "K_twin_b.JPG"))
+    for name in ("K_twin_a.JPG", "K_twin_b.JPG"):
+        os.utime(os.path.join(k.root, name), (t0 + 500, t0 + 500))
+    expect_run(k.analyze(), 9, 0, "第一次")
+    k.write("overrides.json", {"K_1": "精选", "K_2": "废片", "K_3": "精选", "K_5": "废片", "K_6": "精选",
+                               "K_twin_a": "精选"})
+    k.write("client_picks.json", ["K_2", "K_4"])
+    os.rename(os.path.join(k.root, "K_1.JPG"), os.path.join(k.root, "新名_1.JPG"))
+    os.makedirs(os.path.join(k.root, "客户"))
+    os.rename(os.path.join(k.root, "K_2.JPG"), os.path.join(k.root, "客户", "renamed_2.JPG"))
+    os.rename(os.path.join(k.root, "K_6.JPG"), os.path.join(k.root, "K_6 改.jpg"))
+    shutil.copy2(os.path.join(k.root, "K_3.JPG"), os.path.join(k.root, "K_3 副本.JPG"))   # 原件还在：副本不认
+    k.rm("K_5.JPG")
+    os.rename(os.path.join(k.root, "K_twin_a.JPG"), os.path.join(k.root, "双_a.JPG"))
+    os.rename(os.path.join(k.root, "K_twin_b.JPG"), os.path.join(k.root, "双_b.JPG"))
+    res = k.analyze()
+    check(res["ok"] and res["analyzed"] == 3 and res["reused"] == 6,
+          f"改了名的三张原样复用，副本和认不出的两张重算：分析 3、复用 6（实际 {res['analyzed']} / {res['reused']}）")
+    check(sorted(res["refound"]) == ["K_1", "K_2", "K_6"], f"认回 K_1 K_2 K_6（实际 {res['refound']}）")
+    expect_ids(k, {"K_0.JPG": "K_0", "新名_1.JPG": "K_1", "客户/renamed_2.JPG": "K_2", "K_3.JPG": "K_3",
+                   "K_3 副本.JPG": "K_3 副本", "K_4.JPG": "K_4", "K_6 改.jpg": "K_6",
+                   "双_a.JPG": "双_a", "双_b.JPG": "双_b"}, "改名以后")
+    v = k.verdicts()
+    check(v.get("K_1") == "精选" and v.get("K_2") == "废片" and v.get("K_6") == "精选",
+          f"改判跟着回来：K_1 精选、K_2 废片、K_6 精选（实际 {v.get('K_1')} / {v.get('K_2')} / {v.get('K_6')}）")
+    r = k.client_import("谢谢")
+    check(set((r.get("客户选中") or "").split()) == {"K_2", "K_4"}, f"客户选中还是 K_2 K_4（实际 {r.get('客户选中')}）")
+    out = k.verdicts_text("--accept-all")
+    m = re.search(r"人工改判 (\d+) 条", out)
+    check(m is not None and int(m.group(1)) == 4,
+          "「人工改判」只数现有照片：K_1 K_2 K_3 K_6 四条，删掉的 K_5、认不出的 K_twin_a 不算"
+          f"（实际 {m.group(1) if m else out[-300:]}）")
+
+    print("L. 文件名很长（到文件系统上限 255 个字符）照常分析；名字像照片的文件夹不算一张、里面的照常分析（EC-06）")
+    l_ = Shoot("shoot_l")
+    names = ["A" * 240, "B" * 251, "汉" * 235, "ok"]
+    for name in names:
+        l_.put(name + ".JPG")
+    l_.put("客户挑的.jpg/inner.JPG")
+    res = l_.analyze()
+    check(res["ok"] and res["failed"] == [] and res["analyzed"] == 5,
+          "5 张都分析成（以前主干 ≥ 232 的报失败、文件夹报一张失败）"
+          f"（实际 分析 {res['analyzed']}、失败 {[n if len(n) < 20 else n[0] + '×' + str(len(n)) for n in res['failed']]}）")
+    def short(n):
+        return n if len(n) < 20 else f"{n[0]}×{len(n)}"
+
+    by_raw, _ = l_.ids()
+    want = {**{n + ".JPG": n for n in names}, "客户挑的.jpg/inner.JPG": "inner"}
+    wrong = [short(rel) for rel, pid in want.items() if by_raw.get(rel) != pid]
+    check(not wrong and len(by_raw) == len(want),
+          f"id 就是文件名主干（A×240、B×251、汉×235、ok），文件夹里的叫 inner（不对的 {wrong}，共 {len(by_raw)} 张）")
+    missing = [short(n) for n in names if l_.preview_sha(n) is None]
+    check(not missing, f"长名字的预览图都写出来了（没写出来的 {missing}）")
+    leftovers = [f for f in os.listdir(os.path.join(l_.session, "previews")) if f.endswith(".tmp")]
+    check(not leftovers, f"previews 里没有留下临时文件（实际 {leftovers}）")
+
+    print("M. thresholds.json 手改出离谱值（EC-04）：--verdicts 不崩，按滑杆两头判")
+    j.write("thresholds.json", {"sharpness": 45, "faceQuality": 0.3, "exposure": 0.15, "takeGap": 1e19})
+    out = j.verdicts_text()
+    check(not out.startswith("rc=") and "场 (间隔≤60s)" in out, f"同一场最大间隔 1e19 → 60 秒，不崩（实际 {out[:200]!r}）")
+    j.write("thresholds.json", {"sharpness": -1e30, "focus": 1e19, "faceQuality": 99, "exposure": -5})
+    out = j.verdicts_text("--per-photo")
+    check(not out.startswith("rc=") and "阈值: 对焦 150.0 · 曝光裁切 0.005 · 人脸质量 1.0" in out,
+          f"对焦 1e19、曝光 -5、人脸质量 99 → 夹到 150 / 0.005 / 1（实际 {out[-300:]!r}）")
 
 # 中途抛异常（比如分析失败、manifest 没写出来）也要删工作目录：它在 .build 底下，CI 会把 .build 整个缓存起来。
 try:

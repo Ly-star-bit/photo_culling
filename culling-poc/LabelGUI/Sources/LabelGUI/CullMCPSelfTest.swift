@@ -81,7 +81,7 @@ enum CullMCPSelfTest {
                 ids = store.items.map(\.id)
             }
             if step % 97 == 40 { store.rejectBurstDuplicates.toggle() }
-            if step % 151 == 75 { store.sharpnessThreshold += step % 2 == 0 ? 10 : -10 }
+            if step % 151 == 75 { store.focusThreshold += step % 2 == 0 ? 10 : -10 }
             switch next(8) {
             case 0, 1, 2:
                 store.setOverride(ids[next(ids.count)], verdicts[next(4)])
@@ -473,19 +473,20 @@ enum CullMCPSelfTest {
         check(old.aiOverrides[d] == nil, "分组行「接受推荐」（applyOverrides）：不再算 AI 的")
         old.setOverrideBatch(old.overrides.keys.sorted(), nil)
         check(old.overrides.isEmpty && old.aiOverrideCount == 0, "全部恢复自动：没有改判、没有出处")
-        // 复盘统计：锐度线拉到 200（全场都是虚焦废片）→ AI 放行 3 张不出阈值建议；同样 3 张换成用户亲手放行 → 出建议
-        old.sharpnessThreshold = 200
+        // 复盘统计：对焦线拉到 200（全场都是虚焦废片）→ AI 放行 3 张不出阈值建议；同样 3 张换成用户亲手放行 → 出建议
+        let focusBefore = old.focusThreshold
+        old.focusThreshold = 200
         let blurred = old.items.filter { $0.rejectReasons.contains("虚焦") }.map(\.id).sorted()
-        check(blurred.count >= 3, "锐度线 200：虚焦的废片至少 3 张（\(blurred.count)）")
+        check(blurred.count >= 3, "对焦线 200：虚焦的废片至少 3 张（\(blurred.count)）")
         let three = Array(blurred.prefix(3))
         old.applyAIOverrides(three.map { (id: $0, verdict: Verdict.pick) }, opID: "op-ai-0008", tool: "cull_set_verdicts")
         check(old.thresholdSuggestions.isEmpty && old.aiOverrideCount == 3,
               "AI 放行 3 张虚焦：不出阈值建议（不是摄影师在纠正滑杆）：\(old.thresholdSuggestions.map(\.kind.rawValue))")
         old.setOverrideBatch(three, .pick)
-        check(old.thresholdSuggestions.contains { $0.kind == .sharpness && $0.released == 3 } && old.aiOverrideCount == 0,
-              "同样 3 张用户亲手放行：出「锐度下限」建议：\(old.thresholdSuggestions.map(\.kind.rawValue))")
+        check(old.thresholdSuggestions.contains { $0.kind == .focus && $0.released == 3 } && old.aiOverrideCount == 0,
+              "同样 3 张用户亲手放行：出「对焦下限」建议：\(old.thresholdSuggestions.map(\.kind.rawValue))")
         old.setOverrideBatch(three, nil)
-        old.sharpnessThreshold = 45
+        old.focusThreshold = focusBefore
         let clean = old.items.filter { $0.rejectReasons.isEmpty }.map(\.id).sorted()
         old.applyAIOverrides(clean.prefix(2).map { (id: $0, verdict: Verdict.reject) }, opID: "op-ai-0009", tool: "cull_set_verdicts")
         let aiOnly = old.manualRejectsWithoutReason

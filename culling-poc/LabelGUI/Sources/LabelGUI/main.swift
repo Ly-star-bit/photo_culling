@@ -138,6 +138,10 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--analyze"),
         if !summary.corrupt.isEmpty {
             print("Corrupt (\(summary.corrupt.count)): \(summary.corrupt.joined(separator: ", "))")
         }
+        // 改了名、按文件大小 + 修改时间认回原来 id 的（EC-02）：没有就不打。
+        if !summary.refound.isEmpty {
+            print("Refound by fingerprint (\(summary.refound.count)): \(summary.refound.joined(separator: ", "))")
+        }
         // 写了预览图的（分析了的 + 预览丢了补回来的）：界面分析收尾只清这些照片的缓存。全部复用 = 没有这一行。
         if !summary.previewsWritten.isEmpty {
             print("Previews written (\(summary.previewsWritten.count)): \(summary.previewsWritten.joined(separator: ", "))")
@@ -262,10 +266,16 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
         let counts = store.verdictCounts
         print("连拍去重: \(store.rejectBurstDuplicates ? "开" : "关")")
         print("照片 \(store.items.count) · 精选 \(counts.pick) · 可用 \(counts.usable) · 废片 \(counts.reject)")
+        // 状态栏「N 张没进网格」那个数（EC-01 / EC-03）：只在有的时候打，平常的输出不变。
+        if store.unparsedCount > 0 {
+            print("没进网格 \(store.unparsedCount) 张: \(store.unparsedNames.joined(separator: ", "))")
+        }
         let stats = store.burstGroupStats
         let takes = store.takeStats
         print("近似重复 \(stats.groups) 组 / \(stats.photos) 张 (phash 层，自动规则作用范围)")
-        print("场 (间隔≤\(Int(store.takeGapSec))s) \(takes.takes) 个多张场 / \(takes.photos) 张 · 待处理 \(store.pendingTakeCount)")
+        // %.0f 不用 Int(...)：--gap 1e19 这种离谱值不崩（EC-04；thresholds.json 里的读入时已经夹过）。
+        let gapText = String(format: "%.0f", store.takeGapSec)
+        print("场 (间隔≤\(gapText)s) \(takes.takes) 个多张场 / \(takes.photos) 张 · 待处理 \(store.pendingTakeCount)")
         for reason in BatchStore.reasonOrder {
             if let n = store.reasonCounts[reason] { print("  理由 \(reason): \(n)") }
         }
@@ -284,7 +294,7 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
         }
         if CommandLine.arguments.contains("--per-photo") {
             let preset = store.currentPreset?.rawValue ?? "自定义"
-            print("阈值: 锐度 \(store.sharpnessThreshold) · 曝光裁切 \(store.exposureThreshold) · 人脸质量 \(store.faceQualityThreshold) · 预设 \(preset)")
+            print("阈值: 对焦 \(store.focusThreshold) · 曝光裁切 \(store.exposureThreshold) · 人脸质量 \(store.faceQualityThreshold) · 预设 \(preset)")
             let multiBody = store.bodies.count >= 2
             for item in store.items.sorted(by: { $0.id < $1.id }) {
                 let reasons = item.rejectReasons.isEmpty ? "-" : item.rejectReasons.joined(separator: ",")

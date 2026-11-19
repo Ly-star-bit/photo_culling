@@ -53,6 +53,21 @@ struct Photo: Codable, Identifiable {
     }
 }
 
+/// 数组里的一行：按 T 解，解不开不往外抛 —— 整个数组照常往下解，坏的只丢它自己（审查 EC-03：以前 manifest / layer1 里
+/// 一行字段类型不对，整份解不开、整场显示「还没有分析结果」）。解不开的那行另外宽松地认一下 id、raw_path、decode_path
+/// （认得出几样记几样），没进网格的计数和认旧键还要用。
+struct LossyRow<T: Decodable>: Decodable {
+    let value: T?
+    /// value 是 nil 时才有（这一行连对象都不是 = 各字段都是 nil）。
+    let fallback: Manifest.IDOnlyRow?
+
+    init(from decoder: Decoder) throws {
+        let decoded = try? T(from: decoder)
+        value = decoded
+        fallback = decoded == nil ? try? Manifest.IDOnlyRow(from: decoder) : nil
+    }
+}
+
 struct Manifest: Codable {
     let photoDir: String
     let photos: [Photo]
@@ -60,6 +75,9 @@ struct Manifest: Codable {
     /// decode_path。打开场次时认旧键（BatchStore.remapOrphanKeys）它们也算照片。老 manifest 没有；这一列解不开只当没有，
     /// 不连累 photos。
     var photosWithoutResults: [IDOnlyRow]? = nil
+    /// photos 里按 Photo 解不开的那几行（一个字段类型不对、缺 id / raw_path / preview_path）：只丢这一行（EC-03）。
+    /// 它们也是照片：没进网格的计数（BatchStore.unparsedNames）、认旧键（BatchStore.manifestRows）都算上。不写回文件。
+    var undecodableRows: [IDOnlyRow] = []
 
     /// photos_without_results 的一行：每个字段解不开就当没有（和以前按字典读、`as? String` 一样宽）。
     struct IDOnlyRow: Codable {
@@ -90,8 +108,30 @@ struct Manifest: Codable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         photoDir = try c.decode(String.self, forKey: .photoDir)
-        photos = try c.decode([Photo].self, forKey: .photos)
+        let rows = try c.decode([LossyRow<Photo>].self, forKey: .photos)
+        photos = rows.compactMap(\.value)
+        undecodableRows = rows.compactMap { $0.value == nil ? ($0.fallback ?? IDOnlyRow()) : nil }
         photosWithoutResults = try? c.decodeIfPresent([IDOnlyRow].self, forKey: .photosWithoutResults)
+    }
+
+    /// manifest.json 的 photos 里按 Photo 解得开的那些 id（和 BatchStore 打开场次同一个解码器）。分析引擎复用旧结果前先过它：
+    /// 界面解不开的行不复用、重新分析，「开始分析」才修得好（EC-03：以前复用按字典宽松读，坏行原样抄回新 manifest）。
+    /// 只解 photos 这一列（photo_dir 缺了的老 manifest 照样认）；整份不是 JSON、没有 photos = nil。
+    static func decodablePhotoIDs(_ data: Data) -> Set<String>? {
+        struct PhotosOnly: Decodable {
+            let photos: [LossyRow<Photo>]
+        }
+        guard let file = try? JSONDecoder().decode(PhotosOnly.self, from: data) else { return nil }
+        return Set(file.photos.compactMap { $0.value?.id })
+    }
+}
+
+extension Manifest.IDOnlyRow {
+    /// 全空的一行（坏行连对象都不是）。
+    init() {
+        id = nil
+        rawPath = nil
+        decodePath = nil
     }
 }
 
@@ -127,6 +167,12 @@ struct Layer1Result: Codable {
     let faces: [FaceInfo]?
     let horizonDeg: Double?
     let sharpness: Double?
+    /// 锐度量的哪块：eyes（眼眉带）/ mouth / face / subject / whole；analysis_version 3 以前的是 features（眼眉带和嘴取大）。
+    /// 近似重复组里比谁更清楚只在同一种口径之间比（BatchStore.softerInBurst）。老结果没有 = nil，自成一种。
+    let sharpnessScope: String?
+    /// 判「虚焦」用的清晰比（Metrics.focusRatio，0.08–0.12 是清楚的），和 sharpness 量同一块。analysis_version 4 起才有；
+    /// 老结果没有 = 判决按锐度折算（BatchStore.legacyFocus），老场次的虚焦判决不因升级变。
+    let focusRatio: Double?
     let highlightClipPct: Double?
     let shadowClipPct: Double?
     /// 主体区域（脸 → 头 + 上半身）的裁切占比、脸 / 整张的亮度。analysis_version 2 起才有；
@@ -157,6 +203,8 @@ struct Layer1Result: Codable {
         case faces
         case horizonDeg = "horizon_deg"
         case sharpness
+        case sharpnessScope = "sharpness_scope"
+        case focusRatio = "focus_ratio"
         case highlightClipPct = "highlight_clip_pct"
         case shadowClipPct = "shadow_clip_pct"
         case subjectHighlightClipPct = "subject_highlight_clip_pct"
@@ -171,6 +219,23 @@ struct Layer1Result: Codable {
 
 struct Layer1File: Codable {
     let results: [Layer1Result]
+
+    enum CodingKeys: String, CodingKey {
+        case results
+    }
+
+    /// 一行解不开（字段类型不对）只丢这一行（EC-03）：那张照片没有 layer1 结果，算没进网格，其余照常显示。
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        results = try c.decode([LossyRow<Layer1Result>].self, forKey: .results).compactMap(\.value)
+    }
+
+    /// layer1_results.json 里分析引擎能原样复用的 id：按 Layer1Result 解得开、没有 error、有锐度（BatchStore.loadResults
+    /// 要它，没有就不进网格 —— 复用这种行，这张就永远进不了网格）。burst_group 不看：复用时整场重新分组、重写。
+    static func reusableIDs(_ data: Data) -> Set<String>? {
+        guard let file = try? JSONDecoder().decode(Layer1File.self, from: data) else { return nil }
+        return Set(file.results.filter { $0.error == nil && $0.sharpness != nil }.map(\.id))
+    }
 }
 
 struct Layer2Result: Codable {

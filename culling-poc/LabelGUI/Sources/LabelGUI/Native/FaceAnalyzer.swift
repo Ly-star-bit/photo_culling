@@ -66,36 +66,50 @@ enum FaceAnalyzer {
         /// Primary face's UNPADDED area fraction of the frame — drives the
         /// 景别 (framing-scale) compensation curve for quality thresholds.
         let faceAreaPct: Double
-        /// Facial-feature rects of the primary face (eye+brow band, mouth),
-        /// normalized top-left [x0,y0,x1,y1]. Sharpness measured here instead of
-        /// the whole face box keeps hair texture and background (花窗) out of the
-        /// focus metric. Empty when landmarks are unreadable.
-        let featureRects: [[Double]]
+        /// Facial-feature rects of the primary face, normalized top-left [x0,y0,x1,y1]:
+        /// the eye+brow band and the mouth. Sharpness measured here instead of the whole
+        /// face box keeps hair texture and background (花窗) out of the focus metric.
+        /// nil when that part's landmarks are unreadable. 锐度只看眼眉带，嘴只在没有眼眉带时兜底（AnalysisEngine）。
+        let eyeBandRect: [Double]?
+        let mouthRect: [Double]?
         var subjectFaceCount: Int { subjectFaces.count }
     }
 
-    /// Face analysis + horizon in ONE handler.perform() — the three requests
-    /// share the handler's image preparation instead of paying it per request.
+    /// Face analysis + horizon on ONE handler — the requests share the handler's
+    /// image preparation instead of paying it per request.
     struct Analysis {
         let face: FaceResult?
         let horizonDeg: Double?
     }
 
+    /// 人脸质量请求单独跑第二趟，喂 landmarks 找到的脸（inputFaceObservations）。以前三个请求一起 perform，
+    /// 质量请求有时用 landmarks 的脸框、有时用自己检测的（框差一点点），同一张图每次分析出两种分（photot 7208：
+    /// 0.6343 / 0.6816），连拍组里精选、去重扔哪张跟着来回翻（优化分析 2026-11-18 VQ-04）。喂了框以后跨进程、
+    /// 并发都只出一个分；也顺带保证质量分和锐度、闭眼量的是同一张脸（按 uuid 对上，11-04 A14）。
+    /// 喂框的分不一定比以前高（7208 取的是低的那个，7230 是高的）—— analysisVersion 因此升到 3。
     static func analyze(in image: CGImage) -> Analysis {
         let request = VNDetectFaceLandmarksRequest()
-        let qualityRequest = VNDetectFaceCaptureQualityRequest()
         let horizonRequest = VNDetectHorizonRequest()
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
-        guard (try? handler.perform([request, qualityRequest, horizonRequest])) != nil else {
+        guard (try? handler.perform([request, horizonRequest])) != nil else {
             return Analysis(face: nil, horizonDeg: nil)
         }
         let horizonDeg = horizonRequest.results?.first.map { Double($0.angle) * 180.0 / .pi }
-        return Analysis(face: faceResult(from: request, quality: qualityRequest),
+        var qualityRequest: VNDetectFaceCaptureQualityRequest?
+        if let faces = request.results, !faces.isEmpty {
+            let q = VNDetectFaceCaptureQualityRequest()
+            q.inputFaceObservations = faces
+            // 质量这一趟失败只丢质量分（nil），脸、闭眼、锐度照旧。
+            if (try? handler.perform([q])) != nil { qualityRequest = q }
+        }
+        return Analysis(face: faceResult(from: request, quality: qualityRequest,
+                                         imageSize: CGSize(width: image.width, height: image.height)),
                         horizonDeg: horizonDeg)
     }
 
     private static func faceResult(from request: VNDetectFaceLandmarksRequest,
-                                   quality qualityRequest: VNDetectFaceCaptureQualityRequest) -> FaceResult? {
+                                   quality qualityRequest: VNDetectFaceCaptureQualityRequest?,
+                                   imageSize: CGSize) -> FaceResult? {
         guard let faces = request.results, !faces.isEmpty else {
             return nil
         }
@@ -125,7 +139,7 @@ enum FaceAnalyzer {
         var worstEar: Double?
         var subjectFaces: [SubjectFace] = []
         for face in subjects.sorted(by: { area($0) > area($1) }) {
-            let ear = eyeAspectRatio(of: face)
+            let ear = eyeAspectRatio(of: face, imageSize: imageSize)
             if let ear {
                 worstEar = min(worstEar ?? .infinity, ear)
             }
@@ -143,13 +157,12 @@ enum FaceAnalyzer {
             ))
         }
 
-        // Quality results are separate observations; match the primary subject
-        // by picking the largest face there too.
-        let quality = qualityRequest.results?
-            .max { area($0) < area($1) }?
-            .faceCaptureQuality
-            .map(Double.init)
+        // 质量结果是喂进去的那几张脸（uuid 不变）：按 uuid 认主脸；万一对不上才退回「取最大的」。
+        let scored: [VNFaceObservation] = qualityRequest?.results ?? []
+        let scoredPrimary = scored.first { $0.uuid == primary.uuid } ?? scored.max { area($0) < area($1) }
+        let quality = scoredPrimary?.faceCaptureQuality.map(Double.init)
 
+        let features = featureRects(for: primary)
         return FaceResult(
             bbox: padded,
             eyeClosed: worstEar.map { $0 < earClosedThreshold },
@@ -157,7 +170,8 @@ enum FaceAnalyzer {
             captureQuality: quality,
             subjectFaces: subjectFaces,
             faceAreaPct: Double(bb.width * bb.height),
-            featureRects: featureRects(for: primary)
+            eyeBandRect: features.eyeBand,
+            mouthRect: features.mouth
         )
     }
 
@@ -181,6 +195,29 @@ enum FaceAnalyzer {
             bodies.append([cx - w, top - 0.3 * h, cx + w, top + 4 * h])
         }
         return (bodies, boxes)
+    }
+
+    /// 人像分割蒙版：曝光裁切只数人用（Metrics.personClipping，VQ-01）。.balanced 和 .accurate 在合成集上结果几乎一样
+    /// （和真值一致 532 / 533 of 552），.balanced 便宜一半（3:4 的图出 384×512，一张 ~7000 万条指令）。同一张图串行、8 线程并发、
+    /// 跨进程都逐字节相同（2026-11-18 实测），layer1 照样能逐字节比。失败 = nil，调用方照旧用矩形的数。
+    static func personMask(in image: CGImage) -> Metrics.PersonMask? {
+        let request = VNGeneratePersonSegmentationRequest()
+        request.qualityLevel = .balanced
+        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+        guard (try? VNImageRequestHandler(cgImage: image, options: [:]).perform([request])) != nil,
+              let buffer = request.results?.first?.pixelBuffer,
+              CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_OneComponent8 else { return nil }
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        let w = CVPixelBufferGetWidth(buffer), h = CVPixelBufferGetHeight(buffer)
+        let stride = CVPixelBufferGetBytesPerRow(buffer)
+        guard w > 0, h > 0, stride >= w, let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
+        let bytes = base.assumingMemoryBound(to: UInt8.self)
+        var values = [UInt8](repeating: 0, count: w * h)
+        for y in 0..<h {
+            for x in 0..<w { values[y * w + x] = bytes[y * stride + x] }
+        }
+        return Metrics.PersonMask(width: w, height: h, values: values)
     }
 
     // MARK: - 合影小脸：原图分辨率重量 EAR
@@ -255,15 +292,21 @@ enum FaceAnalyzer {
         func distance(_ f: VNFaceObservation) -> Double {
             hypot(Double(f.boundingBox.midX) - cx, Double(f.boundingBox.midY) - cy)
         }
-        return near.min { distance($0) < distance($1) }.flatMap(eyeAspectRatio(of:))
+        let cropSize = CGSize(width: crop.width, height: crop.height)
+        return near.min { distance($0) < distance($1) }.flatMap { eyeAspectRatio(of: $0, imageSize: cropSize) }
     }
 
     /// Eye+brow band and mouth rects of one face, image-normalized top-left
     /// origin. Landmark points come in face-bbox space (bottom-left); each rect
     /// is padded by 25% of its own size so the edge gradients that carry the
     /// focus signal (lash line, lip contour) stay inside the crop.
-    private static func featureRects(for face: VNFaceObservation) -> [[Double]] {
-        guard let landmarks = face.landmarks else { return [] }
+    ///
+    /// 眼眉带再裁回（不带 padding 的）脸框里：两眼两眉连起来很宽，按它自己宽度放的 25% 每边要多出去小半只眼，
+    /// 越过太阳穴落到头发、发饰和背景上。同一组近似重复的两张，脸边那一条背景不一样（7212 那条是发丝衬着蓝天，
+    /// 7211 是发丝衬着暗处），眼睛一样清楚，眼眉带的锐度却差 8.5%；裁回脸框以后 photot 四对近似重复最多差 3.7%，
+    /// 数值范围基本不变（photot 64–91，不裁是 64–93）。嘴那块窄，放出去碰不到脸边，不用裁。
+    private static func featureRects(for face: VNFaceObservation) -> (eyeBand: [Double]?, mouth: [Double]?) {
+        guard let landmarks = face.landmarks else { return (nil, nil) }
         let bb = face.boundingBox
 
         func rect(from regions: [VNFaceLandmarkRegion2D?]) -> [Double]? {
@@ -290,15 +333,14 @@ enum FaceAnalyzer {
             return [Double(x0), Double(y0), Double(x1), Double(y1)]
         }
 
-        var rects: [[Double]] = []
-        if let eyes = rect(from: [landmarks.leftEye, landmarks.rightEye,
-                                  landmarks.leftEyebrow, landmarks.rightEyebrow]) {
-            rects.append(eyes)
+        var eyeBand = rect(from: [landmarks.leftEye, landmarks.rightEye,
+                                  landmarks.leftEyebrow, landmarks.rightEyebrow])
+        if let band = eyeBand {
+            let x0 = max(band[0], Double(bb.minX)), x1 = min(band[2], Double(bb.maxX))
+            let y0 = max(band[1], Double(1.0 - bb.maxY)), y1 = min(band[3], Double(1.0 - bb.minY))
+            eyeBand = x1 > x0 && y1 > y0 ? [x0, y0, x1, y1] : nil
         }
-        if let mouth = rect(from: [landmarks.outerLips]) {
-            rects.append(mouth)
-        }
-        return rects
+        return (eyeBand, rect(from: [landmarks.outerLips]))
     }
 
     /// Normalized top-left bbox of the photo's foreground subject (ring shot,
@@ -343,30 +385,72 @@ enum FaceAnalyzer {
     }
 
     /// Both eyes' aspect ratios averaged (one when only one is readable); nil
-    /// when the landmarks have no eyes.
-    private static func eyeAspectRatio(of face: VNFaceObservation) -> Double? {
+    /// when the landmarks have no eyes. `imageSize` = 跑这次 landmarks 的那张图（分析图或原图裁块）的像素尺寸。
+    private static func eyeAspectRatio(of face: VNFaceObservation, imageSize: CGSize) -> Double? {
         guard let landmarks = face.landmarks,
               let left = landmarks.leftEye, let right = landmarks.rightEye else { return nil }
-        let leftRatio = aspectRatio(of: left)
-        let rightRatio = aspectRatio(of: right)
+        // normalizedPoints 是相对脸框的 0–1（x 按框宽、y 按框高），先换成像素一样大的单位再转：框不是正方形时，
+        // 在归一化坐标里转角度会歪。Vision 的脸框实测都是正方形（photot 21 张、合成 emoji 宽高比 1.000），所以正着的脸
+        // 读数和以前一样；乘上去只是不依赖这一点。
+        let sx = face.boundingBox.width * imageSize.width
+        let sy = face.boundingBox.height * imageSize.height
+        guard sx > 0, sy > 0 else { return nil }
+        func pixels(_ region: VNFaceLandmarkRegion2D) -> [CGPoint] {
+            var out: [CGPoint] = []
+            for p in region.normalizedPoints { out.append(CGPoint(x: p.x * sx, y: p.y * sy)) }
+            return out
+        }
+        return levelledEyeAspectRatio(left: pixels(left), right: pixels(right))
+    }
+
+    /// 两只眼（各自的轮廓点，单位一样大的坐标）按两眼质心连线转平以后的高宽比，两只取平均（只有一只量得出就用那一只）。
+    ///
+    /// 以前直接在图像坐标轴上取外接框：脸一歪，眼睛这条细长的轮廓斜着放，外接框的高被斜边撑起来，读数约等于
+    /// tan(倾角) 往上加 —— 闭着的眼歪 12–13° 就读过 0.22（判决层一律算睁眼），歪 8–9° 单张就过 0.15。photot 21 张
+    /// 两眼连线倾角中位 9.7°，7225–7230 歪 21–23°（读数 0.51–0.55，转平 0.30–0.35）；EXIF 方向写错、脸横躺时读成
+    /// 2–3.5（优化分析 2026-11-18 VQ-05 / VQ-08）。转平后 photot 整张转 ±30° 每张只变 0.02–0.07（以前 0.33–1.16），
+    /// 转 90° 和正着放差 ≤ 0.03。轴用两眼质心连线，不用 face.roll：roll 是按 30° 一档量化的（photot 7213 整张转 10° 读 0、转 20° 读 30°）。
+    /// 连线朝左朝右（转 θ 还是 θ+180°）外接框一样，所以左右眼认反、脸倒着都不影响。
+    /// 只有一只眼有点时没有连线，照旧在原坐标轴上量（实际不会碰到：Vision 的眼睛轮廓总是成对、点数固定）。
+    static func levelledEyeAspectRatio(left: [CGPoint], right: [CGPoint]) -> Double? {
+        var angle = 0.0
+        if !left.isEmpty, !right.isEmpty {
+            let cl = centroid(left), cr = centroid(right)
+            angle = atan2(Double(cr.y - cl.y), Double(cr.x - cl.x))
+        }
+        let leftRatio = extentAspectRatio(left, rotatedBy: -angle)
+        let rightRatio = extentAspectRatio(right, rotatedBy: -angle)
         if let l = leftRatio, let r = rightRatio { return (l + r) / 2 }
         return leftRatio ?? rightRatio
     }
 
-    /// Height/width of the eye outline's bounding extent. Point order in Vision's
-    /// eye region isn't documented, so extent-based ratio is safer than assuming
-    /// dlib-style indexing.
-    private static func aspectRatio(of region: VNFaceLandmarkRegion2D) -> Double? {
-        let points = region.normalizedPoints
-        guard points.count >= 4 else { return nil }
-        var minX = CGFloat.greatestFiniteMagnitude, maxX = -CGFloat.greatestFiniteMagnitude
-        var minY = CGFloat.greatestFiniteMagnitude, maxY = -CGFloat.greatestFiniteMagnitude
+    private static func centroid(_ points: [CGPoint]) -> CGPoint {
+        var x = 0.0, y = 0.0
         for p in points {
-            minX = min(minX, p.x); maxX = max(maxX, p.x)
-            minY = min(minY, p.y); maxY = max(maxY, p.y)
+            x += Double(p.x)
+            y += Double(p.y)
+        }
+        let n = Double(points.count)
+        return CGPoint(x: x / n, y: y / n)
+    }
+
+    /// Height/width of the eye outline's bounding extent after rotating the points
+    /// by `angle` (radians). Point order in Vision's eye region isn't documented,
+    /// so extent-based ratio is safer than assuming dlib-style indexing.
+    private static func extentAspectRatio(_ points: [CGPoint], rotatedBy angle: Double) -> Double? {
+        guard points.count >= 4 else { return nil }
+        let c = cos(angle), s = sin(angle)
+        var minX = Double.greatestFiniteMagnitude, maxX = -Double.greatestFiniteMagnitude
+        var minY = Double.greatestFiniteMagnitude, maxY = -Double.greatestFiniteMagnitude
+        for p in points {
+            let px = Double(p.x), py = Double(p.y)
+            let x = px * c - py * s
+            let y = px * s + py * c
+            minX = min(minX, x); maxX = max(maxX, x)
+            minY = min(minY, y); maxY = max(maxY, y)
         }
         let width = maxX - minX
         guard width > 0 else { return nil }
-        return Double((maxY - minY) / width)
+        return (maxY - minY) / width
     }
 }

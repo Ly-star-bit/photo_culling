@@ -1,0 +1,316 @@
+import Foundation
+
+/// 场次文件里不规矩的输入（优化分析 2026-11-18 edge 维度）：LabelGUI --session-input-selftest。
+/// 纯函数，不读写任何文件；要真文件、真分析的那一半（解不开 / 取消没轮到的照片计数、一行坏了重新分析补回、长文件名、
+/// 改名认回 id、thresholds.json 离谱值 --verdicts 不崩）在 Scripts/photo_id_regression.py 的 J–M 组。
+/// - EC-04：thresholds.json 里四条线都夹到滑杆范围，1e19 / -1e30 / 缺键不崩、不越界；正常值一个不改。
+/// - EC-03：manifest / layer1 里一行字段类型不对、缺 id、根本不是对象：只丢这一行，其余照常；分析引擎复用前用的
+///   decodablePhotoIDs / reusableIDs 和界面同一个解码器（没有锐度的 layer1 行不复用）。
+/// - EC-01：没进网格的照片 = photos 里没结果的 + photos 里解不开的 + photos_without_results（解不开、取消时没轮到），不重复。
+/// - EC-02：改名认回 id 的指纹比对只认一对一；按路径认得出来的（原件还在）不参与，副本拿不走原件的 id。
+/// - PP-05：拍摄时间的手写解析（CaptureTimeParser）和逐张 DateFormatter 逐个相同：十几个时区（夏令时南北半球、
+///   半小时 / 45 分钟的时差和切换、零点切换、跳过一整天、1883 年地方时换标准时）全年每小时一个时刻、切换日每分钟一个，
+///   外加格式不对的串。不存在的时刻（拨快那一小时）、重复的时刻（拨慢那一小时）按年月日时分秒直接拼出来测。
+enum SessionInputSelfTest {
+    @MainActor
+    static func run() -> Never {
+        let c = Checker()
+        thresholds(c)
+        lossyRows(c)
+        unparsed(c)
+        fingerprints(c)
+        captureTimes(c)
+        print(c.failed == 0 ? "场次输入自检通过：\(c.total) 条" : "!! 场次输入自检 \(c.failed) / \(c.total) 条失败")
+        exit(c.failed == 0 ? 0 : 1)
+    }
+
+    final class Checker {
+        var failed = 0
+        var total = 0
+        func check(_ ok: Bool, _ name: String, _ detail: @autoclosure () -> String = "") {
+            total += 1
+            if ok {
+                print("PASS " + name)
+            } else {
+                failed += 1
+                print("FAIL " + name + " " + detail())
+            }
+        }
+    }
+
+    // MARK: - EC-04 thresholds.json 的离谱值
+
+    static func thresholds(_ c: Checker) {
+        func decoded(_ json: String) -> BatchStore.ThresholdState? {
+            try? JSONDecoder().decode(BatchStore.ThresholdState.self, from: Data(json.utf8))
+        }
+        func line(_ s: BatchStore.ThresholdState) -> String {
+            "对焦 \(s.resolvedFocus) 曝光 \(s.resolvedExposure) 人脸 \(s.resolvedFaceQuality) 间隔 \(s.resolvedTakeGap)"
+        }
+        // (json, 对焦, 曝光, 人脸质量, 间隔)
+        let cases: [(String, Double, Double, Double, Double)] = [
+            ("{\"sharpness\":45,\"faceQuality\":0.3,\"exposure\":0.15,\"takeGap\":1e19}", 60, 0.15, 0.3, 60),
+            ("{\"sharpness\":45,\"faceQuality\":0.3,\"exposure\":0.15,\"takeGap\":-1e30}", 60, 0.15, 0.3, 1),
+            ("{\"sharpness\":45,\"faceQuality\":99,\"exposure\":-5,\"takeGap\":-3}", 60, 0.005, 1, 1),
+            ("{\"sharpness\":1e19,\"faceQuality\":-1e30,\"exposure\":1e19}", 150, 0.5, 0, 8),
+            ("{\"sharpness\":45,\"faceQuality\":0.3,\"exposure\":0.15}", 60, 0.15, 0.3, 8),
+            ("{\"sharpness\":45,\"focus\":72.5,\"faceQuality\":0.42,\"exposure\":0.07,\"takeGap\":13}", 72.5, 0.07, 0.42, 13),
+        ]
+        for (json, focus, exposure, quality, gap) in cases {
+            guard let s = decoded(json) else {
+                c.check(false, json, "解不开")
+                continue
+            }
+            let ok = s.resolvedFocus == focus && s.resolvedExposure == exposure
+                && s.resolvedFaceQuality == quality && s.resolvedTakeGap == gap
+            c.check(ok, "\(json) → 对焦 \(focus) 曝光 \(exposure) 人脸 \(quality) 间隔 \(gap)", line(s))
+        }
+        // 三档预设、滑杆两头：原样（夹住不改任何 app 自己写得出的值）。
+        for preset in BatchStore.CullPreset.allCases {
+            let (focus, exposure, quality) = preset.thresholds
+            let s = BatchStore.ThresholdState(focus: focus, exposure: exposure, faceQuality: quality, takeGap: 1)
+            c.check(s.resolvedFocus == focus && s.resolvedExposure == exposure && s.resolvedFaceQuality == quality
+                  && s.resolvedTakeGap == 1, "预设\(preset.rawValue)原样", line(s))
+        }
+        let edges = BatchStore.ThresholdState(focus: 150, exposure: 0.5, faceQuality: 1, takeGap: 60)
+        c.check(edges.resolvedFocus == 150 && edges.resolvedExposure == 0.5 && edges.resolvedFaceQuality == 1
+              && edges.resolvedTakeGap == 60, "滑杆最右边原样", line(edges))
+        // 非有限（JSONDecoder 不收 NaN / Infinity，只能是代码里来的）：给默认，不越界。
+        let weird = BatchStore.ThresholdState(focus: .nan, exposure: .infinity, faceQuality: -.infinity, takeGap: .nan)
+        c.check(weird.resolvedFocus == 60 && weird.resolvedExposure == 0.15 && weird.resolvedFaceQuality == 0.3
+              && weird.resolvedTakeGap == BatchStore.defaultTakeGapSec, "NaN / ±∞ → 标准那一份", line(weird))
+        // 1e400 超出 Double：要么整份解不开（走 thresholds.corrupt 那条路），要么读成有限的范围内的数，不能崩。
+        if let huge = decoded("{\"sharpness\":45,\"faceQuality\":0.3,\"exposure\":0.15,\"takeGap\":1e400}") {
+            c.check(BatchStore.takeGapRange.contains(huge.resolvedTakeGap), "takeGap 1e400：读成范围内的数", line(huge))
+        } else {
+            c.check(true, "takeGap 1e400：整份解不开（走挪开 .corrupt 那条路）")
+        }
+    }
+
+    // MARK: - EC-03 一行坏了只丢那一行
+
+    static func lossyRows(_ c: Checker) {
+        let manifestJSON = """
+        {"photo_dir": "/p", "photos": [
+          {"id": "a", "raw_path": "/p/a.jpg", "preview_path": "/d/a.jpg", "exif": {"iso": 400}},
+          {"id": "b", "raw_path": "/p/b.jpg", "preview_path": "/d/b.jpg", "exif": {"iso": "四百"}},
+          {"id": "c", "raw_path": "/p/c.jpg", "decode_path": "/p/c.JPG", "preview_path": "/d/c.jpg"},
+          {"raw_path": "/p/noid.jpg", "preview_path": "/d/noid.jpg"},
+          {"id": "e", "raw_path": "/p/e.jpg"},
+          42,
+          {"id": "g", "raw_path": "/p/g.jpg", "preview_path": "/d/g.jpg", "capture_time": 7}
+        ], "photos_without_results": [{"id": "x", "raw_path": "/p/x.jpg"}]}
+        """
+        let data = Data(manifestJSON.utf8)
+        let m = try? JSONDecoder().decode(Manifest.self, from: data)
+        c.check(m?.photos.map(\.id) == ["a", "c"], "manifest：好的两行照常（a、c）", "\(m?.photos.map(\.id) ?? [])")
+        let bad = m?.undecodableRows.map { $0.id ?? "-" } ?? []
+        c.check(bad == ["b", "-", "e", "-", "g"], "解不开的五行各记一笔（iso 是字符串、缺 id、缺 preview_path、不是对象、时间是数字）",
+                "\(bad)")
+        c.check(m?.undecodableRows.first?.rawPath == "/p/b.jpg", "解不开的行也认得出路径（认旧键要用）")
+        c.check(m?.photosWithoutResults?.map { $0.id } == ["x"], "photos_without_results 照常")
+        c.check(Manifest.decodablePhotoIDs(data) == ["a", "c"], "复用前的校验：只有 a、c 能复用",
+                "\(Manifest.decodablePhotoIDs(data) ?? [])")
+        let noDir = Data(#"{"photos": [{"id": "a", "raw_path": "/p/a.jpg", "preview_path": "/d/a.jpg"}]}"#.utf8)
+        c.check(Manifest.decodablePhotoIDs(noDir) == ["a"], "没有 photo_dir 的老 manifest：校验照样认行")
+        c.check(Manifest.decodablePhotoIDs(Data("{\"photos\": 3}".utf8)) == nil
+                && Manifest.decodablePhotoIDs(Data("截断的{".utf8)) == nil, "photos 不是数组、不是 JSON：nil（整份不复用）")
+
+        let layer1JSON = """
+        {"results": [
+          {"id": "a", "sharpness": 80.5, "burst_group": 1},
+          {"id": "b", "sharpness": "高", "burst_group": 2},
+          {"id": "c", "burst_group": 3},
+          {"id": "d", "sharpness": 70, "burst_group": 4, "error": "decode"},
+          {"id": "e", "sharpness": 75, "burst_group": "五"},
+          {"id": "f", "sharpness": 60, "burst_group": 6, "faces": [{"bbox": "x"}]},
+          null
+        ]}
+        """
+        let l = try? JSONDecoder().decode(Layer1File.self, from: Data(layer1JSON.utf8))
+        c.check(l?.results.map(\.id) == ["a", "c", "d"], "layer1：类型不对的三行（锐度、分组、人脸框）和 null 只丢自己",
+                "\(l?.results.map(\.id) ?? [])")
+        let reusable = Layer1File.reusableIDs(Data(layer1JSON.utf8))
+        c.check(reusable == ["a"], "复用前的校验：没有锐度（c）、带 error（d）的也不复用", "\(reusable ?? [])")
+    }
+
+    // MARK: - EC-01 没进网格的照片
+
+    static func unparsed(_ c: Checker) {
+        let json = """
+        {"photo_dir": "/p", "photos": [
+          {"id": "a", "raw_path": "/p/a.jpg", "preview_path": "/d/a.jpg"},
+          {"id": "b", "raw_path": "/p/b.jpg", "preview_path": "/d/b.jpg"},
+          {"id": "c", "raw_path": "/p/c.jpg", "exif": {"iso": "四百"}, "preview_path": "/d/c.jpg"},
+          {"raw_path": "/p/q.jpg"}
+        ], "photos_without_results": [{"id": "bad"}, {"id": "b"}, {"id": "late"}, {"raw_path": "/p/nameless.jpg"}]}
+        """
+        guard let m = try? JSONDecoder().decode(Manifest.self, from: Data(json.utf8)) else {
+            c.check(false, "没进网格：manifest 解不开")
+            return
+        }
+        let names = BatchStore.unparsedNames(manifest: m, loadedIDs: ["a"])
+        c.check(names == ["b", "c", "manifest 里第 2 个解不开的行", "bad", "late"],
+                "没进网格 = 没结果的 b + 解不开的 c 和没 id 的那行 + 解不开 / 没轮到的 bad、late（b 不重复）", "\(names)")
+        let none = BatchStore.unparsedNames(manifest: m, loadedIDs: ["a", "b", "c", "bad", "late"])
+        c.check(none == ["manifest 里第 2 个解不开的行"], "都进了网格：只剩认不出 id 的那行", "\(none)")
+    }
+
+    // MARK: - EC-02 改名认回 id
+
+    static func fingerprints(_ c: Checker) {
+        typealias Stamp = ImageLoader.FileStamp
+        let old: [String: Stamp] = [
+            "A": Stamp(size: 1000, mtime: 100), "B": Stamp(size: 2000, mtime: 200),
+            "T1": Stamp(size: 5000, mtime: 500), "T2": Stamp(size: 5000, mtime: 500.4),
+        ]
+        let new: [Stamp?] = [
+            Stamp(size: 1000, mtime: 100.9),   // 0 → A（差 0.9 秒，和分析复用同一个口径）
+            Stamp(size: 2000, mtime: 201),     // 1 → 差整 1 秒：不认
+            Stamp(size: 5000, mtime: 500.2),   // 2 → 对上 T1、T2 两个：不猜
+            nil,                               // 3 → stat 不出来
+            Stamp(size: 999, mtime: 100),      // 4 → 大小不一样
+            Stamp(size: 0, mtime: 0),          // 5 → 0 字节不认
+        ]
+        let got = ImageLoader.PreviousIDs.fingerprintMatches(new: new, old: old)
+        c.check(got == [0: "A"], "指纹：只认一对一、大小一样且修改时间差不到 1 秒的", "\(got)")
+        let twice = ImageLoader.PreviousIDs.fingerprintMatches(new: [Stamp(size: 1000, mtime: 100), Stamp(size: 1000, mtime: 100.5)],
+                                                               old: old)
+        c.check(twice.isEmpty, "两个新文件对上同一个旧 id（复制了两份、原件不在）：都不认", "\(twice)")
+
+        // 整个 match：A 改了名、B 原样在、B 的副本（同样的大小和时间）、C 删了、新来的 N。
+        let manifest: [String: Any] = ["photo_dir": "/shoot", "photos": [
+            ["id": "A", "raw_path": "/shoot/A.jpg"], ["id": "B", "raw_path": "/shoot/B.jpg"],
+            ["id": "C", "raw_path": "/shoot/C.jpg"],
+        ]]
+        let layer1: [String: Any] = ["results": [
+            ["id": "A", "src_size": 1000, "src_mtime": 100.0], ["id": "B", "src_size": 2000, "src_mtime": 200.0],
+            ["id": "C", "src_size": 3000, "src_mtime": 300.0],
+        ]]
+        let root = URL(fileURLWithPath: "/shoot")
+        let previous = ImageLoader.PreviousIDs(manifest: manifest, layer1: layer1, photoDir: root)
+        let files = ["新名A.jpg", "B.jpg", "B 副本.jpg", "N.jpg"].map { root.appendingPathComponent($0) }
+        let stamps: [String: Stamp] = ["新名A.jpg": Stamp(size: 1000, mtime: 100), "B.jpg": Stamp(size: 2000, mtime: 200),
+                                       "B 副本.jpg": Stamp(size: 2000, mtime: 200), "N.jpg": Stamp(size: 3001, mtime: 300)]
+        let kept = previous.match(pairs: files.map { [$0] }, extras: [], root: root) { stamps[$0.lastPathComponent] }
+        c.check(kept.pairs == ["A", "B", nil, nil] && kept.refound == ["A"],
+                "改了名的 A 认回、B 按路径、B 的副本不抢 B、大小差一个字节的 N 不认 C",
+                "\(kept.pairs.map { $0 ?? "-" }) refound \(kept.refound.sorted())")
+        let noLayer1 = ImageLoader.PreviousIDs(manifest: manifest, photoDir: root)
+        let plain = noLayer1.match(pairs: files.map { [$0] }, extras: [], root: root) { stamps[$0.lastPathComponent] }
+        c.check(plain.pairs == [nil, "B", nil, nil] && plain.refound.isEmpty, "没有 layer1（老结果没记大小）：只按路径认")
+    }
+
+    // MARK: - PP-05 拍摄时间的手写解析
+
+    static func captureTimes(_ c: Checker) {
+        // (时区, 逐小时测的年份, 额外逐分钟测的本地日子)
+        let zones: [(String, [Int], [(Int, Int, Int)])] = [
+            ("America/Los_Angeles", [2026, 1970, 1883], [(1883, 11, 18)]),
+            ("America/New_York", [2026], []),
+            ("Europe/Berlin", [2026], []),
+            ("Europe/London", [2026], []),
+            ("Australia/Sydney", [2026], []),
+            ("Australia/Lord_Howe", [2026], []),
+            ("Pacific/Chatham", [2026], []),
+            ("America/Santiago", [2026], []),
+            ("America/Sao_Paulo", [2018], [(2018, 2, 17), (2018, 11, 4)]),
+            ("Pacific/Apia", [2011], [(2011, 12, 29), (2011, 12, 30), (2011, 12, 31)]),
+            ("Asia/Kolkata", [2026], []),
+            ("Asia/Kathmandu", [2026], []),
+            ("Asia/Shanghai", [2026, 1990], []),
+            ("UTC", [2026], []),
+        ]
+        func two(_ v: Int) -> String { v < 10 ? "0\(v)" : "\(v)" }
+        func stamp(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int, _ s: Int) -> String {
+            let year = String(repeating: "0", count: max(0, 4 - String(y).count)) + String(y)
+            return year + "-" + two(mo) + "-" + two(d) + "T" + two(h) + ":" + two(mi) + ":" + two(s)
+        }
+        func daysIn(_ y: Int, _ m: Int) -> Int {
+            switch m {
+            case 2: return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 ? 29 : 28
+            case 4, 6, 9, 11: return 30
+            default: return 31
+            }
+        }
+        var current = TimeZone.current.identifier
+        if zones.contains(where: { $0.0 == current }) { current = "" }
+        let all = zones + (current.isEmpty ? [] : [(current, [2026], [])])
+        var compared = 0, mismatches: [String] = [], irregular = 0, dense = 0
+        for (id, years, extraDays) in all {
+            guard let tz = TimeZone(identifier: id) else {
+                c.check(false, "拍摄时间：时区 \(id) 不认识")
+                continue
+            }
+            var parser = CaptureTimeParser(timeZone: tz)
+            let reference = CaptureTimeParser.makeFormatter(timeZone: tz)
+            func compare(_ text: String) {
+                compared += 1
+                let got = parser.date(from: text), want = reference.date(from: text)
+                if got != want, mismatches.count < 8 {
+                    mismatches.append("\(id) \(text)：手写 \(got.map { "\($0.timeIntervalSince1970)" } ?? "nil")，" +
+                                      "DateFormatter \(want.map { "\($0.timeIntervalSince1970)" } ?? "nil")")
+                }
+            }
+            // 切换在哪几天：按 UTC 逐小时看偏移变没变（只用来挑出要逐分钟测的日子）：变之前那一刻、变之后那一刻的本地日子。
+            var days = Set<Int>()
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = tz
+            for year in years {
+                var t = cal.date(from: DateComponents(year: year, month: 1, day: 1)) ?? Date(timeIntervalSince1970: 0)
+                var offset = tz.secondsFromGMT(for: t)
+                for _ in 0..<(367 * 24) {
+                    let next = t.addingTimeInterval(3600)
+                    let o = tz.secondsFromGMT(for: next)
+                    if o != offset {
+                        for moment in [t, next] {
+                            let local = cal.dateComponents([.year, .month, .day], from: moment)
+                            days.insert((local.year! * 100 + local.month!) * 100 + local.day!)
+                        }
+                        offset = o
+                    }
+                    t = next
+                }
+                // 全年每小时一个时刻（分、秒跟着日子和钟点变）。
+                for month in 1...12 {
+                    for day in 1...daysIn(year, month) {
+                        for hour in 0..<24 {
+                            compare(stamp(year, month, day, hour, (hour * 7 + day) % 60, (hour * 13 + day * 3) % 60))
+                        }
+                    }
+                }
+            }
+            for (y, m, d) in extraDays { days.insert((y * 100 + m) * 100 + d) }
+            // 切换日每分钟一个：不存在的、重复的本地时刻都按数字直接拼出来。
+            for key in days.sorted() {
+                let y = key / 10000, m = key / 100 % 100, d = key % 100
+                dense += 1
+                for hour in 0..<24 {
+                    for minute in 0..<60 { compare(stamp(y, m, d, hour, minute, (minute * 7 + hour) % 60)) }
+                }
+            }
+            irregular += parser.irregularHours
+        }
+        c.check(mismatches.isEmpty && compared > 100_000,
+                "拍摄时间：手写解析和 DateFormatter 逐个相同（\(all.count) 个时区、\(compared) 个时刻，切换前后 \(dense) 天逐分钟）",
+                mismatches.joined(separator: "；"))
+        // 不线性的那几个小时（豪勋爵岛半小时的切换、查塔姆 2:45 的切换、1883 年地方时）走了逐张 DateFormatter 那条路：退路真的测到了。
+        c.check(irregular > 0, "拍摄时间：切换落在一小时中间的那几个小时逐张交给 DateFormatter（\(irregular) 个）")
+
+        // 格式不对、日子不存在的：和 DateFormatter 一样（多半是 nil）。
+        let odd = ["", "2026-03-08", "2026-03-08T02:30", "2026-3-8T2:30:00", "2026-13-01T00:00:00", "2026-00-10T00:00:00",
+                   "2026-02-29T10:00:00", "2024-02-29T10:00:00", "2026-02-30T10:00:00", "2026-04-31T23:59:59",
+                   "2026-03-08T24:00:00", "2026-03-08T23:60:00", "2026-03-08T23:59:60", "abcd-ef-ghTij:kl:mn",
+                   "２０２６-03-08T02:30:00", " 2026-03-08T02:30:00", "2026-03-08T02:30:00Z", "2026-03-08 02:30:00",
+                   "0000-01-01T00:00:00", "1900-01-01T00:00:00", "9999-12-31T23:59:59", "-001-01-01T00:00:00",
+                   "2026-03-08T02:30:00.5", "2026/03/08T02:30:00"]
+        var oddMismatch: [String] = []
+        for id in ["America/Los_Angeles", "Australia/Lord_Howe", "UTC"] {
+            guard let tz = TimeZone(identifier: id) else { continue }
+            var parser = CaptureTimeParser(timeZone: tz)
+            let reference = CaptureTimeParser.makeFormatter(timeZone: tz)
+            for text in odd where parser.date(from: text) != reference.date(from: text) { oddMismatch.append(id + " " + text) }
+        }
+        c.check(oddMismatch.isEmpty, "拍摄时间：格式不对、日子不存在的 \(odd.count) 种和 DateFormatter 一样", oddMismatch.joined(separator: "；"))
+    }
+}

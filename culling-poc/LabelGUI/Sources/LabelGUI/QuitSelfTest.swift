@@ -1247,10 +1247,10 @@ final class QuitSelfTestHarness {
 
     // MARK: - S05e 阈值防抖里排着的那次，退出时写掉
 
-    func sharpness(_ url: URL) -> Double? {
+    func focus(_ url: URL) -> Double? {
         guard let data = try? Data(contentsOf: url),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        return obj["sharpness"] as? Double
+        return obj["focus"] as? Double
     }
 
     func thresholdFlushOnQuit() {
@@ -1263,25 +1263,25 @@ final class QuitSelfTestHarness {
         let global = dataDir.appendingPathComponent("thresholds.json")
         check(fm.fileExists(atPath: own.path), "打开场次时定下了这一场的 thresholds.json")
 
-        store.sharpnessThreshold = 33
+        store.focusThreshold = 33
         NotificationCenter.default.post(name: NSApplication.willTerminateNotification, object: nil)
-        check(sharpness(own) == 33, "刚拖完就退出：这一场的 thresholds.json 写进了 33 → \(sharpness(own).map { "\($0)" } ?? "nil")")
-        check(sharpness(global) == 33, "刚拖完就退出：上次用的那份（数据目录里的）也写进了 33")
+        check(focus(own) == 33, "刚拖完就退出：这一场的 thresholds.json 写进了 33 → \(focus(own).map { "\($0)" } ?? "nil")")
+        check(focus(global) == 33, "刚拖完就退出：上次用的那份（数据目录里的）也写进了 33")
 
         // 退出那一下写过以后，防抖任务被取消，不会再写一遍；之后什么都没排着，再退出也不碰文件。
-        let sentinel = #"{"sharpness":77,"exposure":0.15,"faceQuality":0.3}"#
+        let sentinel = #"{"sharpness":45,"focus":77,"exposure":0.15,"faceQuality":0.3}"#
         try? sentinel.write(to: own, atomically: true, encoding: .utf8)
         spin(0.8) { false }
-        check(sharpness(own) == 77, "退出时写掉以后，原来那个防抖任务不再补写")
+        check(focus(own) == 77, "退出时写掉以后，原来那个防抖任务不再补写")
         NotificationCenter.default.post(name: NSApplication.willTerminateNotification, object: nil)
-        check(sharpness(own) == 77, "什么都没排着：退出时不拿当前值去盖 thresholds.json")
+        check(focus(own) == 77, "什么都没排着：退出时不拿当前值去盖 thresholds.json")
 
         // 防抖自己写完了的：排着的记录跟着清掉，退出时不再写。
-        store.sharpnessThreshold = 44
-        spin(2) { sharpness(own) == 44 }
-        check(sharpness(own) == 44, "半秒防抖照常写盘（44）")
+        store.focusThreshold = 44
+        spin(2) { focus(own) == 44 }
+        check(focus(own) == 44, "半秒防抖照常写盘（44）")
         try? sentinel.write(to: own, atomically: true, encoding: .utf8)
         NotificationCenter.default.post(name: NSApplication.willTerminateNotification, object: nil)
-        check(sharpness(own) == 77, "防抖已经写过的：退出时不再写一遍")
+        check(focus(own) == 77, "防抖已经写过的：退出时不再写一遍")
     }
 }

@@ -42,6 +42,8 @@ enum AnalysisEngine {
         let subjectFaces: [FaceAnalyzer.SubjectFace]
         let sharpness: Double
         let sharpnessScope: String
+        /// 判「虚焦」用的清晰比（Metrics.focusRatio），和 sharpness 量的是同一块。sharpness 留给排序和近似重复组里比谁更清楚。
+        let focusRatio: Double
         let highlightClipPct: Double
         let shadowClipPct: Double
         /// 同一个裁切口径，只数主体区域（主体脸扩到头 + 上半身的并集）；没有脸、或者人在画面里太小
@@ -71,7 +73,17 @@ enum AnalysisEngine {
     /// instead of silently mixing two scales under one slider. Files written
     /// before this key existed are treated as version 1.
     /// 2：曝光裁切改按主体区域算，加了欠曝 / 过曝要的亮度、合影小脸的原图 EAR。
-    static let analysisVersion = 2
+    /// 3：人脸质量改成喂 landmarks 的脸框单独算（FaceAnalyzer.analyze）—— 以前同一张图每次分析出两种分，
+    ///    新分落在哪一种不固定，和老结果混在一场里组内比较就不公平。
+    ///    同一版（还没发出去）里锐度也改了口径：只量眼眉带（裁回脸框），不再和嘴那块取大；sharpness_scope
+    ///    从 "features" 变成 "eyes" / "mouth"。闭眼的 EAR（blink_score、faces[].ear）也改了：按两眼连线转平再量
+    ///    （FaceAnalyzer.levelledEyeAspectRatio），歪着的脸读数变小（photot 歪 21–23° 的 0.51–0.55 → 0.30–0.35）。
+    ///    主体曝光裁切（subject_*_clip_pct）也改了：矩形里有 ≥ 0.5% 裁切的，跑人像分割只数人（Metrics.personClipping），
+    ///    白底 / 黑底 / 逆光背景不再算进来。
+    /// 4：加了 focus_ratio（判虚焦的清晰比，Metrics.focusRatio，量的还是锐度那块）。3 没发过版，用户手里都是 2，
+    ///    2 → 4 和 2 → 3 一样是整场重分析一回；升这一次是让开发中用 3 分析过的数据目录（没有 focus_ratio）也整场重算，
+    ///    不留在「按锐度折算」的老路上（BatchStore.legacyFocus）。
+    static let analysisVersion = 4
 
     struct Summary {
         let analyzed: Int
@@ -88,6 +100,8 @@ enum AnalysisEngine {
         /// 这一次写了预览图（previews/<id>.jpg）的照片，按文件夹顺序：分析了的（新的、改过的）和分析结果还能用、
         /// 只是预览图没了补回来的。原样复用的不在里面。界面只清这些照片的缓存（BatchStore.runAnalysis 收尾）。
         var previewsWritten: [String] = []
+        /// 改了名（或挪了子文件夹）、按文件大小 + 修改时间认回原来 id 的照片（PhotoIDMemory 第三遍，EC-02），按文件夹顺序。
+        var refound: [String] = []
     }
 
     /// Thread-safe cooperative cancellation flag shared with the UI.
@@ -113,9 +127,11 @@ enum AnalysisEngine {
         }
         // 上一次的 manifest 不管哪个引擎、哪个分析版本写的都读：listPhotos 按它沿用上一次的 id（PhotoIDMemory.swift）。
         // 下面增量复用的门控只管分析数值能不能直接用；id 不跟着它走 —— 版本一升整场重分析，id 也得原样留着。
-        let oldManifest = (try? Data(contentsOf: dataDir.appendingPathComponent("manifest.json")))
-            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-        let previousIDs = ImageLoader.PreviousIDs(manifest: oldManifest, photoDir: photoDir)
+        let oldManifestData = try? Data(contentsOf: dataDir.appendingPathComponent("manifest.json"))
+        let oldManifest = oldManifestData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let oldLayer1Data = try? Data(contentsOf: dataDir.appendingPathComponent("layer1_results.json"))
+        let oldLayer1 = oldLayer1Data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let previousIDs = ImageLoader.PreviousIDs(manifest: oldManifest, layer1: oldLayer1, photoDir: photoDir)
         // 顶层列不出来（多半是系统隐私权限没给）就照实说、点名系统设置的开关，不再报「没有支持的图片文件」（审查 D03）。
         if let problem = ImageLoader.folderReadProblem(photoDir) {
             throw NSError(domain: "AnalysisEngine", code: 3, userInfo: [NSLocalizedDescriptionKey: problem])
@@ -137,17 +153,22 @@ enum AnalysisEngine {
         let fm = FileManager.default
         var oldManifestByID: [String: [String: Any]] = [:]
         var oldLayer1ByID: [String: [String: Any]] = [:]
-        if let mData = try? Data(contentsOf: dataDir.appendingPathComponent("manifest.json")),
-           let mJson = try? JSONSerialization.jsonObject(with: mData) as? [String: Any],
+        if let mData = oldManifestData, let mJson = oldManifest,
            let mPhotos = mJson["photos"] as? [[String: Any]],
-           let lData = try? Data(contentsOf: dataDir.appendingPathComponent("layer1_results.json")),
-           let lJson = try? JSONSerialization.jsonObject(with: lData) as? [String: Any],
+           let lData = oldLayer1Data, let lJson = oldLayer1,
            (lJson["engine"] as? String) == "native",
            (lJson["analysis_version"] as? Int ?? 1) == analysisVersion,
            let lResults = lJson["results"] as? [[String: Any]] {
-            for p in mPhotos { if let id = p["id"] as? String { oldManifestByID[id] = p } }
+            // 只复用界面读得懂的行（审查 EC-03）：按字典宽松读的话，一行字段类型不对（手改、以后改了字段类型又装回旧版本）
+            // 会被当成「未变」原样抄回新 manifest，界面那边永远解不开、这一场一直空着，点「开始分析」也修不好。
+            // 和 BatchStore 打开场次用同一个解码器（Photo / Layer1Result）验一遍，解不开的重新分析。
+            let readableManifest = Manifest.decodablePhotoIDs(mData) ?? []
+            let readableLayer1 = Layer1File.reusableIDs(lData) ?? []
+            for p in mPhotos {
+                if let id = p["id"] as? String, readableManifest.contains(id) { oldManifestByID[id] = p }
+            }
             for r in lResults where r["error"] == nil {
-                if let id = r["id"] as? String { oldLayer1ByID[id] = r }
+                if let id = r["id"] as? String, readableLayer1.contains(id) { oldLayer1ByID[id] = r }
             }
         }
 
@@ -179,8 +200,8 @@ enum AnalysisEngine {
                 todo.append(file)
             }
         }
-        // 分析结果还有效、只是预览图没了（掉出最近 15 场被清掉的）：只重做预览，数值原样复用 ——
-        // 整张重分析的话人脸质量每次有点抖，人工改判以外的判决可能悄悄变掉。重做失败的才整张重分析。
+        // 分析结果还有效、只是预览图没了（掉出最近 15 场被清掉的）：只重做预览，数值原样复用 —— 省时间；
+        // 分析版本 3 以前人脸质量每次有点抖，整张重分析的话人工改判以外的判决可能悄悄变掉。重做失败的才整张重分析。
         let missing = candidates.indices.filter {
             !fm.fileExists(atPath: previewDir.appendingPathComponent("\(candidates[$0].file.stem).jpg").path)
         }
@@ -299,7 +320,8 @@ enum AnalysisEngine {
         let written = Set(regeneratedIDs).union(completedIds)
         return Summary(analyzed: completed.count, reused: reusedFinal.count,
                        failed: failed, corrupt: corrupt, cancelled: cancelled,
-                       previewsWritten: orderedIds.filter(written.contains))
+                       previewsWritten: orderedIds.filter(written.contains),
+                       refound: photos.filter(\.refound).map(\.stem))
     }
 
     // MARK: - Per-photo
@@ -348,7 +370,16 @@ enum AnalysisEngine {
             // 人在画面里太小（远景、旅拍里的小人）：画面本身才是主体，照旧按整张算 —— 不然一张碰巧认出来的
             // 小脸就把一大片死白天空排除在外，认没认出来脸，判决就翻。
             let bigEnough = Double(bodyPixels) >= FaceAnalyzer.minSubjectRegionShare * Double(w * h)
-            subjectClip = bigEnough ? Metrics.exposureClipping(rgba: rgba, width: w, spans: bodySpans) : nil
+            var clip = bigEnough ? Metrics.exposureClipping(rgba: rgba, width: w, spans: bodySpans) : nil
+            // 矩形里有背景：白底、黑底、逆光打爆的背景会把曝光正常的人判成「曝光裁切」（VQ-01）。矩形里有点裁切的，
+            // 再跑一次人像分割、只数人（Metrics.personClipping 写了怎么判、为什么不直接取交集）；分割失败照旧用矩形。
+            if let rect = clip, max(rect.highlightPct, rect.shadowPct) >= Metrics.personClipGate,
+               let mask = FaceAnalyzer.personMask(in: loaded.image),
+               let person = Metrics.personClipping(rgba: rgba, width: w, height: h, bodies: bodySpans,
+                                                   faces: regions.faces, mask: mask) {
+                clip = person
+            }
+            subjectClip = clip
             gray = Metrics.grayscale(rgba: rgba, width: w, height: h)
         }
         // 欠曝 / 过曝的依据：脸的亮度中位数（没有脸 = nil），整张的中位数和 p99（「画面里有没有亮的东西」）。
@@ -360,38 +391,50 @@ enum AnalysisEngine {
         // 会被冤成「文件损坏」，还叫人别格式化卡（审查发现）。截断的那些 EOI 检查已经全认得出。
         let fileCorrupt = ImageLoader.jpegTruncated(file.decodeURL)
 
-        // Sharpness ladder: facial-feature rects (eyes/brows/mouth — where focus
-        // is judged, hair and background excluded) → face bbox → foreground
-        // subject (ring/bouquet/detail shots with no face) → whole frame.
-        // Max across feature rects: shallow DOF legitimately blurs the mouth
-        // while the eyes are tack sharp, and that photo is IN focus.
+        // Sharpness ladder: eye+brow band (where focus is judged, hair and
+        // background excluded) → mouth (only when the eyes' landmarks are
+        // unreadable) → face bbox → foreground subject (ring/bouquet/detail shots
+        // with no face) → whole frame.
+        // 以前取眼眉带和嘴两块里大的那个（怕景深浅、眼睛清楚嘴糊的被冤）。可嘴清楚眼睛糊（前焦、焦点落在嘴唇鼻尖，
+        // f/1.2–2 近景人像最常见的失焦）也靠嘴过关：photot 21 张里 18 张是嘴那块大（汉服妆红唇轮廓对比强），
+        // 只糊眼眉 σ8 锐度纹丝不动、三档全放过（优化分析 2026-11-18 复核 M1、11-04 A03-a）。现在只看眼眉带：
+        // 眼睛清楚嘴糊的照样清楚；只糊眼眉和整张糊一样掉到 36–48。眼眉带在 photot 上 64–91，和以前的 68–93
+        // 差不多。
+        // 判虚焦用的清晰比（focusRatio）在同一块上算：锐度跟亮度、景别、分辨率走，判虚焦不再用它（VQ-02）。
         let sharpness: Double
+        let focusRatio: Double
         let scope: String
         func pixelRect(_ r: [Double]) -> (x0: Int, y0: Int, x1: Int, y1: Int) {
             (Int(r[0] * Double(width)), Int(r[1] * Double(height)),
              Int(r[2] * Double(width)), Int(r[3] * Double(height)))
         }
-        func regionScore(_ r: [Double]) -> Double? {
+        func regionScore(_ r: [Double]) -> (sharp: Double, focus: Double)? {
             let p = pixelRect(r)
             guard p.x1 - p.x0 > 4, p.y1 - p.y0 > 4 else { return nil }
-            return Metrics.tenengrad(gray: gray, width: width, height: height,
-                                     x0: p.x0, y0: p.y0, x1: p.x1, y1: p.y1)
+            let sharp = Metrics.tenengrad(gray: gray, width: width, height: height,
+                                          x0: p.x0, y0: p.y0, x1: p.x1, y1: p.y1)
+            let focus = Metrics.focusRatio(gray: gray, width: width, height: height,
+                                           x0: p.x0, y0: p.y0, x1: p.x1, y1: p.y1)
+            return (sharp, focus)
         }
-        let featureScores = (face?.featureRects ?? []).compactMap(regionScore)
-        if let best = featureScores.max() {
-            sharpness = best
-            scope = "features"
+        if let s = face?.eyeBandRect.flatMap(regionScore) {
+            (sharpness, focusRatio) = s
+            scope = "eyes"
+        } else if let s = face?.mouthRect.flatMap(regionScore) {
+            (sharpness, focusRatio) = s
+            scope = "mouth"
         } else if let face,
                   let s = regionScore([face.bbox.x0, face.bbox.y0, face.bbox.x1, face.bbox.y1]) {
-            sharpness = s
+            (sharpness, focusRatio) = s
             scope = "face"
         } else if face == nil,
                   let subject = FaceAnalyzer.subjectRect(in: loaded.image),
                   let s = regionScore([subject.x0, subject.y0, subject.x1, subject.y1]) {
-            sharpness = s
+            (sharpness, focusRatio) = s
             scope = "subject"
         } else {
             sharpness = Metrics.tenengrad(gray: gray, width: width, height: height)
+            focusRatio = Metrics.focusRatio(gray: gray, width: width, height: height)
             scope = "whole"
         }
 
@@ -425,6 +468,7 @@ enum AnalysisEngine {
             subjectFaces: subjectFaces,
             sharpness: sharpness,
             sharpnessScope: scope,
+            focusRatio: focusRatio,
             highlightClipPct: highlightPct,
             shadowClipPct: shadowPct,
             subjectHighlightClipPct: subjectClip?.highlightPct ?? highlightPct,
@@ -556,6 +600,7 @@ enum AnalysisEngine {
             "horizon_deg": p.horizonDeg as Any,
             "sharpness": p.sharpness,
             "sharpness_scope": p.sharpnessScope,
+            "focus_ratio": p.focusRatio,
             // 整张的两个照旧写（evaluate.py / 老工具读它们）；判决用 subject_*。
             "highlight_clip_pct": p.highlightClipPct,
             "shadow_clip_pct": p.shadowClipPct,

@@ -127,6 +127,139 @@ enum Metrics {
         return (sum / count).squareRoot()
     }
 
+    // MARK: - Focus ratio（判虚焦用的清晰比）
+
+    /// 判「虚焦」用的清晰比：同一块区域（锐度阶梯选中的那块，平常是眼眉带）上「二阶导 ÷ 一阶导」，横竖各算一个，
+    /// 原尺度和 2×2 缩一半各算一遍，取四个里最小的（优化分析 2026-11-18 VQ-02）。
+    ///
+    /// 为什么不用 tenengrad：它量的是梯度的绝对大小，跟亮度、景别、分辨率走的幅度和跟模糊一样大 —— 暗一档掉 26%，
+    /// σ3 模糊才掉 17%；长边 2048 的小图涨 25%；特写掉 13–32%。同一条线分不开「清楚但暗 / 特写 / 小图」和「糊」。
+    /// 比值把反差约掉了（亮度、反差乘多少分子分母一起乘），自然图像的频谱近似 1/f，换尺度也基本不动；模糊先砍
+    /// 高频，二阶导掉得比一阶导快，比值随模糊单调往下走。合成集（photot 8 张 × 40 多种变体，4000 万像素上做退化，
+    /// 走 app 同一套解码 / ROI）上：清楚的 81–115（×1000，含 -1/-2EV、长边 2048 / 1024 / 768、裁到 40%、噪声），
+    /// σ2 63–74、σ3 51–61、σ5 35–43、σ8 24–27，只糊眼眉 σ4 42–50。
+    /// - 横竖分开取最小：只有一个方向的运动模糊（手抖、人在动）把那个方向的比值压下去，各向同性的比值几乎不动
+    ///   （横向运动 40 各向同性 58–71、分开取最小 24–32）。
+    /// - 缩一半再算一遍取最小：噪点是高频，糊片加了噪点比值会被抬上去（σ8 + 逐像素噪声 σ20 原尺度 53–86），
+    ///   缩一半把噪点平均掉、模糊还在（同一组 47–54）。成团噪声更重（σ8 + 先糊 1px 的噪声 σ20）时仍然分不开
+    ///   （62–88），比 X-T50 机内降噪后的高感重得多，这一块是已知的弱点。
+    /// - 预模糊、Sobel、边界和 tenengrad 同一套口径；拉普拉斯也在预模糊之后的图上算（原图上算对单像素噪点太敏感）。
+    /// 某个方向几乎没有梯度（Sobel 的 RMS < 3，平的）那个方向不算；全都平的 = 0（和以前 tenengrad ≈ 0 一样判糊）。
+    /// 3 ≈ 每像素 0.4 个灰阶的坡：再缓就只剩 8 位量化和 JPEG 的台阶了，台阶的二阶导会把比值抬到「清楚」（平滑渐变
+    /// 1500 像素走 190 级，Sobel 1.7、比值 112）。合成集 480 张（含 σ48、-4EV 再 σ24）最平的方向 2.5，取不取它对焦都不变。
+    /// 返回比值本身（清楚的约 0.08–0.12）；界面上乘 1000 显示（BatchStore.focusScale）。
+    static func focusRatio(gray: [Float], width: Int, height: Int,
+                           x0: Int = 0, y0: Int = 0, x1: Int? = nil, y1: Int? = nil) -> Double {
+        let xEnd = min(width, x1 ?? width)
+        let yEnd = min(height, y1 ?? height)
+        // 区域外带 4 像素：缩一半以后还剩 2 像素，预模糊和 3×3 的抽头读的都是真像素。
+        let apron = 4
+        let rx0 = max(0, x0 - apron), ry0 = max(0, y0 - apron)
+        let rx1 = min(width, xEnd + apron), ry1 = min(height, yEnd + apron)
+        let rw = rx1 - rx0, rh = ry1 - ry0
+        guard rw >= 5, rh >= 5 else { return 0 }
+        var buf = [Float](repeating: 0, count: rw * rh)
+        gray.withUnsafeBufferPointer { src in
+            buf.withUnsafeMutableBufferPointer { dst in
+                for y in 0..<rh {
+                    let srcRow = (ry0 + y) * width + rx0
+                    let dstRow = y * rw
+                    for x in 0..<rw { dst[dstRow + x] = src[srcRow + x] }
+                }
+            }
+        }
+        var best: Double? = focusDirectionalRatio(buf, rw, rh, max(1, x0 - rx0), max(1, y0 - ry0),
+                                                  min(rw - 1, xEnd - rx0), min(rh - 1, yEnd - ry0))
+        // 缩一半：2×2 平均（不预先低通 —— 区域小，混叠落在被比的最高频上，和原尺度那一遍是一样的口径）
+        let hw = rw / 2, hh = rh / 2
+        if hw >= 5, hh >= 5 {
+            var half = [Float](repeating: 0, count: hw * hh)
+            buf.withUnsafeBufferPointer { src in
+                half.withUnsafeMutableBufferPointer { dst in
+                    for y in 0..<hh {
+                        for x in 0..<hw {
+                            let i = 2 * y * rw + 2 * x
+                            let a: Float = src[i] + src[i + 1]
+                            let b: Float = a + src[i + rw]
+                            dst[y * hw + x] = (b + src[i + rw + 1]) * 0.25
+                        }
+                    }
+                }
+            }
+            let hx0 = max(1, (x0 - rx0) / 2), hy0 = max(1, (y0 - ry0) / 2)
+            let hx1 = min(hw - 1, (xEnd - rx0) / 2), hy1 = min(hh - 1, (yEnd - ry0) / 2)
+            if hx1 > hx0, hy1 > hy0, let h = focusDirectionalRatio(half, hw, hh, hx0, hy0, hx1, hy1) {
+                best = min(best ?? h, h)
+            }
+        }
+        return best ?? 0
+    }
+
+    /// focusRatio 的一个尺度：`buf`（rw × rh，带边）先 3×3 高斯预模糊，再在 [sx0, sx1) × [sy0, sy1) 上求
+    /// RMS(∂²/∂x²) ÷ RMS(Sobel x) 和 RMS(∂²/∂y²) ÷ RMS(Sobel y)，取小的。两个方向都平 = nil。
+    private static func focusDirectionalRatio(_ buf: [Float], _ rw: Int, _ rh: Int,
+                                              _ sx0: Int, _ sy0: Int, _ sx1: Int, _ sy1: Int) -> Double? {
+        guard sx1 > sx0, sy1 > sy0 else { return nil }
+        var smooth = [Float](repeating: 0, count: rw * rh)
+        buf.withUnsafeBufferPointer { src in
+            smooth.withUnsafeMutableBufferPointer { dst in
+                for y in 0..<rh {
+                    let row = y * rw
+                    dst[row] = src[row]
+                    dst[row + rw - 1] = src[row + rw - 1]
+                    for x in 1..<(rw - 1) {
+                        dst[row + x] = (src[row + x - 1] + 2 * src[row + x] + src[row + x + 1]) * 0.25
+                    }
+                }
+            }
+        }
+        var final = [Float](repeating: 0, count: rw * rh)
+        smooth.withUnsafeBufferPointer { src in
+            final.withUnsafeMutableBufferPointer { dst in
+                for x in 0..<rw {
+                    dst[x] = src[x]
+                    dst[(rh - 1) * rw + x] = src[(rh - 1) * rw + x]
+                }
+                for y in 1..<(rh - 1) {
+                    let row = y * rw
+                    for x in 0..<rw {
+                        dst[row + x] = (src[row - rw + x] + 2 * src[row + x] + src[row + rw + x]) * 0.25
+                    }
+                }
+            }
+        }
+        var gxSum = 0.0, gySum = 0.0, lxxSum = 0.0, lyySum = 0.0
+        var count = 0.0
+        final.withUnsafeBufferPointer { g in
+            for y in sy0..<sy1 {
+                let row = y * rw
+                for x in sx0..<sx1 {
+                    let i = row + x
+                    // 抽头分开起名（和 tenengrad 一样）：串成一长条的表达式 CI 的 Swift 6.1.2 类型检查会超时。
+                    let tl = g[i - rw - 1], tc = g[i - rw], tr = g[i - rw + 1]
+                    let ml = g[i - 1], mc = g[i], mr = g[i + 1]
+                    let bl = g[i + rw - 1], bc = g[i + rw], br = g[i + rw + 1]
+                    let gx: Float = tr + 2 * mr + br - tl - 2 * ml - bl
+                    let gy: Float = bl + 2 * bc + br - tl - 2 * tc - tr
+                    let lxx: Float = ml + mr - 2 * mc
+                    let lyy: Float = tc + bc - 2 * mc
+                    gxSum += Double(gx * gx)
+                    gySum += Double(gy * gy)
+                    lxxSum += Double(lxx * lxx)
+                    lyySum += Double(lyy * lyy)
+                    count += 1
+                }
+            }
+        }
+        guard count > 0 else { return nil }
+        // 平的那个方向（Sobel 的 RMS 不到 3）：比值是噪点和量化台阶凑出来的，不算。
+        let flat = 9 * count  // RMS < 3 ⟺ 平方和 < 9 × 像素数
+        var ratios: [Double] = []
+        if gxSum >= flat { ratios.append((lxxSum / gxSum).squareRoot()) }
+        if gySum >= flat { ratios.append((lyySum / gySum).squareRoot()) }
+        return ratios.min()
+    }
+
     /// 对焦高亮用的每像素梯度幅值（Gaussian 3×3 预模糊 + Sobel，和 tenengrad 同一套
     /// 口径，只是不求均值）。边界一圈为 0。阈值由调用方按分位数定 —— 绝对阈值
     /// 换一张曝光就失效。
@@ -266,6 +399,163 @@ enum Metrics {
         }
         guard n > 0 else { return nil }
         return (Double(blown) / Double(n), Double(crushed) / Double(n))
+    }
+
+    // MARK: - 主体裁切只数人（优化分析 2026-11-18 VQ-01）
+
+    /// 人像分割蒙版（FaceAnalyzer.personMask：Vision 的 .balanced，3:4 的图出 384×512），左上原点，0–255，越大越像人。
+    struct PersonMask: Sendable {
+        let width: Int
+        let height: Int
+        let values: [UInt8]
+    }
+
+    /// 矩形里高光、暗部裁切都不到这么多，就不跑分割、照旧用矩形的数（AnalysisEngine）：滑杆最低 0.5%，这些照片判决和以前一样，
+    /// 也省下分割的开销（一张 ~7000 万条指令，进程里第一次还要 ~6 亿条载模型）。
+    static let personClipGate = 0.005
+    /// 一块死白（8 连通）外面一圈没裁切的像素，分割说「是人」的平均（0–1）低于它 = 这块死白是从背景连进来的，整块不算人。
+    static let backgroundBlobVote = 0.25
+    /// 脸芯里（人脸框四边各收 faceCoreInset）分割认作人的像素，有这么多死白 = 脸本身打爆了。
+    static let blownFaceShare = 0.02
+    static let faceCoreInset = 0.15
+    /// 矩形里分割认作人的像素不到矩形的这么多 = 分割基本没认出人（戏服、面具、雕像上的脸……），不信它，照旧用矩形。
+    /// 合成集（184 张）最少 47%，photot 21 张最少 63%。
+    static let minPersonShare = 0.2
+
+    /// 主体区域的曝光裁切，只数人（VQ-01）。`bodies` = 现在的主体矩形（头 + 上半身并集）的像素段，`faces` = 不带 padding 的脸框
+    /// （FaceAnalyzer.exposureRegions）。矩形里分割认作人的像素不到 minPersonShare = nil（调用方照旧用矩形的数）。
+    ///
+    /// 为什么不直接用「矩形 ∩ 分割」（分析员的修法 B）：分割对纯色背景很准（白底 / 黑底 / 高调 / 低调都修好），但对死白区域靠不住，
+    /// 两头都错 —— 逆光时打爆的栏杆和白汉服袖子连成一片，分割把整片并进了人（7231 背景 +3EV：矩形 28.0% → B 31.5%）；
+    /// 整体过曝时打爆的白袖子贴着亮墙，分割又把袖子划出去了（7225 +1.5EV：36.0% → 8.0%）。死白没有纹理，分割只能猜。
+    /// 所以没裁切的像素信分割，死白按「块」判：
+    ///   - 暗部裁切照旧按分割数（黑底、低调、剪影上分割都准：黑底 0 中位 17.2% → 1.7%，剪影照抓）。
+    ///   - 高光裁切：每个和「矩形 ∩ 人」相交的死白连通块（8 连通，整张图上找），看它外面一圈没裁切的像素分割投票 ——
+    ///     < backgroundBlobVote（四周大多是背景）就整块不算（连进来的背景）；否则只数块里「矩形 ∩ 人」的那部分。
+    ///     合成集（脸没爆的那些）里被扔掉的是 7231 背景 +2 / +3EV 连进来的那片（0.12 / 0.20）和 +1EV 时袖子和背景连成的一片
+    ///     （0.12，真值里 22% 是人）；人身上的死白 0.35 以上，只有一个例外 0.23（下面说的 7225 +1EV）。
+    ///   - 脸本身打爆了（脸芯里人的像素 ≥ blownFaceShare 是死白）：整张过曝，死白到处连成一片，上面的块判法会把人身上的也扔掉
+    ///     （不这样的话 +1.5EV 有 2 张、+2EV 有 1 张掉到 15% 以下）。这时取 max(矩形, 矩形 ∩ 人)，不比以前松。合成集里只有整体 / 人 +1.5EV 及以上
+    ///     会到这条（最少 1.2%），白底、逆光、高调的脸芯都是 0（脸框角上的背景不在分割里，不算）。
+    /// 分母 = 矩形 ∩ 人里没裁切的 + 算进来的死白 + 暗部裁切（扔掉的块也从分母里拿掉）。
+    /// 代价（只在 +1EV 这一档，分析员归「看用途」）：脸还没爆、白衣服已经爆了而且和亮墙连成一片的，会被当背景扔掉 ——
+    /// 合成集整体 +1EV 宽松 / 标准 / 严格 2/6/8 → 1/5/7（7225 31.8% → 0.3%、7231 30.9% → 9.9%）；+1.5EV 起脸开始爆，照旧抓。
+    /// 前后对照表在这次提交的说明里。
+    static func personClipping(rgba: [UInt8], width: Int, height: Int, bodies: [Span], faces: [[Double]],
+                               mask: PersonMask) -> (highlightPct: Double, shadowPct: Double)? {
+        let mw = mask.width, mh = mask.height
+        guard width > 0, height > 0, mw > 0, mh > 0, mask.values.count == mw * mh,
+              rgba.count >= width * height * 4, !bodies.isEmpty else { return nil }
+        // 蒙版按像素中心取最近邻对到分析图上：列号 maskX[x]，行起点 maskRow[y]。
+        var maskX = [Int](repeating: 0, count: width)
+        for x in 0..<width {
+            maskX[x] = min(mw - 1, Int((Double(x) + 0.5) * Double(mw) / Double(width)))
+        }
+        var maskRow = [Int](repeating: 0, count: height)
+        for y in 0..<height {
+            maskRow[y] = min(mh - 1, Int((Double(y) + 0.5) * Double(mh) / Double(height))) * mw
+        }
+        let personValue: UInt8 = 128  // 分割 ≥ 0.5 算人
+        let hiBit: UInt8 = 1, loBit: UInt8 = 2, rectBit: UInt8 = 4, seenBit: UInt8 = 8, ringBit: UInt8 = 16
+        var state = [UInt8](repeating: 0, count: width * height)
+        var rectN = 0, rectHi = 0, rectLo = 0, personN = 0, personHi = 0, personLo = 0
+        var coreN = 0, coreHi = 0
+        var counted = 0
+        var cores: [[Double]] = []
+        for f in faces where f.count == 4 {
+            let fw = f[2] - f[0], fh = f[3] - f[1]
+            cores.append([f[0] + faceCoreInset * fw, f[1] + faceCoreInset * fh,
+                          f[2] - faceCoreInset * fw, f[3] - faceCoreInset * fh])
+        }
+        let coreSpans = spans(of: cores, width: width, height: height)
+
+        rgba.withUnsafeBufferPointer { src in
+            mask.values.withUnsafeBufferPointer { seg in
+                state.withUnsafeMutableBufferPointer { st in
+                    for i in 0..<(width * height) {
+                        let r = src[i * 4], g = src[i * 4 + 1], b = src[i * 4 + 2]
+                        if min(r, min(g, b)) >= highlightClipValue {
+                            st[i] = hiBit
+                        } else if max(r, max(g, b)) <= shadowClipValue {
+                            st[i] = loBit
+                        }
+                    }
+                    for s in bodies {
+                        for x in s.x0..<s.x1 {
+                            let i = s.y * width + x
+                            let v = st[i]
+                            st[i] = v | rectBit
+                            rectN += 1
+                            if v & hiBit != 0 { rectHi += 1 }
+                            if v & loBit != 0 { rectLo += 1 }
+                            guard seg[maskRow[s.y] + maskX[x]] >= personValue else { continue }
+                            personN += 1
+                            if v & hiBit != 0 { personHi += 1 }
+                            if v & loBit != 0 { personLo += 1 }
+                        }
+                    }
+                    for s in coreSpans {
+                        for x in s.x0..<s.x1 where seg[maskRow[s.y] + maskX[x]] >= personValue {
+                            coreN += 1
+                            if st[s.y * width + x] & hiBit != 0 { coreHi += 1 }
+                        }
+                    }
+                    guard personN > 0, Double(personN) >= minPersonShare * Double(rectN),
+                          coreN == 0 || Double(coreHi) < blownFaceShare * Double(coreN) else { return }
+
+                    // 高光裁切的连通块：从「矩形 ∩ 人」里的死白像素出发，整张图上 8 连通地找完一整块，
+                    // 顺手数块里「矩形 ∩ 人」的像素、外面一圈（没裁切的 8 邻域，每个像素只数一次）的分割投票。
+                    var stack: [Int32] = []
+                    var ring: [Int32] = []
+                    for s in bodies {
+                        for x in s.x0..<s.x1 {
+                            let start = s.y * width + x
+                            guard st[start] & (hiBit | seenBit) == hiBit,
+                                  seg[maskRow[s.y] + maskX[x]] >= personValue else { continue }
+                            var inPerson = 0, voteSum = 0, voteN = 0
+                            st[start] |= seenBit
+                            stack.append(Int32(start))
+                            while let top = stack.popLast() {
+                                let p = Int(top)
+                                let py = p / width, px = p - py * width
+                                if st[p] & rectBit != 0, seg[maskRow[py] + maskX[px]] >= personValue { inPerson += 1 }
+                                for ny in max(0, py - 1)...min(height - 1, py + 1) {
+                                    for nx in max(0, px - 1)...min(width - 1, px + 1) {
+                                        let q = ny * width + nx
+                                        let v = st[q]
+                                        if v & hiBit != 0 {
+                                            if v & seenBit == 0 {
+                                                st[q] = v | seenBit
+                                                stack.append(Int32(q))
+                                            }
+                                        } else if v & ringBit == 0 {
+                                            st[q] = v | ringBit
+                                            ring.append(Int32(q))
+                                            voteSum += Int(seg[maskRow[ny] + maskX[nx]])
+                                            voteN += 1
+                                        }
+                                    }
+                                }
+                            }
+                            for q in ring { st[Int(q)] &= ~ringBit }
+                            ring.removeAll(keepingCapacity: true)
+                            if voteN > 0, Double(voteSum) >= backgroundBlobVote * 255 * Double(voteN) {
+                                counted += inPerson
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        guard personN > 0, rectN > 0, Double(personN) >= minPersonShare * Double(rectN) else { return nil }
+        if coreN > 0, Double(coreHi) >= blownFaceShare * Double(coreN) {
+            let rect = (Double(rectHi) / Double(rectN), Double(rectLo) / Double(rectN))
+            let person = (Double(personHi) / Double(personN), Double(personLo) / Double(personN))
+            return (max(rect.0, person.0), max(rect.1, person.1))
+        }
+        let total = personN - personHi + counted  // 人里没裁切的 + 暗部裁切 + 算进来的死白
+        guard total > 0 else { return nil }
+        return (Double(counted) / Double(total), Double(personLo) / Double(total))
     }
 
     /// 亮度（grayscale 的 0–255 口径）直方图，256 格。spans 为 nil = 整张。
