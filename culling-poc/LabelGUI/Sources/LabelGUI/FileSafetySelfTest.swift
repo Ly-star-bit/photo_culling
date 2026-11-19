@@ -70,7 +70,8 @@ enum FileSafetySelfTest {
     }
 
     /// 只写照片文件和场次 JSON（打开交给调用方：AppModel 那一路要用它自己的 store）。
-    static func writeShoot(_ dir: URL, _ photos: [Fake]) {
+    /// `withoutResults`：manifest 的 photos_without_results 另记这几个 id（解不开 / 取消时没轮到的，没进网格，EC-01）。
+    static func writeShoot(_ dir: URL, _ photos: [Fake], withoutResults: [String] = []) {
         let fm = FileManager.default
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         var manifest: [[String: Any]] = []
@@ -99,7 +100,12 @@ enum FileSafetySelfTest {
         }
         let session = appDataDir.appendingPathComponent("sessions/" + BatchStore.sessionKey(for: dir))
         try? fm.createDirectory(at: session, withIntermediateDirectories: true)
-        let m: [String: Any] = ["photo_dir": dir.path, "photos": manifest]
+        var m: [String: Any] = ["photo_dir": dir.path, "photos": manifest]
+        if !withoutResults.isEmpty {
+            m["photos_without_results"] = withoutResults.map { id -> [String: Any] in
+                ["id": id, "raw_path": dir.appendingPathComponent(id + ".JPG").path]
+            }
+        }
         let l: [String: Any] = ["analysis_version": 2, "engine": "native", "results": layer1]
         for (name, json) in [("manifest.json", m), ("layer1_results.json", l)] {
             if let data = try? JSONSerialization.data(withJSONObject: json) {

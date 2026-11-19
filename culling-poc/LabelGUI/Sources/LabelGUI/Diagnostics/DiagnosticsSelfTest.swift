@@ -533,6 +533,15 @@ enum DiagnosticsSelfTest {
               "日志里照片文件名、盘的位置（代号）还看得出来", String(log2.suffix(600)))
         let crash2 = second.first { $0.key.contains("/crash-reports/") }?.value ?? ""
         check(crash2.contains("~/Desktop/<文件夹 "), "崩溃报告里转义过的路径也打码", crash2)
+
+        // 5. 没进网格的照片（EC-01：解不开的、取消时没轮到的）：诊断信息和状态栏「N 张没进网格」同一个说法，不再写「未能解析」。
+        let partial = root.appendingPathComponent("取消了一半", isDirectory: true)
+        FileSafetySelfTest.writeShoot(partial, [FileSafetySelfTest.Fake(id: "DSCF0101", raw: "DSCF0101.JPG", jpeg: true)],
+                                      withoutResults: ["DSCF0102"])
+        let partialOpened = batch.switchSession(to: partial) && batch.unparsedCount == 1
+        let sessionLine = model.diagnosticLines().first { $0.hasPrefix("当前场次：") } ?? ""
+        check(partialOpened && sessionLine.contains(" · 1 张 · 没进网格 1 张") && !sessionLine.contains("未能解析"),
+              "诊断信息：没进网格的照片写「没进网格 N 张」（和状态栏同一个说法）", sessionLine)
         check.unlockAll()
         try? fm.removeItem(at: root)
     }

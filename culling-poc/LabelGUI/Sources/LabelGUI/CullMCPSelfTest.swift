@@ -44,6 +44,7 @@ enum CullMCPSelfTest {
         clientPickChecks(check, sessionDir: sessionDir)
         deliveredNoteChecks(check)
         provenanceChecks(check, sessionDir: sessionDir)
+        unparsedWarningChecks(check)
         sceneChecks(check)
         overrideFuzzChecks(check)
         for f in failures { print("FAIL " + f) }
@@ -58,7 +59,7 @@ enum CullMCPSelfTest {
     typealias Check = (Bool, @autoclosure () -> String) -> Void
 
     /// 改判的局部重算（BatchStore.applyOverrideChange）：乱改 600 步（单张、多张、定案、接受推荐、恢复自动、撤销，中途拨
-    /// 去重开关和锐度线），无头时每一步局部重算完都会整场重算一遍对账，对不上进程直接退出 70 —— 能跑到这里的检查就是都对上了。
+    /// 去重开关和对焦线），无头时每一步局部重算完都会整场重算一遍对账，对不上进程直接退出 70 —— 能跑到这里的检查就是都对上了。
     static func overrideFuzzChecks(_ check: Check) {
         let store = open()
         var ids = store.items.map(\.id)
@@ -227,6 +228,21 @@ enum CullMCPSelfTest {
         let reopened = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         reopened.switchSession(to: dir)
         check(text != nil && lastWritten(reopened) as? String == text, "重开这一场：last_written 读回来是同一个时间")
+    }
+
+    /// 没进网格的照片（EC-01）：概览的 unparsed_photos 和 app 状态栏「N 张没进网格」同一个说法、同一个数，两种原因
+    /// （解不开、上次分析取消时没轮到）都说 —— 以前只说「在清单里、但没有分析结果」。键名不变。
+    static func unparsedWarningChecks(_ check: Check) {
+        let dir = appDataDir.appendingPathComponent("cull-mcp-unparsed-shoot")
+        FileSafetySelfTest.writeShoot(dir, [FileSafetySelfTest.Fake(id: "u1", raw: "u1.ARW")], withoutResults: ["u2", "u3"])
+        let store = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
+        store.switchSession(to: dir)
+        let ov = MCPReadModel.overview(store, session: store.sessionDir.lastPathComponent)
+        let warn = (ov["warnings"] as? [[String: Any]] ?? []).first { $0["code"] as? String == "unparsed_photos" }
+        let message = warn?["message"] as? String ?? ""
+        check(store.unparsedCount == 2 && message.hasPrefix("有 2 张照片没进网格：") && message.contains("解不开")
+                && message.contains("取消") && (warn?["hint"] as? String ?? "").contains("重新分析"),
+              "unparsed_photos：「有 2 张照片没进网格」、两种原因都说、hint 指「重新分析」：\(warn ?? [:])")
     }
 
     // MARK: - 2. 导入客户选择（cull_import_client_picks 用的那几样）

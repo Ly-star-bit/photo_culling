@@ -170,8 +170,10 @@ enum MCPReadModel {
             warnings.append(warning("analysis_running", "app 正在分析，结果还在变。", hint: "等 app_status 的 live.analysis.running 变成 false 再读一次"))
         }
         if s.unparsedCount > 0 {
-            warnings.append(warning("unparsed_photos", "有 \(s.unparsedCount) 张照片在清单里、但没有分析结果（不在任何计数里）。",
-                                    hint: "请用户在 app 里点「重新分析」"))
+            // 和 app 状态栏「N 张没进网格」同一个说法、同一个数（EC-01）：解不开的、上次分析取消时没轮到的都算
+            let why = "解不开（文件损坏、格式不支持、分析时还在拷贝），或者上次分析取消时还没轮到"
+            warnings.append(warning("unparsed_photos", "有 \(s.unparsedCount) 张照片没进网格：\(why)；不在任何计数里。",
+                                    hint: "请用户在 app 里点「重新分析」（没变的照片直接复用，只补这几张）"))
         }
         if let unknown = s.xmpStateUnknown {
             // 按钮名照批量页「导出」菜单上的字（写过 / 记录读不进来的场次那一项叫「全部重写 XMP」）
