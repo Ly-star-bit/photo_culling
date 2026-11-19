@@ -14,6 +14,7 @@ import Foundation
 ///     场里只剩这一对时按一帧算、不提精选，接受全部推荐也不把 RAW 钉成废片。
 ///   - VQ-03 收尾：近似重复组里的锐度门，「场内按评分」、连拍挑选、MCP 近似重复名次、「这组全留」兜底、章节代表照片、
 ///     全局按评分、精华 Top N 和精选星 / #1 是同一张（最清楚的那张闭眼判废、开着去重时也一样）。
+///   - 连拍挑选的「眯」（FaceAlignment.squintFactor 0.75）：正好 0.75 不标、0.74 标，保护线放过的半眨眼标。
 ///   - MCP cull_get_photos 的 exif：老 manifest 里存的 shutter_sec / aperture / focal_35 = 0 不报（和 summary 一样）。
 /// 只写数据目录；改过的权限全部改回来，退出前删掉造出来的照片文件夹。
 @MainActor
@@ -45,6 +46,7 @@ enum FollowupSelfTest {
         originalsStop(root.appendingPathComponent("copy"))
         splitTwinDedupe(root.appendingPathComponent("twin"))
         rankGate(root.appendingPathComponent("rank"))
+        squintLine(root.appendingPathComponent("squint"))
         readModelExif(root.appendingPathComponent("exif"))
         unlockAll()
         try? FileManager.default.removeItem(at: root)
@@ -480,6 +482,8 @@ enum FollowupSelfTest {
         var faceQuality: Double?
         var eyeClosed: Bool?
         var scope: String?
+        /// 给了就写一张脸（面积 1%，够大、不免检），EAR = 它（转平后的读数）。连拍挑选「眯」的自检用。
+        var ear: Double?
     }
 
     /// 照 FileSafetySelfTest.writeShoot 手写 manifest / layer1（拍摄时间、小数秒、组号自己给），打开这一场。
@@ -504,6 +508,16 @@ enum FollowupSelfTest {
             if let q = photo.faceQuality { row["face_quality"] = q }
             if let closed = photo.eyeClosed { row["eye_closed"] = closed }
             if let scope = photo.scope { row["sharpness_scope"] = scope }
+            if let ear = photo.ear {
+                let box: [Double] = [0.4, 0.3, 0.6, 0.5]
+                let face: [String: Any] = ["bbox": box, "ear": ear, "area_pct": 0.01, "ear_full_res": false, "eye_closed": false]
+                row["face_found"] = true
+                row["face_count"] = 1
+                row["faces"] = [face]
+                row["face_bbox"] = box
+                row["face_area_pct"] = 0.01
+                row["blink_score"] = ear
+            }
             layer1.append(row)
         }
         let session = appDataDir.appendingPathComponent("sessions/" + BatchStore.sessionKey(for: dir))
@@ -684,6 +698,41 @@ enum FollowupSelfTest {
             check(s.outcome.picks == [keeper], "去重以后「这组全留」兜底挑 \(keeper)", "\(s.outcome.picks)")
         }
         store.rejectBurstDuplicates = false
+    }
+
+    // MARK: - 连拍挑选的「眯」：线 0.75（FaceAlignment.squintFactor）
+
+    /// 「眯」= 判决层没算闭眼、但 EAR 比这个人本组睁得最开的那张小到 0.75 以下（PickSession.swift FaceAlignment）。
+    /// E 组卡边界（0.5 × 0.75 = 0.375 在二进制里是精确的）：正好 0.75 不标、0.74 标；H 组是睁眼保护线（≥ 0.20）放过的
+    /// 半眨眼（最好 0.40 的组里 0.205，合成坏片夹具 N02 那种）：判决是可用，「眯」要标上。组里有人眯，最好那张才带 ★。
+    /// 这条线在 photot 那一场上的标定（垂眼的一张不标）在 --cull-mcp-selftest 的 squintChecks（要 fixture）。
+    static func squintLine(_ dir: URL) {
+        print("— 连拍挑选的「眯」：正好 0.75 不标、0.74 标；保护线放过的半眨眼标「眯」、不判闭眼")
+        func fake(_ id: String, _ time: String, group: Int, ear: Double) -> DupFake {
+            DupFake(id: id, file: id + ".JPG", time: time, group: group, sharpness: 90, faceQuality: 0.6, ear: ear)
+        }
+        let photos: [DupFake] = [
+            fake("E1", "2026-03-23T10:00:00", group: 1, ear: 0.5),
+            fake("E2", "2026-03-23T10:00:01", group: 1, ear: 0.375),
+            fake("E3", "2026-03-23T10:00:02", group: 1, ear: 0.37),
+            fake("H1", "2026-03-23T10:30:00", group: 2, ear: 0.40),
+            fake("H2", "2026-03-23T10:30:01", group: 2, ear: 0.205),
+        ]
+        let store = makeDupShoot(dir, photos)
+        check(store.items.count == photos.count, "造的一场有 \(photos.count) 张", "\(store.items.count)")
+        check(FaceAlignment.squintFactor == 0.75, "眯眼线是 0.75", "\(FaceAlignment.squintFactor)")
+        func marks(_ ids: [String]) -> String {
+            let take = store.item(withID: ids[0])?.take ?? -1
+            let align = FaceAlignment(frames: store.members(ofTake: take))
+            return ids.map { $0 + align.describe($0) }.joined(separator: " ")
+        }
+        let e = marks(["E1", "E2", "E3"])
+        check(e == "E1 眼[开★] E2 眼[开] E3 眼[眯]", "正好是最好那张的 0.75 不标「眯」，0.74 标；最好那张带 ★", e)
+        let h = marks(["H1", "H2"])
+        let h2 = store.item(withID: "H2")
+        check(h == "H1 眼[开★] H2 眼[眯]" && h2?.verdict != .reject && h2?.faces.first?.eyeClosed == false,
+              "保护线放过的半眨眼（0.205 / 0.40）：判决不算闭眼，连拍挑选标「眯」",
+              h + " · \(h2?.verdict.rawValue ?? "nil") \(h2?.rejectReasons ?? [])")
     }
 
     // MARK: - MCP 读模型的 exif：老 manifest 里的 0 不报

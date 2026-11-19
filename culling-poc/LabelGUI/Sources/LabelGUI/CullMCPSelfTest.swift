@@ -45,6 +45,7 @@ enum CullMCPSelfTest {
         deliveredNoteChecks(check)
         provenanceChecks(check, sessionDir: sessionDir)
         unparsedWarningChecks(check)
+        squintChecks(check)
         sceneChecks(check)
         overrideFuzzChecks(check)
         for f in failures { print("FAIL " + f) }
@@ -228,6 +229,30 @@ enum CullMCPSelfTest {
         let reopened = BatchStore(dataDir: appDataDir, pythonRoot: appConfig.resolvedPythonRoot(dataDir: appDataDir))
         reopened.switchSession(to: dir)
         check(text != nil && lastWritten(reopened) as? String == text, "重开这一场：last_written 读回来是同一个时间")
+    }
+
+    /// 连拍挑选「眯」的线（FaceAlignment.squintFactor 0.75）在 photot 那一场上的标定：EAR 转平（VQ-05）以后，DSCF7221–7230
+    /// 这一场里最好的是 7223（抬眼看镜头），7224–7230 都是垂眼（7225–7230 还歪着 21–23°），在它的 0.77–0.92 —— 一张都不该标「眯」。
+    /// 最低的是 7224（≈ 0.77）：落在 0.75 和 0.80 之间，线挪到 0.80 就会把这张垂眼的标成眯。夹具重拍、数变了，这条红 = 回去重看线。
+    /// 边界值（正好 0.75 不标、0.74 标）在 --followup-selftest 的 squintLine。
+    static func squintChecks(_ check: Check) {
+        let store = open()
+        guard let take = store.item(withID: "DSCF7221")?.take else {
+            check(false, "眯眼线：fixture 里没有 DSCF7221")
+            return
+        }
+        let frames = store.members(ofTake: take)
+        let align = FaceAlignment(frames: frames)
+        let squinted = frames.filter { align.summary($0.id).squint > 0 }.map(\.id)
+        let ears: [(id: String, ear: Double)] = frames.compactMap { f in BatchStore.effectiveEar(f).map { (f.id, $0) } }
+        let best = ears.max { $0.ear < $1.ear }
+        let lowest = ears.min { $0.ear < $1.ear }
+        let ratio = (lowest?.ear ?? 0) / max(best?.ear ?? 1, 1e-9)
+        check(frames.count == 10 && ears.count == 10 && squinted.isEmpty,
+              "眯眼线：photot 那一场 10 张（抬眼 3 张、垂眼 7 张，歪头 6 张）一张都不标「眯」：\(squinted)")
+        check(best?.id == "DSCF7223" && lowest?.id == "DSCF7224" && ratio > FaceAlignment.squintFactor && ratio < 0.80,
+              "眯眼线：最低的垂眼 7224 是最好那张 7223 的 \(String(format: "%.3f", ratio))，在线 \(FaceAlignment.squintFactor) 和 0.80 之间"
+                + "（\(best?.id ?? "nil") / \(lowest?.id ?? "nil")）")
     }
 
     /// 没进网格的照片（EC-01）：概览的 unparsed_photos 和 app 状态栏「N 张没进网格」同一个说法、同一个数，两种原因
