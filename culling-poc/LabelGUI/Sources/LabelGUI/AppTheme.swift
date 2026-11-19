@@ -62,13 +62,17 @@ enum AppPalette {
     /// 判决的三个颜色：精选绿、可用蓝、废片红（摄影师的习惯色，每个主题都是这三个色相）。深色主题就是系统的绿 / 蓝 / 红；
     /// 浅色主题压深一档 —— 系统绿的小字在浅底上只有 2.2:1。灰卡的栏和卡片是中灰，系统蓝 / 红 / 紫的小字在卡片上只有
     /// 2.9–3.3:1：灰卡单独给一套，蓝 / 红 / 紫提亮到卡片上 ≥ 4.6:1（色相不出系统色两代的范围），绿和黄本来就够亮、照抄
-    /// macOS 26 的系统色。提亮过的色亮度 ≈ 0.41，当实心底时上面压白字只有 2.3:1（系统色上是 3.2–3.7:1），压深色字
-    /// （`onAccent`）是 7.5:1。
+    /// macOS 26 的系统色。提亮过的色亮度 ≈ 0.41，当实心底时上面压白字只有 2.3:1（系统色上是 3.2–3.7:1）：实心的判决底上
+    /// 的字用 `onVerdict`，灰卡下是深色字（7.5:1）。
     /// 只给界面底色上的东西用：压深过的色压到照片上的黑底里就看不见了（相纸的精选绿在人脸小图的黑圆上 1.5:1），
     /// 那里用 `OnPhotoPalette`。
     static var pick: Color { c.pick }
     static var usable: Color { c.usable }
     static var reject: Color { c.reject }
+    /// 判决色实心底上的字（连拍挑选照片角上的「★ 留 / 留·可用 / ✕ 废」、审片判决条选中的那一个、悬停条的「只留这张」）。
+    /// 石墨、胡桃、午夜、纯黑、相纸是白（和以前写死的 `.white` 一样）；灰卡的判决色提亮过，白字只有 2.3:1，是深色字。
+    /// 自检核对：给了判决色的主题，它在精选 / 可用 / 废片的实心底上 ≥ 4.5:1；用系统色的四套必须是白。
+    static var onVerdict: Color { c.onVerdict }
 
     /// 焦点框（数字键在没有选中时判的那一张、审片胶片条的当前张）：深色主题是白、浅色主题是黑（以前写死白，相纸的浅底上
     /// 1.3:1，TA-03）。石墨下和以前的 `Color.white.opacity(0.95)` 一模一样。纯黑 / 灰卡的点缀色本身就是白，焦点和选中靠位置分：
@@ -132,6 +136,9 @@ struct ThemeColors: Equatable {
     /// macOS 15 / 26 上的值核对。给值（相纸、灰卡）就五个一起给，自检按给的值核对对比度。
     var pick = Color.green, usable = Color.blue, reject = Color.red
     var caution = Color.yellow, client = Color.purple
+    /// 判决色实心底上的字（`AppPalette.onVerdict`）：不给值就是 `Color.white`（石墨、胡桃、午夜、纯黑、相纸，和以前写死的
+    /// `.white` 同一个颜色）；`hex` 里一律登记（没给就是 0xFFFFFF），自检按它核对。
+    var onVerdict = Color.white
     /// 自检算对比度用的原始值（0xRRGGBB），和上面的 Color 一一对应。
     var hex: [String: UInt32]
 
@@ -141,7 +148,7 @@ struct ThemeColors: Equatable {
 
     init(dark: Bool, bar: UInt32, panel: UInt32, card: UInt32, hairline: UInt32, canvas: UInt32, surround: UInt32, track: UInt32,
          text: UInt32, secondary: UInt32, tertiary: UInt32, accent: UInt32, onAccent: UInt32, warning: UInt32,
-         verdicts: (pick: UInt32, usable: UInt32, reject: UInt32)? = nil,
+         verdicts: (pick: UInt32, usable: UInt32, reject: UInt32)? = nil, onVerdict: UInt32? = nil,
          marks: (caution: UInt32, client: UInt32)? = nil) {
         let color = Self.color
         self.dark = dark
@@ -156,6 +163,8 @@ struct ThemeColors: Equatable {
             pick = color(verdicts.pick); usable = color(verdicts.usable); reject = color(verdicts.reject)
             hex["pick"] = verdicts.pick; hex["usable"] = verdicts.usable; hex["reject"] = verdicts.reject
         }
+        if let onVerdict { self.onVerdict = color(onVerdict) }
+        hex["onVerdict"] = onVerdict ?? 0xFFFFFF
         if let marks {
             caution = color(marks.caution); client = color(marks.client)
             hex["caution"] = marks.caution; hex["client"] = marks.client
@@ -213,10 +222,12 @@ enum AppThemeID: String, CaseIterable, Identifiable {
             // #0091FF、红 #FF4245 往白里混到卡片上 4.6:1，色相不变（206° / 359°）；客户紫取 288°（和相纸同一个色相，在系统紫两代
             // 280°–293° 中间）、B 拉满提亮到同一亮度。绿 #30D158、黄 #FFD600 就是 macOS 26 的系统色，卡片上已经 5.2 / 7.5:1。
             // 待处理橙跟着提亮（v1.32.0 #FF8A4C 的亮度和提亮后的废片红一样，色弱时分不开）：20° 挪到 22°，比废片红亮 1.25 倍。
+            // 判决色实心底上的字是深色（和 onAccent 同一个 #1C1C1C）：提亮过的蓝 / 红上白字只有 2.3:1，深色字 7.5:1，
+            // 胶囊 0.85 不透明压在黑照片上也还有 5.4:1。
             return ThemeColors(dark: true, bar: 0x2A2A2A, panel: 0x343434, card: 0x3F3F3F, hairline: 0x4A4A4A, canvas: 0x3C3C3C,
                                surround: 0x484848, track: 0x5A5A5A, text: 0xF4F4F4, secondary: 0xC4C4C4, tertiary: 0x969696,
                                accent: 0xF4F4F4, onAccent: 0x1C1C1C, warning: 0xFFAD7D,
-                               verdicts: (pick: 0x30D158, usable: 0x4EB3FF, reject: 0xFF898B),
+                               verdicts: (pick: 0x30D158, usable: 0x4EB3FF, reject: 0xFF898B), onVerdict: 0x1C1C1C,
                                marks: (caution: 0xFFD600, client: 0xE785FF))
         case .walnut:
             // 胡桃：带棕的深灰 + 黄铜，老暗房的木头和铜件。点缀色没用红铜：红铜（色相 17°）和「待处理」的橙（20°）撞色。
