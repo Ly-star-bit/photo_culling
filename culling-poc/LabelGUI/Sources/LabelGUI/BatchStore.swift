@@ -724,7 +724,7 @@ final class BatchStore: ObservableObject {
 
     private func onThresholdEdited() {
         guard !batchingThresholds else { return }
-        applyThresholds()
+        applyThresholdChange()
         scheduleThresholdSave()
     }
 
@@ -808,6 +808,16 @@ final class BatchStore: ObservableObject {
         var takeChapter: [Int: Int] = [:]
         /// 章节 → 成员下标（items 顺序）。
         var chapterMembers: [Int: [Int]] = [:]
+        /// 近似重复组的闭眼 / 人脸质量基线（applyThresholds 第一趟算的）：拖阈值滑杆的快路径重判翻过线的那几张时用。
+        var baselines = GroupBaselines()
+    }
+
+    /// 每个近似重复组睁得最开的 EAR、最好的人脸质量，和各有几张有这个数。只看照片本身，和三条线、判决都无关。
+    struct GroupBaselines: Equatable {
+        var bestEar: [Int: Double] = [:]
+        var earCount: [Int: Int] = [:]
+        var bestQ: [Int: Double] = [:]
+        var qCount: [Int: Int] = [:]
     }
 
     /// 一场的小计。
@@ -832,26 +842,27 @@ final class BatchStore: ObservableObject {
         let overrides = self.overrides, clientPicks = self.clientPicks
         var alive: [Int] = []
         for idx in indices {
-            let item = items[idx]
-            switch item.verdict {
+            // 按下标就地读（let item = items[idx] 会整张拷一份；拖阈值滑杆的快路径一下要算几百场，PI-04）
+            let verdict = items[idx].verdict
+            switch verdict {
             case .reject: s.reject += 1
             case .usable: s.usable += 1
             case .pick: s.pick += 1
             }
-            for reason in item.rejectReasons { s.reasons[reason, default: 0] += 1 }
-            if item.verdict == .reject, overrides[item.id] == nil { s.autoReject += 1 }
-            if !clientPicks.isEmpty, clientPicks.contains(item.id) {  // 多半没有客户选中：不必每张算一遍 id 的哈希
+            for reason in items[idx].rejectReasons { s.reasons[reason, default: 0] += 1 }
+            if verdict == .reject, overrides[items[idx].id] == nil { s.autoReject += 1 }
+            if !clientPicks.isEmpty, clientPicks.contains(items[idx].id) {  // 多半没有客户选中：不必每张算一遍 id 的哈希
                 s.clientPick += 1
-                if item.verdict == .reject { s.clientPickReject += 1 }
+                if verdict == .reject { s.clientPickReject += 1 }
             }
-            if item.verdict != .reject { alive.append(idx) }
+            if verdict != .reject { alive.append(idx) }
         }
         s.pending = alive.count >= 2 && alive.contains { overrides[items[$0].id] == nil }
         if alive.count > 1 {
             // 和提名同一道锐度门（bestIndex）：近似重复组里糊一截的那张不标 #1。
             let soft = Self.softerInBurst(alive, in: items)
             let ranked = alive.sorted {
-                Self.rankKey(items[$0], soft: soft.contains($0)) > Self.rankKey(items[$1], soft: soft.contains($1))
+                Self.rankKey(items, $0, soft: soft.contains($0)) > Self.rankKey(items, $1, soft: soft.contains($1))
             }
             s.ranks = ranked.prefix(3).map { items[$0].id }
         }
@@ -1294,8 +1305,10 @@ final class BatchStore: ObservableObject {
         bodies = Self.bodySummary(items, offsets: bodyOffsets)
     }
 
-    private func rebuildDerived(groupQCount: [Int: Int]) {
+    private func rebuildDerived(baselines: GroupBaselines) {
         var d = Derived()
+        d.baselines = baselines
+        let groupQCount = baselines.qCount
         // 整场循环、排序的比较（每比一次读两下）里读的 items 先取一份本地的（同名遮住属性，下面一个字不用改；
         // 优化分析 2026-11-18 PI-04）：以前排序 n log n 次比较、每次两遍 @Published 的包装再整张拷出 BatchItem。
         let items = self.items
@@ -3124,11 +3137,16 @@ final class BatchStore: ObservableObject {
     /// 同上，三条线由调用的人给：整场重算时每张都问，每问一次读四遍 @Published（拖一格阈值滑杆 7980 张时占重算的
     /// 两成多，优化分析 2026-11-18 PI-04）。
     static func isBorderline(_ item: BatchItem, focus: Double, exposure clip: Double, faceQuality: Double) -> Bool {
-        if focus > 0, abs(Self.focusValue(item) - focus) <= focus * 0.15 { return true }
-        if abs(item.worstClipPct - clip) <= clip * 0.15 { return true }
-        if faceQuality > 0, let quality = item.faceQuality {
+        isBorderline(LineInput(item), lines: Lines(focus: focus, exposure: clip, faceQuality: faceQuality))
+    }
+
+    /// 同上，照片只给线要看的那几个数（拖阈值滑杆的快路径整场数临界时按下标就地读，不整张拷）。
+    static func isBorderline(_ input: LineInput, lines: Lines) -> Bool {
+        if lines.focus > 0, abs(input.focus - lines.focus) <= lines.focus * 0.15 { return true }
+        if abs(input.clip - lines.exposure) <= lines.exposure * 0.15 { return true }
+        if lines.faceQuality > 0, let quality = input.faceQuality {
             let threshold = Self.compensatedQualityThreshold(
-                slider: faceQuality, faceAreaPct: item.faceAreaPct)
+                slider: lines.faceQuality, faceAreaPct: input.faceAreaPct)
             if abs(quality - threshold) <= threshold * 0.15 { return true }
         }
         return false
@@ -4514,7 +4532,7 @@ final class BatchStore: ObservableObject {
     /// 兜底。近似重复组里明显更糊的（softerInBurst）排在表情分之后、人脸质量之前。返回 nil = 没有候选。
     private static func bestIndex(_ indices: [Int], in items: [BatchItem]) -> Int? {
         let soft = softerInBurst(indices, in: items)
-        return indices.max { rankKey(items[$0], soft: soft.contains($0)) < rankKey(items[$1], soft: soft.contains($1)) }
+        return indices.max { rankKey(items, $0, soft: soft.contains($0)) < rankKey(items, $1, soft: soft.contains($1)) }
     }
 
     /// 不带锐度门的那一半。挑「最好那张」、排名次的地方都不直接用它，用 rankKey（多一道近似重复组里的锐度门，要看同组的
@@ -4547,6 +4565,11 @@ final class BatchStore: ObservableObject {
     /// （平常都没有）就是「先剔掉糊一截的，剩下的照旧按人脸质量 → 锐度」。
     static func rankKey(_ item: BatchItem, soft: Bool) -> (Int, Int, Double, Double) {
         (item.expressionScore ?? -1, soft ? 0 : 1, item.faceQuality ?? -1, item.sharpness)
+    }
+
+    /// = rankKey(items[idx], soft:)，按下标就地读：比较里传 items[idx] 整张会拷一份 BatchItem，n log n 次（提名、场内名次，PI-04）。
+    @inline(__always) static func rankKey(_ items: [BatchItem], _ idx: Int, soft: Bool) -> (Int, Int, Double, Double) {
+        (items[idx].expressionScore ?? -1, soft ? 0 : 1, items[idx].faceQuality ?? -1, items[idx].sharpness)
     }
 
     /// 近似重复组里比最清楚的那张低这么多（比例）就算「糊一截」，挑精选、「只留最佳」时排到后面（优化分析 2026-11-18 VQ-03）。
@@ -4594,96 +4617,22 @@ final class BatchStore: ObservableObject {
         let faceQualityThreshold = self.faceQualityThreshold
 
         // Pass 1: per-burst-group baselines (best EAR, best face quality).
-        var groupBestEar: [Int: Double] = [:]
-        var groupEarCount: [Int: Int] = [:]
-        var groupBestQ: [Int: Double] = [:]
-        var groupQCount: [Int: Int] = [:]
+        var baselines = GroupBaselines()
         for item in updated {
             if let ear = Self.effectiveEar(item) {
-                groupBestEar[item.burstGroup] = max(groupBestEar[item.burstGroup] ?? 0, ear)
-                groupEarCount[item.burstGroup, default: 0] += 1
+                baselines.bestEar[item.burstGroup] = max(baselines.bestEar[item.burstGroup] ?? 0, ear)
+                baselines.earCount[item.burstGroup, default: 0] += 1
             }
             if let q = item.faceQuality {
-                groupBestQ[item.burstGroup] = max(groupBestQ[item.burstGroup] ?? 0, q)
-                groupQCount[item.burstGroup, default: 0] += 1
+                baselines.bestQ[item.burstGroup] = max(baselines.bestQ[item.burstGroup] ?? 0, q)
+                baselines.qCount[item.burstGroup, default: 0] += 1
             }
         }
 
+        let lines = Lines(focus: focusThreshold, exposure: exposureThreshold, faceQuality: faceQualityThreshold)
         for i in updated.indices {
-            let group = updated[i].burstGroup
-            let earCount = groupEarCount[group] ?? 0
-
-            // Dynamic eye state: photo-level for the verdict, then the same rule
-            // per face so the strip badges tell the same story.
-            let eyeClosed: Bool?
-            if let ear = Self.effectiveEar(updated[i]) {
-                eyeClosed = Self.eyeVerdict(ear: ear, groupBest: groupBestEar[group],
-                                            groupEarCount: earCount)
-            } else if updated[i].faces.contains(where: { $0.ear != nil }) {
-                eyeClosed = nil  // faces exist but all EAR-immune (too small)
-            } else {
-                eyeClosed = updated[i].eyeClosed  // legacy session without raw EARs
-            }
-            updated[i].dynamicEyeClosed = eyeClosed
-            for f in updated[i].faces.indices {
-                let face = updated[i].faces[f]
-                guard let ear = face.ear else { continue }
-                let closed: Bool?
-                if Self.earImmune(face) {
-                    closed = nil
-                } else {
-                    closed = Self.eyeVerdict(ear: ear, groupBest: groupBestEar[group],
-                                             groupEarCount: earCount)
-                }
-                if closed != face.eyeClosed {
-                    updated[i].faces[f] = FaceInfo(bbox: face.bbox, eyeClosed: closed, ear: face.ear,
-                                                   areaPct: face.areaPct, earFullRes: face.earFullRes)
-                }
-            }
-
-            var reasons: [String] = []
-            if updated[i].fileCorrupt { reasons.append("文件损坏") }
-            if eyeClosed == true { reasons.append("闭眼") }
-            if Self.focusValue(updated[i]) < focusThreshold { reasons.append("虚焦") }
-            if updated[i].worstClipPct >= exposureThreshold { reasons.append("曝光裁切") }
-            if let tone = Self.toneReason(updated[i]) { reasons.append(tone) }
-            if faceQualityThreshold > 0, let q = updated[i].faceQuality {
-                if (groupQCount[group] ?? 0) >= 2, let best = groupBestQ[group] {
-                    // Burst siblings exist: only a clear intra-group loser is suspect.
-                    if q < best - Self.qualityGroupGap { reasons.append("人脸质量低") }
-                } else if q < Self.compensatedQualityThreshold(slider: faceQualityThreshold,
-                                                               faceAreaPct: updated[i].faceAreaPct) {
-                    reasons.append("人脸质量低")
-                }
-            }
-            if updated[i].vlmReject { reasons.append("VLM建议淘汰") }
-
-            // Appeal court: the VLM can only clear the SPECIFIC charge it
-            // re-examined; a photo walks when no charges remain. Verdicts stay
-            // valid across slider moves — "the subject IS sharp" doesn't depend
-            // on where the threshold sits.
-            var rescued: [String] = []
-            func clear(_ charge: String, when verdict: Bool?) {
-                guard verdict == true, reasons.contains(charge) else { return }
-                reasons.removeAll { $0 == charge }
-                rescued.append(charge)
-            }
-            if !Self.eyesBeyondAppeal(updated[i]) {
-                clear("闭眼", when: updated[i].appealClosedEyes.map { !$0 })
-            }
-            clear("虚焦", when: updated[i].appealSubjectSharp)
-            clear("曝光裁切", when: updated[i].appealIntentionalExposure)
-            // 欠曝 / 过曝问的是同一个问题（是不是刻意的低调 / 高调、剪影），答案一并清。
-            clear("欠曝", when: updated[i].appealIntentionalExposure)
-            clear("过曝", when: updated[i].appealIntentionalExposure)
-            updated[i].vlmRescued = rescued
-            updated[i].rejectReasons = reasons
-
-            // Manual override wins over every threshold: a manual non-reject keeps
-            // the photo alive no matter what the sliders say, and vice versa.
-            let auto: Verdict = reasons.isEmpty ? .usable : .reject
-            let effective = overrides[updated[i].id] ?? auto
-            updated[i].verdict = effective
+            let override = overrides[updated[i].id]
+            Self.judge(&updated[i], baselines: baselines, lines: lines, override: override)
         }
 
         // 两趟，作用在两个不同的层上 —— 别合并回一趟：
@@ -4714,7 +4663,128 @@ final class BatchStore: ObservableObject {
         for (_, indices) in takeGroups { nominate(indices, in: &updated) }
 
         items = updated
-        rebuildDerived(groupQCount: groupQCount)
+        rebuildDerived(baselines: baselines)
+    }
+
+    /// 三根滑杆的线（对焦下限、曝光裁切上限、人脸质量下限）。
+    struct Lines: Equatable {
+        var focus: Double
+        var exposure: Double
+        var faceQuality: Double
+    }
+
+    /// 一张照片里三条线要看的那几个数（lineCharges、isBorderline 只看这些）。
+    struct LineInput {
+        var focus: Double
+        var clip: Double
+        var faceQuality: Double?
+        var faceAreaPct: Double?
+        var group: Int
+
+        init(_ item: BatchItem) {
+            focus = BatchStore.focusValue(item)
+            clip = item.worstClipPct
+            faceQuality = item.faceQuality
+            faceAreaPct = item.faceAreaPct
+            group = item.burstGroup
+        }
+
+        /// 整场扫的时候按下标就地读：把 items[idx] 整张传进函数会拷一份 BatchItem（二十来个引用计数一加一减），
+        /// 7980 张一格问三遍就是 28 百万条指令。读的和上面那个一样（focusValue 那一句照抄）。
+        @inline(__always) init(_ items: [BatchItem], _ idx: Int) {
+            focus = items[idx].focus ?? BatchStore.legacyFocus(fromSharpness: items[idx].sharpness)
+            clip = items[idx].worstClipPct
+            faceQuality = items[idx].faceQuality
+            faceAreaPct = items[idx].faceAreaPct
+            group = items[idx].burstGroup
+        }
+    }
+
+    /// 一张照片的理由里看线的只有这三样：虚焦、曝光裁切、人脸质量低（judge 加理由用它；拖滑杆的快路径拿新旧两组线各问一遍，
+    /// 三样都一样的照片这一下判决、理由什么都不会变 —— 两边是同一个判断，不会一边按区间算、一边按比较算对不上）。
+    private static func lineCharges(_ input: LineInput, baselines: GroupBaselines,
+                                    lines: Lines) -> (blur: Bool, clip: Bool, quality: Bool) {
+        var quality = false
+        if lines.faceQuality > 0, let q = input.faceQuality {
+            if (baselines.qCount[input.group] ?? 0) >= 2, let best = baselines.bestQ[input.group] {
+                // Burst siblings exist: only a clear intra-group loser is suspect.
+                quality = q < best - Self.qualityGroupGap
+            } else {
+                quality = q < Self.compensatedQualityThreshold(slider: lines.faceQuality, faceAreaPct: input.faceAreaPct)
+            }
+        }
+        return (input.focus < lines.focus, input.clip >= lines.exposure, quality)
+    }
+
+    /// 一张照片自己的那一段判决：闭眼（组内相对）、理由、复审平反、判决（人工改判 > 有理由就废）。去重、提名要看同组 / 同场的
+    /// 别的照片，不在这里。整场重算（applyThresholds）每张都过它，拖滑杆的快路径（applyThresholdChange）只让翻过线的过它。
+    private static func judge(_ item: inout BatchItem, baselines: GroupBaselines, lines: Lines, override: Verdict?) {
+        let group = item.burstGroup
+        let earCount = baselines.earCount[group] ?? 0
+
+        // Dynamic eye state: photo-level for the verdict, then the same rule
+        // per face so the strip badges tell the same story.
+        let eyeClosed: Bool?
+        if let ear = Self.effectiveEar(item) {
+            eyeClosed = Self.eyeVerdict(ear: ear, groupBest: baselines.bestEar[group],
+                                        groupEarCount: earCount)
+        } else if item.faces.contains(where: { $0.ear != nil }) {
+            eyeClosed = nil  // faces exist but all EAR-immune (too small)
+        } else {
+            eyeClosed = item.eyeClosed  // legacy session without raw EARs
+        }
+        item.dynamicEyeClosed = eyeClosed
+        for f in item.faces.indices {
+            let face = item.faces[f]
+            guard let ear = face.ear else { continue }
+            let closed: Bool?
+            if Self.earImmune(face) {
+                closed = nil
+            } else {
+                closed = Self.eyeVerdict(ear: ear, groupBest: baselines.bestEar[group],
+                                         groupEarCount: earCount)
+            }
+            if closed != face.eyeClosed {
+                item.faces[f] = FaceInfo(bbox: face.bbox, eyeClosed: closed, ear: face.ear,
+                                         areaPct: face.areaPct, earFullRes: face.earFullRes)
+            }
+        }
+
+        let charges = lineCharges(LineInput(item), baselines: baselines, lines: lines)
+        var reasons: [String] = []
+        if item.fileCorrupt { reasons.append("文件损坏") }
+        if eyeClosed == true { reasons.append("闭眼") }
+        if charges.blur { reasons.append("虚焦") }
+        if charges.clip { reasons.append("曝光裁切") }
+        if let tone = Self.toneReason(item) { reasons.append(tone) }
+        if charges.quality { reasons.append("人脸质量低") }
+        if item.vlmReject { reasons.append("VLM建议淘汰") }
+
+        // Appeal court: the VLM can only clear the SPECIFIC charge it
+        // re-examined; a photo walks when no charges remain. Verdicts stay
+        // valid across slider moves — "the subject IS sharp" doesn't depend
+        // on where the threshold sits.
+        var rescued: [String] = []
+        func clear(_ charge: String, when verdict: Bool?) {
+            guard verdict == true, reasons.contains(charge) else { return }
+            reasons.removeAll { $0 == charge }
+            rescued.append(charge)
+        }
+        if !Self.eyesBeyondAppeal(item) {
+            clear("闭眼", when: item.appealClosedEyes.map { !$0 })
+        }
+        clear("虚焦", when: item.appealSubjectSharp)
+        clear("曝光裁切", when: item.appealIntentionalExposure)
+        // 欠曝 / 过曝问的是同一个问题（是不是刻意的低调 / 高调、剪影），答案一并清。
+        clear("欠曝", when: item.appealIntentionalExposure)
+        clear("过曝", when: item.appealIntentionalExposure)
+        item.vlmRescued = rescued
+        item.rejectReasons = reasons
+
+        // Manual override wins over every threshold: a manual non-reject keeps
+        // the photo alive no matter what the sliders say, and vice versa.
+        let auto: Verdict = reasons.isEmpty ? .usable : .reject
+        item.verdict = override ?? auto
     }
 
     /// 一个近似重复组的去重。`indices` = 组里还没被淘汰的（items 顺序）。
@@ -4756,7 +4826,8 @@ final class BatchStore: ObservableObject {
 
     // MARK: - 改判的局部重算
 
-    /// 无头运行（自检、冒烟、门禁）时每次局部重算完再整场重算一遍对账，对不上就退出（--perf 量手感时关掉）。
+    /// 无头运行（自检、冒烟、门禁）时每次局部重算（改判、拖阈值滑杆两条都算）完再整场重算一遍对账，对不上就退出
+    /// （--perf 量手感时关掉）。
     static var verifyOverrideFastPath = AppRuntime.headless
     /// 局部重算走了几回（自检看它确实走到了）。
     private(set) var overrideFastPathRuns = 0
@@ -4772,44 +4843,14 @@ final class BatchStore: ObservableObject {
         }
         var d = derived
         var updated = items
-        var groups = Set<Int>(), takes = Set<Int>()
+        var seeds: [Int] = []
         for id in ids {
             guard let idx = d.indexByID[id], updated.indices.contains(idx), updated[idx].id == id else { continue }
-            groups.insert(updated[idx].burstGroup)
-            takes.insert(updated[idx].take)
+            seeds.append(idx)
         }
-        func auto(_ item: BatchItem) -> Verdict {
-            overrides[item.id] ?? (item.rejectReasons.isEmpty ? .usable : .reject)
-        }
-        // 这几个近似重复组：去掉上次去重贴的理由，回到去重之前，再去重一次。
-        var inGroups = Set<Int>()
-        for group in groups {
-            let members = d.burstIndices[group] ?? []
-            for idx in members {
-                inGroups.insert(idx)
-                takes.insert(updated[idx].take)
-                if updated[idx].rejectReasons.contains("连拍重复") {
-                    updated[idx].rejectReasons.removeAll { $0 == "连拍重复" }
-                }
-                updated[idx].verdict = auto(updated[idx])
-            }
-            if rejectBurstDuplicates {
-                dedupe(members.filter { updated[$0].verdict != .reject }, in: &updated)
-            }
-        }
-        // 牵到的场：组外的照片去重结果没变（理由还在），只把上次提名的精选放回去，再提名一次。
-        for take in takes {
-            guard let slot = d.takeSlot[take] else { continue }
-            let members = d.takeRows[slot].indices.sorted()
-            for idx in members where !inGroups.contains(idx) { updated[idx].verdict = auto(updated[idx]) }
-            nominate(members.filter { updated[$0].verdict != .reject }, in: &updated)
-            if let old = d.takeStats[take] { Self.fold(old, into: &d, sign: -1) }
-            let stat = takeStat(members, in: updated)
-            d.takeStats[take] = stat
-            Self.fold(stat, into: &d, sign: 1)
-        }
+        let chapters = recomputeAround(seeds, in: &updated, &d)
         items = updated
-        finishDerived(&d, chapters: Set(takes.compactMap { d.takeChapter[$0] }))
+        finishDerived(&d, chapters: chapters)
         derived = d
         derivedStamp = currentStamp
         overrideFastPathRuns += 1
@@ -4824,24 +4865,169 @@ final class BatchStore: ObservableObject {
         }
     }
 
-    private static func fastPathDiff(_ a: [BatchItem], _ da: Derived, _ b: [BatchItem], _ db: Derived) -> String? {
+    /// 改判、拖滑杆两条局部重算共用的一段：`seeds`（items 下标）这几张的判决前提变了（人工改判了，或者理由刚按新的线重判过）。
+    /// 它们所在的近似重复组重新去重，牵到的场重新提名、换掉这几场的小计（derived 里按场的那份）。返回牵到的章节（finishDerived
+    /// 只重算这几段）。调用前 seeds 的 rejectReasons 要是新的 —— 去重贴的「连拍重复」除外，这里摘掉重贴。
+    private func recomputeAround(_ seeds: [Int], in updated: inout [BatchItem], _ d: inout Derived) -> Set<Int> {
+        var groups = Set<Int>(), takes = Set<Int>()
+        for idx in seeds {
+            groups.insert(updated[idx].burstGroup)
+            takes.insert(updated[idx].take)
+        }
+        let overrides = self.overrides  // 每张都读（同名遮住属性，下面一个字不用改）
+        // 按下标读（传 updated[idx] 整张进来会拷一份 BatchItem）
+        func auto(_ idx: Int) -> Verdict {
+            overrides[updated[idx].id] ?? (updated[idx].rejectReasons.isEmpty ? .usable : .reject)
+        }
+        // 这几个近似重复组：去掉上次去重贴的理由，回到去重之前，再去重一次。
+        var inGroups = Set<Int>()
+        for group in groups {
+            let members = d.burstIndices[group] ?? []
+            for idx in members {
+                inGroups.insert(idx)
+                takes.insert(updated[idx].take)
+                if updated[idx].rejectReasons.contains("连拍重复") {
+                    updated[idx].rejectReasons.removeAll { $0 == "连拍重复" }
+                }
+                updated[idx].verdict = auto(idx)
+            }
+            if rejectBurstDuplicates {
+                dedupe(members.filter { updated[$0].verdict != .reject }, in: &updated)
+            }
+        }
+        // 牵到的场：组外的照片去重结果没变（理由还在），只把上次提名的精选放回去，再提名一次。
+        for take in takes {
+            guard let slot = d.takeSlot[take] else { continue }
+            let members = d.takeRows[slot].indices.sorted()
+            for idx in members where !inGroups.contains(idx) { updated[idx].verdict = auto(idx) }
+            nominate(members.filter { updated[$0].verdict != .reject }, in: &updated)
+            if let old = d.takeStats[take] { Self.fold(old, into: &d, sign: -1) }
+            let stat = takeStat(members, in: updated)
+            d.takeStats[take] = stat
+            Self.fold(stat, into: &d, sign: 1)
+        }
+        return Set(takes.compactMap { d.takeChapter[$0] })
+    }
+
+    // MARK: - 拖阈值滑杆的局部重算（优化分析 2026-11-18 PI-04）
+
+    /// 拖阈值滑杆走了几回快路径、最近一回重判了几张（自检看它确实走到了，BatchPerf 打出来）。
+    private(set) var thresholdFastPathRuns = 0
+    private(set) var thresholdFastPathRejudged = 0
+    /// 翻过线的照片超过这个比例就整场重算（牵到的场多了，局部重算不比整场省）。只是省不省的取舍，不关对错：阈值滑杆的自检
+    /// 有一半拖法把它拉到 1，大跳、人脸质量过零也走快路径，照样要和整场重算对得上。
+    static var thresholdFastPathMaxShare = 0.25
+
+    /// 拖阈值滑杆（三根线、预设、「应用」建议，都经 onThresholdEdited）时的重算。以前每一下整场重算：7980 张一格 335 百万条
+    /// 指令在这（逐张重判 76、去重提名 70、建索引 / 按场分行 / 每场小计 149、章节 28），网格、右栏重画另算；现在一张没翻的一格
+    /// 约 8 百万条，翻一成照片的约 105–110 百万条（--perf thresh 的「其中设属性那一句」）。
+    /// 一张照片的理由里只有虚焦、曝光裁切、人脸质量低看线（lineCharges），所以拿 derived 是照哪组线算的（derivedStamp）和
+    /// 现在的线各问一遍：三样都一样的照片这一下什么都不变；变了的重判（judge），再照改判那样只重算它们牵到的组、场、章节
+    /// （recomputeAround）。索引、按场分好的行、直方图、组基线都和线无关，原样留着；临界张数看线，整场数一遍（便宜）。
+    /// derived 不是照现在这份 items 算的（derivedStamp 除了三条线还有别的对不上）、或者翻过线的超过四分之一（预设一下跳好几档、
+    /// 人脸质量从「关闭」拨开；thresholdFastPathMaxShare）就整场重算。
+    private func applyThresholdChange() {
+        let lines = Lines(focus: focusThreshold, exposure: exposureThreshold, faceQuality: faceQualityThreshold)
+        let old = Lines(focus: derivedStamp.focus, exposure: derivedStamp.exposure, faceQuality: derivedStamp.faceQuality)
+        var expected = derivedStamp
+        expected.focus = lines.focus
+        expected.exposure = lines.exposure
+        expected.faceQuality = lines.faceQuality
+        guard expected == currentStamp, derived.indexByID.count == items.count else {
+            applyThresholds()
+            return
+        }
+        var d = derived
+        let baselines = d.baselines
+        let current = items  // 整场扫：拿一份本地的，按下标就地读
+        var flipped: [Int] = []
+        var borderline = 0
+        for idx in current.indices {
+            let input = LineInput(current, idx)
+            if Self.lineCharges(input, baselines: baselines, lines: old) != Self.lineCharges(input, baselines: baselines, lines: lines) {
+                flipped.append(idx)
+            }
+            if Self.isBorderline(input, lines: lines) { borderline += 1 }
+        }
+        guard Double(flipped.count) <= Double(current.count) * Self.thresholdFastPathMaxShare else {
+            applyThresholds()
+            return
+        }
+        d.borderlineCount = borderline
+        var chapters = Set<Int>()
+        if !flipped.isEmpty {
+            var updated = current
+            let overrides = self.overrides
+            for idx in flipped {
+                let override = overrides[updated[idx].id]
+                Self.judge(&updated[idx], baselines: baselines, lines: lines, override: override)
+            }
+            chapters = recomputeAround(flipped, in: &updated, &d)
+            items = updated
+        }
+        // 一张都没翻：items 原样不动（不发布），只有临界张数、阈值建议这些看线的跟着变。
+        finishDerived(&d, chapters: chapters)
+        derived = d
+        derivedStamp = currentStamp
+        thresholdFastPathRuns += 1
+        thresholdFastPathRejudged = flipped.count
+
+        if Self.verifyOverrideFastPath {
+            let fastItems = items, fast = derived
+            applyThresholds()
+            if let diff = Self.fastPathDiff(fastItems, fast, items, derived) {
+                FileHandle.standardError.write("拖阈值滑杆的局部重算和整场重算对不上：\(diff)\n".data(using: .utf8)!)
+                exit(70)
+            }
+        }
+    }
+
+    /// 局部重算（a / da）和整场重算（b / db）哪里不一样（nil = 逐字段相同）：items 整张比，derived 每一样都比。
+    /// 不是 private：拖阈值滑杆的自检（ThresholdFastPathSelfTest）也拿它比。
+    static func fastPathDiff(_ a: [BatchItem], _ da: Derived, _ b: [BatchItem], _ db: Derived) -> String? {
         guard a.count == b.count else { return "张数 \(a.count) / \(b.count)" }
         for i in a.indices where a[i].verdict != b[i].verdict || a[i].rejectReasons != b[i].rejectReasons {
             return "\(a[i].id)：\(a[i].verdict.rawValue) \(a[i].rejectReasons) / \(b[i].verdict.rawValue) \(b[i].rejectReasons)"
         }
+        for i in a.indices where a[i] != b[i] {
+            return "\(a[i].id) 判决、理由一样，别的字段不一样（平反 \(a[i].vlmRescued) / \(b[i].vlmRescued)、"
+                + "闭眼 \(String(describing: a[i].dynamicEyeClosed)) / \(String(describing: b[i].dynamicEyeClosed))…）"
+        }
+        return derivedDiff(da, db)
+    }
+
+    /// Derived 的每一样（加了字段这里也要加一行）。一句一样：拼成一长串 || 在 CI 的 Swift 6.1 上类型检查慢。
+    private static func derivedDiff(_ da: Derived, _ db: Derived) -> String? {
         if da.verdictCounts != db.verdictCounts { return "verdictCounts \(da.verdictCounts) / \(db.verdictCounts)" }
         if da.reasonCounts != db.reasonCounts { return "reasonCounts \(da.reasonCounts) / \(db.reasonCounts)" }
+        if da.chapterSegments != db.chapterSegments { return "chapterSegments" }
+        if da.chapterWarnings != db.chapterWarnings { return "chapterWarnings" }
+        if da.borderlineCount != db.borderlineCount { return "borderline \(da.borderlineCount) / \(db.borderlineCount)" }
+        if da.pendingTakeCount != db.pendingTakeCount { return "pendingTakeCount" }
         if da.pendingTakes != db.pendingTakes { return "pendingTakes" }
         if da.takeRank != db.takeRank { return "takeRank" }
-        if da.takeStats != db.takeStats { return "takeStats" }
+        if da.thresholdSuggestions != db.thresholdSuggestions { return "thresholdSuggestions" }
+        if da.takeRows.map(\.take) != db.takeRows.map(\.take) { return "takeRows（场）" }
+        if da.takeRows.map(\.indices) != db.takeRows.map(\.indices) { return "takeRows（成员）" }
         if da.recommendationSummary != db.recommendationSummary { return "recommendationSummary" }
         if da.byVerdict != db.byVerdict { return "byVerdict" }
+        if da.focusBins != db.focusBins { return "focusBins" }
+        if da.exposureBins != db.exposureBins { return "exposureBins" }
+        if da.faceQualityBins != db.faceQualityBins { return "faceQualityBins" }
         if da.autoRejectCount != db.autoRejectCount { return "autoRejectCount" }
-        if da.manualOverrideCount != db.manualOverrideCount || da.aiOverrideCount != db.aiOverrideCount { return "overrideCount" }
-        if da.clientPickCount != db.clientPickCount || da.clientPickRejectCount != db.clientPickRejectCount { return "clientPick" }
-        if da.borderlineCount != db.borderlineCount { return "borderline" }
-        if da.chapterSegments != db.chapterSegments || da.chapterWarnings != db.chapterWarnings { return "chapters" }
+        if da.manualOverrideCount != db.manualOverrideCount { return "manualOverrideCount" }
+        if da.aiOverrideCount != db.aiOverrideCount { return "aiOverrideCount" }
         if da.xmpStaleCount != db.xmpStaleCount { return "xmpStale" }
+        if da.clientPickCount != db.clientPickCount { return "clientPickCount" }
+        if da.clientPickRejectCount != db.clientPickRejectCount { return "clientPickRejectCount" }
+        if da.faceQualityAbsoluteValues != db.faceQualityAbsoluteValues { return "faceQualityAbsoluteValues" }
+        if da.indexByID != db.indexByID { return "indexByID" }
+        if da.takeStats != db.takeStats { return "takeStats" }
+        if da.takeSlot != db.takeSlot { return "takeSlot" }
+        if da.burstIndices != db.burstIndices { return "burstIndices" }
+        if da.takeChapter != db.takeChapter { return "takeChapter" }
+        if da.chapterMembers != db.chapterMembers { return "chapterMembers" }
+        if da.baselines != db.baselines { return "baselines" }
         return nil
     }
 
@@ -4920,7 +5106,7 @@ final class BatchStore: ObservableObject {
     // MARK: - 阈值建议（从你的改判反推，不是机器学习）
 
     /// 只做三个有滑杆的理由。闭眼是组内相对 EAR、VLM 没有滑杆 —— 那两个不编建议。
-    struct ThresholdSuggestion: Identifiable {
+    struct ThresholdSuggestion: Identifiable, Equatable {
         enum Kind: String { case focus = "对焦下限", exposure = "曝光裁切上限", faceQuality = "人脸质量下限" }
         let kind: Kind
         /// 被这条线判死、又被你放行的张数（放行 = 有人工改判且不是废片）。

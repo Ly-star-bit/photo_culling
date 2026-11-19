@@ -88,6 +88,8 @@ enum SelfTestRegistry {
               ci: .selftests()) { _ in DiagnosticsSelfTest.run() },
         .init("--followup-selftest", "跟进小修：写盘失败报给 MCP（persisted / save_failed）、水印页按客户选中导入、复制原片连续失败就停……",
               ci: .selftests()) { _ in FollowupSelfTest.run() },
+        .init("--threshold-selftest", "拖阈值滑杆的快路径（只重判翻过线的、只重算牵到的组 / 场 / 章节）和整场重算逐字段相同：造一场 480 张的假拍摄，按 seed 随机拖 200 下三根滑杆（夹着预设、人脸质量过零、改判、去重开关），每 10 下比一次（--seed N；要临时数据目录）",
+              ci: .selftests(["--seed", "{seed}"])) { _ in ThresholdFastPathSelfTest.runFromCommandLine() },
         .init("--persist-selftest", "场次持久化：删场次留判决、坏文件挪开不盖、读不了的拒绝切场次、写盘失败看得见（<Fixtures/photot-session>）",
               minArgs: 1, ci: .selftests(["{fixture}"])) { i in PersistSelfTest.run(flagIndex: i) },
         .init("--cull-mcp-selftest", "选片 MCP 在真的 BatchStore 上：XMP 待更新、导入客户选择、AI 改判的出处、一次定一场（<Fixtures/photot-session>，要空的数据目录）",

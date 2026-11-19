@@ -55,11 +55,27 @@ enum BatchPerf {
         let keyStep: (String) -> () -> Void = { key in { keys.send(key) } }
         if scenario == "thresh" {
             // 和滑杆的绑定同一条路：设属性 → didSet 重判。对焦滑杆一格是 5（step: 5），曝光滑杆没有格、拖一下约 0.01。来回拖。
+            // 设属性那一句本身（store 同步重判 + 派生）另记一份：measure 那一行减掉它，剩下的是 SwiftUI 重画（PI-04 拆账）。
             let focus = store.focusThreshold, clip = store.exposureThreshold
-            measure("对焦滑杆一格", (0..<12).map { k in { store.focusThreshold = focus + (k % 2 == 0 ? 5 : 0) } },
+            var sync: [Double] = [], rejudged: [Int] = [], fast = 0
+            func timed(_ change: @escaping () -> Void) -> () -> Void {
+                return {
+                    let runs = store.thresholdFastPathRuns, i = instructionsM()
+                    change()
+                    sync.append(instructionsM() - i)
+                    if store.thresholdFastPathRuns > runs {
+                        fast += 1
+                        rejudged.append(store.thresholdFastPathRejudged)
+                    }
+                }
+            }
+            measure("对焦滑杆一格", (0..<12).map { k in timed { store.focusThreshold = focus + (k % 2 == 0 ? 5 : 0) } },
                     idle: idle, spin: spin)
-            measure("曝光滑杆一格", (0..<12).map { k in { store.exposureThreshold = clip + (k % 2 == 0 ? 0.01 : 0) } },
+            printSync(sync, fast: fast, rejudged: rejudged)
+            sync = []; rejudged = []; fast = 0
+            measure("曝光滑杆一格", (0..<12).map { k in timed { store.exposureThreshold = clip + (k % 2 == 0 ? 0.01 : 0) } },
                     idle: idle, spin: spin)
+            printSync(sync, fast: fast, rejudged: rejudged)
             return
         }
         if scenario == "sel" {
@@ -104,6 +120,18 @@ enum BatchPerf {
             measure("直接改判 不带动画", (12..<24).map { setStep($0, animated: false) }, idle: idle, spin: spin)
         }
         print("perf grid：完了以后 \(store.manualOverrideCount) 张人工改判 · 挂着的格子 \(viewport.mountedCells) 个")
+    }
+
+    /// thresh 那两行的拆账：设属性那一句（store 同步重判 + 派生）之后几下的中位数（和 measure 一样不算第 1 下），快路径走了几下、
+    /// 每下重判了几张（BatchStore.applyThresholdChange）。拆成几句拼：一长串格式化在 CI 的 Xcode 16 上类型检查慢。
+    private static func printSync(_ sync: [Double], fast: Int, rejudged: [Int]) {
+        let rest = sync.dropFirst().sorted()
+        guard !rest.isEmpty else { return }
+        let r = rejudged.sorted()
+        let head: String = String(format: "  其中设属性那一句（store 重判 + 派生，同步）之后中位数 %.1f 百万条（%.1f–%.1f）",
+                                  rest[rest.count / 2], rest.first ?? 0, rest.last ?? 0)
+        let tail = "，快路径 \(fast) / \(sync.count) 下，每下重判中位数 \(r.isEmpty ? 0 : r[r.count / 2]) 张"
+        print(head + tail)
     }
 
     /// 真的不带动画地改：PI-01 以后格子的判决色有 0.15 秒的过渡（隐式动画，AppMotion.verdictFade），改的那张在屏上时离屏
