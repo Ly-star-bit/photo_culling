@@ -385,7 +385,7 @@ struct BatchView: View {
                     .controlSize(.small)
                     .disabled(store.isRunning)
                 Button { store.finishedImport = nil } label: { Image(systemName: "xmark.circle.fill") }
-                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .buttonStyle(.plain).foregroundStyle(AppPalette.secondary)
                     .help("不打开（以后从「选择文件夹…」打开这个文件夹也行）")
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
@@ -399,7 +399,7 @@ struct BatchView: View {
                     .textSelection(.enabled)
                 Spacer()
                 Button { store.importNotice = nil } label: { Image(systemName: "xmark.circle.fill") }
-                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .buttonStyle(.plain).foregroundStyle(AppPalette.secondary)
                     .help("知道了（关掉这条提醒）")
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
@@ -839,7 +839,7 @@ struct BatchView: View {
                 // 「待处理 N 场连拍」的入口挪到顶栏右边的琥珀色按钮（两种视图都在）。
                 if store.manualOverrideCount > 0 {
                     Text(store.manualOverrideLabel)
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(AppPalette.secondary)
                 }
                 if store.clientPickCount > 0 {
                     Label("客户选中 \(store.clientPickCount)", systemImage: "heart.fill")
@@ -893,11 +893,11 @@ struct BatchView: View {
             // AI 刚在这一页做了什么（改判、撤销改判，§9.4.3 第 11 步；10 s 后自己消失）。放状态栏不放顶栏（顶栏在 1280pt
             // 已经挤满），和拼图页状态栏的提示同一个位置、同一个样子：一行放不下就截掉尾巴（悬停看全文）。没有 AI 时这里什么都没有。
             if let notice = store.externalNotice {
-                Text(notice).font(.caption).foregroundStyle(.secondary)
+                Text(notice).font(.caption).foregroundStyle(AppPalette.secondary)
                     .lineLimit(1).truncationMode(.tail).help(notice)
             }
             if !store.progressText.isEmpty {
-                Text(store.progressText).font(.caption).foregroundStyle(.secondary)
+                Text(store.progressText).font(.caption).foregroundStyle(AppPalette.secondary)
                     .lineLimit(1)
             }
             if let fraction = store.progressFraction {
@@ -910,7 +910,7 @@ struct BatchView: View {
             ThemeButton()
             Button { showShortcuts.toggle() } label: { Image(systemName: "keyboard") }
                 .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(AppPalette.secondary)
                 .help("快捷键一览 (?)")
                 .popover(isPresented: $showShortcuts, arrowEdge: .top) { ShortcutsPanel() }
         }
@@ -925,7 +925,7 @@ struct BatchView: View {
         let title = "\(store.bodies.count) 台机身" + (adjusted ? " · 已对时" : "")
         return Button { showBodyClock = true } label: {
             Label(title, systemImage: "camera.on.rectangle")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(AppPalette.secondary)
         }
         .buttonStyle(.plain)
         .help("这一场有 \(store.bodies.count) 台机身（同型号的按序列号分开），连拍的「场」各分各的。两台的钟不准时点这里对时")
@@ -960,7 +960,7 @@ struct BatchView: View {
             Toggle("覆盖已存在的同名文件", isOn: $jpegOverwrite)
                 .help("关闭时目标里已有同名文件就另存为 -2、-3，旧文件不动 (防止覆盖客户已精修的文件)")
             Text(jpegPresets.countLine(count))
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(AppPalette.secondary)
             HStack {
                 Spacer()
                 Button("取消") { showJPEGSheet = false }
@@ -1028,13 +1028,13 @@ struct BatchView: View {
         return VStack(alignment: .leading, spacing: 14) {
             Text("精华 Top N").font(.headline)
             Text("全场评分最高的 N 张（表情 > 人脸质量 > 锐度），精选优先、不够从可用里补。当天发客户/朋友圈的那一把。")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(AppPalette.secondary)
             Stepper("张数：\(highlightsCount)", value: $highlightsCount, in: 5...100, step: 5)
             DeliveryOptionsSection(options: options, namePreview: preview, tokensHint: DeliveryNaming.rankTokenHint)
             Text(top.fromUsable > 0
                  ? "精选只有 \(top.ids.count - top.fromUsable) 张，从可用里按评分补了 \(top.fromUsable) 张"
                  : "共 \(top.ids.count) 张，全部来自精选")
-                .font(.caption).foregroundStyle(top.fromUsable > 0 ? AppPalette.warning : .secondary)
+                .font(.caption).foregroundStyle(top.fromUsable > 0 ? AppPalette.warning : AppPalette.secondary)
             Text("每次导到 拍摄文件夹/\(ImageLoader.jpegExportSubfolder)/精华/ 下面一个新文件夹（Top\(top.ids.count)_日期_时间），不和上次导的混")
                 .hintText()
             HStack {
@@ -1076,7 +1076,7 @@ struct BatchView: View {
             Toggle("排除废片", isOn: $isoKeepersOnly)
             Text("符合条件: \(matches.raws) 个 RAW"
                  + (matches.jpegOnly > 0 ? " (另有 \(matches.jpegOnly) 张只有 JPG，不会复制)" : ""))
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(AppPalette.secondary)
             Text("复制 (不移动) 到 拍摄文件夹/\(ImageLoader.denoiseSubfolder)/，供 DxO PureRAW、LR AI 降噪等批量处理；该文件夹不参与分析")
                 .hintText()
             HStack {
@@ -1747,11 +1747,11 @@ struct BatchView: View {
         VStack(spacing: 10) {
             Image(systemName: "line.3.horizontal.decrease.circle")
                 .font(.system(size: 34))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(AppPalette.tertiary)
             Text("「" + filters.joined(separator: "」+「") + "」下没有照片")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(AppPalette.secondary)
             Text("这一场共 \(store.items.count) 张，都被" + (filters.count > 1 ? "这几个" : "这个") + "筛选条件挡在外面了")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(AppPalette.secondary)
             Button("显示全部") { clearGridFilters() }
                 .buttonStyle(.accentProminent)
                 .help("关掉判决筛选、只看客户选中、只看这一章、只看临界、理由筛选和只看待处理")
@@ -1786,11 +1786,11 @@ struct BatchView: View {
         VStack(spacing: 10) {
             Image(systemName: "photo.badge.arrow.down")
                 .font(.system(size: 30))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(AppPalette.secondary)
             Text("这一场的预览图清掉了")
                 .font(.headline)
             Text("为了省空间（掉出了最近 15 场，或者从「移除历史记录」里移除过）。判决和人工改判都还在。")
-                .font(.callout).foregroundStyle(.secondary)
+                .font(.callout).foregroundStyle(AppPalette.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
             Button("重新分析") { store.runAnalysis() }
@@ -1811,10 +1811,10 @@ struct BatchView: View {
         VStack(spacing: 12) {
             Image(systemName: "photo.stack")
                 .font(.system(size: 42))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(AppPalette.tertiary)
             if store.isRunning {
                 Text(store.progressText.isEmpty ? "分析中..." : store.progressText)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppPalette.secondary)
             } else if let error = store.lastError {
                 // The status-bar error is easy to miss; an empty grid is exactly
                 // when the user is staring at the middle of the window.
@@ -1828,12 +1828,12 @@ struct BatchView: View {
                     .disabled(store.photoDir == nil)
             } else if let dir = store.photoDir {
                 Text("已选择 \(dir.lastPathComponent)，还没有分析结果")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppPalette.secondary)
                 Button("开始分析") { store.runAnalysis() }
                     .buttonStyle(.accentProminent)
             } else {
                 Text("还没有分析结果")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppPalette.secondary)
                 Button("选择照片文件夹...") { pickFolder() }
             }
             // 以前这里是一整行密密麻麻的快捷键；现在有快捷键表了，只留两条最有用的入口。
@@ -1851,10 +1851,10 @@ struct BatchView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("拍摄复盘 (出片率 = 非废片占比)").font(.headline)
             if store.focalStats.isEmpty && store.isoStats.isEmpty {
-                Text("没有 EXIF 数据 (需要重新分析一次)").foregroundStyle(.secondary)
+                Text("没有 EXIF 数据 (需要重新分析一次)").foregroundStyle(AppPalette.secondary)
             }
             if !store.focalStats.isEmpty {
-                Text("按焦段").font(.caption).foregroundStyle(.secondary)
+                Text("按焦段").font(.caption).foregroundStyle(AppPalette.secondary)
                 ForEach(store.focalStats) { b in
                     HStack {
                         Text(b.label).frame(width: 90, alignment: .leading)
@@ -1864,7 +1864,7 @@ struct BatchView: View {
                 }
             }
             if !store.isoStats.isEmpty {
-                Text("按 ISO").font(.caption).foregroundStyle(.secondary)
+                Text("按 ISO").font(.caption).foregroundStyle(AppPalette.secondary)
                 ForEach(store.isoStats) { b in
                     HStack {
                         Text(b.label).frame(width: 90, alignment: .leading)
@@ -1878,7 +1878,7 @@ struct BatchView: View {
             let vlmSuggested = store.items.filter(\.vlmReject)
             if !vlmSuggested.isEmpty {
                 Divider()
-                Text("本地模型判断校准").font(.caption).foregroundStyle(.secondary)
+                Text("本地模型判断校准").font(.caption).foregroundStyle(AppPalette.secondary)
                 let released = vlmSuggested.filter { $0.verdict != .reject }.count
                 Text("本地模型建议淘汰 \(vlmSuggested.count) 张 · 你放行了其中 \(released) 张 (\(released * 100 / vlmSuggested.count)%)")
                     .font(.caption)
@@ -1888,7 +1888,7 @@ struct BatchView: View {
             // 不是机器学习，是算术 —— 但它是"学习你的风格"里诚实能做的那部分。
             if !store.thresholdSuggestions.isEmpty || store.manualRejectsWithoutReason > 0 {
                 Divider()
-                Text("阈值建议（从你的改判反推）").font(.caption).foregroundStyle(.secondary)
+                Text("阈值建议（从你的改判反推）").font(.caption).foregroundStyle(AppPalette.secondary)
                 ForEach(store.thresholdSuggestions) { sug in
                     HStack(spacing: 6) {
                         Text("你放行了 \(sug.released) 张被「\(sug.kind.rawValue)」判死的 → 建议 \(sug.currentText) → \(sug.suggestedText)（能救回 \(sug.rescued)/\(sug.released)）")
@@ -1903,7 +1903,7 @@ struct BatchView: View {
                 }
                 if store.manualRejectsWithoutReason > 0 {
                     Text("你手动废掉了 \(store.manualRejectsWithoutReason) 张滑杆一个理由都没给的 —— 滑杆漏掉的，没有信号说明该收紧哪条线")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(AppPalette.secondary)
                 }
             }
             let rescued = store.items.filter { !$0.vlmRescued.isEmpty }.count
@@ -2037,7 +2037,7 @@ struct BatchView: View {
                 // 进度：这一轮（全场 / 本章）多张连拍定了几场。
                 ProgressView(value: Double(decided), total: Double(bursts))
                     .frame(width: 70)
-                Text("已定 \(decided)/\(bursts) 场").font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                Text("已定 \(decided)/\(bursts) 场").font(.caption).monospacedDigit().foregroundStyle(AppPalette.secondary)
                     .help((chapter != nil ? "这一章" : "这场拍摄") + "里 \(bursts) 个多张连拍，定完 \(decided) 个")
             }
             Spacer()
@@ -2705,13 +2705,13 @@ struct BatchView: View {
         Button { toggleTakeSelection(info) } label: {
             HStack(spacing: 6) {
                 Image(systemName: info.allSelected ? "checkmark.square.fill" : "square")
-                    .foregroundStyle(info.allSelected ? AppPalette.accent : .secondary)
+                    .foregroundStyle(info.allSelected ? AppPalette.accent : AppPalette.secondary)
                 Text("场 \(info.take)").font(.subheadline.bold())
                 if count {
-                    Text("\(info.all.count) 张").font(.caption).foregroundStyle(.secondary)
+                    Text("\(info.all.count) 张").font(.caption).foregroundStyle(AppPalette.secondary)
                 }
                 if time, let range = Self.timeRange(info.all) {
-                    Text(range).font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+                    Text(range).font(.caption2).monospacedDigit().foregroundStyle(AppPalette.secondary)
                 }
             }
             .lineLimit(1)
@@ -2747,13 +2747,13 @@ struct BatchView: View {
                 Button { setTakeExpanded(info.take, true) } label: {
                     Label("显示被废的 \(info.folded) 张", systemImage: "square.stack.3d.up").lineLimit(1).fixedSize()
                 }
-                .buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)
+                .buttonStyle(.plain).font(.caption2).foregroundStyle(AppPalette.secondary)
                 .help("这一场定完了，被废的照片叠起来了。点开再看一遍")
             } else if info.canFold {
                 Button { setTakeExpanded(info.take, false) } label: {
                     Label("收起废片", systemImage: "rectangle.compress.vertical").lineLimit(1).fixedSize()
                 }
-                .buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)
+                .buttonStyle(.plain).font(.caption2).foregroundStyle(AppPalette.secondary)
             }
             Spacer(minLength: 4)
             if info.pending {
@@ -2779,13 +2779,13 @@ struct BatchView: View {
                 Button { setTakeExpanded(info.take, true) } label: {
                     Label("\(info.folded)", systemImage: "square.stack.3d.up").lineLimit(1).fixedSize()
                 }
-                .buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)
+                .buttonStyle(.plain).font(.caption2).foregroundStyle(AppPalette.secondary)
                 .help("这一场定完了，被废的 \(info.folded) 张叠起来了。点开再看一遍")
             } else if info.canFold {
                 Button { setTakeExpanded(info.take, false) } label: {
                     Image(systemName: "rectangle.compress.vertical")
                 }
-                .buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)
+                .buttonStyle(.plain).font(.caption2).foregroundStyle(AppPalette.secondary)
                 .help("收起废片")
             }
             Spacer(minLength: 2)
@@ -2874,7 +2874,7 @@ struct BatchView: View {
                     Image(systemName: showSingles ? "chevron.down" : "chevron.right")
                         .font(.caption.bold()).frame(width: 12)
                     Text("单张 \(singles.count)").font(.subheadline.bold())
-                    Text("没有连拍、不用挑，收在这里免得把要挑的连拍冲散").font(.caption).foregroundStyle(.secondary)
+                    Text("没有连拍、不用挑，收在这里免得把要挑的连拍冲散").font(.caption).foregroundStyle(AppPalette.secondary)
                 }
                 .contentShape(Rectangle())
             }
@@ -2996,7 +2996,7 @@ struct BatchView: View {
                 HStack(spacing: 6) {
                     Image(systemName: verdict.symbol).font(.caption.bold()).foregroundStyle(color)
                     Text(verdict.rawValue).font(.headline)
-                    Text("\(matching.count)").font(.headline).foregroundStyle(.secondary)
+                    Text("\(matching.count)").font(.headline).foregroundStyle(AppPalette.secondary)
                     if verdict == .reject {
                         reasonChips
                     }
@@ -3583,9 +3583,9 @@ private struct BatchControlPanel: View {
                 Text("同一场最大间隔").font(.callout)
                 Spacer()
                 Text("\(stats.takes) 场多张").font(.caption).monospacedDigit()
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppPalette.secondary)
                 Text(String(format: "%.0f 秒", store.takeGapSec)).font(.callout).monospacedDigit()
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppPalette.secondary)
             }
             MetricHistogram(
                 bins: store.captureGapBins,
@@ -3766,7 +3766,7 @@ private struct BatchControlPanel: View {
                     Text("淘汰 \(killCount)").font(.caption).monospacedDigit()
                         .foregroundStyle(AppPalette.reject)
                 }
-                Text(value).font(.callout).monospacedDigit().foregroundStyle(.secondary)
+                Text(value).font(.callout).monospacedDigit().foregroundStyle(AppPalette.secondary)
             }
             histogram
             // 读屏软件念「锐度下限，45」，不是一根没名字的滑杆（UX-12）。--ax-dump 读的是 AppKit 滑杆的 cell
@@ -3956,7 +3956,7 @@ private struct GridCell: View, Equatable {
                     // （不用 @Environment(\.accessibilityReduceMotion)：格子带上环境依赖，release 315 张按方向键每下多约 0.4 百万条指令，实测）。
                     .animation(AppMotion.animation(AppMotion.verdictFade), value: item.verdict)
                 Text(item.id).font(.caption2).lineLimit(1).truncationMode(.middle)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppPalette.secondary)
                 // 只有高感（ISO 3200 起，值得批量降噪的那些）才写：以前每张都挂一个「ISO 500」。
                 if let iso = item.exif?.iso, iso >= 3200 {
                     Text("ISO \(iso)").font(.caption2).monospacedDigit().lineLimit(1)
@@ -5327,7 +5327,7 @@ struct PhotoInspector: View {
     private func header(_ item: BatchItem) -> some View {
         HStack {
             Text(item.id).font(.headline)
-            Text("场 \(item.take)").foregroundStyle(.secondary)
+            Text("场 \(item.take)").foregroundStyle(AppPalette.secondary)
             if (store.groupSizes[item.burstGroup] ?? 1) > 1 {
                 Label("近似重复", systemImage: "square.stack.3d.down.right")
                     .font(.caption).foregroundStyle(AppPalette.warning)
@@ -5507,7 +5507,7 @@ struct PhotoInspector: View {
     }
 
     private func sectionTitle(_ text: String) -> some View {
-        Text(text).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+        Text(text).font(.subheadline.weight(.semibold)).foregroundStyle(AppPalette.secondary)
     }
 
     /// Face close-ups with eye-state rings — scan this instead of zooming.
@@ -5606,10 +5606,10 @@ struct PhotoInspector: View {
     private func exifRow(_ item: BatchItem) -> some View {
         if let exif = item.exif {
             VStack(alignment: .leading, spacing: 3) {
-                Text(exif.summary).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                Text(exif.summary).font(.caption).monospacedDigit().foregroundStyle(AppPalette.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let lens = exif.lens {
-                    Text(lens).font(.caption).foregroundStyle(.secondary)
+                    Text(lens).font(.caption).foregroundStyle(AppPalette.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if exif.slowShutter {
@@ -5658,7 +5658,7 @@ struct PhotoInspector: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if let reason = item.vlmReason {
-                    Text("本地模型：\(reason)").font(.caption).foregroundStyle(.secondary)
+                    Text("本地模型：\(reason)").font(.caption).foregroundStyle(AppPalette.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -5673,7 +5673,7 @@ struct PhotoInspector: View {
             verdictButtons(item)
             Button { showShortcuts.toggle() } label: { Image(systemName: "keyboard") }
                 .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(AppPalette.secondary)
                 .help("快捷键一览 (?)")
                 .popover(isPresented: $showShortcuts, arrowEdge: .top) { ShortcutsPanel() }
             Spacer()
@@ -5685,7 +5685,7 @@ struct PhotoInspector: View {
 
     private func signal(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(label).font(.caption2).foregroundStyle(.secondary)
+            Text(label).font(.caption2).foregroundStyle(AppPalette.secondary)
             Text(value).font(.callout).monospacedDigit()
         }
     }
@@ -5695,7 +5695,7 @@ struct PhotoInspector: View {
         let override = store.overrides[item.id]
         // 按钮上写键（UX-06，和审片的判决条一样）。看单张里改判不自动下一张：这里是看一张，审片才是过一串。
         HStack(spacing: 8) {
-            Text("改判:").foregroundStyle(.secondary)
+            Text("改判:").foregroundStyle(AppPalette.secondary)
             Button("精选  1") { store.setOverride(item.id, .pick) }
                 .buttonStyle(.bordered)
                 .tint(override == .pick ? AppPalette.pick : nil)
@@ -5922,7 +5922,7 @@ struct ReviewView: View {
                         Text(item.rejectReasons.map(BatchStore.reasonLabel).joined(separator: ", ")).font(.caption).foregroundStyle(AppPalette.reject)
                     }
                     if let exif = item.exif {
-                        Text(exif.summary).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                        Text(exif.summary).font(.caption).monospacedDigit().foregroundStyle(AppPalette.secondary)
                     }
                     // 连拍里的第几张：审到连拍时知道前后还有几张同一瞬间的；点一下（或按 C）去挑这一场。
                     if let position = burstPosition(item) {
@@ -5931,7 +5931,7 @@ struct ReviewView: View {
                                 .font(.caption).monospacedDigit()
                         }
                         .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(AppPalette.secondary)
                         .help("这张是连拍里的一张：去连拍挑选把这一场并排比一遍 (C)")
                     }
                     Spacer()
@@ -6198,7 +6198,7 @@ struct ReviewView: View {
             .help("去掉人工改判，回到按滑杆算的判决 (0)")
             Button { showShortcuts.toggle() } label: { Image(systemName: "keyboard") }
                 .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(AppPalette.secondary)
                 .help("快捷键一览 (?)")
                 .popover(isPresented: $showShortcuts, arrowEdge: .bottom) { ShortcutsPanel() }
         }

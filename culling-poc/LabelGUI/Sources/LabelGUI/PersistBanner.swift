@@ -34,7 +34,7 @@ extension BatchView {
                         .textSelection(.enabled)
                     Spacer()
                     Button { store.dataNotice = nil } label: { Image(systemName: "xmark.circle.fill") }
-                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                        .buttonStyle(.plain).foregroundStyle(AppPalette.secondary)
                         .help("知道了（关掉这条提醒）")
                 }
                 .padding(.horizontal, 12).padding(.vertical, 6)

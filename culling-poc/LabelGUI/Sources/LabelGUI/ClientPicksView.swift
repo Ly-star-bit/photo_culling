@@ -27,12 +27,12 @@ struct ClientImportSheet: View {
         let empty = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         return VStack(alignment: .leading, spacing: 12) {
             Text("导入客户选择").font(.headline)
-            Text(Self.intro).font(.caption).foregroundStyle(.secondary)
+            Text(Self.intro).font(.caption).foregroundStyle(AppPalette.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             TextEditor(text: $text)
                 .font(.system(.body, design: .monospaced))
                 .frame(minHeight: 140, maxHeight: 220)
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.4)))
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(AppPalette.secondary.opacity(0.4)))
             HStack {
                 Button("打开 .txt / .csv 文件...") { openFile() }
                 Spacer()

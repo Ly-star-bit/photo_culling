@@ -213,7 +213,7 @@ struct PickView: View {
                 ProgressView(value: Double(session.decidedCount), total: Double(max(1, session.groups.count)))
                     .frame(width: 80)
                     .help("这一轮 \(session.groups.count) 组里已经定了 \(session.decidedCount) 组")
-                Text("已定 \(session.decidedCount)").font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                Text("已定 \(session.decidedCount)").font(.caption).monospacedDigit().foregroundStyle(AppPalette.secondary)
             }
             let unconfirmed = session.unconfirmedGroups.count
             if unconfirmed > 0 {
@@ -278,9 +278,9 @@ struct PickView: View {
             let pending = session.isPending(take)
             HStack(spacing: 6) {
                 Text("场 \(take)").font(.subheadline.bold())
-                Text("\(frames.count) 张").font(.caption).foregroundStyle(.secondary)
+                Text("\(frames.count) 张").font(.caption).foregroundStyle(AppPalette.secondary)
                 if let range = BatchView.timeRange(frames) {
-                    Text(range).font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+                    Text(range).font(.caption2).monospacedDigit().foregroundStyle(AppPalette.secondary)
                 }
                 // 待处理 = 实心胶囊（和批量页组头同一个写法，TA-06），已定 = 淡底。
                 Text(pending ? "待处理" : "已定")
@@ -292,7 +292,7 @@ struct PickView: View {
             .lineLimit(1)
         } else {
             Text("跨 \(Set(frames.map(\.take)).count) 场 · \(frames.count) 张")
-                .font(.subheadline).foregroundStyle(.secondary)
+                .font(.subheadline).foregroundStyle(AppPalette.secondary)
         }
     }
 
@@ -304,7 +304,7 @@ struct PickView: View {
         if frames.isEmpty {
             VStack(spacing: 8) {
                 Image(systemName: "checkmark.circle").font(.largeTitle).foregroundStyle(AppPalette.pick)
-                Text(session.groups.isEmpty ? "没有要挑的连拍" : "这一组已经没有照片了").foregroundStyle(.secondary)
+                Text(session.groups.isEmpty ? "没有要挑的连拍" : "这一组已经没有照片了").foregroundStyle(AppPalette.secondary)
             }
             .frame(width: size.width, height: size.height)
         } else {
@@ -426,7 +426,7 @@ struct PickView: View {
                     .foregroundStyle(wholeGroupOut ? AppPalette.reject : Color.primary)
                     .lineLimit(1).truncationMode(.middle)
                 if outcome.changes == 0 {
-                    Text("（和现在一样）").font(.caption).foregroundStyle(.tertiary)
+                    Text("（和现在一样）").font(.caption).foregroundStyle(AppPalette.secondary)
                 }
                 if session.draftEdited {
                     Button("恢复推荐 (0)") { withAnimation(AppMotion.animation(.easeOut(duration: 0.12))) { session.resetDraft() } }
@@ -461,7 +461,7 @@ struct PickView: View {
                     .lineLimit(1).truncationMode(.tail)
                 Button { showShortcuts.toggle() } label: { Image(systemName: "keyboard").font(.caption) }
                     .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppPalette.secondary)
                     .help("快捷键一览 (?)")
                     .popover(isPresented: $showShortcuts, arrowEdge: .top) { ShortcutsPanel() }
             }
@@ -851,15 +851,15 @@ private struct PickTile: View {
                     RoundedRectangle(cornerRadius: 6)
                         .strokeBorder(AppPalette.ink.opacity(0.25), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
                         .frame(width: size, height: size)
-                        .overlay(Text("没检测到").font(.caption2).foregroundStyle(.secondary))
+                        .overlay(Text("没检测到").font(.caption2).foregroundStyle(AppPalette.secondary))
                         .help("这一张里没检测到这个人的脸（转头、被挡住或出画）")
                 }
             }
             if faceSlots.count > shown.count {
-                Text("+\(faceSlots.count - shown.count)").font(.caption).foregroundStyle(.secondary)
+                Text("+\(faceSlots.count - shown.count)").font(.caption).foregroundStyle(AppPalette.secondary)
             }
             if faceSlots.isEmpty {
-                Text("没有检测到人脸").font(.caption2).foregroundStyle(.secondary)
+                Text("没有检测到人脸").font(.caption2).foregroundStyle(AppPalette.secondary)
             }
         }
         .frame(width: box.width, height: size, alignment: .leading)
@@ -878,7 +878,7 @@ private struct PickTile: View {
             }
             eyeSummary
             Spacer(minLength: 4)
-            Text(item.id).font(.caption2).foregroundStyle(.secondary)
+            Text(item.id).font(.caption2).foregroundStyle(AppPalette.secondary)
                 .lineLimit(1).truncationMode(.middle)
                 .layoutPriority(-1)
         }
@@ -890,7 +890,7 @@ private struct PickTile: View {
     /// 本组最高的那一项标绿 + ▲。
     private func metric(_ label: String, _ value: String, top: Bool) -> some View {
         HStack(spacing: 2) {
-            Text(label).foregroundStyle(.secondary)
+            Text(label).foregroundStyle(AppPalette.secondary)
             Text(value).monospacedDigit().bold(top)
                 .foregroundStyle(top ? Verdict.pick.color : Color.primary)
             if top {

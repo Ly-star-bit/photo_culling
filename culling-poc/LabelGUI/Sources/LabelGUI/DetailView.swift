@@ -135,7 +135,7 @@ struct DetailView: View {
                 if let warning = store.loadWarning {
                     Text(warning).font(.caption).foregroundStyle(AppPalette.warning)
                 } else if l1 == nil {
-                    Text("这张照片没有算法分析结果（分析失败或未分析）").font(.caption).foregroundStyle(.secondary)
+                    Text("这张照片没有算法分析结果（分析失败或未分析）").font(.caption).foregroundStyle(AppPalette.secondary)
                 }
             }
 
@@ -170,9 +170,9 @@ struct DetailView: View {
                 Text(typing ? "正在输入文字，快捷键已暂停；点击图片恢复"
                             : (focus == .pane ? "键盘快捷键已激活" : "点击图片启用键盘快捷键"))
                     .font(.caption)
-                    .foregroundStyle(focus == .pane ? AppPalette.accent : .secondary)
+                    .foregroundStyle(focus == .pane ? AppPalette.accent : AppPalette.secondary)
                 Text("快捷键: ←/→ 换图, 1-5 评分, b 虚焦, c 闭眼, x 曝光问题, ⌘] 下一张未标注")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(AppPalette.secondary)
             }
         }
         .formStyle(.grouped)
@@ -226,7 +226,7 @@ struct AccuracyPanel: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(c.kind.rawValue).font(.system(size: 12, weight: .semibold))
-                Text(report.countsLine(c)).font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(report.countsLine(c)).hintText()
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let ratio = report.ratioLine(c) {

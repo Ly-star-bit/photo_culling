@@ -229,7 +229,7 @@ struct JPEGPresetSection: View {
                 Button("加三套常用的") { presets.addStarters(from: options) }
                     .controlSize(.small)
                     .help("原尺寸（给客户）、小红书 3:4、朋友圈长边 1080（这两套去 GPS）；锐化、质量、文件名照上面的")
-                Text("原尺寸 / 小红书 / 朋友圈").font(.caption).foregroundStyle(.secondary)
+                Text("原尺寸 / 小红书 / 朋友圈").font(.caption).foregroundStyle(AppPalette.secondary)
             }
         }
         Text("勾上的几套点一次导出就都导，每套进以预设名命名的子文件夹；一个都不勾就按上面的设置导一套")
@@ -277,7 +277,7 @@ private struct JPEGPresetRow: View {
             .help(active ? "上面的设置就是这个预设" : "把这套设置套用到上面")
             Text(summary)
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(AppPalette.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 4)
