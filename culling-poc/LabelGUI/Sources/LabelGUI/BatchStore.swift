@@ -1721,7 +1721,8 @@ final class BatchStore: ObservableObject {
                                      sessionDir: URL) -> (rows: [(id: String, paths: [String])], photoDir: String?)? {
         if let manifest {
             var rows = manifest.photos.map { ($0.id, [$0.rawPath] + ($0.decodePath.map { [$0] } ?? [])) }
-            for row in manifest.photosWithoutResults ?? [] {
+            // photos 里解不开的那几行（EC-03）也是照片：它们的键不算孤儿。
+            for row in manifest.undecodableRows + (manifest.photosWithoutResults ?? []) {
                 guard let id = row.id else { continue }
                 rows.append((id, [row.rawPath, row.decodePath].compactMap { $0 }))
             }
@@ -3270,7 +3271,7 @@ final class BatchStore: ObservableObject {
                     self.progressText = summary.reused > 0
                         ? "完成: 分析 \(summary.analyzed) 张 · 复用 \(summary.reused) 张未变"
                         : "完成: \(summary.analyzed) 张"
-                    // 拆开拼：一长串插值 + 三元在 CI 的 Xcode 16 上类型检查会慢。
+                        // 拆开拼：一长串插值 + 三元在 CI 的 Xcode 16 上类型检查会慢。
                     func names(_ ids: [String]) -> String {
                         ids.prefix(5).joined(separator: ", ") + (ids.count > 5 ? "..." : "")
                     }
@@ -3591,7 +3592,26 @@ final class BatchStore: ObservableObject {
     /// or the file was mid-copy when analyzed). They are invisible in the
     /// grid, so the count is shown permanently in the status bar — the
     /// one-time "N 张无法解析" toast after analysis was easy to miss.
-    @Published private(set) var unparsedCount = 0
+    /// 以前只数 manifest 的 photos 里没有 layer1 结果的那几张，可真解不开的照片根本不进 photos、记在 photos_without_results 里，
+    /// 这个数对它们恒为 0（审查 S19a / EC-01）；取消分析时还没轮到的也记在那里，第二天打开网格少一截、什么提示都没有。
+    /// 现在三样都算：photos 里没结果的、photos 里那一行解不开的（EC-03）、photos_without_results。按 manifest 的顺序，不重复。
+    @Published private(set) var unparsedNames: [String] = []
+    var unparsedCount: Int { unparsedNames.count }
+
+    /// 没进网格的照片（纯函数，--session-input-selftest 直接测）：`loadedIDs` 是进了网格的。解不开、又认不出 id 的行记成「manifest 第 N 行」。
+    nonisolated static func unparsedNames(manifest: Manifest, loadedIDs: Set<String>) -> [String] {
+        var seen = loadedIDs
+        var out: [String] = []
+        func add(_ name: String) {
+            if seen.insert(name).inserted { out.append(name) }
+        }
+        for photo in manifest.photos { add(photo.id) }
+        for (k, row) in manifest.undecodableRows.enumerated() { add(row.id ?? "manifest 里第 \(k + 1) 个解不开的行") }
+        for row in manifest.photosWithoutResults ?? [] {
+            if let id = row.id { add(id) }
+        }
+        return out
+    }
 
     func loadResults() {
         loadResults(manifest: Self.readManifest(in: sessionDir))
@@ -3610,7 +3630,7 @@ final class BatchStore: ObservableObject {
 
         guard let manifest else {
             items = []
-            unparsedCount = 0
+            unparsedNames = []
             rebuildGroupSizes()
             return
         }
@@ -3684,7 +3704,7 @@ final class BatchStore: ObservableObject {
         Self.assignTakes(&loaded, gapSec: takeGapSec)
         Self.sort(&loaded, by: sortOrder)
         items = loaded
-        unparsedCount = manifest.photos.count - loaded.count
+        unparsedNames = Self.unparsedNames(manifest: manifest, loadedIDs: Set(loaded.map(\.id)))
         rebuildGroupSizes()
         backfillBodySerials(manifest.photos)
     }

@@ -262,6 +262,10 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--verdicts"),
         let counts = store.verdictCounts
         print("连拍去重: \(store.rejectBurstDuplicates ? "开" : "关")")
         print("照片 \(store.items.count) · 精选 \(counts.pick) · 可用 \(counts.usable) · 废片 \(counts.reject)")
+        // 状态栏「N 张没进网格」那个数（EC-01 / EC-03）：只在有的时候打，平常的输出不变。
+        if store.unparsedCount > 0 {
+            print("没进网格 \(store.unparsedCount) 张: \(store.unparsedNames.joined(separator: ", "))")
+        }
         let stats = store.burstGroupStats
         let takes = store.takeStats
         print("近似重复 \(stats.groups) 组 / \(stats.photos) 张 (phash 层，自动规则作用范围)")

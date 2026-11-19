@@ -116,7 +116,7 @@ enum ImageLoader {
             AppLog.warning("analysis", "列照片时跳过读不了的 \(url.path)：\(Diagnostics.describeIO(error))")
             return true
         }
-        if let enumerator = fm.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey],
+        if let enumerator = fm.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
                                           options: [.skipsPackageDescendants], errorHandler: skipUnreadable) {
             for case let url as URL in enumerator {
                 if url.lastPathComponent.hasPrefix(".") {
@@ -127,7 +127,8 @@ enum ImageLoader {
                     enumerator.skipDescendants()
                     continue
                 }
-                if imageExtensions.contains(url.pathExtension.lowercased()) {
+                // 名字像照片的文件夹（「客户挑的.jpg」）不是照片：以前被当成一张、报解析失败（EC-06）。里面的照片照常往下列。
+                if imageExtensions.contains(url.pathExtension.lowercased()), !Self.isDirectory(url) {
                     images.append(url)
                 }
             }
@@ -222,6 +223,13 @@ enum ImageLoader {
             return PhotoFile(stem: claim(candidate), primaryURL: url, decodeURL: url)
         }
         return paired + extraFiles
+    }
+
+    /// 枚举器给的 URL 是不是文件夹：只对扩展名像照片的那几个问（预取过 isDirectoryKey，不另外 stat）。
+    /// 指向文件夹的符号链接不算（和以前一样当一张、解不开报失败；枚举器本来就不跟进去）。
+    private static func isDirectory(_ url: URL) -> Bool {
+        if url.hasDirectoryPath { return true }
+        return (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
     }
 
     static func load(_ url: URL) -> Loaded? {
@@ -392,8 +400,10 @@ enum ImageLoader {
 
         // Write beside the target and rename: a crash mid-write used to leave a
         // truncated preview that the reuse check ("file exists") trusted forever.
-        let tmp = url.deletingLastPathComponent()
-            .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString.prefix(8)).tmp")
+        // 临时名只用 UUID，不从目标名派生（审查 EC-06）：以前是「. + 目标名 + . + 8 位 + .tmp」，比 <id>.jpg 长 14 个字符，
+        // ImageIO 的 CGImageDestinationCreateWithURL 不收 ≥ 250 个字符的文件名 —— 主干 ≥ 232 个字符的照片预览写不出来、
+        // 整张算分析失败，还报成「文件损坏」。现在目标名能到文件系统的上限（255）。
+        let tmp = url.deletingLastPathComponent().appendingPathComponent(".preview-\(UUID().uuidString).tmp")
         guard let dest = CGImageDestinationCreateWithURL(tmp as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
             return false
         }

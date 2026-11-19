@@ -114,7 +114,7 @@ enum SelfTestRegistry {
               stage: .beforeDataDir, ci: .selftests()) { _ in PersonClipSelfTest.run() },
         .init("--focus-selftest", "判虚焦的对焦（清晰比）：合成纹理越糊越低、暗下去不变、横向运动压得下去、平的给 0、贴边不崩；thresholds.json 旧刻度按档迁移、离谱值夹住、老结果折算后判决逐个不变；纯数组，不读写任何文件",
               stage: .beforeDataDir, ci: .selftests()) { _ in FocusSelfTest.run() },
-        .init("--session-input-selftest", "场次文件里不规矩的输入：thresholds.json 离谱值夹到滑杆范围；纯函数，不读写任何文件（要真文件的那一半在 photo_id_regression.py 的 J–M 组）",
+        .init("--session-input-selftest", "场次文件里不规矩的输入：thresholds.json 离谱值夹到滑杆范围、manifest / layer1 一行坏只丢那一行、没进网格的照片怎么数；纯函数，不读写任何文件（要真文件的那一半在 photo_id_regression.py 的 J、L、M 组）",
               stage: .beforeDataDir, ci: .selftests()) { _ in SessionInputSelfTest.run() },
         .init("--mcp-selftest", "MCP 这一层的纯函数（含不开界面那道闸的判断表）：不起服务器、不读写任何文件（[--json]）",
               stage: .beforeDataDir, ci: .elsewhere("mcp_smoke.py")) { _ in MCPSelfTest.run() },

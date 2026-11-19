@@ -125,8 +125,10 @@ enum AnalysisEngine {
         }
         // 上一次的 manifest 不管哪个引擎、哪个分析版本写的都读：listPhotos 按它沿用上一次的 id（PhotoIDMemory.swift）。
         // 下面增量复用的门控只管分析数值能不能直接用；id 不跟着它走 —— 版本一升整场重分析，id 也得原样留着。
-        let oldManifest = (try? Data(contentsOf: dataDir.appendingPathComponent("manifest.json")))
-            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let oldManifestData = try? Data(contentsOf: dataDir.appendingPathComponent("manifest.json"))
+        let oldManifest = oldManifestData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let oldLayer1Data = try? Data(contentsOf: dataDir.appendingPathComponent("layer1_results.json"))
+        let oldLayer1 = oldLayer1Data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
         let previousIDs = ImageLoader.PreviousIDs(manifest: oldManifest, photoDir: photoDir)
         // 顶层列不出来（多半是系统隐私权限没给）就照实说、点名系统设置的开关，不再报「没有支持的图片文件」（审查 D03）。
         if let problem = ImageLoader.folderReadProblem(photoDir) {
@@ -149,17 +151,22 @@ enum AnalysisEngine {
         let fm = FileManager.default
         var oldManifestByID: [String: [String: Any]] = [:]
         var oldLayer1ByID: [String: [String: Any]] = [:]
-        if let mData = try? Data(contentsOf: dataDir.appendingPathComponent("manifest.json")),
-           let mJson = try? JSONSerialization.jsonObject(with: mData) as? [String: Any],
+        if let mData = oldManifestData, let mJson = oldManifest,
            let mPhotos = mJson["photos"] as? [[String: Any]],
-           let lData = try? Data(contentsOf: dataDir.appendingPathComponent("layer1_results.json")),
-           let lJson = try? JSONSerialization.jsonObject(with: lData) as? [String: Any],
+           let lData = oldLayer1Data, let lJson = oldLayer1,
            (lJson["engine"] as? String) == "native",
            (lJson["analysis_version"] as? Int ?? 1) == analysisVersion,
            let lResults = lJson["results"] as? [[String: Any]] {
-            for p in mPhotos { if let id = p["id"] as? String { oldManifestByID[id] = p } }
+            // 只复用界面读得懂的行（审查 EC-03）：按字典宽松读的话，一行字段类型不对（手改、以后改了字段类型又装回旧版本）
+            // 会被当成「未变」原样抄回新 manifest，界面那边永远解不开、这一场一直空着，点「开始分析」也修不好。
+            // 和 BatchStore 打开场次用同一个解码器（Photo / Layer1Result）验一遍，解不开的重新分析。
+            let readableManifest = Manifest.decodablePhotoIDs(mData) ?? []
+            let readableLayer1 = Layer1File.reusableIDs(lData) ?? []
+            for p in mPhotos {
+                if let id = p["id"] as? String, readableManifest.contains(id) { oldManifestByID[id] = p }
+            }
             for r in lResults where r["error"] == nil {
-                if let id = r["id"] as? String { oldLayer1ByID[id] = r }
+                if let id = r["id"] as? String, readableLayer1.contains(id) { oldLayer1ByID[id] = r }
             }
         }
 
