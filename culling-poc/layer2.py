@@ -17,8 +17,9 @@ Usage:
   uv run python layer2.py --backend ollama --base-url http://localhost:11434 \
       --model minicpm-v4.6:f16
   # production run: only judge photos that survived layer1 (sharp, in-focus,
-  # not a duplicate, not confidently closed-eyes) — thresholds come from
-  # evaluate.py's sweep against your labeled data, not guessed:
+  # not a duplicate, not confidently closed-eyes) — check the thresholds
+  # against your labeled data in the app's 标注校准 tab (LabelGUI --accuracy),
+  # not guessed:
   uv run python layer2.py --skip-blurry 50 --dedup-keep-best --skip-closed-eyes
 """
 import argparse
@@ -413,8 +414,8 @@ class GroupFrameCache:
 def judge_photo_ollama(photo, l1, base_url, model, timeout, frame_cache=None):
     """Two focused calls instead of one rubric: face crop (eyes, expression),
     full frame (background, photobombers, limb crops). Results are mapped onto
-    the same output schema the openai backend produces, so the GUI and
-    evaluate.py don't know or care which backend ran. Photos without a face
+    the same output schema the openai backend produces, so the GUI doesn't
+    know or care which backend ran. Photos without a face
     skip the face question: expression_score stays null instead of a made-up
     number leaking into XMP stars and pick ranking (and ~6s saved per photo)."""
     t0 = time.perf_counter()

@@ -25,7 +25,8 @@ Scripts/selftests.sh 里跑）；这里验它们在命令行出口上确实接�
    每套进 --dest 下以预设名命名的子文件夹（/ 去掉、只差大小写的另起 -2），每套按自己的尺寸 / 去 GPS，
    交付对照每套记一条，全部成功在访达里选中外面那层；没存过的预设名退出码 1。
 
-每条命令都带临时 LABELGUI_DATA_DIR、LABELGUI_NO_GUI=1；CI 里放在 MCP 冒烟后面。
+每条命令都带临时 LABELGUI_DATA_DIR、LABELGUI_NO_GUI=1。CI 里在 test-bridge 那台 runner 上跑（和 build 里的 MCP 冒烟
+不在同一台机器上，不用再排在它后面，见 release.yml）。
 用法: python3 -I Scripts/delivery_regression.py <LabelGUI> [--keep]
 """
 import hashlib, importlib.util, json, os, re, shutil, stat, subprocess, sys, tempfile

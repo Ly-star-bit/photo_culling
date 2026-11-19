@@ -124,8 +124,9 @@ def exposure_clipping(rgb_array):
     preview — a JPEG preview can look blown while the RAW still has recoverable
     headroom, which matters for photographers shooting ETTR or deliberately
     underexposed. This only measures; it does not decide what counts as "too much" —
-    evaluate.py calibrates that cutoff against your own labels.csv judgment instead
-    of a guessed threshold.
+    that cutoff is the app's exposure slider, and the 标注校准 tab (`LabelGUI
+    --accuracy`) checks it against your own labels.csv judgment instead of a
+    guessed threshold.
     """
     max_channel = rgb_array.max(axis=2)
     min_channel = rgb_array.min(axis=2)

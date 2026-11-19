@@ -28,7 +28,8 @@ sips 出的图没有拍摄时间（没有时间的每张单独成组），所以
 最后是规模守护：把 photot-session 的 21 行克隆成 2000 / 8000 行（只有 JSON，不要图），给 `--verdicts` 计时；
 共享 runner 计时抖得厉害，只卡很宽的上限和「8000 比 2000 的耗时比」（线性 ≈ 4，O(n²) ≈ 16），各取几次里最快的。
 
-每条命令都带临时 LABELGUI_DATA_DIR、LABELGUI_NO_GUI=1；CI 里放在 MCP 冒烟后面（见 release.yml 那段注释）。
+每条命令都带临时 LABELGUI_DATA_DIR、LABELGUI_NO_GUI=1。CI 里在 test-selftests 那台 runner 上跑（和 build 里的 MCP 冒烟
+不在同一台机器上，不用再排在它后面，见 release.yml）。
 用法: python3 -I Scripts/native_analysis_smoke.py <LabelGUI> [--keep] [--no-scale]
 """
 import importlib.util, json, os, re, shutil, subprocess, sys, tempfile, time

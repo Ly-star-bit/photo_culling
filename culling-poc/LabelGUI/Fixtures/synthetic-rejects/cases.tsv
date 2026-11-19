@@ -1,4 +1,4 @@
-# 每张测什么、期望（判决 理由）：--per-photo / --dedupe --per-photo / --accept-all --per-photo。verdict_regression.sh 逐张核对；「不在」= 不进网格。
+# 每张测什么、期望（判决 理由）：--per-photo / --dedupe --per-photo / --accept-all --per-photo。verdict_regression.sh 逐张核对；「不在」= 没进网格（--verdicts 另打一行「没进网格 N 张: …」列出来）。
 id	默认	去重	接受推荐后	测什么
 A01-ok	可用 -	可用 -	可用 -	对照：原样抄 DSCF7207
 A02-focus59	废片 虚焦	废片 虚焦	废片 虚焦	对焦 59 < 线 60（thresholds.json 存的旧刻度锐度 45，按档迁移成 60）
@@ -73,4 +73,4 @@ S03-dark-sharp30	可用 -	可用 -	可用 -	锐度只有 30（暗、特写会这
 S04-sharp85-focus40	废片 虚焦	废片 虚焦	废片 虚焦	锐度 85 但对焦 40（眼睛那块糊、反差大）→ 虚焦（升级前不判）
 Z01-corrupt	废片 文件损坏	废片 文件损坏	废片 文件损坏	file_corrupt=true
 Z02-ch2-blur	废片 虚焦	废片 虚焦	废片 虚焦	第二章另一张虚焦：这一章全灭
-Z03-l1-error	不在	不在	不在	layer1 这一行带 error：不进网格（照片数不算它）
+Z03-l1-error	不在	不在	不在	layer1 这一行带 error：没进网格（照片数不算它；--verdicts 另打一行「没进网格 1 张: Z03-l1-error」）

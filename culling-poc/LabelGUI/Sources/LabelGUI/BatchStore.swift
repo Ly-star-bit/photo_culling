@@ -3256,8 +3256,8 @@ final class BatchStore: ObservableObject {
         Task.detached { [weak self] in
             defer { sleepGuard.end() }  // 所有出口都放掉防睡眠（审查 S05c）
             // Runs natively (ImageIO/Vision) — no Python, no external deps.
-            // Artifacts keep the prepare.py/layer1.py format so the VLM stage and
-            // evaluate.py stay unchanged.
+            // Artifacts keep the prepare.py/layer1.py format so the VLM stage
+            // (layer2.py) stays unchanged.
             await MainActor.run { [weak self] in self?.progressText = "分析中..." }
             let summary: AnalysisEngine.Summary
             do {
