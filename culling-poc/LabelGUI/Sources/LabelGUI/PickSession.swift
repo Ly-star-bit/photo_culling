@@ -148,14 +148,9 @@ final class PickSession: ObservableObject {
             let wanted = Set(selectionIDs ?? [])
             return store.items.filter { wanted.contains($0.id) }
         }
-        var members = store.members(ofTake: key)
-        if sortByScore {
-            members.sort { a, b in
-                let ka = BatchStore.scoreKey(a), kb = BatchStore.scoreKey(b)
-                return ka == kb ? a.id < b.id : ka > kb
-            }
-        }
-        return members
+        let members = store.members(ofTake: key)
+        // 和网格那一行同一个先后（BatchStore.scoreOrder：没淘汰的在前，近似重复组里糊一截的排在清楚的后面）。
+        return sortByScore ? BatchStore.scoreOrder(members) : members
     }
 
     /// 这一组还待处理吗（跨场那组不算）。
@@ -301,7 +296,9 @@ final class PickSession: ObservableObject {
             let recommendation = recommended(currentKey)
             picks = Set(frames.filter { recommendation[$0.id] == .pick }.map(\.id))
         }
-        if picks.isEmpty, let best = frames.max(by: { BatchStore.scoreKey($0) < BatchStore.scoreKey($1) }) {
+        // 兜底挑的是「按评分」排第一的（scoreOrder）：没淘汰的优先，近似重复组里糊一截的不挑 —— 以前直接比 scoreKey，
+        // 开着去重时会把被扔掉的、人脸质量最高的那张糊片挑成精选。
+        if picks.isEmpty, let best = BatchStore.scoreOrder(frames).first {
             picks = [best.id]
         }
         let d = Dictionary(frames.map { ($0.id, picks.contains($0.id) ? Verdict.pick : .usable) },

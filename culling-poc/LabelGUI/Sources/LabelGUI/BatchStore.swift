@@ -1353,8 +1353,9 @@ final class BatchStore: ObservableObject {
     enum SortOrder: String, CaseIterable {
         case captureTime = "拍摄时间"
         case filename = "文件名"
-        /// 评分高的在前（表情 > 人脸质量 > 锐度，同 scoreKey）—— 交付前过最终
-        /// 选片时精选区最好的排最前。
+        /// 评分高的在前（表情 > 近似重复里糊一截的靠后 > 人脸质量 > 锐度，同 rankKey）—— 交付前过最终
+        /// 选片时精选区最好的排最前。只在载入、换排序时排一次（不跟着滑杆、改判重排），所以锐度门不看判决，
+        /// 在全部照片里比（见 sort）；按判决分区显示，精选在精选区，和场内名次不打架。
         case score = "评分"
     }
 
@@ -1378,10 +1379,16 @@ final class BatchStore: ObservableObject {
         case .filename:
             array.sort { $0.order < $1.order }
         case .score:
-            array.sort { a, b in
-                let ka = scoreKey(a), kb = scoreKey(b)
-                return ka == kb ? a.order < b.order : ka > kb
+            // 和提名、#1 #2 #3 同一把尺子（rankKey，优化分析 2026-11-18 VQ-03 收尾）。这里排的时候判决多半还是旧的
+            // （载入时还没判），排完也不跟着判决重排（重排会挪 items 的下标，改判的局部重算对不上整场重算），所以不看判决：
+            // 锐度门在全部照片里比，两次打开排出来一样。没有表情分时糊一截的会沉到同一区的后面，这正是要的。
+            // 键先算好：比较里每次算锐度门、拷两张 BatchItem 是 n log n 次。
+            let soft = softerInBurst(Array(array.indices), in: array)
+            let keys = array.indices.map { rankKey(array[$0], soft: soft.contains($0)) }
+            let order = array.indices.sorted { a, b in
+                keys[a] == keys[b] ? array[a].order < array[b].order : keys[a] > keys[b]
             }
+            array = order.map { array[$0] }
         case .captureTime:
             array.sort { a, b in
                 switch (a.captureTime, b.captureTime) {
@@ -4109,8 +4116,12 @@ final class BatchStore: ObservableObject {
         var pick = 0, usable = 0, reject = 0
         // 代表照片：线性挑前 4（每次滑杆都会重算，别为它整章排序）。
         var top: [Int] = []
-        func key(_ i: Int) -> (Int, Double, Double) {
-            (items[i].expressionScore ?? -1, items[i].faceQuality ?? -1, items[i].sharpness)  // = scoreKey，不拷整张
+        // 和场内名次同一道锐度门（scoreOrder）：一场没有精选时（人工改判过、只剩一张没淘汰…），近似重复组里糊一截的那张
+        // 不当代表。参照只在没淘汰的里找；整章算一次，不在下面的比较里算。
+        let soft = softerInBurst(members.filter { items[$0].verdict != .reject }, in: items)
+        func key(_ i: Int) -> (Int, Int, Double, Double) {
+            // = rankKey，不拷整张
+            (items[i].expressionScore ?? -1, soft.contains(i) ? 0 : 1, items[i].faceQuality ?? -1, items[i].sharpness)
         }
         func better(_ a: Int, _ b: Int) -> Bool {
             let ra = coverRank(items[a].verdict), rb = coverRank(items[b].verdict)
@@ -4491,11 +4502,29 @@ final class BatchStore: ObservableObject {
         return indices.max { rankKey(items[$0], soft: soft.contains($0)) < rankKey(items[$1], soft: soft.contains($1)) }
     }
 
-    /// 同一把尺子给三处用：场内自动提名、「按评分」排序、缩略图上的 #1 #2 #3。
-    /// 三处用的不是同一个排序的话，标着 #1 的那张不是精选，用户会怀疑软件。
-    /// 提名、去重和 #1 #2 #3 在它上面还多一道近似重复组里的锐度门（rankKey）；它要看同组的候选，一张照片自己算不出来。
+    /// 不带锐度门的那一半。挑「最好那张」、排名次的地方都不直接用它，用 rankKey（多一道近似重复组里的锐度门，要看同组的
+    /// 候选，一张照片自己算不出来）：场内自动提名、去重、缩略图上的 #1 #2 #3、「按评分」排序（全局、堆栈、连拍挑选）、
+    /// 「这组全留」的兜底、MCP 近似重复组的名次、章节代表照片、精华 Top N。
+    /// 这几处用的不是同一个排序的话，标着 #1 的那张不是精选，用户会怀疑软件。
     static func scoreKey(_ item: BatchItem) -> (Int, Double, Double) {
         (item.expressionScore ?? -1, item.faceQuality ?? -1, item.sharpness)
+    }
+
+    /// 「按评分」排一批照片（一场、一个近似重复组、跨场多选的几张）：没淘汰的在前，按 rankKey 排 —— 锐度门的参照只在这批
+    /// 没淘汰的里找，和 takeStat 的 #1 #2 #3 是同一批候选、同一把尺子，所以没有人工改判时拿精选的那张（去重留下的那张）
+    /// 排第一；淘汰的排在后面（它们之间不过门，照 scoreKey）—— 不然闭了眼、人脸质量又最高的那张会排在精选前面。同分按 id。
+    /// 堆栈「场内按评分」、连拍挑选、「这组全留」的兜底、MCP 近似重复组的名次、精华 Top N 都走它。人工改的精选不往前挪
+    /// （名次是算法的看法）。
+    static func scoreOrder(_ members: [BatchItem]) -> [BatchItem] {
+        let alive = members.indices.filter { members[$0].verdict != .reject }
+        let soft = softerInBurst(alive, in: members)
+        let keys = members.indices.map { rankKey(members[$0], soft: soft.contains($0)) }
+        let order = members.indices.sorted { a, b in
+            let aliveA = members[a].verdict != .reject, aliveB = members[b].verdict != .reject
+            if aliveA != aliveB { return aliveA }
+            return keys[a] == keys[b] ? members[a].id < members[b].id : keys[a] > keys[b]
+        }
+        return order.map { members[$0] }
     }
 
     /// scoreKey 加上锐度门：`soft` = 这张在候选里比自己近似重复组里最清楚的那张糊一截（softerInBurst）。
@@ -4864,10 +4893,12 @@ final class BatchStore: ObservableObject {
     /// 全场评分最高的 N 张：精选优先，不够再从可用里按评分补。`fromUsable` 是补了
     /// 几张 —— 界面上要说清楚，别让人以为精华全是精选。
     func topPicks(_ n: Int) -> (ids: [String], fromUsable: Int) {
-        let picks = items.filter { $0.verdict == .pick }.sorted { Self.scoreKey($0) > Self.scoreKey($1) }
+        // 精选、可用一起按 scoreOrder 排（锐度门的参照在全部没淘汰的里找，和场内名次一样），再按判决分开取：从可用里补时，
+        // 近似重复组里糊一截的排在后面。
+        let ranked = Self.scoreOrder(items.filter { $0.verdict != .reject })
+        let picks = ranked.filter { $0.verdict == .pick }
         if picks.count >= n { return (picks.prefix(n).map(\.id), 0) }
-        let fill = items.filter { $0.verdict == .usable }.sorted { Self.scoreKey($0) > Self.scoreKey($1) }
-            .prefix(n - picks.count)
+        let fill = ranked.filter { $0.verdict == .usable }.prefix(n - picks.count)
         return (picks.map(\.id) + fill.map(\.id), fill.count)
     }
 

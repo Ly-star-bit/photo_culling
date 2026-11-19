@@ -530,7 +530,8 @@ enum MCPReadModel {
         return out
     }
 
-    /// 近似重复（burstGroup）：名次和场内名次同一个分数（BatchStore.scoreKey），只排没被淘汰的。
+    /// 近似重复（burstGroup）：名次和场内名次同一把尺子（BatchStore.scoreOrder：表情 > 组里糊一截的靠后 > 人脸质量 > 锐度，
+    /// 锐度门的参照只在组里没淘汰的里找），只排没被淘汰的 —— 没有人工改判时，组里拿精选的那张就是 #1。
     static func dupGroups(_ s: BatchStore, minSize: Int) -> [[String: Any]] {
         var byGroup: [Int: [BatchItem]] = [:]
         for item in s.items { byGroup[item.burstGroup, default: []].append(item) }
@@ -539,8 +540,7 @@ enum MCPReadModel {
             var members = byGroup[key] ?? []
             guard members.count >= minSize else { continue }
             BatchStore.sort(&members, by: .captureTime)
-            let alive = members.filter { $0.verdict != .reject }
-            let ranked = alive.sorted { BatchStore.scoreKey($0) > BatchStore.scoreKey($1) }
+            let ranked = BatchStore.scoreOrder(members).filter { $0.verdict != .reject }
             var rank: [String: Int] = [:]
             if ranked.count > 1 {
                 for (i, item) in ranked.enumerated() { rank[item.id] = i + 1 }

@@ -790,7 +790,7 @@ private struct PickTile: View {
             if let rank {
                 Text("#\(rank)").font(.caption2.bold()).monospacedDigit()
                     .foregroundStyle(rank == 1 ? Color.white : Color.white.opacity(0.6))
-                    .help("算法评分本组第 \(rank)（表情 > 人脸质量 > 锐度）")
+                    .help("算法评分本组第 \(rank)（表情 > 近似重复里明显更糊的靠后 > 人脸质量 > 锐度）")
             }
             if manual {
                 Image(systemName: "hand.raised.fill").font(.system(size: 9)).foregroundStyle(.white.opacity(0.7))
