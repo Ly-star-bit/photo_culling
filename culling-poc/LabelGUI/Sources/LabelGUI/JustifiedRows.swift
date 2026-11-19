@@ -130,6 +130,15 @@ enum TakeShelves {
     static let gap: CGFloat = 10
     /// 小组内容最窄多少（放得下组头：选中框、场号、状态点、「⋯」）。
     static let minContent: CGFloat = 132
+    /// 独占一块的场超过这么多行就拆成一行一块（网格 Lazy 栈的一个孩子一行，和单张区一样）。不拆的话这一场有几张就一次铺几格：
+    /// 一场 300 张（连着拍、相邻都不超过 8 秒）按分组时方向键每下 557 百万条指令，挂着的格子 300 个（优化分析 2026-11-18
+    /// edge 复核 N1）。三行以内的照旧一整块（一屏放得下，拆了只是多几个孩子）。
+    static let splitRows = 3
+
+    /// 拆开的大场里第 `row` 行那一块的 id（滚动定位的目标）。第一行就是整场那一块原来的 id，跳到这一场照旧落在它上面。
+    static func partID(take: Int, row: Int) -> String {
+        row == 0 ? "take-\(take)" : "take-\(take)-\(row)"
+    }
 
     /// 并排的一行里的一场。
     struct Placed: Equatable {

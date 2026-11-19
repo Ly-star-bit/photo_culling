@@ -96,6 +96,8 @@ enum SelfTestRegistry {
               ci: .selftests(["{fixture}"])) { i in SnapshotEventsSelfTest.run(flagIndex: i) },
         .init("--view-prefs-selftest", "无头拨控件不碰设置域：视图设置（@AppStorage）无头时只落一份临时的、读不到设置域里存过的；给了 fixture 再把自己拷成新名字（新的设置域），在拷贝里真点批量页的「按分组」、缩略图滑杆、跑 --perf grid，跑完那个域还不存在（[<Fixtures/photot-session>]，窗口从不上屏）",
               ci: .selftests(["{fixture}"])) { i in ViewPrefsSelfTest.run(flagIndex: i) },
+        .init("--grid-scale-selftest", "批量页网格在大场上的形状：造一场 150 张连着拍的（一个场），离屏拼出批量页按分组 —— 拆成一行一块、只铺眼前几行，↓ 走到底每下焦点都铺出来，跳回中间 / 开头落得到（要临时数据目录，窗口从不上屏）",
+              ci: .selftests()) { _ in GridScaleSelfTest.run() },
         .init("--files-selftest", "文件安全：XMP 只写改了的、同名共用 .xmp、废片避开拼图、高 ISO RAW 复制不互相顶掉",
               ci: .selftests()) { _ in FileSafetySelfTest.run() },
         .init("--collage-export-selftest", "拼图 / 相册导出：PDF 先写临时文件再改名、缺跨页不出 PDF、空照片格先确认",

@@ -1612,7 +1612,10 @@ struct BatchView: View {
     /// 还在网格里就滚到那一场，不在就不滚（以前一律滚到最底下的「单张」，R8）。
     private func groupScrollTarget(_ id: String) -> String? {
         let anchors = groupLayout.anchors
-        if let inTake = groupedItems.first(where: { $0.members.contains { $0.id == id } }) { return anchors[inTake.group] }
+        if let inTake = groupedItems.first(where: { $0.members.contains { $0.id == id } }) {
+            // 拆开的大场：滚到它所在的那一行（整场一块时滚到这一场，这一场一铺出来里面每一格都在；拆开以后只铺眼前几行）。
+            return partTarget(groupLayout, take: inTake.group, id: id) ?? anchors[inTake.group]
+        }
         if showSingles, let row = navigationRows().last(where: { $0.cells.contains { $0.id == id } }),
            row.id.hasPrefix("singles-") {
             return row.id
@@ -2224,10 +2227,22 @@ struct BatchView: View {
 
     /// 按分组时的一块：一行放不下的一场（自己占一块），或者并排的几场。直接是网格那个 LazyVStack 的孩子。
     private struct GroupBlock: Identifiable {
-        /// 滚动定位的目标：「take-场号」/「shelf-这一行第一场的场号」。
+        /// 滚动定位的目标：「take-场号」/「shelf-这一行第一场的场号」；拆开的大场是 TakeShelves.partID。
         let id: String
-        /// 这一块里的场：独占一块的只有一场（content = nil，撑满），并排的一行有几场。
+        /// 这一块里的场：独占一块的只有一场（content = nil，撑满），并排的一行有几场。拆开的大场的一行：那一场（只带这一行）。
         let takes: [ShelfTake]
+        /// 拆开的大场里的一行（nil = 整块）。
+        var part: TakePart? { takes.first?.part }
+    }
+
+    /// 拆开的大场里的一行：第几行、是不是头尾（组头、框的上下边只画在头尾），和整场的两样（不是每一块都去整场算 takeInfo）。
+    private struct TakePart {
+        let row: Int
+        let first: Bool
+        let last: Bool
+        /// 整场没淘汰的张数（只剩一张时那一格不出「只留这张」）。
+        let alive: Int
+        let pending: Bool
     }
 
     /// 小组里的一场：成员、怎么分行。`content` = 小组内容的宽度（独占一块的 = nil，撑满）。
@@ -2235,14 +2250,19 @@ struct BatchView: View {
         let entry: TakeGroup
         let rows: [GridRow]
         let content: CGFloat?
+        /// 拆开的大场（TakeShelves.splitRows）里的一行；nil = 整场一个小组。
+        var part: TakePart? = nil
         var id: Int { entry.group }
     }
 
     /// 按分组时整页怎么排（TakeShelves）：每一块、每场在哪一块（滚动定位）。`packed`、`groups` 留着给 ↑ ↓ 的行表
-    /// （groupNavRows，用到才算：改判以后整页重排，但多半用不着行表）。blocks 和 packed 一一对应。
+    /// （groupNavRows，用到才算：改判以后整页重排，但多半用不着行表）。blocks 和 packed 一一对应，只有拆开的大场
+    /// （TakeShelves.splitRows）一行一块。
     private struct GroupLayout {
         var blocks: [GroupBlock] = []
         var anchors: [Int: String] = [:]
+        /// 拆开的大场：场号 → 它第一行那一块在 blocks 里的下标（滚动定位找某一张在哪一行）。
+        var split: [Int: Int] = [:]
         var packed: [TakeShelves.Block] = []
         var groups: [TakeGroup] = []
     }
@@ -2276,8 +2296,13 @@ struct BatchView: View {
                     let rowID = "take\(group.group)-\(k)"
                     gridRows.append(GridRow(id: rowID, items: group.members[row.range], widths: row.widths, height: row.height))
                 }
-                out.blocks.append(GroupBlock(id: blockID, takes: [ShelfTake(entry: group, rows: gridRows, content: nil)]))
                 out.anchors[group.group] = blockID
+                if gridRows.count > TakeShelves.splitRows {
+                    out.split[group.group] = out.blocks.count
+                    appendParts(group, gridRows, to: &out)
+                } else {
+                    out.blocks.append(GroupBlock(id: blockID, takes: [ShelfTake(entry: group, rows: gridRows, content: nil)]))
+                }
             case .shelf(let placed):
                 // 并排的一行至少有一场（TakeShelves.pack 不出空行）。
                 let blockID = "shelf-\(placed.first.map { groups[$0.take].group } ?? -1)"
@@ -2294,13 +2319,37 @@ struct BatchView: View {
         return out
     }
 
+    /// 大场一行一块（TakeShelves.splitRows）。组头那几样只给第一行算（takeInfo），别的行只要整场的两个数。
+    private func appendParts(_ group: TakeGroup, _ rows: [GridRow], to out: inout GroupLayout) {
+        let all = store.members(ofTake: group.group)
+        let alive = all.filter { $0.verdict != .reject }
+        let pending = store.isPendingTake(alive: alive)
+        for (k, row) in rows.enumerated() {
+            let part = TakePart(row: k, first: k == 0, last: k == rows.count - 1, alive: alive.count, pending: pending)
+            let take = ShelfTake(entry: group, rows: [row], content: nil, part: part)
+            out.blocks.append(GroupBlock(id: TakeShelves.partID(take: group.group, row: k), takes: [take]))
+        }
+    }
+
+    /// 拆开的大场里这一张在哪一行那一块（没拆、不在这一场 = nil）。
+    private func partTarget(_ layout: GroupLayout, take: Int, id: String) -> String? {
+        guard let start = layout.split[take] else { return nil }
+        var k = start
+        while k < layout.blocks.count, let only = layout.blocks[k].takes.first, let part = only.part, only.entry.group == take {
+            if only.rows.contains(where: { row in row.items.contains { $0.id == id } }) { return layout.blocks[k].id }
+            if part.last { break }
+            k += 1
+        }
+        return nil
+    }
+
     /// 按分组时 ↑ ↓ 的行表：独占一块的场一行一行，并排的一行算一行（格子中点带着小组的位置）。
     private var groupNavRows: [GridMemo.NavRow] {
         memo.value("groupNav", key: GridMemo.NavKey(view: viewKey, layout: layoutKey)) {
             let layout = groupLayout
             let ids = layout.groups.map { $0.members.map(\.id) }
             var out: [GridMemo.NavRow] = []
-            for (k, block) in layout.packed.enumerated() {
+            for block in layout.packed {
                 switch block {
                 case .rows(let index, let rows):
                     let take = layout.groups[index].group
@@ -2308,7 +2357,9 @@ struct BatchView: View {
                         out.append(GridMemo.NavRow(id: "take\(take)-\(r)", cells: JustifiedRows.cells(ids: ids[index], row: row)))
                     }
                 case .shelf(let placed):
-                    out.append(GridMemo.NavRow(id: layout.blocks[k].id, cells: TakeShelves.cells(ids: ids, shelf: placed)))
+                    // 并排那一块的 id（和 computeGroupLayout 一样拼：大场拆开以后 blocks 和 packed 不再一一对应）。
+                    let shelfID = "shelf-\(placed.first.map { layout.groups[$0.take].group } ?? -1)"
+                    out.append(GridMemo.NavRow(id: shelfID, cells: TakeShelves.cells(ids: ids, shelf: placed)))
                 }
             }
             return out
@@ -2324,7 +2375,7 @@ struct BatchView: View {
         let singles = singleItems
         ForEach(groupLayout.blocks) { block in
             groupBlockView(block)
-                .padding(.bottom, 4)
+                .padding(.bottom, block.part.map { $0.last ? 4 : 0 } ?? 4)
                 .id(block.id)
         }
         if !singles.isEmpty {
@@ -2347,7 +2398,12 @@ struct BatchView: View {
     private func groupBlockView(_ block: GroupBlock) -> some View {
         HStack(alignment: .top, spacing: TakeShelves.gap) {
             ForEach(block.takes) { take in
-                takeBox(take)
+                if let part = take.part {
+                    // 拆开的大场的一行。
+                    takePart(take, part)
+                } else {
+                    takeBox(take)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2457,7 +2513,7 @@ struct BatchView: View {
             }
             .contentShape(Rectangle())
             .contextMenu { takeMenuItems(info) }
-            // 一场的照片不多，行不用 Lazy：这一场铺出来了，里面每一格都找得到（滚动定位）。
+            // 一场的照片不多，行不用 Lazy：这一场铺出来了，里面每一格都找得到（滚动定位）。行多的大场拆成一行一块（takePart）。
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(take.rows) { row in
                     rowView(row) { member, width, height in
@@ -2482,6 +2538,63 @@ struct BatchView: View {
         .overlay(alignment: .leading) {
             if info.pending {
                 RoundedRectangle(cornerRadius: 2).fill(AppPalette.warning.opacity(0.8)).frame(width: 3).padding(.vertical, 8)
+            }
+        }
+    }
+
+    /// 组头（takeBox 里那一段的同一份，给拆开的大场第一行用；整块的小组 takeBox 一个字没动）。
+    private func takeHeader(_ info: TakeInfo) -> some View {
+        ViewThatFits(in: .horizontal) {
+            takeHeaderFull(info)
+            takeHeaderShort(info)
+            takeHeaderTiny(info)
+        }
+        .contentShape(Rectangle())
+        .contextMenu { takeMenuItems(info) }
+    }
+
+    /// 拆开的大场里的一行照片（同 takeBox 里那一段）。`alive` = 整场没淘汰的张数。
+    private func takeRow(_ row: GridRow, alive: Int) -> some View {
+        rowView(row) { member, width, height in
+            // groupSize 1：行头已经写了张数，缩略图上再贴 ×N 就重复了。
+            let soleKeeper = member.verdict != .reject && alive == 1
+            gridCell(member, color: member.verdict.color, groupSize: 1, width: width, height: height,
+                     keepOnly: !soleKeeper, showPick: true)
+        }
+    }
+
+    /// 拆开的大场里的一行（TakeShelves.splitRows）：Lazy 栈的一个孩子，滚到哪一行才铺哪一行的格子。第一行带组头；
+    /// 框（底色、边线、待处理竖条）每一行只画自己那一截（TakeBoxPiece），拼起来和整块的小组（takeBox）一样。
+    private func takePart(_ take: ShelfTake, _ part: TakePart) -> some View {
+        let info: TakeInfo? = part.first ? takeInfo(take.entry) : nil
+        let pending = part.pending
+        return VStack(alignment: .leading, spacing: 6) {
+            if let info { takeHeader(info) }
+            ForEach(take.rows) { row in
+                takeRow(row, alive: part.alive)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, TakeShelves.pad)
+        .padding(.top, part.first ? TakeShelves.pad : 0)
+        .padding(.bottom, part.last ? TakeShelves.pad : 0)
+        .background {
+            if pending {
+                TakeBoxPiece(first: part.first, last: part.last) {
+                    RoundedRectangle(cornerRadius: 8).fill(AppPalette.ink.opacity(0.04))
+                }
+            }
+        }
+        .overlay {
+            TakeBoxPiece(first: part.first, last: part.last) {
+                RoundedRectangle(cornerRadius: 8).strokeBorder(AppPalette.ink.opacity(0.09), lineWidth: 1)
+            }
+        }
+        .overlay(alignment: .leading) {
+            if pending {
+                TakeBoxPiece(first: part.first, last: part.last) {
+                    RoundedRectangle(cornerRadius: 2).fill(AppPalette.warning.opacity(0.8)).frame(width: 3).padding(.vertical, 8)
+                }
             }
         }
     }
@@ -3204,6 +3317,35 @@ struct BatchView: View {
 }
 
 // MARK: - 顶栏量宽度
+
+/// 拆开的大场（TakeShelves.splitRows）一行一块以后，小组那一圈框（底色、边线、待处理竖条）每块只画自己那一截：照整框的样子画，
+/// 上下伸出去的部分剪掉（圆角只留在头尾两块）；不是第一行的往上多画一个行距 —— 网格 Lazy 栈两个孩子之间那 8pt
+/// （BatchView.gridArea 的 spacing，和整块小组里行与行之间的 8 一样）不属于谁，不补上边线就断开。各块正好接上、不重叠
+/// （边线是 9% 的白，叠一层就看得出来）。
+private struct TakeBoxPiece<Content: View>: View {
+    let first: Bool
+    let last: Bool
+    let content: Content
+
+    /// 剪掉的那一截：比圆角（8）、竖条离上下边的 8pt 都长。
+    private static var overhang: CGFloat { 24 }
+    /// 网格 Lazy 栈相邻两个孩子之间的空。
+    private static var rowGap: CGFloat { 8 }
+
+    init(first: Bool, last: Bool, @ViewBuilder content: () -> Content) {
+        self.first = first
+        self.last = last
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .padding(.top, first ? 0 : -Self.overhang)
+            .padding(.bottom, last ? 0 : -Self.overhang)
+            .clipped()
+            .padding(.top, first ? 0 : -Self.rowGap)
+    }
+}
 
 /// 量顶栏某一档要多宽的替身（BatchView.barProbes）：按内容自己的宽度排（fixedSize），量到了报回去。
 /// 只在 Key 变了才重算：里面是一整条顶栏，不能跟着方向键、改判每下重建。
