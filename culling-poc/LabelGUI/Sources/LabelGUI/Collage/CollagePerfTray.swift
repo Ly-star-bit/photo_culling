@@ -4,7 +4,9 @@ import Darwin
 
 /// `--collage-ui … --perf trayclick`：托盘点选（单击换一张）。每一下哪些 body 重算了几次、主线程上的活有多少，
 /// 21 张的托盘和复制成 315 张的大托盘（婚礼相册的量）各来一遍；最后核对「单击换一张：网格 0 次、格子最多 2 格」。
-/// 主要看指令数（进程的 ri_instructions，减掉同样空转一段的）：不随核的种类、频率变，同一份二进制几次跑差不到 2%。
+/// 主要看指令数（主线程自己的，thread_selfcounts；取不到才退回进程的 ri_instructions；都减掉同样空转一段的）：不随核的
+/// 种类、频率变，同一份二进制几次跑差不到 2%。以前用进程的：后台还在算路人信息、蒙版、渲预览时空转一段就是几十亿条
+/// （2026-11-18 量到空转 0.3 秒 7000 多百万条），减出来全是 0。
 /// 主线程 CPU 毫秒只作参考：离屏、不激活的进程主线程有时被放到能效核上，同一份二进制能差 3–5 倍（开了
 /// latencyCritical、把主线程 QoS 设成 user-interactive 也压不住）。不量间隔：定时器被节流（CollagePerf 顶上说的那个坑）。
 /// 合成鼠标事件到不了离屏窗口里的 SwiftUI 手势（窗口没上屏、进程不激活），所以「按下 / 松开到选中」等不等
@@ -18,7 +20,7 @@ extension CollagePerf {
         pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)
         spin(4)
         let idle = idleCost(spin: spin)
-        print(String(format: "perf trayclick：空转 0.3 秒 进程 %.2f 百万条指令、主线程 %.2f ms（下面的都已减掉）",
+        print(String(format: "perf trayclick：空转 0.3 秒 主线程 %.2f 百万条指令、%.2f ms（下面的都已减掉）",
                      idle.instr, idle.ms))
 
         var ok = clicks("托盘点选", store: store, idle: idle, spin: spin)
@@ -52,10 +54,10 @@ extension CollagePerf {
     }
 
     /// 当前线程（主线程）用掉的 CPU 毫秒。
-    private static func cpuMS() -> Double { Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)) / 1e6 }
+    static func cpuMS() -> Double { Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)) / 1e6 }
 
     /// 整个进程到现在执行了多少条指令（百万）。后台线程空着（缩略图、预览都落下来了）时基本就是主线程的。
-    private static func instructionsM() -> Double {
+    static func instructionsM() -> Double {
         var info = rusage_info_v4()
         let ok = withUnsafeMutablePointer(to: &info) { p in
             p.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(getpid(), RUSAGE_INFO_V4, $0) }
@@ -63,12 +65,15 @@ extension CollagePerf {
         return ok == 0 ? Double(info.ri_instructions) / 1e6 : 0
     }
 
+    /// 点选量的指令：主线程自己的（取不到退回整个进程的）。
+    private static func clickInstructionsM() -> Double { threadInstructionsM() ?? instructionsM() }
+
     private static func idleCost(spin: (Double) -> Void) -> (instr: Double, ms: Double) {
         var instr: [Double] = [], ms: [Double] = []
         for _ in 0..<5 {
-            let i = instructionsM(), c = cpuMS()
+            let i = clickInstructionsM(), c = cpuMS()
             spin(0.3)
-            instr.append(instructionsM() - i)
+            instr.append(clickInstructionsM() - i)
             ms.append(cpuMS() - c)
         }
         return (instr.sorted()[instr.count / 2], ms.sorted()[ms.count / 2])
@@ -87,10 +92,10 @@ extension CollagePerf {
         for id in order.prefix(12) {
             bodies = [:]
             enabled = true
-            let i = instructionsM(), c = cpuMS()
+            let i = clickInstructionsM(), c = cpuMS()
             tray.click(id, command: false, shift: false, order: order)
             spin(0.3)
-            instr.append(max(0, instructionsM() - i - idle.instr))
+            instr.append(max(0, clickInstructionsM() - i - idle.instr))
             cpu.append(max(0, cpuMS() - c - idle.ms))
             enabled = false
             counts.append(bodies)
