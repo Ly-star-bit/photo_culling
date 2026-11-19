@@ -2,16 +2,21 @@ import Foundation
 import SwiftUI
 
 /// LabelGUI --theme-selftest：六套主题的颜色表（AppTheme.swift）逐套核对 —— 字读不读得清、点缀色认不认得出、会不会和判决色撞、
-/// 选中框压在白纸上看不看得见、放照片的底带不带色。核对的是界面上实际画出来的颜色：深色主题的判决色 / 提醒黄 / 客户紫没有
-/// 自己的值（就是系统色），按系统色在 macOS 15 和 26 上的实际值算（`systemDark`）；相纸用它自己压深过的值。
+/// 选中框压在白纸上看不看得见、放照片的底带不带色。核对的是界面上实际画出来的颜色：石墨、胡桃、午夜、纯黑的判决色 / 提醒黄 /
+/// 客户紫没有自己的值（就是系统色），按系统色在 macOS 15 和 26 上的实际值算（`systemDark`）；相纸、灰卡用自己给的值（相纸压深、
+/// 灰卡提亮），五个都要给、小字在四种底上都核对。
 /// 不读写任何文件，不建窗口；只有共用的选中框用 ImageRenderer 离屏画一遍、取像素（`renderedRingContrast`），别的都是算数。
 ///
 /// 管不到的（这里通过不等于界面上没问题）：
 ///   - 页面到底用没用这些出口：说明字写成 SwiftUI 的 `.secondary`、废片红写成 `.red`、提醒写成 `.yellow`、选中框自己画一条
 ///     点缀色而不用 SelectionRing，这里照样通过（优化分析 2026-11-18 V-01：相纸下系统的二级字只有 3.8:1，自检核对的
 ///     `secondary` 那时除了暗房没人用）。改页面的时候要拍快照量。
-///   - 深色主题判决色 / 客户紫的对比度：那是系统色，石墨也不许动，这里只核对色相。灰卡的栏和卡片是中灰，系统蓝 / 红 / 紫在上面
-///     偏暗（卡片上 2.9–3.3:1、栏上 3.4–4.4:1）；其余四套深色在栏上 ≥ 4.7:1、卡片上 ≥ 4.1:1。
+///   - 石墨、胡桃、午夜、纯黑的判决色 / 客户紫的对比度：那是系统色，石墨也不许动，这里只核对色相（这四套在栏上 ≥ 4.7:1、
+///     卡片上 ≥ 4.1:1）。灰卡的栏和卡片是中灰，系统蓝 / 红 / 紫在上面偏暗（卡片上 2.9–3.3:1），所以灰卡自己给了一套提亮的，
+///     和相纸一样核对。
+///   - 实心的判决底上压的字：只核对了判决色当小字，没核对判决色当底。灰卡提亮过的蓝 / 红 / 紫上面压白字只有 2.3:1（系统色上
+///     3.2–3.7:1，绿底上一直是 2:1 上下）：连拍挑选照片角上的「留·可用」「✕ 废」胶囊、审片判决条选中的那一个写死白字，
+///     灰卡下读着吃力。
 enum ThemeSelfTest {
     static func rgb(_ v: UInt32) -> (r: Double, g: Double, b: Double) {
         (Double((v >> 16) & 0xFF) / 255, Double((v >> 8) & 0xFF) / 255, Double(v & 0xFF) / 255)
@@ -155,13 +160,23 @@ enum ThemeSelfTest {
             check(contrast(c("onAccent"), c("warning")) >= 4.5, "\(name)：待处理胶囊上的字 \(fmt(contrast(c("onAccent"), c("warning"))))")
 
             // 判决色、提醒黄、客户紫实际画出来的值：浅色主题必须自己给（系统色是照深色底调的，系统黄在相纸上 1.1:1），
-            // 小字在栏、卡片、放照片的底上 ≥ 4.5:1；深色主题没给的按系统色两代的值算。
+            // 深色主题底是中灰的也自己给（灰卡：系统蓝 / 红 / 紫在卡片上 2.9–3.3:1）。给了就五个都给（只给一半的话剩下的是系统色，
+            // 没人核对），小字在栏、卡片、放照片的底上 ≥ 4.5:1；深色主题一个没给的按系统色两代的值算。
             let own = h.filter { markKeys.contains($0.key) }
             let markSets: [(os: String, colors: [String: UInt32])]
-            if colors.dark {
-                markSets = systemDark.map { sys in (sys.os, sys.colors.merging(own) { _, mine in mine }) }
+            if colors.dark && own.isEmpty {
+                markSets = systemDark
+                // 用系统色的那几套，系统色两代的小字至少在栏上 ≥ 4.5:1（卡片上本来就差一点，见文件头）。灰卡要是又不给值了，
+                // 这里会卡住（系统蓝在灰卡的顶栏上 3.9:1）。
+                for sys in systemDark {
+                    for key in markKeys {
+                        guard let v = sys.colors[key] else { continue }
+                        let r = contrast(v, c("bar"))
+                        check(r >= 4.5, "\(name)（\(sys.os)）：系统色 \(key) 在 bar 上 \(fmt(r))，这套底要自己给判决色")
+                    }
+                }
             } else {
-                check(own.count == markKeys.count, "\(name)：浅色主题没给全判决色 / 提醒黄 / 客户紫（缺 \(markKeys.filter { own[$0] == nil })）")
+                check(own.count == markKeys.count, "\(name)：没给全判决色 / 提醒黄 / 客户紫（缺 \(markKeys.filter { own[$0] == nil })）")
                 markSets = [("", own)]
                 for key in markKeys {
                     guard let v = own[key] else { continue }

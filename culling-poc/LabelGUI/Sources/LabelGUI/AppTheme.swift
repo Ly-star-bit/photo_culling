@@ -36,13 +36,16 @@ enum AppPalette {
     /// 废片的系统红（macOS 15 是 3°、26 是 359°）中间；亮度也在中间，色弱时靠明暗也分得开。自检逐套拿这一套自己的废片红核对：
     /// 色相差 ≥ 15°、亮度比 ≥ 1.2（以前比的是写死的 3°、不查亮度，相纸的橙和红 1.05:1 也过了）。只表示「待处理 / 警告」，
     /// 不当点缀色用；也当字用（状态栏、ISO），所以在栏、卡片、画布上都 ≥ 4.5:1。
+    /// 灰卡例外：底是中灰，废片红要提亮到 L 0.41 才够 4.5:1（见 `pick`），待处理色就再亮一档（#FFAD7D，比废片红亮 1.25 倍），
+    /// 亮度不再夹在中间，靠「橙比红亮」分。
     static var warning: Color { c.warning }
     /// 待处理色上面的字（实心的「待处理」胶囊）：就是点缀色上的那个字色，六套在待处理色上都 ≥ 4.5:1（自检核对）。
     static var onWarning: Color { c.onAccent }
-    /// 提醒黄：眯眼、慢门、歪了 ——「看一眼，不一定要处理」。深色主题是系统黄；相纸压深成芥末色（系统黄在相纸上只有 1.1:1，
-    /// 连拍挑选里的「眯眼」等于看不见）。压在照片上的用 `OnPhotoPalette.caution`。
+    /// 提醒黄：眯眼、慢门、歪了 ——「看一眼，不一定要处理」。深色主题是系统黄（灰卡写死成 macOS 26 的系统黄 #FFD600，
+    /// 本来就够亮）；相纸压深成芥末色（系统黄在相纸上只有 1.1:1，连拍挑选里的「眯眼」等于看不见）。压在照片上的用
+    /// `OnPhotoPalette.caution`。
     static var caution: Color { c.caution }
-    /// 客户紫：客户在确认表里点的（和 XMP 的紫色标同一个意思）。深色主题是系统紫，相纸压深一档。
+    /// 客户紫：客户在确认表里点的（和 XMP 的紫色标同一个意思）。深色主题是系统紫，灰卡提亮（同 `pick`），相纸压深一档。
     static var client: Color { c.client }
     /// 字：正文、二级（说明字、分段标题、文件名）、三级。界面上的说明字用这里的 `secondary`，别用 SwiftUI 的 `.secondary`：
     /// 系统的二级字是白 55% / 黑 50% 叠在底上，相纸下只有 3.8:1，自检核对的这个颜色以前除了暗房没人用（优化分析 2026-11-18 V-01）。
@@ -57,8 +60,12 @@ enum AppPalette {
     /// 凹下去的槽（分段控件的底、九宫格的底）：深色主题压暗一档，浅色主题只压一点。
     static var well: Color { c.dark ? Color.black.opacity(0.35) : Color.black.opacity(0.07) }
     /// 判决的三个颜色：精选绿、可用蓝、废片红（摄影师的习惯色，每个主题都是这三个色相）。深色主题就是系统的绿 / 蓝 / 红；
-    /// 浅色主题压深一档 —— 系统绿的小字在浅底上只有 2.2:1。只给界面底色上的东西用：压深过的色压到照片上的黑底里就看不见了
-    /// （相纸的精选绿在人脸小图的黑圆上 1.5:1），那里用 `OnPhotoPalette`。
+    /// 浅色主题压深一档 —— 系统绿的小字在浅底上只有 2.2:1。灰卡的栏和卡片是中灰，系统蓝 / 红 / 紫的小字在卡片上只有
+    /// 2.9–3.3:1：灰卡单独给一套，蓝 / 红 / 紫提亮到卡片上 ≥ 4.6:1（色相不出系统色两代的范围），绿和黄本来就够亮、照抄
+    /// macOS 26 的系统色。提亮过的色亮度 ≈ 0.41，当实心底时上面压白字只有 2.3:1（系统色上是 3.2–3.7:1），压深色字
+    /// （`onAccent`）是 7.5:1。
+    /// 只给界面底色上的东西用：压深过的色压到照片上的黑底里就看不见了（相纸的精选绿在人脸小图的黑圆上 1.5:1），
+    /// 那里用 `OnPhotoPalette`。
     static var pick: Color { c.pick }
     static var usable: Color { c.usable }
     static var reject: Color { c.reject }
@@ -112,7 +119,8 @@ enum OnPhotoPalette {
 
 // MARK: - 主题
 
-/// 一套主题的颜色。只管界面：导出的图、照片本身不跟着变；判决的绿 / 蓝 / 红、客户的紫、提醒的黄色相不变，浅色主题只压深一档。
+/// 一套主题的颜色。只管界面：导出的图、照片本身不跟着变；判决的绿 / 蓝 / 红、客户的紫、提醒的黄色相不变，浅色主题只压深一档，
+/// 灰卡（中灰的底）提亮一档。
 struct ThemeColors: Equatable {
     var dark: Bool
     var bar, panel, card, hairline, canvas: Color
@@ -120,7 +128,8 @@ struct ThemeColors: Equatable {
     var surround, track: Color
     var text, secondary, tertiary: Color
     var accent, onAccent, warning: Color
-    /// 判决色、提醒黄、客户紫：不给值就是系统色（深色主题），`hex` 里也没有这几个键 —— 自检按系统色在 macOS 15 / 26 上的值核对。
+    /// 判决色、提醒黄、客户紫：不给值就是系统色（石墨、胡桃、午夜、纯黑），`hex` 里也没有这几个键 —— 自检按系统色在
+    /// macOS 15 / 26 上的值核对。给值（相纸、灰卡）就五个一起给，自检按给的值核对对比度。
     var pick = Color.green, usable = Color.blue, reject = Color.red
     var caution = Color.yellow, client = Color.purple
     /// 自检算对比度用的原始值（0xRRGGBB），和上面的 Color 一一对应。
@@ -200,9 +209,15 @@ enum AppThemeID: String, CaseIterable, Identifiable {
                                accent: 0xFFB340, onAccent: 0x141414, warning: 0xFF7A38)
         case .neutral:
             // 灰卡：Lightroom / Capture One 那一路的中灰，点缀色也是灰白。界面上除了照片和判决没有别的颜色，看曝光、看肤色最稳。
+            // 判决色单独提亮（v1.32.0 用的是系统色：蓝 / 红 / 紫的小字在卡片上 2.9–3.3:1、顶栏上 3.9–4.4:1）：macOS 26 的系统蓝
+            // #0091FF、红 #FF4245 往白里混到卡片上 4.6:1，色相不变（206° / 359°）；客户紫取 288°（和相纸同一个色相，在系统紫两代
+            // 280°–293° 中间）、B 拉满提亮到同一亮度。绿 #30D158、黄 #FFD600 就是 macOS 26 的系统色，卡片上已经 5.2 / 7.5:1。
+            // 待处理橙跟着提亮（v1.32.0 #FF8A4C 的亮度和提亮后的废片红一样，色弱时分不开）：20° 挪到 22°，比废片红亮 1.25 倍。
             return ThemeColors(dark: true, bar: 0x2A2A2A, panel: 0x343434, card: 0x3F3F3F, hairline: 0x4A4A4A, canvas: 0x3C3C3C,
                                surround: 0x484848, track: 0x5A5A5A, text: 0xF4F4F4, secondary: 0xC4C4C4, tertiary: 0x969696,
-                               accent: 0xF4F4F4, onAccent: 0x1C1C1C, warning: 0xFF8A4C)
+                               accent: 0xF4F4F4, onAccent: 0x1C1C1C, warning: 0xFFAD7D,
+                               verdicts: (pick: 0x30D158, usable: 0x4EB3FF, reject: 0xFF898B),
+                               marks: (caution: 0xFFD600, client: 0xE785FF))
         case .walnut:
             // 胡桃：带棕的深灰 + 黄铜，老暗房的木头和铜件。点缀色没用红铜：红铜（色相 17°）和「待处理」的橙（20°）撞色。
             // 暗房四周是同亮度的中性灰（v1.32.0 是 #2E2B29，带棕；优化分析 2026-11-18 TB-07）。
