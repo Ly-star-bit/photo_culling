@@ -148,14 +148,9 @@ final class PickSession: ObservableObject {
             let wanted = Set(selectionIDs ?? [])
             return store.items.filter { wanted.contains($0.id) }
         }
-        var members = store.members(ofTake: key)
-        if sortByScore {
-            members.sort { a, b in
-                let ka = BatchStore.scoreKey(a), kb = BatchStore.scoreKey(b)
-                return ka == kb ? a.id < b.id : ka > kb
-            }
-        }
-        return members
+        let members = store.members(ofTake: key)
+        // 和网格那一行同一个先后（BatchStore.scoreOrder：没淘汰的在前，近似重复组里糊一截的排在清楚的后面）。
+        return sortByScore ? BatchStore.scoreOrder(members) : members
     }
 
     /// 这一组还待处理吗（跨场那组不算）。
@@ -301,7 +296,9 @@ final class PickSession: ObservableObject {
             let recommendation = recommended(currentKey)
             picks = Set(frames.filter { recommendation[$0.id] == .pick }.map(\.id))
         }
-        if picks.isEmpty, let best = frames.max(by: { BatchStore.scoreKey($0) < BatchStore.scoreKey($1) }) {
+        // 兜底挑的是「按评分」排第一的（scoreOrder）：没淘汰的优先，近似重复组里糊一截的不挑 —— 以前直接比 scoreKey，
+        // 开着去重时会把被扔掉的、人脸质量最高的那张糊片挑成精选。
+        if picks.isEmpty, let best = BatchStore.scoreOrder(frames).first {
             picks = [best.id]
         }
         let d = Dictionary(frames.map { ($0.id, picks.contains($0.id) ? Verdict.pick : .usable) },
@@ -673,10 +670,20 @@ struct FaceAlignment {
     }
 
     /// 眯眼：EAR 低于这个人本组最好的这个比例。纯相对、不设绝对线 —— 判决层的「≥0.20 一律睁眼」
-    /// 是防误杀的，可提示要的正是 0.25 对 0.40 这种「没闭但明显没睁满」。实测 photot 一场 10 张：
-    /// 正常睁眼在最好那张的 0.80–1.00，眼睛明显小的那张 0.60（DSCF7224），0.75 正好分开。
-    /// （上面这组是 EAR 按两眼连线转平（VQ-05）之前量的，那时 7225–7230 歪 21–23°、读数虚高。转平后同一场：
-    /// 其余 0.80–1.00（7229 0.80 最低），7224 0.77 —— 0.75 不再把 7224 标成眯眼，这条线归连拍挑选那边重定。）
+    /// 是防误杀的，可提示要的正是 0.25 对 0.40 这种「没闭但明显没睁满」（保护线放过的半眨眼，也标）。
+    /// 0.75 是 EAR 按两眼连线转平（VQ-05）以后重核过的，保留（2026-11-18）：
+    /// - 以前的标定（「7224 是最好那张的 0.60、是眯眼」）是转平前量的，那时 7225–7230 歪 21–23°、读数虚高，7224 显得特别小。
+    ///   转平后 photot 一场 10 张（DSCF7221–7230）：最好的是 7223（0.378，抬眼看镜头），7221 / 7222（也抬眼）0.93 / 0.95，
+    ///   垂眼的 7225–7230 0.80–0.92（7229 0.80 最低），7224 0.77。按两眼转平的裁块看过：7224–7230 都是同一个垂眼往下看的
+    ///   姿势（7224 是眼皮压得最低的那张），没有一张是没睁开 —— 垂眼的不该标，0.75 一张都不标。
+    /// - 往上挪不行：0.80 就把 7224 这张垂眼的标成眯；同一张照片整张转 -30°…30°，转平后的读数最低是最高的 0.805（7211）、
+    ///   是正着的 0.84（7230 转 20°）—— 歪头本身的量测抖动就这么大，线再往上就开始标歪头的。
+    /// - 往下挪（比如和判决层的相对线一样 0.70）也没有依据：同一姿势相邻两帧能差 13%（7229 / 7230），0.70 和 0.75 防不住
+    ///   垂眼偶尔被标的程度差不多；手上一张真眯眼 / 半睁的片都没有，没理由缩小提示的范围（合成坏片夹具的 B03 0.215 / 0.30
+    ///   = 0.72 在 expected_compare.txt 里钉着「眯」）。拿到真眯眼片再定。
+    /// - 已知代价：垂眼的一帧读数偏低两三个点就会带上黄色的「眯」—— 只是提示，不进判决。
+    /// 断言：--cull-mcp-selftest 的 squintChecks（photot 那一场一张不标、最低的 7224 在 0.75 和 0.80 之间）、
+    /// --followup-selftest 的 squintLine（正好 0.75 不标、0.74 标，保护线放过的半眨眼标）。
     static let squintFactor = 0.75
 
     /// 人数（以脸最多的那张为准）。

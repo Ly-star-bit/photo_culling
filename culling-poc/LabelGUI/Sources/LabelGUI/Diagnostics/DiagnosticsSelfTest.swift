@@ -533,6 +533,15 @@ enum DiagnosticsSelfTest {
               "日志里照片文件名、盘的位置（代号）还看得出来", String(log2.suffix(600)))
         let crash2 = second.first { $0.key.contains("/crash-reports/") }?.value ?? ""
         check(crash2.contains("~/Desktop/<文件夹 "), "崩溃报告里转义过的路径也打码", crash2)
+
+        // 5. 没进网格的照片（EC-01：解不开的、取消时没轮到的）：诊断信息和状态栏「N 张没进网格」同一个说法，不再写「未能解析」。
+        let partial = root.appendingPathComponent("取消了一半", isDirectory: true)
+        FileSafetySelfTest.writeShoot(partial, [FileSafetySelfTest.Fake(id: "DSCF0101", raw: "DSCF0101.JPG", jpeg: true)],
+                                      withoutResults: ["DSCF0102"])
+        let partialOpened = batch.switchSession(to: partial) && batch.unparsedCount == 1
+        let sessionLine = model.diagnosticLines().first { $0.hasPrefix("当前场次：") } ?? ""
+        check(partialOpened && sessionLine.contains(" · 1 张 · 没进网格 1 张") && !sessionLine.contains("未能解析"),
+              "诊断信息：没进网格的照片写「没进网格 N 张」（和状态栏同一个说法）", sessionLine)
         check.unlockAll()
         try? fm.removeItem(at: root)
     }
@@ -644,6 +653,16 @@ enum DiagnosticsSelfTest {
               "废纸篓：张数、前几张、原因", note)
         check(note.contains("其中 1 张只移走了一部分（DSCF0001：DSCF0001.RAF 已在废纸篓，DSCF0001.JPG 还在原处）"),
               "废纸篓移走一半的单独说", note)
+        // 失败名单全 app 一个写法（FailureNames.list，EC-08）：前 3 张，多了写「等 N 张」—— 以前废纸篓写「…」、分析完那句前 5 张加「...」。
+        let four = ["DSCF0001", "DSCF0002", "DSCF0003", "DSCF0004"]
+        let many = BatchStore.trashFailureNote(trashed: 0, failed: four, reasons: [:], partial: [])
+        check(many == "移到废纸篓: 0 成功, 4 失败 (DSCF0001, DSCF0002, DSCF0003 等 4 张)", "废纸篓失败多于 3 张：「前 3 张 等 N 张」", many)
+        let six = four + ["DSCF0005", "DSCF0006"]
+        let analysis = BatchStore.analysisProblemNote(failed: six, corrupt: ["DSCF0009"]) ?? "nil"
+        check(analysis == "6 张解不开、没进网格 (文件损坏、格式不支持或仍在拷贝中): DSCF0001, DSCF0002, DSCF0003 等 6 张；"
+                + "1 张文件损坏 (不完整，可能读卡出错或拷贝中断)，已判废片: DSCF0009 —— 卡先别格式化，从卡上重新拷一次",
+              "分析完那句：解不开的说「没进网格」，名单「前 3 张 等 N 张」，坏文件单独一句", analysis)
+        check(BatchStore.analysisProblemNote(failed: [], corrupt: []) == nil, "分析完没有解不开 / 坏文件：不报")
         trashOutcomeChecks(work, check)
 
         // 不限体积那条路改成先在内存里编码再原子写：字节要和以前直接写文件一模一样。

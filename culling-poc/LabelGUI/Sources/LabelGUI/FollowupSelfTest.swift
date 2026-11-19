@@ -12,6 +12,9 @@ import Foundation
 ///     照片写不进、旁边的 .xmp 写得进（盘满）也照样停，.xmp 不单独过去。
 ///   - M01 近似重复去重：拍摄时刻完全一样、一张 RAW 一张 JPG（分卡存、分文件夹放的同一帧）时，RAW 不判「连拍重复」；
 ///     场里只剩这一对时按一帧算、不提精选，接受全部推荐也不把 RAW 钉成废片。
+///   - VQ-03 收尾：近似重复组里的锐度门，「场内按评分」、连拍挑选、MCP 近似重复名次、「这组全留」兜底、章节代表照片、
+///     全局按评分、精华 Top N 和精选星 / #1 是同一张（最清楚的那张闭眼判废、开着去重时也一样）。
+///   - 连拍挑选的「眯」（FaceAlignment.squintFactor 0.75）：正好 0.75 不标、0.74 标，保护线放过的半眨眼标。
 ///   - MCP cull_get_photos 的 exif：老 manifest 里存的 shutter_sec / aperture / focal_35 = 0 不报（和 summary 一样）。
 /// 只写数据目录；改过的权限全部改回来，退出前删掉造出来的照片文件夹。
 @MainActor
@@ -42,6 +45,8 @@ enum FollowupSelfTest {
         watermarkShutter()
         originalsStop(root.appendingPathComponent("copy"))
         splitTwinDedupe(root.appendingPathComponent("twin"))
+        rankGate(root.appendingPathComponent("rank"))
+        squintLine(root.appendingPathComponent("squint"))
         readModelExif(root.appendingPathComponent("exif"))
         unlockAll()
         try? FileManager.default.removeItem(at: root)
@@ -473,6 +478,12 @@ enum FollowupSelfTest {
         var camera = "X-T50"
         /// manifest 里的 exif（不给 = 只有 ISO 400）。
         var exif: [String: Any]?
+        /// layer1 的 face_quality / eye_closed / sharpness_scope（不给 = 不写这一项）。锐度门的自检用。
+        var faceQuality: Double?
+        var eyeClosed: Bool?
+        var scope: String?
+        /// 给了就写一张脸（面积 1%，够大、不免检），EAR = 它（转平后的读数）。连拍挑选「眯」的自检用。
+        var ear: Double?
     }
 
     /// 照 FileSafetySelfTest.writeShoot 手写 manifest / layer1（拍摄时间、小数秒、组号自己给），打开这一场。
@@ -494,6 +505,19 @@ enum FollowupSelfTest {
                 "highlight_clip_pct": 0.0, "shadow_clip_pct": 0.0, "frame_luma": 128, "frame_luma_p99": 220,
             ]
             if let sub = photo.subsec { row["capture_subsec"] = sub }
+            if let q = photo.faceQuality { row["face_quality"] = q }
+            if let closed = photo.eyeClosed { row["eye_closed"] = closed }
+            if let scope = photo.scope { row["sharpness_scope"] = scope }
+            if let ear = photo.ear {
+                let box: [Double] = [0.4, 0.3, 0.6, 0.5]
+                let face: [String: Any] = ["bbox": box, "ear": ear, "area_pct": 0.01, "ear_full_res": false, "eye_closed": false]
+                row["face_found"] = true
+                row["face_count"] = 1
+                row["faces"] = [face]
+                row["face_bbox"] = box
+                row["face_area_pct"] = 0.01
+                row["blink_score"] = ear
+            }
             layer1.append(row)
         }
         let session = appDataDir.appendingPathComponent("sessions/" + BatchStore.sessionKey(for: dir))
@@ -581,6 +605,134 @@ enum FollowupSelfTest {
               "关掉去重也一样：单帧场里的同一帧 RAW + JPG 都是可用，不提精选",
               "T1 \(verdict("T1").map(\.rawValue) ?? "—") · T1_2 \(verdict("T1_2").map(\.rawValue) ?? "—")")
         check(!dup("J1") && !dup("S1"), "关掉去重：连拍重复整组回来")
+    }
+
+    // MARK: - 近似重复组里的锐度门：名次、排序、兜底和精选是同一张
+
+    /// 挑「最好那张」、排名次的几条路都过锐度门（BatchStore.scoreOrder / rankKey，优化分析 2026-11-18 VQ-03 收尾）：
+    /// 门起作用的组里，「场内按评分」排第一的、连拍挑选按评分的第一张、MCP 近似重复组的 #1、精选星、#1 角标是同一张；
+    /// 「这组全留」没有精选时兜底挑的、章节代表照片、全局「按评分」、精华 Top N 也不挑 / 不排前糊的那张。
+    static func rankGate(_ dir: URL) {
+        print("— 近似重复组里的锐度门：按评分排第一的、连拍挑选、MCP 名次、「这组全留」兜底、精选星是同一张")
+        func fake(_ id: String, _ time: String, group: Int, sharp: Double, q: Double, closed: Bool? = nil) -> DupFake {
+            DupFake(id: id, file: id + ".JPG", time: time, group: group, sharpness: sharp,
+                    faceQuality: q, eyeClosed: closed, scope: "eyes")
+        }
+        let photos: [DupFake] = [
+            // A 一场一组：A3 人脸质量最高、但比 A1 糊 15% → 过门以后 A1 拿精选；A2 清楚、人脸质量最低。
+            fake("A1", "2026-03-22T10:00:00", group: 1, sharp: 100, q: 0.70),
+            fake("A2", "2026-03-22T10:00:01", group: 1, sharp: 98, q: 0.66),
+            fake("A3", "2026-03-22T10:00:02", group: 1, sharp: 85, q: 0.78),
+            // B 最清楚的 B1 闭眼判废（不算对手）：B3 只比 B2 低 1%、不算糊，人脸质量高拿精选。参照要是连废片一起找，
+            // B3 比 B1 低 8.1% 会被算成糊、B2 排到它前面；B1 人脸质量最高，排序不把废片挪后它会排第一。
+            // B 隔半小时、另成一章（章节代表照片要有两章以上才算）。
+            fake("B1", "2026-03-22T10:30:00", group: 2, sharp: 100, q: 0.92, closed: true),
+            fake("B2", "2026-03-22T10:30:01", group: 2, sharp: 93, q: 0.80),
+            fake("B3", "2026-03-22T10:30:02", group: 2, sharp: 91.9, q: 0.88),
+        ]
+        let store = makeDupShoot(dir, photos)
+        check(store.items.count == photos.count, "造的一场有 \(photos.count) 张", "\(store.items.count)")
+        store.rejectBurstDuplicates = false
+        func verdict(_ id: String) -> Verdict? { store.item(withID: id)?.verdict }
+        func ids(_ items: [BatchItem]) -> String { items.map(\.id).joined(separator: " ") }
+        func take(_ id: String) -> Int { store.item(withID: id)?.take ?? -1 }
+        func preview(_ id: String) -> String { store.item(withID: id)?.previewPath ?? "?" }
+        check(verdict("B1") == .reject && store.item(withID: "B1")?.rejectReasons == ["闭眼"], "B1 闭眼判废",
+              "\(store.item(withID: "B1")?.rejectReasons ?? [])")
+        let takeA: Set<Int> = Set(["A1", "A2", "A3"].map(take))
+        let takeB: Set<Int> = Set(["B1", "B2", "B3"].map(take))
+        check(takeA.count == 1 && takeB.count == 1 && takeA != takeB && store.chapterSegments.count == 2,
+              "A、B 各成一场、各成一章", "\(takeA) \(takeB) 章 \(store.chapterSegments.count)")
+        let dups = MCPReadModel.dupGroups(store, minSize: 2)
+        for (pick, group) in [("A1", 1), ("B3", 2)] {
+            let members = store.members(ofTake: take(pick))
+            let rank = store.takeRank
+            check(verdict(pick) == .pick && rank[pick] == 1, "\(pick) 拿精选、标 #1",
+                  "\(verdict(pick).map(\.rawValue) ?? "—") #\(rank[pick].map(String.init) ?? "-")")
+            let stack = BatchStore.scoreOrder(members).map(\.id)
+            check(stack.first == pick, "「场内按评分」第一张是精选 \(pick)", stack.joined(separator: " "))
+            // #1 #2 #3（只排没淘汰的）的先后 = 「场内按评分」最前面那几张。
+            let ranked: [String] = members.map(\.id).filter { rank[$0] != nil }.sorted { (rank[$0] ?? 0) < (rank[$1] ?? 0) }
+            check(Array(stack.prefix(ranked.count)) == ranked, "「场内按评分」的先后和 #1 #2 #3 一样",
+                  stack.joined(separator: " ") + " / " + ranked.joined(separator: " "))
+            let session = PickSession(store: store, request: .only(take(pick), focus: nil), sortByScore: true)
+            check(session.frames.first?.id == pick, "连拍挑选按评分第一张是 \(pick)", ids(session.frames))
+            let row = dups.first { $0["key"] as? Int == group }
+            let first = (row?["members"] as? [[String: Any]])?.first { $0["rank"] as? Int == 1 }
+            check(first?["id"] as? String == pick && row?["recommended"] as? String == pick,
+                  "MCP 近似重复组 \(group) 的 #1、recommended 是 \(pick)", "\(row ?? [:])")
+        }
+        // 全局「按评分」：不看判决（锐度门在全部照片里比），按判决分区显示 —— 精选在精选区，排第一；同一区里糊的在清楚的后面。
+        store.sortOrder = .score
+        let shown = [Verdict.pick, .usable, .reject].flatMap { v in store.items.filter { $0.verdict == v } }
+        let shownA = shown.filter { $0.take == take("A1") }.map(\.id)
+        check(shownA == ["A1", "A2", "A3"], "全局按评分（按判决分区）：A1 精选在前，可用区里 A2 在糊的 A3 前面", shownA.joined(separator: " "))
+        check(shown.first { $0.take == take("B1") }?.id == "B3", "全局按评分（按判决分区）：B 组第一张是精选 B3", ids(shown))
+        store.sortOrder = .captureTime
+        // 精华 Top N：精选优先，从可用里补时糊的 A3 在清楚的 A2 后面。
+        let top = store.topPicks(10).ids
+        check(Array(top.prefix(2)) == ["B3", "A1"] && (top.firstIndex(of: "A2") ?? 99) < (top.firstIndex(of: "A3") ?? -1),
+              "精华 Top N：精选在前，可用里糊的 A3 排在 A2 后面", top.joined(separator: " "))
+        // 一场没有精选（三张都人工改成可用，提名不碰改判过的）：「这组全留」兜底、章节代表照片都挑 A1，不挑 A3。
+        store.setOverrideBatch(["A1", "A2", "A3"], .usable)
+        check(["A1", "A2", "A3"].allSatisfy { verdict($0) == .usable } && store.takeRank["A1"] == 1,
+              "A 三张都改成可用：没有精选，#1 还是 A1", "\(store.takeRank)")
+        let keep = PickSession(store: store, request: .only(take("A1"), focus: nil), sortByScore: false)
+        keep.keepAll()
+        check(keep.outcome.picks == ["A1"], "「这组全留」没有精选时兜底挑 A1", "\(keep.outcome.picks)")
+        let covers = store.chapterSegments.flatMap(\.covers)
+        check(covers.contains(preview("A1")) && !covers.contains(preview("A3")) && covers.contains(preview("B3")),
+              "章节代表照片：A 场是 A1（不是糊的 A3），B 场是精选 B3", "\(covers.map { ($0 as NSString).lastPathComponent })")
+        store.undoLastOverride()
+        check(verdict("A1") == .pick, "撤销改判：A1 又是精选")
+        // 开着去重：A2、A3、B2 进废片「连拍重复」，每场只剩一张、没有精选。去重留下的、按评分第一、连拍挑选第一、「这组全留」兜底是同一张
+        // （以前兜底直接比 scoreKey，会把被扔掉的 A3 / 闭眼的 B1 挑成精选）。
+        store.rejectBurstDuplicates = true
+        for (keeper, losers) in [("A1", ["A2", "A3"]), ("B3", ["B2"])] {
+            let dropped = losers.allSatisfy { store.item(withID: $0)?.rejectReasons.contains("连拍重复") == true }
+            check(verdict(keeper) == .usable && dropped, "去重：\(keeper) 留下，\(losers.joined(separator: "、")) 连拍重复")
+            check(BatchStore.scoreOrder(store.members(ofTake: take(keeper))).first?.id == keeper, "去重以后按评分第一张是 \(keeper)")
+            let s = PickSession(store: store, request: .only(take(keeper), focus: nil), sortByScore: true)
+            check(s.frames.first?.id == keeper, "去重以后连拍挑选第一张是 \(keeper)", ids(s.frames))
+            s.keepAll()
+            check(s.outcome.picks == [keeper], "去重以后「这组全留」兜底挑 \(keeper)", "\(s.outcome.picks)")
+        }
+        store.rejectBurstDuplicates = false
+    }
+
+    // MARK: - 连拍挑选的「眯」：线 0.75（FaceAlignment.squintFactor）
+
+    /// 「眯」= 判决层没算闭眼、但 EAR 比这个人本组睁得最开的那张小到 0.75 以下（PickSession.swift FaceAlignment）。
+    /// E 组卡边界（0.5 × 0.75 = 0.375 在二进制里是精确的）：正好 0.75 不标、0.74 标；H 组是睁眼保护线（≥ 0.20）放过的
+    /// 半眨眼（最好 0.40 的组里 0.205，合成坏片夹具 N02 那种）：判决是可用，「眯」要标上。组里有人眯，最好那张才带 ★。
+    /// 这条线在 photot 那一场上的标定（垂眼的一张不标）在 --cull-mcp-selftest 的 squintChecks（要 fixture）。
+    static func squintLine(_ dir: URL) {
+        print("— 连拍挑选的「眯」：正好 0.75 不标、0.74 标；保护线放过的半眨眼标「眯」、不判闭眼")
+        func fake(_ id: String, _ time: String, group: Int, ear: Double) -> DupFake {
+            DupFake(id: id, file: id + ".JPG", time: time, group: group, sharpness: 90, faceQuality: 0.6, ear: ear)
+        }
+        let photos: [DupFake] = [
+            fake("E1", "2026-03-23T10:00:00", group: 1, ear: 0.5),
+            fake("E2", "2026-03-23T10:00:01", group: 1, ear: 0.375),
+            fake("E3", "2026-03-23T10:00:02", group: 1, ear: 0.37),
+            fake("H1", "2026-03-23T10:30:00", group: 2, ear: 0.40),
+            fake("H2", "2026-03-23T10:30:01", group: 2, ear: 0.205),
+        ]
+        let store = makeDupShoot(dir, photos)
+        check(store.items.count == photos.count, "造的一场有 \(photos.count) 张", "\(store.items.count)")
+        check(FaceAlignment.squintFactor == 0.75, "眯眼线是 0.75", "\(FaceAlignment.squintFactor)")
+        func marks(_ ids: [String]) -> String {
+            let take = store.item(withID: ids[0])?.take ?? -1
+            let align = FaceAlignment(frames: store.members(ofTake: take))
+            return ids.map { $0 + align.describe($0) }.joined(separator: " ")
+        }
+        let e = marks(["E1", "E2", "E3"])
+        check(e == "E1 眼[开★] E2 眼[开] E3 眼[眯]", "正好是最好那张的 0.75 不标「眯」，0.74 标；最好那张带 ★", e)
+        let h = marks(["H1", "H2"])
+        let h2 = store.item(withID: "H2")
+        check(h == "H1 眼[开★] H2 眼[眯]" && h2?.verdict != .reject && h2?.faces.first?.eyeClosed == false,
+              "保护线放过的半眨眼（0.205 / 0.40）：判决不算闭眼，连拍挑选标「眯」",
+              h + " · \(h2?.verdict.rawValue ?? "nil") \(h2?.rejectReasons ?? [])")
     }
 
     // MARK: - MCP 读模型的 exif：老 manifest 里的 0 不报

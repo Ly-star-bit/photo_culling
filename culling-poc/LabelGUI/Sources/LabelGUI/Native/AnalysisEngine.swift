@@ -3,8 +3,8 @@ import CoreGraphics
 
 /// Native replacement for prepare.py + layer1.py. Produces the exact same
 /// artifacts (data/previews/*.jpg, data/manifest.json, data/layer1_results.json,
-/// snake_case keys, relative preview paths) so layer2.py (VLM), evaluate.py and
-/// the existing GUI loaders keep working unchanged — and so native results can be
+/// snake_case keys, relative preview paths) so layer2.py (VLM) and the existing
+/// GUI loaders keep working unchanged — and so native results can be
 /// diffed against the Python pipeline's on the same photos.
 enum AnalysisEngine {
     struct PhotoAnalysis: Sendable {
@@ -601,7 +601,7 @@ enum AnalysisEngine {
             "sharpness": p.sharpness,
             "sharpness_scope": p.sharpnessScope,
             "focus_ratio": p.focusRatio,
-            // 整张的两个照旧写（evaluate.py / 老工具读它们）；判决用 subject_*。
+            // 整张的两个照旧写（标注校准页的「高光裁切 / 暗部裁切」读它们，和老版本的结果同一个字段）；判决用 subject_*。
             "highlight_clip_pct": p.highlightClipPct,
             "shadow_clip_pct": p.shadowClipPct,
             "subject_highlight_clip_pct": p.subjectHighlightClipPct,

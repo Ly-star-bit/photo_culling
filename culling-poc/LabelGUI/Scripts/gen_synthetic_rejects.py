@@ -267,12 +267,13 @@ add("S03-dark-sharp30", t + timedelta(seconds=40), "锐度只有 30（暗、特�
 add("S04-sharp85-focus40", t + timedelta(seconds=60), "锐度 85 但对焦 40（眼睛那块糊、反差大）→ 虚焦（升级前不判）", "废片 虚焦",
     patch={"sharpness": 85.0, "focus_ratio": 0.04})
 
-# Z：第二章（隔 1 小时 45 分），全是废片 → 章节警告。Z03 的 layer1 带 error：不进网格。
+# Z：第二章（隔 1 小时 45 分），全是废片 → 章节警告。Z03 的 layer1 带 error：没进网格 —— 照片数、判决都不算它，
+# --verdicts 另打一行「没进网格 1 张: Z03-l1-error」（EC-01，和状态栏「N 张没进网格」同一个数），四份带这一行的期望文件都有它。
 t = T0 + timedelta(hours=2)
 add("Z01-corrupt", t, "file_corrupt=true", "废片 文件损坏", patch={"file_corrupt": True})
 add("Z02-ch2-blur", t + timedelta(seconds=20), "第二章另一张虚焦：这一章全灭", "废片 虚焦",
     patch={"sharpness": 20.0, "focus_ratio": 0.02})
-add("Z03-l1-error", t + timedelta(seconds=40), "layer1 这一行带 error：不进网格（照片数不算它）", "不在", patch={"error": "decode failed"})
+add("Z03-l1-error", t + timedelta(seconds=40), "layer1 这一行带 error：没进网格（照片数不算它；--verdicts 另打一行「没进网格 1 张: Z03-l1-error」）", "不在", patch={"error": "decode failed"})
 
 os.makedirs(OUT, exist_ok=True)
 
@@ -293,7 +294,7 @@ dump("thresholds.json", {"sharpness": 45, "exposure": 0.15, "faceQuality": 0.30}
 dump("overrides.json", overrides)
 with open(os.path.join(OUT, "cases.tsv"), "w", encoding="utf-8") as f:
     f.write("# 每张测什么、期望（判决 理由）：--per-photo / --dedupe --per-photo / --accept-all --per-photo。"
-            "verdict_regression.sh 逐张核对；「不在」= 不进网格。\n")
+            "verdict_regression.sh 逐张核对；「不在」= 没进网格（--verdicts 另打一行「没进网格 N 张: …」列出来）。\n")
     f.write("id\t默认\t去重\t接受推荐后\t测什么\n")
     for pid, what, d, dd, a in cases:
         f.write(f"{pid}\t{d}\t{dd}\t{a}\t{what}\n")

@@ -1027,7 +1027,7 @@ struct BatchView: View {
         let preview = store.jpegNamePreview(options.wrappedValue, includeUsable: true, ids: top.ids, ranked: true)
         return VStack(alignment: .leading, spacing: 14) {
             Text("精华 Top N").font(.headline)
-            Text("全场评分最高的 N 张（表情 > 人脸质量 > 锐度），精选优先、不够从可用里补。当天发客户/朋友圈的那一把。")
+            Text("全场评分最高的 N 张（表情 > 近似重复里明显更糊的靠后 > 人脸质量 > 锐度），精选优先、不够从可用里补。当天发客户/朋友圈的那一把。")
                 .font(.caption).foregroundStyle(AppPalette.secondary)
             Stepper("张数：\(highlightsCount)", value: $highlightsCount, in: 5...100, step: 5)
             DeliveryOptionsSection(options: options, namePreview: preview, tokensHint: DeliveryNaming.rankTokenHint)
@@ -1148,21 +1148,18 @@ struct BatchView: View {
             let alive = members.filter { $0.verdict != .reject }
             let pending = BatchStore.isPendingTake(alive: alive, overrides: overrides)
             if pendingTakesOnly, !pending { return nil }
+            // 「场内按评分」先按整场排（BatchStore.scoreOrder：锐度门在整场没淘汰的里比，和 #1 #2 #3、连拍挑选同一个先后），
+            // 下面的筛选只拿掉照片、不打乱先后 —— 只拿筛剩的几张排，参照少了会和 #1 #2 #3 排得不一样。
+            if takeSortByScore { members = BatchStore.scoreOrder(members) }
             if let filter = verdictFilter {
                 members = members.filter { $0.verdict == filter }
             } else if !pending, !alive.isEmpty, !expandedTakes.contains(row.take), !clientPickFilter {
                 // 定完的场叠起来：只剩留下的那几张（整场全废的不叠，不然这一行什么都看不见）。
                 // 「只看客户选中」时不叠：客户选中的废片也得看得见。
-                members = alive
+                members = takeSortByScore ? members.filter { $0.verdict != .reject } : alive
             }
             if clientPickFilter { members = members.filter { clientPicks.contains($0.id) } }
             guard !members.isEmpty else { return nil }
-            if takeSortByScore {
-                members.sort {
-                    let ka = BatchStore.scoreKey($0), kb = BatchStore.scoreKey($1)
-                    return ka == kb ? $0.id < $1.id : ka > kb
-                }
-            }
             return TakeGroup(group: row.take, members: members)
         }
     }
@@ -2033,7 +2030,7 @@ struct BatchView: View {
                 .help("只显示还留着 2 张以上没淘汰的场 —— 定完一场它就自动消失。这场共 \(stats.takes) 个多张场、\(stats.photos) 张")
             Toggle("场内按评分", isOn: $takeSortByScore)
                 .toggleStyle(.button).controlSize(.small)
-                .help("每场里评分高的排前面 (表情 > 人脸质量 > 锐度)；关掉则按拍摄顺序。缩略图上的 #1 #2 #3 是同一把尺子")
+                .help("每场里评分高的排前面 (表情 > 近似重复里明显更糊的靠后 > 人脸质量 > 锐度)，淘汰的排最后；关掉则按拍摄顺序。缩略图上的 #1 #2 #3 是同一把尺子")
             if bursts > 0 {
                 ThemedDivider(vertical: true).frame(height: 14)
                 // 进度：这一轮（全场 / 本章）多张连拍定了几场。
@@ -3771,7 +3768,7 @@ private struct BatchControlPanel: View {
                 Text(value).font(.callout).monospacedDigit().foregroundStyle(AppPalette.secondary)
             }
             histogram
-            // 读屏软件念「锐度下限，45」，不是一根没名字的滑杆（UX-12）。--ax-dump 读的是 AppKit 滑杆的 cell
+            // 读屏软件念「对焦下限，60」，不是一根没名字的滑杆（UX-12）。--ax-dump 读的是 AppKit 滑杆的 cell
             // （CustomMarkedSliderCell），没接辅助功能客户端时看不到 SwiftUI 给的名字，照旧打印没名字 —— 这一条要用 VoiceOver /
             // 辅助功能检查器在真 app 里看（手点清单）。
             slider

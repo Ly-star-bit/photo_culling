@@ -263,7 +263,8 @@ extension AppModel {
             // key 用钉住的那个（sessions/<key> 的名字）：认回 / 书签跟到新位置以后，按 photoDir 现算的对不上 sessions.txt。
             let key = batch.sessionDir.lastPathComponent
             var parts = ["当前场次：\(dir.path)（key \(key)）", "\(batch.items.count) 张"]
-            if batch.unparsedCount > 0 { parts.append("未能解析 \(batch.unparsedCount) 张") }
+            // 和状态栏「N 张没进网格」同一个说法（EC-01）：解不开的、上次分析取消时没轮到的都算，「未能解析」只说得通前一种。
+            if batch.unparsedCount > 0 { parts.append("没进网格 \(batch.unparsedCount) 张") }
             if batch.xmpStaleCount > 0 { parts.append("XMP 过期 \(batch.xmpStaleCount) 张") }
             if batch.isRunning { parts.append("正在处理") }
             lines.append(parts.joined(separator: " · "))
