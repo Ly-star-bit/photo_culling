@@ -440,7 +440,7 @@ struct CardImportSheet: View {
                 .frame(width: 40)
             VStack(alignment: .leading, spacing: 3) {
                 Text("发现存储卡「\(offer.volume.name)」").font(.title3.bold())
-                Text(headline(offer)).font(.callout).foregroundStyle(.secondary)
+                Text(headline(offer)).font(.callout).foregroundStyle(AppPalette.secondary)
             }
         }
     }
@@ -471,7 +471,7 @@ struct CardImportSheet: View {
                 if !plan.copies.isEmpty {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("\(plan.shotCount) 张新照片").font(.system(size: 22, weight: .semibold)).monospacedDigit()
-                        Text(fileLine(plan)).font(.callout).foregroundStyle(.secondary).monospacedDigit()
+                        Text(fileLine(plan)).font(.callout).foregroundStyle(AppPalette.secondary).monospacedDigit()
                     }
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         row("folder", destinationText(offer, plan))
@@ -510,7 +510,7 @@ struct CardImportSheet: View {
         } else {
             HStack(spacing: 10) {
                 ProgressView().controlSize(.small)
-                Text(offer.planningNote ?? "数照片、和以前导入过的比对…").foregroundStyle(.secondary)
+                Text(offer.planningNote ?? "数照片、和以前导入过的比对…").foregroundStyle(AppPalette.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 8)
@@ -725,7 +725,7 @@ struct CardImportSheet: View {
         Label {
             Text(text).fixedSize(horizontal: false, vertical: true)
         } icon: {
-            Image(systemName: icon).foregroundStyle(.secondary)
+            Image(systemName: icon).foregroundStyle(AppPalette.secondary)
         }
         .font(.callout)
     }
@@ -761,7 +761,7 @@ struct CardImportSheet: View {
             HStack(spacing: 8) {
                 Image(systemName: "hourglass").foregroundStyle(AppPalette.warning)
                 Text(busyText)
-                    .font(.callout).foregroundStyle(.secondary)
+                    .font(.callout).foregroundStyle(AppPalette.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer()
                 if blockedByOtherTask {
@@ -770,9 +770,9 @@ struct CardImportSheet: View {
             }
         }
         HStack {
-            // 插卡时最让人放心的这句：以前是 .caption + 系统三级灰，2.20:1（UX-12）。11pt + 主题的二级字（每套 ≥ 4.5:1）。
+            // 插卡时最让人放心的这句：以前是 .caption + 系统三级灰，2.20:1（UX-12）。hintText = 11pt + 主题的二级字（每套 ≥ 4.5:1）。
             Text("只复制，不会删除或改动存储卡上的任何文件")
-                .font(.system(size: 11)).foregroundStyle(AppPalette.secondary)
+                .hintText()
             Spacer()
             if canImport {
                 Button("不导入") { center.dismiss() }

@@ -289,7 +289,7 @@ private struct ShortcutsRow: View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(row.keys).font(.caption.monospaced().bold())
                 .frame(width: 128, alignment: .leading)
-            Text(row.action).font(.caption).foregroundStyle(.secondary)
+            Text(row.action).font(.caption).foregroundStyle(AppPalette.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }

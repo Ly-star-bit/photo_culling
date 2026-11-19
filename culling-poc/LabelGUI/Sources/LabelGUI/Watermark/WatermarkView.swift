@@ -620,7 +620,7 @@ struct WatermarkView: View {
                 .help(help)
             Text(summary)
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(AppPalette.secondary)
                 .lineLimit(1)
             Spacer()
             Button {

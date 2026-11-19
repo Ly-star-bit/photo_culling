@@ -184,7 +184,7 @@ private struct DeliveryNameRow: View {
                 TextField(DeliveryNaming.originalToken, text: $options.nameTemplate)
             }
             Text("第一张：" + preview)
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(AppPalette.secondary)
                 .lineLimit(1).truncationMode(.middle)
             Text(hint + "；「:3」补零到 3 位，重名另存 -2")
                 .hintText()
@@ -294,7 +294,7 @@ struct DeliveryOptionsPreview: View {
             if let presets {
                 JPEGPresetSection(presets: presets, options: $options)
                 Text(presets.countLine(scopes.first { $0.scope == scope }?.count ?? 0))
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(AppPalette.secondary)
                 HStack {
                     Spacer()
                     Button("取消") {}

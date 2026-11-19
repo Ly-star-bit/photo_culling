@@ -13,13 +13,13 @@ struct BodyClockSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("按机身对时").font(.headline)
             Text("两台机器的钟差几分钟，排序、分场、章节就会交错。给慢的那台补上差的时间：+180 或 +3:00 = 往后拨 3 分钟，-0:30 = 往前拨 30 秒。只改这里的顺序，不改原片。")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(AppPalette.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             ForEach(store.bodies) { info in
                 row(info)
             }
             Text("用两张照片对齐：在网格里 ⌘ 点选两台机身同一瞬间各拍的一张（同一次闪光、同一个动作），批量栏点「把这两张对成同一时刻」，以照片多的那台（第一行）为准。")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(AppPalette.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button("撤销上次对时") {
@@ -51,7 +51,7 @@ struct BodyClockSheet: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(info.name).font(.body.bold())
                 Text("\(info.count) 张 · \(BodyClock.range(info))")
-                    .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                    .font(.caption).foregroundStyle(AppPalette.secondary).monospacedDigit()
             }
             Spacer()
             if let problem {

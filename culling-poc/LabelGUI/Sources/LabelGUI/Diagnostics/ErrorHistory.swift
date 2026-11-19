@@ -116,8 +116,10 @@ enum DiagFormat {
 struct ErrorNotice: View {
     let text: String
     let source: ErrorHistory.Source
-    /// 关闭按钮的颜色（批量页是 secondary，拼图 / 水印页是 tertiary，和以前一样）。
-    var closeStyle: HierarchicalShapeStyle = .secondary
+    /// 关闭按钮的颜色（批量页是 secondary，拼图 / 水印页是 tertiary，和以前一样）。取的是主题的二级 / 三级字，不是系统的
+    /// 层级样式（相纸下系统灰不够，V-01）；调用处照旧写 `.tertiary`。
+    enum CloseTone { case secondary, tertiary }
+    var closeStyle: CloseTone = .secondary
     var closeHelp: String = "关闭这条提示"
     let dismiss: () -> Void
     @State private var showDetail = false
@@ -135,7 +137,7 @@ struct ErrorNotice: View {
             Button(action: dismiss) {
                 Image(systemName: "xmark.circle.fill").font(.caption)
             }
-            .buttonStyle(.plain).foregroundStyle(closeStyle)
+            .buttonStyle(.plain).foregroundStyle(closeStyle == .tertiary ? AppPalette.tertiary : AppPalette.secondary)
             .help(closeHelp)
         }
     }
@@ -169,7 +171,7 @@ struct ErrorHistoryPanel: View {
             }
             HStack {
                 Text("最近的提示（\(history.entries.count) 条，三个页面一起，新的在上）")
-                    .font(.subheadline).foregroundStyle(.secondary)
+                    .font(.subheadline).foregroundStyle(AppPalette.secondary)
                 Spacer()
                 Button("全部复制") { ErrorHistory.copy(history.plainText()) }
                     .disabled(history.entries.isEmpty)
@@ -177,7 +179,7 @@ struct ErrorHistoryPanel: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     if history.entries.isEmpty {
-                        Text("还没有").font(.caption).foregroundStyle(.tertiary)
+                        Text("还没有").font(.caption).foregroundStyle(AppPalette.secondary)
                     }
                     ForEach(history.entries) { entry in
                         ErrorHistoryRow(entry: entry)
@@ -191,7 +193,7 @@ struct ErrorHistoryPanel: View {
                 Button("导出诊断信息…") { Diagnostics.exportInteractively() }
                     .help("把版本、系统、最近的日志和这些提示打成一个 zip（不含照片、预览图、客户回复原文）；「帮助 › 反馈问题…」打开 GitHub 上的问题表，把它拖进去")
                 Spacer()
-                Text("「帮助」菜单里也有").font(.caption).foregroundStyle(.tertiary)
+                Text("「帮助」菜单里也有").font(.caption).foregroundStyle(AppPalette.secondary)
             }
         }
         .padding(14)
@@ -221,9 +223,9 @@ private struct ErrorHistoryRow: View {
         return HStack(alignment: .top, spacing: 6) {
             Image(systemName: entry.level == .error ? "exclamationmark.circle.fill" : "info.circle")
                 .font(.caption)
-                .foregroundStyle(entry.level == .error ? Color.red : Color.secondary)
+                .foregroundStyle(entry.level == .error ? Color.red : AppPalette.secondary)
             VStack(alignment: .leading, spacing: 2) {
-                Text(head).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                Text(head).font(.caption2.monospacedDigit()).foregroundStyle(AppPalette.secondary)
                 Text(entry.text)
                     .font(.caption)
                     .textSelection(.enabled)
@@ -233,7 +235,7 @@ private struct ErrorHistoryRow: View {
             Button { ErrorHistory.copy(ErrorHistory.line(entry)) } label: {
                 Image(systemName: "doc.on.doc").font(.caption)
             }
-            .buttonStyle(.plain).foregroundStyle(.secondary)
+            .buttonStyle(.plain).foregroundStyle(AppPalette.secondary)
             .help("复制这一条")
         }
     }

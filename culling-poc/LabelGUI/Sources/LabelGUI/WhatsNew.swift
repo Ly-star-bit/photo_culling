@@ -193,7 +193,7 @@ struct WhatsNewSheet: View {
             HStack(alignment: .firstTextBaseline) {
                 Label("这一版新增", systemImage: "sparkles").font(.title2.bold())
                 Spacer()
-                Text("v\(notes.version)").font(.callout).foregroundStyle(.secondary).monospacedDigit()
+                Text("v\(notes.version)").font(.callout).foregroundStyle(AppPalette.secondary).monospacedDigit()
             }
             VStack(alignment: .leading, spacing: 14) {
                 ForEach(notes.entries) { entry in
@@ -204,12 +204,12 @@ struct WhatsNewSheet: View {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("以后在「帮助 › 这一版新增」里还能再看")
-                        .font(.caption).foregroundStyle(.tertiary)
+                        .font(.caption).foregroundStyle(AppPalette.secondary)
                     // 跳着升级的人看不到中间几版的表（OP-05）：去 GitHub Releases 看。Link 走 openURL，无头时点不到。
                     // 字用次要灰、不用系统链接的蓝：蓝是「可用」的判决色，琥珀只表示选中 / 下一步（AppTheme 开头）。
                     Link("更早的版本说明 ↗", destination: WhatsNew.releasesURL)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(AppPalette.secondary)
                 }
                 Spacer()
                 Button("知道了", action: onClose)
@@ -233,7 +233,7 @@ struct WhatsNewSheet: View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(entry.title).font(.headline)
-                Text(entry.detail).font(.callout).foregroundStyle(.secondary)
+                Text(entry.detail).font(.callout).foregroundStyle(AppPalette.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)

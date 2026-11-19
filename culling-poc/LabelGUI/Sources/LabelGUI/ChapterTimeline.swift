@@ -480,7 +480,7 @@ private struct TimelineCard: View {
                 Spacer(minLength: 6)
                 Text("\(segment.count) 张").font(.callout).monospacedDigit()
             }
-            Text(subtitle).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+            Text(subtitle).font(.caption).monospacedDigit().foregroundStyle(AppPalette.secondary)
             if !segment.covers.isEmpty {
                 HStack(spacing: 4) {
                     ForEach(segment.covers, id: \.self) { path in
@@ -511,12 +511,15 @@ private struct TimelineCard: View {
             Text(missed ? "当前视图里没有这一章的照片（被筛选掉了，或单张已收起）"
                         : "点击跳到这一章 · 右键只看这一章 · 网格里 [ ] 上一章 / 下一章")
                 .font(.caption2)
-                .foregroundStyle(missed ? AnyShapeStyle(AppPalette.warning) : AnyShapeStyle(.tertiary))
+                // 卡片上的字用二级字：以前是系统的三级灰，卡片上只有 1.9–2.3:1（三级字只在栏上够 3:1，见 AppPalette.text）。
+                .foregroundStyle(missed ? AppPalette.warning : AppPalette.secondary)
         }
         .padding(10)
         .frame(width: ChapterTimeline.cardWidth, alignment: .leading)
         .background(AppPalette.card, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppPalette.ink.opacity(0.12)))
+        // 先合成一层再投影：不合成的话 SwiftUI 给卡片里每一样（缩略图、每行字）各投一次，相纸的浅卡片上字周围一圈灰晕。
+        .compositingGroup()
         .shadow(color: .black.opacity(0.5), radius: 8, y: 3)
     }
 
