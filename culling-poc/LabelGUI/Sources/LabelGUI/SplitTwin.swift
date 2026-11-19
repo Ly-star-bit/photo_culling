@@ -18,6 +18,27 @@ extension BatchStore {
     /// --verdicts 一个场 100 / 300 / 1000 张是 0.37 / 1.12 / 6.93 G 条指令（优化分析 2026-11-18 edge 复核 N1）。现在不是 RAW 的
     /// 按（拍摄时刻、小数秒、机身）记一张表、RAW 去表里找，结果和逐对比一样：isSplitTwin 只看这三样和两边的扩展名。
     static func splitTwinRaws(_ indices: [Int], in items: [BatchItem]) -> Set<Int> {
+        // 先只看拍摄时刻（到小数秒）：同一帧的两张时刻一定一样，时刻跟谁都不撞的照片不用再看扩展名、机身（拖一格阈值滑杆
+        // 每一场都要问一遍，几千张时整场算扩展名、建表占提名的大半，优化分析 2026-11-18 PI-04）。
+        struct Moment: Hashable {
+            let time: Date
+            let subsec: Double?
+        }
+        var moments: [Moment: Int] = [:]
+        for idx in indices {
+            guard let time = items[idx].captureTime else { continue }
+            moments[Moment(time: time, subsec: items[idx].captureSubsec), default: 0] += 1
+        }
+        let shared = indices.filter { idx in
+            guard let time = items[idx].captureTime else { return false }
+            return (moments[Moment(time: time, subsec: items[idx].captureSubsec)] ?? 0) > 1
+        }
+        guard shared.count >= 2 else { return [] }
+        return splitTwinRaws(among: shared, in: items)
+    }
+
+    /// splitTwinRaws 的后一半：只在拍摄时刻撞了的那几张里认。
+    private static func splitTwinRaws(among indices: [Int], in items: [BatchItem]) -> Set<Int> {
         struct Frame: Hashable {
             let time: Date
             let subsec: Double?
