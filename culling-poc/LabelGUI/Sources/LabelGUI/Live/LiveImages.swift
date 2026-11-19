@@ -50,12 +50,8 @@ enum LiveImages {
         guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path, isDirectory: false) as CFURL, nil) else {
             return nil
         }
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: max(1, maxEdge),
-            kCGImageSourceCreateThumbnailWithTransform: true,
-        ]
-        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+        // UprightDecode：和 ImageIO 带变换逐字节一样；竖拍原图要的正好是整幅 / 1/2 1/4 1/8 时走 vImage 转正。
+        return UprightDecode.thumbnail(source, maxPixel: max(1, maxEdge))
     }
 
     /// 在 1024 的预览上按人脸裁（受保护位置、原图读不到时，§10.3）：裁块用 CompareZoom.region，尺寸按预览算。

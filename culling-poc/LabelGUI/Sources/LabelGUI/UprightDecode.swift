@@ -26,15 +26,41 @@ import UniformTypeIdentifiers
 /// 一路多一帧：4000 万像素 4 路的 peak footprint 长边 4096 + 锐化 2.5 → 3.1 GB、水印原尺寸 1.9 → 2.4–2.7 GB。
 /// 交付导出的路数按这个算。输出缓冲不能用 NSMutableData：在导出的并发任务里大块内存一直不还（同一组 4 路涨到 7 GB）。
 ///
-/// 现在接的是交付这一条线：WatermarkEngine.decodeUpright（水印批量、水印预览、导出 JPG / 水印的缩小 + 锐化
-/// SharpRenderer.deliveryDownscale 的整幅那档）和 BatchStore.writeJPEG 不锐化缩图那条。检视器 1:1（FullResCache）、
-/// 连拍挑选放大（CompareZoom.crop）、合影小脸（FaceAnalyzer）、拼图解码（CollageImages.decode）、MCP 的图（LiveImages）
-/// 都是把 `CGImageSourceCreateThumbnailAtIndex(… WithTransform: true)` 换成 `UprightDecode.thumbnail` 一行的事，结果逐字节一样。
+/// 接在：交付 —— WatermarkEngine.decodeUpright（水印批量、水印预览、导出 JPG / 水印的缩小 + 锐化
+/// SharpRenderer.deliveryDownscale 的整幅那档）、BatchStore.writeJPEG 不锐化缩图那条、确认表的脸部特写；看片 —— 检视器 /
+/// 审片 1:1（FullResCache，整幅：竖拍按 Z 少等的就是这一步）、适应视图的大图（ThumbCache.decode，4000 万像素机身解正好
+/// 一半）、连拍挑选放大（CompareZoom.crop，整幅）；分析 —— 合影小脸（FaceAnalyzer.refineSmallFaces，整幅）；拼图解码
+/// （CollageImages.decode，只有要整幅 / 整除档时走新路）；MCP 的图（LiveImages.thumbnail）。这些地方以前都是
+/// `CGImageSourceCreateThumbnailAtIndex(… FromImageAlways, MaxPixelSize, WithTransform: true)`，换过来结果逐字节一样
+/// （--delivery-selftest「转正解码：调用点」逐处核对）。没接：分析的 3072（ImageLoader.load，不是整除档，换了也走老路）、
+/// RAW 内嵌预览那条（FromImageIfAbsent，不是同一组参数）。
 enum UprightDecode {
     /// 解到长边不超过 `maxPixel`、按 EXIF 方向转正。和 ImageIO 的
     /// `[FromImageAlways: true, ThumbnailMaxPixelSize: maxPixel, WithTransform: true]` 缩略图逐字节一样。
     static func thumbnail(_ source: CGImageSource, maxPixel: Int) -> CGImage? {
-        rotated(source, maxPixel: maxPixel) ?? transformed(source, maxPixel: maxPixel)
+        if let image = rotated(source, maxPixel: maxPixel) {
+            taken.bump()
+            return image
+        }
+        return transformed(source, maxPixel: maxPixel)
+    }
+
+    /// 新路走成了几次。只给自检用：两条路结果逐字节一样，光比像素看不出调用点接没接上新路。只在走成时加一次锁。
+    static let taken = Count()
+
+    final class Count: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+
+        var value: Int {
+            lock.lock(); defer { lock.unlock() }
+            return count
+        }
+
+        func bump() {
+            lock.lock(); defer { lock.unlock() }
+            count += 1
+        }
     }
 
     /// 老路：ImageIO 带变换的缩略图。

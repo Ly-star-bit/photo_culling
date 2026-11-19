@@ -131,12 +131,9 @@ enum CompareZoom {
             .cgImage(forProposedRect: nil, context: nil, hints: nil) {
             full = cached  // 检视器/审片刚放大过这张，直接从它裁
         } else {
+            // 原尺寸、按 EXIF 转正（UprightDecode：和 ImageIO 带变换逐字节一样，竖拍快一倍）。
             guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: item.decodePath) as CFURL, nil),
-                  let decoded = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                      kCGImageSourceCreateThumbnailFromImageAlways: true,
-                      kCGImageSourceThumbnailMaxPixelSize: 20000,  // 原尺寸
-                      kCGImageSourceCreateThumbnailWithTransform: true,
-                  ] as CFDictionary) else { return nil }
+                  let decoded = UprightDecode.thumbnail(source, maxPixel: 20000) else { return nil }
             full = decoded
         }
         let faces = item.faces.isEmpty ? (item.faceBbox.map { [$0] } ?? []) : item.faces.map(\.bbox)

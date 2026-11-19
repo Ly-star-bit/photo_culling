@@ -254,12 +254,8 @@ enum FaceAnalyzer {
 
         fullResGate.wait()
         defer { fullResGate.signal() }
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: max(pw, ph),
-            kCGImageSourceCreateThumbnailWithTransform: true,
-        ]
-        guard let full = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return faces }
+        // 整幅、按 EXIF 转正（UprightDecode：和 ImageIO 带变换逐字节一样；竖拍不走逐像素的转，同一时刻多一帧内存）。
+        guard let full = UprightDecode.thumbnail(source, maxPixel: max(pw, ph)) else { return faces }
         var out = faces
         for i in todo {
             guard let ear = fullResEar(of: faces[i].bbox, in: full) else { continue }

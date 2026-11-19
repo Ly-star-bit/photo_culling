@@ -21,11 +21,9 @@ enum CollageImages {
 
     static func decode(path: String, maxPixel: Int) -> CGImage? {
         guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil) else { return nil }
-        return CGImageSourceCreateThumbnailAtIndex(source, 0, [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: max(16, maxPixel),
-            kCGImageSourceCreateThumbnailWithTransform: true,
-        ] as CFDictionary)
+        // 按 EXIF 转正（UprightDecode：和 ImageIO 带变换逐字节一样）。竖拍只有要整幅 / 正好 1/2 1/4 1/8 时走 vImage；
+        // 相册格子常落的 4096 / 5000 这些要重采样的尺寸照旧 ImageIO。
+        return UprightDecode.thumbnail(source, maxPixel: max(16, maxPixel))
     }
 
     /// 预览用：需要的不超过 1024 就解预览文件，否则解原图；都进缓存。
