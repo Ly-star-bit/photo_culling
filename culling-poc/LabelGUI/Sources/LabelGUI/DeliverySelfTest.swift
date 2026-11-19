@@ -53,6 +53,12 @@ enum DeliverySelfTest {
         gpsCases(work.appendingPathComponent("gps"), t)
         print("== 交付对照（DeliveryLedger，见 DeliveryLedgerSelfTest.swift）")
         DeliveryLedgerSelfTest.run(work.appendingPathComponent("ledger")) { t.check($0, $1, $2) }
+        print("== 失败名单、导出范围（见 DeliveryScopeSelfTest.swift）")
+        DeliveryScopeSelfTest.run { t.check($0, $1, $2) }
+        print("== 交付的解码（见 DeliveryDecodeSelfTest.swift）")
+        DeliveryDecodeSelfTest.run { t.check($0, $1, $2) }
+        print("== 交付的预设（见 DeliveryPresetSelfTest.swift）")
+        DeliveryPresetSelfTest.run(work.appendingPathComponent("presets")) { t.check($0, $1, $2) }
         try? fm.removeItem(at: work)
         print(t.failures == 0 ? "== 全部通过" : "== \(t.failures) 条没过")
         exit(t.failures == 0 ? 0 : 1)

@@ -14,8 +14,16 @@ Scripts/selftests.sh 里跑）；这里验它们在命令行出口上确实接�
    自己写的（x:xmptk="选片工具"）和以前 culling-poc 写的 → 整份重写成现在的模板；读不全的（rdf:resource）、
    读不了的（chmod 000）→ 字节不变、点名「没写星级」；没有 sidecar 的 → 新写一份。星级按 --verdicts 的判决算。
 4. --export-jpeg --scope top:N（精华，出厂默认去 GPS）：原片 EXIF 带 GPS → 输出没有 GPS（命令行自己说的「无GPS」和
-   这里自己读 EXIF / XMP 两边都看）；--keep-gps 的对照组 GPS 还在。
+   这里自己读 EXIF / XMP 两边都看）；--keep-gps 的对照组 GPS 还在。做完「在访达中显示」的是这次新建的 Top2_… 文件夹（UX-04）。
 5. --watermark --config '{"stripGPS":true}' → 输出没有 GPS；false 的对照组 GPS 还在。
+6. --export-jpeg 失败多于 3 张（4 张原片挪开）：状态栏那句列前 3 张、写「等 4 张」（EC-08，以前只列 3 张不写「等」），
+   全名单（按导出顺序、带原因）记进这一场 exports.json 那一条的 failed。
+   6b. --watermark-batch 失败多于 3 张（4 张 chmod 000）：同一个写法「前 3 张 等 4 张」、按导出顺序（以前写「…」、按完成顺序）。
+7.--export-jpeg --ids（面板上「选中的」那档）只导给的那几张、按给的顺序（不按判决挑），做完在访达里选中导出文件夹；
+   --scope client（「客户选中」那档）只导客户选中的、按网格顺序（UX-03）。
+8. --export-jpeg --save-preset 存导出预设（数据目录的 delivery/jpeg_presets.json，不导出）；--sets 一次导出几套（GP-09）：
+   每套进 --dest 下以预设名命名的子文件夹（/ 去掉、只差大小写的另起 -2），每套按自己的尺寸 / 去 GPS，
+   交付对照每套记一条，全部成功在访达里选中外面那层；没存过的预设名退出码 1。
 
 每条命令都带临时 LABELGUI_DATA_DIR、LABELGUI_NO_GUI=1；CI 里放在 MCP 冒烟后面。
 用法: python3 -I Scripts/delivery_regression.py <LabelGUI> [--keep]
@@ -418,6 +426,12 @@ def gps_section():
         check(tags == [want] * 2 and mine == [want] * 2,
               f"{label}：输出{'带着' if want else '没有'} GPS（命令行说 {['有GPS' if x else '无GPS' for x in tags]}，"
               f"自己读 EXIF / XMP {mine}）")
+        # UX-04：做完在访达里选中这次新建的 Top2_日期_时间（无头不弹，打出来）。
+        shown = re.findall(r"^在访达中显示: (.+)$", r.stdout, re.M)
+        tops = [os.path.join(dest, n) for n in os.listdir(dest)]
+        check(len(shown) == 1 and len(tops) == 1 and os.path.realpath(shown[0]) == os.path.realpath(tops[0])
+              and os.path.basename(tops[0]).startswith("Top2_"),
+              f"{label}：做完在访达里选中这次新建的精华文件夹（{shown}，文件夹里 {[os.path.basename(t) for t in tops]}）")
     print("5. --watermark --config stripGPS")
     for strip in (True, False):
         out = os.path.join(WORK, f"wm-gps-{strip}.jpg")
@@ -429,11 +443,180 @@ def gps_section():
                                          f"（退出码 {r.returncode}，GPS {has}）")
 
 
+# ---------------------------------------------------------------- 6. 失败名单
+
+def ledger_records(data):
+    """这个数据目录里唯一一场的 exports.json（没有 = []）。"""
+    found = [os.path.join(dp, "exports.json") for dp, _, ns in os.walk(os.path.join(data, "sessions")) if "exports.json" in ns]
+    return json.load(open(found[0], encoding="utf-8")) if len(found) == 1 else []
+
+
+def failure_list_section():
+    print("6. --export-jpeg 失败多于 3 张：列前 3 张、写「等 4 张」，全名单进交付对照")
+    photos, data, ids = synth_session("fails", 21)
+    v = verdicts(photos, data)
+    keep = [i for i in ids if v.get(i) in ("精选", "可用")]
+    if not check(len(keep) >= 5, f"前提：精选 + 可用至少 5 张（{len(keep)}）"):
+        return
+    gone = keep[:4]
+    for i in gone:
+        os.rename(os.path.join(photos, i + ".JPG"), os.path.join(WORK, i + ".aside"))
+    dest = os.path.join(WORK, "fails-out")
+    try:
+        r = run(["--export-jpeg", photos, "--dest", dest, "--scope", "picks+usable"], data)
+    finally:
+        for i in gone:
+            os.rename(os.path.join(WORK, i + ".aside"), os.path.join(photos, i + ".JPG"))
+    out = r.stdout + r.stderr
+    m = re.search(r"JPG 导出: (\d+) 成功, 4 失败 \(([^)]*)\)", out)
+    listed = m.group(2) if m else ""
+    shown = listed.split(" 等 ")[0].split(", ") if listed else []
+    check(r.returncode == 1 and m is not None and int(m.group(1)) == len(keep) - 4,
+          f"退出码 1、「{len(keep) - 4} 成功, 4 失败」（{r.returncode}，{out.strip()[-200:]!r}）")
+    check(listed.endswith(" 等 4 张") and len(shown) == 3 and set(shown) <= set(gone),
+          f"括号里列前 3 张、写「等 4 张」：({listed})")
+    recs = ledger_records(data)
+    failed = recs[-1].get("failed", []) if recs else []
+    check(len(recs) == 1 and sorted(f["id"] for f in failed) == sorted(gone)
+          and all("reason" in f for f in failed) and len(recs[-1].get("files", [])) == len(keep) - 4,
+          f"exports.json 这一条：写出的 {len(keep) - 4} 张照记，failed 是 4 张全名单"
+          f"（{[f['id'] for f in failed]}，要 {gone}）")
+    check(shown == [f["id"] for f in failed][:3], f"状态栏列的就是全名单的前 3 张、同一个顺序（{shown}）")
+    check("交付对照里记的失败 4 张: " in r.stdout, "命令行把记下的失败全名单打出来")
+    check("在访达中显示" not in r.stdout, "有失败的那次不在访达里弹（和高 ISO、水印一样只在全部成功时弹，UX-04）")
+
+
+def watermark_failure_section():
+    print("6b. --watermark-batch 失败多于 3 张：列前 3 张、写「等 4 张」，按导出顺序")
+    d = os.path.join(WORK, "wm-fails")
+    os.makedirs(d)
+    names = [f"w{i}.jpg" for i in range(1, 6)]
+    for i, name in enumerate(names):
+        make_jpeg(os.path.join(d, name), seed=40 + i)
+    data = fresh_data("wm-fails")
+    os.makedirs(os.path.join(data, "watermark"))
+    json.dump({"options": {"nameTemplate": "{原名}", "size": "long:600"}},
+              open(os.path.join(data, "watermark", "state.json"), "w"), ensure_ascii=False)
+    gone = names[1:]    # 读不了的 4 张（chmod 000）；w1 照常导出
+    for n in gone:
+        os.chmod(os.path.join(d, n), 0)
+    try:
+        r = run(["--watermark-batch", d, os.path.join(WORK, "wm-fails-out"), "--exif"], data)
+    finally:
+        for n in gone:
+            os.chmod(os.path.join(d, n), stat.S_IRUSR | stat.S_IWUSR)
+    out = r.stdout + r.stderr
+    m = re.search(r"4 张导出失败 \(([^)]*)\)", out)
+    listed = m.group(1) if m else ""
+    check(r.returncode == 1 and "1 成功, 4 失败" in out and m is not None,
+          f"退出码 1、「1 成功, 4 失败」、「4 张导出失败 (…)」（{r.returncode}，{out.strip()[-200:]!r}）")
+    check(listed == "w2.jpg, w3.jpg, w4.jpg 等 4 张",
+          f"括号里是导出顺序的前 3 张、写「等 4 张」（{listed!r}）")
+
+
+# ---------------------------------------------------------------- 7. 导出 JPG 的范围
+
+def scope_section():
+    print("7. --export-jpeg --ids / --scope client：只导选中的 / 客户选中的（UX-03）")
+    photos, data, ids = synth_session("scope", 8)
+    v = verdicts(photos, data)
+    usable = [i for i in ids if v.get(i) == "可用"]
+    picks = [i for i in ids if v.get(i) == "精选"]
+    if not check(usable and picks, f"前提：8 张里有精选、有可用（{v}）"):
+        return
+    # 选中的一张可用、一张精选，倒着网格顺序给（选中的就导，不按判决挑）：按给的顺序导，交付对照也按这个顺序记。
+    chosen = sorted([usable[-1], picks[0]], key=ids.index, reverse=True)
+    dest = os.path.join(WORK, "scope-ids")
+    r = run(["--export-jpeg", photos, "--dest", dest, "--ids", ",".join(chosen), "--name", "{序号:2}_{原名}"], data)
+    got = sorted(os.listdir(dest)) if os.path.isdir(dest) else []
+    want = [f"{n + 1:02d}_{i}.jpg" for n, i in enumerate(chosen)]
+    check(r.returncode == 0 and got == sorted(want) and f"范围: 选中的 {len(chosen)} 张" in r.stdout,
+          f"--ids 给 2 张（一张可用、一张精选，倒着给）：只导这几张、序号按给的顺序（{got}，要 {want}）"
+          f"（{(r.stdout + r.stderr).strip()[-160:]!r}）")
+    recs = ledger_records(data)
+    check(len(recs) == 1 and [f["id"] for f in recs[-1]["files"]] == chosen,
+          f"交付对照按给的顺序记（{[f['id'] for f in recs[-1]['files']] if recs else []}）")
+    shown = re.findall(r"^在访达中显示: (.+)$", r.stdout, re.M)
+    check(len(shown) == 1 and os.path.realpath(shown[0]) == os.path.realpath(dest),
+          f"全部成功：在访达里选中导出的文件夹（{shown}，UX-04）")
+
+    reply = os.path.join(WORK, "scope-reply.txt")
+    picked = [ids[5], ids[2]]
+    with open(reply, "w", encoding="utf-8") as f:
+        f.write("\n".join(picked) + "\n")
+    r = run(["--client-import", photos, "--text", reply, "--apply"], data)
+    check(r.returncode == 0 and "客户选中 2 张" in r.stdout, f"前提：导入客户选择 2 张（{r.stdout.strip()[-120:]!r}）")
+    dest = os.path.join(WORK, "scope-client")
+    r = run(["--export-jpeg", photos, "--dest", dest, "--scope", "client"], data)
+    got = sorted(os.listdir(dest)) if os.path.isdir(dest) else []
+    order = [i for i in ids if i in picked]
+    check(r.returncode == 0 and got == sorted(i + ".jpg" for i in picked) and "范围: 客户选中 2 张" in r.stdout,
+          f"--scope client：只导客户选中的 2 张（{got}）（{(r.stdout + r.stderr).strip()[-160:]!r}）")
+    recs = ledger_records(data)
+    check(len(recs) == 2 and [f["id"] for f in recs[-1]["files"]] == order,
+          f"客户选中按网格顺序导、记（{[f['id'] for f in recs[-1]['files']] if len(recs) == 2 else recs}，要 {order}）")
+
+
+# ---------------------------------------------------------------- 8. 一次导出几套（预设）
+
+def sets_section():
+    print("8. --export-jpeg --save-preset / --sets：一次导出勾选的几套，每套进自己的子文件夹（GP-09）")
+    photos, data, ids = synth_session("sets", 8, gps=(31.2304, 121.4737))
+    v = verdicts(photos, data)
+    keep = [i for i in ids if v.get(i) in ("精选", "可用")]
+    if not check(len(keep) >= 2, f"前提：精选 + 可用至少 2 张（{len(keep)}）"):
+        return
+    dest = os.path.join(WORK, "sets-out")
+    r = run(["--export-jpeg", photos, "--dest", dest, "--size", "long:450", "--strip-gps", "--save-preset", "网/页"], data)
+    store = os.path.join(data, "delivery", "jpeg_presets.json")
+    saved = json.load(open(store, encoding="utf-8")).get("presets", {}) if os.path.exists(store) else {}
+    check(r.returncode == 0 and saved.get("网/页", {}).get("size") == "long:450" and saved["网/页"].get("stripGPS") is True
+          and not os.path.exists(dest),
+          f"--save-preset：存进数据目录的 delivery/jpeg_presets.json、不导出（{saved}）（{r.stdout.strip()[-120:]!r}）")
+    r = run(["--export-jpeg", photos, "--dest", dest, "--scope", "picks+usable", "--sets", "原尺寸=original,小=long:300,网/页"],
+            data, timeout=300)
+    out = r.stdout + r.stderr
+    subs = sorted(os.listdir(dest)) if os.path.isdir(dest) else []
+    check(r.returncode == 0 and subs == sorted(["原尺寸", "小", "网页"]),
+          f"三套各进自己的子文件夹（预设名里的 / 去掉）、外面一层没有散文件（{subs}）（{out.strip()[-200:]!r}）")
+    def dims(sub):
+        return {m.group(1): (int(m.group(2)), int(m.group(3)))
+                for m in re.finditer(r"^  (\S+)\.jpg (\d+)x(\d+) ", out.split("套「" + sub + "」 ")[-1].split("\n套「")[0], re.M)}
+    big, small, web = dims("原尺寸"), dims("小"), dims("网/页")
+    check(sorted(big) == sorted(keep) and sorted(small) == sorted(keep) and sorted(web) == sorted(keep),
+          f"每套都是精选 + 可用那 {len(keep)} 张（{len(big)} / {len(small)} / {len(web)}）")
+    check(all(max(w, h) == 300 for w, h in small.values()) and all(max(w, h) == 450 for w, h in web.values())
+          and all(max(w, h) == 900 for w, h in big.values()),
+          f"每套按自己的尺寸：原尺寸 900、小 300、存的预设 450（{list(big.values())[:1]} {list(small.values())[:1]} {list(web.values())[:1]}）")
+    web_lines = [l for l in out.split("套「网/页」 ")[-1].split("\n套「")[0].splitlines() if ".jpg " in l]
+    big_lines = [l for l in out.split("套「原尺寸」 ")[-1].split("\n套「")[0].splitlines() if ".jpg " in l]
+    check(web_lines and all("无GPS" in l for l in web_lines) and big_lines and all("有GPS" in l for l in big_lines),
+          f"存的预设连去 GPS 一起带上（原片带 GPS：存的那套去掉，原尺寸那套照面板留着）")
+    recs = ledger_records(data)
+    folders = [os.path.basename(rec.get("folder", "")) for rec in recs]
+    check(len(recs) == 3 and folders == ["原尺寸", "小", "网页"] and all(len(rec["files"]) == len(keep) for rec in recs),
+          f"交付对照每套记一条、文件夹是那一套的子文件夹（{folders}）")
+    check(f"JPG 导出完成: 3 套 × {len(keep)} 张" in out, f"状态栏一句说几套几张（{out.strip()[-160:]!r}）")
+    shown = re.findall(r"^在访达中显示: (.+)$", r.stdout, re.M)
+    check(len(shown) == 1 and os.path.realpath(shown[0]) == os.path.realpath(dest), f"全部成功：在访达里选中外面那层（{shown}）")
+    # 两个预设名只差大小写：子文件夹另起 -2（APFS 默认不分大小写，不然两套写进同一个文件夹）。
+    dest2 = os.path.join(WORK, "sets-case")
+    r = run(["--export-jpeg", photos, "--dest", dest2, "--ids", keep[0], "--sets", "web=long:300,WEB=long:200"], data)
+    subs = sorted(os.listdir(dest2)) if os.path.isdir(dest2) else []
+    check(r.returncode == 0 and subs == sorted(["web", "WEB-2"]), f"只差大小写的两套：web/、WEB-2/（{subs}）")
+    r = run(["--export-jpeg", photos, "--dest", dest2, "--sets", "没存过的"], data)
+    check(r.returncode == 1 and "没有叫「没存过的」的导出预设" in r.stdout, f"没存过的预设名：退出码 1、说清楚（{r.stdout.strip()[-100:]!r}）")
+
+
 try:
     same_file_section()
     batch_section()
     xmp_section()
     gps_section()
+    failure_list_section()
+    watermark_failure_section()
+    scope_section()
+    sets_section()
     if not REAL_BEFORE:
         check(not os.path.exists(REAL_DATA), f"跑之前没有 {REAL_DATA}，跑完也没有（每条命令都走临时数据目录）")
 finally:

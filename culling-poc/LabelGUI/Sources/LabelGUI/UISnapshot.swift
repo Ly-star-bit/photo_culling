@@ -300,8 +300,14 @@ enum BatchUISnapshot {
             return DeliveryOptionsPreview(options: options, preview: "DSCF7207_wm.jpg", showsColor: false, width: 310)
         default:
             let options = DeliveryOptions.load(json, defaults: .jpegExport(legacyMaxPixel: 0, legacyQuality: 90))
+            // 面板上面那行「范围」（UX-03）：离屏没有选中、不开筛选，停在「精选 + 可用」。
+            let counts = store.verdictCounts
+            let scopes = JPEGScopeChoice.choices(picks: counts.pick, usable: counts.usable, selected: 0,
+                                                 client: store.clientPickCount, filter: nil)
+            // 下面「预设」一节和按钮（GP-09）：数据目录里存的导出预设（delivery/jpeg_presets.json）。
             return DeliveryOptionsPreview(options: options,
-                                          preview: store.jpegNamePreview(options, includeUsable: true))
+                                          preview: store.jpegNamePreview(options, includeUsable: true), scopes: scopes,
+                                          presets: JPEGPresetStore(dataDir: appDataDir))
         }
     }
 }

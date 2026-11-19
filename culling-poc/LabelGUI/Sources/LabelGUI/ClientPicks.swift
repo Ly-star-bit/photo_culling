@@ -207,6 +207,8 @@ enum ClientReply {
         var note: String?
         /// 这条备注只凭表上编号认的（没写「备注」，见 HeadKind.sheet）。
         var numbered = false
+        /// 在第几行（lineTokens 填；表格认的 = -1）。确认表回复里一行什么都没认出时整行进「没认出」用（EC-05）。
+        var line = -1
     }
 
     /// 普通文字按行切：整行就是这一场的一个文件名（带空格的文件名「IMG 0001.JPG」，确认表复制出来的
@@ -219,12 +221,20 @@ enum ClientReply {
         let originals = original.components(separatedBy: .newlines)
         var words: [Word] = []
         for (index, line) in lines.enumerated() {
+            let first = words.count
+            defer { for i in first..<words.count { words[i].line = index } }
+            let raw = originals.count == lines.count ? originals[index] : line
+            // 整行先拿原文原样比（EC-05）：确认表复制出来的是 data-name 原样，名字首尾带空格 / 句点的（「 前空格」「点结尾.」）
+            // clean 以后就和照片 id 对不上了，以前接着被当成聊天的字丢掉。查表按真文件名建，比原文、不比转过半角的。
+            if lookup.byFilename(raw) != nil {
+                words.append(Word(token: raw))
+                continue
+            }
             // 不只看带空格的：「001-婚礼.JPG」整行是文件名，别让 headCuts 在「-婚」那里切开、把后半截当备注（NR2 加了那一刀）。
             if let whole = clean(line), lookup.byFilename(whole) != nil {
                 words.append(Word(token: whole))
                 continue
             }
-            let raw = originals.count == lines.count ? originals[index] : line
             if let marked = markedNote(line, original: raw, lookup: lookup, isHead: isHead) {
                 words.append(marked)
                 continue
@@ -262,15 +272,26 @@ enum ClientReply {
     private static func markedNote(_ line: String, original: String, lookup: Lookup,
                                    isHead: (String) -> HeadKind?) -> Word? {
         guard let mark = line.range(of: #"\s+备注[:：]"#, options: .regularExpression) else { return nil }
-        let headText = String(line[..<mark.lowerBound])
-        guard let head = clean(headText) else { return nil }
-        let oneWord = hasDigit(head) && tokens(headText).count == 1
-        guard lookup.byFilename(head) != nil || oneWord else { return nil }
-        guard isHead(head) != nil else { return Word(token: head) }
         let scalars = Array(line.unicodeScalars)
         let source = Array(original.unicodeScalars)
         let raw = source.count == scalars.count ? source : scalars
         let offset = line.unicodeScalars.distance(from: line.unicodeScalars.startIndex, to: mark.upperBound)
+        // 页面复制出来的是「<data-name 原样> 备注：…」，名字后面正好一个空格（ProofSheetPage.script 的 text()）：先拿原文
+        // 记号前面那一截（去掉那一个空格）原样比 —— 名字首尾带空格 / 句点的，`\s+` 吃掉名字自己的尾空格、clean 再去掉
+        // 首尾的空格和句点，就对不上了（EC-05）。
+        let verbatimEnd = offset - 4    // 「备注」两个字、冒号、前面那一个空格
+        let verbatim = verbatimEnd > 0 ? String(String.UnicodeScalarView(raw[..<min(verbatimEnd, raw.count)])) : ""
+        let headText = String(line[..<mark.lowerBound])
+        let head: String
+        if !verbatim.isEmpty, lookup.byFilename(verbatim) != nil {
+            head = verbatim
+        } else {
+            guard let cleaned = clean(headText) else { return nil }
+            head = cleaned
+        }
+        let oneWord = hasDigit(head) && tokens(headText).count == 1
+        guard lookup.byFilename(head) != nil || oneWord else { return nil }
+        guard isHead(head) != nil else { return Word(token: head) }
         let noteText = String(String.UnicodeScalarView(raw[min(offset, raw.count)...]))
         let note = noteText.trimmingCharacters(in: .whitespacesAndNewlines)
         return Word(token: head, note: note.isEmpty ? nil : note)
@@ -549,7 +570,11 @@ enum ClientReply {
         var pendingNote: String?
         /// 这条备注只凭表上编号认的：客户写的编号（导入预览单列一行）；nil = 不是。
         var pendingNumbered: String?
+        /// 正在认的词在第几行；认出了或进了「没认出」的行（确认表回复里剩下的行整行进没认出，见循环后面）。
+        var currentLine = -1
+        var countedLines = Set<Int>()
         func hit(_ id: String) {
+            countedLines.insert(currentLine)
             if seen.insert(id).inserted { r.ids.append(id) }
             if let note = pendingNote {
                 r.notes[id] = note
@@ -558,7 +583,10 @@ enum ClientReply {
             }
             pendingNote = nil
         }
-        func miss(_ token: String) { if unknownSeen.insert(token).inserted { r.unknown.append(token) } }
+        func miss(_ token: String) {
+            countedLines.insert(currentLine)
+            if unknownSeen.insert(token).inserted { r.unknown.append(token) }
+        }
         /// 表上第 n 张（还在这一场的）。
         func sheetPhoto(_ n: Int) -> String? {
             guard let sheet = r.sheet, n >= 1, n <= sheet.ids.count else { return nil }
@@ -615,6 +643,7 @@ enum ClientReply {
             ?? lineTokens(rest, original: spoken, lookup: lookup, isHead: headKind)
         for word in words {
             let token = word.token
+            currentLine = word.line
             pendingNote = word.note
             pendingNumbered = word.numbered ? token : nil
             if let ids = lookup.byFilename(token) {
@@ -688,9 +717,27 @@ enum ClientReply {
                 miss(token + ((byNumber?.count ?? 0) > 1 ? "（好几张都是这个号）" : ""))
             }
         }
+        // 确认表「复制我的选择」复制出来的回复（带表号那一行）：表号下面一行就是页面上的一张照片。一行里一张都没认出、
+        // 也没进「没认出」的（上面按「聊天里的字」丢掉了），整行原样进「没认出」—— 客户选了 8 张、导进来 4 张要看得出来
+        // （EC-05）。表号前面的话（「你好，选好了」）照旧当聊天；当成表格认的不走这里。
+        if parsed == nil, let headerLine = headerLineIndex(half) {
+            let counted = countedLines
+            for (index, text) in spoken.components(separatedBy: .newlines).enumerated()
+            where index > headerLine && !counted.contains(index) {
+                let shown = text.trimmingCharacters(in: .whitespaces)
+                if shown.contains(where: { $0.isLetter || $0.isNumber }) { miss(shown) }
+            }
+        }
         // 表格别的列里带数字、认不出的格子：不拿来认（多半是备注、序号），可也不悄悄扔，列在后面。
         parsed?.dropped.forEach(miss)
         return r
+    }
+
+    /// 表号那一行（splitHeader 认的那个）是第几行（按换行切，和 lineTokens 一样）；没有表号 = nil。
+    private static func headerLineIndex(_ half: String) -> Int? {
+        let pattern = ProofSheetPage.header + #"\s*([0-9]{8}-[0-9]{6})"#
+        guard let range = half.range(of: pattern, options: .regularExpression) else { return nil }
+        return String(half[..<range.lowerBound]).components(separatedBy: .newlines).count - 1
     }
 
     /// 导入框里的预览（几行字）。`existing` = 现在的客户选中（导入是加上去，不清掉原来的）。

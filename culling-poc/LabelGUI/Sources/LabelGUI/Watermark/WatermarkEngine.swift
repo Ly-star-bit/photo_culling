@@ -390,11 +390,8 @@ enum WatermarkEngine {
     }
 
     static func decodeUpright(_ source: CGImageSource, maxPixel: Int) -> DecodedBase? {
-        guard let thumb = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixel),
-            kCGImageSourceCreateThumbnailWithTransform: true,
-        ] as CFDictionary) else { return nil }
+        // 竖拍整幅（水印原尺寸、deliveryDownscale 的整幅那档）走 vImage 转正，和 ImageIO 带变换逐字节一样、CPU 少一半（PP-02）。
+        guard let thumb = UprightDecode.thumbnail(source, maxPixel: max(1, maxPixel)) else { return nil }
         // kCGImagePropertyPixelWidth 是编码宽度（方向变换之前）；缩略图已经转正。
         // 竖拍（存 6000×4000 + 方向 6）若不交换，scale 会是 1067/6000 而不是
         // 1067/4000，预览的边距和字号全小三分之一。
@@ -743,6 +740,18 @@ enum WatermarkEngine {
         let natural: CGSize
     }
 
+    /// 排字（建 CTLine）一次只排一个。几个线程同时第一次拿某个字号的系统字体排字时，CoreText 有时排出来窄 3%，而且这个字号
+    /// 在整个进程里一直窄：8 个线程同时量默认 EXIF 那一行（231.84 pt），10 个进程里 8 个量出 8059.8、单线程永远是 8298.1。
+    /// 水印批量几路同时开工，头几张字号没缩、和后面的不一样（PP-01 放开路数时查出来的；v1.32.0 的 4 路也碰得到，只是窗口小）。
+    /// 只锁建 CTLine 这一下（微秒级）：建字体、量宽、画字不锁 —— 实测锁住这一下 16 个进程全是 8298.1。
+    private static let textLayoutLock = NSLock()
+
+    static func makeLine(_ attr: NSAttributedString) -> CTLine {
+        textLayoutLock.lock()
+        defer { textLayoutLock.unlock() }
+        return CTLineCreateWithAttributedString(attr)
+    }
+
     /// 量字 + 定位；字是空的 = nil。
     private static func layoutExifText(config: ExifTextConfig, tags: ExifTags,
                                        imgW: Int, imgH: Int, scale: CGFloat) -> ExifTextLayout? {
@@ -758,7 +767,7 @@ enum WatermarkEngine {
                 .font: font,
                 .foregroundColor: config.color.nsColor.withAlphaComponent(config.opacity),
             ])
-            let line = CTLineCreateWithAttributedString(attr)
+            let line = makeLine(attr)
             return (line, CTLineGetTypographicBounds(line, nil, nil, nil))
         }
         let lineHeight = (font.ascender - font.descender + font.leading).rounded(.up)
@@ -855,7 +864,7 @@ enum WatermarkEngine {
             let attr = NSAttributedString(string: text, attributes: [
                 .font: font, .foregroundColor: color.nsColor,
             ])
-            let line = CTLineCreateWithAttributedString(attr)
+            let line = makeLine(attr)
             return MeasuredLine(line: line, width: CTLineGetTypographicBounds(line, nil, nil, nil))
         }
 
@@ -1012,13 +1021,10 @@ enum WatermarkEngine {
         let size = options.sizeValue
         var maxPixel = 20000
         var downscaled = false
-        if let full = uprightSize(of: src) {
-            let predicted = predictedOutputSize(baseW: Double(full.width), baseH: Double(full.height), config: config)
-            if let cap = size.longEdgeCap(width: predicted.width, height: predicted.height) {
-                let growth = max(predicted.width, predicted.height) / Double(max(full.width, full.height))
-                maxPixel = max(1, Int((Double(cap) / growth).rounded()))
-                downscaled = maxPixel < max(full.width, full.height)
-            }
+        if let full = uprightSize(of: src),
+           let cap = baseMaxPixel(width: full.width, height: full.height, config: config, size: size) {
+            maxPixel = cap
+            downscaled = maxPixel < max(full.width, full.height)
         }
         // 缩小了就先给照片本身补一刀输出锐化，再往上合成签名 / 文字 —— 水印不能跟着被锐化出白边。
         // 不锐化 = 以前那条 ImageIO 缩略图，一个字节不变。
@@ -1057,6 +1063,15 @@ enum WatermarkEngine {
         case .overLimit: throw ExportError.overLimit(options.maxMB)
         case .ok: return composition.textFit
         }
+    }
+
+    /// 底图要解到的长边（转正后 `width`×`height` 的原图）：尺寸规格是对成品说的，相框 / 画布会把成品撑大，按预测的成品
+    /// 尺寸折成长边再倒推。nil = 不缩（原尺寸）。export 和交付并发路数（DeliveryConcurrency.watermark）共用。
+    static func baseMaxPixel(width: Int, height: Int, config: Config, size: DeliverySize) -> Int? {
+        let predicted = predictedOutputSize(baseW: Double(width), baseH: Double(height), config: config)
+        guard let cap = size.longEdgeCap(width: predicted.width, height: predicted.height) else { return nil }
+        let growth = max(predicted.width, predicted.height) / Double(max(width, height))
+        return max(1, Int((Double(cap) / growth).rounded()))
     }
 
     /// Bool 版入口（main.swift 的 --watermark 冒烟测试用）。

@@ -336,6 +336,18 @@ enum DeliveryNaming {
     }
 }
 
+// MARK: - 失败名单的写法（导出 JPG / 精华 / 写 XMP / 高 ISO RAW）
+
+/// 状态栏里「N 失败 (…)」括号里那一截（优化分析 EC-08）：不超过 `limit` 个全列；多了列前 `limit` 个、后面写「等 M 张」
+/// （M 是总数）。以前这几处只列前 3 个、不写「等」，4 张失败读起来像只失败了 3 张；同一个文件里另几处写「…」，两种混着。
+/// 全名单另外记：导出 JPG / 精华写进这一场的交付对照（exports.json 的 failed），四样都写进日志（AppLog）。
+enum FailureNames {
+    static func list(_ names: [String], unit: String, limit: Int = 3, separator: String = ", ") -> String {
+        let shown = names.prefix(limit).joined(separator: separator)
+        return names.count > limit ? shown + " 等 \(names.count) \(unit)" : shown
+    }
+}
+
 // MARK: - 编码（体积上限）
 
 enum DeliveryEncoder {
@@ -345,9 +357,9 @@ enum DeliveryEncoder {
     /// `failed` 带给人看的原因（盘满了、没有权限、只读盘……，审查 D03：以前只有一个 failed，收尾只报张数）。
     enum Outcome: Sendable { case ok, overLimit, failed(String) }
 
-    /// 收尾时点名压不到上限的那几张（文件照最低质量写出去了）。
+    /// 收尾时点名压不到上限的那几张（文件照最低质量写出去了）。名单和失败名单同一个写法（前 3 张、多了写「等 N 张」，EC-08）。
     static func overLimitNote(_ names: [String], maxMB: Double) -> String {
-        let list = names.prefix(3).joined(separator: ", ") + (names.count > 3 ? "…" : "")
+        let list = FailureNames.list(names, unit: "张")
         return "\(names.count) 张压到最低质量 \(Int(floorQuality * 100)) 还是超过 \(String(format: "%g", maxMB)) MB"
             + "（已按最低质量写出）：\(list)"
     }
