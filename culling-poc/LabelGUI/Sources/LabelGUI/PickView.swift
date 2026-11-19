@@ -815,10 +815,10 @@ private struct PickTile: View {
     /// 单独一个函数：CI 的 Xcode 16 对结果构建器里的 switch 比本地编译器挑剔。
     private static func stateLook(_ state: Verdict) -> (text: String, fill: Color, ink: Color) {
         switch state {
-        case .pick: return ("★ 留", Verdict.pick.color.opacity(0.9), .white)
-        case .usable: return ("留·可用", Verdict.usable.color.opacity(0.9), .white)
+        case .pick: return ("★ 留", Verdict.pick.color.opacity(0.9), AppPalette.onVerdict)
+        case .usable: return ("留·可用", Verdict.usable.color.opacity(0.9), AppPalette.onVerdict)
         // 废：红底白字（以前是黑底上一个小红字，深色照片上几乎看不见）。
-        case .reject: return ("✕ 废", Verdict.reject.color.opacity(0.85), .white)
+        case .reject: return ("✕ 废", Verdict.reject.color.opacity(0.85), AppPalette.onVerdict)
         }
     }
 

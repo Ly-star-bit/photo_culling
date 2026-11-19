@@ -4059,7 +4059,7 @@ private struct CellHoverBar<Content: View>: View {
             Text("只留这张").font(.caption2.bold())
                 .padding(.horizontal, 7).padding(.vertical, 3)
                 .background(Verdict.pick.color.opacity(0.92), in: Capsule())
-                .foregroundStyle(.white)
+                .foregroundStyle(AppPalette.onVerdict)
         }
         .buttonStyle(.plain)
         .help("这张留下（精选），本场其余设为废片。整场一次改判，⌘Z 撤销")
@@ -6183,7 +6183,7 @@ struct ReviewView: View {
                         .font(.callout.bold())
                         .padding(.horizontal, 12).padding(.vertical, 4)
                         .background(on ? verdict.color.opacity(0.85) : verdict.color.opacity(0.15), in: Capsule())
-                        .foregroundStyle(on ? Color.white : verdict.color)
+                        .foregroundStyle(on ? AppPalette.onVerdict : verdict.color)
                 }
                 .buttonStyle(.plain)
                 .help("\(verdict.rawValue) (\(key))，判完自动下一张")
