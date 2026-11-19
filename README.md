@@ -323,7 +323,8 @@ swift build -c release
 #     （Scripts/gen_synthetic_rejects.py 生成，cases.tsv 逐张写着测什么、期望什么；有意改判决：改生成脚本里的期望、重新生成，再 UPDATE_SYNTH=1 重跑）
 #   合成图跑原生分析: python3 -I Scripts/native_analysis_smoke.py .build/release/LabelGUI [--no-scale] [--keep]
 #   交付回归(水印不写回原片 / -2 另存 / XMP 合并 / 去 GPS): python3 -I Scripts/delivery_regression.py .build/release/LabelGUI [--keep]
-#   无头护栏回归(数据目录闸、设置域不被改、启动门控；只能给裸二进制): python3 -I Scripts/cli_guard_regression.py .build/release/LabelGUI
+#   无头护栏回归(数据目录闸、设置域不被改、启动门控、源码里每个 @AppStorage 都带 store: AppRuntime.viewDefaults；只能给裸二进制):
+#     python3 -I Scripts/cli_guard_regression.py .build/release/LabelGUI
 #   照片 id 稳定回归(sips 合成小图，加 / 删 / 换同名文件后 id 和改判还对得上): python3 -I Scripts/photo_id_regression.py .build/release/LabelGUI
 #   交付对照回归(导出 → exports.json → 按交付文件名导入客户选择): python3 -I Scripts/delivery_ledger_regression.py .build/release/LabelGUI
 #   选片确认表回归(套餐张数、备注读回来、精修要求.csv、确认表水印): python3 -I Scripts/proof_sheet_regression.py .build/release/LabelGUI
@@ -331,6 +332,8 @@ swift build -c release
 # 新加一个 --*-selftest 只改自检登记表 Sources/LabelGUI/SelfTestRegistry.swift：在 all 里加一行（参数、一句说明、入口、CI 怎么跑），
 #   无头参数、main.swift 的分派、selftests.sh 跑不跑都从它来；新加的 Scripts/*_regression.py、*_smoke.py 必须在
 #   .github/workflows/release.yml 里加一步（放进 test-bridge 或 test-selftests，哪边短放哪边）：不然 selftests.sh 最后的「CI 登记」会红
+# 新加一个 @AppStorage 一律写 store: AppRuntime.viewDefaults（界面里就是 UserDefaults.standard；无头时是一份临时的，--events 拨控件
+#   不会写进设置域）：漏写的话 cli_guard_regression.py 的 H 组报「文件:行」，真要例外写进脚本里的 APPSTORAGE_EXCEPTIONS 并写明为什么
 ```
 
 ## 使用流程

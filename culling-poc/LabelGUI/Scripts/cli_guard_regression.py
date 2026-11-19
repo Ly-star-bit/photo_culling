@@ -6,6 +6,8 @@
       旧的一行、pid 不是 LabelGUI、空的一行 → 等满以后 unknown；只拿 LOCK_SH 的不挡。
   G   main.swift 顶层分派的参数和 AppRuntime.commandFlags 两边对得上；自检只登在登记表（--list-selftests）里，
       main.swift 在建数据目录之前、开界面之前两处按表分派。
+  H   源码级：Sources 里每个 @AppStorage(…) 都带 store: AppRuntime.viewDefaults（例外列在 APPSTORAGE_EXCEPTIONS，
+      写明为什么）；漏写的控件无头时一拨就写进设置域，没带的报「文件:行」。只读源码，不跑程序。
 
 用法: python3 -I cli_guard_regression.py <LabelGUI 裸二进制> [工作目录]
 「真实数据目录」一律用 CFFIXED_USER_HOME 换成假的家目录下那个（card_import_regression G 段、live_smoke 同一招）：
@@ -325,5 +327,51 @@ dispatched |= {f for f in re.findall(r'"(--mcp[\w-]*)"', mcp_src)}
 check(bool(commands) and len(dispatched) > 20, f"读到了 commandFlags（{len(commands)} 个）和顶层分派（{len(dispatched)} 个）")
 check(dispatched <= commands, f"分派了却没登记：{sorted(dispatched - commands)}")
 check(commands <= dispatched, f"登记了却没有分派：{sorted(commands - dispatched)}")
+
+print("H. 源码里每个 @AppStorage 都带 store: AppRuntime.viewDefaults（无头拨控件不碰设置域）")
+# 优化分析 2026-11-18 perf-ui 复核「漏-1」：v1.32.0 的 --events 点一下「按分组」、拖一下缩略图滑杆，batch.gridMode / batch.thumbSize
+# 就写进了裸二进制的设置域 LabelGUI（这一版起无头时视图设置走 AppRuntime.viewDefaults：一份临时的 UserDefaults，见 HeadlessGuards.swift）。
+# --view-prefs-selftest 只拨得到网格模式和缩略图滑杆：以后新加的 @AppStorage 忘了写 store:，自检抓不到，这里按源码一个个查。
+# 例外（真要读写 UserDefaults.standard、或者另有闸的）写进下面这张表：键是「相对 Sources/LabelGUI 的路径:设置键」，值写为什么。
+APPSTORAGE_EXCEPTIONS = {}
+STORE_RE = re.compile(r"\bstore\s*:\s*AppRuntime\.viewDefaults\b")
+
+
+def appstorage_decls(text):
+    """一个源文件里每个 @AppStorage(…) 的（行号, 括号里的原文）。括号按层数配对（写成好几行的也认）。
+    跳过注释和字符串里的：同一行在它前面有 //，或者前面的双引号是单数。注释、说明字里写的「（@AppStorage）」是全角括号，本来就不算。"""
+    out = []
+    for m in re.finditer(r"@AppStorage\s*\(", text):
+        prefix = text[text.rfind("\n", 0, m.start()) + 1:m.start()]
+        if "//" in prefix or prefix.replace('\\"', "").count('"') % 2 == 1:
+            continue
+        depth, i = 1, m.end()
+        while i < len(text) and depth:
+            depth += {"(": 1, ")": -1}.get(text[i], 0)
+            i += 1
+        out.append((text.count("\n", 0, m.start()) + 1, text[m.end():i - 1]))
+    return out
+
+
+decls, unstored = [], []
+for base, _dirs, names in os.walk(SRC):
+    for name in sorted(names):
+        if not name.endswith(".swift"):
+            continue
+        path = os.path.join(base, name)
+        rel = os.path.relpath(path, SRC)
+        for line, args in appstorage_decls(open(path, encoding="utf-8").read()):
+            km = re.match(r'\s*"([^"]*)"', args)
+            key = km.group(1) if km else "?"
+            decls.append(f"{rel}:{key}")
+            if not STORE_RE.search(args) and f"{rel}:{key}" not in APPSTORAGE_EXCEPTIONS:
+                unstored.append(f"{rel}:{line} @AppStorage(\"{key}\")")
+# 现在是 21 个（BatchView 18、DetailView、PickView、CardImportView 各 1）：一下子少到 20 以下多半是扫描坏了，不是真删了
+check(len(decls) >= 20, f"Sources 里认出 {len(decls)} 个 @AppStorage（少于 20 个多半是扫描坏了）")
+check(not unstored, "每个 @AppStorage 都带 store: AppRuntime.viewDefaults"
+      + (f"；没带的 {len(unstored)} 个（加上 store: AppRuntime.viewDefaults，真要例外就写进 APPSTORAGE_EXCEPTIONS 并写明为什么）："
+         + "；".join(unstored) if unstored else ""))
+stale = sorted(set(APPSTORAGE_EXCEPTIONS) - set(decls))
+check(not stale, f"APPSTORAGE_EXCEPTIONS 里每一项源码里都还有{('；已经没有的：' + '；'.join(stale)) if stale else ''}")
 
 finish()
