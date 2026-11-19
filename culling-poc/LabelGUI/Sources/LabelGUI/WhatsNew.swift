@@ -31,19 +31,31 @@ enum WhatsNew {
     }
 
     /// 这一版新增的条目（两三条到五条，一条一句话，能「带我去」的都带上）。发下一版时整张换掉、version 跟着改。
-    static let notes = Notes(version: "1.32.0", entries: [
-        Entry(id: "themes",
-              title: "界面可以换主题了",
-              detail: "六套：石墨（原来的）、灰卡、胡桃、午夜、纯黑，和一套浅色的相纸。状态栏右下角的半圆按钮点开就能挑，点了立刻换；「显示 › 主题」里也有。",
+    static let notes = Notes(version: "1.33.0", entries: [
+        Entry(id: "reanalyze-once",
+              title: "老场次要重新分析一次",
+              detail: "判虚焦、闭眼、曝光、人脸质量的算法都改了。打开以前分析过的拍摄点「重新分析」，整场重算一次；改判过的、客户选中的都保留，没重新分析前判决和升级前一样。",
               destination: .batch),
-        Entry(id: "themes-photos-untouched",
-              title: "换的只是界面",
-              detail: "照片、判决的绿蓝红、导出的图都不跟着主题变；看大图、审片时照片四周一直是黑的。",
+        Entry(id: "focus",
+              title: "判虚焦改看眼睛的「对焦」",
+              detail: "只量眼眉那一块对没对上焦：暗一两档、逆光、特写的清楚照片不再被冤，焦点落在嘴上、眼睛发虚的也抓得到。右栏第一根滑杆改名「对焦下限」，宽松 45 / 标准 60 / 严格 70。",
+              destination: .batch),
+        Entry(id: "eyes-exposure",
+              title: "闭眼、曝光判得更准",
+              detail: "歪着头闭眼认得出，垂眼往下看的不算闭眼；白底、黑底、逆光的人像不再被判「曝光裁切」，只看人本身。",
               destination: nil),
-        Entry(id: "override-fast",
-              title: "大场次改判跟手了",
-              detail: "几千张的场次里按 1 / 2 / 3 改判，和几百张时差不多快（v1.31.1、v1.31.2 做的）。",
+        Entry(id: "context-menu-drag",
+              title: "照片能右键、能拖出去",
+              detail: "右键改判、在访达中显示、用别的 app 打开、放进拼图托盘；拖到访达是复制原片，拖到 Capture One / Lightroom 的图标上就用它打开。",
               destination: .batch),
+        Entry(id: "export-presets",
+              title: "导出能存预设、挑范围",
+              detail: "「小红书」「朋友圈」这样的设置存成预设，勾几套一次导完；范围可以只导选中的、客户选中的，或者当前筛选下的。",
+              destination: .batch),
+        Entry(id: "album-bleed",
+              title: "相册出血补足 3mm",
+              detail: "以前实际只有 2.96mm，以前做的相册打开就自动改好；挪照片、加照片以后，手动裁满的格子也不会再被改回留白。",
+              destination: nil),
     ])
 
     /// 记「上次见过哪一版」的键（app 自己的 UserDefaults 域；自检写进参数域，不碰这里）。
