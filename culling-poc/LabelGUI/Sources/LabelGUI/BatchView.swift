@@ -1837,9 +1837,9 @@ struct BatchView: View {
                 Button("选择照片文件夹...") { pickFolder() }
             }
             // 以前这里是一整行密密麻麻的快捷键；现在有快捷键表了，只留两条最有用的入口。
-            // 新用户最需要的这行指路：以前是 .caption + 系统三级灰，2.26:1（UX-12）。11pt + 主题的二级字（每套 ≥ 4.5:1，自检核对）。
+            // 新用户最需要的这行指路：以前是 .caption + 系统三级灰，2.26:1（UX-12）。hintText = 11pt + 主题的二级字（每套 ≥ 4.5:1，自检核对）。
             Text("也可以把照片文件夹从访达直接拖进窗口 · 插上相机存储卡会问要不要导入 · 按 ? 看全部快捷键")
-                .font(.system(size: 11)).foregroundStyle(AppPalette.secondary)
+                .hintText()
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 120)

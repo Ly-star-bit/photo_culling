@@ -770,9 +770,9 @@ struct CardImportSheet: View {
             }
         }
         HStack {
-            // 插卡时最让人放心的这句：以前是 .caption + 系统三级灰，2.20:1（UX-12）。11pt + 主题的二级字（每套 ≥ 4.5:1）。
+            // 插卡时最让人放心的这句：以前是 .caption + 系统三级灰，2.20:1（UX-12）。hintText = 11pt + 主题的二级字（每套 ≥ 4.5:1）。
             Text("只复制，不会删除或改动存储卡上的任何文件")
-                .font(.system(size: 11)).foregroundStyle(AppPalette.secondary)
+                .hintText()
             Spacer()
             if canImport {
                 Button("不导入") { center.dismiss() }
