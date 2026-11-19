@@ -24,7 +24,8 @@ import AppKit
 /// LabelGUI --batch-ui <photo_dir> <out.png> --perf grid [--copies 15] [--size 2560x1440 -batch.thumbSize 90]
 ///     （截完图接着在网格里按 → ← 和数字键，打印每一下哪些视图 body 重算了几次、主线程 CPU、进程指令数：BatchPerf；
 ///     带改判动画的两行（数字键、直接改判 带动画）头一个数是估计 = 首圈 + 每帧 × 24 帧，见 BatchPerf.measure；
-///     --copies N 先把这一场复制成 N 倍的照片）
+///     --copies N 先把这一场复制成 N 倍的照片。--perf 换成 set = 只量直接改判 240 下（拿 sample 用）、thresh = 右栏锐度 /
+///     曝光滑杆各拖 12 格、sel = 选着 3 张时按方向键）
 ///
 /// 和 --collage-ui 同一套：用 app 里一模一样的视图在一个从不显示的无边框窗口里布局、
 /// 渲染成 PNG。界面不能开，排布有没有挤、时间轴会不会压到别的区域，只能这样看。

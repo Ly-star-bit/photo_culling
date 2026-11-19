@@ -1269,6 +1269,9 @@ struct BatchView: View {
                 case "←": moveFocus(-1, proxy: proxy)
                 case "↓": moveFocusVertically(1, proxy: proxy)
                 case "↑": moveFocusVertically(-1, proxy: proxy)
+                // --perf sel：选中网格里头 N 张（离屏点不出 ⌘ 多选）。
+                case let k where k.hasPrefix("select:"):
+                    selectedIDs = Set(visibleIDs.prefix(Int(k.dropFirst(7)) ?? 0))
                 default: _ = applyDigit(key, proxy: proxy)
                 }
                 SnapshotPreview.gridFocus = focusedID

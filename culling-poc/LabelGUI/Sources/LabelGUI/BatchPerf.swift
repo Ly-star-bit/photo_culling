@@ -35,8 +35,10 @@ enum BatchPerf {
 
     static func run(_ scenario: String, store: BatchStore, viewport: GridViewport, spin: (Double) -> Void) {
         // set = 只量「直接改判 不带动画」，连改 240 下：拿 sample 采样找这一下贵在哪时用（grid 里它只有 12 下，采不到几个样本）。
-        guard scenario == "grid" || scenario == "set" else {
-            print("不认识的场景（grid / set）")
+        // thresh = 右栏阈值滑杆拖一格（锐度、曝光各 12 下，PI-04）；sel = 网格里选着 3 张时按方向键（批量栏每次 body 都在，PI-06）。
+        // 这两个单列，不进 grid：grid 的几行要和以前的基线（base-1.32.0/perf-batch.txt）逐行比。
+        guard ["grid", "set", "thresh", "sel"].contains(scenario) else {
+            print("不认识的场景（grid / set / thresh / sel）")
             return
         }
         let activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical],
@@ -51,11 +53,27 @@ enum BatchPerf {
         print("perf 动画：" + AppMotion.summary)
         // 第一下 → 从「没有焦点」落到第一张；之后每下挪一格。← 再走回来。
         let keyStep: (String) -> () -> Void = { key in { keys.send(key) } }
+        if scenario == "thresh" {
+            // 和滑杆的绑定同一条路：设属性 → didSet 重判。锐度滑杆一格是 5（step: 5），曝光滑杆没有格、拖一下约 0.01。来回拖。
+            let sharp = store.sharpnessThreshold, clip = store.exposureThreshold
+            measure("锐度滑杆一格", (0..<12).map { k in { store.sharpnessThreshold = sharp + (k % 2 == 0 ? 5 : 0) } },
+                    idle: idle, spin: spin)
+            measure("曝光滑杆一格", (0..<12).map { k in { store.exposureThreshold = clip + (k % 2 == 0 ? 0.01 : 0) } },
+                    idle: idle, spin: spin)
+            return
+        }
+        if scenario == "sel" {
+            keys.send("select:3")
+            spin(0.5)
+            measure("选着 3 张 → 键", Array(repeating: "→", count: 13).map(keyStep), idle: idle, spin: spin)
+            measure("选着 3 张 ← 键", Array(repeating: "←", count: 12).map(keyStep), idle: idle, spin: spin)
+            return
+        }
         if scenario == "set" {
             let ids = store.items.map(\.id)
             guard !ids.isEmpty else { return }
             let all: [Verdict] = [.pick, .usable, .reject]
-            measure("直接改判 不带动画", (0..<240).map { k in { store.setOverrideBatch([ids[(k * 37) % ids.count]], all[k % 3]) } },
+            measure("直接改判 不带动画", (0..<240).map { k in { quietly { store.setOverrideBatch([ids[(k * 37) % ids.count]], all[k % 3]) } } },
                     idle: idle, spin: spin)
             return
         }
@@ -76,7 +94,7 @@ enum BatchPerf {
                 if animated {
                     withAnimation(.easeInOut(duration: 0.2)) { store.setOverrideBatch([id], verdict) }
                 } else {
-                    store.setOverrideBatch([id], verdict)
+                    quietly { store.setOverrideBatch([id], verdict) }
                 }
             }
         }
@@ -86,6 +104,15 @@ enum BatchPerf {
             measure("直接改判 不带动画", (12..<24).map { setStep($0, animated: false) }, idle: idle, spin: spin)
         }
         print("perf grid：完了以后 \(store.manualOverrideCount) 张人工改判 · 挂着的格子 \(viewport.mountedCells) 个")
+    }
+
+    /// 真的不带动画地改：PI-01 以后格子的判决色有 0.15 秒的过渡（隐式动画，AppMotion.verdictFade），改的那张在屏上时离屏
+    /// 不限帧率地画它，「不带动画」那 0.3 秒的合计就成了「主线程忙满了」（一场 300 张、改的就在眼前时 1.7G，减少动态效果开着
+    /// 0.17G）。以前改的多半不在屏上（照网格的先后挑的），看不出来。
+    private static func quietly(_ change: () -> Void) {
+        var quiet = Transaction()
+        quiet.disablesAnimations = true
+        withTransaction(quiet, change)
     }
 
     /// 量的时候网格是什么样（数跟着它走：按分组比按判决贵、缩略图越小一屏格子越多）。读的是视图设置（AppRuntime.viewDefaults）：
