@@ -18,7 +18,7 @@ struct WatermarkView: View {
     var body: some View {
         VStack(spacing: 0) {
             topBar
-            Divider()
+            ThemedDivider()
             HSplitView {
                 photoList
                     .frame(minWidth: 200, maxWidth: 280)
@@ -27,7 +27,7 @@ struct WatermarkView: View {
                 settingsPanel
                     .frame(width: 330)
             }
-            Divider()
+            ThemedDivider()
             statusBar
         }
         .shortcutsHotkey(isPresented: $showShortcuts)
@@ -162,11 +162,11 @@ struct WatermarkView: View {
             missingNotice
             Spacer()
             if let notice = store.notice {
-                Text(notice).font(.caption).foregroundStyle(.secondary)
+                Text(notice).font(.caption).foregroundStyle(AppPalette.secondary)
                     .transition(.opacity)
             }
             if !store.progressText.isEmpty {
-                Text(store.progressText).font(.caption).foregroundStyle(.secondary)
+                Text(store.progressText).font(.caption).foregroundStyle(AppPalette.secondary)
             }
             if let fraction = store.progressFraction {
                 ProgressView(value: fraction).frame(width: 140)
@@ -174,7 +174,7 @@ struct WatermarkView: View {
             ThemeButton()
             Button { showShortcuts.toggle() } label: { Image(systemName: "keyboard") }
                 .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(AppPalette.secondary)
                 .help("快捷键一览 (?)")
                 .popover(isPresented: $showShortcuts, arrowEdge: .top) { ShortcutsPanel(page: .watermark) }
         }
@@ -194,7 +194,7 @@ struct WatermarkView: View {
                         .font(.system(size: 34)).foregroundStyle(.tertiary)
                     // 批量页选好的片子从顶栏「导入选片结果」拿（NU7：以前空状态只提「导入照片」）。
                     Text("拖拽照片/文件夹到这里\n或点「导入照片」\n选好的片子：点「导入选片结果」拿批量页的精选")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(AppPalette.secondary)
                         .multilineTextAlignment(.center)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -222,11 +222,15 @@ struct WatermarkView: View {
                     .tag(url)
                 }
                 .listStyle(.sidebar)
+                // 列表自己的底（离屏是系统的 #282828、真窗口是侧栏材质）不跟主题：藏掉，露下面的栏色（TB-04）。
+                .scrollContentBackground(.hidden)
                 .onDeleteCommand {
                     if let selected = store.selectedPhoto { store.removePhoto(selected) }
                 }
             }
         }
+        // 空的时候、有照片的时候都铺栏色（以前没有底，透出窗口的系统灰）。
+        .background(AppPalette.panel)
         .overlay {
             RoundedRectangle(cornerRadius: 6)
                 .strokeBorder(AppPalette.accent, lineWidth: 2)
@@ -271,7 +275,7 @@ struct WatermarkView: View {
             } else if store.selectedPhoto != nil {
                 ProgressView()
             } else {
-                Text("导入照片后在这里实时预览").foregroundStyle(.secondary)
+                Text("导入照片后在这里实时预览").foregroundStyle(AppPalette.secondary)
             }
             // 切换照片时旧图还在，新图在渲染：盖一层转圈而不是让人以为没反应。
             if store.previewStale, store.previewImage != nil {
@@ -287,7 +291,8 @@ struct WatermarkView: View {
                     .padding(.bottom, 14)
             }
         }
-        .environment(\.colorScheme, .dark)
+        // 以前这里强制 .dark（水印页初版整个 app 是深色）：底早就跟主题走了（canvas），相纸下强制深色只剩副作用 ——
+        // 「导入照片后在这里实时预览」按深色取成浅灰白字，压在浅底上 1.19:1（TB-03）。现在跟主题的深浅。
     }
 
     // MARK: - 右: 参数面板
@@ -370,7 +375,7 @@ struct WatermarkView: View {
                         tintSwatch(WatermarkEngine.RGB(r: 0, g: 0, b: 0), label: "黑", name: "黑色")
                         Spacer(minLength: 4)
                         // 自定义：前面写上字（以前是色块后面一个没有说明的白色长条）。
-                        Text("自定义").font(.caption).foregroundStyle(.secondary)
+                        Text("自定义").font(.caption).foregroundStyle(AppPalette.secondary)
                         ColorPicker("", selection: rgbBinding(
                             get: { store.config.tint },
                             set: { store.config.tint = $0; store.config.tintEnabled = true }
@@ -461,7 +466,7 @@ struct WatermarkView: View {
     /// 相框四个文本框：带位置标签，填了内容后也分得清哪个是哪个。
     private func frameField(_ label: String, _ text: Binding<String>) -> some View {
         HStack(spacing: 6) {
-            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(label).font(.caption).foregroundStyle(AppPalette.secondary)
                 .frame(width: 30, alignment: .leading)
             TextField("留空不显示", text: text).font(.caption)
         }
@@ -685,7 +690,7 @@ struct WatermarkView: View {
             .padding(4)
             .background(AppPalette.well, in: RoundedRectangle(cornerRadius: 6))
             VStack(alignment: .leading, spacing: 2) {
-                Text("位置").font(.caption).foregroundStyle(.secondary)
+                Text("位置").font(.caption).foregroundStyle(AppPalette.secondary)
                 Text(Self.positionName(selection.wrappedValue)).font(.callout)
             }
             Spacer(minLength: 0)
@@ -731,10 +736,9 @@ struct WatermarkView: View {
                 Circle()
                     .fill(rgb.map { Color($0.nsColor) } ?? Color.clear)
                     .frame(width: 20, height: 20)
-                    .overlay(Circle().stroke(isActive ? AppPalette.accent : .gray.opacity(0.4),
-                                             lineWidth: isActive ? 2 : 1))
+                    .overlay { SwatchRing(on: isActive, offOpacity: 0.4) }
                 if rgb == nil {
-                    Text(label).font(.system(size: 9)).foregroundStyle(.secondary)
+                    Text(label).font(.system(size: 9)).foregroundStyle(AppPalette.secondary)
                 }
             }
         }

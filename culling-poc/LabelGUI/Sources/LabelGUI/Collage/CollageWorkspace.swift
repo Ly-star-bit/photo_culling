@@ -326,11 +326,13 @@ private struct CollageSplitHandle: View {
     @State private var start: CGFloat?
     @State private var hovering = false
 
+    /// 底是栏色、线是主题的发丝线（以前 Color.clear + 系统的 separatorColor：透出窗口的系统灰，纯黑主题里栏和画布中间
+    /// 一根 7px 的灰柱，TB-04）。
     var body: some View {
         ZStack {
-            Color.clear
+            AppPalette.panel
             Rectangle()
-                .fill(start != nil || hovering ? AppPalette.accent.opacity(0.7) : Color(nsColor: .separatorColor))
+                .fill(start != nil || hovering ? AppPalette.accent.opacity(0.7) : AppPalette.hairline)
                 .frame(width: start != nil || hovering ? 2 : 1)
         }
         .frame(width: CollageWorkspace.handleWidth)
@@ -370,7 +372,7 @@ struct CollagePaneToggle: View {
             Image(systemName: left ? "sidebar.left" : "sidebar.right")
                 .font(.system(size: 13))
                 .frame(width: 22, height: 20)
-                .foregroundStyle(shown ? AnyShapeStyle(HierarchicalShapeStyle.secondary) : AnyShapeStyle(Color.white.opacity(0.9)))
+                .foregroundStyle(shown ? AnyShapeStyle(AppPalette.secondary) : AnyShapeStyle(Color.white.opacity(0.9)))
                 .background(shown ? AnyShapeStyle(Color.clear) : AnyShapeStyle(Color.black.opacity(0.55)),
                             in: RoundedRectangle(cornerRadius: 5))
         }
@@ -409,8 +411,10 @@ struct CollagePaneToggleLayer: View {
 
 extension View {
     /// 面板里的说明字：11pt、二级灰（以前是 10pt 三级灰，深色底上几乎读不出来，而不少操作只靠这些字说明）。
+    /// 主题的二级字（AppPalette.secondary），不是 SwiftUI 的 `.secondary`：系统的相纸下只有 3.85:1（优化分析 2026-11-18 V-01）。
+    /// 拼图、水印页别的说明字也一律写 `AppPalette.secondary`。
     func collageHint() -> some View {
-        font(.subheadline).foregroundStyle(.secondary)
+        font(.subheadline).foregroundStyle(AppPalette.secondary)
     }
 }
 

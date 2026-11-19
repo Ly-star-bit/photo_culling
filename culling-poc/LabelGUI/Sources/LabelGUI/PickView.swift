@@ -70,14 +70,14 @@ struct PickView: View {
         let faces = FaceAlignment(frames: frames)
         VStack(spacing: 0) {
             header(frames, people: faces.people)
-            Divider()
+            ThemedDivider()
             GeometryReader { geo in
                 stage(frames, draft: draft, faces: faces, size: geo.size)
             }
             .overlay(alignment: .top) {
                 if session.allDone { doneBanner }
             }
-            Divider()
+            ThemedDivider()
             footer
         }
         .background(AppPalette.canvas)
@@ -220,7 +220,7 @@ struct PickView: View {
                 Text("\(unconfirmed) 组未确认").font(.caption).foregroundStyle(AppPalette.warning)
                     .help("这几组点过但没按 ⏎，判决还没写进去。离开时会问你要不要一起确认")
             }
-            Divider().frame(height: 16)
+            ThemedDivider(vertical: true).frame(height: 16)
             groupTitle(frames)
             Spacer(minLength: 8)
             if !session.isSelection {
@@ -235,7 +235,7 @@ struct PickView: View {
                     .disabled(!session.hasNext)
                     .help("下一组 (↓)，这一组先不定")
             }
-            Divider().frame(height: 16)
+            ThemedDivider(vertical: true).frame(height: 16)
             // 全写那一档照旧只有字（和改之前一个像素不差）；去字那一档只剩图标。
             Button { toggleZoom() } label: {
                 if icons {
@@ -282,11 +282,12 @@ struct PickView: View {
                 if let range = BatchView.timeRange(frames) {
                     Text(range).font(.caption2).monospacedDigit().foregroundStyle(.secondary)
                 }
+                // 待处理 = 实心胶囊（和批量页组头同一个写法，TA-06），已定 = 淡底。
                 Text(pending ? "待处理" : "已定")
                     .font(.caption2.bold())
                     .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background((pending ? AppPalette.warning : AppPalette.pick).opacity(0.22), in: Capsule())
-                    .foregroundStyle(pending ? AppPalette.warning : AppPalette.pick)
+                    .background(pending ? AppPalette.warning : AppPalette.pick.opacity(0.22), in: Capsule())
+                    .foregroundStyle(pending ? AppPalette.onWarning : AppPalette.pick)
             }
             .lineLimit(1)
         } else {
@@ -419,10 +420,10 @@ struct PickView: View {
         return VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 10) {
                 Image(systemName: wholeGroupOut ? "trash.fill" : "checkmark.circle.fill")
-                    .foregroundStyle(wholeGroupOut ? Color.red : Verdict.pick.color)
+                    .foregroundStyle(wholeGroupOut ? AppPalette.reject : Verdict.pick.color)
                 Text(PickSession.outcomeText(outcome))
                     .font(.callout)
-                    .foregroundStyle(wholeGroupOut ? Color.red : Color.primary)
+                    .foregroundStyle(wholeGroupOut ? AppPalette.reject : Color.primary)
                     .lineLimit(1).truncationMode(.middle)
                 if outcome.changes == 0 {
                     Text("（和现在一样）").font(.caption).foregroundStyle(.tertiary)
@@ -771,7 +772,9 @@ private struct PickTile: View {
             .opacity(vivid ? 1 : 0.6)
             .overlay {
                 if zoomed && loadingCrop {
+                    // 压在照片上的黑底：转圈按深色外观画（相纸下跟着外观是深灰转圈压在黑底上，TA-07 同一类）。
                     ProgressView().controlSize(.small)
+                        .environment(\.colorScheme, .dark)
                         .padding(8)
                         .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
                 }
@@ -827,7 +830,7 @@ private struct PickTile: View {
                 .font(.caption2.bold())
                 .padding(.horizontal, 6).padding(.vertical, 2)
                 .background(.black.opacity(0.6), in: Capsule())
-                .foregroundStyle(.red)
+                .foregroundStyle(OnPhotoPalette.reject)
                 .lineLimit(1)
                 .padding(6)
         }
@@ -905,9 +908,10 @@ private struct PickTile: View {
             let total = max(eyes.known, faceSlots.count)
             Group {
                 if eyes.closed > 0 {
-                    Label("闭眼 \(eyes.closed)/\(total)", systemImage: "eye.slash").foregroundStyle(Color.red)
+                    Label("闭眼 \(eyes.closed)/\(total)", systemImage: "eye.slash").foregroundStyle(AppPalette.reject)
                 } else if eyes.squint > 0 {
-                    Label("眯眼 \(eyes.squint)/\(total)", systemImage: "eye").foregroundStyle(Color.yellow)
+                    // 界面底色上的提醒黄：相纸下压深成芥末色（系统黄在相纸上 1.04:1，等于看不见，TA-02）。
+                    Label("眯眼 \(eyes.squint)/\(total)", systemImage: "eye").foregroundStyle(AppPalette.caution)
                 } else {
                     Label("睁眼 \(eyes.known)/\(total)", systemImage: "eye").foregroundStyle(AppPalette.pick)
                 }

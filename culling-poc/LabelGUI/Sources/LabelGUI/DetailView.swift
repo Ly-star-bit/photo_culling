@@ -13,7 +13,7 @@ struct DetailView: View {
     var body: some View {
         HStack(spacing: 0) {
             imagePane
-            Divider()
+            ThemedDivider(vertical: true)
             formPane
                 .frame(width: 320)
         }
@@ -65,7 +65,9 @@ struct DetailView: View {
                 ThumbnailView(path: photo.previewPath, maxPixel: 1600, fit: true)
                     .padding()
             } else {
+                // 底是黑的（照片区）：字不跟外观走，相纸下不写颜色就是黑字压黑底（TA-07 同一类）。
                 Text("无法加载预览图: \(photo.previewPath)")
+                    .foregroundStyle(OnPhotoPalette.text)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -174,6 +176,9 @@ struct DetailView: View {
             }
         }
         .formStyle(.grouped)
+        // 表单底跟主题（以前是系统的 #282828 / 相纸冷灰；纯黑下表单里的卡片反而比表单底暗，TA-12）。
+        .scrollContentBackground(.hidden)
+        .background(AppPalette.panel)
     }
 }
 

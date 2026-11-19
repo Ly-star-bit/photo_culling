@@ -35,6 +35,9 @@ struct SidebarView: View {
                 .tag(photo.id)
             }
         }
+        // 列表底跟主题（以前五套深色都是系统的 #282828，纯黑下是黑底中间一块灰，TA-12）。
+        .scrollContentBackground(.hidden)
+        .background(AppPalette.panel)
         .safeAreaInset(edge: .bottom) { footer }
         .navigationSplitViewColumnWidth(min: 220, ideal: 260)
     }
@@ -53,7 +56,7 @@ struct SidebarView: View {
             if let error = store.saveError {
                 Text(error)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(AppPalette.reject)
                     .textSelection(.enabled)
             }
         }

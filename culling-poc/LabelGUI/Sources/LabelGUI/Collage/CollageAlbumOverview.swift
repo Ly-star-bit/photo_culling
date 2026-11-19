@@ -37,9 +37,9 @@ struct CollageAlbumOverview: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
+            ThemedDivider()
             selectionBar
-            Divider()
+            ThemedDivider()
             GeometryReader { geo in
                 ScrollView(.vertical) {
                     grid(width: geo.size.width)
@@ -76,15 +76,15 @@ struct CollageAlbumOverview: View {
         return HStack(spacing: 8) {
             Label("整本", systemImage: "square.grid.3x3.fill").font(.headline).fixedSize()
             Text(summary)
-                .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                .font(.caption).foregroundStyle(AppPalette.secondary).monospacedDigit()
                 .lineLimit(1).truncationMode(.tail)
                 .help(summary)
             Spacer(minLength: 4)
-            Image(systemName: "photo").font(.caption2).foregroundStyle(.secondary)
+            Image(systemName: "photo").font(.caption2).foregroundStyle(AppPalette.secondary)
             Slider(value: $ui.overviewCardWidth, in: CollageAlbumUI.cardWidthRange)
                 .frame(minWidth: 56, maxWidth: 120)
                 .help("缩略图大小")
-            Image(systemName: "photo").font(.body).foregroundStyle(.secondary)
+            Image(systemName: "photo").font(.body).foregroundStyle(AppPalette.secondary)
             Button("回到编辑") { ui.overviewShown = false }
                 .fixedSize()
                 .help("回到画布编辑现在这个跨页（Esc、G 也行）")
@@ -104,7 +104,7 @@ struct CollageAlbumOverview: View {
                     .lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 0)
             } else {
-                Text("已选 \(picked.count) 个跨页").font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                Text("已选 \(picked.count) 个跨页").font(.caption).foregroundStyle(AppPalette.secondary).monospacedDigit()
                 Spacer(minLength: 4)
                 actionButtons(picked)
                 Button {
@@ -376,9 +376,10 @@ private struct CollageOverviewCard: View {
         }
     }
 
+    /// 缩略图没出来时是卡片色的占位（以前写死 #383838，TB-02）；外面一圈成品的发丝线（TB-05）。
     private var image: some View {
         ZStack {
-            Rectangle().fill(Color(white: 0.22))
+            Rectangle().fill(AppPalette.card)
             if let thumb {
                 Image(nsImage: thumb).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
             }
@@ -386,26 +387,28 @@ private struct CollageOverviewCard: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .shadow(color: .black.opacity(0.3), radius: 3, y: 1)
+        .sheetEdge()
         .overlay(alignment: .topLeading) {
             if locked { CollageLockBadge() }
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 2)
-                .strokeBorder(borderColor, lineWidth: selected || targeted ? 3 : 1.5)
-                .padding(-3)
+            // 选中 / 托盘照片拖上来：共用的选中框（TB-01），点缀色还是缩略图外面那 3pt，两侧各一圈 keyline —— 纯黑 / 灰卡的
+            // 点缀色是白，以前贴着纸白的缩略图只像缩略图大了一圈。正在编辑的那个照旧一圈淡淡的 ink。
+            if selected || targeted {
+                SelectionRing(shape: RoundedRectangle(cornerRadius: 2), lineWidth: 3).padding(-4)
+            } else if current {
+                RoundedRectangle(cornerRadius: 2)
+                    .strokeBorder(AppPalette.ink.opacity(0.55), lineWidth: 1.5)
+                    .padding(-3)
+            }
         }
-    }
-
-    private var borderColor: Color {
-        if targeted || selected { return AppPalette.accent }
-        return current ? AppPalette.ink.opacity(0.55) : .clear
     }
 
     private var caption: some View {
         HStack(spacing: 4) {
             Text("\(number)").fontWeight(.semibold).foregroundStyle(over ? AppPalette.warning : Color.primary)
-            Text("· " + CollageAlbumRules.photoCountLabel(photos)).foregroundStyle(.secondary)
-            if locked { Image(systemName: "lock.fill").foregroundStyle(.secondary) }
+            Text("· " + CollageAlbumRules.photoCountLabel(photos)).foregroundStyle(AppPalette.secondary)
+            if locked { Image(systemName: "lock.fill").foregroundStyle(AppPalette.secondary) }
             if current { Text("· 在编辑").foregroundStyle(.tertiary) }
         }
         .font(.caption2)
@@ -424,13 +427,14 @@ private struct CollageOverviewCoverCard: View {
     var body: some View {
         VStack(spacing: 2) {
             ZStack {
+                // 封面的小图比格子窄一点：底下不再垫写死的 #383838（相纸下两侧各露一条 4px 深灰，TB-02）；
+                // 还没渲出来时 CollageCoverThumb 自己画占位。
                 if store.project.bookCover != nil {
-                    Rectangle().fill(Color(white: 0.22))
                     CollageCoverThumb(store: store, longEdge: 520)
                 } else {
                     RoundedRectangle(cornerRadius: 4)
                         .strokeBorder(Color.secondary.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
-                    Label("封面", systemImage: "plus").font(.callout).foregroundStyle(.secondary)
+                    Label("封面", systemImage: "plus").font(.callout).foregroundStyle(AppPalette.secondary)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -441,7 +445,7 @@ private struct CollageOverviewCoverCard: View {
             }
             Text(store.project.bookCover == nil ? "还没有封面" : "封面")
                 .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(AppPalette.secondary)
                 .frame(height: captionHeight - 2)
         }
         .contentShape(Rectangle())

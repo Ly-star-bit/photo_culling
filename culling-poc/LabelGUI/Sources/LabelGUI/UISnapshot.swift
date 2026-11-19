@@ -81,6 +81,13 @@ enum SnapshotAX {
     }
 }
 
+/// 快照工具给单画的根视图垫底：主题的这个颜色在 body 里读（换主题跟着重画）。界面里不用它，界面的底各自在 body 里读 AppPalette。
+private struct ThemedFill: View {
+    let key: KeyPath<ThemeColors, Color>
+    init(_ key: KeyPath<ThemeColors, Color>) { self.key = key }
+    var body: some View { ThemeCenter.shared.colors[keyPath: key] }
+}
+
 enum BatchUISnapshot {
     @MainActor
     static func run(flagIndex: Int, compare: Bool) -> Never {
@@ -136,35 +143,39 @@ enum BatchUISnapshot {
         var order: [String] = []
         for v in sections { order += store.items.filter { $0.verdict == v }.map(\.id) }
         let startID = option("--id") ?? order.first ?? ""
+        // 单画的根视图垫的底一律用 ThemedFill（颜色在它自己的 body 里读）：以前写 `.background(AppPalette.x)`，颜色在这里、建根视图
+        // 那一刻就取成了定值，LABELGUI_THEME_THEN 换完主题底还是上一套，换主题比对必报 DIFF（优化分析 2026-11-18 CR-02 / TA-11）。
         if args.contains("--theme-ui") {
             // 状态栏主题按钮点开的那六张小样（popover 在离屏窗口里画不出来，单独当根视图画）。
-            root = AnyView(ThemePicker().fixedSize().frame(maxWidth: .infinity, maxHeight: .infinity).background(AppPalette.canvas))
+            root = AnyView(ThemePicker().fixedSize().frame(maxWidth: .infinity, maxHeight: .infinity).background(ThemedFill(\.canvas)))
         } else if args.contains("--shortcuts-ui") {
             let name = option("--shortcuts-page") ?? ShortcutsPage.batch.rawValue
             guard let page = ShortcutsPage(rawValue: name) else {
                 print("--shortcuts-page 只认 \(ShortcutsPage.allCases.map(\.rawValue).joined(separator: "|"))：\(name)")
                 exit(2)
             }
-            root = AnyView(ShortcutsPanel(page: page).background(AppPalette.card))
+            // 底是 ShortcutsPanel 自己垫的（和真窗口、弹出框同一个），这里不另垫。
+            root = AnyView(ShortcutsPanel(page: page))
         } else if let kind = option("--delivery-ui") {
+            // 导出设置是 sheet 里的那一段：底和真 sheet 一样（themedSheet，TA-04；以前垫的是 card，看着像跟了主题）。
             root = AnyView(deliveryPreview(kind, store: store, json: option("--delivery-json") ?? "")
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .background(AppPalette.card))
+                .themedSheet())
         } else if let path = option("--client-import-ui") {
             // 导入客户选择对话框（sheet 在离屏窗口里画不出来，单独当根视图画），框里预先放好这段回复。
             let text = (try? Data(contentsOf: URL(fileURLWithPath: path))).flatMap(ClientReply.decode) ?? ""
             root = AnyView(ClientImportSheet(store: store, isPresented: .constant(true), text: text)
-                .background(AppPalette.card))
+                .themedSheet())
         } else if args.contains("--body-clock-ui") {
             // 按机身对时面板（sheet 在离屏窗口里画不出来，单独当根视图画）。
             root = AnyView(BodyClockSheet(store: store, isPresented: .constant(true))
-                .background(AppPalette.card))
+                .themedSheet())
         } else if args.contains("--review-ui") {
             // 焦点、审片开关是活的（不是 .constant）：--press 的 → / Esc 要真的翻页、退出。
             let skippable = order.contains { store.item(withID: $0).map { $0.verdict != .reject } ?? false }
             root = AnyView(ReviewSnapshotHost(store: store, order: order, skippable: skippable, startID: startID))
         } else if args.contains("--inspector-ui") {
-            root = AnyView(InspectorSnapshotHost(store: store, order: order, startID: startID))
+            root = AnyView(InspectorSnapshotHost(store: store, order: order, startID: startID).themedSheet())
         } else if args.contains("--timeline-only") {
             // 只画时间轴 + 悬停卡片（--hover N = 第 N 段），下面垫一块网格色看卡片压在网格上的样子。
             let hover = option("--hover").flatMap(Int.init)
@@ -174,8 +185,8 @@ enum BatchUISnapshot {
                                 filtered: store.activeChapterFilter, previewHover: hover) { _ in true }
                     .padding(.horizontal, 14).padding(.top, 8)
                     .zIndex(1)
-                AppPalette.canvas
-            }.background(AppPalette.canvas))
+                ThemedFill(\.canvas)
+            }.background(ThemedFill(\.canvas)))
             for (i, seg) in store.chapterSegments.enumerated() {
                 print("段 \(i): 章节 \(seg.chapter) · \(seg.count) 张 · \(seg.timeRange) · 待处理 \(seg.pendingTakes)\(seg.undated ? " · 无时间" : "")")
             }

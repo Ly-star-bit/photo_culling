@@ -79,7 +79,7 @@ struct CollagePageSizeFields: View {
             TextField("宽", text: $width).frame(width: 52)
             Text("×")
             TextField("高", text: $height).frame(width: 52)
-            Text("cm").font(.caption).foregroundStyle(.secondary)
+            Text("cm").font(.caption).foregroundStyle(AppPalette.secondary)
             Button("应用") { apply() }
                 .disabled(parsed == nil)
         }
@@ -160,7 +160,7 @@ struct CollagePrintRulesBox: View {
                     ForEach([0.9, 0.95, 1.0], id: \.self) { q in Text("\(Int(q * 100))").tag(Double?(q)) }
                 }
                 .fixedSize()
-                Text("· 基线（baseline）").foregroundStyle(.secondary)
+                Text("· 基线（baseline）").foregroundStyle(AppPalette.secondary)
             }
             .font(.caption)
             .help("印厂常要「JPEG 质量拉满、基线（不是渐进式）」：导出写的一直是基线 JPEG，这里只定质量")
@@ -204,7 +204,7 @@ struct CollagePrintRulesBox: View {
                 }
                 .fixedSize()
             } else {
-                Text(String(format: "%.1fmm", now)).foregroundStyle(.secondary).monospacedDigit()
+                Text(String(format: "%.1fmm", now)).foregroundStyle(AppPalette.secondary).monospacedDigit()
             }
         }
         .font(.caption)
@@ -332,14 +332,14 @@ struct CollagePreflightBox: View {
                     ForEach(Array(issues.prefix(Self.shownLimit).enumerated()), id: \.offset) { row($0.element) }
                     if issues.count > Self.shownLimit {
                         Text("还有 \(issues.count - Self.shownLimit) 条（拦的在前；改好前面的再看）")
-                            .font(.caption2).foregroundStyle(.secondary)
+                            .font(.caption2).foregroundStyle(AppPalette.secondary)
                     }
                     if issues.contains(where: { $0.severity == .block }) {
                         Text("有「拦」的，点导出时会先问一句")
                             .collageHint()
                     }
                 } else {
-                    Text("检查中…").font(.caption).foregroundStyle(.secondary)
+                    Text("检查中…").font(.caption).foregroundStyle(AppPalette.secondary)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

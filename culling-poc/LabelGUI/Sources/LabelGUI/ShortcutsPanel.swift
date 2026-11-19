@@ -244,6 +244,9 @@ struct ShortcutsPanel: View {
             ShortcutsPageView(page: page)
         }
         .padding(16)
+        // 底是这一套的栏色（和主题小样 ThemePicker 一样自己垫）：以前不垫，「帮助 › 快捷键一览」窗口、? 弹出框露的是系统的窗口灰 /
+        // 弹出框材质，五套深色一个样。
+        .background(AppPalette.panel)
         .onAppear { if let follow { page = follow() } }
     }
 }

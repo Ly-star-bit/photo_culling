@@ -384,9 +384,9 @@ struct CollageCanvasView: View {
         VStack(spacing: 12) {
             Image(systemName: "rectangle.3.offgrid")
                 .font(.system(size: 38))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(AppPalette.secondary)
             if store.project.photos.isEmpty {
-                Text("先带几张照片进来").foregroundStyle(.secondary)
+                Text("先带几张照片进来").foregroundStyle(AppPalette.secondary)
                 if let batch = store.batch {
                     CollageEmptyActions(store: store, batch: batch)
                 } else {
@@ -394,10 +394,10 @@ struct CollageCanvasView: View {
                 }
                 Text("也可以把照片文件直接拖进来 · 批量页多选后点「拼图」也能带过来")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppPalette.secondary)
             } else {
                 // 相册的按钮叫「自动编排」（NU7：以前提示一律说「自动排版」，相册里找不到这个按钮）。
-                Text("托盘里有 \(store.project.photos.count) 张照片").foregroundStyle(.secondary)
+                Text("托盘里有 \(store.project.photos.count) 张照片").foregroundStyle(AppPalette.secondary)
                 Button(action: onAutoLayout) {
                     Label(store.isAlbum ? "自动编排" : "自动排版", systemImage: "wand.and.stars").frame(minWidth: 140)
                 }
@@ -406,7 +406,7 @@ struct CollageCanvasView: View {
                 .disabled(store.isSolving)
                 Text("或者把托盘里的照片拖进来 · 左栏「模板」里套一个")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppPalette.secondary)
             }
         }
     }
@@ -841,6 +841,9 @@ private struct CollageCanvasImage: View {
         return abs(got / want - 1) < 0.015
     }
 
+    /// 成品外面一圈界面发丝线（sheetEdge，TB-05：墨黑的成品在深色画布上看得出边）；还没有预览（空画布、刚换版式、刚进 / 出封面
+    /// 编辑）时是一张还没印的纸：卡片色 + 同一圈线。以前占位写死 #383838，相纸下压在上面的深色说明字只有 1.45:1（TB-02）。
+    /// 都只画在界面上，导出不经过这里。
     var body: some View {
         if let image = preview.image, fits(image) {
             Image(nsImage: image)
@@ -848,11 +851,13 @@ private struct CollageCanvasImage: View {
                 .interpolation(.high)
                 .frame(width: rect.width, height: rect.height)
                 .shadow(color: .black.opacity(0.35), radius: 10, y: 3)
+                .sheetEdge()
                 .offset(x: rect.minX, y: rect.minY)
         } else {
             Rectangle()
-                .fill(Color(white: 0.22))
+                .fill(AppPalette.card)
                 .frame(width: rect.width, height: rect.height)
+                .sheetEdge()
                 .offset(x: rect.minX, y: rect.minY)
         }
     }
@@ -914,16 +919,18 @@ struct CollageCanvasOverlay: View {
         .offset(x: box.minX, y: box.minY)
     }
 
-    /// 选中图层：旋转后的外框 + 旋转把手（上）+ 缩放把手（右下）。
+    /// 选中图层：旋转后的外框 + 旋转把手（上）+ 缩放把手（右下）。框和把手都垫一圈 keyline（同 SelectionRing）：纯黑 / 灰卡的
+    /// 点缀色是白，压在白衣服、纸白上会断掉（TB-01）。
     private func itemSelection(_ h: CollageItemHandles) -> some View {
-        ZStack(alignment: .topLeading) {
-            Path { path in
-                path.addLines(h.corners)
-                path.closeSubpath()
-                path.move(to: h.topCenter)
-                path.addLine(to: h.rotate)
-            }
-            .stroke(AppPalette.accent, lineWidth: 2)
+        let outline = Path { path in
+            path.addLines(h.corners)
+            path.closeSubpath()
+            path.move(to: h.topCenter)
+            path.addLine(to: h.rotate)
+        }
+        return ZStack(alignment: .topLeading) {
+            outline.stroke(AppPalette.selectionKeyline, lineWidth: 4)
+            outline.stroke(AppPalette.accent, lineWidth: 2)
             handle(at: h.rotate)
             handle(at: h.resize)
         }
@@ -934,6 +941,7 @@ struct CollageCanvasOverlay: View {
             .fill(Color.white)
             .overlay(Circle().stroke(AppPalette.accent, lineWidth: 2))
             .frame(width: 12, height: 12)
+            .background(Circle().fill(AppPalette.selectionKeyline).frame(width: 16, height: 16))
             .offset(x: p.x - 6, y: p.y - 6)
     }
 
@@ -941,12 +949,13 @@ struct CollageCanvasOverlay: View {
         layout.toView(frame.rect.cgRect)
     }
 
+    /// 选中的格子：共用的选中框（点缀色 + 两侧 keyline）。点缀色那一圈还在原来的位置（格子外 2pt 到格子里 0.5pt），两侧各多
+    /// 一圈 1pt keyline —— 纯黑 / 灰卡的点缀色是白，以前压在纸白的留白上看不出选的是哪一格（TB-01）。
     private func selectionOutline(_ frame: CollageLayout.Frame) -> some View {
         let r = viewRect(frame)
-        return Rectangle()
-            .strokeBorder(AppPalette.accent, lineWidth: 2.5)
-            .frame(width: r.width + 4, height: r.height + 4)
-            .offset(x: r.minX - 2, y: r.minY - 2)
+        return SelectionRing(shape: Rectangle())
+            .frame(width: r.width + 6, height: r.height + 6)
+            .offset(x: r.minX - 3, y: r.minY - 3)
     }
 
     private func gutterHighlight(_ g: CollageLayout.Gutter) -> some View {

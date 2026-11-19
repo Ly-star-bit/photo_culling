@@ -1016,8 +1016,10 @@ enum CollageUISnapshot {
         let view = CollageSnapshotHost(store: store, batchStore: batch, watermarkStore: watermarkStore,
                                        inspectorWidth: inspectorWidth, whatsNew: whatsNew)
             .frame(width: inspectorWidth ?? size.width, height: size.height)
-            .environment(\.colorScheme, light ? .light : ThemeCenter.shared.scheme)
-        let host = NSHostingView(rootView: view.appTheme())
+        // 深 / 浅交给 appTheme()（在它的 body 里读，LABELGUI_THEME_THEN 换完跟着变）。以前这里写死
+        // `.environment(\.colorScheme, ThemeCenter.shared.scheme)`：建视图那一刻的值、又在 appTheme() 里面一层，盖掉了跟着主题走的那个，
+        // 换到相纸以后系统控件、`.secondary` 还按深色画（优化分析 2026-11-18 TB-11）。--light 要在里面一层才盖得住 appTheme()。
+        let host = NSHostingView(rootView: (light ? AnyView(view.environment(\.colorScheme, .light)) : AnyView(view)).appTheme())
         host.frame = NSRect(origin: .zero, size: NSSize(width: inspectorWidth ?? size.width, height: size.height))
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = light ? NSAppearance(named: .aqua) : ThemeCenter.shared.appearance
@@ -1036,6 +1038,9 @@ enum CollageUISnapshot {
             print("暗房 · 套用到 \(dr.effectiveScope.label) · \(dr.current.look.label) · 样张 \(dr.frames.count) · 试条 \(dr.testStrip.count) · "
                   + "底片条 \(dr.reel.count) · 放大镜 \(dr.loupe == nil ? "无" : "有")")
         }
+        // LABELGUI_THEME_THEN：画完换主题再截（和 --batch-ui / --app-ui 同一个，TB-11）。放在这里：后面的 --notice（5 秒自己清）、
+        // --go（描边亮 1.6 秒）、--zoom、悬停都在换完以后做，不会被换主题那几秒等过去。
+        if ThemeCenter.switchForSnapshot(window: window) { host.layoutSubtreeIfNeeded(); spin(3); host.displayIfNeeded(); spin(0.5) }
         // --tray-click：渲出来以后再点（每格的选中框各自订阅 tray.mark，这条路一开始就选好的截图走不到）。
         if let clicks = option("--tray-click") {
             for spec in clicks.split(separator: ",") {
@@ -1170,11 +1175,17 @@ private struct CollageSnapshotHost: View {
     var body: some View {
         // 离屏没有窗口底色：不垫一层，透明处存成 PNG 是黑的，黑字就看不见了。
         Group {
+            // 单截的两样垫的底和真窗口一样（颜色在这个 body 里读，换主题跟着变）：以前露的是下面那层窗口的系统灰，
+            // 五套深色一个样、相纸是冷灰，和真 app 对不上。
             if whatsNew {
+                // 真 sheet 挂的是 themedSheet（ContentView）。它里面自己带一层 appTheme()，和外面那层套着，无妨。
                 WhatsNewSheet(notes: WhatsNew.notes, onGo: { _ in }, onClose: {})
                     .frame(maxHeight: .infinity, alignment: .top)
+                    .themedSheet()
             } else if inspectorWidth != nil {
+                // 真窗口里检视器这一栏的底是 CollageSplit 垫的 panel（CollageWorkspace）。
                 CollageInspector(store: store, watermarkStore: watermarkStore)
+                    .background(AppPalette.panel)
             } else {
                 CollageView(store: store, batchStore: batchStore, watermarkStore: watermarkStore)
             }

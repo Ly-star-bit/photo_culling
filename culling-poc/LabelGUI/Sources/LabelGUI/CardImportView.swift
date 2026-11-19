@@ -424,7 +424,7 @@ struct CardImportSheet: View {
             if let offer = center.offer {
                 header(offer)
                 details(offer)
-                Divider()
+                ThemedDivider()
                 footer(offer)
             }
         }
@@ -492,13 +492,13 @@ struct CardImportSheet: View {
                 }
                 if !plan.backupEnoughSpace, let backup = plan.backup {
                     Label(backupSpaceText(backup), systemImage: "externaldrive.badge.exclamationmark")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(AppPalette.reject)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if !plan.copies.isEmpty && !plan.primaryEnoughSpace {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Label(spaceText(plan), systemImage: "externaldrive.badge.exclamationmark")
-                            .foregroundStyle(.red)
+                            .foregroundStyle(AppPalette.reject)
                             .fixedSize(horizontal: false, vertical: true)
                         Spacer(minLength: 4)
                         // 内置盘放不下：换到外接盘（选完重新出计划）。
@@ -770,8 +770,9 @@ struct CardImportSheet: View {
             }
         }
         HStack {
+            // 插卡时最让人放心的这句：以前是 .caption + 系统三级灰，2.20:1（UX-12）。11pt + 主题的二级字（每套 ≥ 4.5:1）。
             Text("只复制，不会删除或改动存储卡上的任何文件")
-                .font(.caption).foregroundStyle(.tertiary)
+                .font(.system(size: 11)).foregroundStyle(AppPalette.secondary)
             Spacer()
             if canImport {
                 Button("不导入") { center.dismiss() }
@@ -891,8 +892,9 @@ enum CardImportSnapshot {
             store.importing = true
             store.progressText = "导入中 120/624 个文件 · 3.1 GB/18.4 GB"
         }
+        // 和 ContentView 里的真 sheet 挂同一个修饰（themedSheet，TA-04）：以前垫的是系统窗口灰。
         let view = CardImportSheet(center: center, store: store)
-            .background(Color(nsColor: .windowBackgroundColor))
+            .themedSheet()
         let host = NSHostingView(rootView: view.appTheme())
         let size = host.fittingSize
         host.frame = NSRect(origin: .zero, size: size)
@@ -901,6 +903,13 @@ enum CardImportSnapshot {
         window.contentView = host
         host.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        // LABELGUI_THEME_THEN：画完换主题再截（和 --batch-ui / --app-ui 同一个；以前这里不接，「从石墨切过来」截的还是石墨）。
+        if ThemeCenter.switchForSnapshot(window: window) {
+            host.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(3))
+            host.displayIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        }
         guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { exit(1) }
         host.cacheDisplay(in: host.bounds, to: rep)
         guard let data = rep.representation(using: .png, properties: [:]), (try? data.write(to: out)) != nil else {

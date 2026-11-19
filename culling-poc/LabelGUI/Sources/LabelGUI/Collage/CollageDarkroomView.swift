@@ -2,7 +2,8 @@ import SwiftUI
 import AppKit
 
 /// 暗房工作台（状态和规则见 CollageDarkroom.swift）。整页换掉拼图页（和批量页的审片、连拍挑选一样：画布不在
-/// 视图树里，它的 ←→「换一版」就不会和这里的 ←→ 抢），强制深色。
+/// 视图树里，它的 ←→「换一版」就不会和这里的 ←→ 抢）。深浅跟主题（以前强制深色：v1.32 有了相纸以后，系统画的转圈、
+/// 滚动条、快捷键弹框在相纸下会按深色画，TB-10）。
 ///
 /// 视觉（R8 §3.3 方向 A「石墨工作台」，用户 2026-11-05 选的；第一版的胶带、齿孔、计数窗、斜放被嫌丑）：
 /// 照片是唯一的颜色 —— 外壳中性近黑，图片四周中性灰（四周染了色，看色调会偏）；只有一个点缀色琥珀，只表示
@@ -38,7 +39,6 @@ struct CollageDarkroomView: View {
                 .frame(height: 96)
         }
         .background(DarkroomPalette.shell)
-        .environment(\.colorScheme, .dark)
         // 滑杆松手 = 这一次拖动结束（DarkroomSlider 读它，CollageStore.endCoalescing）。
         .environment(\.collageUndo, store)
         .focusable()
@@ -92,6 +92,13 @@ enum DarkroomPalette {
     static var tertiary: Color { c.tertiary }
     /// 唯一的点缀色：现在套着的。
     static var accent: Color { c.accent }
+    /// 点缀色上的字、勾（「完成」、现在套着的勾）：以前写死黑，相纸的赭石上 4.16:1，和外面「导出」的白字两样（TB-08）。
+    static var onAccent: Color { c.onAccent }
+    /// 提醒（这一格单独设了色调、数据没读到）：全 app 的待处理 / 警告色。别借点缀色：点缀色只表示「现在套着的」（TB-06）。
+    static var warning: Color { c.warning }
+    /// 大样张的投影：深色主题照旧 0.45；浅色主题 0.18 —— 相纸四周是浅灰，0.45 的投影（这一层每个叠着的图各投一次，左半边
+    /// 原图那一层又叠一次）压出一圈 #818181 的重灰，比拼图画布上同一张图的投影重得多（TB-09）。
+    static var printShadow: Color { Color.black.opacity(c.dark ? 0.45 : 0.18) }
 }
 
 private struct DarkroomHairline: View {
@@ -237,13 +244,13 @@ private struct DarkroomSlider: View {
     }
 }
 
-/// 现在套着的：琥珀圆底黑勾。
+/// 现在套着的：点缀色的圆、onAccent 的勾（石墨是琥珀圆底深色勾，相纸是赭石圆底白勾）。
 private struct DarkroomCheck: View {
     var size: CGFloat = 16
     var body: some View {
         Image(systemName: "checkmark")
             .font(.system(size: size * 0.52, weight: .bold))
-            .foregroundStyle(Color.black)
+            .foregroundStyle(DarkroomPalette.onAccent)
             .frame(width: size, height: size)
             .background(Circle().fill(DarkroomPalette.accent))
             .shadow(color: .black.opacity(0.4), radius: 1, y: 0.5)
@@ -292,7 +299,7 @@ private struct DarkroomTopBar: View {
                 undoButton("keyboard", "快捷键一览", enabled: true) { showShortcuts.toggle() }
                     .help("快捷键一览 (?)")
                     .popover(isPresented: $showShortcuts, arrowEdge: .bottom) {
-                        ShortcutsPanel(page: .darkroom).environment(\.colorScheme, .dark)
+                        ShortcutsPanel(page: .darkroom)
                     }
                 // 撤销 / 重做：暗房开着时拼图的顶栏（⌘Z 绑在它上面）不在视图树里，以前暗房里按 ⌘Z 没人接，界面却写着
                 // 「⌘Z 一步步撤」。条件、提示和拼图顶栏的一样。
@@ -319,7 +326,7 @@ private struct DarkroomTopBar: View {
                 Button {
                     store.closeDarkroom()
                 } label: {
-                    Text("完成").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.black)
+                    Text("完成").font(.system(size: 12, weight: .semibold)).foregroundStyle(DarkroomPalette.onAccent)
                         .padding(.horizontal, 16).padding(.vertical, 5)
                         .background(RoundedRectangle(cornerRadius: 6).fill(DarkroomPalette.accent))
                 }
@@ -557,7 +564,7 @@ private struct DarkroomPreview: View {
                 tag(model.hover.map { "预览 · \($0.label)" } ?? model.current.look.label).padding(10)
             }
         }
-        .shadow(color: .black.opacity(0.45), radius: 10, y: 4)
+        .shadow(color: DarkroomPalette.printShadow, radius: 10, y: 4)
     }
 
     /// 图上角的小标签：半透明黑底白字。
@@ -650,15 +657,12 @@ private struct DarkroomControls: View {
                             .foregroundStyle(DarkroomPalette.accent)
                     }
                     if let note = model.overriddenBelow {
-                        Text(note).font(.system(size: 11)).foregroundStyle(DarkroomPalette.accent)
-                            .fixedSize(horizontal: false, vertical: true)
+                        DarkroomNote(text: note)
                     }
                     // 这一款的表、颗粒数据读不到（漏打包）：以前静默变原样，没人发现（v1.24–v1.26.1）。只看暗房问好的
                     // 结果（CollageDarkroom.dataMissing：只问缓存，没读过的在后台读），body 里不读文件。
                     if spectral, model.dataMissing.contains(setting.look) {
-                        Text("这款的数据没读到，颜色 / 颗粒不起作用（缺哪个文件记在日志里）")
-                            .font(.system(size: 11)).foregroundStyle(DarkroomPalette.accent)
-                            .fixedSize(horizontal: false, vertical: true)
+                        DarkroomNote(text: "这款的数据没读到，颜色 / 颗粒不起作用（缺哪个文件记在日志里）")
                     }
                 }
 
@@ -746,6 +750,19 @@ private struct DarkroomControls: View {
             .padding(16)
         }
         .background(DarkroomPalette.sidebar)
+    }
+}
+
+/// 右栏的提醒：警告色 + 三角（和拼图检视器的提醒行同一个样子）。以前借点缀色：纯黑 / 灰卡下它是白、和正文一个颜色，
+/// 石墨下和选中样张的琥珀框同色，读起来像「现在套着的」而不是「注意」（TB-06）。
+private struct DarkroomNote: View {
+    let text: String
+
+    var body: some View {
+        Label(text, systemImage: "exclamationmark.triangle.fill")
+            .font(.system(size: 11))
+            .foregroundStyle(DarkroomPalette.warning)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 

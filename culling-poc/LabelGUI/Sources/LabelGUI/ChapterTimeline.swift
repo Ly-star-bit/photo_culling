@@ -396,11 +396,12 @@ struct ChapterTimeline: View, Equatable {
                 if hovered == s.index {
                     ctx.fill(shape, with: .color(AppPalette.ink.opacity(0.3)))
                 }
+                // 「只看这一章」的描边：深色主题白、相纸墨色（以前写死白，相纸的浅底上看不见，TA-03）。
                 if filtered == seg.chapter {
                     ctx.stroke(Path(roundedRect: rect.insetBy(dx: -1.5, dy: -1.5), cornerRadius: 3),
-                               with: .color(.white), lineWidth: 1.5)
+                               with: .color(AppPalette.ink), lineWidth: 1.5)
                 }
-                // 现在网格里看得见的章节：条下面一道白线（相邻的连成一片）。
+                // 现在网格里看得见的章节：条下面一道线（深色主题白、相纸墨色；相邻的连成一片）。
                 if visible.contains(seg.chapter) {
                     ctx.fill(Path(CGRect(x: s.x, y: barY + Self.barHeight + 1.5, width: s.width, height: 2)),
                              with: .color(AppPalette.ink.opacity(0.85)))
@@ -413,7 +414,7 @@ struct ChapterTimeline: View, Equatable {
                     tri.addLine(to: CGPoint(x: cx + 3.5, y: 6.5))
                     tri.addLine(to: CGPoint(x: cx - 3.5, y: 6.5))
                     tri.closeSubpath()
-                    ctx.fill(tri, with: .color(seg.allRejected ? .red : AppPalette.warning))
+                    ctx.fill(tri, with: .color(seg.allRejected ? AppPalette.reject : AppPalette.warning))
                 } else if showPending && seg.pendingTakes > 0 {
                     ctx.fill(Path(ellipseIn: CGRect(x: cx - 2, y: 2, width: 4, height: 4)), with: .color(AppPalette.warning))
                 }
@@ -424,7 +425,7 @@ struct ChapterTimeline: View, Equatable {
             }
             for label in layout.labels {
                 let seg = segments[label.index]
-                let color: Color = seg.allRejected ? .red
+                let color: Color = seg.allRejected ? AppPalette.reject
                     : (label.isDay ? AppPalette.ink.opacity(0.9) : AppPalette.ink.opacity(seg.undated ? 0.4 : 0.6))
                 let text = Text(label.text)
                     .font(.system(size: 10, weight: label.isDay ? .semibold : .regular).monospacedDigit())
@@ -501,7 +502,7 @@ private struct TimelineCard: View {
             }
             if segment.allRejected {
                 Label("这一章全部被淘汰（漏交风险）", systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(.red)
+                    .font(.caption).foregroundStyle(AppPalette.reject)
             } else if segment.underMin {
                 Label("只留了 \(segment.pick + segment.usable) 张（每章至少 \(minKeepers)）",
                       systemImage: "exclamationmark.triangle.fill")
