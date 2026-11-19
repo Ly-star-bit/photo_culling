@@ -3766,7 +3766,7 @@ private struct BatchControlPanel: View {
                 Text(value).font(.callout).monospacedDigit().foregroundStyle(.secondary)
             }
             histogram
-            // 读屏软件念「锐度下限，45」，不是一根没名字的滑杆（UX-12）。--ax-dump 读的是 AppKit 滑杆的 cell
+            // 读屏软件念「对焦下限，60」，不是一根没名字的滑杆（UX-12）。--ax-dump 读的是 AppKit 滑杆的 cell
             // （CustomMarkedSliderCell），没接辅助功能客户端时看不到 SwiftUI 给的名字，照旧打印没名字 —— 这一条要用 VoiceOver /
             // 辅助功能检查器在真 app 里看（手点清单）。
             slider
