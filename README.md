@@ -357,25 +357,25 @@ app 没开时也能用的只有前 3 个；其余 27 个要 app 开着、而且 
 
 | # | 工具 | 做什么 | app 没开时 |
 |---|---|---|---|
-| 1 | `app_status` 状态自检 | 版本、数据目录、app 开没开、能不能实时操作（`live.state`）、app 当前打开的场次（`live.open_session`）和页、各种上限。AI 第一个调它 | 能用 |
+| 1 | `app_status` 状态自检 | 版本、数据目录、app 开没开、能不能实时操作（`live.state`）、app 当前打开的场次（`live.open_session`）和页、各种上限、下一步做什么（`next`；菜单里关了实时操作时指那个菜单项，不再叫你「打开选片工具」）。AI 第一个调它 | 能用 |
 | 2 | `cull_list_sessions` 列出已分析的场次 | 侧栏「最近场次」里的场次（最多 15 场）：照片文件夹、张数、在不在线、是不是在受保护位置、是不是 app 当前打开的那一场 | 能用 |
 | 3 | `collage_list_templates` 拼图模板与成套 | 内置模板（分类、照片格数、要几张横图竖图）、一键成套、样式、色调、画布能填的值；`include` 里写 `layout_grammar` 拿设计版式的语法 | 能用 |
-| 4 | `cull_session_overview` 场次概览 | 精选 / 可用 / 废片各多少张、废片理由、阈值、章节、场和近似重复、还没处理的场、多机身对时；XMP 待更新几张（`xmp.stale_count`：上次写 XMP 之后判决、星级或客户选中变了的，过期了带 `xmp_stale` 警告；其中同名不同格式共用一个 .xmp、app 写不了的单独报 `shared_sidecar_count`；`xmp.written` 为 false 是这一场还没写过；`xmp.last_written` 是上次写的时间，老版本写的没记就没有；上次写 XMP 的记录 xmp_state.json 读不进来时 `written`、`stale_count`、`shared_sidecar_count` 都是 null、`xmp.unknown` 写原因，带 `xmp_state_unknown` 警告：说不清过期了几张，不是没写过）、人工改判里 AI 改的有几张（`ai_override_count`）、设置（去重只管这一场 `dedupe_scope=session`，每章节最少保留所有场次通用 `min_keepers_scope=all_sessions`） | `app_not_running` |
-| 5 | `cull_list_photos` 列照片 | 按条件列照片，每张一行（判决、理由、时间、场、锐度、人脸和闭眼、是否人工改判……；`changed_by` 是 `ai` = AI 改的、`user` = 你亲手改的），分页 | `app_not_running` |
-| 6 | `cull_get_photos` 照片详情 | 1–20 张的完整分析：EXIF、每张脸的位置和睁闭眼、复审结果、人工改判（AI 改的带 `ai_override`：哪一次、什么时候、改之前是什么）和客户选中 | `app_not_running` |
-| 7 | `cull_list_groups` 分组 | 章节、场（一串连拍，带名次和推荐的那张）、近似重复组的成员 | `app_not_running` |
+| 4 | `cull_session_overview` 场次概览 | 精选 / 可用 / 废片各多少张、废片理由、阈值（判虚焦的线是 `thresholds.focus`，旧的 `sharpness` 键没有了）、章节（最多 60 章，多了标 `chapters_truncated`、`chapters_total` 写一共几章、带同名警告，余下的用第 7 个 `kind=chapter` 翻）、场和近似重复、还没处理的场、多机身对时；XMP 待更新几张（`xmp.stale_count`：上次写 XMP 之后判决、星级或客户选中变了的，过期了带 `xmp_stale` 警告；其中同名不同格式共用一个 .xmp、app 写不了的单独报 `shared_sidecar_count`；`xmp.written` 为 false 是这一场还没写过；`xmp.last_written` 是上次写的时间，老版本写的没记就没有；上次写 XMP 的记录 xmp_state.json 读不进来时 `written`、`stale_count`、`shared_sidecar_count` 都是 null、`xmp.unknown` 写原因，带 `xmp_state_unknown` 警告：说不清过期了几张，不是没写过）、人工改判里 AI 改的有几张（`ai_override_count`）、设置（去重只管这一场 `dedupe_scope=session`，每章节最少保留所有场次通用 `min_keepers_scope=all_sessions`） | `app_not_running` |
+| 5 | `cull_list_photos` 列照片 | 按条件列照片，每张一行（判决、理由、时间、场、锐度（排序用）、对焦 `focus`（判虚焦看它，低于 `thresholds.focus` 判虚焦；老版本分析的按锐度折算，带 `focus_estimated`）、人脸和闭眼、是否人工改判……；`changed_by` 是 `ai` = AI 改的、`user` = 你亲手改的；客户选中的带 `client_pick`，有客户备注的带 `client_note`），分页。条件里 `reason` 只认 9 个固定的废片理由（虚焦、闭眼、曝光裁切……，写错回 `invalid_argument` 并列出能填的，以前是悄悄回 0 张），`client_pick` 给 true 只列客户选中的、false 只列没选中的 | `app_not_running` |
+| 6 | `cull_get_photos` 照片详情 | 1–20 张的完整分析：EXIF、每张脸的位置和睁闭眼、复审结果、人工改判（AI 改的带 `ai_override`：哪一次、什么时候、改之前是什么）、客户选中和客户备注（`client_note`：客户回复里文件名后面的修图要求，有才给） | `app_not_running` |
+| 7 | `cull_list_groups` 分组 | 章节、场（一串连拍，带名次和推荐的那张）、近似重复组的成员；`kind=scene` 时 `pending_only:true` 只列还要人取舍的场（别的 `kind` 带它回 `invalid_argument`） | `app_not_running` |
 | 8 | `cull_preview_photos` 看照片 | 1–4 张缩小预览（内联图片）；`crop=face` 从原图按主脸裁一块放大，看眼睛和对焦，和连拍挑选里的放大同一个算法 | `app_not_running` |
-| 9 | `collage_get_state` 看 app 里的拼图 | 拼图工程的状态（模式、页、画布尺寸、模板、样式、文字、托盘里每张照片的比例（客户选中的带 `client_pick`）、相册设了目标跨页数时的 `album_target`、每个格子和它的位置、这一页版式的语法 `layout`、存过的方案、撤销深度、`digest`）和 app 当前画面的预览。相册另有 `album`：每个跨页（号从 1 起）放了哪几张、锁没锁，印厂规格的页数合不合规，有没有封面；`editing_cover` 为 true 时正在编辑封面，`page_kind` 是 `cover`、格子和版式是封面那一块。`candidates_for` 填一张照片的 id，另给换它的候选（同连拍 / 同场 / 画面相似，带分数、用在第几个跨页、是不是废片、客户选中） | `app_not_running` |
+| 9 | `collage_get_state` 看 app 里的拼图 | 拼图工程的状态（模式、页、画布尺寸、模板、样式、文字、托盘张数 `tray` 和其中还没上版的 `tray_unused`、托盘里每张照片的比例 `tray_photos`（客户选中的带 `client_pick`；一次最多 200 张，没列全时带 `tray_photos_truncated`、`tray_next_offset` 和 `tray_truncated` 警告，用 `tray_offset` 往后翻，翻过了头是 `tray_offset_past_end` 警告）、相册设了目标跨页数时的 `album_target`、每个格子和它的位置、这一页版式的语法 `layout`、存过的方案、撤销深度、「导出 ▾」里的设置 `export`（输出目录 `folder` 和是不是默认的 `folder_is_default`、`format`、实际用的倍数 `scale`、出不出印刷 PDF `print_pdf`、裁切线 `crop_marks`、带不带水印 `watermark`）、`digest`）和 app 当前画面的预览。`include` 只要点名的几块（`tray_photos` / `cells` / `layout` / `album` / `variants`，不给 = 全给；托盘大时省字）；和列表一样受文字上限管，超了从 `tray_photos` 尾部少给几张。相册另有 `album`：每个跨页（号从 1 起）放了哪几张、锁没锁，印厂规格的页数合不合规，有没有封面（`album.cover` 带 `spine_pages` / `spine_stale`，同第 30 个）；`editing_cover` 为 true 时正在编辑封面，`page_kind` 是 `cover`、格子和版式是封面那一块。`candidates_for` 填一张照片的 id，另给换它的候选（同连拍 / 同场 / 画面相似，带分数、用在第几个跨页、是不是废片、客户选中），还有这张自己在第几个跨页的哪一格（`candidates.page`、`candidates.path`，照填给第 27 个，不用先翻过去；散落版、印样上的 `path` 是 null） | `app_not_running` |
 | 10 | `app_open_session` 在 app 里打开场次 | = 侧栏「最近场次」里点它。只能开列表里的；会清掉 app 里这一场的撤销记录，撤销栈不空时先回 `confirm_required` 让 AI 问你；这一场有原件读不出来、只在内存里的改动（`data.unsaved_in_memory`）时也先回 `confirm_required`，你同意丢掉这些改动 AI 才带 confirm 切；这一场的判决、客户选中、客户备注、对时或拼图工程因为盘满没存上时不切（`save_failed`；腾出空间后再调一次，app 切之前会先再存一次） | `app_not_running` |
 | 11 | `cull_set_verdicts` 改判 | = 网格里按 1/2/3/0（精选 / 可用 / 废片 / 恢复自动）。`ids` + `verdict` 都改成同一个，或者 `changes:[{id, verdict}]` 每张各自的（定一场连拍：一张精选、其余废片，一次写完）；不管几张几种判决，一次调用一步撤销。AI 改的照样算人工改判（✋），另外记下出处（重开也在），状态栏显示「人工改判 N（其中 AI M）」，阈值建议不拿它们当样本；你之后亲手再改就算你的 | `app_not_running` |
 | 12 | `cull_show_photos` 在 app 里定位照片 | 在网格里选中这些照片、把焦点移过去给你看，默认把 app 切到批量页（不拉到前台）；不改判决、不进撤销、不改你的筛选 | `app_not_running` |
-| 13 | `collage_apply_template` 套模板 | = 左栏「模板」里点模板；模板全名、分类名、名字里的几个字都认 | `app_not_running` |
-| 14 | `collage_run_kit` 在 app 里一键成套 | 出一期 / 按卷出印样 / 整本婚礼相册，替换当前拼图，一步撤销（最长约 50 秒）。整本婚礼相册可以带 `spreads`（目标跨页数，0 = 改回自动）/ `min_per_spread` / `max_per_spread`，结果报跨页数和多了几个，不删片；婚礼 fine-art 每跨页固定 1–3 张，`max_per_spread` 给 1、2 回 `invalid_argument` | `app_not_running` |
+| 13 | `collage_apply_template` 套模板 | = 左栏「模板」里点模板；模板全名、分类名、名字里的几个字都认。托盘里的照片不够填满模板（托盘空着就一张都没有）时照样套上，`warnings` 报 `empty_slots`（这一页几格空着、`hint` 说怎么带照片进托盘） | `app_not_running` |
+| 14 | `collage_run_kit` 在 app 里一键成套 | 出一期 / 按卷出印样 / 整本婚礼相册，替换当前拼图，一步撤销（最长约 50 秒）。整本婚礼相册只编托盘里的照片（托盘空着回 `nothing_to_render`，原话和状态栏上那句一样，`hint` 指 `collage_auto_layout` 的 `photos` 带照片进托盘），可以带 `spreads`（目标跨页数，0 = 改回自动）/ `min_per_spread` / `max_per_spread`，结果报跨页数和多了几个，不删片；婚礼 fine-art 每跨页固定 1–3 张，`max_per_spread` 给 1、2 回 `invalid_argument`。在排好的相册上会整本重排、不先问：只换没锁的跨页，结果的 `album.spreads_replaced` 是换掉的原有跨页数、`spreads_kept` 是原样留着的（锁住的） | `app_not_running` |
 | 15 | `collage_next_cover` 换封面 | 「出一期」换下一张封面，内页不动 | `app_not_running` |
 | 16 | `collage_set_text` 改标题/刊头/期号/文字 | 标题、副标题、刊头、期号，或者某个格子里某块字的第一行；几个字段一起改也是一步撤销 | `app_not_running` |
 | 17 | `collage_set_style` 换样式/色调 | 样式预设、统一色调和强度、光谱胶片的颗粒和晕光；外边距、缝宽、圆角、底色、默认格子形状可以单独调 | `app_not_running` |
 | 18 | `app_undo` 撤销 AI 刚做的一步 | 只撤 AI 自己的那一步（`target` 分 `verdicts` / `collage`）；你之后又改过就不撤（`undo_not_ours`），请你自己 ⌘Z | `app_not_running` |
-| 19 | `collage_save_variant` 存成方案 | 把现在这一版（画布、样式、文字、所有页、水印）存进拼图页底下的「方案」栏；让 AI 出几版设计时，每版排好就存一个，下一版不会盖掉它。一模一样的不再存，一场最多 30 个；不进撤销 | `app_not_running` |
+| 19 | `collage_save_variant` 存成方案 | 把现在这一版（画布、样式、文字、所有页、水印）存进拼图页底下的「方案」栏；让 AI 出几版设计时，每版排好就存一个，下一版不会盖掉它。一模一样的不再存，一场最多 30 个；不进撤销（结果的 `undo.target` 是 null，存错了在方案栏里右键删掉） | `app_not_running` |
 | 20 | `collage_open_variant` 切到方案 | = 方案栏里点它：整版换成那个方案，托盘照旧（它用到、托盘里没有的照片补回去）；一步撤销 | `app_not_running` |
 | 21 | `collage_export` 导出拼图 | = 拼图页的「导出」按钮：写进「导出 ▾」里设的输出目录（没设过 = 照片文件夹里的「拼图导出」），同名加 -2 不覆盖；清晰度 1–3 倍（九宫格、轮播最多 2 倍，印刷画布不放大）、格式、文件名可以只为这一次指定，不改「导出 ▾」里的设置；能直接导存着的方案。`pages` 只导某几个跨页（「1-3, 7」，文件名里的序号还是原来的跨页号；部分导出不出印刷 PDF、不出封面）；`proof:true` 改出给客户看的看版 PDF（每个跨页一页低清，页脚印跨页号和照片文件名，有封面放第一页，「名_看版.pdf」）。导出前跑一遍导出前检查（同第 28 个；给了 `pages` 只算那几个跨页上的），结果放在 `preflight`，除空照片格以外还有「拦」时另给一条 `preflight_blocks`（照样导出）。有空照片格照样导出，`warnings` 里报 `empty_slots`（带页号）；相册有跨页没写出来时不出 PDF（`export_partial` 写明缺第几个跨页）；输出目录在拍摄文件夹里面（会被下次分析扫到）时不导、回 `invalid_state`，请你在「导出 ▾」里点「用默认」或选拍摄文件夹外面的目录；这一场开在存储卡上时不往卡上导（默认的「拼图导出」在卡上，也回 `invalid_state`），请你先导入这张卡或在「导出 ▾」里选卡外的目录。不改拼图、不进撤销、不弹访达，返回每个文件的路径和像素尺寸 | `app_not_running` |
 | 22 | `collage_set_layout` 设计版式 | AI 自己定这一页的版式，不用模板：怎么切分、哪张照片放哪一格、取景、形状、完整显示、裁切、压字、文字格、留白（语法见第 3 个工具的 `layout_grammar`）。不在托盘的照片自动进托盘，可以顺便换画布（只有一页时）；写错了指出错在哪、什么都不改；读到的 `layout` 原样发回来不改任何东西；一步撤销 | `app_not_running` |
@@ -390,7 +390,7 @@ app 没开时也能用的只有前 3 个；其余 27 个要 app 开着、而且 
 
 **编辑封面时的「当前页」**：编辑封面（跨页条最前面那张「封面」卡，或 `collage_cover action=edit`）时 app 的「当前页」是封面那一块：`collage_get_state` 照实报（`editing_cover: true`、`page_kind: cover`），`collage_replace_photo` 换的是封面的格子；`collage_set_layout`、`collage_auto_layout`、`collage_apply_template` 和 `collage_set_text` 的 `cell_text` 回 `invalid_state`（它们按跨页的画布算格子，套到封面上会算错）；`collage_pages`、`collage_move_photos` 先退出封面编辑再按跨页号做。
 
-改判和拼图写的结果里有 `live.notice`（和窗口里那一页状态栏上同一句话）、这一步怎么撤，拼图写还带 app 当前画面的预览图。改判、撤销、导入客户选择和拼图的写工具结果里有 `persisted`：盘满、场次目录写不进去时是 false，另带一条 `save_failed` 警告，原话就是批量页顶上红条那一句（拼图是拼图页上那句）；导入客户选择和撤销它时，客户选中和客户备注两份都存上才算 true；这时改动在 app 里已经生效，但只在内存里，AI 会请你腾出空间、点红条上的「重试」；拼图工程原件读不出来、这一场先不存拼图时，AI 会请你修好或移走那个文件，再切到别的场次、切回来重新打开（腾空间没用，在那之前拼图上的改动都不会存盘）。设了 `LABELGUI_MCP_LIVE=0` 时只注册前 3 个。
+改判和拼图写的结果里有 `live.notice`（和窗口里那一页状态栏上同一句话）、这一步怎么撤，拼图写还带 app 当前画面的预览图。改判、撤销、导入客户选择和拼图的写工具结果里有 `persisted`：盘满、场次目录写不进去时是 false，另带一条 `save_failed` 警告，原话就是批量页顶上红条那一句（拼图是拼图页上那句）；导入客户选择和撤销它时，客户选中和客户备注两份都存上才算 true；这时改动在 app 里已经生效，但只在内存里，AI 会请你腾出空间、点红条上的「重试」；拼图工程原件读不出来、这一场先不存拼图时，AI 会请你修好或移走那个文件，再切到别的场次、切回来重新打开（腾空间没用，在那之前拼图上的改动都不会存盘）。结果里的小数一律按最短的写法（`0.637`，不再是 `0.63700000000000001`），同样的文字上限里能多放几行。设了 `LABELGUI_MCP_LIVE=0` 时只注册前 3 个。
 
 ### 安全承诺
 
@@ -485,7 +485,7 @@ Claude Code 交互模式下，每个工具第一次调用都会问你。建议 1
 | `LABELGUI_MCP_OUT` | `~/Pictures/xuanpian-mcp` | 预览存在哪（绝对路径），只用里面的 `previews/`。空目录、或者带 `.xuanpian-mcp` 标记的目录才用（不空又没标记的不用，免得清理删到你的文件）；不能在受保护位置、数据目录、照片文件夹里。不能用时图照常内联、带一条警告（`inline:false` 时回 `output_dir_unusable`） |
 | `LABELGUI_MCP_DEADLINE_SEC` | 50 | `deadline_seconds` 的上限（秒，5–600）。只有看照片（默认 30）、一键成套和换封面（默认 50）三个工具有这个参数；AI 没传时用的默认值也不超过它（和工具定义里写的 default 一样）；其余读写都是 10 秒，不受它管 |
 | `LABELGUI_MCP_INLINE_KB` | 600 | 一次调用里内联图片的合计上限（KB，最大 20000）；超了的那几张不给图，标 `truncated:true` |
-| `LABELGUI_MCP_TEXT_MAX` | 20000 | 文字结果的长度上限（字符，1000–1000000；小于 1000 按默认）；超了就少给几条、标 `truncated:true`（列照片、分组带 `next_cursor` 接着翻） |
+| `LABELGUI_MCP_TEXT_MAX` | 20000 | 文字结果的长度上限（字符，1000–1000000；小于 1000 按默认）；超了就少给几条、标 `truncated:true`（列照片、分组带 `next_cursor` 接着翻；场次概览的章节、`collage_get_state` 的 `tray_photos` 也按它截，各带一条警告说怎么接着拿） |
 | `LABELGUI_MCP_LIVE` | 不设（开） | `0` = 只注册 app 没开也能用的 3 个工具，从不连 app：保证 AI 碰不到开着的 app |
 | `LABELGUI_NO_GUI` | 不设 | `1` = 这个进程绝不开界面，命令行里没有无头参数就直接退出。上面的配置都带着它 |
 | `LABELGUI_ALLOW_GUI` | 不设 | `1` = 父进程不是 launchd、stdin 又不是终端时也允许开界面（从 Xcode、IDE、脚本里开 app 时用，见排错） |
