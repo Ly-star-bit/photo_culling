@@ -7,6 +7,9 @@ import Foundation
 /// - EC-03：manifest / layer1 里一行字段类型不对、缺 id、根本不是对象：只丢这一行，其余照常；分析引擎复用前用的
 ///   decodablePhotoIDs / reusableIDs 和界面同一个解码器（没有锐度的 layer1 行不复用）。
 /// - EC-01：没进网格的照片 = photos 里没结果的 + photos 里解不开的 + photos_without_results（解不开、取消时没轮到），不重复。
+/// - PP-05：拍摄时间的手写解析（CaptureTimeParser）和逐张 DateFormatter 逐个相同：十几个时区（夏令时南北半球、
+///   半小时 / 45 分钟的时差和切换、零点切换、跳过一整天、1883 年地方时换标准时）全年每小时一个时刻、切换日每分钟一个，
+///   外加格式不对的串。不存在的时刻（拨快那一小时）、重复的时刻（拨慢那一小时）按年月日时分秒直接拼出来测。
 enum SessionInputSelfTest {
     @MainActor
     static func run() -> Never {
@@ -14,6 +17,7 @@ enum SessionInputSelfTest {
         thresholds(c)
         lossyRows(c)
         unparsed(c)
+        captureTimes(c)
         print(c.failed == 0 ? "场次输入自检通过：\(c.total) 条" : "!! 场次输入自检 \(c.failed) / \(c.total) 条失败")
         exit(c.failed == 0 ? 0 : 1)
     }
@@ -148,5 +152,118 @@ enum SessionInputSelfTest {
                 "没进网格 = 没结果的 b + 解不开的 c 和没 id 的那行 + 解不开 / 没轮到的 bad、late（b 不重复）", "\(names)")
         let none = BatchStore.unparsedNames(manifest: m, loadedIDs: ["a", "b", "c", "bad", "late"])
         c.check(none == ["manifest 里第 2 个解不开的行"], "都进了网格：只剩认不出 id 的那行", "\(none)")
+    }
+
+    // MARK: - PP-05 拍摄时间的手写解析
+
+    static func captureTimes(_ c: Checker) {
+        // (时区, 逐小时测的年份, 额外逐分钟测的本地日子)
+        let zones: [(String, [Int], [(Int, Int, Int)])] = [
+            ("America/Los_Angeles", [2026, 1970, 1883], [(1883, 11, 18)]),
+            ("America/New_York", [2026], []),
+            ("Europe/Berlin", [2026], []),
+            ("Europe/London", [2026], []),
+            ("Australia/Sydney", [2026], []),
+            ("Australia/Lord_Howe", [2026], []),
+            ("Pacific/Chatham", [2026], []),
+            ("America/Santiago", [2026], []),
+            ("America/Sao_Paulo", [2018], [(2018, 2, 17), (2018, 11, 4)]),
+            ("Pacific/Apia", [2011], [(2011, 12, 29), (2011, 12, 30), (2011, 12, 31)]),
+            ("Asia/Kolkata", [2026], []),
+            ("Asia/Kathmandu", [2026], []),
+            ("Asia/Shanghai", [2026, 1990], []),
+            ("UTC", [2026], []),
+        ]
+        func two(_ v: Int) -> String { v < 10 ? "0\(v)" : "\(v)" }
+        func stamp(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int, _ s: Int) -> String {
+            let year = String(repeating: "0", count: max(0, 4 - String(y).count)) + String(y)
+            return year + "-" + two(mo) + "-" + two(d) + "T" + two(h) + ":" + two(mi) + ":" + two(s)
+        }
+        func daysIn(_ y: Int, _ m: Int) -> Int {
+            switch m {
+            case 2: return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 ? 29 : 28
+            case 4, 6, 9, 11: return 30
+            default: return 31
+            }
+        }
+        var current = TimeZone.current.identifier
+        if zones.contains(where: { $0.0 == current }) { current = "" }
+        let all = zones + (current.isEmpty ? [] : [(current, [2026], [])])
+        var compared = 0, mismatches: [String] = [], irregular = 0, dense = 0
+        for (id, years, extraDays) in all {
+            guard let tz = TimeZone(identifier: id) else {
+                c.check(false, "拍摄时间：时区 \(id) 不认识")
+                continue
+            }
+            var parser = CaptureTimeParser(timeZone: tz)
+            let reference = CaptureTimeParser.makeFormatter(timeZone: tz)
+            func compare(_ text: String) {
+                compared += 1
+                let got = parser.date(from: text), want = reference.date(from: text)
+                if got != want, mismatches.count < 8 {
+                    mismatches.append("\(id) \(text)：手写 \(got.map { "\($0.timeIntervalSince1970)" } ?? "nil")，" +
+                                      "DateFormatter \(want.map { "\($0.timeIntervalSince1970)" } ?? "nil")")
+                }
+            }
+            // 切换在哪几天：按 UTC 逐小时看偏移变没变（只用来挑出要逐分钟测的日子）：变之前那一刻、变之后那一刻的本地日子。
+            var days = Set<Int>()
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = tz
+            for year in years {
+                var t = cal.date(from: DateComponents(year: year, month: 1, day: 1)) ?? Date(timeIntervalSince1970: 0)
+                var offset = tz.secondsFromGMT(for: t)
+                for _ in 0..<(367 * 24) {
+                    let next = t.addingTimeInterval(3600)
+                    let o = tz.secondsFromGMT(for: next)
+                    if o != offset {
+                        for moment in [t, next] {
+                            let local = cal.dateComponents([.year, .month, .day], from: moment)
+                            days.insert((local.year! * 100 + local.month!) * 100 + local.day!)
+                        }
+                        offset = o
+                    }
+                    t = next
+                }
+                // 全年每小时一个时刻（分、秒跟着日子和钟点变）。
+                for month in 1...12 {
+                    for day in 1...daysIn(year, month) {
+                        for hour in 0..<24 {
+                            compare(stamp(year, month, day, hour, (hour * 7 + day) % 60, (hour * 13 + day * 3) % 60))
+                        }
+                    }
+                }
+            }
+            for (y, m, d) in extraDays { days.insert((y * 100 + m) * 100 + d) }
+            // 切换日每分钟一个：不存在的、重复的本地时刻都按数字直接拼出来。
+            for key in days.sorted() {
+                let y = key / 10000, m = key / 100 % 100, d = key % 100
+                dense += 1
+                for hour in 0..<24 {
+                    for minute in 0..<60 { compare(stamp(y, m, d, hour, minute, (minute * 7 + hour) % 60)) }
+                }
+            }
+            irregular += parser.irregularHours
+        }
+        c.check(mismatches.isEmpty && compared > 100_000,
+                "拍摄时间：手写解析和 DateFormatter 逐个相同（\(all.count) 个时区、\(compared) 个时刻，切换前后 \(dense) 天逐分钟）",
+                mismatches.joined(separator: "；"))
+        // 不线性的那几个小时（豪勋爵岛半小时的切换、查塔姆 2:45 的切换、1883 年地方时）走了逐张 DateFormatter 那条路：退路真的测到了。
+        c.check(irregular > 0, "拍摄时间：切换落在一小时中间的那几个小时逐张交给 DateFormatter（\(irregular) 个）")
+
+        // 格式不对、日子不存在的：和 DateFormatter 一样（多半是 nil）。
+        let odd = ["", "2026-03-08", "2026-03-08T02:30", "2026-3-8T2:30:00", "2026-13-01T00:00:00", "2026-00-10T00:00:00",
+                   "2026-02-29T10:00:00", "2024-02-29T10:00:00", "2026-02-30T10:00:00", "2026-04-31T23:59:59",
+                   "2026-03-08T24:00:00", "2026-03-08T23:60:00", "2026-03-08T23:59:60", "abcd-ef-ghTij:kl:mn",
+                   "２０２６-03-08T02:30:00", " 2026-03-08T02:30:00", "2026-03-08T02:30:00Z", "2026-03-08 02:30:00",
+                   "0000-01-01T00:00:00", "1900-01-01T00:00:00", "9999-12-31T23:59:59", "-001-01-01T00:00:00",
+                   "2026-03-08T02:30:00.5", "2026/03/08T02:30:00"]
+        var oddMismatch: [String] = []
+        for id in ["America/Los_Angeles", "Australia/Lord_Howe", "UTC"] {
+            guard let tz = TimeZone(identifier: id) else { continue }
+            var parser = CaptureTimeParser(timeZone: tz)
+            let reference = CaptureTimeParser.makeFormatter(timeZone: tz)
+            for text in odd where parser.date(from: text) != reference.date(from: text) { oddMismatch.append(id + " " + text) }
+        }
+        c.check(oddMismatch.isEmpty, "拍摄时间：格式不对、日子不存在的 \(odd.count) 种和 DateFormatter 一样", oddMismatch.joined(separator: "；"))
     }
 }

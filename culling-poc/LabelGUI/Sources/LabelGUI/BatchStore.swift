@@ -3653,9 +3653,9 @@ final class BatchStore: ObservableObject {
             for r in file.results where r.error == nil { appealById[r.id] = r }
         }
 
-        let isoParser = DateFormatter()
-        isoParser.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
-        isoParser.locale = Locale(identifier: "en_US_POSIX")
+        // 拍摄时间按字节拆、同一小时只请 DateFormatter 解两次（PP-05：以前逐张 DateFormatter，7980 张主线程 123 ms），
+        // 结果和逐张 DateFormatter 一模一样（含夏令时切换那一小时，CaptureTimeParser 的注释）。
+        var timeParser = CaptureTimeParser()
 
         var loaded = manifest.photos.enumerated().compactMap { index, photo -> BatchItem? in
             guard let l1 = l1ById[photo.id], let sharpness = l1.sharpness, let group = l1.burstGroup else { return nil }
@@ -3683,7 +3683,7 @@ final class BatchStore: ObservableObject {
                 appealSubjectSharp: appealById[photo.id]?.subjectSharp,
                 appealIntentionalExposure: appealById[photo.id]?.intentionalExposure,
                 appealReason: appealById[photo.id]?.reason,
-                captureTime: photo.captureTime.flatMap(isoParser.date(from:)),
+                captureTime: photo.captureTime.flatMap { timeParser.date(from: $0) },
                 exif: photo.exif,
                 horizonDeg: l1.horizonDeg
             )
