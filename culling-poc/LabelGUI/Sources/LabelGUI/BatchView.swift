@@ -1156,7 +1156,7 @@ struct BatchView: View {
             } else if !pending, !alive.isEmpty, !expandedTakes.contains(row.take), !clientPickFilter {
                 // 定完的场叠起来：只剩留下的那几张（整场全废的不叠，不然这一行什么都看不见）。
                 // 「只看客户选中」时不叠：客户选中的废片也得看得见。
-                members = members.filter { $0.verdict != .reject }
+                members = takeSortByScore ? members.filter { $0.verdict != .reject } : alive
             }
             if clientPickFilter { members = members.filter { clientPicks.contains($0.id) } }
             guard !members.isEmpty else { return nil }

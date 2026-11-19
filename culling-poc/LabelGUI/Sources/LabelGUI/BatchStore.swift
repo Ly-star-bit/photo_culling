@@ -912,11 +912,17 @@ final class BatchStore: ObservableObject {
             if let chapter = d.takeChapter[take] { pendingByChapter[chapter, default: 0] += 1 }
         }
         if d.chapterMembers.count > 1 {
+            // 代表照片的锐度门只用得着有近似重复的照片（落单的永远不算糊、也不当别人的参照）：先按 burstIndices 标出来，
+            // 章节里只拿这些过 softerInBurst（每张都过要多一成滑杆的指令数，结果一样）。
+            var inBurst = [Bool](repeating: false, count: items.count)
+            for members in d.burstIndices.values where members.count > 1 {
+                for idx in members where idx < inBurst.count { inBurst[idx] = true }
+            }
             if let chapters, !d.chapterSegments.isEmpty {
                 for k in d.chapterSegments.indices where chapters.contains(d.chapterSegments[k].chapter) {
                     let chapter = d.chapterSegments[k].chapter
                     d.chapterSegments[k] = Self.chapterSegment(chapter, members: d.chapterMembers[chapter] ?? [], in: items,
-                                                               minKeepers: minKeepersPerChapter,
+                                                               inBurst: inBurst, minKeepers: minKeepersPerChapter,
                                                                pending: pendingByChapter[chapter] ?? 0)
                 }
             } else {
@@ -926,8 +932,8 @@ final class BatchStore: ObservableObject {
                     return a < b
                 }
                 d.chapterSegments = order.map {
-                    Self.chapterSegment($0, members: d.chapterMembers[$0]!, in: items, minKeepers: minKeepersPerChapter,
-                                        pending: pendingByChapter[$0] ?? 0)
+                    Self.chapterSegment($0, members: d.chapterMembers[$0]!, in: items, inBurst: inBurst,
+                                        minKeepers: minKeepersPerChapter, pending: pendingByChapter[$0] ?? 0)
                 }
             }
             d.chapterWarnings = Self.chapterWarnings(d.chapterSegments, minKeepers: minKeepersPerChapter)
@@ -4109,7 +4115,8 @@ final class BatchStore: ObservableObject {
     /// computed properties doing the same grouping on every render). Warnings:
     /// chapters where culling left NOTHING — losing a whole scene is a delivery
     /// accident, a few extra keepers is just waste.
-    private static func chapterSegment(_ chapter: Int, members: [Int], in items: [BatchItem], minKeepers: Int,
+    /// `inBurst`：按 items 下标，这张有没有近似重复（组里不止它一张）。
+    private static func chapterSegment(_ chapter: Int, members: [Int], in items: [BatchItem], inBurst: [Bool], minKeepers: Int,
                                        pending: Int) -> ChapterSegment {
         // 按下标就地读字段（以前把每张 BatchItem 拷进各章的数组再拷出来，8000 张的场次改一次判 14 ms 花在这）。
         var start: Date?, end: Date?
@@ -4117,8 +4124,8 @@ final class BatchStore: ObservableObject {
         // 代表照片：线性挑前 4（每次滑杆都会重算，别为它整章排序）。
         var top: [Int] = []
         // 和场内名次同一道锐度门（scoreOrder）：一场没有精选时（人工改判过、只剩一张没淘汰…），近似重复组里糊一截的那张
-        // 不当代表。参照只在没淘汰的里找；整章算一次，不在下面的比较里算。
-        let soft = softerInBurst(members.filter { items[$0].verdict != .reject }, in: items)
+        // 不当代表。参照只在没淘汰的里找；整章算一次，不在下面的比较里算；落单的照片不用过（inBurst）。
+        let soft = softerInBurst(members.filter { inBurst[$0] && items[$0].verdict != .reject }, in: items)
         func key(_ i: Int) -> (Int, Int, Double, Double) {
             // = rankKey，不拷整张
             (items[i].expressionScore ?? -1, soft.contains(i) ? 0 : 1, items[i].faceQuality ?? -1, items[i].sharpness)
