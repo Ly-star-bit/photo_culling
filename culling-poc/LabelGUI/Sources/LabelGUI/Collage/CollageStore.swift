@@ -128,6 +128,10 @@ final class CollageStore: ObservableObject {
     var testUnreadableOriginals: Set<String>?
     /// 自检：导出封面时封面那一页当成渲染失败。GUI 和命令行永远是 false。
     var testExportFailCover = false
+    /// 导出同时渲几页，盖过按内存定的（exportLanes）：自检、命令行 ops 的 exportlanes:N（量并行前后用）。GUI 永远是 nil。
+    var exportLanesOverride: Int?
+    /// 自检：记导出每页什么时候开始、结束、同时最多几页在渲，让指定的页先睡一会儿（完成顺序和页序对不上）。GUI 和命令行永远是 nil。
+    var testExportProbe: CollageExportProbe?
     /// 「书脊是估的」整本导出时问过、用户点了「仍然导出」的那一版（封面 id、页数、估算用的纸厚板厚）：这几样没变就不再问
     /// （优化分析 A4：问一次，不是每次导出都弹）。不存盘：下次打开再导还会问一次。
     private var estimatedSpineAsked: String?
@@ -265,6 +269,15 @@ final class CollageStore: ObservableObject {
     /// 命令行 renderexport 都走这一个。原图不够大的照片会被放大（不比标准的更糊，只是不会更清楚）。
     nonisolated static func exportScale(canvas: CollageCanvas, options: ExportOptions) -> Int {
         min(max(1, options.scale), maxExportScale(canvas))
+    }
+
+    /// 导出同时渲几页（优化分析 2026-11-18 PP-03）：以前一页渲完、写完才开下一页，16 核只用 1 核（并行度 0.97）。
+    /// 按内存定、不按核数：一个 30×30cm 跨页渲染时峰值 1.0–1.4 GB（解原图、转正、调色的中间图），胶片色调再 +1.2 GB。
+    /// 内存 < 12 GB 照旧一页一页来；< 32 GB 两页；再大三页（每页本身基本是单线程，再多吃不满的是解码器和内存带宽）。
+    nonisolated static func exportLanes(physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
+        let gb = physicalMemory >> 30
+        if gb < 12 { return 1 }
+        return gb < 32 ? 2 : 3
     }
 
     @Published var exportOptions = ExportOptions() { didSet { scheduleStateSave() } }
@@ -3402,6 +3415,8 @@ final class CollageStore: ObservableObject {
         var locks: CollageNode?
         var fallback: CollageNode
         var carry: CollageNode?
+        /// 手调的格子比例按哪棵树量（nil = carry 自己）：加照片时是插之前那一页（M-01，见 carryAdjustments 的 aspects）。
+        var carryAspects: CollageNode? = nil
 
         /// F3 新跨页同步那一步搜几次（主线程上）。命令行 landbench 在 photot 上量（2–4 张的跨页）：中位 1 ms 上下，最慢 8 ms
         /// （撞上求解器放宽范围、再搜 2000 次的那一支）；精排还是 16000 次，后台 35–65 ms。插照片、拿照片不搜，0.01 ms。
@@ -3428,9 +3443,15 @@ final class CollageStore: ObservableObject {
             if let carry {
                 root = CollageLayout.carryOverlays(from: carry, into: root)
                 // 这一页其余照片的手调（裁切、景别、完整显示、形状、抠图）按照片 id 带回去（优化分析 A5）。
-                root = CollageLayout.carryAdjustments(from: carry, into: root, canvas: ctx.canvas, style: ctx.style)
+                root = CollageLayout.carryAdjustments(from: carry, into: root, canvas: ctx.canvas, style: ctx.style,
+                                                      aspects: carryAspects)
             }
             return root
+        }
+
+        /// 落下的这一版里哪几张的裁切没带过去（格子比例差太多）：挪 / 加照片的提示点名用（CR-01）。没有 carry = 不带手调的页。
+        func droppedCrops(in root: CollageNode) -> [String] {
+            carry.map { CollageLayout.droppedCrops(from: $0, to: root) } ?? []
         }
 
         /// 同步落下的那一版（主线程）：定的就是求解结果本身；有现成的树（S1：插进去 / 拿掉以后收拢的，同旧
@@ -3465,8 +3486,11 @@ final class CollageStore: ObservableObject {
     /// （精排落下之前镜像过的页也就不会被盖掉，R1#4）。不另记撤销：落地之后压的那几步快照里也换上（⌘Z 一步回到操作之前）。
     /// 种子、次数、Context 和以前的后台求解一模一样，最后的版式也一样（门禁）。
     /// 返回精排的号；这几页都是定的（没照片、只有一张，同步那一步就是结果）= nil。
+    /// `amend`：精排落下的页上有裁切没带过去（格子比例差太多）时，提示换成哪一句（参数是那几张的 id）。只在状态栏
+    /// 还是这次操作那句时换，不盖后来的提示（CR-01：以前精排丢了裁切，提示照样说「裁切留着」）。
     @discardableResult
-    private func refinePages(_ jobs: [RefineJob], context ctx: CollageLayout.Context) -> Int? {
+    private func refinePages(_ jobs: [RefineJob], context ctx: CollageLayout.Context,
+                             amend: (@Sendable ([String]) -> String)? = nil) -> Int? {
         let work = jobs.filter { !$0.job.isFixed }
         guard !work.isEmpty else { return nil }
         refineSerial += 1
@@ -3474,6 +3498,7 @@ final class CollageStore: ObservableObject {
         pendingRefines.insert(ticket)
         let session = sessionToken
         let epoch = refineEpoch
+        let shown = notice
         // 同步落地压的那一步之后又压了几步，回来时只往那几步的快照里补。
         let pushes = undoPushes
         var locked: [UUID: Bool] = [:]
@@ -3486,7 +3511,8 @@ final class CollageStore: ObservableObject {
             guard let self, self.refineEpoch == epoch else { return }
             self.pendingRefines.remove(ticket)
             guard self.sessionToken == session else { return }
-            self.landRefined(Array(zip(work, roots)), locked: locked, since: pushes, basis: basis)
+            let lost = self.landRefined(Array(zip(work, roots)), locked: locked, since: pushes, basis: basis)
+            if let amend, !lost.isEmpty, self.notice == shown { self.setNotice(amend(lost)) }
         }
         return ticket
     }
@@ -3502,13 +3528,15 @@ final class CollageStore: ObservableObject {
         init(_ p: CollageProject) { canvas = p.canvas; style = p.style; mode = p.mode }
     }
 
-    /// 精排回来：逐页核对（见 refinePages），对得上的换成精排的。
+    /// 精排回来：逐页核对（见 refinePages），对得上的换成精排的。返回落下了的页上哪几张的裁切没带过去（提示点名用）。
+    @discardableResult
     private func landRefined(_ done: [(RefineJob, CollageNode)], locked: [UUID: Bool], since pushes: Int,
-                             basis: RefineBasis) {
+                             basis: RefineBasis) -> [String] {
         let onCanvas = page?.id
         let keep = selectedCell?.photoID
         let refined = done.filter { $0.1 != $0.0.landed }.map { RefinedPage(id: $0.0.pageID, from: $0.0.landed, to: $0.1) }
-        guard !refined.isEmpty else { return }
+        guard !refined.isEmpty else { return [] }
+        var lost: [String] = []
         var landed: [RefinedPage] = []
         // 工程里不在了的页（删掉了、撤销到操作之前、清空了托盘）：快照里的照样补（之后撤销 / 重做回来就是精排的）。
         var absent: [RefinedPage] = []
@@ -3526,6 +3554,7 @@ final class CollageStore: ObservableObject {
             if now.id == onCanvas, cropEditing || continuousEditDepth > 0 { continue }
             project.pages[i].root = r.to
             landed.append(r)
+            if let job = done.first(where: { $0.0.pageID == r.id })?.0.job { lost += job.droppedCrops(in: r.to) }
         }
         // 落地之后又压的几步（改别的跨页、改标题……）：快照里这一页还是同步那一版的也换上精排的 —— 撤销那一步只退那一步，
         // 不连精排一起退。只补落下了的页和工程里不在了的页：用户动过的页（镜像了、拖了缝），撤销回去应该是他看到过的那一版。
@@ -3534,7 +3563,7 @@ final class CollageStore: ObservableObject {
         for s in undoStack.indices.suffix(later) { undoStack[s] = Self.patched(undoStack[s], landed + absent, basis: basis) }
         // 重做栈（精排回来之前撤销了：工程里是操作之前的版，这一页对不上）：重做回来的那一版里还是同步那一版的，换上精排的。
         for s in redoStack.indices { redoStack[s] = Self.patched(redoStack[s], refined, basis: basis) }
-        guard !landed.isEmpty else { return }
+        guard !landed.isEmpty else { return [] }
         if let onCanvas, landed.contains(where: { $0.id == onCanvas }) {
             // 画布上这一页换了树：选中跟着那张照片走（找不到就清掉）；备选作废（画布上已经不是其中的任何一版）。
             let root = page?.root
@@ -3542,6 +3571,7 @@ final class CollageStore: ObservableObject {
             clearAlternatives()
         }
         commitEdit()
+        return lost
     }
 
     private struct RefinedPage {
@@ -3594,12 +3624,14 @@ final class CollageStore: ObservableObject {
     }
 
     /// 一页加上这几格照片以后要怎么排（S1）：同「加进现在的版式（重排）」—— 照片 + 这一页的文字格重新求解，有锁定格的保住锁定格。
+    /// 手调从插过的树带（挪过来的照片带着自己的字、景别、形状），可格子比例按插之前那一页量：插过的树上最大那格已经
+    /// 劈成两半，量它的话那张（多半是精心裁过的主图）的裁切总被比例门挡掉（M-01）。
     private func joinJob(_ page: CollagePage, adding cells: [CollageCell]) -> PageSolve {
         let map = photoMap
         let joined = inserting(cells, into: page.root)
         let photos = Self.unique(page.root.photoIDs + cells.compactMap(\.photoID)).compactMap { map[$0] }
         return PageSolve(photos: photos, texts: page.root.leaves.filter { $0.kind == .text }, locks: joined,
-                         fallback: joined, carry: joined)
+                         fallback: joined, carry: joined, carryAspects: page.root)
     }
 
     /// 散落版目标：放一张相纸（散落版不画切分树，插进树里就看不见了），放在相纸少的那半页正中（跨页正中是中缝）。
@@ -3665,12 +3697,26 @@ final class CollageStore: ObservableObject {
         clearAlternatives()
         commitEdit()
         let what = ids.count == 1 ? "" : " \(ids.count) 张"
-        // 两页其余照片的裁切、景别、形状照旧（PageSolve.run 按照片 id 带回去；格子比例差太多的那几张裁切回到自动）。
-        setNotice("已移到第 \(target + 1) 个\(pageUnit)\(what)（两页重排了，其余照片的裁切、景别留着；⌘Z 撤回这次挪动）"
-                  + (destination.freeform ? "：放在照片少的那半页，拖到想要的位置" : ""))
+        // 两页其余照片的裁切、景别、形状照旧（PageSolve.run 按照片 id 带回去；格子比例差太多的那几张裁切回到自动，
+        // 提示里点名：定的页同步这一步就知道，要精排的页落下时再换那一句）。
+        let head = "已移到第 \(target + 1) 个\(pageUnit)\(what)（两页重排了，"
+        let tail = "；⌘Z 撤回这次挪动）" + (destination.freeform ? "：放在照片少的那半页，拖到想要的位置" : "")
+        let now = zip(jobs, landed).flatMap { $0.droppedCrops(in: $1) }
+        setNotice(head + Self.keptNote("其余照片", lost: now) + tail)
         let pageIDs = [source.id, destination.id]
         return refinePages(jobs.indices.map { RefineJob(pageID: pageIDs[$0], job: jobs[$0], seed: seeds[$0], landed: landed[$0]) },
-                           context: ctx)
+                           context: ctx, amend: { head + Self.keptNote("其余照片", lost: now + $0) + tail })
+    }
+
+    /// 挪 / 加照片提示里「手调留着」那半句（CR-01）：裁切都带过去了 = 「裁切、景别留着」；格子比例变了太多、裁切回到
+    /// 自动的点名（多了只点前三张）。
+    nonisolated static func keptNote(_ who: String, lost: [String]) -> String {
+        let kept = who + "的裁切、景别留着"
+        let names = unique(lost)
+        guard !names.isEmpty else { return kept }
+        let shown = names.count > 3 ? names.prefix(3).joined(separator: "、") + " 等 \(names.count) 张"
+                                    : names.joined(separator: "、") + " "
+        return kept + "，只有 \(shown)的格子形状变了太多、裁切回到自动"
     }
 
     /// S1：托盘里的几张放进第 target 个跨页（从 0 起），同「加进现在的版式（重排）」：当场插进去（有空照片格先放空格、
@@ -3722,8 +3768,11 @@ final class CollageStore: ObservableObject {
             clearAlternatives()
         }
         commitEdit()
-        setNotice("第 \(target + 1) 个\(pageUnit)加了 \(fresh.count) 张，重排了（原有照片的裁切、景别留着）" + skipped)
-        return refinePages([RefineJob(pageID: destination.id, job: job, seed: seed, landed: landed)], context: ctx)
+        let head = "第 \(target + 1) 个\(pageUnit)加了 \(fresh.count) 张，重排了（"
+        let now = job.droppedCrops(in: landed)
+        setNotice(head + Self.keptNote("原有照片", lost: now) + "）" + skipped)
+        return refinePages([RefineJob(pageID: destination.id, job: job, seed: seed, landed: landed)], context: ctx,
+                           amend: { head + Self.keptNote("原有照片", lost: now + $0) + "）" + skipped })
     }
 
     /// 命令行 landbench（审查 R1#2 的修法要量的）：同步落地那一步在每个网格跨页上的主线程耗时（毫秒）——
@@ -4811,6 +4860,8 @@ final class CollageStore: ObservableObject {
         let pdfFaults = testExportFailPDFEncodePages
         let fakeLowRes = testUnreadableOriginals ?? []
         let failCover = testExportFailCover
+        let probe = testExportProbe
+        let lanes = min(max(1, order.count), max(1, exportLanesOverride ?? Self.exportLanes()))
         // 导出前检查里的「提醒」有几条（优化分析 A6）：⌘E / 顶栏按钮只问「拦」的，提醒以前在导出时完全不出现 —— 导完那句
         // 后面带一句条数。和导出同时在后台算（要排一遍字），只对相册、印刷画布（「导出 ▾」里有那张清单的）。
         let readable = preflightReadable
@@ -4839,10 +4890,13 @@ final class CollageStore: ObservableObject {
             var missing: [String] = []
             var signatureLost = false
             var fillerBody = false
-            for (n, i) in order.enumerated() {
+            // 一页的渲染 + 写盘（后台）。同时最多 lanes 页在飞（PP-03），结果照页序一页页收：files、PDF 页序、「第一个出错的页」
+            // 都和以前一页一页串着时一样；进度按收到的页数走。
+            func launch(_ i: Int) -> Task<PageResult, Never> {
                 let page = snapshot.pages[i]
-                if self?.exportCancelled ?? true { break }
-                let result = await Task.detached(priority: .userInitiated) { () -> PageResult in
+                return Task.detached(priority: .userInitiated) { () -> PageResult in
+                    probe?.begin(i)
+                    defer { probe?.end(i) }
                     var opts = CollageRender.Options(scale: Double(scale))
                     opts.export = true
                     opts.includeBleed = true
@@ -4867,7 +4921,10 @@ final class CollageStore: ObservableObject {
                     } catch {
                         return PageResult(pdfData: nil, error: error.localizedDescription, lowRes: [], missing: [])
                     }
-                }.value
+                }
+            }
+            // 收一页：照页序调（先写完的后面的页等前面的收了再收），每页做的和以前一页一页串着时一样。
+            func take(_ i: Int, _ result: PageResult) {
                 if let f = result.error, failure == nil { failure = f }
                 // 这一页出错时也照实报已经写出的（九宫格 / 轮播先写整张、再写切片，切片写失败时整张已经在盘上了；
                 // 文件名是这次新起的，盘上有就是这次写的）
@@ -4885,12 +4942,49 @@ final class CollageStore: ObservableObject {
                 missing += result.missing
                 signatureLost = signatureLost || result.signatureLost
                 fillerBody = fillerBody || result.fillerBody
-                guard let self else {
-                    outcome.failure = "导出中断（拼图页关了）"
-                    return
+            }
+            var orphaned = false
+            await withTaskGroup(of: (Int, PageResult).self) { group in
+                var next = 0
+                var running = 0
+                var received = 0
+                var stopped = false
+                // 写完了、前面还有页没写完的（按 order 里的位置）：攒着的只是文件名和小结果，位图早放掉了。
+                var ready: [Int: PageResult] = [:]
+                var taken = 0
+                while true {
+                    // 补满：取消了（拼图页关了也算）就不再开新页；已经在渲的照样等它写完、照实列进 files（「已写出的保留」）。
+                    while !stopped, running < lanes, next < order.count {
+                        if self?.exportCancelled ?? true {
+                            stopped = true
+                        } else {
+                            let n = next
+                            let task = launch(order[n])
+                            group.addTask { (n, await task.value) }
+                            running += 1
+                            next += 1
+                        }
+                    }
+                    guard let (n, result) = await group.next() else { break }
+                    running -= 1
+                    received += 1
+                    ready[n] = result
+                    while let r = ready.removeValue(forKey: taken) {
+                        take(order[taken], r)
+                        taken += 1
+                    }
+                    guard let self else {
+                        // 以前这里直接返回；现在可能还有页在渲：等它们写完、列进 files 再返回（不开新页，见上）。
+                        orphaned = true
+                        continue
+                    }
+                    self.progressFraction = Double(received) / Double(order.count)
+                    self.progressText = "导出 \(received)/\(order.count)…"
                 }
-                self.progressFraction = Double(n + 1) / Double(order.count)
-                self.progressText = "导出 \(n + 1)/\(order.count)…"
+            }
+            if orphaned {
+                outcome.failure = "导出中断（拼图页关了）"
+                return
             }
             // 缺页的 PDF 不能拿去印（页序整体前移、文件名照常，最容易直接发给印厂）：有跨页没写出来就不出 PDF。
             if wantPDF, plan.pdf != nil, !pdfMissing.isEmpty, !(self?.exportCancelled ?? true) {
@@ -6160,4 +6254,40 @@ enum CollageTextTarget: Hashable {
     /// 路径 + 那一格当时的照片 + 所在页（换一批后路径上换了照片就不认）+ 第几个字块。
     case overlay([Int], String?, UUID?, Int)
     case item(UUID)
+}
+
+/// 自检用（CollageStore.testExportProbe）：导出时每页开始、结束各记一笔，数同时最多几页在渲；delays 里的页开始后先睡
+/// 这么多秒，好让完成顺序和页序对不上（并行导出时 files、PDF 页序还得照页序）。后台线程上调，自己加锁。
+final class CollageExportProbe: @unchecked Sendable {
+    let delays: [Int: Double]
+    private let lock = NSLock()
+    private var active = 0
+    private var peakValue = 0
+    private var startedPages: [Int] = []
+    private var finishedPages: [Int] = []
+
+    init(delays: [Int: Double] = [:]) { self.delays = delays }
+
+    func begin(_ page: Int) {
+        lock.lock()
+        active += 1
+        peakValue = max(peakValue, active)
+        startedPages.append(page)
+        lock.unlock()
+        if let d = delays[page] { Thread.sleep(forTimeInterval: d) }
+    }
+
+    func end(_ page: Int) {
+        lock.lock()
+        active -= 1
+        finishedPages.append(page)
+        lock.unlock()
+    }
+
+    /// 同时最多几页在渲、开始的页序、写完的页序。
+    var snapshot: (peak: Int, started: [Int], finished: [Int]) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (peakValue, startedPages, finishedPages)
+    }
 }

@@ -1214,7 +1214,9 @@ struct CollageExportPanel: View {
         Binding(get: { mmValue(store.project.canvas[keyPath: keyPath]) },
                 set: { mm in
                     var c = store.project.canvas
-                    c[keyPath: keyPath] = Int((mm / 25.4 * c.dpi).rounded())
+                    // 出血向上取整（不少于拖到的 mm，MC-12，同 CollageCanvas.bleedPx）；安全区照旧四舍五入。
+                    c[keyPath: keyPath] = keyPath == \CollageCanvas.bleed ? CollageCanvas.bleedPx(mm: mm, dpi: c.dpi)
+                        : Int((mm / 25.4 * c.dpi).rounded())
                     store.setCanvas(c, coalesce: true)
                 })
     }

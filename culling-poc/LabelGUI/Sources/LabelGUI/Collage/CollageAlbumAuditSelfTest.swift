@@ -9,7 +9,8 @@ import ImageIO
 /// 1. A1 / A2 原图读不了：检查报「拦」（带页号、格子，一张报一次）；导出不出印刷 PDF、不写「导出完成」；缺图和低清都报；
 /// 2. A3 胶装照片跨中缝：拦、带页号和格子、点了跳过去；平铺不报；
 /// 3. A4 书脊：记下填的时候多少 P，P 数变了拦；旧工程缺键读得回来、不报；估的整本导出问一次；
-/// 4. A5 挪照片后的重排把其余照片的手调带回去，格子比例差太多的才清裁切；
+/// 4. A5 挪照片后的重排把其余照片的手调带回去，格子比例差太多的才清裁切；CR-01 / M-01（优化分析 2026-11-18）：
+///    用户的裁切盖过求解器给的完整显示、加照片按插之前那一页量比例、裁切没带过去的提示里点名；
 /// 5. A6 胶装时字压进中缝带是拦；导出完那句后面带提醒条数；
 /// 6. A7 部分导出成了范围复位、按钮上写清导哪几个；
 /// 7. A8 指纹并进当前页号和封面状态，翻页不算改了拼图；collage_pages 的 delete 要 pages；
@@ -44,6 +45,8 @@ enum CollageAlbumAuditSelfTest {
         checkSpine(root.appendingPathComponent("spine"), check: check)
         print("== A5 挪照片后其余照片的手调")
         checkCarry(check: check)
+        print("== CR-01 / M-01 挪 / 加照片后的裁切（求解器给的完整显示、插过新格的树）")
+        checkCarryCrops(check: check)
         print("== A6 胶装时字压进中缝带、导出完带提醒条数")
         checkGluedText(root.appendingPathComponent("text"), check: check)
         print("== A7 导出范围")
@@ -399,6 +402,119 @@ enum CollageAlbumAuditSelfTest {
         store.addPhotos(["E7"], toPage: 1)
         Edit.spin(30) { !store.isRefining }
         check(now(1, "E3")?.framing == .close && store.project.pages[1].photoIDs.contains("E7"), "往那个跨页再加一张：原有照片的景别还在")
+    }
+
+    /// CR-01 / M-01（优化分析 2026-11-18）：一页一张的照片求解器给完整显示，用户双击拖满（裁切）以后——
+    /// 同跨页挪走别的照片（CR-01：求解器又给完整显示，以前盖掉裁切）、往这个跨页加一张（M-01：带手调按插过新格的树
+    /// 量比例，最大那格被劈成两半，比例门挡掉裁切）—— 格子比例没变的裁切都要留着；真变了太多的提示里点名。
+    @MainActor
+    static func checkCarryCrops(check: Check) {
+        let canvas = Edit.album30
+        let style = CollageStyle()
+        func cell(_ root: CollageNode, _ id: String) -> CollageCell? { root.leaves.first { $0.photoID == id } }
+        let crop = CollageCropOverride(cx: 0.5, cy: 0.42, zoom: 1.0)
+        var a = CollageCell.photo("A")
+        a.crop = crop
+        // 纯函数：同一个格子，新树上求解器给了完整显示 → 裁切赢。
+        let old = CollageNode.split(.row, 0.5, .leaf(a), .leaf(.photo("B")))
+        var solved = CollageCell.photo("A")
+        solved.contain = true
+        let fresh = CollageNode.split(.row, 0.5, .leaf(solved), .leaf(.photo("B")))
+        let won = cell(CollageLayout.carryAdjustments(from: old, into: fresh, canvas: canvas, style: style), "A")
+        check(won?.crop == crop && won?.contain == false && won?.containBlur == false,
+              "格子比例没变、新格子是求解器给的完整显示：用户的裁切赢")
+        // 比例差太多：完整显示照旧，裁切不带，droppedCrops 点名。
+        let strip = CollageNode.split(.column, 0.25, .leaf(solved), .leaf(.photo("B")))
+        let lost = CollageLayout.carryAdjustments(from: old, into: strip, canvas: canvas, style: style)
+        check(cell(lost, "A")?.crop == nil && cell(lost, "A")?.contain == true, "格子比例差太多：求解器的完整显示照旧、裁切不带")
+        check(CollageLayout.droppedCrops(from: old, to: lost) == ["A"] && CollageLayout.droppedCrops(from: old, to: old).isEmpty,
+              "droppedCrops：只点没带过去的那张")
+        // M-01：插过新格的树上 A 那格被劈成两半；量那棵树裁切被挡掉，按插之前那一页量就带得回去。
+        let joined = CollageNode.split(.row, 0.5, .split(.row, 0.5, .leaf(a), .leaf(.photo("N"))), .leaf(.photo("B")))
+        let again = CollageNode.split(.row, 0.5, .leaf(solved), .split(.column, 0.5, .leaf(.photo("N")), .leaf(.photo("B"))))
+        let split = CollageLayout.carryAdjustments(from: joined, into: again, canvas: canvas, style: style)
+        check(cell(split, "A")?.crop == nil, "（病因）按劈过的格子量：比例差两倍，裁切被挡掉")
+        let measured = CollageLayout.carryAdjustments(from: joined, into: again, canvas: canvas, style: style, aspects: old)
+        check(cell(measured, "A")?.crop == crop && cell(measured, "A")?.contain == false, "按插之前那一页量：裁切带回去")
+        check(CollageStore.keptNote("其余照片", lost: []) == "其余照片的裁切、景别留着", "提示：都带过去了照旧一句")
+        let named = CollageStore.keptNote("其余照片", lost: ["W", "X", "Y", "Z", "W"])
+        check(named.contains("只有 W、X、Y 等 4 张的格子形状变了太多、裁切回到自动"), "提示：没带过去的点名（多了只点前三张）", named)
+
+        // store：E0 / E3 / E6 / E9 是横图，其余竖图；按 E 后面的数字先后拍。
+        let photos = (0..<14).map { Edit.photo("E\($0)", Double($0) * 5, portrait: $0 % 3 != 0, score: 3 - Double($0) * 0.1) }
+        func leaf(_ id: String, _ edit: (inout CollageCell) -> Void = { _ in }) -> CollageNode {
+            var cell = CollageCell.photo(id)
+            edit(&cell)
+            return .leaf(cell)
+        }
+        let mark = CollageOverlays.preset("masthead") ?? CollageOverlay(text: CollageText())
+        var p = CollageProject()
+        p.mode = .album
+        p.canvas = canvas
+        p.photos = photos
+        p.pages = [
+            // 0：横图 E0 独占左页（裁过）；挪走 E2 以后剩两张，一页一张，求解器给 E0 完整显示。
+            CollagePage(root: .split(.row, 0.5, leaf("E0") { $0.crop = crop },
+                                     .split(.column, 0.5, leaf("E1"), leaf("E2") { $0.framing = .close; $0.overlays = [mark] }))),
+            // 1：E3 在左页上半格裁过；挪走 E5 以后它独占左页，比例差两倍：裁切真带不过去。
+            CollagePage(root: .split(.row, 0.5, .split(.column, 0.5, leaf("E3") { $0.crop = crop }, leaf("E4")), leaf("E5"))),
+            // 2：左页文字、右页横图 E6 一张（裁过）；往这里轮着加托盘里的几张。
+            CollagePage(root: .split(.row, 0.5, .leaf(.text(CollageTemplates.centeredTitle())), leaf("E6") { $0.crop = crop })),
+            CollagePage(root: .split(.row, 0.5, leaf("E7"), leaf("E9"))),
+        ]
+        let store = CollageStore(dataDir: appDataDir)
+        store.loadForTesting(p)
+        func now(_ page: Int, _ id: String) -> CollageCell? { store.project.pages[page].root.leaves.first { $0.photoID == id } }
+        func alone(_ page: Int, _ id: String) -> Bool {
+            let root = store.project.pages[page].root
+            return root.children.contains { $0.isLeaf && $0.cell?.photoID == id }
+        }
+        let notice = { store.notice ?? "" }
+
+        // CR-01：同跨页挪走别的照片。
+        let depth = store.undoDepth
+        store.pageIndex = 0
+        store.moveCells([[1, 1]], toPage: 3)
+        Edit.spin(30) { !store.isRefining }
+        let e0 = now(0, "E0")
+        check(alone(0, "E0"), "（前提）挪走 E2 以后 E0 还是独占一页", store.project.pages[0].root.signature)
+        check(e0?.crop == crop && e0?.contain == false, "CR-01 同跨页挪走一张：E0 的裁切留着（不被求解器的完整显示盖掉）",
+              "\(e0?.crop.map { "\($0.cx),\($0.cy)×\($0.zoom)" } ?? "没裁") 完整=\(e0?.contain == true)")
+        check(notice().contains("其余照片的裁切、景别留着") && !notice().contains("只有"), "提示说裁切留着，和实际一致", notice())
+        check(now(3, "E2")?.framing == .close && now(3, "E2")?.overlays == [mark], "挪过去的那张：景别、压字跟着走",
+              "\(now(3, "E2")?.framing.rawValue ?? "-") 压字 \(now(3, "E2")?.overlays.count ?? 0)")
+        check(store.undoDepth == depth + 1, "还是一步撤销")
+        store.undo()
+        check(now(0, "E0")?.crop == crop && now(0, "E2") != nil && store.project.pages[3].photoIDs == ["E7", "E9"],
+              "⌘Z 一步回到挪之前（E2 回来、E0 的裁切在）")
+
+        // 真带不过去的：提示点名。
+        store.pageIndex = 1
+        store.moveCells([[1]], toPage: 3)
+        Edit.spin(30) { !store.isRefining }
+        check(alone(1, "E3"), "（前提）挪走 E5 以后 E3 独占左页", store.project.pages[1].root.signature)
+        check(now(1, "E3")?.crop == nil, "E3 从半页变成整页（比例差两倍）：裁切回到自动")
+        check(notice().contains("只有 E3 的格子形状变了太多、裁切回到自动"), "提示点名 E3，不再说一律留着", notice())
+
+        // M-01：往有裁切主图（E6 独占右页）的跨页加一张。几张轮着加、每次撤回（一次换一个种子，落在哪儿由求解器定）：
+        // 加完 E6 还独占一页的，比例没变，裁切一定留着（以前量的是插过新格、劈成两半的格子，总被挡掉）；
+        // 落进半格的按规矩回到自动，提示得点名。
+        var aloneSeen = 0
+        for id in ["E8", "E10", "E11", "E12", "E13"] {
+            store.addPhotos([id], toPage: 2)
+            Edit.spin(30) { !store.isRefining }
+            let e6 = now(2, "E6")
+            let kept = e6?.crop == crop && e6?.contain == false
+            let shape = store.project.pages[2].root.signature
+            if alone(2, "E6") {
+                aloneSeen += 1
+                check(kept, "M-01 加 \(id)：E6 还独占一页，裁切留着（按插之前那一页量比例）", shape)
+            }
+            check(kept != notice().contains("只有 E6"), "加 \(id)：提示和实际一致（留着 = 不点名）", shape + " · " + notice())
+            store.undo()
+        }
+        check(aloneSeen > 0, "（前提）至少有一次加完 E6 还独占一页", "\(aloneSeen) 次")
+        check(now(2, "E6")?.crop == crop && store.project.pages[2].photoIDs == ["E6"], "每次 ⌘Z 一步撤回：E6 一张、裁切还在")
     }
 
     // MARK: - 5. 胶装时字压进中缝带

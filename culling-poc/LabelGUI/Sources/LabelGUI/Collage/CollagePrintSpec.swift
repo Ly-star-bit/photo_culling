@@ -188,11 +188,14 @@ struct CollagePrintSpec: Codable, Hashable, Identifiable {
         self.key = key
     }
 
+    /// 留四位小数（「存成规格…」量回来的 cm / mm）。
+    static func round4(_ v: Double) -> Double { (v * 10_000).rounded() / 10_000 }
+
     /// 「存成规格…」：从现在的画布量回来（像素按 dpi 换回 cm / mm，留四位小数）。再套回来得到的像素和现在一样
     /// （30×30cm 300dpi = 7087px，换回去还是 7087）。以前留两位：5000px 宽的跨页 → 单页 21.17cm → 套回来 5001px，
     /// 菜单上那一条显示「（改过）」、不打勾（R2#7）。四位小数的误差到 1200dpi 也不到 0.05px。
     init(name: String, canvas: CollageCanvas) {
-        func round4(_ v: Double) -> Double { (v * 10_000).rounded() / 10_000 }
+        let round4 = Self.round4
         let dpi = max(1, canvas.dpi)
         self.init(name: name,
                   pageWidthCM: round4(Double(canvas.width) / 2 / dpi * 2.54),
@@ -217,6 +220,12 @@ struct CollagePrintSpec: Codable, Hashable, Identifiable {
         let dpiValue = c.soft(.dpi, 300.0)
         dpi = dpiValue.isFinite ? min(1200, max(150, dpiValue)) : 300
         bleedMM = min(10, max(0, c.soft(.bleedMM, 3.0)))
+        // v1.32 以前「存成规格」从 3mm 四舍五入的画布量回来（35px@300dpi → 2.9633mm，MC-12）：读回来当 3mm，套上去是
+        // 向上取整的 36，和读旧工程时升过的画布对得上（菜单照样打勾，不显示「（改过）」）。
+        if let old = CollageCanvas.legacyBleed3mm(dpi: dpi),
+           abs(bleedMM - Self.round4(Double(old) / dpi * 25.4)) < 0.00001 {
+            bleedMM = 3
+        }
         safeMM = min(30, max(0, c.soft(.safeMM, 5.0)))
         binding = c.soft(.binding, .layflat)
         rules = c.soft(.rules, CollagePrintRules())

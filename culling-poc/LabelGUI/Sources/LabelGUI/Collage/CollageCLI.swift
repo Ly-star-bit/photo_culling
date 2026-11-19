@@ -1259,7 +1259,8 @@ private struct CollageSnapshotHost: View {
 /// 方案栏：variantsave[:名字]、variantopen:N、variantupdate:N、variantrename:N=名字、variantdel:N（N = 方案栏里的序号，
 ///     从 0 起；只有 variantopen 是一步撤销，别的不进撤销）、variants（列出方案、哪个是当前的、编辑指纹）。
 /// export:<目录> = 走导出全流程（无头模式不弹访达；会真的写出文件，测试脚本用 renderexport）；exportname:<名字>（导出文件名）；
-///     exportscale:1|2|3（导出清晰度；renderexport 和 export 都按 CollageStore.exportScale 算这张画布实际几倍）。
+///     exportscale:1|2|3（导出清晰度；renderexport 和 export 都按 CollageStore.exportScale 算这张画布实际几倍）；
+///     exportlanes:N（导出同时渲几页：0 = 按内存，1 = 一页一页来；量并行前后用）。
 enum CollageOpsScript {
     @MainActor
     static func run(flagIndex: Int) -> Never {
@@ -2730,6 +2731,14 @@ enum CollageOpsScript {
                     let c = store.project.canvas
                     let used = CollageStore.exportScale(canvas: c, options: store.exportOptions)
                     print("  清晰度 \(k) 倍 → 这张画布用 \(used) 倍（最多 \(CollageStore.maxExportScale(c))）：\(c.width * used)×\(c.height * used)")
+                } else {
+                    ok = false
+                }
+            case "exportlanes":
+                // 导出同时渲几页（PP-03）：0 = 按内存（CollageStore.exportLanes），1 = 和以前一样一页一页来。量并行前后用。
+                if let k = Int(arg), (0...8).contains(k) {
+                    store.exportLanesOverride = k == 0 ? nil : k
+                    print("  导出同时渲 \(k == 0 ? "\(CollageStore.exportLanes())（按内存）" : "\(k)") 页")
                 } else {
                     ok = false
                 }
