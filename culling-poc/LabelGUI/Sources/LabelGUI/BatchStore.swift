@@ -3305,20 +3305,9 @@ final class BatchStore: ObservableObject {
                     if !summary.refound.isEmpty {
                         self.progressText += " · 认回 \(summary.refound.count) 张改了名的（改判、客户选中都还在）"
                     }
-                    // 拆开拼：一长串插值 + 三元在 CI 的 Xcode 16 上类型检查会慢。
-                    func names(_ ids: [String]) -> String {
-                        ids.prefix(5).joined(separator: ", ") + (ids.count > 5 ? "..." : "")
+                    if let note = Self.analysisProblemNote(failed: summary.failed, corrupt: summary.corrupt) {
+                        self.lastError = note
                     }
-                    var problems: [String] = []
-                    if !summary.failed.isEmpty {
-                        problems.append("\(summary.failed.count) 张无法解析被跳过 (文件损坏或仍在拷贝中): " + names(summary.failed))
-                    }
-                    // 坏文件照样在网格里（看得到缺的那截），判废片；要紧的是别把卡格式化了。
-                    if !summary.corrupt.isEmpty {
-                        problems.append("\(summary.corrupt.count) 张文件损坏 (不完整，可能读卡出错或拷贝中断)，已判废片: "
-                                        + names(summary.corrupt) + " —— 卡先别格式化，从卡上重新拷一次")
-                    }
-                    if !problems.isEmpty { self.lastError = problems.joined(separator: "；") }
                 }
                 self.isRunning = false
                 self.analyzing = false
@@ -3332,6 +3321,24 @@ final class BatchStore: ObservableObject {
                 self.postResultsChanged(previewsChanged: !stale.isEmpty, stalePaths: stale)
             }
         }
+    }
+
+    /// 分析跑完、有解不开 / 文件损坏的照片时状态栏那句（没有 = nil）。名单和别处的失败名单同一个写法：前 3 张、多了写
+    /// 「等 N 张」（FailureNames.list，EC-08；以前这里前 5 张加「...」）。解不开的就是状态栏「N 张没进网格」数的那种（EC-01），
+    /// 这里用同一个说法。坏文件照样在网格里（看得到缺的那截），判废片；要紧的是别把卡格式化了。
+    nonisolated static func analysisProblemNote(failed: [String], corrupt: [String]) -> String? {
+        // 拆开拼：一长串插值 + 三元在 CI 的 Xcode 16 上类型检查会慢。
+        var problems: [String] = []
+        if !failed.isEmpty {
+            let list = FailureNames.list(failed, unit: "张")
+            problems.append("\(failed.count) 张解不开、没进网格 (文件损坏、格式不支持或仍在拷贝中): " + list)
+        }
+        if !corrupt.isEmpty {
+            let list = FailureNames.list(corrupt, unit: "张")
+            problems.append("\(corrupt.count) 张文件损坏 (不完整，可能读卡出错或拷贝中断)，已判废片: " + list
+                            + " —— 卡先别格式化，从卡上重新拷一次")
+        }
+        return problems.isEmpty ? nil : problems.joined(separator: "；")
     }
 
     /// VLM judges only the photos that survive the CURRENT thresholds + manual
@@ -5197,10 +5204,10 @@ final class BatchStore: ObservableObject {
     }
 
     /// 移到废纸篓有失败时状态栏那句：张数、前 3 张、原因（几种不同的分开数），移走了一半的单独说
-    /// （照片留在网格里、再移一次只移剩下的）。
+    /// （照片留在网格里、再移一次只移剩下的）。名单和导出那几句同一个写法：多了写「等 N 张」（FailureNames.list，EC-08；以前写「…」）。
     nonisolated static func trashFailureNote(trashed: Int, failed: [String], reasons: [String: String],
                                              partial: [TrashPartial]) -> String {
-        let names = failed.prefix(3).joined(separator: ", ") + (failed.count > 3 ? "…" : "")
+        let names = FailureNames.list(failed, unit: "张")
         var note = "移到废纸篓: \(trashed) 成功, \(failed.count) 失败 (\(names))"
         note += Diagnostics.reasonSummary(failed.compactMap { reasons[$0] })
         if let first = partial.first {
