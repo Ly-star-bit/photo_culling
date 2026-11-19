@@ -186,7 +186,7 @@ enum CollageStyleSwiss {
     static func lineBody(font: CollageFont, weight: CollageWeight, size: Double) -> Double {
         let f = CollageTypeset.font(font, weight, italic: false, size: CGFloat(size))
         let attrs: [NSAttributedString.Key: Any] = [NSAttributedString.Key(kCTFontAttributeName as String): f]
-        let line = CTLineCreateWithAttributedString(NSAttributedString(string: "Hxgy0", attributes: attrs))
+        let line = TextLayoutLock.line(NSAttributedString(string: "Hxgy0", attributes: attrs))
         var ascent: CGFloat = 0
         var descent: CGFloat = 0
         var leading: CGFloat = 0
@@ -344,7 +344,7 @@ enum CollageStyleSwiss {
     static func capGap(font: CollageFont, weight: CollageWeight, size: Double) -> Double {
         let f = CollageTypeset.font(font, weight, italic: false, size: CGFloat(size))
         let attrs: [NSAttributedString.Key: Any] = [NSAttributedString.Key(kCTFontAttributeName as String): f]
-        let line = CTLineCreateWithAttributedString(NSAttributedString(string: "0", attributes: attrs))
+        let line = TextLayoutLock.line(NSAttributedString(string: "0", attributes: attrs))
         var ascent: CGFloat = 0
         var descent: CGFloat = 0
         var leading: CGFloat = 0

@@ -280,7 +280,7 @@ enum CollageBookCoverRender {
     }
 
     private static func lineWidth(_ s: String, font: CTFont, upright: Bool) -> CGFloat {
-        let line = CTLineCreateWithAttributedString(attributed(s, font: font, upright: upright))
+        let line = TextLayoutLock.line(attributed(s, font: font, upright: upright))
         return CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
     }
 
@@ -300,7 +300,7 @@ enum CollageBookCoverRender {
     /// 在左上原点（翻转过）的 context 里画书脊字。
     static func drawSpine(_ layout: SpineLayout, ctx: CGContext, color: CollageColor) {
         for g in layout.glyphs {
-            let line = CTLineCreateWithAttributedString(attributed(g.text, font: g.font, upright: g.upright,
+            let line = TextLayoutLock.line(attributed(g.text, font: g.font, upright: g.upright,
                                                                    color: color.cgColor))
             ctx.saveGState()
             if g.upright {

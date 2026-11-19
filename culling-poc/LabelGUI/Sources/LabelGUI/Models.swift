@@ -68,6 +68,16 @@ struct LossyRow<T: Decodable>: Decodable {
     }
 }
 
+/// 用 JSONSerialization 读 manifest / layer1 的那些地方（复用、认旧 id、挪文件夹、补机身序列号、移到废纸篓后重写）取一列行：
+/// 不是数组 = nil；数组里不是对象的那行（null、数字）只丢它自己（和 LossyRow 一个口径）。以前整列 `as? [[String: Any]]`，
+/// 一行 null 整列就是 nil：重新分析整场重来、记过的 id 和改名认回的指纹全丢、挪文件夹不改路径（发版前审查查出来的）。
+enum JSONRows {
+    static func objects(_ value: Any?) -> [[String: Any]]? {
+        guard let array = value as? [Any] else { return nil }
+        return array.compactMap { $0 as? [String: Any] }
+    }
+}
+
 struct Manifest: Codable {
     let photoDir: String
     let photos: [Photo]

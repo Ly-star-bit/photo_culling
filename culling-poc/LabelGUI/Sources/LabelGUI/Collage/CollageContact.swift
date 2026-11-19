@@ -1348,7 +1348,7 @@ enum CollageContact {
             NSAttributedString.Key(kCTFontAttributeName as String): font,
             NSAttributedString.Key(kCTForegroundColorAttributeName as String): color.cgColor,
         ]
-        let line = CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: attrs))
+        let line = TextLayoutLock.line(NSAttributedString(string: s, attributes: attrs))
         ctx.saveGState()
         ctx.translateBy(x: x, y: baseline)
         ctx.scaleBy(x: 1, y: -1)
@@ -1400,7 +1400,7 @@ enum CollageContact {
             ]
         }
         func makeLine(_ size: Double) -> CTLine {
-            CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes(size)))
+            TextLayoutLock.line(NSAttributedString(string: text, attributes: attributes(size)))
         }
         let room: Double = max(1, note.maxX - note.minX)
         var line = makeLine(note.size)
@@ -1412,8 +1412,8 @@ enum CollageContact {
             line = makeLine(size)
             let shrunk: Double = CTLineGetTypographicBounds(line, nil, nil, nil)
             if shrunk > room {
-                let token = CTLineCreateWithAttributedString(NSAttributedString(string: "…", attributes: attributes(size)))
-                if let cut = CTLineCreateTruncatedLine(line, room, .end, token) { line = cut }
+                let token = TextLayoutLock.line(NSAttributedString(string: "…", attributes: attributes(size)))
+                if let cut = TextLayoutLock.truncated(line, room, .end, token) { line = cut }
             }
         }
         var ascent: CGFloat = 0

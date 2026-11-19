@@ -803,7 +803,7 @@ enum CollageTypeset {
             NSAttributedString.Key(kCTForegroundColorAttributeName as String): spec.color.cgColor,
             NSAttributedString.Key(kCTKernAttributeName as String): NSNumber(value: spec.tracking * glyph),
         ]
-        let line = CTLineCreateWithAttributedString(NSAttributedString(string: string, attributes: attrs))
+        let line = TextLayoutLock.line(NSAttributedString(string: string, attributes: attrs))
         var ascent: CGFloat = 0
         var descent: CGFloat = 0
         var leading: CGFloat = 0
@@ -1702,14 +1702,14 @@ enum CollageTypeset {
         guard body.dropCap == 0, !cols.isEmpty else { return body }
         func fits(_ b: CollageBody) -> Bool {
             let attributed = bodyString(b, text, size: b.size * short, capFirst: false)
-            let setter = CTFramesetterCreateWithAttributedString(attributed)
+            let setter = TextLayoutLock.framesetter(attributed)
             let total = attributed.length
             var location = 0
             var attrs: [CFString: Any] = [:]
             if b.vertical { attrs[kCTFrameProgressionAttributeName] = CTFrameProgression.rightToLeft.rawValue }
             for col in cols where location < total {
                 let path = CGPath(rect: CGRect(origin: .zero, size: col.size), transform: nil)
-                let frame = CTFramesetterCreateFrame(setter, CFRange(location: location, length: 0), path,
+                let frame = TextLayoutLock.frame(setter, CFRange(location: location, length: 0), path,
                                                      attrs as CFDictionary)
                 let visible = CTFrameGetVisibleStringRange(frame)
                 guard visible.length > 0 else { break }
@@ -1794,7 +1794,7 @@ enum CollageTypeset {
             string = String(string[string.index(after: i)...])
         }
         let attributed = bodyString(body, string, size: size, capFirst: cap != nil)
-        let setter = CTFramesetterCreateWithAttributedString(attributed)
+        let setter = TextLayoutLock.framesetter(attributed)
         let total = attributed.length
         let h = CGFloat(canvasHeight)
         // 平衡分栏：每栏排几行（nil = 照旧一栏排满再接下一栏）。
@@ -1866,7 +1866,7 @@ enum CollageTypeset {
                     [kCTFramePathClippingPathAttributeName: CGPath(rect: room, transform: nil)] as CFDictionary,
                 ] as CFArray
             }
-            let frame = CTFramesetterCreateFrame(setter, CFRange(location: location, length: 0),
+            let frame = TextLayoutLock.frame(setter, CFRange(location: location, length: 0),
                                                  CGPath(rect: box, transform: nil), attrs as CFDictionary)
             CTFrameDraw(frame, ctx)
             if let capLine, CFArrayGetCount(CTFrameGetLines(frame)) > 0 {
@@ -1898,7 +1898,7 @@ enum CollageTypeset {
             : CGRect(x: 0, y: 0, width: along, height: far)
         var attrs: [CFString: Any] = [:]
         if body.vertical { attrs[kCTFrameProgressionAttributeName] = CTFrameProgression.rightToLeft.rawValue }
-        let frame = CTFramesetterCreateFrame(setter, CFRange(location: 0, length: 0), CGPath(rect: probe, transform: nil),
+        let frame = TextLayoutLock.frame(setter, CFRange(location: 0, length: 0), CGPath(rect: probe, transform: nil),
                                              attrs as CFDictionary)
         let count = CFArrayGetCount(CTFrameGetLines(frame))
         let n = cols.count

@@ -154,11 +154,11 @@ enum AnalysisEngine {
         var oldManifestByID: [String: [String: Any]] = [:]
         var oldLayer1ByID: [String: [String: Any]] = [:]
         if let mData = oldManifestData, let mJson = oldManifest,
-           let mPhotos = mJson["photos"] as? [[String: Any]],
+           let mPhotos = JSONRows.objects(mJson["photos"]),
            let lData = oldLayer1Data, let lJson = oldLayer1,
            (lJson["engine"] as? String) == "native",
            (lJson["analysis_version"] as? Int ?? 1) == analysisVersion,
-           let lResults = lJson["results"] as? [[String: Any]] {
+           let lResults = JSONRows.objects(lJson["results"]) {
             // 只复用界面读得懂的行（审查 EC-03）：按字典宽松读的话，一行字段类型不对（手改、以后改了字段类型又装回旧版本）
             // 会被当成「未变」原样抄回新 manifest，界面那边永远解不开、这一场一直空着，点「开始分析」也修不好。
             // 和 BatchStore 打开场次用同一个解码器（Photo / Layer1Result）验一遍，解不开的重新分析。

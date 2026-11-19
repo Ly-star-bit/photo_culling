@@ -743,13 +743,10 @@ enum WatermarkEngine {
     /// 排字（建 CTLine）一次只排一个。几个线程同时第一次拿某个字号的系统字体排字时，CoreText 有时排出来窄 3%，而且这个字号
     /// 在整个进程里一直窄：8 个线程同时量默认 EXIF 那一行（231.84 pt），10 个进程里 8 个量出 8059.8、单线程永远是 8298.1。
     /// 水印批量几路同时开工，头几张字号没缩、和后面的不一样（PP-01 放开路数时查出来的；v1.32.0 的 4 路也碰得到，只是窗口小）。
-    /// 只锁建 CTLine 这一下（微秒级）：建字体、量宽、画字不锁 —— 实测锁住这一下 16 个进程全是 8298.1。
-    private static let textLayoutLock = NSLock()
-
+    /// 只锁建 CTLine 这一下（微秒级）：建字体、量宽、画字不锁 —— 实测锁住这一下 16 个进程全是 8298.1。拼图导出几路同时渲
+    /// 也会碰到，锁是全进程一把（TextLayoutLock）。
     static func makeLine(_ attr: NSAttributedString) -> CTLine {
-        textLayoutLock.lock()
-        defer { textLayoutLock.unlock() }
-        return CTLineCreateWithAttributedString(attr)
+        TextLayoutLock.line(attr)
     }
 
     /// 量字 + 定位；字是空的 = nil。

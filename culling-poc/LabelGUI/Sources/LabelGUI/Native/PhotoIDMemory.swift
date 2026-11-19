@@ -32,12 +32,12 @@ extension ImageLoader {
         /// layer1：上一次的 layer1_results.json（按字典读的），只拿每张的 src_size / src_mtime 当指纹 —— 不管哪个分析版本写的
         /// （文件大小、修改时间和分析口径无关，版本升级整场重分析时改了名的照片也认得回来）。
         init(manifest: [String: Any]?, layer1: [String: Any]? = nil, photoDir: URL) {
-            let analyzed = manifest?["photos"] as? [[String: Any]] ?? []
-            let idOnly = manifest?[Self.idOnlyKey] as? [[String: Any]] ?? []
+            let analyzed = JSONRows.objects(manifest?["photos"]) ?? []
+            let idOnly = JSONRows.objects(manifest?[Self.idOnlyKey]) ?? []
             let rows = analyzed + idOnly
             guard !rows.isEmpty else { return }
             let analyzedIDs = Set(analyzed.compactMap { $0["id"] as? String })
-            for r in layer1?["results"] as? [[String: Any]] ?? [] {
+            for r in JSONRows.objects(layer1?["results"]) ?? [] {
                 guard let id = r["id"] as? String, analyzedIDs.contains(id),
                       let size = r["src_size"] as? Int, size > 0,
                       let mtime = r["src_mtime"] as? Double, mtime.isFinite else { continue }
@@ -106,7 +106,8 @@ extension ImageLoader {
             }
             for j in extras.indices where extraIDs[j] == nil { candidates.append((nil, j, extras[j])) }
             guard !candidates.isEmpty else { return (pairIDs, extraIDs, []) }
-            let found = Self.fingerprintMatches(new: candidates.map { stamp($0.url) }, old: oldLeft)
+            let found = Self.fingerprintMatches(new: candidates.map { stamp($0.url) }, old: oldLeft,
+                                                claimed: fingerprints.filter { taken.contains($0.key) })
             var refound = Set<String>()
             for (k, id) in found {
                 if let i = candidates[k].pair { pairIDs[i] = id }
@@ -118,14 +119,21 @@ extension ImageLoader {
 
         /// 新文件的指纹（nil = stat 不出来）对旧 id 的指纹：大小一样、修改时间差不到 1 秒（和分析复用同一个口径）算对上。
         /// 只认一对一 —— 这个新文件只对上这一个旧 id，这个旧 id 也只被这一个新文件对上；同一秒连拍的无损 RAW 大小一样、
-        /// 修改时间也一样，对上几个的不猜。返回 新文件下标 → 旧 id。纯函数（--session-input-selftest 直接测）。
-        static func fingerprintMatches(new: [FileStamp?], old: [String: FileStamp]) -> [Int: String] {
+        /// 修改时间也一样，对上几个的不猜。`claimed` = 前两遍按路径已经认走的旧 id 的指纹：新文件和其中哪个也对得上，
+        /// 一样不猜（发版前审查：连拍 X、Y 同大小同一秒，在访达里删了 Y、把 X 复制进子文件夹 —— X 按路径认走自己的 id，
+        /// 副本只剩 Y 可对，以前就把 Y 的判决、客户选中、预览图安到了 X 的副本上）。返回 新文件下标 → 旧 id。
+        /// 纯函数（--session-input-selftest 直接测）。
+        static func fingerprintMatches(new: [FileStamp?], old: [String: FileStamp],
+                                       claimed: [String: FileStamp] = [:]) -> [Int: String] {
             var bySize: [Int: [(id: String, mtime: Double)]] = [:]
             for (id, s) in old { bySize[s.size, default: []].append((id, s.mtime)) }
+            var claimedBySize: [Int: [Double]] = [:]
+            for (_, s) in claimed { claimedBySize[s.size, default: []].append(s.mtime) }
             var hits: [Int: [String]] = [:]
             var claims: [String: Int] = [:]
             for (k, s) in new.enumerated() {
                 guard let s, s.size > 0 else { continue }
+                if (claimedBySize[s.size] ?? []).contains(where: { abs($0 - s.mtime) < 1.0 }) { continue }
                 let ids = (bySize[s.size] ?? []).filter { abs($0.mtime - s.mtime) < 1.0 }.map(\.id)
                 guard !ids.isEmpty else { continue }
                 hits[k] = ids

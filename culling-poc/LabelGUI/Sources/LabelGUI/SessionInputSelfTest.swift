@@ -199,6 +199,41 @@ enum SessionInputSelfTest {
         let noLayer1 = ImageLoader.PreviousIDs(manifest: manifest, photoDir: root)
         let plain = noLayer1.match(pairs: files.map { [$0] }, extras: [], root: root) { stamps[$0.lastPathComponent] }
         c.check(plain.pairs == [nil, "B", nil, nil] && plain.refound.isEmpty, "没有 layer1（老结果没记大小）：只按路径认")
+
+        // 同一秒连拍的无损 RAW：X、Y 大小一样、修改时间差不到 1 秒。在访达里删了 Y、把 X 复制进子文件夹：X 按路径拿走自己的 id，
+        // 副本和已经被认走的 X 也对得上 —— 不能因为只剩 Y 没人要就把 Y 安到 X 的副本上（发版前审查）。
+        let burstManifest: [String: Any] = ["photo_dir": "/shoot", "photos": [
+            ["id": "X", "raw_path": "/shoot/X.ARW"], ["id": "Y", "raw_path": "/shoot/Y.ARW"],
+        ]]
+        let burstLayer1: [String: Any] = ["results": [
+            ["id": "X", "src_size": 24_000_000, "src_mtime": 700.0], ["id": "Y", "src_size": 24_000_000, "src_mtime": 700.3],
+        ]]
+        let burst = ImageLoader.PreviousIDs(manifest: burstManifest, layer1: burstLayer1, photoDir: root)
+        let burstFiles = ["X.ARW", "精选/X.ARW"].map { root.appendingPathComponent($0) }
+        let burstStamps: [String: Stamp] = ["/shoot/X.ARW": Stamp(size: 24_000_000, mtime: 700),
+                                            "/shoot/精选/X.ARW": Stamp(size: 24_000_000, mtime: 700)]
+        let burstKept = burst.match(pairs: burstFiles.map { [$0] }, extras: [], root: root) { burstStamps[$0.path] }
+        c.check(burstKept.pairs == ["X", nil] && burstKept.refound.isEmpty,
+                "连拍同大小同一秒：X 按路径认、X 的副本也对得上 X，不把删掉的 Y 的 id 安到副本上",
+                "\(burstKept.pairs.map { $0 ?? "-" }) refound \(burstKept.refound.sorted())")
+        let lone = ImageLoader.PreviousIDs.fingerprintMatches(new: [Stamp(size: 24_000_000, mtime: 700)],
+                                                              old: ["Y": Stamp(size: 24_000_000, mtime: 700.3)],
+                                                              claimed: ["X": Stamp(size: 24_000_000, mtime: 700)])
+        c.check(lone.isEmpty, "指纹：和前两遍已认走的旧 id 也对得上的不认", "\(lone)")
+
+        // 数组里不是对象的那行（null、数字）只丢它自己：用 JSONSerialization 读的地方（复用、认旧 id、挪文件夹）也一样。
+        let withNull = try? JSONSerialization.jsonObject(with: Data("""
+        {"photo_dir": "/shoot", "photos": [{"id": "A", "raw_path": "/shoot/A.jpg"}, null, 42,
+                                          {"id": "B", "raw_path": "/shoot/B.jpg"}]}
+        """.utf8)) as? [String: Any]
+        c.check(JSONRows.objects(withNull?["photos"])?.compactMap { $0["id"] as? String } == ["A", "B"]
+                && JSONRows.objects(withNull?["photo_dir"]) == nil,
+                "JSONRows：null、42 只丢自己，不是数组的给 nil")
+        let nullIDs = ImageLoader.PreviousIDs(manifest: withNull, photoDir: root)
+        let nullKept = nullIDs.match(pairs: [root.appendingPathComponent("A.jpg"), root.appendingPathComponent("B.jpg")].map { [$0] },
+                                     extras: [], root: root) { _ in nil }
+        c.check(nullKept.pairs == ["A", "B"], "manifest 里夹一行 null：旧 id 照样沿用（以前整列读不出、记过的 id 全丢）",
+                "\(nullKept.pairs.map { $0 ?? "-" })")
     }
 
     // MARK: - PP-05 拍摄时间的手写解析

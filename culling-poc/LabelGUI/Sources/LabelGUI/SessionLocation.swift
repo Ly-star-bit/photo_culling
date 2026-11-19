@@ -109,7 +109,7 @@ enum SessionLocation {
               let data = try? Data(contentsOf: url),
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let old = json["photo_dir"] as? String,
-              var photos = json["photos"] as? [[String: Any]] else { return (nil, false) }
+              var photos = JSONRows.objects(json["photos"]) else { return (nil, false) }
         let new = folder.path
         guard old != new else { return (nil, false) }
         if let a = identity(old), let b = identity(new), a == b { return (nil, false) }
@@ -150,7 +150,7 @@ enum SessionLocation {
         rebaseRows(&photos)
         // 这一次没分析成、只记了 id 的那一份（PhotoIDMemory.swift 的 idOnlyKey：取消时没轮到的、解码失败的）也换：
         // 下次分析 PreviousIDs 按 photo_dir 和现在的根目录算相对路径，旧位置的绝对路径对不上，沿用下来的 id 又会变。
-        var idOnly = json[ImageLoader.PreviousIDs.idOnlyKey] as? [[String: Any]]
+        var idOnly = JSONRows.objects(json[ImageLoader.PreviousIDs.idOnlyKey])
         if idOnly != nil { rebaseRows(&idOnly!) }
         if rows == 0 && unmatched > 0 {
             SessionFiles.log.error("manifest.json 的照片路径一条都对不上原来的 photo_dir（\(old, privacy: .public)），没改")
@@ -205,11 +205,11 @@ enum SessionLocation {
     static func relocationCheck(sessionDir: URL, under folder: URL, limit: Int = 50) -> RelocationCheck? {
         guard let data = try? Data(contentsOf: sessionDir.appendingPathComponent("manifest.json")),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let photos = json["photos"] as? [[String: Any]] else { return nil }
+              let photos = JSONRows.objects(json["photos"]) else { return nil }
         var layer1: [String: [String: Any]] = [:]
         if let l1Data = try? Data(contentsOf: sessionDir.appendingPathComponent("layer1_results.json")),
            let l1Json = try? JSONSerialization.jsonObject(with: l1Data) as? [String: Any],
-           let results = l1Json["results"] as? [[String: Any]] {
+           let results = JSONRows.objects(l1Json["results"]) {
             for row in results {
                 if let id = row["id"] as? String { layer1[id] = row }
             }

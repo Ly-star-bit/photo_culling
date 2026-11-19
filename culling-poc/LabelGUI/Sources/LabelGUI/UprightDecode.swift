@@ -140,8 +140,14 @@ enum UprightDecode {
         case 3: error = vImageRotate90_ARGB8888(&src, &dst, 2, &fill, flags)
         case 4: error = vImageVerticalReflect_ARGB8888(&src, &dst, flags)
         case 5, 7:
-            let turned = vImageRotate90_ARGB8888(&src, &dst, orientation == 5 ? 1 : 3, &fill, flags)
-            error = turned == kvImageNoError ? vImageVerticalReflect_ARGB8888(&dst, &dst, flags) : turned
+            // 先转进一块临时的、再翻进 dst：vImage 的 Reflect / Rotate90 不能原地做（Geometry.h「do not work in place」），
+            // 以前 dst → dst 地翻，换个系统版本或分块方式就可能翻出半张镜像。5 / 7 相机几乎不写，多一帧内存无所谓。
+            guard let tmp = malloc(byteCount) else { return nil }
+            defer { free(tmp) }
+            var turnedBuffer = vImage_Buffer(data: tmp, height: vImagePixelCount(outH),
+                                             width: vImagePixelCount(outW), rowBytes: rowBytes)
+            let turned = vImageRotate90_ARGB8888(&src, &turnedBuffer, orientation == 5 ? 1 : 3, &fill, flags)
+            error = turned == kvImageNoError ? vImageVerticalReflect_ARGB8888(&turnedBuffer, &dst, flags) : turned
         case 6: error = vImageRotate90_ARGB8888(&src, &dst, 3, &fill, flags)
         case 8: error = vImageRotate90_ARGB8888(&src, &dst, 1, &fill, flags)
         default: return nil

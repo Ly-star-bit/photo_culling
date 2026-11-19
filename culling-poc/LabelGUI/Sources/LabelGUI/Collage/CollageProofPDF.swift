@@ -107,8 +107,8 @@ enum CollageProofPDF {
 
     /// 页脚排在宽 width 里要多高（点）。
     private static func footerHeight(_ text: NSAttributedString, width: CGFloat) -> CGFloat {
-        let setter = CTFramesetterCreateWithAttributedString(text)
-        let size = CTFramesetterSuggestFrameSizeWithConstraints(setter, CFRange(location: 0, length: 0), nil,
+        let setter = TextLayoutLock.framesetter(text)
+        let size = TextLayoutLock.suggestSize(setter, CFRange(location: 0, length: 0), nil,
                                                                 CGSize(width: width, height: .greatestFiniteMagnitude), nil)
         return ceil(size.height)
     }
@@ -175,7 +175,7 @@ enum CollageProofPDF {
             // PDF 原点在左下：画面在上、页脚在下。
             ctx.draw(image, in: CGRect(x: 0, y: footerH, width: imageW, height: imageH))
             let path = CGPath(rect: CGRect(x: margin, y: margin, width: textW, height: footerH - margin * 2), transform: nil)
-            let frame = CTFramesetterCreateFrame(CTFramesetterCreateWithAttributedString(text),
+            let frame = TextLayoutLock.frame(TextLayoutLock.framesetter(text),
                                                  CFRange(location: 0, length: 0), path, nil)
             CTFrameDraw(frame, ctx)
             ctx.endPDFPage()

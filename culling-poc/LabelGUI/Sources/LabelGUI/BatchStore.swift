@@ -1773,8 +1773,8 @@ final class BatchStore: ObservableObject {
         let manifestURL = sessionDir.appendingPathComponent("manifest.json")
         guard let data = try? Data(contentsOf: manifestURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let analyzed = json["photos"] as? [[String: Any]] else { return nil }
-        let dicts = analyzed + (json[ImageLoader.PreviousIDs.idOnlyKey] as? [[String: Any]] ?? [])
+              let analyzed = JSONRows.objects(json["photos"]) else { return nil }
+        let dicts = analyzed + (JSONRows.objects(json[ImageLoader.PreviousIDs.idOnlyKey]) ?? [])
         let rows = dicts.compactMap { row -> (id: String, paths: [String])? in
             guard let id = row["id"] as? String else { return nil }
             return (id, ["raw_path", "decode_path"].compactMap { row[$0] as? String })
@@ -4062,7 +4062,7 @@ final class BatchStore: ObservableObject {
         let url = target.appendingPathComponent("manifest.json")
         if let data = try? Data(contentsOf: url),
            var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let photos = json["photos"] as? [[String: Any]] {
+           let photos = JSONRows.objects(json["photos"]) {
             json["photos"] = photos.map { entry -> [String: Any] in
                 guard entry["body_serial"] == nil, let id = entry["id"] as? String, let serial = found[id] else { return entry }
                 var entry = entry
@@ -5413,7 +5413,7 @@ final class BatchStore: ObservableObject {
             let url = sessionDir.appendingPathComponent(name)
             guard let data = try? Data(contentsOf: url),
                   var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let array = json[arrayKey] as? [[String: Any]] else { return }
+                  let array = JSONRows.objects(json[arrayKey]) else { return }
             json[arrayKey] = array.filter { entry in
                 guard let id = entry["id"] as? String else { return true }
                 return !ids.contains(id)
@@ -5630,8 +5630,10 @@ final class BatchStore: ObservableObject {
                 let outcome = await Self.writeJPEGSet(planned, isHighlights: isHighlights, originals: originals, flag: flag) { [weak self] done in
                     let overall = base + done
                     await MainActor.run { [weak self] in
-                        self?.progressText = "\(head) \(done)/\(total)..."
-                        self?.progressFraction = Double(overall) / Double(grand)
+                        // 点了取消以后还在写的几张写完时不改字：「正在取消...」一直留到收尾（以前每写完一张又盖回「导出 n/N」）。
+                        guard let self, !self.cancelRequested else { return }
+                        self.progressText = "\(head) \(done)/\(total)..."
+                        self.progressFraction = Double(overall) / Double(grand)
                     }
                 }
                 outcomes.append(outcome)
@@ -5736,7 +5738,7 @@ final class BatchStore: ObservableObject {
             DeliveryRecord.File(file: $0.dest.lastPathComponent, id: $0.id, original: originals[$0.id] ?? $0.source.path)
         }
         return JPEGSetOutcome(planned: planned, written: written.sorted { $0.lastPathComponent < $1.lastPathComponent },
-                              failedIds: failedIds, failures: failures, reasons: failed.compactMap { failureReasons[$0] },
+                              failedIds: failedIds, failures: failures, reasons: failedIds.compactMap { failureReasons[$0] },
                               overIds: overLimit, delivered: delivered, concurrency: plan.label)
     }
 

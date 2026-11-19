@@ -4980,8 +4980,11 @@ final class CollageStore: ObservableObject {
                         orphaned = true
                         continue
                     }
-                    self.progressFraction = Double(received) / Double(order.count)
-                    self.progressText = "导出 \(received)/\(order.count)…"
+                    // 点了取消以后，还在渲的两三页写完时不改字：「正在取消…」一直留到收尾。
+                    if !self.exportCancelled {
+                        self.progressFraction = Double(received) / Double(order.count)
+                        self.progressText = "导出 \(received)/\(order.count)…"
+                    }
                 }
             }
             if orphaned {
