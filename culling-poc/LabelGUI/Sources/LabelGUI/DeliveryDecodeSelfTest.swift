@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
@@ -9,14 +10,106 @@ import UniformTypeIdentifiers
 ///   1/2、1/4、1/8 这几档和 ImageIO 带变换的结果逐字节比，还要核对真的走了新路。要重采样的尺寸、灰度 JPEG、PNG
 ///   要退回老路（结果当然也一样）。一张小图（816×544，所有档位）+ 一张相机大小的（4032×3024，整幅和一半：
 ///   大图 ImageIO 可能换硬件解码器）。
+/// - 转正解码的调用点（PP-02 后一半）：检视器 1:1、适应视图大图、连拍挑选放大、拼图解码、MCP 的图各从自己的入口解
+///   方向 6 / 8 的样张文件，和 ImageIO 带变换逐字节比、核对走了新路（UprightDecode.taken）。合影小脸那处（整幅）在
+///   refineSmallFaces 里面、单独调不到：端到端靠 --analyze 的 layer1 逐字节比（交接里写了怎么造小脸样张）。
 /// - 交付并发路数（DeliveryConcurrency，PP-01）：各个尺寸 / 锐化 / 色彩落到哪一档（含 Core Image 那档），16 核 128 GB、10 核 16 GB、
 ///   8 核 8 GB 各开几路；缩到一半以内和 RAW 跟以前一样。真导出的路数在 --export-jpeg / --watermark-batch 打的「并发:」。
 enum DeliveryDecodeSelfTest {
     typealias Check = (Bool, String, String) -> Void
 
-    static func run(check: Check) {
+    /// `dir`：调用点那段写样张文件的地方（跑完删掉）。
+    static func run(_ dir: URL, check: Check) {
         upright(check: check)
+        callSites(dir, check: check)
         concurrency(check: check)
+    }
+
+    // MARK: - 转正解码的调用点
+
+    private static func callSites(_ dir: URL, check: Check) {
+        let fm = FileManager.default
+        defer { try? fm.removeItem(at: dir) }
+        guard let base = texturedJPEG(width: 4032, height: 3024),
+              (try? fm.createDirectory(at: dir, withIntermediateDirectories: true)) != nil else {
+            check(false, "转正解码：调用点造不出样张 / 建不了目录", dir.path)
+            return
+        }
+        func cg(_ image: NSImage?) -> CGImage? { image?.cgImage(forProposedRect: nil, context: nil, hints: nil) }
+        for orientation in [6, 8] {
+            let url = dir.appendingPathComponent("o\(orientation).jpg")
+            guard let data = retagged(base, orientation: orientation), (try? data.write(to: url)) != nil,
+                  let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+                check(false, "转正解码：调用点写不出方向 \(orientation) 的样张", url.path)
+                continue
+            }
+            let path = url.path
+            FullResCache.cache.removeObject(forKey: path as NSString)
+            // （名字、maxPixel、该不该走新路、解码）：maxPixel 是那一处实际传给 ImageIO 的。
+            let sites: [(String, Int, Bool, () -> CGImage?)] = [
+                ("检视器 / 审片 1:1（FullResCache.load，整幅）", 20000, true, { cg(FullResCache.load(path: path)) }),
+                ("适应视图大图（ThumbCache.decode，正好一半）", 2016, true, { cg(ThumbCache.decode(path: path, maxPixel: 2016)) }),
+                ("适应视图大图（ThumbCache.decode，要重采样的 1000 照旧 ImageIO）", 1000, false,
+                 { cg(ThumbCache.decode(path: path, maxPixel: 1000)) }),
+                ("拼图解码（CollageImages.decode，整幅）", 4032, true, { CollageImages.decode(path: path, maxPixel: 4032) }),
+                ("拼图解码（CollageImages.decode，1/4）", 1008, true, { CollageImages.decode(path: path, maxPixel: 1008) }),
+                ("MCP 的图（LiveImages.thumbnail，整幅）", 4032, true, { LiveImages.thumbnail(path, maxEdge: 4032) }),
+            ]
+            var wrong: [String] = []
+            for (label, maxPixel, shouldTake, decode) in sites {
+                let before = UprightDecode.taken.value
+                let got = decode()
+                let took = UprightDecode.taken.value > before
+                guard let got, let want = UprightDecode.transformed(source, maxPixel: maxPixel) else {
+                    wrong.append(label + " 解不出")
+                    continue
+                }
+                if !sameImage(want, got) || got.width > got.height { wrong.append(label + " 和 ImageIO 不一样") }
+                if took != shouldTake { wrong.append(label + (took ? " 不该走新路" : " 没走新路")) }
+            }
+            // 连拍挑选放大：解整幅、按脸裁、另画一份。拿 ImageIO 带变换的整幅按同一块裁，两边画进同一种位图再比。
+            CompareZoom.cache.removeAllObjects()
+            FullResCache.cache.removeObject(forKey: path as NSString)
+            let bbox = [0.40, 0.30, 0.55, 0.42]
+            let item = BatchItem(
+                id: "o\(orientation)", previewPath: "", rawPath: path, decodePath: path, sharpness: 0, worstClipPct: 0,
+                eyeClosed: nil, faceQuality: nil, faceCount: 1, faceBbox: bbox, faceAreaPct: nil, faces: [],
+                burstGroup: 0, expressionScore: nil, vlmReject: false, vlmCompositionIssues: [], vlmReason: nil,
+                appealClosedEyes: nil, appealSubjectSharp: nil, appealIntentionalExposure: nil, appealReason: nil,
+                exif: nil, horizonDeg: nil)
+            let before = UprightDecode.taken.value
+            let crop = CompareZoom.crop(item)
+            let took = UprightDecode.taken.value > before
+            let label = "连拍挑选放大（CompareZoom.crop，整幅）"
+            if let crop, let full = UprightDecode.transformed(source, maxPixel: 20000) {
+                let rect = CompareZoom.region(faces: [bbox], width: full.width, height: full.height)
+                let want = full.cropping(to: rect).flatMap(redraw)
+                let got = cg(crop.image).flatMap(redraw)
+                var same = false
+                if let want, let got { same = sameImage(want, got) }
+                if crop.fullSize != CGSize(width: full.width, height: full.height) || crop.rect != rect {
+                    wrong.append(label + " 整幅 \(crop.fullSize) / 裁块 \(crop.rect) 不对")
+                }
+                if !same { wrong.append(label + " 和 ImageIO 不一样") }
+                if !took { wrong.append(label + " 没走新路") }
+            } else {
+                wrong.append(label + " 解不出")
+            }
+            FullResCache.cache.removeObject(forKey: path as NSString)
+            CompareZoom.cache.removeAllObjects()
+            check(wrong.isEmpty,
+                  "转正解码：调用点（方向 \(orientation)，4032×3024）检视器 1:1、适应视图、连拍挑选放大、拼图、MCP 都和 ImageIO 带变换逐字节一样，整除档走了新路",
+                  wrong.joined(separator: "，"))
+        }
+    }
+
+    /// 画进一张新的 sRGB RGBX 位图（连拍挑选放大的裁块是另画的一份，两边过同一道再比）。
+    private static func redraw(_ image: CGImage) -> CGImage? {
+        guard let ctx = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return ctx.makeImage()
     }
 
     // MARK: - 并发路数

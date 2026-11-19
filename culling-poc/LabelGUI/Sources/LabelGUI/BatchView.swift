@@ -4195,14 +4195,11 @@ enum ThumbCache {
            FaceStripCache.sameAspect(CGSize(width: embedded.width, height: embedded.height), embeddedAspect) {
             return NSImage(cgImage: embedded, size: NSSize(width: embedded.width, height: embedded.height))
         }
-        guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                  kCGImageSourceCreateThumbnailFromImageAlways: true,
-                  kCGImageSourceThumbnailMaxPixelSize: maxPixel,
-                  // 以前只喂已经转正的预览图，没这个键也没事。SharpImageView 现在直接喂
-                  // 相机原文件（带 EXIF 方向），不转的话竖拍先正着出预览、再横着换上
-                  // 清晰版，分析框还画错轴。对预览图是无操作。
-                  kCGImageSourceCreateThumbnailWithTransform: true,
-              ] as CFDictionary) else { return nil }
+        // 按 EXIF 方向转正（UprightDecode：和 ImageIO 带 WithTransform 逐字节一样，竖拍解到正好一半时省掉逐像素的转）。
+        // 以前只喂已经转正的预览图，没这个键也没事。SharpImageView 现在直接喂
+        // 相机原文件（带 EXIF 方向），不转的话竖拍先正着出预览、再横着换上
+        // 清晰版，分析框还画错轴。对预览图是无操作。
+        guard let cg = UprightDecode.thumbnail(source, maxPixel: maxPixel) else { return nil }
         return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
     }
 }
@@ -4580,12 +4577,9 @@ enum FullResCache {
 
     static func load(path: String) -> NSImage? {
         if let hit = cache.object(forKey: path as NSString) { return hit }
+        // 20000 = 不设上限。竖拍走 UprightDecode 的 vImage 转正（和 ImageIO 带变换逐字节一样，4000 万像素少 ~0.15 s CPU）。
         guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
-              let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                  kCGImageSourceCreateThumbnailFromImageAlways: true,
-                  kCGImageSourceThumbnailMaxPixelSize: 20000,  // effectively uncapped
-                  kCGImageSourceCreateThumbnailWithTransform: true,
-              ] as CFDictionary) else { return nil }
+              let cg = UprightDecode.thumbnail(source, maxPixel: 20000) else { return nil }
         let image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
         cache.setObject(image, forKey: path as NSString, cost: cg.width * cg.height * 4)
         return image
