@@ -39,14 +39,14 @@ final class BatchMenuState: ObservableObject {
         var canExport = false
 
         /// 纯函数（--ux-selftest 核对）。和顶栏的按钮同一套条件：文件夹菜单分析中灰着；「开始分析」要有文件夹；
-        /// 「导出 JPG…」要有要导的照片（精选，勾了带可用再加可用）。busy = 审片 / 挑连拍 / 看单张，或者开着导出框、
+        /// 「导出 JPG…」这一场有照片就能点（和顶栏的按钮一样：没有精选也能在面板里选范围导选中的、客户选中的，UX-03）。busy = 审片 / 挑连拍 / 看单张，或者开着导出框、
         /// 确认框、选文件夹、对时面板 —— 这时候弹选文件夹、开导出框会叠在它们上面。
-        static func make(running: Bool, hasFolder: Bool, empty: Bool, busy: Bool, exportCount: Int) -> Flags {
+        static func make(running: Bool, hasFolder: Bool, empty: Bool, busy: Bool) -> Flags {
             let free: Bool = !running && !busy
             return Flags(canOpen: free,
                          canAnalyze: free && hasFolder,
                          analyzeTitle: empty ? "开始分析" : "重新分析",
-                         canExport: free && exportCount > 0)
+                         canExport: free && !empty)
         }
     }
 
@@ -164,19 +164,18 @@ enum FileMenuSelfTest {
         typealias F = BatchMenuState.Flags
 
         // 1. 能不能点
-        let idle: F = F.make(running: false, hasFolder: true, empty: false, busy: false, exportCount: 3)
+        let idle: F = F.make(running: false, hasFolder: true, empty: false, busy: false)
         check(idle.canOpen && idle.canAnalyze && idle.canExport && idle.analyzeTitle == "重新分析", "闲着、分析过：三项都能点，写「重新分析」")
-        let first: F = F.make(running: false, hasFolder: false, empty: true, busy: false, exportCount: 0)
+        let first: F = F.make(running: false, hasFolder: false, empty: true, busy: false)
         check(first.canOpen && !first.canAnalyze && !first.canExport && first.analyzeTitle == "开始分析",
               "第一次打开（没文件夹）：只能打开文件夹，「开始分析」灰着")
-        let picked: F = F.make(running: false, hasFolder: true, empty: true, busy: false, exportCount: 0)
+        let picked: F = F.make(running: false, hasFolder: true, empty: true, busy: false)
         check(picked.canAnalyze && picked.analyzeTitle == "开始分析", "选了文件夹还没分析：「开始分析」能点")
-        let running: F = F.make(running: true, hasFolder: true, empty: false, busy: false, exportCount: 3)
+        let running: F = F.make(running: true, hasFolder: true, empty: false, busy: false)
         check(!running.canOpen && !running.canAnalyze && !running.canExport, "分析中：三项都灰（⌘R 不会变成取消）")
-        let busy: F = F.make(running: false, hasFolder: true, empty: false, busy: true, exportCount: 3)
+        let busy: F = F.make(running: false, hasFolder: true, empty: false, busy: true)
         check(!busy.canOpen && !busy.canAnalyze && !busy.canExport, "审片 / 挑连拍 / 看单张 / 开着框：三项都灰")
-        let none: F = F.make(running: false, hasFolder: true, empty: false, busy: false, exportCount: 0)
-        check(none.canAnalyze && !none.canExport, "没有要导的照片：导出 JPG 灰着、分析照旧")
+        check(!picked.canExport, "选了文件夹还没分析（一张照片都没有）：导出 JPG 灰着")
 
         // 2. 各页
         for tab in [AppTab.watermark, .collage, .labeling] {

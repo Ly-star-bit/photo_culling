@@ -330,7 +330,7 @@ struct BatchView: View {
     /// 「文件」菜单三项能不能点（FileMenuCommands.swift）。对时面板开着也算忙：选文件夹、导出框别叠在它上面。
     private var menuFlags: BatchMenuState.Flags {
         BatchMenuState.Flags.make(running: store.isRunning, hasFolder: store.photoDir != nil, empty: store.items.isEmpty,
-                                  busy: busyWithPhotos || showBodyClock, exportCount: jpegExportCount)
+                                  busy: busyWithPhotos || showBodyClock)
     }
 
     /// 菜单项点了：灰着的按不到，这里照现在的状态再看一遍（同步慢一拍时不出错）。动作和顶栏那几个按钮一样。
