@@ -1804,6 +1804,8 @@ struct BatchView: View {
         .frame(maxWidth: 380)
         .background(AppPalette.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(AppPalette.ink.opacity(0.10), lineWidth: 1))
+        // 先合成一层再投影（同时间轴悬停卡片）：不然卡片里的图标、每行字各投一次，相纸下字周围一圈灰晕。
+        .compositingGroup()
         .shadow(color: .black.opacity(0.45), radius: 18, y: 6)
     }
 
