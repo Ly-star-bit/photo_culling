@@ -239,6 +239,9 @@ struct BatchView: View {
             pagingOrder = []
             pickRequest = nil
             expandedTakes = []
+            // 新的这一场的宽高比后台先读（PI-05，见网格的 onAppear）。不另挂 onChange：批量页每重算一次（方向键一下一次）
+            // 每个修饰都要比一遍。
+            warmAspects()
         }
         // 实时桥（§9.6b）：这几样开着时 AI 的改判 / 切场次 / 定位照片要等或者不做。只往 store 上记，界面不变
         .onChange(of: liveFlags, initial: true) { store.liveUI = liveFlags }
@@ -1072,8 +1075,14 @@ struct BatchView: View {
     }
 
     private func computeGroupedItems() -> [TakeGroup] {
+        // store 的这几样在循环外取一次：循环里每一场都读 @Published（筛选、客户选中、isPendingTake 里的 overrides）要过一遍
+        // 包装和类型转换，7980 张时占整页 groupLayout 的四分之一（优化分析 2026-11-18 PI-03）。行为不变。
         let items = store.items
         let chapter = store.activeChapterFilter
+        let overrides = store.overrides
+        let verdictFilter = store.verdictFilter
+        let clientPickFilter = store.clientPickFilter
+        let clientPicks = store.clientPicks
         return store.takeRows.compactMap { row in
             guard row.indices.count >= 2 else { return nil }
             // 「只看这一章」：一场不会跨章，看第一张就够。
@@ -1086,16 +1095,16 @@ struct BatchView: View {
                 return items[idx]
             }
             let alive = members.filter { $0.verdict != .reject }
-            let pending = store.isPendingTake(alive: alive)
+            let pending = BatchStore.isPendingTake(alive: alive, overrides: overrides)
             if pendingTakesOnly, !pending { return nil }
-            if let filter = store.verdictFilter {
+            if let filter = verdictFilter {
                 members = members.filter { $0.verdict == filter }
-            } else if !pending, !alive.isEmpty, !expandedTakes.contains(row.take), !store.clientPickFilter {
+            } else if !pending, !alive.isEmpty, !expandedTakes.contains(row.take), !clientPickFilter {
                 // 定完的场叠起来：只剩留下的那几张（整场全废的不叠，不然这一行什么都看不见）。
                 // 「只看客户选中」时不叠：客户选中的废片也得看得见。
                 members = alive
             }
-            if store.clientPickFilter { members = members.filter { store.clientPicks.contains($0.id) } }
+            if clientPickFilter { members = members.filter { clientPicks.contains($0.id) } }
             guard !members.isEmpty else { return nil }
             if takeSortByScore {
                 members.sort {
@@ -1114,14 +1123,19 @@ struct BatchView: View {
 
     private func computeSingleItems() -> [BatchItem] {
         guard !pendingTakesOnly else { return [] }
+        // 和 computeGroupedItems 一样：store 的几样循环外取一次（PI-03）。
         let items = store.items
+        let verdictFilter = store.verdictFilter
+        let clientPickFilter = store.clientPickFilter
+        let clientPicks = store.clientPicks
+        let chapter = store.activeChapterFilter
         return store.takeRows.compactMap { row -> BatchItem? in
             guard row.indices.count == 1, let idx = row.indices.first, idx < items.count,
                   items[idx].take == row.take else { return nil }
             let item = items[idx]
-            if let filter = store.verdictFilter, item.verdict != filter { return nil }
-            if store.clientPickFilter, !store.clientPicks.contains(item.id) { return nil }
-            if let chapter = store.activeChapterFilter, BatchStore.timelineChapter(of: item) != chapter { return nil }
+            if let filter = verdictFilter, item.verdict != filter { return nil }
+            if clientPickFilter, !clientPicks.contains(item.id) { return nil }
+            if let chapter, BatchStore.timelineChapter(of: item) != chapter { return nil }
             return item
         }
     }
@@ -1130,13 +1144,32 @@ struct BatchView: View {
     /// 支持一次跨多场：每场挑一张，一次性把 5 场的重复全部定案。
     /// 单张场要排除掉：选 4 张毫不相干的照片 + 1 张连拍，候选集里混进那 4 张单张，
     /// 一点定案就把它们一起写成精选了 —— 用户根本没要求改它们的判决。
+    /// 按选中记住（store 一发布就作废，GridMemo）：多选着的时候批量栏每次 body 都要它，以前每次对全部照片扫两遍（复制选中的
+    /// BatchItem、再整场 filter 一遍）—— 选着照片按方向键、改判，每下都付（优化分析 2026-11-18 PI-06）。现在只碰选中那几张
+    /// 和它们那几场（store 的 takeRows），结果的先后照旧是 items 的顺序。
     private var selectionGroupMembers: [String] {
+        memo.value("selectionGroup", key: selectedIDs) { computeSelectionGroupMembers() }
+    }
+
+    private func computeSelectionGroupMembers() -> [String] {
         let sizes = store.takeSizes
-        let takes = Set(store.items
-            .filter { selectedIDs.contains($0.id) && (sizes[$0.take] ?? 1) > 1 }
-            .map(\.take))
+        var takes = Set<Int>()
+        for id in selectedIDs {
+            if let item = store.item(withID: id), (sizes[item.take] ?? 1) > 1 { takes.insert(item.take) }
+        }
         guard !takes.isEmpty else { return [] }
-        return store.items.filter { takes.contains($0.take) }.map(\.id)
+        let items = store.items
+        var indices: [Int] = []
+        for row in store.takeRows where takes.contains(row.take) {
+            for idx in row.indices {
+                // 下标是上次 rebuildDerived 的：items 换了还没重算的那一帧，老老实实整场扫（和 members(ofTake:) 一样）。
+                guard idx < items.count, items[idx].take == row.take else {
+                    return items.filter { takes.contains($0.take) }.map(\.id)
+                }
+                indices.append(idx)
+            }
+        }
+        return indices.sorted().map { items[$0].id }
     }
 
     // MARK: - Left: results grid (dark canvas — photos judge better on neutral gray)
@@ -1207,6 +1240,9 @@ struct BatchView: View {
             // AI 在别的 tab 时要定位的照片（cull_show_photos 的 pending）也在这里补上。
             .onAppear {
                 applyViewRequest(proxy)
+                // 整场的宽高比后台先读（PI-05）：以前不在屏的分区（按判决时的可用、废片）要等第一次按方向键（↑ ↓ 的行表、滚动定位
+                // 要整页的分行）才在主线程上当场读，几百张的场次第一下卡 35–60 ms、上千张约 0.1–0.25 秒。都读过了就什么都不做。
+                warmAspects()
                 guard let id = focusedID else { return }
                 DispatchQueue.main.async { scrollGrid(proxy, id, anchor: .center) }
             }

@@ -823,6 +823,11 @@ final class BatchStore: ObservableObject {
     /// 以前只看"存活 ≥2"：K 勾两张定案（两张手判精选、其余手判废片）的场永远算待处理，
     /// D 和连拍挑选的 ⏎ 会一直绕回这些早就定完的场。全经你手定过的就是定完了。
     func isPendingTake(alive: [BatchItem]) -> Bool {
+        Self.isPendingTake(alive: alive, overrides: overrides)
+    }
+
+    /// 同上，overrides 由调用的人给（网格每场循环外取一次，不在循环里一场一场读 @Published，优化分析 2026-11-18 PI-03）。
+    static func isPendingTake(alive: [BatchItem], overrides: [String: Verdict]) -> Bool {
         alive.count >= 2 && alive.contains { overrides[$0.id] == nil }
     }
     var takeRank: [String: Int] { derived.takeRank }
