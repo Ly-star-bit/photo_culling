@@ -827,6 +827,8 @@ final class BatchStore: ObservableObject {
     /// 一场的小计。`indices` 要按 items 顺序（升序）：同分时谁排前面跟着它走，整场重算和局部重算得是同一个顺序。
     private func takeStat(_ indices: [Int], in items: [BatchItem]) -> TakeStat {
         var s = TakeStat()
+        // 每张都读：先取成局部的（同名遮住属性，下面一个字不用改；优化分析 2026-11-18 PI-04）。
+        let overrides = self.overrides, clientPicks = self.clientPicks
         var alive: [Int] = []
         for idx in indices {
             let item = items[idx]
@@ -837,7 +839,7 @@ final class BatchStore: ObservableObject {
             }
             for reason in item.rejectReasons { s.reasons[reason, default: 0] += 1 }
             if item.verdict == .reject, overrides[item.id] == nil { s.autoReject += 1 }
-            if clientPicks.contains(item.id) {
+            if !clientPicks.isEmpty, clientPicks.contains(item.id) {  // 多半没有客户选中：不必每张算一遍 id 的哈希
                 s.clientPick += 1
                 if item.verdict == .reject { s.clientPickReject += 1 }
             }
@@ -885,6 +887,7 @@ final class BatchStore: ObservableObject {
     private func finishDerived(_ d: inout Derived, chapters: Set<Int>? = nil) {
         d.pendingTakes = d.takeRows.compactMap { d.takeStats[$0.take]?.pending == true ? $0.take : nil }
         d.pendingTakeCount = d.pendingTakes.count
+        let acceptedIDs = self.acceptedIDs  // 每个 key 都读（同名遮住属性，下面一个字不用改；优化分析 2026-11-18 PI-04）
         // 只数这一场现有的照片（审查 EC-02）：照片在访达里删了、改了名（认不回来的），改判还挂在旧 id 上，以前照样算进
         // 「人工改判 N」，网格里却数不出这么多 ✋。键原样留着（照片放回来、认回来还对得上），只是不算。
         d.manualOverrideCount = overrides.keys.filter { d.indexByID[$0] != nil && !acceptedIDs.contains($0) }.count
@@ -958,6 +961,11 @@ final class BatchStore: ObservableObject {
     /// 以前只看"存活 ≥2"：K 勾两张定案（两张手判精选、其余手判废片）的场永远算待处理，
     /// D 和连拍挑选的 ⏎ 会一直绕回这些早就定完的场。全经你手定过的就是定完了。
     func isPendingTake(alive: [BatchItem]) -> Bool {
+        Self.isPendingTake(alive: alive, overrides: overrides)
+    }
+
+    /// 同上，overrides 由调用的人给（网格每场循环外取一次，不在循环里一场一场读 @Published，优化分析 2026-11-18 PI-03）。
+    static func isPendingTake(alive: [BatchItem], overrides: [String: Verdict]) -> Bool {
         alive.count >= 2 && alive.contains { overrides[$0.id] == nil }
     }
     var takeRank: [String: Int] { derived.takeRank }
@@ -1165,6 +1173,7 @@ final class BatchStore: ObservableObject {
     /// 上次写 XMP 的记录读不进来（xmpStateUnknown，NR4）：不知道，不提醒（点下去「只更新改了的」也不写）。
     private func xmpStale(in items: [BatchItem]) -> Int {
         guard xmpStateUnknown == nil, let state = xmpState else { return 0 }
+        let clientPicks = self.clientPicks  // 每张都读（同名遮住属性，下面一个字不用改；优化分析 2026-11-18 PI-04）
         var n = 0
         for item in items where Self.xmpNeedsWrite(item, state: state, clientPick: clientPicks.contains(item.id)) {
             n += 1
@@ -1280,10 +1289,14 @@ final class BatchStore: ObservableObject {
 
     private func rebuildDerived(groupQCount: [Int: Int]) {
         var d = Derived()
+        // 整场循环、排序的比较（每比一次读两下）里读的 items 先取一份本地的（同名遮住属性，下面一个字不用改；
+        // 优化分析 2026-11-18 PI-04）：以前排序 n log n 次比较、每次两遍 @Published 的包装再整张拷出 BatchItem。
+        let items = self.items
+        let focus = focusThreshold, clip = exposureThreshold, quality = faceQualityThreshold
         d.indexByID.reserveCapacity(items.count)
         for (idx, item) in items.enumerated() {
             d.indexByID[item.id] = idx
-            if isBorderline(item) { d.borderlineCount += 1 }
+            if Self.isBorderline(item, focus: focus, exposure: clip, faceQuality: quality) { d.borderlineCount += 1 }
             if let q = item.faceQuality, (groupQCount[item.burstGroup] ?? 0) < 2 {
                 d.faceQualityAbsoluteValues.append(q)
             }
@@ -1298,10 +1311,10 @@ final class BatchStore: ObservableObject {
         d.exposureBins = Self.histogramBins(items.map(\.worstClipPct), range: Self.exposureHistRange, sqrtScale: true)
         d.faceQualityBins = Self.histogramBins(d.faceQualityAbsoluteValues, range: Self.faceQualityHistRange, sqrtScale: false)
         let order = items.indices.sorted { a, b in
-            let ia = items[a], ib = items[b]
-            if ia.take != ib.take { return ia.take < ib.take }
-            let ta = ia.captureTime ?? .distantPast, tb = ib.captureTime ?? .distantPast
-            return ta != tb ? ta < tb : ia.id < ib.id
+            // 按下标就地读字段，不整张拷出来。
+            if items[a].take != items[b].take { return items[a].take < items[b].take }
+            let ta = items[a].captureTime ?? .distantPast, tb = items[b].captureTime ?? .distantPast
+            return ta != tb ? ta < tb : items[a].id < items[b].id
         }
         var rows: [(take: Int, indices: [Int])] = []
         for idx in order {
@@ -3091,13 +3104,17 @@ final class BatchStore: ObservableObject {
     /// Within ±15% of any ACTIVE threshold — the photos a small slider nudge
     /// would flip either way.
     func isBorderline(_ item: BatchItem) -> Bool {
-        let focus = focusThreshold
+        Self.isBorderline(item, focus: focusThreshold, exposure: exposureThreshold, faceQuality: faceQualityThreshold)
+    }
+
+    /// 同上，三条线由调用的人给：整场重算时每张都问，每问一次读四遍 @Published（拖一格阈值滑杆 7980 张时占重算的
+    /// 两成多，优化分析 2026-11-18 PI-04）。
+    static func isBorderline(_ item: BatchItem, focus: Double, exposure clip: Double, faceQuality: Double) -> Bool {
         if focus > 0, abs(Self.focusValue(item) - focus) <= focus * 0.15 { return true }
-        let clip = exposureThreshold
         if abs(item.worstClipPct - clip) <= clip * 0.15 { return true }
-        if faceQualityThreshold > 0, let quality = item.faceQuality {
+        if faceQuality > 0, let quality = item.faceQuality {
             let threshold = Self.compensatedQualityThreshold(
-                slider: faceQualityThreshold, faceAreaPct: item.faceAreaPct)
+                slider: faceQuality, faceAreaPct: item.faceAreaPct)
             if abs(quality - threshold) <= threshold * 0.15 { return true }
         }
         return false
@@ -4525,6 +4542,12 @@ final class BatchStore: ObservableObject {
         // objectWillChange per write — five per photo, ~15k per slider tick on
         // a 3000-photo shoot — which is what made the sliders feel sticky.
         var updated = items
+        // 下面整场循环里每张都要读的几样先取成局部的：每读一次 @Published 都要过一遍包装
+        // （同名遮住属性，下面一个字不用改；优化分析 2026-11-18 PI-04）。
+        let overrides = self.overrides
+        let focusThreshold = self.focusThreshold
+        let exposureThreshold = self.exposureThreshold
+        let faceQualityThreshold = self.faceQualityThreshold
 
         // Pass 1: per-burst-group baselines (best EAR, best face quality).
         var groupBestEar: [Int: Double] = [:]
@@ -4653,6 +4676,7 @@ final class BatchStore: ObservableObject {
     /// 一个近似重复组的去重。`indices` = 组里还没被淘汰的（items 顺序）。
     private func dedupe(_ indices: [Int], in updated: inout [BatchItem]) {
         guard indices.count >= 2 else { return }
+        let overrides = self.overrides  // 组里每张都读（同名遮住属性，下面一个字不用改；优化分析 2026-11-18 PI-04）
         // 组里有人工精选就以它为准，不另外自动挑一张。
         let manualPicks = indices.filter { overrides[updated[$0].id] == .pick }
         var winners = Set(manualPicks)
@@ -4660,10 +4684,11 @@ final class BatchStore: ObservableObject {
            let best = Self.bestIndex(indices.filter { overrides[updated[$0].id] == nil }, in: updated) {
             winners.insert(best)
         }
+        let twins = Self.splitTwinRaws(indices, in: updated)
         for idx in indices where !winners.contains(idx) && overrides[updated[idx].id] == nil {
             // RAW、JPG 分卡存 / 分文件夹放时同一帧成了两张（审查 M01）：组里有它那张 JPG 时 RAW 不算「连拍重复」，
             // 不然「移到废纸篓」会把这一帧唯一的 RAW 挪走。只护 RAW，那张 JPG 照常去重。
-            if indices.contains(where: { $0 != idx && Self.isSplitTwin(raw: updated[idx], of: updated[$0]) }) { continue }
+            if twins.contains(idx) { continue }
             updated[idx].rejectReasons.append("连拍重复")
             updated[idx].verdict = .reject
         }
@@ -4672,12 +4697,12 @@ final class BatchStore: ObservableObject {
     /// 一场的精选提名。`indices` = 这一场还没被淘汰的（items 顺序）。
     private func nominate(_ indices: [Int], in updated: inout [BatchItem]) {
         guard indices.count >= 2 else { return }
+        let overrides = self.overrides  // 场里每张都读（同名遮住属性，下面一个字不用改；优化分析 2026-11-18 PI-04）
         // 按「帧」数对手：分卡存 / 分文件夹放的同一帧（RAW 和它那张 JPG，审查 M01）只算一张 —— 去重护住 RAW 以后，
         // 单帧的场里剩下这一对，不该提出一张没有真实对手的精选。只用来数，候选还是这一场全部存活的照片。
-        let frames = indices.filter { idx in
-            !indices.contains { $0 != idx && Self.isSplitTwin(raw: updated[idx], of: updated[$0]) }
-        }
-        guard frames.count >= 2 else { return }
+        // （查表，不逐对比：一场几百上千张时逐对比是 n²，见 splitTwinRaws。）
+        let twins = Self.splitTwinRaws(indices, in: updated)
+        guard indices.count - twins.count >= 2 else { return }
         // 场里有人工精选就让给它，不在旁边再自动挑一张。
         if indices.contains(where: { overrides[updated[$0].id] == .pick }) { return }
         if let best = Self.bestIndex(indices.filter { overrides[updated[$0].id] == nil }, in: updated) {
@@ -4877,6 +4902,8 @@ final class BatchStore: ObservableObject {
     private func computeThresholdSuggestions() -> [ThresholdSuggestion] {
         // 整场只扫一遍、就地读（每次改判都会走到这）：先挑出「带着理由、又被你亲手放行」的那几张，再按理由分。
         let items = self.items
+        // 每张带理由的都读：先取成局部的（同名遮住属性，下面一个字不用改；优化分析 2026-11-18 PI-04）。
+        let overrides = self.overrides, acceptedIDs = self.acceptedIDs
         var freed: [BatchItem] = []
         for idx in items.indices where !items[idx].rejectReasons.isEmpty {
             let id = items[idx].id

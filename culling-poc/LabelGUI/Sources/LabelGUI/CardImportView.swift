@@ -397,15 +397,16 @@ final class CardImportCenter: ObservableObject {
         "\(volume.uuid ?? volume.name)|\(plan.copies.count)|\(plan.totalBytes)"
     }
 
+    // 记在视图设置里（AppRuntime.viewDefaults）：界面就是 UserDefaults.standard；无头（--card-ui --events 点「不导入」）只落临时的那份。
     private static func wasDismissed(_ volume: CardImporter.Volume, _ plan: CardImporter.Plan) -> Bool {
-        (UserDefaults.standard.stringArray(forKey: dismissedKey) ?? []).contains(dismissSignature(volume, plan))
+        (AppRuntime.viewDefaults.stringArray(forKey: dismissedKey) ?? []).contains(dismissSignature(volume, plan))
     }
 
     private static func rememberDismissed(_ volume: CardImporter.Volume, _ plan: CardImporter.Plan) {
-        var list = UserDefaults.standard.stringArray(forKey: dismissedKey) ?? []
+        var list = AppRuntime.viewDefaults.stringArray(forKey: dismissedKey) ?? []
         list.removeAll { $0.hasPrefix((volume.uuid ?? volume.name) + "|") }
         list.append(dismissSignature(volume, plan))
-        UserDefaults.standard.set(Array(list.suffix(30)), forKey: dismissedKey)
+        AppRuntime.viewDefaults.set(Array(list.suffix(30)), forKey: dismissedKey)
     }
 }
 
@@ -416,7 +417,7 @@ struct CardImportSheet: View {
     @ObservedObject var store: BatchStore
     /// 点了「导入」（ContentView 切到批量页看进度）。
     var onImport: () -> Void = {}
-    @AppStorage("cardImport.analyzeAfter") private var analyzeAfter = true
+    @AppStorage("cardImport.analyzeAfter", store: AppRuntime.viewDefaults) private var analyzeAfter = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {

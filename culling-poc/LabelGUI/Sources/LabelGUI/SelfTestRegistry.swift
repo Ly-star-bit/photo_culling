@@ -60,8 +60,10 @@ enum SelfTestRegistry {
 
     /// 先后 = selftests.sh 跑的先后；同一段里命令行同时带两条自检时，排在前面的那条先跑（跑完就退出）。
     static let all: [Entry] = [
-        .init("--ux-selftest", "网格改判后焦点落在哪（BatchView.placeAfterChange）；另挂 EXIF 快门 0、网格多选规则、水印页 RAW+JPG 配对、拼图检视器的去那儿、这一版新增、快捷键一览（? 键的判断表、每页列了绑着的键）",
+        .init("--ux-selftest", "网格改判后焦点落在哪（BatchView.placeAfterChange）；另挂 EXIF 快门 0、网格多选规则、水印页 RAW+JPG 配对、拼图检视器的去那儿、这一版新增、快捷键一览（? 键的判断表、每页列了绑着的键）、连拍挑选单行每张的框、时间轴跨年份带年、「文件」菜单三项",
               ci: .selftests()) { _ in UXSelfTest.run() },
+        .init("--viewer-zoom-selftest", "看单张 / 审片的放大（ViewerZoom）：翻页保持放大、预解下一张、翻到预解好的当场就有、连着翻过去的不解、换方向放掉预解的、解不出不卡、同一张只解一份、落在主脸中心；审片 / 看单张的人脸特写多大（自己造几张 JPEG，不开界面）",
+              ci: .selftests()) { _ in ViewerZoomSelfTest.run() },
         .init("--timeline-selftest", "时间轴 3000 组随机章节不出界、不重叠；随机数按 seed 播种（--seed N 或 LABELGUI_SELFTEST_SEED，--trial K 只重跑那一组），CI 跑三个 seed（三批互不相同的 3000 组，自检开头核对）",
               ci: .selftests(["--seed", "{seed}"])) { _ in ChapterTimelineSelfTest.runFromCommandLine() },
         .init("--swiss-selftest", "瑞士风版式规则（完全不收照片参数）",
@@ -90,8 +92,12 @@ enum SelfTestRegistry {
               minArgs: 1, ci: .selftests(["{fixture}"])) { i in PersistSelfTest.run(flagIndex: i) },
         .init("--cull-mcp-selftest", "选片 MCP 在真的 BatchStore 上：XMP 待更新、导入客户选择、AI 改判的出处、一次定一场（<Fixtures/photot-session>，要空的数据目录）",
               ci: .selftests(["{fixture}"])) { i in CullMCPSelfTest.run(flagIndex: i) },
-        .init("--events-selftest", "离屏假事件（--events）实测送不送得到：最小 SwiftUI 视图上的点击 / 双击 / 悬停 / 滚轮 / 右键菜单；给了 fixture 再验批量页网格点一下格子焦点变到那张、悬停一格悬停条出现（[<Fixtures/photot-session>]，窗口从不上屏）",
+        .init("--events-selftest", "离屏假事件（--events）实测送不送得到：最小 SwiftUI 视图上的点击 / 双击 / 悬停 / 滚轮 / 右键菜单；给了 fixture 再验批量页网格点一下格子焦点变到那张、悬停一格悬停条出现、格子的右键菜单（选中几张、只动这一张、改判点下去改对了几张）、拖出的锚点（不挡点击、按下拖过 5pt 认对哪一格）（[<Fixtures/photot-session>]，窗口从不上屏）",
               ci: .selftests(["{fixture}"])) { i in SnapshotEventsSelfTest.run(flagIndex: i) },
+        .init("--view-prefs-selftest", "无头拨控件不碰设置域：视图设置（@AppStorage）无头时只落一份临时的、读不到设置域里存过的；给了 fixture 再把自己拷成新名字（新的设置域），在拷贝里真点批量页的「按分组」、缩略图滑杆、跑 --perf grid，跑完那个域还不存在（[<Fixtures/photot-session>]，窗口从不上屏）",
+              ci: .selftests(["{fixture}"])) { i in ViewPrefsSelfTest.run(flagIndex: i) },
+        .init("--grid-scale-selftest", "批量页网格在大场上的形状：造一场 150 张连着拍的（一个场），离屏拼出批量页按分组 —— 拆成一行一块、只铺眼前几行，↓ 走到底每下焦点都铺出来，跳回中间 / 开头落得到；按判决时废片区在屏幕外，网格一出来整场的宽高比就后台读掉了（要临时数据目录，窗口从不上屏）",
+              ci: .selftests()) { _ in GridScaleSelfTest.run() },
         .init("--files-selftest", "文件安全：XMP 只写改了的、同名共用 .xmp、废片避开拼图、高 ISO RAW 复制不互相顶掉",
               ci: .selftests()) { _ in FileSafetySelfTest.run() },
         .init("--collage-export-selftest", "拼图 / 相册导出：PDF 先写临时文件再改名、缺跨页不出 PDF、空照片格先确认",
@@ -194,6 +200,7 @@ enum UXSelfTest {
         failed += CollageNavSelfTest.run()      // 拼图检视器重排：去那儿（页签、滚动请求）、--tab 新老名字、色调两节
         failed += WhatsNewSelfTest.run()        // 这一版新增：版本号、弹不弹、记账只写独立的 suite、数据表
         failed += ShortcutsSelfTest.run()       // 快捷键一览：? 键的判断表、每页的表、拼图 / 暗房 / 水印绑着的键都列了
+        failed += SmallUXSelfTest.run()         // 连拍挑选单行每张的框、时间轴跨年份带年、「文件」菜单三项
         exit(failed == 0 ? 0 : 1)
     }
 }

@@ -1,6 +1,6 @@
 import Foundation
 
-// MARK: - 无头命令的两道护栏：数据目录不能是真实的那个、batch.* 设置钉住不落盘
+// MARK: - 无头命令的三道护栏：数据目录不能是真实的那个、batch.* 设置钉住不落盘、视图设置（@AppStorage）不碰设置域
 
 /// LABELGUI_DATA_DIR 是不是解析到了真实的默认数据目录（~/Library/Application Support/选片工具）。
 /// 判断拆成对「已经解析好的 (路径, dev, ino)」的纯函数（`isRealDataDir`），--mcp-selftest 拿假的输入逐行测、不碰文件；
@@ -68,4 +68,51 @@ extension AppRuntime {
     /// BatchStore 打开场次时用它、拨开关 / 拖滑杆 / --gap 写盘时写的照样是这一场原来存的（审查 S20a 要的不落盘的设法）。
     /// 建 store 之前设：BatchStore.init 会先打开「最近」里的第一场。nil = 按场次存的走（界面、测试宿主都是 nil）。
     static var pinnedRejectBurstDuplicates: Bool?
+}
+
+// MARK: - 视图级设置（@AppStorage）：无头时不读也不写设置域
+
+extension AppRuntime {
+    /// 各视图的 @AppStorage 读写用的那份 UserDefaults。**新加 @AppStorage 一律写 `store: AppRuntime.viewDefaults`**
+    /// （不写就回到 UserDefaults.standard：无头一拨控件又写进设置域；--view-prefs-selftest 只拨得到网格模式和缩略图滑杆）。
+    ///
+    /// 界面：就是 UserDefaults.standard，照旧记在 app 自己的设置域，下次打开还在。
+    /// 无头（命令行带无头参数 —— 和 main.swift 认无头同一个判断；不看 AppRuntime.headless，有的自检中途会把它拨回 false）：
+    /// 一份临时的 —— suite 名写系统临时目录下的绝对路径，cfprefsd 只读写那个 plist（目录它自己建），退出时整个目录删掉。于是
+    ///   - 读：只看参数域（命令行 `-batch.gridMode 按分组`）和代码里的默认，**看不到** app 自己的持久设置域。以前某次无头拨过的
+    ///     batch.gridMode / batch.thumbSize 留在裸二进制的 LabelGUI 域里，之后所有不传参的 --batch-ui 快照、BatchPerf 都按它画，
+    ///     数对不上也不报错（优化分析 2026-11-18 perf-ui 复核「漏-1」）；
+    ///   - 写：--events 点「按分组」、拖缩略图滑杆、--perf 里拨控件在这个进程里照常生效，落在临时 plist，设置域一个字节不写。
+    ///
+    /// 为什么不照 pinBatchSettings 把这些键也钉进参数域：参数域只管读。实测带 `-k a` 启动再 set(b)：持久域照样多出 k = b，
+    /// 读出来还是 a —— 写照样落盘，控件还被钉死（点了不变）。pinBatchSettings 那三个键不落盘，靠的是 BatchStore 里 didSet 前面那句
+    /// `!AppRuntime.headless`；@AppStorage 没有这道闸。
+    ///
+    /// 走它的键（2026-11-18，全部 @AppStorage + 插卡框「不导入」的记忆）：
+    ///   BatchView：batch.thumbSize、batch.gridMode、batch.showSingles、batch.showControls、batch.pendingTakesOnly、
+    ///     batch.takeSortByScore、batch.jpegQuality、batch.jpegIncludeUsable、batch.jpegOverwrite、batch.jpegMaxPixel、
+    ///     batch.jpegDelivery、batch.highlightsCount、batch.highlightsMaxPixel、batch.highlightsDelivery、batch.isoThreshold、
+    ///     batch.isoKeepersOnly、batch.proofWatermark；审片 review.skipRejects；
+    ///   DetailView：labelAutoAdvanceAfterScore；PickView（连拍挑选）：pick.autoAdvance；
+    ///   CardImportView：cardImport.analyzeAfter、cardImport.dismissed。
+    /// 不走它的：BatchStore 的 batch.rejectBurstDuplicates / minKeepersPerChapter / sortOrder（pinBatchSettings + didSet 的闸）、
+    /// ui.theme（ThemeCenter 自己的闸）、拼图偏好（CollageWorkspace 自己的闸）、whatsNew.*、live.bridgeEnabled（只有界面写）。
+    static let viewDefaults: UserDefaults = {
+        guard CommandLine.arguments.contains(where: { headlessFlags.contains($0) }) else { return .standard }
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LabelGUI-view-settings-\(UUID().uuidString)", isDirectory: true)
+        headlessViewDefaultsDir = dir.path
+        atexit {
+            if let dir = AppRuntime.headlessViewDefaultsDir { try? FileManager.default.removeItem(atPath: dir) }
+        }
+        // 绝对路径的 suite 名：只读写 <路径>.plist。init(suiteName:) 只在名字是 app 自己的 bundle id 或 NSGlobalDomain 时
+        // 返回 nil，这里走不到；真走到了也不退回 .standard（那就又写设置域了）。
+        guard let defaults = UserDefaults(suiteName: dir.appendingPathComponent("view").path) else {
+            fatalError("建不了无头的视图设置（\(dir.path)）")
+        }
+        return defaults
+    }()
+
+    /// 无头时那份视图设置的临时目录（退出时删）；界面运行时是 nil。--view-prefs-selftest 核对它在临时目录里。
+    static var headlessViewDefaultsDir: String?
 }

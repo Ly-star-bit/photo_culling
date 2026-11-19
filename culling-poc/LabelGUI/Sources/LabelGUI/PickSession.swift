@@ -562,10 +562,24 @@ enum PickLayout {
 
     struct Result: Equatable {
         let arrangement: Arrangement
-        /// 照片框（按这一组的中位宽高比算；别的比例在框里等比放）。
+        /// 照片框（按这一组的中位宽高比算；别的比例在框里等比放）。铺满（grid）那一档每张都用它；单行滚动那一档
+        /// 每张按自己的比例另算（frame(aspect:)），它只是中位比例那一张的框。
         let image: CGSize
         /// 人脸条每张脸的边长，0 = 这一组没有脸、不留人脸条。
         let faceSize: CGFloat
+        /// 单行滚动时框的高度上限和宽度上限（和算 image 的是同一套：高 = 台面高 − 照片以外的高度，宽 = 一屏露出 2.3 张）。
+        /// 铺满那一档用不到，是 0。
+        var stripHeight: CGFloat = 0
+        var stripMaxWidth: CGFloat = 0
+
+        /// 宽高比为 aspect 的那一张用多大的框。铺满（行 × 列）：格子一样大，就是 image。单行滚动：每张按自己的比例算 ——
+        /// 以前整组共用中位比例的框，横竖混拍的一场（人像里同一个姿势竖一张横一张很常见，8 秒的间隔会把它们并成一场）
+        /// 5 竖 5 横取到横框，竖片塞在 590×393 里只剩约 262×393，按竖框算是 394×592、面积约 2.25 倍（ux 复核漏网 1）。
+        /// 高度各按同一规则算，竖片顶满高度、横片顶满宽度上限，单行里竖直居中。
+        func frame(aspect: CGFloat) -> CGSize {
+            guard arrangement == .strip, stripHeight > 0, stripMaxWidth > 0 else { return image }
+            return PickLayout.stripFrame(aspect: aspect, height: stripHeight, maxWidth: stripMaxWidth)
+        }
     }
 
     static let spacing: CGFloat = 10
@@ -615,15 +629,23 @@ enum PickLayout {
                           image: CGSize(width: floor(b.w), height: floor(b.h)), faceSize: face)
         }
         let stripFace = faceSize(count: n, strip: true, hasFaces: hasFaces)
-        var h = size.height - Self.chrome(face: stripFace)
-        var w = h * aspect
-        let maxW = (size.width - spacing * 2) / stripVisible - tilePadding * 2
-        if w > maxW {
-            w = maxW
+        let height: CGFloat = size.height - Self.chrome(face: stripFace)
+        let maxW: CGFloat = (size.width - spacing * 2) / stripVisible - tilePadding * 2
+        return Result(arrangement: .strip,
+                      image: stripFrame(aspect: aspect, height: height, maxWidth: maxW), faceSize: stripFace,
+                      stripHeight: height, stripMaxWidth: maxW)
+    }
+
+    /// 单行滚动的一张框：先顶满高度，宽过了上限就按上限反算高度。
+    static func stripFrame(aspect: CGFloat, height: CGFloat, maxWidth: CGFloat) -> CGSize {
+        let aspect = max(0.2, min(5, aspect))
+        var h: CGFloat = height
+        var w: CGFloat = h * aspect
+        if w > maxWidth {
+            w = maxWidth
             h = w / aspect
         }
-        return Result(arrangement: .strip,
-                      image: CGSize(width: floor(max(80, w)), height: floor(max(60, h))), faceSize: stripFace)
+        return CGSize(width: floor(max(80, w)), height: floor(max(60, h)))
     }
 }
 

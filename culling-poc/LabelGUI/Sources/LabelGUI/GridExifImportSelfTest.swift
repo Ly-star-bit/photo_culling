@@ -24,6 +24,7 @@ enum GridExifImportSelfTest {
         let tally = Tally()
         exifCases(tally)
         gridSelectionCases(tally)
+        handoffCases(tally)
         justifiedRowCases(tally)
         watermarkCases(tally)
         trayMarkCases(tally)
@@ -554,6 +555,43 @@ enum GridExifImportSelfTest {
         t.check(TakeShelves.pack(takes: [], width: 1000, target: 100).isEmpty, "并排：没有多张的场 = 没有块")
     }
 
+    // MARK: - 网格照片交给别的 app（GP-07：右键「在访达中显示」「用…打开」、拖出）
+
+    private static func handoffCases(_ t: Tally) {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("labelgui-handoff-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: dir) }
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let raw = dir.appendingPathComponent("A.ARW"), jpg = dir.appendingPathComponent("A.JPG")
+        let solo = dir.appendingPathComponent("B.JPG"), xmp = dir.appendingPathComponent("A.xmp")
+        for url in [raw, jpg, solo, xmp] { fm.createFile(atPath: url.path, contents: Data([0])) }
+        let pair = GridHandoff.originals(rawPath: raw.path, decodePath: jpg.path).map(\.lastPathComponent)
+        t.check(pair == ["A.ARW", "A.JPG"], "交给别的 app RAW+JPG 双存：RAW、JPG 两个都给（和复制原片同一个规则），旁边的 .xmp 不给",
+                "得到 \(pair)")
+        let single = GridHandoff.originals(rawPath: solo.path, decodePath: solo.path).map(\.lastPathComponent)
+        t.check(single == ["B.JPG"], "交给别的 app 只有 JPG：给它一个", "得到 \(single)")
+        let gone = dir.appendingPathComponent("C.ARW").path
+        let missing = GridHandoff.originals(rawPath: gone, decodePath: jpg.path).map(\.lastPathComponent)
+        t.check(missing == ["A.JPG"] && GridHandoff.primary(rawPath: gone) == nil,
+                "交给别的 app 磁盘上没有的不给（盘没挂、文件被挪走）", "得到 \(missing)")
+        t.check(GridHandoff.primary(rawPath: raw.path)?.lastPathComponent == "A.ARW", "用…打开 RAW+JPG 只开 RAW")
+
+        // 能打开 JPG 的 app：问 LaunchServices，系统自带的「预览」总在；默认的排第一；本程序自己不在里面。
+        let apps = GridHandoff.apps(toOpen: [solo])
+        let names = apps.map(\.name)
+        t.check(apps.contains { Bundle(url: $0.url)?.bundleIdentifier == "com.apple.Preview" },
+                "用…打开 JPG：列得出预览", "得到 \(names)")
+        t.check(apps.filter(\.isDefault).count <= 1 && (apps.firstIndex { $0.isDefault } ?? 0) == 0,
+                "用…打开 默认的 app 排第一、最多一个", "得到 \(names)")
+        t.check(Set(apps.map(\.id)).count == apps.count, "用…打开 同一个 app 不列两遍", "得到 \(names)")
+        // 拖出去只给复制：给了移动，拖到同一块盘上的访达文件夹，原片就被挪出拍摄文件夹了；拖回本程序不收。
+        t.check(GridDragOut.operations(for: .outsideApplication) == .copy, "拖出 拖到别的 app / 访达：只给复制（没有移动）")
+        t.check(GridDragOut.operations(for: .withinApplication).isEmpty, "拖出 拖回本程序（网格收文件 = 打开文件夹）：不收")
+        let mixed = GridHandoff.apps(toOpen: [solo, raw])
+        t.check(Set(mixed.map(\.id)).isSubset(of: Set(apps.map(\.id))), "用…打开 JPG 和 RAW 混着：只列两种都能开的",
+                "JPG \(apps.count) 个、混着 \(mixed.count) 个")
+    }
+
     // MARK: - 网格多选（S21）
 
     private static func gridSelectionCases(_ t: Tally) {
@@ -598,11 +636,52 @@ enum GridExifImportSelfTest {
             t.check(got == want, "多选 剪选中 " + name, "得到 \(got.sorted())")
         }
 
+        // 右键菜单 / 拖出动哪几张（GP-07）
+        typealias M = GridSelectionRules.MenuTargets
+        let menuRows: [(String, String, Set<String>, [String], M)] = [
+            ("没有选中：只动右键的这张", "b", [], ["a", "b", "c"], M(ids: ["b"], fromSelection: false, otherSelected: 0)),
+            ("右键的在选中里：按网格顺序动选中的全部", "c", ["c", "a"], ["a", "b", "c"],
+             M(ids: ["a", "c"], fromSelection: true, otherSelected: 0)),
+            ("右键的在选中里、选中有一张被筛掉了：只动看得见的", "a", ["a", "x"], ["a", "b"],
+             M(ids: ["a"], fromSelection: true, otherSelected: 0)),
+            ("右键的不在选中里：只动它，选中的 2 张不动（菜单头上说）", "b", ["a", "c"], ["a", "b", "c"],
+             M(ids: ["b"], fromSelection: false, otherSelected: 2)),
+        ]
+        for (name, clicked, selected, visible, want) in menuRows {
+            let got = GridSelectionRules.menuTargets(clicked: clicked, selected: selected, visible: visible)
+            t.check(got == want, "右键 / 拖出 " + name, "得到 \(got)")
+        }
+
         let many = GridSelectionRules.changedNotice(count: 3, verdict: .reject) ?? "nil"
         t.check(many == "已改 3 张 → 废片 · ⌘Z 撤销", "多选 改了多张提示「已改 N 张」", "得到 \(many)")
         let restore = GridSelectionRules.changedNotice(count: 2, verdict: nil) ?? "nil"
         t.check(restore == "已改 2 张 → 恢复自动 · ⌘Z 撤销", "多选 按 0 恢复自动也提示", "得到 \(restore)")
         t.check(GridSelectionRules.changedNotice(count: 1, verdict: .pick) == nil, "多选 只改一张不提示")
+
+        // 小组头「✓」接受推荐的提示（UX-05）。
+        let accept: [(String, [String], Int, String)] = [
+            ("留一张废一张", ["DSCF7208"], 1, "场 2：留 DSCF7208，废 1 张 · ⌘Z 撤销"),
+            ("留两张", ["DSCF7208", "DSCF7209"], 3, "场 2：留 DSCF7208 等 2 张，废 3 张 · ⌘Z 撤销"),
+            ("没有要废的", ["DSCF7208"], 0, "场 2：留 DSCF7208，没有要废的 · ⌘Z 撤销"),
+        ]
+        for (name, kept, rejected, want) in accept {
+            let got = GridSelectionRules.acceptNotice(take: 2, kept: kept, rejected: rejected)
+            t.check(got == want, "接受推荐提示 " + name, "得到 \(got)")
+        }
+
+        // 网格一格给读屏软件的名字（UX-12）。
+        let names: [(String, String)] = [
+            (BatchView.cellAccessibilityName(id: "DSCF7208", verdict: .pick, reasons: [], rank: 1, groupSize: 10,
+                                             manual: false, client: false), "DSCF7208，精选，本场第 1 名（共 10 张）"),
+            (BatchView.cellAccessibilityName(id: "DSCF7209", verdict: .reject, reasons: ["虚焦", "闭眼"], rank: nil,
+                                             groupSize: 2, manual: true, client: true),
+             "DSCF7209，废片（虚焦、闭眼），同场 2 张，人工改判，客户选中"),
+            (BatchView.cellAccessibilityName(id: "DSCF7300", verdict: .usable, reasons: [], rank: nil, groupSize: 1,
+                                             manual: false, client: false), "DSCF7300，可用"),
+        ]
+        for (got, want) in names {
+            t.check(got == want, "格子的读屏名字 " + want, "得到 \(got)")
+        }
     }
 
     /// 多选改判以后焦点落在哪（GridSelectionRules.refocus，数字键和批量栏共用）。

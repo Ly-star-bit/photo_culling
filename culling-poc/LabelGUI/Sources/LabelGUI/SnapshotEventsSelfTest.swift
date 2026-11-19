@@ -5,7 +5,9 @@ import AppKit
 //
 // 离屏假事件（SnapshotEvents.swift）到底送不送得到，每次实测：
 //   甲. 一个最小的 SwiftUI 视图（系统按钮、plain 按钮、单击 / 双击手势、onHover、滚动区、右键菜单），挨个发、数回调。
-//   乙. 给了 fixture：真的批量页网格 —— 点一下格子焦点变到那张；悬停一格悬停条出现、挪开消失。
+//   乙. 给了 fixture：真的批量页网格 —— 点一下格子焦点变到那张；悬停一格悬停条出现、挪开消失；格子的右键菜单
+//       （没选中 / 选着别的 / 全选三种头一行，改判那几项用 performActionForItem 点下去，改对了几张）；拖出的锚点
+//       （不挡点击、GridHover 记的是指针下那一格、造的左键事件直接喂给它：挪 3pt 不拖、过 5pt 拖起按下的那一格）。
 // 窗口从不上屏（NeverShownWindow + 挪到屏幕外 + 全透明）。
 
 /// 最小实验的计数（视图回调往里记）。
@@ -251,6 +253,12 @@ enum SnapshotEventsSelfTest {
         let mouse = SnapshotEvents.Mouse(window: window, host: host)
         mouse.pump(1.5)
 
+        // 菜单栏「文件」三项（UX-08）：批量页一出来就把能不能点同步给菜单（菜单本身无头看不到）。fixture 分析过、有精选。
+        let menu = BatchMenuState.shared.flags
+        let counts = store.verdictCounts
+        check(menu.canOpen && menu.canAnalyze && menu.analyzeTitle == "重新分析" && menu.canExport == (counts.pick > 0),
+              "批量页把「文件」菜单三项能不能点同步过去（打开、重新分析、导出 JPG 都能点）", "\(menu) · 精选 \(counts.pick)")
+
         // 悬停：指针挪到一格上，格子下沿冒出悬停条（★ ● ✕）；挪开就没了。左上那一片里撒点，截图比前后 ——
         // 指针下面不远多出一小条（比整个网格小得多）就是悬停条。找到的这个点下面点击也用。
         mouse.run(.move(CGPoint(x: 2, y: 2)))
@@ -327,6 +335,150 @@ enum SnapshotEventsSelfTest {
         } else {
             print("跳过「点一下格子焦点变到那张」的断言（\(firstOK && secondOK ? "这次送到了" : "没送到")：\(detail)）")
         }
+        // 第一格是哪张：点击送得到、两次点的落在同一张才算知道（26 SDK 的构建上点不到，推出来的是出发的那张）。
+        let tileID: String? = SnapshotEvents.clicksReachSwiftUI && firstOK ? first.0 : nil
+        dragAnchor(host: host, mouse: mouse, at: tiles[0].point, clickedID: tileID, tally)
+        cellMenu(store: store, mouse: mouse, at: tiles[0].point, order: order, clickedID: tileID, tally)
         check(!window.isVisible && NSApp.windows.allSatisfy { !$0.isVisible }, "批量页这一段也没有窗口上过屏")
+    }
+
+    /// 格子的右键菜单（GP-07 / UX-02）：
+    ///   - 没选中：这一张的菜单；只是右键（读菜单项）判决一张没动。
+    ///   - 选中别的一张、这一格没重算：再右键，头一行「只这一张（不含选中的 1 张）」—— 弹过的菜单 SwiftUI 留着，
+    ///     没有 GridMenuState 的话还是上次那份没有头的（实测过）。点「废片」只改这一张，选中的那张不动、还选着。
+    ///   - 全选：头一行「选中的 N 张」；点「可用」全部改成可用、选中清掉。
+    /// 「点」= 拿到右键菜单以后 performActionForItem（菜单不弹，SwiftUI 的按钮照样调）；只点改判那几项（别的会开窗口、
+    /// 写剪贴板、拉起别的 app）。
+    @MainActor
+    private static func cellMenu(store: BatchStore, mouse: SnapshotEvents.Mouse, at point: CGPoint, order: [String],
+                                 clickedID: String?, _ tally: Tally) {
+        func check(_ ok: Bool, _ name: String, _ detail: @autoclosure () -> String = "") { tally.check(ok, name, detail()) }
+        func select(_ ids: [String]) {
+            store.viewRequest = BatchStore.ViewRequest(token: UUID(), session: store.sessionDir.lastPathComponent,
+                                                       ids: ids, select: true)
+            mouse.pump(0.6)
+        }
+        /// 选中以后顶上多出批量栏、网格往下挪：在原来那一点往下 0–80pt 里找头一行是 `first` 的格子。
+        func find(_ first: (String?) -> Bool) -> (point: CGPoint, outcome: SnapshotEvents.Outcome)? {
+            var tried: [String] = []
+            for dy in [0.0, 20.0, 40.0, 60.0, 80.0] {
+                let p = CGPoint(x: point.x, y: point.y + dy)
+                let outcome = mouse.run(.rclick(p))
+                if outcome.menu != nil, first(outcome.menu?.first) { return (p, outcome) }
+                tried.append(outcome.line)
+            }
+            print("右键菜单：没找到要的那一格 —— " + tried.joined(separator: " / "))
+            return nil
+        }
+        let overrides = store.overrides
+        let common = ["精选", "可用", "废片", "恢复自动", "看单张", "从这张开始审片", "在访达中显示", "用…打开", "复制文件名"]
+        let single = mouse.run(.rclick(point))
+        let items = single.menu ?? []
+        check(items.first == "精选" && common.allSatisfy(items.contains) && items.contains("拼图 · 放进托盘"),
+              "右键一格（没有选中）→ 改判四项、看单张、从这张开始审片、在访达中显示、用…打开、复制文件名、拼图", single.line)
+        check(store.overrides == overrides, "只右键不点：判决一张没动", "overrides \(overrides.count) → \(store.overrides.count) 条")
+
+        if let other = order.last, other != clickedID {
+            select([other])
+            let header = "只这一张（不含选中的 1 张）"
+            let hit = find { $0 == header }
+            check(hit != nil, "选中了别的一张再右键（这一格没重算）：头一行变成「\(header)」，不是上次弹出时留下的旧菜单")
+            if let hit {
+                let before = store.overrides
+                let done = performMenuItem("废片", at: hit.point, mouse: mouse)
+                let changed = store.overrides.filter { before[$0.key] != $0.value }
+                check(done && changed.count == 1 && changed.values.first == .reject && changed[other] == nil,
+                      "只这一张时点「废片」：只改了右键的这一张，选中的那张没动", "改了 \(changed)")
+                let again = find { $0 == header }
+                check(again != nil, "点完选中还在（只动这一张的时候不清选中）")
+            }
+        }
+
+        select(order)
+        let n = order.count
+        let hitAll = find { $0 == "选中的 \(n) 张" }
+        let many = hitAll?.outcome.menu ?? []
+        check(common.allSatisfy(many.contains) && many.contains("挑选这 \(n) 张 (C)") && many.contains("拼图 · 排一版（\(n) 张）"),
+              "全选以后右键：头一行写「选中的 \(n) 张」，多了挑选这 N 张、拼图排一版", hitAll?.outcome.line ?? "没找到")
+        if let hitAll {
+            let done = performMenuItem("可用", at: hitAll.point, mouse: mouse)
+            let usable = order.filter { store.overrides[$0] == .usable }.count
+            check(done && usable == n, "全选时点「可用」：\(n) 张全改成可用", "可用 \(usable) 张")
+            let after = mouse.run(.rclick(point))
+            check(after.menu?.first == "精选", "点完选中清掉（和批量栏一样）：再右键没有「选中的」那一行", after.line)
+        }
+    }
+
+    /// 拖出去（GP-07，GridDragOut.swift）离屏验得了的那一半：网格底下垫着拖出的锚点、它不挡点击（落点还是格子）；
+    /// 指针停在哪一格 GridHover 就记哪一格（按下去拖的是它），挪开就清。拖放会话本身离屏开不了，只能真机手点。
+    @MainActor
+    private static func dragAnchor(host: NSView, mouse: SnapshotEvents.Mouse, at point: CGPoint, clickedID: String?,
+                                   _ tally: Tally) {
+        func check(_ ok: Bool, _ name: String, _ detail: @autoclosure () -> String = "") { tally.check(ok, name, detail()) }
+        func anchors(_ view: NSView) -> [NSView] {
+            (view is GridDragOutAnchor.AnchorView ? [view] : []) + view.subviews.flatMap(anchors)
+        }
+        let found = anchors(host)
+        let hit = mouse.hitView(point)
+        check(found.count == 1 && !(hit is GridDragOutAnchor.AnchorView),
+              "拖出的锚点垫在网格底下（一个），点击落点还是格子", "锚点 \(found.count) 个 · 落点 \(SnapshotEvents.Mouse.className(hit))")
+        mouse.run(.move(point))
+        let hovered = GridHover.id
+        if let clickedID {
+            check(hovered == clickedID, "指针停在一格上 → GridHover 记的是这一格（拖出按它认）", "记的 \(hovered ?? "无")、应为 \(clickedID)")
+        } else {
+            check(hovered != nil, "指针停在一格上 → GridHover 记下了一格（拖出按它认）")
+        }
+        mouse.run(.move(CGPoint(x: 2, y: 2)))
+        check(GridHover.id == nil, "指针挪出网格 → GridHover 清掉（按在空白处不会拖起哪一张）", "还记着 \(GridHover.id ?? "")")
+
+        // 监听的判断：拿造的左键事件直接喂给锚点（离屏窗口上监听收不到假事件），拖放会话换成记一笔（startProbe）。
+        guard let anchor = found.first as? GridDragOutAnchor.AnchorView else { return }
+        var started: [String] = []
+        anchor.startProbe = { started.append($0) }
+        defer { anchor.startProbe = nil }
+        func feed(_ type: NSEvent.EventType, _ p: CGPoint) {
+            guard let event = NSEvent.mouseEvent(with: type, location: mouse.windowPoint(p), modifierFlags: [],
+                                                 timestamp: ProcessInfo.processInfo.systemUptime,
+                                                 windowNumber: mouse.window.windowNumber, context: nil, eventNumber: 0,
+                                                 clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1) else { return }
+            anchor.handle(event)
+        }
+        func shifted(_ dx: CGFloat) -> CGPoint { CGPoint(x: point.x + dx, y: point.y) }
+        mouse.run(.move(point))
+        let under = GridHover.id
+        feed(.leftMouseDown, point); feed(.leftMouseDragged, shifted(3)); feed(.leftMouseUp, shifted(3))
+        check(started.isEmpty, "按住一格挪 3pt 就松手：还是单击，不拖", "拖起了 \(started)")
+        feed(.leftMouseDown, point); feed(.leftMouseDragged, shifted(3)); feed(.leftMouseDragged, shifted(12))
+        check(under != nil && started == [under!], "按住一格挪过 5pt：拖起的是按下去的那一格",
+              "拖起了 \(started)、指针下是 \(under ?? "无")")
+        feed(.leftMouseDragged, shifted(40)); feed(.leftMouseUp, shifted(40))
+        check(started.count == 1, "拖起来以后接着挪：不再开第二次", "拖起了 \(started)")
+        mouse.run(.move(CGPoint(x: 2, y: 2)))
+        feed(.leftMouseDown, CGPoint(x: 2, y: 2)); feed(.leftMouseDragged, CGPoint(x: 40, y: 2)); feed(.leftMouseUp, CGPoint(x: 40, y: 2))
+        check(started.count == 1, "按在网格外面（顶栏）拖：不拖照片", "拖起了 \(started)")
+    }
+
+    /// 拿到这一点的右键菜单，点标题是 `title` 的那一项（performActionForItem：菜单不弹）。
+    @MainActor
+    private static func performMenuItem(_ title: String, at p: CGPoint, mouse: SnapshotEvents.Mouse) -> Bool {
+        mouse.run(.move(p))
+        guard let event = NSEvent.mouseEvent(with: .rightMouseDown, location: mouse.windowPoint(p), modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: mouse.window.windowNumber, context: nil, eventNumber: 0,
+                                             clickCount: 1, pressure: 1) else { return false }
+        var view = mouse.hitView(p)
+        while let v = view {
+            if let menu = v.menu(for: event) {
+                menu.update()
+                menu.delegate?.menuNeedsUpdate?(menu)
+                guard let index = menu.items.firstIndex(where: { $0.title == title }) else { return false }
+                menu.performActionForItem(at: index)
+                mouse.pump(0.6)
+                return true
+            }
+            view = v.superview
+        }
+        return false
     }
 }

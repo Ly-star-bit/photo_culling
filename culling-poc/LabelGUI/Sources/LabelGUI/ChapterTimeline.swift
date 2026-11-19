@@ -112,6 +112,7 @@ struct ChapterTimelineLayout: Equatable {
         let calendar = Calendar.current
         let days: [Date?] = segs.map { $0.start.map { calendar.startOfDay(for: $0) } }
         let multiDay = Set(days.compactMap { $0 }).count > 1
+        let withYear = spansYears(segs)
         // 第 i 段之前换了一天（无时间那段的 day 是 nil，也算换）。写成循环：闭包版的类型推断在
         // 本地就要 70ms，CI 的 Xcode 16 对这类式子超时过。
         var breaks = [Bool](repeating: false, count: n)
@@ -185,7 +186,8 @@ struct ChapterTimelineLayout: Equatable {
             guard let start = seg.start else { continue }
             let time = BatchStore.chapterTimeFormatter.string(from: start)
             if multiDay && (i == 0 || breaks[i]) {
-                candidates.append(Candidate(index: i, texts: ["\(dayText(start)) \(time)", dayText(start)],
+                let day: String = dayText(start, year: withYear)
+                candidates.append(Candidate(index: i, texts: ["\(day) \(time)", day],
                                             isDay: true, priority: 3e9 - Double(i)))
             } else {
                 var texts: [String] = []
@@ -225,9 +227,24 @@ struct ChapterTimelineLayout: Equatable {
         return layout
     }
 
-    static func dayText(_ date: Date) -> String {
-        let c = Calendar.current.dateComponents([.month, .day], from: date)
-        return "\(c.month ?? 0)月\(c.day ?? 0)日"
+    /// 「3月21日」；year = true 时「2000年1月1日」。
+    static func dayText(_ date: Date, year: Bool = false) -> String {
+        let c = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        let day = "\(c.month ?? 0)月\(c.day ?? 0)日"
+        return year ? "\(c.year ?? 0)年" + day : day
+    }
+
+    /// 章节跨了不同年份（EC-07）：换电池后机身时间复位成 2000-01-01、1970-01-01，和另一台机身混在一场里，几段都叫
+    /// 「1月1日 00:00」分不出哪段是哪段。这时时间轴标签、悬停卡片、右键菜单都带年；同一年里的照旧不写（多数拍摄都是）。
+    static func spansYears(_ segs: [BatchStore.ChapterSegment]) -> Bool {
+        let calendar = Calendar.current
+        var years = Set<Int>()
+        for seg in segs {
+            guard let start = seg.start else { continue }
+            years.insert(calendar.component(.year, from: start))
+            if years.count > 1 { return true }
+        }
+        return false
     }
 
     static func weekdayText(_ date: Date) -> String {
@@ -319,7 +336,8 @@ struct ChapterTimeline: View, Equatable {
                         if filtered == seg.chapter {
                             Button("显示全部章节") { onFilter(nil) }
                         } else {
-                            Button("只看这一章（\(Self.menuTitle(seg))）") { onFilter(seg.chapter) }
+                            let year: Bool = ChapterTimelineLayout.spansYears(segments)
+                            Button("只看这一章（\(Self.menuTitle(seg, year: year))）") { onFilter(seg.chapter) }
                         }
                     }
                     if filtered != nil, hovered.map({ segments.indices.contains($0) && segments[$0].chapter == filtered }) != true {
@@ -331,7 +349,8 @@ struct ChapterTimeline: View, Equatable {
                        let seg = layout.segments.first(where: { $0.index == i }) {
                         let x = min(max(0, seg.x + seg.width / 2 - Self.cardWidth / 2),
                                     max(0, geo.size.width - Self.cardWidth))
-                        TimelineCard(segment: segments[i], minKeepers: minKeepers, missed: missed == i)
+                        TimelineCard(segment: segments[i], minKeepers: minKeepers, missed: missed == i,
+                                     withYear: ChapterTimelineLayout.spansYears(segments))
                             .offset(x: x, y: Self.height + 4)
                             .allowsHitTesting(false)
                     }
@@ -341,9 +360,10 @@ struct ChapterTimeline: View, Equatable {
         .frame(height: Self.height)
     }
 
-    static func menuTitle(_ seg: BatchStore.ChapterSegment) -> String {
+    /// year：章节跨了不同年份时带年（ChapterTimelineLayout.spansYears）。
+    static func menuTitle(_ seg: BatchStore.ChapterSegment, year: Bool = false) -> String {
         guard let start = seg.start else { return "无拍摄时间 · \(seg.count) 张" }
-        return "章节 \(seg.chapter + 1) · \(ChapterTimelineLayout.dayText(start)) \(seg.timeRange) · \(seg.count) 张"
+        return "章节 \(seg.chapter + 1) · \(ChapterTimelineLayout.dayText(start, year: year)) \(seg.timeRange) · \(seg.count) 张"
     }
 
     private func canvas(_ layout: ChapterTimelineLayout) -> some View {
@@ -435,10 +455,13 @@ private struct TimelineCard: View {
     let segment: BatchStore.ChapterSegment
     let minKeepers: Int
     let missed: Bool
+    /// 章节跨了不同年份：标题带年（EC-07）。
+    var withYear = false
 
     private var title: String {
         guard let start = segment.start else { return "无拍摄时间" }
-        return "章节 \(segment.chapter + 1) · \(ChapterTimelineLayout.dayText(start)) \(ChapterTimelineLayout.weekdayText(start))"
+        let day: String = ChapterTimelineLayout.dayText(start, year: withYear)
+        return "章节 \(segment.chapter + 1) · \(day) \(ChapterTimelineLayout.weekdayText(start))"
     }
 
     private var subtitle: String {
